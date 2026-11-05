@@ -9,6 +9,8 @@
 //! Two-bit coding (A/C/G/T in 2 bits) applies. This is a SEED: real
 //! genozip-level work, such as a quality-score model, is long term, and that is
 //! marked honestly.
+//! Exposed for the B.U.D. 3.0 codec registry: the registry wires these
+//! transforms.
 
 #![forbid(unsafe_code)]
 

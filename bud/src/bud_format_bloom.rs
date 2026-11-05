@@ -10,6 +10,8 @@
 //! parameter.
 //! Dedup stays LOSSLESS: the filter only says "it may exist"; the definite
 //! answer comes from the hash set.
+//! Exposed for the B.U.D. 3.0 codec registry: the registry wires these
+//! transforms.
 
 #![forbid(unsafe_code)]
 

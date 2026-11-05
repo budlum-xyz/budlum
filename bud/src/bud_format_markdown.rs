@@ -11,12 +11,14 @@
 //! The B.U.D. transform (lossless) splits markdown into STRUCTURAL SECTIONS - heading/paragraph/
 //! list/code/link/table - each section type is serialized compactly (heading level as a
 //! separate byte, code blocks as a separate stream). Output: an md-token stream (compresses better with zstd,
-//! because structural repetition separates out) plus a compiled view for LLM context (heading tree + digest).
+//! because structural repetition separates out).
 //! Lossless: token stream -> original md (roundtrip tested). Blank lines are carried as
 //! sections too (`MdSection::Blank`) and the trailing newline lives in a separate
 //! flag; both are separators in markdown, and dropping them means the document cannot be restored.
 //!
 //! Code: `#![forbid(unsafe_code)]`, deterministic, panic free.
+//! Exposed for the B.U.D. 3.0 codec registry: the registry wires these
+//! transforms.
 
 #![forbid(unsafe_code)]
 
@@ -43,7 +45,6 @@ pub enum MdSection {
 pub struct MarkdownSplit {
     pub sections: Vec<MdSection>,
     pub contents: Vec<String>, // the text of each section (including the heading marker - verbatim)
-    pub heading_tree: Vec<String>, // LLM context: the heading hierarchy (compiled view)
     /// Whether the input ended with a newline. `str::lines` swallows this; it must be carried
     /// separately for losslessness.
     pub trailing_newline: bool,
@@ -59,7 +60,6 @@ impl MarkdownSplit {
         }
         let mut sections = Vec::new();
         let mut contents = Vec::new();
-        let mut heading_tree = Vec::new();
         let mut in_code = false;
         for line in md.lines() {
             // open/close a code block (independent of in_code - toggle when the line is ```)
@@ -75,7 +75,6 @@ impl MarkdownSplit {
                 let stripped = line.trim_start_matches('#');
                 let depth = line.len() - stripped.len();
                 if depth <= 6 && stripped.starts_with(' ') {
-                    heading_tree.push(line.to_string());
                     MdSection::Heading(depth as u8)
                 } else {
                     MdSection::Other
@@ -108,7 +107,6 @@ impl MarkdownSplit {
         let split = MarkdownSplit {
             sections,
             contents,
-            heading_tree,
             trailing_newline,
         };
         // `str::lines` also removes the CR of a CRLF ending. The split must
@@ -134,17 +132,7 @@ impl MarkdownSplit {
         out
     }
 
-    /// LLM context efficiency: heading tree size / original size (compiled view).
-    pub fn context_ratio(&self) -> f64 {
-        let tree_len: usize = self.heading_tree.iter().map(|s| s.len() + 1).sum();
-        let orig: usize = self.contents.iter().map(|s| s.len() + 1).sum();
-        if orig == 0 {
-            return 1.0;
-        }
-        orig as f64 / tree_len.max(1) as f64
-    }
-
-    /// Deterministic blob: types + contents + heading tree + digest.
+    /// Deterministic blob: types + contents + digest.
     pub fn to_blob(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&MD_MAGIC);
@@ -153,10 +141,6 @@ impl MarkdownSplit {
         for (t, c) in self.sections.iter().zip(self.contents.iter()) {
             out.push(section_code(*t));
             push_str(&mut out, c);
-        }
-        out.extend_from_slice(&(self.heading_tree.len() as u32).to_le_bytes());
-        for h in &self.heading_tree {
-            push_str(&mut out, h);
         }
         // The trailing newline: `str::lines` swallows it and it cannot be recovered from the
         // cannot be derived, so it enters the blob as a separate byte.
@@ -207,20 +191,6 @@ impl MarkdownSplit {
             sections.push(t);
             contents.push(c);
         }
-        if bytes.len() < pos + 4 {
-            return None;
-        }
-        let tree_count = u32::from_le_bytes(bytes[pos..pos + 4].try_into().ok()?) as usize;
-        pos += 4;
-        // Same rationale: each heading consumes at least a 4-byte length field.
-        if tree_count > payload_len.saturating_sub(pos) / 4 {
-            return None;
-        }
-        let mut heading_tree = Vec::with_capacity(tree_count);
-        for _ in 0..tree_count {
-            let h = read_str(bytes, &mut pos)?;
-            heading_tree.push(h);
-        }
         if bytes.len() < pos + 1 {
             return None;
         }
@@ -238,7 +208,6 @@ impl MarkdownSplit {
         Some(MarkdownSplit {
             sections,
             contents,
-            heading_tree,
             trailing_newline,
         })
     }
@@ -345,10 +314,6 @@ mod tests {
             back.contents, split.contents,
             "section contents are identical"
         );
-        assert_eq!(
-            back.heading_tree, split.heading_tree,
-            "the heading tree is identical"
-        );
     }
 
     /// Losslessness: `encode` -> `decode` returns the input byte for byte.
@@ -433,13 +398,6 @@ mod tests {
         assert!(split.sections.contains(&MdSection::CodeBlock), "kod");
         assert!(split.sections.contains(&MdSection::Link), "link");
         assert!(split.sections.contains(&MdSection::Table), "tablo");
-        assert!(!split.heading_tree.is_empty(), "heading tree (LLM view)");
-        // context_ratio: the heading tree is far smaller than the original
-        assert!(
-            split.context_ratio() > 3.0,
-            "LLM context is compact: {:.1}x",
-            split.context_ratio()
-        );
     }
 
     /// Every heading level 1 to 6 is recognised; seven marks or no
@@ -460,7 +418,6 @@ mod tests {
             MdSection::Other,
         ];
         assert_eq!(split.sections, want);
-        assert_eq!(split.heading_tree.len(), 6);
         assert_eq!(split.decode(), md);
     }
 
@@ -471,7 +428,6 @@ mod tests {
         let blob = split.to_blob();
         let back = MarkdownSplit::from_blob(&blob).expect("blob");
         assert_eq!(back.sections.len(), split.sections.len());
-        assert_eq!(back.heading_tree, split.heading_tree);
         // kurcalama red
         let mut bad = blob.clone();
         *bad.last_mut().unwrap() ^= 0x01;

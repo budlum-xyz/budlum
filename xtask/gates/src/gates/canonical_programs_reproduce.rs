@@ -1589,7 +1589,7 @@ mod tests {
     /// Regeneration must beat proof production: the whole point of the
     /// reproduction gate is that re-deriving canonical state is cheap enough
     /// to run before release, while a proof is the expensive artifact.
-    /// `bud_format_regeneration.rs` asserts `production_cost < %1 x
+    /// The removed artifact-repair code asserted `production_cost < %1 x
     /// proof_cost`; this pins the same inequality on the gate side.
     ///
     /// Reference prove costs (measured 2026-08-27, `benches/canonical_programs.rs`,

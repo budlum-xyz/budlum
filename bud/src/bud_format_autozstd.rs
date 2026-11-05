@@ -6,6 +6,8 @@
 //! and save the CPU - the ZFS smart pattern.
 //!
 //! Honesty: the decision rests on a REAL measurement, never on a guess.
+//! Exposed for the B.U.D. 3.0 codec registry: the registry wires these
+//! transforms.
 
 #![forbid(unsafe_code)]
 

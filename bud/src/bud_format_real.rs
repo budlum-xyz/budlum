@@ -7,6 +7,8 @@
 //! (bud_format_huffman) is used, and the magic is specific to B.U.D. (no
 //! imitation). Real zstd/xz/avif FFI integration is a separate step (its
 //! measurements are documented separately).
+//! Exposed for the B.U.D. 3.0 codec registry: the registry wires these
+//! transforms.
 
 #![forbid(unsafe_code)]
 

@@ -1,18 +1,17 @@
-//! B.U.D. 2.0 - the tenant dictionary, a zstd dictionary; ideas 2.0 item I5 and
-//! F1048, 2026-08-16.
+//! B.U.D. 2.0 - the tenant dictionary, a zstd dictionary (F1048, 2026-08-16).
 //!
 //! On small objects, such as a JSON record, a log line or a config, zstd is
 //! weak without a dictionary; a cohort-based dictionary raises the ratio by two
 //! to three times. The measurement: small JSON records go from 1.20x without a
 //! dictionary to 2.75x with one, and determinism was verified.
 //!
-//! Determinism (I5): the same sample set, the same parameters and the same zstd
-//! version yield THE SAME dictionary bytes. The dictionary therefore falls into
-//! the reproducible class: the chain holds the training recipe, the sample
-//! hashes and the parameters, not the dictionary BYTES, and the dictionary is
-//! retrained on demand. That is I5, dictionary as recipe.
+//! Determinism: the same sample set, the same parameters and the same zstd
+//! version yield THE SAME dictionary bytes. The dictionary bytes are stored
+//! like any object; nothing is retrained on demand.
 //!
 //! The code is `#![forbid(unsafe_code)]` and panic-free.
+//! Exposed for the B.U.D. 3.0 codec registry: the registry wires these
+//! transforms.
 
 #![forbid(unsafe_code)]
 
@@ -76,7 +75,7 @@ impl TenantDictionary {
         }
     }
 
-    /// The deterministic dictionary identity; I5 says to use the hash of the
+    /// The deterministic dictionary identity: the hash of the
     /// body rather than an ID.
     pub fn id(&self) -> [u8; 32] {
         self.digest

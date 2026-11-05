@@ -17,6 +17,8 @@
 //! alignment, classifies a crop as aligned or broken, and produces a
 //! deterministic derivation record, which can be bound to a PACT as a
 //! production proof.
+//! Exposed for the B.U.D. 3.0 codec registry: the registry wires these
+//! transforms.
 
 #![forbid(unsafe_code)]
 

@@ -30,10 +30,10 @@
 //!
 //! # What this adds to the regeneration layer
 //!
-//! The existing regeneration layer (`bud/src/bud_format_regeneration.rs`) does
+//! The removed artifact-repair layer (gone with the legacy removal) did
 //! something different and complementary: given a damaged *input*, it
-//! regenerates the canonical bytes and refuses to let a divergent version be
-//! published. That is repair at the level of one artifact.
+//! regenerated the canonical bytes and refused to let a divergent version be
+//! published. That was repair at the level of one artifact.
 //!
 //! This module works at the level of the *node's own state*. Its question is:
 //! the artifacts are fine but this node's view of the chain is damaged beyond

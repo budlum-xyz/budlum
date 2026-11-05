@@ -6,13 +6,15 @@
 //! class: small objects travel inline (with dedup plus delta), and anything
 //! above the threshold uses a PACT. The threshold is the
 //! `tiny_object_threshold` governance parameter. There is NO dedup for
-//! encrypted inline objects (the tenant key), which is the strict Pollen
+//! encrypted inline objects (the tenant key), which is the strict data-market
 //! rule.
 //!
 //! Y4: the cohort dictionary lives on the chain like a PACT; the "dictionary
 //! guardian" is the guardian running the cohort's audit round; the dictionary
 //! bytes are stored nowhere (COVER(cohort_commitment, seed) - retraining is
 //! CPU work, inside the I4 budget).
+//! Exposed for the B.U.D. 3.0 codec registry: the registry wires these
+//! transforms.
 
 #![forbid(unsafe_code)]
 
@@ -34,7 +36,7 @@ pub fn is_tiny(size: usize, threshold: usize) -> bool {
 pub struct TinyInline {
     pub content_id: [u8; 32],
     pub data: Vec<u8>,
-    pub encrypted: bool, // Pollen strict: NO cross-tenant dedup for encrypted inline
+    pub encrypted: bool, // data-market strict: NO cross-tenant dedup for encrypted inline
 }
 
 /// Y5: inline object packing - how many objects fit in a 128 KB block (the

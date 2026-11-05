@@ -1,14 +1,10 @@
-//! B.U.D. 2.0 - the JPEG recompression path (2026-08-16).
+//! B.U.D. 2.0 - the JPEG structure parser (2026-08-16).
 //!
-//! JPEG XL can recompress an existing JPEG LOSSLESSLY (a 20 percent
-//! saving with a bit-exact round trip - the original JPEG bytes can be
-//! reproduced). For B.U.D. this is the image leg of KF2, which says the format
-//! may change as long as the resolution is preserved.
-//!
-//! Before moving to JXL, this module MEASURES HOW COMPRESSIBLE THE JPEG IS and
-//! records the decision: the segment structure (SOI, APP, DQT, SOF, SOS, EOI),
-//! the estimated saving and a decision record (a deterministic blob that can be
-//! written to the chain).
+//! It parses an existing JPEG and records the segment structure (SOI, APP,
+//! DQT, SOF, SOS, EOI) in a deterministic blob. Only the parsing migrates:
+//! the re-encode suggestions are not part of this layer.
+//! Exposed for the B.U.D. 3.0 codec registry: the registry wires these
+//! transforms.
 
 #![forbid(unsafe_code)]
 
@@ -34,7 +30,6 @@ pub struct JpegAnalysis {
     pub quant_tables: usize,
     pub scan_data_bytes: u64,
     pub header_bytes: u64,
-    pub recompress_savings_pct: f64,
 }
 
 impl JpegAnalysis {
@@ -110,7 +105,6 @@ impl JpegAnalysis {
         let header_bytes = scan_start as u64;
         let scan_data_bytes = data.len().saturating_sub(scan_start) as u64;
         let total = data.len() as u64;
-        let recompress_savings_pct = Self::savings_pct(header_bytes, total);
         Some(JpegAnalysis {
             width,
             height,
@@ -118,23 +112,7 @@ impl JpegAnalysis {
             quant_tables,
             scan_data_bytes,
             header_bytes,
-            recompress_savings_pct,
         })
-    }
-
-    /// The estimate, a formula of the header share. `from_blob` recomputes it,
-    /// so a stored value cannot be anything else.
-    fn savings_pct(header_bytes: u64, total: u64) -> f64 {
-        let header_ratio = if total > 0 {
-            header_bytes as f64 / total as f64
-        } else {
-            0.0
-        };
-        15.0 + header_ratio * 20.0
-    }
-
-    pub fn recommends_jxl(&self) -> bool {
-        self.recompress_savings_pct >= 10.0
     }
 
     pub fn to_blob(&self) -> Vec<u8> {
@@ -147,7 +125,6 @@ impl JpegAnalysis {
         out.extend_from_slice(&(self.quant_tables as u32).to_le_bytes());
         out.extend_from_slice(&self.scan_data_bytes.to_le_bytes());
         out.extend_from_slice(&self.header_bytes.to_le_bytes());
-        out.extend_from_slice(&self.recompress_savings_pct.to_le_bytes());
         let mut h = Sha3_256::new();
         h.update(Self::DOMAIN);
         h.update(&out);
@@ -156,7 +133,7 @@ impl JpegAnalysis {
     }
 
     pub fn from_blob(bytes: &[u8]) -> Option<Self> {
-        const HDR: usize = 8 + 1 + 4 + 4 + 1 + 4 + 8 + 8 + 8;
+        const HDR: usize = 8 + 1 + 4 + 4 + 1 + 4 + 8 + 8;
         if bytes.len() < HDR + 32 || bytes[0..8] != JPEG_RE_MAGIC || bytes[8] != JPEG_RE_VERSION {
             return None;
         }
@@ -173,13 +150,7 @@ impl JpegAnalysis {
         let quant_tables = u32::from_le_bytes(bytes[18..22].try_into().ok()?) as usize;
         let scan_data_bytes = u64::from_le_bytes(bytes[22..30].try_into().ok()?);
         let header_bytes = u64::from_le_bytes(bytes[30..38].try_into().ok()?);
-        let recompress_savings_pct = f64::from_le_bytes(bytes[38..46].try_into().ok()?);
         if bytes.len() != HDR + 32 {
-            return None;
-        }
-        // NaN, infinity or any value the formula does not give is refused.
-        let total = header_bytes.checked_add(scan_data_bytes)?;
-        if recompress_savings_pct.to_bits() != Self::savings_pct(header_bytes, total).to_bits() {
             return None;
         }
         Some(JpegAnalysis {
@@ -189,7 +160,6 @@ impl JpegAnalysis {
             quant_tables,
             scan_data_bytes,
             header_bytes,
-            recompress_savings_pct,
         })
     }
 }
@@ -235,20 +205,6 @@ mod tests {
         assert!(a.quant_tables >= 1);
         assert!(a.scan_data_bytes > 0);
         assert!(a.header_bytes > 0);
-        assert!(a.recommends_jxl(), "recompression is recommended");
-        assert!(a.recompress_savings_pct >= 15.0);
-    }
-
-    #[test]
-    fn a_blob_with_a_stored_saving_the_formula_does_not_give_is_refused() {
-        let j = synthetic_jpeg();
-        let a = JpegAnalysis::analyze(&j).unwrap();
-        for bad in [f64::NAN, f64::INFINITY, 99.0] {
-            let mut forged = a.clone();
-            forged.recompress_savings_pct = bad;
-            assert!(JpegAnalysis::from_blob(&forged.to_blob()).is_none());
-        }
-        assert!(JpegAnalysis::from_blob(&a.to_blob()).is_some());
     }
 
     #[test]
@@ -258,7 +214,6 @@ mod tests {
         let blob = a.to_blob();
         let back = JpegAnalysis::from_blob(&blob).expect("blob");
         assert_eq!(back.width, a.width);
-        assert_eq!(back.recompress_savings_pct, a.recompress_savings_pct);
         let mut bad = blob.clone();
         *bad.last_mut().unwrap() ^= 0x01;
         assert!(JpegAnalysis::from_blob(&bad).is_none());

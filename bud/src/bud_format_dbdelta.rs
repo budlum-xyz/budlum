@@ -5,6 +5,8 @@
 //! (SQLite or FDB): an XOR delta between consecutive pages, then zstd (under an
 //! append-heavy workload neighbouring pages
 //! is similar). LOSSLESS: the original pages are restored byte for byte.
+//! Exposed for the B.U.D. 3.0 codec registry: the registry wires these
+//! transforms.
 
 #![forbid(unsafe_code)]
 

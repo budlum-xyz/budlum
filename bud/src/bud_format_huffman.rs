@@ -19,6 +19,8 @@
 //!   No panics.
 //!
 //! Kod: `#![forbid(unsafe_code)]`, deterministik, no unsafe.
+//! Exposed for the B.U.D. 3.0 codec registry: the registry wires these
+//! transforms.
 
 #![forbid(unsafe_code)]
 

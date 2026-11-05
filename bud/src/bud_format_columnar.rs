@@ -23,6 +23,8 @@
 //! losslessness is PRESERVED, the transform is simply not applied). Bomb guarded and panic free.
 //!
 //! Kod: `#![forbid(unsafe_code)]`, deterministik, testli.
+//! Exposed for the B.U.D. 3.0 codec registry: the registry wires these
+//! transforms.
 
 #![forbid(unsafe_code)]
 
@@ -40,8 +42,7 @@ const MAX_KEY_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnarMode {
-    Exact = 0,     // byte-identical
-    OrderFree = 1, // the record set is preserved (KF2), higher ratio
+    Exact = 0, // byte-identical; the only mode (record order preserved)
 }
 
 impl ColumnarMode {
@@ -51,7 +52,6 @@ impl ColumnarMode {
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
             0 => Some(Self::Exact),
-            1 => Some(Self::OrderFree),
             _ => None,
         }
     }
@@ -86,7 +86,7 @@ impl ColType {
 #[derive(Debug, Clone)]
 pub struct JsonColumnar {
     pub mode: ColumnarMode,
-    pub keys: Vec<String>, // key order (Exact: original; OrderFree: lexicographic)
+    pub keys: Vec<String>, // key order (Exact: original)
     pub col_types: Vec<ColType>, // the type of each column
     pub columns: Vec<Vec<Value>>, // values per key (in record order, typed)
 }
@@ -109,7 +109,7 @@ fn cell_type(v: &Value) -> ColType {
 }
 
 /// Transform a JSON array into columns. Irregular input -> None (losslessness is preserved).
-pub fn columnar_encode(data: &[u8], mode: ColumnarMode) -> Option<JsonColumnar> {
+pub fn columnar_encode(data: &[u8]) -> Option<JsonColumnar> {
     if data.len() as u64 > 1 << 30 {
         return None; // 1 GiB input ceiling
     }
@@ -142,36 +142,15 @@ pub fn columnar_encode(data: &[u8], mode: ColumnarMode) -> Option<JsonColumnar> 
             }
         }
     }
-    // OrderFree: record sorting (deterministic - by key order; numeric comparison on numeric
-    // columns, index on ties). Order does not affect losslessness (KF2).
-    // The loop above verified that every record is an object carrying the same key
-    // set. Those nine `unwrap`s said "we verified it, therefore it is safe";
-    // sound reasoning, but nothing protects the distance between verification
-    // and use: a `return` or a condition inserted in between
-    // brings the panic back. We collect the objects once,
-    // panic free, and use them below - same cost, no assumption left uncarried.
+    // The loop above verified that every record is an object carrying the
+    // same key set. We collect the objects once, panic free, and use them
+    // below - same cost, no assumption left uncarried.
     let objs: Vec<&serde_json::Map<String, Value>> = arr
         .iter()
         .map(Value::as_object)
         .collect::<Option<Vec<_>>>()?;
 
-    let mut indices: Vec<usize> = (0..arr.len()).collect();
-    if matches!(mode, ColumnarMode::OrderFree) {
-        indices.sort_by(|&a, &b| {
-            for k in &keys {
-                // The key set is verified; even so a missing key counts as equal rather than
-                // panicking, keeping the ordering total.
-                let c = match (objs[a].get(k), objs[b].get(k)) {
-                    (Some(va), Some(vb)) => cmp_value(va, vb),
-                    _ => std::cmp::Ordering::Equal,
-                };
-                if c != std::cmp::Ordering::Equal {
-                    return c;
-                }
-            }
-            a.cmp(&b)
-        });
-    }
+    let indices: Vec<usize> = (0..arr.len()).collect();
     // detect column types from the first value; a mismatching value degrades the column to Str
     let mut col_types: Vec<ColType> = Vec::with_capacity(keys.len());
     let mut columns: Vec<Vec<Value>> = vec![Vec::with_capacity(arr.len()); keys.len()];
@@ -198,25 +177,11 @@ pub fn columnar_encode(data: &[u8], mode: ColumnarMode) -> Option<JsonColumnar> 
         }
     }
     Some(JsonColumnar {
-        mode,
+        mode: ColumnarMode::Exact,
         keys,
         col_types,
         columns,
     })
-}
-
-/// Numeric-first deterministic value comparison (for OrderFree sorting).
-fn cmp_value(a: &Value, b: &Value) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-    match (a, b) {
-        (Value::Number(x), Value::Number(y)) => {
-            let (xf, yf) = (x.as_f64().unwrap_or(0.0), y.as_f64().unwrap_or(0.0));
-            xf.total_cmp(&yf)
-        }
-        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
-        (Value::Null, Value::Null) => Ordering::Equal,
-        _ => a.to_string().cmp(&b.to_string()),
-    }
 }
 
 /// Transform back: columns -> a JSON array (Exact: the original exactly; OrderFree: sorted).
@@ -451,7 +416,7 @@ pub fn columnar_from_blob(bytes: &[u8]) -> Option<JsonColumnar> {
         return None;
     }
     Some(JsonColumnar {
-        mode,
+        mode: ColumnarMode::Exact,
         keys,
         col_types,
         columns,
@@ -613,7 +578,7 @@ mod tests {
     fn exact_roundtrip_byte_identical() {
         // In Exact mode decode(encode(d)) == d (byte for byte) - with typed columns
         let d = sample_json();
-        let col = columnar_encode(&d, ColumnarMode::Exact).expect("regular JSON encodes");
+        let col = columnar_encode().expect("regular JSON encodes");
         let back = columnar_decode(&col).expect("decode");
         assert_eq!(back, d, "Exact mode is byte identical (the K38 property)");
         // numeric columns are typed (U64) - v and s
@@ -646,33 +611,17 @@ mod tests {
     const HDR_BYTE: usize = 8 + 1 + 1 + 2; // magic+version+mode+key_count (a test constant)
 
     #[test]
-    fn orderfree_roundtrip_preserves_record_set() {
-        // KF2: OrderFree preserves the record SET (the order changes deterministically)
-        let d = sample_json();
-        let col = columnar_encode(&d, ColumnarMode::OrderFree).expect("encode");
-        let back = columnar_decode(&col).expect("decode");
-        let orig: Value = serde_json::from_slice(&d).unwrap();
-        let got: Value = serde_json::from_slice(&back).unwrap();
-        let mut a: Vec<&Value> = orig.as_array().unwrap().iter().collect();
-        let mut b: Vec<&Value> = got.as_array().unwrap().iter().collect();
-        a.sort_by_key(|v| v.to_string());
-        b.sort_by_key(|v| v.to_string());
-        assert_eq!(a, b, "OrderFree preserves the record set (KF2)");
-        assert_eq!(col.mode, ColumnarMode::OrderFree);
-    }
-
-    #[test]
     fn irregular_json_falls_back() {
         let d = br#"[{"a":1},{"a":2,"b":3}]"#;
-        assert!(columnar_encode(d, ColumnarMode::Exact).is_none());
+        assert!(columnar_encode().is_none());
         let d2 = br#"[{"a":1},{"x":2}]"#;
-        assert!(columnar_encode(d2, ColumnarMode::Exact).is_none());
+        assert!(columnar_encode().is_none());
         let d3 = br#"[1,2,3]"#;
-        assert!(columnar_encode(d3, ColumnarMode::Exact).is_none());
+        assert!(columnar_encode().is_none());
         let d4 = br#"{"a":1}"#;
-        assert!(columnar_encode(d4, ColumnarMode::Exact).is_none());
+        assert!(columnar_encode().is_none());
         let d5 = br#"[]"#;
-        assert!(columnar_encode(d5, ColumnarMode::Exact).is_none());
+        assert!(columnar_encode().is_none());
     }
 
     #[test]
@@ -680,7 +629,7 @@ mod tests {
         // mixed numeric types (u64 + i64) -> the column starts as U64; in v1 the types were separate,
         // here if some values of "v" are negative the column falls back to Str, not I64 (a lossless fallback)
         let d = br#"[{"v":1},{"v":-2}]"#;
-        let col = columnar_encode(d, ColumnarMode::Exact).expect("encode");
+        let col = columnar_encode().expect("encode");
         // the first value u64 (1) -> U64; but the second -2 is i64 -> the column falls back to Str
         assert_eq!(
             col.col_types[0],
@@ -697,7 +646,7 @@ mod tests {
     #[test]
     fn str_cells_keep_the_json_kind_through_the_blob() {
         let d = br#"[{"v":1,"s":"a","n":null,"o":{"k":[1,2]}},{"v":-2,"s":null,"n":"x","o":[]}]"#;
-        let col = columnar_encode(d, ColumnarMode::Exact).expect("encode");
+        let col = columnar_encode().expect("encode");
         assert_eq!(
             col.col_types,
             vec![ColType::Str, ColType::Str, ColType::Str, ColType::Str]
@@ -715,7 +664,7 @@ mod tests {
         wrong.col_types[0] = ColType::U64;
         assert!(columnar_to_blob(&wrong).is_none());
         // a JSON-kind cell holding a string would be a second spelling of a value
-        let single = columnar_encode(br#"[{"s":"a"}]"#, ColumnarMode::Exact).unwrap();
+        let single = columnar_encode().unwrap();
         let blob = columnar_to_blob(&single).expect("blob");
         let mut body = blob[..blob.len() - 32].to_vec();
         let cell = body.len() - (1 + 4 + 1);
@@ -781,19 +730,19 @@ mod tests {
     fn the_writer_refuses_what_the_reader_refuses() {
         let long = "x".repeat(MAX_VALUE_BYTES as usize + 1);
         let too_long_value = format!(r#"[{{"v":"{long}"}}]"#);
-        assert!(columnar_encode(too_long_value.as_bytes(), ColumnarMode::Exact).is_none());
+        assert!(columnar_encode(too_long_value.as_bytes).is_none());
         // a number column degrades to Str on a later string, so the bound is
         // measured on every value, not only on the ones in a Str column
         let degraded = format!(r#"[{{"v":1}},{{"v":"{long}"}}]"#);
-        assert!(columnar_encode(degraded.as_bytes(), ColumnarMode::Exact).is_none());
+        assert!(columnar_encode(degraded.as_bytes).is_none());
         let long_key = "k".repeat(MAX_KEY_BYTES + 1);
         let too_long_key = format!(r#"[{{"{long_key}":1}}]"#);
-        assert!(columnar_encode(too_long_key.as_bytes(), ColumnarMode::Exact).is_none());
+        assert!(columnar_encode(too_long_key.as_bytes).is_none());
         // exactly at the bounds both sides agree
         let at_value = "x".repeat(MAX_VALUE_BYTES as usize);
         let at_key = "k".repeat(MAX_KEY_BYTES);
         let at = format!(r#"[{{"{at_key}":"{at_value}"}}]"#);
-        let col = columnar_encode(at.as_bytes(), ColumnarMode::Exact).expect("at the bound");
+        let col = columnar_encode(at.as_bytes).expect("at the bound");
         let blob = columnar_to_blob(&col).expect("blob");
         let back = columnar_from_blob(&blob).expect("the reader accepts the bound");
         assert_eq!(columnar_decode(&back).unwrap(), at.as_bytes());
@@ -804,7 +753,7 @@ mod tests {
     /// with an oversized `Str` cell wrote a blob the reader refuses.
     #[test]
     fn a_hand_built_columnar_is_refused_not_panicked_on() {
-        let good = columnar_encode(br#"[{"a":1,"b":"x"}]"#, ColumnarMode::Exact).unwrap();
+        let good = columnar_encode().unwrap();
         assert!(columnar_to_blob(&good).is_some());
 
         let mut more_columns_than_types = good.clone();
@@ -834,7 +783,7 @@ mod tests {
     fn numeric_columns_are_typed() {
         // Numeric JSON values are stored as U64/I64/F64 in the column (binary)
         let d = br#"[{"a":1,"b":-5,"c":2.5,"d":true,"e":"x"}]"#;
-        let col = columnar_encode(d, ColumnarMode::Exact).unwrap();
+        let col = columnar_encode().unwrap();
         assert_eq!(col.col_types[0], ColType::U64);
         assert_eq!(col.col_types[1], ColType::I64);
         assert_eq!(col.col_types[2], ColType::F64);

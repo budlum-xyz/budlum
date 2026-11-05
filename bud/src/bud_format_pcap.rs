@@ -10,6 +10,8 @@
 //! including `orig_len` where a snaplen truncated the packet. Version 1 of
 //! this transform dropped `orig_len` and restored it as `incl_len`, which is
 //! wrong for every capture taken with a snaplen smaller than the packet.
+//! Exposed for the B.U.D. 3.0 codec registry: the registry wires these
+//! transforms.
 
 #![forbid(unsafe_code)]
 

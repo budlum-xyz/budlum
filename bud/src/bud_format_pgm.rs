@@ -5,6 +5,8 @@
 //! With the error kept under epsilon, the model plus a correction table needs
 //! very little RAM; F117 measured PGM at 8x to 70x less RAM. It is
 //! deterministic.
+//! Exposed for the B.U.D. 3.0 codec registry: the registry wires these
+//! transforms.
 
 #![forbid(unsafe_code)]
 

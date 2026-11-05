@@ -16,6 +16,8 @@
 //! EXACTLY from the template and the columns.
 //!
 //! Code: `#![forbid(unsafe_code)]`, deterministic, panic free.
+//! Exposed for the B.U.D. 3.0 codec registry: the registry wires these
+//! transforms.
 
 #![forbid(unsafe_code)]
 
