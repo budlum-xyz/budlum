@@ -8,8 +8,9 @@ description = "B.U.D. 3.0 A0 codec registry: the frozen decoders and the candida
 
 [dependencies]
 # Encoder only. Compressor output may differ between versions; the decoder
-# below is the frozen side.
-zstd = { version = "=0.13.3", default-features = false }
+# below is the frozen side. `zdict_builder` trains the class dictionary
+# (`zstd::dict::from_samples`); the rest of the default features stays off.
+zstd = { version = "=0.13.3", default-features = false, features = ["zdict_builder"] }
 # The content ids and the deterministic digests of the migrated transforms.
 sha3 = "0.12"
 # The columnar transform reads and writes JSON with stable key order.
