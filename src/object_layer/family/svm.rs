@@ -11,6 +11,13 @@
 //!   proof (`SliceReadRule::EndpointEvent`).
 //! * The upgrade authority is the BPF upgradeable loader's authority of the
 //!   class's program.
+//!
+//! WIRING: the block executor reaches this module through the
+//! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door, and RPC reads it
+//! through `bud_getCharter`, `bud_getAssetClass`, `bud_getAsset` and the
+//! other 9.5 item 4 methods. Both land in the next WP-49 step; until then
+//! the state is held by `SettlementRegistries::object_layer` and closed on
+//! the testnet by `ACTIVATION`.
 
 use crate::core::address::Address;
 use crate::cross_domain::external::spec::{FinalityKind, TimeUnit};
@@ -46,7 +53,9 @@ pub struct SvmFamily;
 pub fn discriminator(event: &str) -> [u8; 8] {
     let digest = Sha256::digest(format!("event:{event}").as_bytes());
     let mut out = [0u8; 8];
-    out.copy_from_slice(&digest[..8]);
+    for (o, d) in out.iter_mut().zip(digest.iter()) {
+        *o = *d;
+    }
     out
 }
 
@@ -232,7 +241,7 @@ impl FamilyProfile for SvmFamily {
 pub(crate) mod fixture {
     //! Borsh encoders matching `contracts/object-layer/svm`, for the tests.
     use super::*;
-    use crate::object_layer::family::EventFixture;
+    use crate::object_layer::family::{ArriveSpec, EventFixture};
 
     fn option_key(out: &mut Vec<u8>, raw: &[u8]) {
         if raw.is_empty() {
@@ -265,16 +274,15 @@ pub(crate) mod fixture {
             id[0] = seed;
             id
         }
-        fn arrive(
-            &self,
-            endpoint: &[u8],
-            kind: AssetKind,
-            contract: &[u8],
-            native_id: &[u8],
-            amount: u128,
-            depositor: &[u8],
-            recipient: Option<Address>,
-        ) -> RawEndpointEvent {
+        fn arrive(&self, endpoint: &[u8], spec: ArriveSpec<'_>) -> RawEndpointEvent {
+            let ArriveSpec {
+                kind,
+                contract,
+                native_id,
+                amount,
+                depositor,
+                recipient,
+            } = spec;
             let mut d = vec![kind.code()];
             d.extend_from_slice(contract);
             option_key(&mut d, native_id);

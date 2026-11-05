@@ -11,6 +11,13 @@
 //! * The app hash in the CometBFT header commits the contract store, so the
 //!   class slice is read with an ICS-23 proof (`AccountAndStorageProof`).
 //! * The upgrade authority is the contract's migrate admin.
+//!
+//! WIRING: the block executor reaches this module through the
+//! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door, and RPC reads it
+//! through `bud_getCharter`, `bud_getAssetClass`, `bud_getAsset` and the
+//! other 9.5 item 4 methods. Both land in the next WP-49 step; until then
+//! the state is held by `SettlementRegistries::object_layer` and closed on
+//! the testnet by `ACTIVATION`.
 
 use crate::core::address::Address;
 use crate::cross_domain::external::spec::{FinalityKind, TimeUnit};
@@ -320,7 +327,7 @@ impl FamilyProfile for CosmWasmFamily {
 pub(crate) mod fixture {
     //! Attribute encoders matching `contracts/object-layer/cosmwasm`.
     use super::*;
-    use crate::object_layer::family::EventFixture;
+    use crate::object_layer::family::{ArriveSpec, EventFixture};
 
     /// The dev chain prefix; the generic suite charters with it.
     pub const PREFIX: &str = "wasm";
@@ -360,16 +367,15 @@ pub(crate) mod fixture {
         fn native_id(&self, seed: u8) -> Vec<u8> {
             format!("token-{seed}").into_bytes()
         }
-        fn arrive(
-            &self,
-            endpoint: &[u8],
-            kind: AssetKind,
-            contract: &[u8],
-            native_id: &[u8],
-            amount: u128,
-            depositor: &[u8],
-            recipient: Option<Address>,
-        ) -> RawEndpointEvent {
+        fn arrive(&self, endpoint: &[u8], spec: ArriveSpec<'_>) -> RawEndpointEvent {
+            let ArriveSpec {
+                kind,
+                contract,
+                native_id,
+                amount,
+                depositor,
+                recipient,
+            } = spec;
             let mut a = vec![
                 ("kind".into(), kind_str(kind)),
                 ("token".into(), bech(contract)),

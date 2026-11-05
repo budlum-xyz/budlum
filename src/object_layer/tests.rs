@@ -10,7 +10,8 @@ use crate::object_layer::charter::{
 };
 use crate::object_layer::family::class_ref_bytes;
 use crate::object_layer::family::{
-    fixture_for, profile_for, AssetKind, EventFixture, HomeVmFamily, RawEndpointEvent, SliceSource,
+    fixture_for, profile_for, ArriveSpec, AssetKind, EventFixture, HomeVmFamily, RawEndpointEvent,
+    SliceSource,
 };
 use crate::object_layer::ids::{AssetClassId, AssetId, HomeIdentity};
 use crate::object_layer::registry::{
@@ -233,12 +234,14 @@ impl World {
         };
         let raw = self.fx.arrive(
             &self.endpoint,
-            AssetKind::Unique,
-            &self.unique,
-            &self.fx.native_id(seed),
-            1,
-            depositor,
-            recipient,
+            ArriveSpec {
+                kind: AssetKind::Unique,
+                contract: &self.unique,
+                native_id: &self.fx.native_id(seed),
+                amount: 1,
+                depositor,
+                recipient,
+            },
         );
         let p = self.proof(raw);
         self.reg.arrive(&p, &YES)
@@ -247,12 +250,14 @@ impl World {
     fn arrive_fungible(&mut self, amount: u128, to: Address) -> Result<AssetId, Refusal> {
         let raw = self.fx.arrive(
             &self.endpoint,
-            AssetKind::Fungible,
-            &self.fungible,
-            &[],
-            amount,
-            &self.fx.address(0x31),
-            Some(to),
+            ArriveSpec {
+                kind: AssetKind::Fungible,
+                contract: &self.fungible,
+                native_id: &[],
+                amount,
+                depositor: &self.fx.address(0x31),
+                recipient: Some(to),
+            },
         );
         let p = self.proof(raw);
         self.reg.arrive(&p, &YES)
@@ -333,12 +338,14 @@ fn arrival_round_trip_keeps_identity(family: HomeVmFamily) {
     // Single use: the same event carried twice is refused.
     let raw = w.fx.arrive(
         &w.endpoint,
-        AssetKind::Unique,
-        &w.unique,
-        &w.fx.native_id(8),
-        1,
-        &depositor,
-        None,
+        ArriveSpec {
+            kind: AssetKind::Unique,
+            contract: &w.unique,
+            native_id: &w.fx.native_id(8),
+            amount: 1,
+            depositor: &depositor,
+            recipient: None,
+        },
     );
     let p = w.proof(raw);
     w.reg.arrive(&p, &YES).unwrap();
@@ -364,11 +371,11 @@ fn arrival_round_trip_keeps_identity(family: HomeVmFamily) {
     let raw = w.fx.released(&w.endpoint, &departure);
     let p = w.proof(raw);
     assert_eq!(w.reg.confirm_departure(&p, &YES), Ok(departure));
-    assert_eq!(w.reg.unique[&first].location, Location::Home);
+    assert_eq!(w.reg.unique.get(&first).unwrap().location, Location::Home);
 
     let again = w.arrive_unique(7, &depositor, Some(bob())).unwrap();
     assert_eq!(first, again, "the round trip keeps the asset's identity");
-    assert_eq!(w.reg.unique[&again].holder, Some(bob()));
+    assert_eq!(w.reg.unique.get(&again).unwrap().holder, Some(bob()));
 }
 
 fn home_call_binds_sender(family: HomeVmFamily) {
@@ -377,7 +384,7 @@ fn home_call_binds_sender(family: HomeVmFamily) {
     let h2 = w.fx.address(0x33);
     let asset = w.arrive_unique(3, &h1, None).unwrap();
     let id1 = Holder::Home(HomeIdentity::derive(DOMAIN, &h1));
-    assert_eq!(w.reg.unique[&asset].holder, Some(id1));
+    assert_eq!(w.reg.unique.get(&asset).unwrap().holder, Some(id1));
 
     let calls = postcard::to_allocvec(&vec![w.unique_call(3, id1, alice())]).unwrap();
     // Another sender cannot act for h1's home identity.
@@ -403,7 +410,7 @@ fn home_call_binds_sender(family: HomeVmFamily) {
         w.reg.home_call(&p, &YES),
         Ok(HomeIdentity::derive(DOMAIN, &h1))
     );
-    assert_eq!(w.reg.unique[&asset].holder, Some(alice()));
+    assert_eq!(w.reg.unique.get(&asset).unwrap().holder, Some(alice()));
     // Replaying nonce 0 in a new event is refused.
     let raw = w.fx.call(&w.endpoint, &h1, 0, &calls);
     let p = w.proof(raw);
@@ -485,11 +492,14 @@ fn custody_parity_holds(family: HomeVmFamily) {
 
     let audit = w.reg.audit_custody(class, 100).unwrap();
     assert_eq!(audit.delta, 0);
-    assert_eq!(w.reg.classes[&class].status, ClassStatus::Active);
+    assert_eq!(
+        w.reg.classes.get(&class).unwrap().status,
+        ClassStatus::Active
+    );
     let audit = w.reg.audit_custody(class, 99).unwrap();
     assert_eq!(audit.delta, -1);
     assert_eq!(
-        w.reg.classes[&class].status,
+        w.reg.classes.get(&class).unwrap().status,
         ClassStatus::Frozen(FreezeReason::CustodyDeficit)
     );
 }
@@ -669,7 +679,7 @@ fn offer_accept_runs_both_sides_or_none() {
         .unwrap();
     assert_eq!(w.reg.balance(&fclass, &alice()), 25);
     let asset = AssetId::derive(&w.class(AssetKind::Unique), &w.fx.native_id(2));
-    assert_eq!(w.reg.unique[&asset].holder, Some(bob()));
+    assert_eq!(w.reg.unique.get(&asset).unwrap().holder, Some(bob()));
     assert_eq!(
         w.reg.accept(bob(), offer, &[], 10),
         Err(Refusal::UnknownOffer)
@@ -712,8 +722,8 @@ fn escape_removes_asset_from_object_layer() {
     );
     let p = w.proof(raw);
     assert_eq!(w.reg.record_escape(&p, &YES), Ok(asset));
-    assert_eq!(w.reg.unique[&asset].location, Location::Home);
-    assert_eq!(w.reg.unique[&asset].holder, None);
+    assert_eq!(w.reg.unique.get(&asset).unwrap().location, Location::Home);
+    assert_eq!(w.reg.unique.get(&asset).unwrap().holder, None);
 }
 
 #[test]
@@ -721,12 +731,14 @@ fn tentative_events_are_refused_until_step_6() {
     let mut w = World::new(HomeVmFamily::Evm);
     let raw = w.fx.arrive(
         &w.endpoint,
-        AssetKind::Unique,
-        &w.unique,
-        &w.fx.native_id(1),
-        1,
-        &w.fx.address(0x31),
-        None,
+        ArriveSpec {
+            kind: AssetKind::Unique,
+            contract: &w.unique,
+            native_id: &w.fx.native_id(1),
+            amount: 1,
+            depositor: &w.fx.address(0x31),
+            recipient: None,
+        },
     );
     let mut p = w.proof(raw);
     p.phase = Phase::Tentative;

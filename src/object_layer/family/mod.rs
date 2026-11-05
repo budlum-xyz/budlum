@@ -20,6 +20,13 @@
 //!
 //! [`profile_for`] is the only place that matches on [`HomeVmFamily`]. The
 //! test `object_layer_core_has_no_family_branch` keeps it that way.
+//!
+//! WIRING: the block executor reaches this module through the
+//! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door, and RPC reads it
+//! through `bud_getCharter`, `bud_getAssetClass`, `bud_getAsset` and the
+//! other 9.5 item 4 methods. Both land in the next WP-49 step; until then
+//! the state is held by `SettlementRegistries::object_layer` and closed on
+//! the testnet by `ACTIVATION`.
 
 pub mod cosmwasm;
 pub mod encoding;
@@ -94,7 +101,8 @@ pub fn class_ref_bytes(kind: AssetKind, contract: &[u8]) -> Vec<u8> {
 }
 
 /// Split canonical class reference bytes back into kind and contract.
-pub fn split_class_ref(class_ref: &[u8]) -> Result<(AssetKind, &[u8]), FamilyError> {
+#[cfg(test)]
+fn split_class_ref(class_ref: &[u8]) -> Result<(AssetKind, &[u8]), FamilyError> {
     let (code, contract) = class_ref
         .split_first()
         .ok_or(FamilyError::Malformed("empty class ref"))?;
@@ -247,8 +255,8 @@ impl fmt::Display for FamilyError {
     }
 }
 
-impl From<encoding::DecodeError> for FamilyError {
-    fn from(e: encoding::DecodeError) -> Self {
+impl From<encoding::WireError> for FamilyError {
+    fn from(e: encoding::WireError) -> Self {
         Self::Malformed(e.0)
     }
 }
@@ -338,21 +346,22 @@ pub fn profile_for(family: HomeVmFamily) -> &'static dyn FamilyProfile {
 
 /// Test-only encoders of each family's endpoint events, so one generic test
 /// suite drives every family through its own wire format.
+/// The fields of one arrival event, for [`EventFixture::arrive`].
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
+pub(crate) struct ArriveSpec<'a> {
+    pub kind: AssetKind,
+    pub contract: &'a [u8],
+    pub native_id: &'a [u8],
+    pub amount: u128,
+    pub depositor: &'a [u8],
+    pub recipient: Option<Address>,
+}
+
+#[cfg(test)]
 pub(crate) trait EventFixture: Sync {
     fn address(&self, seed: u8) -> Vec<u8>;
     fn native_id(&self, seed: u8) -> Vec<u8>;
-    fn arrive(
-        &self,
-        endpoint: &[u8],
-        kind: AssetKind,
-        contract: &[u8],
-        native_id: &[u8],
-        amount: u128,
-        depositor: &[u8],
-        recipient: Option<Address>,
-    ) -> RawEndpointEvent;
+    fn arrive(&self, endpoint: &[u8], spec: ArriveSpec<'_>) -> RawEndpointEvent;
     fn call(&self, endpoint: &[u8], sender: &[u8], nonce: u64, calls: &[u8]) -> RawEndpointEvent;
     fn released(&self, endpoint: &[u8], departure: &DepartureId) -> RawEndpointEvent;
     fn escaped(

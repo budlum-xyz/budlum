@@ -3,6 +3,13 @@
 //! The enum carries every variant the directive lists, in its order, so the
 //! wire codes are fixed from the first release. Variants whose WP-49 step
 //! has not landed are refused with [`TxRefusal::StepNotOpen`].
+//!
+//! WIRING: the block executor reaches this module through the
+//! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door, and RPC reads it
+//! through `bud_getCharter`, `bud_getAssetClass`, `bud_getAsset` and the
+//! other 9.5 item 4 methods. Both land in the next WP-49 step; until then
+//! the state is held by `SettlementRegistries::object_layer` and closed on
+//! the testnet by `ACTIVATION`.
 
 use crate::core::address::Address;
 use crate::domain::types::{DomainId, Hash32};

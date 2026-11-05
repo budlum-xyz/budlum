@@ -7,6 +7,13 @@
 //! The registry never creates value (N-5). Fungible balances only grow by an
 //! arrival whose custody the home endpoint measured, and only shrink by a
 //! departure or an escape. `object_layer_never_mints` checks the sums.
+//!
+//! WIRING: the block executor reaches this module through the
+//! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door, and RPC reads it
+//! through `bud_getCharter`, `bud_getAssetClass`, `bud_getAsset` and the
+//! other 9.5 item 4 methods. Both land in the next WP-49 step; until then
+//! the state is held by `SettlementRegistries::object_layer` and closed on
+//! the testnet by `ACTIVATION`.
 
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
@@ -20,7 +27,7 @@ use crate::object_layer::family::{
 };
 use crate::object_layer::ids::{ArrivalKey, AssetClassId, AssetId, DepartureId, HomeIdentity};
 use crate::object_layer::rule::{
-    sample_commitment, transition, verify_samples, AssetSlice, ClassRule, ClassSlice, Condition,
+    apply_rule, sample_commitment, verify_samples, AssetSlice, ClassRule, ClassSlice, Condition,
     Holder, ReferenceSample, RuleRefusal, Verb,
 };
 use crate::object_layer::{DEFAULT_MIN_REFERENCE_SAMPLES, MAX_COMPOSITE_CALLS};
@@ -518,7 +525,7 @@ impl ObjectLayerRegistry {
         let have = self.balances.get(&key).copied().unwrap_or(0);
         let left = have
             .checked_sub(amount)
-            .ok_or(Refusal::Rule(RuleRefusal::InsufficientBalance))?;
+            .ok_or(Refusal::Rule(RuleRefusal::BalanceTooLow))?;
         if left == 0 {
             self.balances.remove(&key);
         } else {
@@ -555,7 +562,7 @@ impl ObjectLayerRegistry {
                     return Err(Refusal::AssetNotHere);
                 }
                 let holder = asset.holder.ok_or(Refusal::AssetNotHere)?;
-                let t = transition(
+                let t = apply_rule(
                     &class.rule,
                     &class.slice,
                     &AssetSlice::Unique { holder },
@@ -577,7 +584,7 @@ impl ObjectLayerRegistry {
                     .map(|h| (h, self.balance(&call.class, &h)))
                     .filter(|(_, v)| *v > 0)
                     .collect();
-                let t = transition(
+                let t = apply_rule(
                     &class.rule,
                     &class.slice,
                     &AssetSlice::Fungible { balances: before },

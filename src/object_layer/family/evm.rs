@@ -12,6 +12,13 @@
 //!
 //! The Ethereum finality leg (sync committee) depends on WP-60; until it
 //! lands the endpoint's `release` stays closed and only the escape opens.
+//!
+//! WIRING: the block executor reaches this module through the
+//! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door, and RPC reads it
+//! through `bud_getCharter`, `bud_getAssetClass`, `bud_getAsset` and the
+//! other 9.5 item 4 methods. Both land in the next WP-49 step; until then
+//! the state is held by `SettlementRegistries::object_layer` and closed on
+//! the testnet by `ACTIVATION`.
 
 use crate::core::address::Address;
 use crate::cross_domain::external::spec::{FinalityKind, TimeUnit};
@@ -41,10 +48,13 @@ const VERIFIER_SOURCE: &[u8] =
 pub struct EvmFamily;
 
 fn kind_word(word: &[u8; 32]) -> Result<AssetKind, FamilyError> {
-    if word[..31].iter().any(|b| *b != 0) {
+    let (low, high) = word
+        .split_last()
+        .ok_or(FamilyError::Malformed("empty word"))?;
+    if high.iter().any(|b| *b != 0) {
         return Err(FamilyError::Malformed("uint8 word has dirty high bytes"));
     }
-    AssetKind::from_code(word[31]).ok_or(FamilyError::Malformed("unknown asset kind"))
+    AssetKind::from_code(*low).ok_or(FamilyError::Malformed("unknown asset kind"))
 }
 
 fn native_id(kind: AssetKind, word: [u8; 32]) -> Result<Vec<u8>, FamilyError> {
@@ -227,7 +237,7 @@ impl FamilyProfile for EvmFamily {
 pub(crate) mod fixture {
     //! ABI encoders matching `BudlumSettlementEndpoint.sol`, for the tests.
     use super::*;
-    use crate::object_layer::family::EventFixture;
+    use crate::object_layer::family::{ArriveSpec, EventFixture};
 
     fn word_u(n: u128) -> [u8; 32] {
         let mut w = [0u8; 32];
@@ -274,16 +284,15 @@ pub(crate) mod fixture {
         fn native_id(&self, seed: u8) -> Vec<u8> {
             word_u(u128::from(seed)).to_vec()
         }
-        fn arrive(
-            &self,
-            endpoint: &[u8],
-            kind: AssetKind,
-            contract: &[u8],
-            native_id: &[u8],
-            amount: u128,
-            depositor: &[u8],
-            recipient: Option<Address>,
-        ) -> RawEndpointEvent {
+        fn arrive(&self, endpoint: &[u8], spec: ArriveSpec<'_>) -> RawEndpointEvent {
+            let ArriveSpec {
+                kind,
+                contract,
+                native_id,
+                amount,
+                depositor,
+                recipient,
+            } = spec;
             let words = vec![
                 word_u(u128::from(kind.code())),
                 word_addr(contract),
@@ -361,19 +370,21 @@ mod tests {
 
     #[test]
     fn evm_refuses_a_fungible_event_with_a_token_id() {
-        use crate::object_layer::family::EventFixture;
+        use crate::object_layer::family::{ArriveSpec, EventFixture};
         let ctx = FamilyContext {
             chain_reference: "31337",
             address_prefix: "",
         };
         let raw = fixture::EvmFixture.arrive(
             &[1; 20],
-            AssetKind::Fungible,
-            &[2; 20],
-            &[9; 32],
-            5,
-            &[3; 20],
-            None,
+            ArriveSpec {
+                kind: AssetKind::Fungible,
+                contract: &[2; 20],
+                native_id: &[9; 32],
+                amount: 5,
+                depositor: &[3; 20],
+                recipient: None,
+            },
         );
         assert!(EvmFamily.translate_event(&ctx, &raw).is_err());
     }

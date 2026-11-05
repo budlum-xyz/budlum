@@ -4,6 +4,13 @@
 //! settlement endpoint. Admission is permissionless (N-11) but proven: the
 //! endpoint and verifier code hashes are shown with an account proof and must
 //! equal the canonical hashes genesis pins for the family.
+//!
+//! WIRING: the block executor reaches this module through the
+//! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door, and RPC reads it
+//! through `bud_getCharter`, `bud_getAssetClass`, `bud_getAsset` and the
+//! other 9.5 item 4 methods. Both land in the next WP-49 step; until then
+//! the state is held by `SettlementRegistries::object_layer` and closed on
+//! the testnet by `ACTIVATION`.
 
 use crate::domain::types::Hash32;
 use crate::object_layer::family::{profile_for, FamilyContext, HomeVmFamily};

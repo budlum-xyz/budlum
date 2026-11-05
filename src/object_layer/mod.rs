@@ -32,6 +32,13 @@
 //! `ConfirmDeparture`, `AuditCustody`, escape records, and the four family
 //! profiles. Tentative phase, challenges, `RecordV1`, header V9 and the RPC
 //! reads are later steps of WP-49 and are refused until they land.
+//!
+//! WIRING: the block executor reaches this module through the
+//! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door, and RPC reads it
+//! through `bud_getCharter`, `bud_getAssetClass`, `bud_getAsset` and the
+//! other 9.5 item 4 methods. Both land in the next WP-49 step; until then
+//! the state is held by `SettlementRegistries::object_layer` and closed on
+//! the testnet by `ACTIVATION`.
 
 pub mod charter;
 pub mod family;

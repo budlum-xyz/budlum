@@ -3,6 +3,13 @@
 //! A class rule is a pure function. It reads the class slice, the asset
 //! slice and one verb, and either accepts the transition or refuses it. It
 //! never reads the registry, the clock or any other class (N-2, N-12).
+//!
+//! WIRING: the block executor reaches this module through the
+//! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door, and RPC reads it
+//! through `bud_getCharter`, `bud_getAssetClass`, `bud_getAsset` and the
+//! other 9.5 item 4 methods. Both land in the next WP-49 step; until then
+//! the state is held by `SettlementRegistries::object_layer` and closed on
+//! the testnet by `ACTIVATION`.
 
 use crate::core::address::Address;
 use crate::object_layer::ids::{AssetClassId, HomeIdentity};
@@ -151,7 +158,7 @@ pub enum RuleRefusal {
     Paused,
     WrongShape,
     NotHolder,
-    InsufficientBalance,
+    BalanceTooLow,
     ZeroAmount,
     Overflow,
 }
@@ -165,7 +172,7 @@ fn is_set(slice: &ClassSlice, field: &Option<String>) -> bool {
 
 /// Run one verb under a class rule. Pure: the same inputs always give the
 /// same output, on every node.
-pub fn transition(
+pub fn apply_rule(
     rule: &ClassRule,
     class_slice: &ClassSlice,
     before: &AssetSlice,
@@ -187,7 +194,7 @@ pub fn transition(
             let have = balances.get(from).copied().unwrap_or(0);
             let left = have
                 .checked_sub(*amount)
-                .ok_or(RuleRefusal::InsufficientBalance)?;
+                .ok_or(RuleRefusal::BalanceTooLow)?;
             if left == 0 {
                 balances.remove(from);
             } else {
@@ -234,7 +241,7 @@ pub fn verify_samples(rule: &ClassRule, samples: &[ReferenceSample]) -> Result<(
     for (index, sample) in samples.iter().enumerate() {
         let mut slice = sample.before.clone();
         for verb in &sample.verbs {
-            slice = transition(rule, &sample.class_slice, &slice, verb)
+            slice = apply_rule(rule, &sample.class_slice, &slice, verb)
                 .map_err(|_| index)?
                 .asset_slice;
         }
@@ -334,7 +341,7 @@ mod tests {
     fn unique_template_does_not_enforce_info_royalty() {
         let mut slice = ClassSlice::new();
         slice.insert("royalty".into(), vec![0, 0, 0, 250]);
-        let t = transition(
+        let t = apply_rule(
             &unique(),
             &slice,
             &AssetSlice::Unique { holder: acct(1) },
@@ -366,7 +373,7 @@ mod tests {
             amount: 1,
         };
         assert_eq!(
-            transition(&fungible(), &slice, &before, &verb),
+            apply_rule(&fungible(), &slice, &before, &verb),
             Err(RuleRefusal::Paused)
         );
     }
@@ -379,7 +386,7 @@ mod tests {
             amount: 1,
         };
         assert_eq!(
-            transition(
+            apply_rule(
                 &unique(),
                 &ClassSlice::new(),
                 &AssetSlice::Unique { holder: acct(1) },
@@ -400,7 +407,7 @@ mod tests {
         for rule in [ClassRule::Program, ClassRule::Replica, ClassRule::Native] {
             assert!(!matches!(rule, ClassRule::Native) || !rule.is_open());
             assert_eq!(
-                transition(&rule, &ClassSlice::new(), &before, &verb),
+                apply_rule(&rule, &ClassSlice::new(), &before, &verb),
                 Err(RuleRefusal::ClosedRule)
             );
         }

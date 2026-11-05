@@ -12,6 +12,13 @@
 //!
 //! The Sui dialect (object-centric, WP-50) is a separate execution
 //! environment; its family parts join here when WP-50 lands.
+//!
+//! WIRING: the block executor reaches this module through the
+//! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door, and RPC reads it
+//! through `bud_getCharter`, `bud_getAssetClass`, `bud_getAsset` and the
+//! other 9.5 item 4 methods. Both land in the next WP-49 step; until then
+//! the state is held by `SettlementRegistries::object_layer` and closed on
+//! the testnet by `ACTIVATION`.
 
 use crate::core::address::Address;
 use crate::cross_domain::external::spec::{FinalityKind, TimeUnit};
@@ -196,7 +203,7 @@ impl FamilyProfile for MoveFamily {
     }
 
     fn call_envelope(&self) -> &'static str {
-        "BCS vector<u8> in HomeCallEvent.calls; sender = signer::address_of(&signer)"
+        "BCS vector<u8> in HomeCallEvent.calls; sender = the transaction signer"
     }
 
     fn template_for(&self, kind: AssetKind) -> TemplateId {
@@ -230,7 +237,7 @@ impl FamilyProfile for MoveFamily {
 pub(crate) mod fixture {
     //! BCS encoders matching `settlement_endpoint.move`, for the tests.
     use super::*;
-    use crate::object_layer::family::EventFixture;
+    use crate::object_layer::family::{ArriveSpec, EventFixture};
 
     fn uleb(out: &mut Vec<u8>, mut n: usize) {
         loop {
@@ -273,16 +280,15 @@ pub(crate) mod fixture {
             id[31] = seed;
             id
         }
-        fn arrive(
-            &self,
-            endpoint: &[u8],
-            kind: AssetKind,
-            contract: &[u8],
-            native_id: &[u8],
-            amount: u128,
-            depositor: &[u8],
-            recipient: Option<Address>,
-        ) -> RawEndpointEvent {
+        fn arrive(&self, endpoint: &[u8], spec: ArriveSpec<'_>) -> RawEndpointEvent {
+            let ArriveSpec {
+                kind,
+                contract,
+                native_id,
+                amount,
+                depositor,
+                recipient,
+            } = spec;
             let mut d = vec![kind.code()];
             d.extend_from_slice(contract);
             option_address(&mut d, native_id);

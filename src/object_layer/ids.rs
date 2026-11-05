@@ -15,6 +15,13 @@
 //! `hash_fields_bytes` already length-prefixes every field. The explicit
 //! `len(..)` fields are kept anyway so the preimage is the formula above,
 //! field for field, and a second implementation can follow the text.
+//!
+//! WIRING: the block executor reaches this module through the
+//! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door, and RPC reads it
+//! through `bud_getCharter`, `bud_getAssetClass`, `bud_getAsset` and the
+//! other 9.5 item 4 methods. Both land in the next WP-49 step; until then
+//! the state is held by `SettlementRegistries::object_layer` and closed on
+//! the testnet by `ACTIVATION`.
 
 use crate::core::hash::hash_fields_bytes;
 use crate::domain::types::{DomainId, Hash32};
