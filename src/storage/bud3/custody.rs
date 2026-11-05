@@ -288,7 +288,7 @@ impl CustodyProof {
 }
 
 /// One audit of one custody share.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Audit {
     /// Segment index.
     pub segment: u64,

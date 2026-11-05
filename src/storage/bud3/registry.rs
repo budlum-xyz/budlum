@@ -49,7 +49,7 @@ pub type Address = [u8; 32];
 pub type NftId = [u8; 32];
 
 /// The life of a share.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ShareStatus {
     /// Placed, not yet acknowledged by the holder.
     Pending,
@@ -58,7 +58,7 @@ pub enum ShareStatus {
 }
 
 /// One share as the chain tracks it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ShareState {
     /// Segment index.
     pub segment: u64,
@@ -83,7 +83,7 @@ pub struct ShareState {
 
 /// A symbol root and the ESI range it covers. The upload root covers ESI
 /// `0..symbols_per_segment`; each repair adds one root over its new ESIs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SymbolRoot {
     /// Segment index.
     pub segment: u64,
@@ -96,7 +96,7 @@ pub struct SymbolRoot {
 }
 
 /// One object.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ObjectEntry {
     /// The record the uploader registered.
     pub record: ObjectRecord,
@@ -184,14 +184,50 @@ pub enum Registered {
     Deduplicated(ObjectKey),
 }
 
-/// The registry.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// The registry. It serializes as flat lists, so a JSON snapshot (which
+/// cannot key a map by a byte array) carries it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(from = "FlatRegistry", into = "FlatRegistry")]
 pub struct Bud3Registry {
     objects: BTreeMap<ObjectKey, ObjectEntry>,
     public_index: BTreeMap<[u8; 32], ObjectKey>,
     nfts: BTreeMap<NftId, (ObjectKey, Address)>,
     tombstones: BTreeMap<ObjectKey, u64>,
     declines: BTreeSet<([u8; 32], Address)>,
+}
+
+/// The serialized form of [`Bud3Registry`].
+#[derive(serde::Serialize, serde::Deserialize)]
+struct FlatRegistry {
+    objects: Vec<(ObjectKey, ObjectEntry)>,
+    public_index: Vec<([u8; 32], ObjectKey)>,
+    nfts: Vec<(NftId, (ObjectKey, Address))>,
+    tombstones: Vec<(ObjectKey, u64)>,
+    declines: Vec<([u8; 32], Address)>,
+}
+
+impl From<Bud3Registry> for FlatRegistry {
+    fn from(r: Bud3Registry) -> Self {
+        Self {
+            objects: r.objects.into_iter().collect(),
+            public_index: r.public_index.into_iter().collect(),
+            nfts: r.nfts.into_iter().collect(),
+            tombstones: r.tombstones.into_iter().collect(),
+            declines: r.declines.into_iter().collect(),
+        }
+    }
+}
+
+impl From<FlatRegistry> for Bud3Registry {
+    fn from(f: FlatRegistry) -> Self {
+        Self {
+            objects: f.objects.into_iter().collect(),
+            public_index: f.public_index.into_iter().collect(),
+            nfts: f.nfts.into_iter().collect(),
+            tombstones: f.tombstones.into_iter().collect(),
+            declines: f.declines.into_iter().collect(),
+        }
+    }
 }
 
 fn check_placement(record: &ObjectRecord, shares: &[(u64, Share)]) -> Result<(), RegistryError> {
@@ -758,6 +794,12 @@ impl Bud3Registry {
             dropped += before - obj.shares.len();
         }
         dropped
+    }
+
+    /// Whether the registry holds nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.objects.is_empty() && self.tombstones.is_empty() && self.declines.is_empty()
     }
 
     /// The registry state root over every map, in order.

@@ -469,6 +469,9 @@ pub struct AccountState {
     /// The validator directory: class, operator key, quota and the
     /// bond of every mobile validator. Rooted and snapshotted.
     pub validator_directory: crate::validators::ValidatorDirectory,
+    /// The B.U.D. 3.0 registry: objects, references, shares and audits.
+    /// Rooted and snapshotted.
+    pub bud3_registry: crate::storage::bud3::registry::Bud3Registry,
     /// Governance-queued compliance freezes/unfreezes awaiting
     /// application (see [`PendingPoaCompliance`]).
     pub pending_poa_freezes: Vec<PendingPoaCompliance>,
@@ -542,6 +545,7 @@ impl AccountState {
             pending_domain_unfreezes: Vec::new(),
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
             validator_directory: crate::validators::ValidatorDirectory::new(),
+            bud3_registry: crate::storage::bud3::registry::Bud3Registry::default(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -606,6 +610,7 @@ impl AccountState {
             pending_domain_unfreezes: Vec::new(),
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
             validator_directory: crate::validators::ValidatorDirectory::new(),
+            bud3_registry: crate::storage::bud3::registry::Bud3Registry::default(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -679,6 +684,7 @@ impl AccountState {
             pending_domain_unfreezes: Vec::new(),
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
             validator_directory: crate::validators::ValidatorDirectory::new(),
+            bud3_registry: crate::storage::bud3::registry::Bud3Registry::default(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -795,6 +801,7 @@ impl AccountState {
             pending_domain_unfreezes: Vec::new(),
             poa_compliance: snapshot.poa_compliance.clone().unwrap_or_default(),
             validator_directory: snapshot.validator_directory.clone().unwrap_or_default(),
+            bud3_registry: snapshot.bud3_registry.clone().unwrap_or_default(),
             burned_total: snapshot.burned_total,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -4345,6 +4352,12 @@ impl AccountState {
         if !self.validator_directory.is_empty() {
             final_hasher.update(b"validator_directory_v1");
             final_hasher.update(self.validator_directory.root());
+        }
+        // The B.U.D. 3.0 registry folds in once it holds anything, so a chain
+        // that never stored an object keeps its pinned roots.
+        if !self.bud3_registry.is_empty() {
+            final_hasher.update(b"bud3_registry_v1");
+            final_hasher.update(self.bud3_registry.state_root());
         }
         if !self.external_roots.is_empty() {
             final_hasher.update(b"external_roots_v1");

@@ -785,6 +785,9 @@ pub enum TransactionType {
     /// except for the quota update, whose payload names the owner and carries
     /// the operator key's signature.
     Validator(crate::validators::ValidatorTx),
+    /// The B.U.D. 3.0 storage door (`StorageTx` v3). The signer is
+    /// `tx.from`. Appended last because `bincode` encodes the variant index.
+    StorageV3(Box<crate::storage::bud3::tx::StorageTxV3>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2453,6 +2456,8 @@ impl Transaction {
             TransactionType::Validator(_) => {
                 schedule.contract_call_gas * 2 + schedule.gas_per_signature * 2
             }
+            // A registry write; a proof batch also hashes Merkle paths.
+            TransactionType::StorageV3(_) => schedule.contract_call_gas * 2,
             TransactionType::RoleBond { .. } => schedule.contract_call_gas,
             // A registry write that re-derives the manifest id over every
             // shard: priced like the registry arms beside it. Opening a deal
@@ -2880,6 +2885,7 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::RoleUnbond { .. } => 67,
         TransactionType::RoleWithdraw { .. } => 68,
         TransactionType::Validator(_) => 69,
+        TransactionType::StorageV3(_) => 70,
     }
 }
 fn encode_chain(chain: ExternalChain, out: &mut Vec<u8>) {
@@ -3833,6 +3839,14 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
             put_u32(out, *role);
         }
         TransactionType::Validator(validator_tx) => encode_validator_tx(validator_tx, out),
+        // The whole payload is signed: its canonical bincode bytes,
+        // length-prefixed.
+        TransactionType::StorageV3(storage_tx) => {
+            put_bytes(
+                out,
+                &bincode::serialize(storage_tx.as_ref()).unwrap_or_default(),
+            );
+        }
         TransactionType::ExternalDomain(external_tx) => {
             put_u8(out, 53);
             encode_external_domain_tx(external_tx, out);

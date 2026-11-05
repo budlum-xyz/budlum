@@ -707,6 +707,10 @@ pub struct StateSnapshotV2 {
     /// is what a chain that predates the validator door had.
     #[serde(default)]
     pub validator_directory: Option<crate::validators::ValidatorDirectory>,
+    /// The B.U.D. 3.0 registry. `None` reads as empty, which is what a chain
+    /// that predates the B.U.D. 3.0 door had.
+    #[serde(default)]
+    pub bud3_registry: Option<crate::storage::bud3::registry::Bud3Registry>,
     /// Proof tasks and unpaid receipts.
     ///
     /// `#[serde(default)]` like its neighbours: a snapshot taken before this
@@ -948,6 +952,7 @@ impl StateSnapshotV2 {
             scheme_registry: Some(SchemeRegistrySnapshot::of(&account_state.scheme_registry)),
             reward_pool_enabled: Some(account_state.reward_pool_enabled),
             validator_directory: Some(account_state.validator_directory.clone()),
+            bud3_registry: Some(account_state.bud3_registry.clone()),
             proof_market: Some(account_state.proof_market.clone()),
             identity: Some(account_state.identity.clone()),
             vault: Some(account_state.vault.clone()),

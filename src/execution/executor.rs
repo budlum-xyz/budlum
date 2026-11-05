@@ -3070,6 +3070,36 @@ impl Executor {
                 })?;
                 sender.nonce = sender.nonce.saturating_add(1);
             }
+            TransactionType::StorageV3(storage_tx) => {
+                // The storage door moves no value: the signed amount is zero
+                // and only the fee is charged. The registry refuses before it
+                // writes, so a refusal leaves the state as it was.
+                if tx.amount != 0 {
+                    return Err(BudlumError::validation(
+                        "storage_v3_amount_nonzero",
+                        "a StorageTx v3 transaction carries no amount",
+                    ));
+                }
+                if state.spendable_balance(&tx.from) < total_cost {
+                    return Err(BudlumError::validation(
+                        "insufficient_balance",
+                        format!("the fee exceeds the spendable balance: need {total_cost}"),
+                    ));
+                }
+                let epoch = state.epoch_index;
+                crate::storage::bud3::tx::apply(
+                    &mut state.bud3_registry,
+                    *tx.from.as_bytes(),
+                    storage_tx.as_ref().clone(),
+                    epoch,
+                )
+                .map_err(|e| BudlumError::validation("storage_v3_refused", format!("{e:?}")))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(total_cost).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
             TransactionType::RoleBond { role } => {
                 // The verifier family's production
                 // registration door. The bond is the signed amount; the role
