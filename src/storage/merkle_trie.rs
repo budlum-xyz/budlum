@@ -467,6 +467,39 @@ const fn get_bit(address: &[u8; 32], level: usize) -> bool {
 mod tests {
     use super::*;
 
+    /// The persistence move is behaviour neutral: this fixed account set
+    /// still hashes to the same proof-bearing root, whatever module path the
+    /// trie lives under. The golden values were derived from the leaf,
+    /// internal and root rules before the move, so a drift in any of the
+    /// three fails here and not inside a later change.
+    #[test]
+    fn persistence_move_is_behaviour_neutral() {
+        let empty = MerkleTrie::new();
+        assert_eq!(
+            hex::encode(empty.root_ref()),
+            "6e0097eedcbc7a88b1e3e9bd96352a716f662b202b08990b710271fd90f4a936"
+        );
+        let mut trie = MerkleTrie::new();
+        trie.bulk_insert(&[
+            ([0x00; 32], 0, 0),
+            ([0x01; 32], 1, 2),
+            ([0x7F; 32], 123_456_789, 0),
+            ([0x80; 32], u64::MAX, u64::MAX),
+            ([0xAA; 32], 42, 7),
+            ([0xFF; 32], 7, 42),
+        ]);
+        assert_eq!(
+            hex::encode(trie.root_ref()),
+            "f3e661cde96ee987c1afff49f71dc0afa08956cfc1867c74d70ff06b5234b77c"
+        );
+        // The proofs drawn from that root verify against it, presence and
+        // absence alike, so the proof carrying behaviour moves intact too.
+        let present = prove_from_trie(&trie, &[0xAA; 32]);
+        assert!(present.present && present.verify_self_consistent());
+        let absent = prove_from_trie(&trie, &[0x55; 32]);
+        assert!(!absent.present && absent.verify_self_consistent());
+    }
+
     fn addr(b: u8) -> [u8; 32] {
         let mut a = [0u8; 32];
         a[0] = b;
