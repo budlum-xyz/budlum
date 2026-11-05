@@ -1,4 +1,4 @@
-//! The domain charter (9.3.1).
+//! The domain charter.
 //!
 //! A charter binds one consensus domain to the object layer through its
 //! settlement endpoint. Admission is permissionless (N-11) but proven: the
@@ -8,7 +8,7 @@
 //! WIRING: the block executor reaches this module through the
 //! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door, and RPC reads it
 //! through `bud_getCharter`, `bud_getAssetClass`, `bud_getAsset` and the
-//! other 9.5 item 4 methods. Both land in the next WP-49 step; until then
+//! other object-layer read methods. Both land in a later step; until then
 //! the state is held by `SettlementRegistries::object_layer` and closed on
 //! the testnet by `ACTIVATION`.
 

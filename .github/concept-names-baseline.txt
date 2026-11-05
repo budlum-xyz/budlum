@@ -1,7 +1,7 @@
 # Legacy concept-name counts per entry of config/naming/concept_map.toml.
 # One line per entry: name|files|matches. A ratchet: the numbers may only fall.
 # Lower it with: BUDLUM_CONCEPT_NAMES_WRITE=1 budlum-gates concept-names
-# WP-43 sets the map to `absolute` mode and every line to zero.
+# The map moves to `absolute` mode once every line is zero.
 Anaç|0|0
 Atlas|7|55
 Budscan|33|268

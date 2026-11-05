@@ -135,7 +135,7 @@ impl BlsKeypair {
 
     /// Derive a key pair from a 64-byte seed. A seed that reduces to the
     /// zero scalar (the all-zero seed, or any multiple of the group order) is
-    /// refused (BLG-200): its public key is the identity point, which signs
+    /// refused: its public key is the identity point, which signs
     /// every message and aggregates into any set without changing it.
     pub fn from_seed(seed: &[u8; 64]) -> Result<Self, CryptoError> {
         let sk = Scalar::from_bytes_wide(seed);
@@ -910,7 +910,7 @@ pub fn wallet_address_from_ml_dsa_87_public_key(
 ///
 /// The signature must be exactly 4627 bytes and the public key exactly 2592
 /// bytes. The check runs through the dual-verifier facade (`crypto::pq`,
-///): RustCrypto `ml-dsa` and `libcrux-ml-dsa` must both accept. This path
+/// : RustCrypto `ml-dsa` and `libcrux-ml-dsa` must both accept. This path
 /// is intentionally separate from validator PQ signatures (ML-DSA-65): user
 /// wallets are pinned to ML-DSA-87 for Category 5 security.
 ///
@@ -933,8 +933,8 @@ pub fn verify_ml_dsa_87_signature(
 }
 
 #[cfg(feature = "wallet-ml-dsa")]
-/// [`verify_ml_dsa_87_signature`] under the scheme statuses of a chain
-///. A family the registry marks
+/// [`verify_ml_dsa_87_signature`] under the scheme statuses of a chain.
+/// A family the registry marks
 /// `Disabled` or not yet `Active` is refused before any key is decoded.
 pub fn verify_ml_dsa_87_signature_in(
     registry: &super::scheme::SchemeStatusRegistry,
@@ -998,7 +998,7 @@ pub fn verify_ml_dsa_87_signature(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn blg_200_zero_seed_is_refused() {
+    fn zero_seed_is_refused() {
         // The all-zero seed and a seed equal to the group order both reduce
         // to the zero scalar, whose public key is the identity point.
         assert!(super::BlsKeypair::from_seed(&[0u8; 64]).is_err());

@@ -70,18 +70,18 @@ jobs:
       # needs recorded baseline history and lands when there is a baseline to
       # compare against; until then a run that produces no numbers is itself a
       # failure, never a silent green.
-      - name: Fail on a vacuous benchmark run (BLG-1049 interim)
+      - name: Fail on a vacuous benchmark run (interim)
         run: |
           set -euo pipefail
           for f in /tmp/bench-micro.txt /tmp/bench-single.txt; do
             if ! grep -qE 'Throughput:|Avg per' "$f"; then
-              echo "::error file=$f::no benchmark metric in $f - a vacuous run must fail (BLG-1049)"
+              echo "::error file=$f::no benchmark metric in $f - a vacuous run must fail"
               exit 1
             fi
           done
           for f in /tmp/bench-budzero-canonical.txt /tmp/bench-budzero-baseline.txt; do
             if [ ! -s "$f" ]; then
-              echo "::error file=$f::empty BudZero bench output - a vacuous run must fail (BLG-1049)"
+              echo "::error file=$f::empty BudZero bench output - a vacuous run must fail"
               exit 1
             fi
           done

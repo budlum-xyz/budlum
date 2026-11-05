@@ -1,7 +1,7 @@
 [package]
 name = "BudlumObjectLayer"
 version = "0.1.0"
-# No upgrades: the package is published immutable (directive 9.3.2 item 2).
+# No upgrades: the package is published immutable.
 upgrade_policy = "immutable"
 
 [addresses]

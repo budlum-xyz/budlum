@@ -1,4 +1,4 @@
-/// Budlum settlement endpoint, Move family (WP-64, directive 9.3.2).
+/// Budlum settlement endpoint, Move family.
 ///
 /// Takes custody of Fungible Asset and token objects that enter the Budlum
 /// Universal Object Layer, carries home calls, and tracks the last accepted
@@ -26,7 +26,7 @@ module budlum::settlement_endpoint {
     const E_BAD_RECIPIENT: u64 = 2;
     const E_NOT_FINAL: u64 = 3;
     const E_NOT_NEWER: u64 = 4;
-    /// release and escape open with WP-49 step 5 (object-layer root opening).
+    /// release and escape open with the object-layer root opening.
     const E_NOT_OPEN: u64 = 5;
 
     /// Seconds without a newly accepted checkpoint before the exit opens.
@@ -162,12 +162,12 @@ module budlum::settlement_endpoint {
         timestamp::now_seconds() > e.last_accepted_at + SILENCE_WINDOW_SECS
     }
 
-    /// Opens with WP-49 step 5.
+    /// Opens with the object-layer root opening.
     public entry fun release(_proof: vector<u8>) {
         abort E_NOT_OPEN
     }
 
-    /// Opens with WP-49 step 5.
+    /// Opens with the object-layer root opening.
     public entry fun escape(_proof: vector<u8>) {
         abort E_NOT_OPEN
     }

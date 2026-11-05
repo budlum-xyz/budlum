@@ -1,5 +1,4 @@
-//! Validator classes and the single registration door (directive section 7,
-//! WP-08).
+//! Validator classes and the single registration door.
 //!
 //! A validator is Full, Mobile or MobileOpportunistic. One transaction family,
 //! [`ValidatorTx`], registers a validator, changes its class, rotates its
@@ -109,7 +108,7 @@ pub struct LeaderCommitment {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeatFields {
     /// The slot VRF key. The PoS engine still draws with it until the hash
-    /// chain election is the only election (WP-12); it is refused for the
+    /// chain election is the only election; it is refused for the
     /// mobile classes.
     pub vrf_key: Vec<u8>,
     /// The ML-DSA-65 half of the finality vote.

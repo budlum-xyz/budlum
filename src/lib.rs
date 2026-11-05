@@ -93,14 +93,14 @@ mod bls_keypair_integrity_test {
         );
     }
 
-    /// BLG-200: the test above was green for the wrong reason. All-zero bytes
+    /// The test above was green for the wrong reason. All-zero bytes
     /// are simply not an encoding; the identity point has its own encoding
     /// (compression and infinity flags, `0xc0` first byte) and that one
     /// *does* decode. The defence is the verifier's identity check, so that
     /// is what this test drives: an identity public key with an identity
     /// signature must be refused for any message.
     #[test]
-    fn blg_200_identity_points_are_refused_by_the_verifier() {
+    fn identity_points_are_refused_by_the_verifier() {
         let identity_pk = G2Affine::identity().to_compressed();
         let identity_sig = G1Affine::identity().to_compressed();
         assert_eq!(identity_pk[0], 0xc0);

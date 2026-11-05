@@ -10,7 +10,7 @@ interface IBudlumObjectLayerFinality {
     function heightFinal(uint64 height) external view returns (bool);
 }
 
-/// @title Budlum settlement endpoint (EVM family, directive 9.3.2).
+/// @title Budlum settlement endpoint (EVM family).
 /// @notice Takes custody of ERC-20 and ERC-721 assets that enter the Budlum
 ///         Universal Object Layer, carries home calls, and tracks the last
 ///         accepted Budlum checkpoint for the silence window.
@@ -90,15 +90,15 @@ contract BudlumSettlementEndpoint {
         return block.timestamp > lastAcceptedAt + silenceWindow;
     }
 
-    /// Opens with WP-49 step 5: needs an opening of the object-layer root of
+    /// Opens later: needs an opening of the object-layer root of
     /// an accepted global header (V9).
     function release(bytes calldata) external pure {
-        revert NotOpen("WP-49 step 5: departure proof");
+        revert NotOpen("departure proof");
     }
 
-    /// Opens with WP-49 step 5: the exit rests on the state at the last
+    /// Opens later: the exit rests on the state at the last
     /// accepted header, which needs the same opening.
     function escape(bytes calldata) external pure {
-        revert NotOpen("WP-49 step 5: escape proof");
+        revert NotOpen("escape proof");
     }
 }

@@ -1,6 +1,6 @@
 // The wire contract between the Execution Coordinator (node process) and an
-// execution-environment worker (one binary per environment). Directive section
-// 8.3. One frame is a big-endian u32 length followed by one `Envelope`; the
+// execution-environment worker (one binary per environment).
+// One frame is a big-endian u32 length followed by one `Envelope`; the
 // largest frame is 16 MiB. Every envelope starts with the ABI version (field 1),
 // so a mismatched peer is refused before the body is interpreted.
 syntax = "proto3";

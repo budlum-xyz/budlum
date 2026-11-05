@@ -1,5 +1,5 @@
 //! The coordinator <-> worker round trip over a real Unix socket, with the mock
-//! environment on the worker side (WP-09 tests).
+//! environment on the worker side.
 
 // A panic is how a test reports a broken invariant; the node-wide panic gate is for
 // production code (the same exemption the root manifest documents for tests).

@@ -240,7 +240,7 @@ pub struct SyncAttestation<'a> {
     /// execution block inside it.
     pub beacon: &'a BeaconBinding,
     /// The header the committee signed and the branch proving `beacon` is
-    /// its finalized checkpoint (BLG-235). A signed head alone is not
+    /// its finalized checkpoint. A signed head alone is not
     /// finality.
     pub finality: &'a FinalityUpdate,
     /// Fork version and genesis validators root. The adapter's, never the

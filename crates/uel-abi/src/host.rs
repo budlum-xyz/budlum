@@ -1,6 +1,6 @@
-//! The two traits of the contract (directive 8.3.3).
+//! The two traits of the contract.
 //!
-//! Two deliberate refinements of the directive's conceptual sketch. First,
+//! Two deliberate refinements of the conceptual design. First,
 //! `bud_balance` is a read, so it lives on [`HostRead`]: a `query` runs with a
 //! `&dyn HostRead` and a read-only call has to see balances. Second,
 //! `HostApi::write` takes a [`Namespace`] and `Option<&[u8]>`, where `None`
@@ -73,7 +73,7 @@ pub trait HostApi: HostRead {
     ) -> Result<(), HostError>;
 }
 
-/// An execution environment (directive 8.3.3), served by a worker process.
+/// An execution environment, served by a worker process.
 pub trait ExecutionEnvironment {
     /// The catalog id.
     fn id(&self) -> EeId;

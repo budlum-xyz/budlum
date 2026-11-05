@@ -1,4 +1,4 @@
-//! Identity derivations of the Universal Object Layer (directive 9.3.3).
+//! Identity derivations of the Universal Object Layer.
 //!
 //! Every identity is a domain-separated hash. The home domain fixes the
 //! identity of an asset once (N-1): Budlum never mints a wrapped copy, so the
@@ -19,7 +19,7 @@
 //! WIRING: the block executor reaches this module through the
 //! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door, and RPC reads it
 //! through `bud_getCharter`, `bud_getAssetClass`, `bud_getAsset` and the
-//! other 9.5 item 4 methods. Both land in the next WP-49 step; until then
+//! other object-layer read methods. Both land in a later step; until then
 //! the state is held by `SettlementRegistries::object_layer` and closed on
 //! the testnet by `ACTIVATION`.
 
@@ -77,7 +77,7 @@ hash_id!(
 hash_id!(
     /// The Budlum-side identity of an address on a home domain. A home call
     /// runs as this identity; its authority is the home domain's finality
-    /// proof, not a signature (9.3.10).
+    /// proof, not a signature.
     HomeIdentity
 );
 hash_id!(

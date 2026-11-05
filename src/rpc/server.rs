@@ -1041,7 +1041,7 @@ pub(crate) fn cors_outcome<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) 
     };
     // An origin listed by name is echoed: that is the one value the
     // operator approved. A `*` entry answers with the literal `*` and never
-    // echoes the caller's header back (BULGU-011): a reflected wildcard turns
+    // echoes the caller's header back: a reflected wildcard turns
     // "any origin" into "this exact origin", which caches and credential
     // rules treat as a named grant.
     if config.cors_origins.iter().any(|allowed| allowed == origin) {
@@ -1108,7 +1108,7 @@ fn clamp_feed_limit(limit: usize) -> usize {
 /// serialization cost do not grow with chain state.
 const MAX_LIST_RESPONSE_ITEMS: usize = 1000;
 
-/// Finish a `*_prepare_*` transaction template (BLG-032): the nonce is
+/// Finish a `*_prepare_*` transaction template: the nonce is
 /// the sender's next nonce and the fee is the admission floor the chain
 /// enforces (`AccountState::required_fee`), with `max_fee == fee` as
 /// flat-fee mode requires. The templates used to carry hard-coded fees
@@ -1131,7 +1131,7 @@ async fn finish_template(
 
 /// Serialize one RPC result value. A value that cannot be encoded is an
 /// explicit `-32603` error naming what failed, never a silent `null`
-/// (BULGU-012): a `null` reads as "absent", which is a different answer.
+///: a `null` reads as "absent", which is a different answer.
 pub(crate) fn to_json<T: serde::Serialize>(
     what: &str,
     value: &T,
@@ -1191,7 +1191,7 @@ fn is_per_ip_rate_limited(
             //
             // The evicted client is the one with the fewest requests in its
             // window (oldest first among equals), never a busy one
-            // (BLG-029): evicting a client at its quota resets its window,
+            //: evicting a client at its quota resets its window,
             // so an attacker rotating addresses could buy a fresh quota for
             // its own saturated address by filling the table.
             if let Some(quietest) = rates
@@ -1797,7 +1797,7 @@ impl BudlumApiServer for RpcServer {
         // Fee is what will be charged and it is returned unchanged.
         //
         // The floor is `AccountState::required_fee`, the same function the
-        // admission rule uses (BLG-192): base fee plus the proportional cut
+        // admission rule uses: base fee plus the proportional cut
         // on a transfer, the escalating fee on a governance proposal. A
         // floor of `base_fee` alone under-quoted both, and the wallet's
         // transaction was then refused for a fee the RPC had just suggested.
@@ -4826,7 +4826,7 @@ impl BudlumApiServer for RpcServer {
 
         // The executor requires the parent's owner as the sender
         // (`register_subdomain` compares it with `tx.from`); a zero sender
-        // made the template unsignable (BLG-032).
+        // made the template unsignable.
         let parent_owner = self
             .chain
             .bns_resolve_full(parent_name.clone())
@@ -7285,7 +7285,7 @@ mod tests {
             .is_none());
     }
 
-    /// BULGU-011: a `*` configuration answers with the literal `*`; the
+    /// A `*` configuration answers with the literal `*`; the
     /// caller's `Origin` header is never echoed back.
     #[test]
     fn cors_wildcard_does_not_reflect_headers() {
@@ -7301,11 +7301,11 @@ mod tests {
         );
     }
 
-    /// BLG-032: a prepared template carries the sender's next nonce and the
+    /// A prepared template carries the sender's next nonce and the
     /// admission fee floor, with `max_fee == fee`, whatever the hard-coded
     /// values in the template were.
     #[tokio::test]
-    async fn blg_032_prepare_templates_carry_valid_nonce_and_fee() {
+    async fn prepare_templates_carry_valid_nonce_and_fee() {
         use crate::chain::chain_actor::ChainCommand;
         let (sender, mut rx) = tokio::sync::mpsc::channel(4);
         let chain = ChainHandle::new(sender);
@@ -7338,7 +7338,7 @@ mod tests {
         assert_eq!(done.priority_fee, 0);
     }
 
-    /// BULGU-012: a value that cannot be encoded is an explicit error, not a
+    /// A value that cannot be encoded is an explicit error, not a
     /// `null` that reads as "absent".
     #[test]
     fn rpc_serialization_error_is_explicit() {
@@ -7624,11 +7624,11 @@ mod tests {
         assert!(!is_per_ip_rate_limited(&config, &per_ip_rates, ip));
     }
 
-    /// BLG-029: when the table is full, the quietest client is evicted, never
+    /// When the table is full, the quietest client is evicted, never
     /// one that sits at its quota: evicting a saturated client would reset its
     /// window and hand it a fresh quota.
     #[test]
-    fn blg_029_full_table_does_not_evict_a_saturated_client() {
+    fn full_table_does_not_evict_a_saturated_client() {
         let config = RpcSecurityConfig {
             rate_limit_per_minute: Some(2),
             ..Default::default()

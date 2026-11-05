@@ -1,7 +1,6 @@
-//! Lane C live-verification regression tests for `bud-proof` (WP-03).
+//! Regression tests for `bud-proof`.
 //!
-//! Previously fixed findings only: every test is green and stays permanent
-//! (directive section 14.1 rule 7).
+//! Each test locks a fix that is already in the tree: it is green and stays permanent.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -82,15 +81,15 @@ fn prove_and_verify(vm: &Vm, pi: &ExecutionPublicInputs, program: &[u64]) -> Res
 }
 
 #[test]
-fn audit_lane_c_blg_039_control_honest_logging_proof_is_accepted() {
+fn control_honest_logging_proof_is_accepted() {
     let (program, vm, events) = logging_run();
     let pi = honest_inputs(&vm, &program, &events);
     prove_and_verify(&vm, &pi, &program).expect("control: the honest proof must verify");
 }
 
-/// BLG-037: no trace containing the reserved VerifyInference opcode can be proven.
+/// No trace containing the reserved VerifyInference opcode can be proven.
 #[test]
-fn audit_lane_c_blg_037_verify_inference_is_refused_in_any_trace() {
+fn verify_inference_is_refused_in_any_trace() {
     let model_c = 0xABCD_EF01_2345_6789u64;
     let input_c = 0x1122_3344_5566_7788u64;
     let output_c = bud_vm::poseidon4_hash(model_c, input_c);
@@ -128,9 +127,9 @@ fn audit_lane_c_blg_037_verify_inference_is_refused_in_any_trace() {
     );
 }
 
-/// BLG-039 / BLG-142: absurd claimed sizes are refused, never a panic.
+/// Absurd claimed sizes are refused, never a panic.
 #[test]
-fn audit_lane_c_blg_039_oversized_claims_are_refused_not_fatal() {
+fn oversized_claims_are_refused_not_fatal() {
     let (program, vm, events) = logging_run();
     let pi = honest_inputs(&vm, &program, &events);
     let envelope = Prover::prove(&vm.trace, &pi, &program).expect("honest proof");
@@ -150,9 +149,9 @@ fn audit_lane_c_blg_039_oversized_claims_are_refused_not_fatal() {
     );
 }
 
-/// BLG-186: a public scalar at or above the Goldilocks modulus aliases `x - p`.
+/// A public scalar at or above the Goldilocks modulus aliases `x - p`.
 #[test]
-fn audit_lane_c_blg_186_non_canonical_public_scalars_are_refused() {
+fn non_canonical_public_scalars_are_refused() {
     let (program, vm, events) = logging_run();
     let pi = honest_inputs(&vm, &program, &events);
     let envelope = Prover::prove(&vm.trace, &pi, &program).expect("honest proof");
@@ -179,9 +178,9 @@ fn audit_lane_c_blg_186_non_canonical_public_scalars_are_refused() {
     }
 }
 
-/// BLG-142: one proof has one encoding; bytes appended after a valid proof are refused.
+/// One proof has one encoding; bytes appended after a valid proof are refused.
 #[test]
-fn audit_lane_c_blg_142_trailing_bytes_after_a_valid_proof_are_refused() {
+fn trailing_bytes_after_a_valid_proof_are_refused() {
     let (program, vm, events) = logging_run();
     let pi = honest_inputs(&vm, &program, &events);
     let envelope = Prover::prove(&vm.trace, &pi, &program).expect("honest proof");
@@ -194,10 +193,10 @@ fn audit_lane_c_blg_142_trailing_bytes_after_a_valid_proof_are_refused() {
     );
 }
 
-/// BLG-154: one pin source alone is not agreement. Reconciliation needs at least two
+/// One pin source alone is not agreement. Reconciliation needs at least two
 /// sources, and two that differ fail closed.
 #[test]
-fn audit_lane_c_blg_154_single_pin_source_is_not_unanimity() {
+fn single_pin_source_is_not_unanimity() {
     use bud_proof::canonical_recovery::{reconcile, Reconciliation, MIN_PIN_SOURCES};
     let only = [7u8; 32];
     // The constant is what the behaviour below rests on.
@@ -215,10 +214,10 @@ fn audit_lane_c_blg_154_single_pin_source_is_not_unanimity() {
     assert_eq!(reconcile(&[only, [8u8; 32]]), Reconciliation::Split);
 }
 
-/// BLG-182: public inputs that nothing in the trace supports are refused when they are
+/// Public inputs that nothing in the trace supports are refused when they are
 /// baked in before proving (a post-hoc change is already caught by Fiat-Shamir).
 #[test]
-fn audit_lane_c_blg_182_unsupported_public_inputs_are_refused() {
+fn unsupported_public_inputs_are_refused() {
     let (program, vm, events) = logging_run();
     let honest = honest_inputs(&vm, &program, &events);
     prove_and_verify(&vm, &honest, &program).expect("control: the honest proof verifies");

@@ -48,7 +48,7 @@ jobs:
 # the part of the bridge fed from outside.
           #
           - evm_rlp_decode
-          # WP-09: the worker-socket frame codec reads bytes from a peer process.
+          # The worker-socket frame codec reads bytes from a peer process.
           - uel_abi_frame
           # BPQS WOTS chain-walk refusal safety (crates/bpqs). Runs the
           # quick gate too; here it gets the deep budget.

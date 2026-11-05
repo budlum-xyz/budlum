@@ -1,4 +1,4 @@
-//! The types the coordinator and a worker exchange (directive 8.3.2, WP-09).
+//! The types the coordinator and a worker exchange.
 //!
 //! Every type that crosses the socket has a bound here and is checked when it
 //! is built from the wire (see `wire.rs`): an identity is at most
@@ -17,7 +17,7 @@ pub const MAX_LOG_TOPICS: usize = 8;
 /// The longest log topic, in bytes.
 pub const MAX_TOPIC_BYTES: usize = 64;
 
-/// An execution environment (directive 8.2): the catalog id.
+/// An execution environment: the catalog id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EeId(pub u8);
 
@@ -136,7 +136,7 @@ pub struct EeCall {
 }
 
 /// A deterministic result of a call. Revert and out-of-gas are normal failed
-/// receipts (directive 8.3.5): the fee is taken, nothing else is written.
+/// receipts: the fee is taken, nothing else is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutcomeStatus {
     /// The call succeeded.
@@ -160,7 +160,7 @@ pub struct EeOutcome {
     pub gas_used: u64,
 }
 
-/// A deterministic panic caught inside the engine (directive 8.3.5). It is a
+/// A deterministic panic caught inside the engine. It is a
 /// receipt, not a node failure: the worker restarts and the block continues.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EeFault {

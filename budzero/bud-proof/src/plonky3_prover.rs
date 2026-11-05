@@ -2107,11 +2107,11 @@ mod tests {
     use bud_vm::Vm;
     use p3_field::PrimeField64;
 
-    /// BLG-159: `setup_preprocessed` is `pub` and takes `degree_bits` as given, so a
+    /// `setup_preprocessed` is `pub` and takes `degree_bits` as given, so a
     /// shift past the word width, a height that disagrees with the trace, or a degree
     /// above the cap must be a refusal (`None`), never a panic that aborts a node.
     #[test]
-    fn blg_159_setup_preprocessed_refuses_bad_degrees_instead_of_panicking() {
+    fn setup_preprocessed_refuses_bad_degrees_instead_of_panicking() {
         let config = build_config();
         let air = BudAir {
             num_steps: 2,

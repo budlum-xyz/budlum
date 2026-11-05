@@ -1,4 +1,4 @@
-//! The Move family (WP-64), Aptos dialect.
+//! The Move family, Aptos dialect.
 //!
 //! * Addresses are 32 bytes, shown in the AIP-40 long form (`0x` + 64 hex).
 //! * A fungible class is a Fungible Asset metadata object; a unique class is
@@ -10,13 +10,13 @@
 //!   slice is read with a state proof (`AccountAndStorageProof`).
 //! * The upgrade authority is the package's publisher and upgrade policy.
 //!
-//! The Sui dialect (object-centric, WP-50) is a separate execution
-//! environment; its family parts join here when WP-50 lands.
+//! The Sui dialect (object-centric) is a separate execution
+//! environment; its family parts join here when it lands.
 //!
 //! WIRING: the block executor reaches this module through the
 //! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door, and RPC reads it
 //! through `bud_getCharter`, `bud_getAssetClass`, `bud_getAsset` and the
-//! other 9.5 item 4 methods. Both land in the next WP-49 step; until then
+//! other object-layer read methods. Both land in a later step; until then
 //! the state is held by `SettlementRegistries::object_layer` and closed on
 //! the testnet by `ACTIVATION`.
 

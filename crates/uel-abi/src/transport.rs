@@ -1,11 +1,11 @@
 //! The Unix-domain-socket transport between the coordinator and a worker
-//! (directive 8.3.2 item 6, 8.3.5).
+//! .
 //!
 //! Two roles. [`EeClient`] is the coordinator's side: it connects, handshakes,
 //! sends a request and, while the worker executes, answers the worker's host
 //! requests from a [`HostApi`]. [`serve_connection`] is the worker's side.
 //!
-//! The error classes follow directive 8.3.5. What an environment decides
+//! The error classes follow the UEL error model. What an environment decides
 //! (outcome, refusal, caught panic) is `Ok`. Everything this module can fail at
 //! (a dead socket, a missed deadline, a protocol violation) is a
 //! [`TransportError`]: the non-deterministic class, on which the coordinator
@@ -27,7 +27,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-/// The wall-clock guard on one request (directive 8.3.5). It only ever trips
+/// The wall-clock guard on one request. It only ever trips
 /// the non-deterministic class; gas is what ends a call deterministically.
 pub const WATCHDOG: Duration = Duration::from_secs(2);
 
@@ -226,7 +226,7 @@ fn answer_host_request(access: &mut HostAccess<'_>, request: pb::HostRequest) ->
 ///
 /// The connection is opened lazily and re-opened after any failure, so a
 /// restarted worker is picked up by the next call. A failed call is never
-/// retried here: directive 8.3.5 puts the three-attempt retry above this layer,
+/// retried here: the UEL error model puts the three-attempt retry above this layer,
 /// at the block.
 pub struct EeClient {
     socket: PathBuf,
@@ -493,7 +493,7 @@ pub enum ServeEnd {
     /// The coordinator closed the connection.
     Closed,
     /// The engine panicked and the fault was reported. The worker process
-    /// restarts (directive 8.3.5): its engine state is not trusted any more.
+    /// restarts: its engine state is not trusted any more.
     Faulted,
 }
 

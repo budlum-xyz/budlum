@@ -86,7 +86,7 @@ const MAX_ITEMS: usize = 100_000;
 
 /// Encodes an RLP `Item` canonically.
 ///
-/// Two passes (BLG-200): the first measures every list's payload once,
+/// Two passes: the first measures every list's payload once,
 /// bottom-up; the second writes each byte once, top-down. The old shape
 /// encoded every list into a scratch buffer and copied it into its parent,
 /// so a byte at depth `D` was copied `D` times: `O(D * N)` work and
@@ -574,7 +574,7 @@ mod tests {
     /// The item budget bounds the decode, whatever the
     /// caller's byte limit is.
     #[test]
-    fn blg_200_encode_matches_the_nested_copy_encoder_and_is_linear() {
+    fn encode_matches_the_nested_copy_encoder_and_is_linear() {
         // The reference: the old encoder, kept here as the oracle.
         fn naive(item: &Item, out: &mut Vec<u8>) {
             match item {

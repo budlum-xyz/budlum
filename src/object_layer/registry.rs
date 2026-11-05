@@ -11,7 +11,7 @@
 //! WIRING: the block executor reaches this module through the
 //! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door, and RPC reads it
 //! through `bud_getCharter`, `bud_getAssetClass`, `bud_getAsset` and the
-//! other 9.5 item 4 methods. Both land in the next WP-49 step; until then
+//! other object-layer read methods. Both land in a later step; until then
 //! the state is held by `SettlementRegistries::object_layer` and closed on
 //! the testnet by `ACTIVATION`.
 
@@ -34,11 +34,11 @@ use crate::object_layer::{DEFAULT_MIN_REFERENCE_SAMPLES, MAX_COMPOSITE_CALLS};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The finality phase of a home event (9.3.8).
+/// The finality phase of a home event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Phase {
     Final,
-    /// Opens with WP-49 step 6. Refused until then.
+    /// Opens in a later step. Refused until then.
     Tentative,
 }
 
@@ -69,7 +69,7 @@ pub trait HomeFinality {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FreezeReason {
-    /// The home code's upgrade authority changed (9.3.4 item 6).
+    /// The home code's upgrade authority changed.
     UpgradeAuthorityChanged,
     /// Home custody fell below the object-layer record (N-4).
     CustodyDeficit,
@@ -96,7 +96,7 @@ pub struct AssetClass {
     pub sample_commitment: Hash32,
 }
 
-/// Where an asset is (9.3.7 item 1).
+/// Where an asset is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Location {
     Home,
@@ -124,7 +124,7 @@ pub struct Departure {
     pub requested_at: u64,
 }
 
-/// One call of a composite (9.3.9).
+/// One call of a composite.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Call {
     pub class: AssetClassId,
@@ -133,7 +133,7 @@ pub struct Call {
     pub verb: Verb,
 }
 
-/// A standing offer (9.3.9 item 2).
+/// A standing offer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Offer {
     pub maker: Holder,
@@ -224,7 +224,7 @@ impl From<RuleRefusal> for Refusal {
     }
 }
 
-/// The outcome of a custody audit (9.3.7 item 4).
+/// The outcome of a custody audit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CustodyAudit {
     pub recorded: u128,
@@ -728,7 +728,7 @@ impl ObjectLayerRegistry {
     }
 
     /// `ObjectLayerTx::HomeCall`: the home event's sender acts as its home
-    /// identity. The authority is the finality proof (9.3.10 item 2); the
+    /// identity. The authority is the finality proof; the
     /// per-identity nonce stops a replay of an older call.
     pub fn home_call(
         &mut self,

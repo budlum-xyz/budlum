@@ -536,17 +536,17 @@ pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 /// byte-exact: at 6 and below the two fields cannot affect the digest.
 ///
 /// Schema 10 carries and digests the settlement registries (testnet
-///): state that moved from `Blockchain` into the account
+/// : state that moved from `Blockchain` into the account
 /// state when its writes became transaction doors. A node that dropped a
 /// registration would serve a chain that is not the chain's; at 9 and below
 /// the field cannot affect the digest.
 ///
-/// Schema 11 carries and digests the scheme and suite statuses of the chain
-///. A status decides whether a signature family still
+/// Schema 11 carries and digests the scheme and suite statuses of the chain.
+/// A status decides whether a signature family still
 /// verifies, so a node that dropped a `Disabled` mark would accept signatures
 /// the chain refuses; at 10 and below the field cannot affect the digest.
 ///
-/// Schema 13 carries and digests the validator directory (WP-08): the class,
+/// Schema 13 carries and digests the validator directory: the class,
 /// operator key, quota and mobile bond of every registered validator. It is
 /// folded into the state root, so a restore that dropped it would restore a
 /// root that no peer computes. At 12 and below the field cannot affect the
@@ -1154,8 +1154,8 @@ impl StateSnapshotV2 {
         if self.schema_version >= 6 {
             hash_opt_serializable(&mut hasher, &self.vault);
         }
-        // --- The PoA admission + compliance pair (schema-7 bump, /
-        //). Same gate logic as identity and vault: at 6 and
+        // --- The PoA admission + compliance pair (schema-7 bump, /.
+        // Same gate logic as identity and vault: at 6 and
         //     below these fields cannot affect the digest, at 7 and above a
         //     node that dropped an admission set or a freeze produces a
         //     different hash instead of a quietly-valid snapshot. ---

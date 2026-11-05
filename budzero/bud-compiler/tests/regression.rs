@@ -1,9 +1,8 @@
-//! Lane C live-verification regression tests for `bud-compiler` (WP-03).
+//! Regression tests for `bud-compiler`.
 //!
-//! Previously fixed findings only: every test here is green and stays permanent
-//! (directive section 14.1 rule 7). It lives in the `bud-compiler` package because
-//! `budzero/` is a virtual workspace and a root-level `tests/` directory belongs to no
-//! package, so cargo would never compile it (see `budzero/tests/audit_lane_c.rs`).
+//! Each test locks a fix that is already in the tree: it is green and stays permanent.
+//! It lives in the `bud-compiler` package because `budzero/` is a virtual workspace and
+//! a root-level `tests/` directory belongs to no package, so cargo would never compile it.
 
 // A panic is how a test reports a broken invariant (the same exemption the other
 // budzero integration tests carry).
@@ -19,9 +18,9 @@ fn run_events(src: &str) -> Vec<u64> {
     vm.events.clone()
 }
 
-/// BLG-114: a `match` integer pattern above `i32::MAX` is not truncated.
+/// A `match` integer pattern above `i32::MAX` is not truncated.
 #[test]
-fn audit_lane_c_blg_114_match_pattern_is_not_truncated_to_i32() {
+fn match_pattern_is_not_truncated_to_i32() {
     let src = r#"
         contract WidePattern {
             fn probe(x: u64) -> u64 {
@@ -40,9 +39,9 @@ fn audit_lane_c_blg_114_match_pattern_is_not_truncated_to_i32() {
     assert_eq!(run_events(src), vec![0, 1]);
 }
 
-/// BLG-114: a `let` inside a match arm does not clobber the outer variable.
+/// A `let` inside a match arm does not clobber the outer variable.
 #[test]
-fn audit_lane_c_blg_114_arm_let_does_not_clobber_outer_variable() {
+fn arm_let_does_not_clobber_outer_variable() {
     let src = r#"
         contract ArmScope {
             pub fn main() {
@@ -59,9 +58,9 @@ fn audit_lane_c_blg_114_arm_let_does_not_clobber_outer_variable() {
     assert_eq!(run_events(src), vec![5, 1]);
 }
 
-/// BLG-114: duplicate `main` and a literal at or above the field modulus are refused.
+/// Duplicate `main` and a literal at or above the field modulus are refused.
 #[test]
-fn audit_lane_c_blg_114_duplicate_main_and_oversized_literal_are_refused() {
+fn duplicate_main_and_oversized_literal_are_refused() {
     let dup = "contract C { pub fn main() { } pub fn main() { constrain(0); } }";
     assert!(compile(dup, IsaProfile::Production).is_err());
     let big = "contract C { pub fn main() { let x = 0xFFFFFFFFFFFFFFFF; } }";
@@ -71,10 +70,10 @@ fn audit_lane_c_blg_114_duplicate_main_and_oversized_literal_are_refused() {
     ));
 }
 
-/// BLG-198: long binary and field chains return a parser error instead of
+/// Long binary and field chains return a parser error instead of
 /// overflowing the stack.
 #[test]
-fn audit_lane_c_blg_198_long_operator_and_field_chains_return_parser_error() {
+fn long_operator_and_field_chains_return_parser_error() {
     let terms = 20_000;
     let sum = vec!["1"; terms].join(" + ");
     let fields = format!("a{}", ".f".repeat(terms));
@@ -89,17 +88,17 @@ fn audit_lane_c_blg_198_long_operator_and_field_chains_return_parser_error() {
     }
 }
 
-/// BLG-198: a field read on an unknown struct type is refused, not scanned.
+/// A field read on an unknown struct type is refused, not scanned.
 #[test]
-fn audit_lane_c_blg_198_unknown_struct_field_read_is_refused() {
+fn unknown_struct_field_read_is_refused() {
     let src = "contract T { pub fn main() { let v = 1; let y = v.f; } }";
     assert!(compile(src, IsaProfile::Production).is_err());
 }
 
-/// BLG-338: a `let` inside a branch body must not keep its register after the branch,
+/// A `let` inside a branch body must not keep its register after the branch,
 /// or many sequential branches run the compiler out of registers.
 #[test]
-fn audit_lane_c_blg_338_sequential_branches_release_their_registers() {
+fn sequential_branches_release_their_registers() {
     let mut body = String::from("let c = 1;\n");
     for i in 0..200 {
         body.push_str(&format!(
@@ -120,16 +119,16 @@ fn audit_lane_c_blg_338_sequential_branches_release_their_registers() {
     assert!(res.is_ok(), "register exhaustion in while: {:?}", res.err());
 }
 
-/// BLG-136: a call used as a statement (`f(1);`) parses and runs.
+/// A call used as a statement (`f(1);`) parses and runs.
 #[test]
-fn audit_lane_c_blg_136_bare_call_statement_compiles_and_runs() {
+fn bare_call_statement_compiles_and_runs() {
     let src = "contract T { fn f(a: u64) { emit Result(a); } pub fn main() { f(41); f(1); } }";
     assert_eq!(run_events(src), vec![41, 1]);
 }
 
-/// BLG-162: a hexadecimal literal is a valid match pattern, equal to its decimal twin.
+/// A hexadecimal literal is a valid match pattern, equal to its decimal twin.
 #[test]
-fn audit_lane_c_blg_162_hex_match_pattern_matches() {
+fn hex_match_pattern_matches() {
     let src = r#"
         contract T {
             fn probe(x: u64) -> u64 {

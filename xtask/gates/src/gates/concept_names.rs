@@ -1,4 +1,4 @@
-//! The concept-name counter gate (directive section 2.3, Appendix C).
+//! The concept-name counter gate.
 //!
 //! `config/naming/concept_map.toml` lists every legacy architecture name. This
 //! gate searches the tree for each entry's `patterns` and holds the counts
@@ -7,7 +7,7 @@
 //! * `count` mode (the starting mode): a count above the baseline fails, and a
 //!   count below it also fails until the baseline is lowered, so the number can
 //!   only fall and the file is the ratchet.
-//! * `absolute` mode (set by WP-43 at the end): any match fails.
+//! * `absolute` mode (set once every count is zero): any match fails.
 //!
 //! To lower the baseline run the gate with `BUDLUM_CONCEPT_NAMES_WRITE=1`. The
 //! writer refuses to raise any number.
@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
-/// The roots the gate searches (directive 15.8, WP-05 step 2).
+/// The roots the gate searches.
 const SCAN_ROOTS: &[&str] = &[
     "src",
     "crates",
@@ -38,7 +38,6 @@ const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
 const MAP_PATH: &str = "config/naming/concept_map.toml";
 const BASELINE_PATH: &str = ".github/concept-names-baseline.txt";
-const PACKAGES_PATH: &str = "docs/work/PACKAGES.md";
 const WRITE_ENV: &str = "BUDLUM_CONCEPT_NAMES_WRITE";
 
 /// Counts for one concept.
@@ -67,7 +66,6 @@ struct Map {
     mode: Mode,
     global_allow: Vec<String>,
     concepts: Vec<Concept>,
-    owners: Vec<(String, String)>,
 }
 
 /// Compare measured counts against a baseline for one concept.
@@ -134,7 +132,6 @@ fn parse_map(text: &str) -> Result<Map, String> {
         .and_then(toml::Value::as_array)
         .ok_or_else(|| format!("{MAP_PATH}: no [[concept]] entries"))?;
     let mut concepts = Vec::new();
-    let mut owners = Vec::new();
     for (i, entry) in entries.iter().enumerate() {
         let t = entry
             .as_table()
@@ -148,7 +145,6 @@ fn parse_map(text: &str) -> Result<Map, String> {
         for key in ["new_code", "term_en", "term_tr", "area", "reason"] {
             required_str(t, key, &who)?;
         }
-        owners.push((name.clone(), required_str(t, "owner", &who)?.to_string()));
         let raw = string_list(t, "patterns")?;
         if raw.is_empty() {
             return Err(format!("{who}: `patterns` is empty"));
@@ -169,38 +165,7 @@ fn parse_map(text: &str) -> Result<Map, String> {
         mode,
         global_allow,
         concepts,
-        owners,
     })
-}
-
-/// Package ids named in the package table, as `WP-NN`.
-fn known_packages(root: &Path) -> Result<Vec<String>, String> {
-    let text = std::fs::read_to_string(root.join(PACKAGES_PATH))
-        .map_err(|e| format!("cannot read {PACKAGES_PATH}: {e}"))?;
-    Ok(text
-        .lines()
-        .filter_map(|l| l.strip_prefix("| WP-"))
-        .filter_map(|r| r.split(' ').next())
-        .map(|n| format!("WP-{n}"))
-        .collect())
-}
-
-fn check_owners(map: &Map, root: &Path) -> Result<(), String> {
-    let known = known_packages(root)?;
-    let mut bad = String::new();
-    for (name, owner) in &map.owners {
-        if !known.contains(owner) {
-            let _ = writeln!(
-                bad,
-                "  {name}: owner `{owner}` is not a package in {PACKAGES_PATH}"
-            );
-        }
-    }
-    if bad.is_empty() {
-        Ok(())
-    } else {
-        Err(format!("FAIL: unknown owner package:\n{bad}"))
-    }
 }
 
 fn collect_files(dir: &Path, root: &Path, out: &mut Vec<(String, std::path::PathBuf)>) {
@@ -321,7 +286,7 @@ fn render_baseline(counts: &BTreeMap<String, Count>) -> String {
         "# Legacy concept-name counts per entry of config/naming/concept_map.toml.\n\
          # One line per entry: name|files|matches. A ratchet: the numbers may only fall.\n\
          # Lower it with: BUDLUM_CONCEPT_NAMES_WRITE=1 budlum-gates concept-names\n\
-         # WP-43 sets the map to `absolute` mode and every line to zero.\n",
+         # The map moves to `absolute` mode once every line is zero.\n",
     );
     for (name, c) in counts {
         let _ = writeln!(s, "{name}|{}|{}", c.files, c.matches);
@@ -334,7 +299,6 @@ fn check(root: &Path, write: bool) -> Result<String, String> {
     let text = std::fs::read_to_string(root.join(MAP_PATH))
         .map_err(|e| format!("cannot read {MAP_PATH}: {e}"))?;
     let map = parse_map(&text)?;
-    check_owners(&map, root)?;
     let counts = measure(&map, root);
     let total: usize = counts.values().map(|c| c.matches).sum();
 
@@ -424,7 +388,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     check(root, std::env::var_os(WRITE_ENV).is_some_and(|v| v == "1"))
 }
 
-const CANARY_MAP: &str = "schema = 1\nmode = \"count\"\nglobal_allow_paths = [\"config/naming/\", \"docs/NAMING.md\"]\n\n[[concept]]\nold = [\"Canaryname\"]\npatterns = ['(?i)canary-?name']\nnew_code = \"x\"\nterm_en = \"x\"\nterm_tr = \"x\"\narea = \"x\"\nowner = \"WP-05\"\nreason = \"x\"\n";
+const CANARY_MAP: &str = "schema = 1\nmode = \"count\"\nglobal_allow_paths = [\"config/naming/\", \"docs/NAMING.md\"]\n\n[[concept]]\nold = [\"Canaryname\"]\npatterns = ['(?i)canary-?name']\nnew_code = \"x\"\nterm_en = \"x\"\nterm_tr = \"x\"\narea = \"x\"\nreason = \"x\"\n";
 
 fn stage(root: &Path, map: &str, baseline: &str) -> Result<(), String> {
     let put = |rel: &str, body: &str| -> Result<(), String> {
@@ -436,7 +400,6 @@ fn stage(root: &Path, map: &str, baseline: &str) -> Result<(), String> {
     };
     put(MAP_PATH, map)?;
     put(BASELINE_PATH, baseline)?;
-    put(PACKAGES_PATH, "| WP-05 | Concept map | D |\n")?;
     put("src/clean.rs", "fn clean() {}\n")?;
     put("docs/NAMING.md", "This file may name CANARY-NAME freely.\n")
 }
@@ -481,18 +444,12 @@ pub fn self_test() -> Result<String, String> {
         if check(&dir, false).is_ok() {
             return Err(String::from("canary: absolute mode accepted a legacy name"));
         }
-        stage(&dir, &CANARY_MAP.replace("WP-05", "WP-99"), zero)?;
-        std::fs::remove_file(dir.join("src/injected.rs")).map_err(|e| e.to_string())?;
-        match check(&dir, false) {
-            Err(e) if e.contains("unknown owner") => {}
-            other => return Err(format!("canary: an unknown owner was accepted: {other:?}")),
-        }
         Ok(())
     })();
     let _ = std::fs::remove_dir_all(&dir);
     result?;
     Ok(String::from(
-        "concept-names canary OK: an injected name raised the count, a lowered count and a rising writer were refused, absolute mode and unknown owners failed.",
+        "concept-names canary OK: an injected name raised the count, a lowered count and a rising writer were refused, and absolute mode failed.",
     ))
 }
 
@@ -562,14 +519,13 @@ mod tests {
     }
 
     #[test]
-    fn concept_map_owner_is_a_known_package() {
+    fn concept_map_parses_with_every_entry() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let map = std::fs::read_to_string(root.join(MAP_PATH)).unwrap_or_default();
         let parsed = parse_map(&map);
         assert!(parsed.is_ok(), "{:?}", parsed.as_ref().err());
         if let Ok(m) = parsed {
-            assert_eq!(m.owners.len(), 27);
-            assert!(check_owners(&m, &root).is_ok());
+            assert_eq!(m.concepts.len(), 27);
         }
     }
 }

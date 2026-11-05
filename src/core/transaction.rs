@@ -665,7 +665,7 @@ pub enum TransactionType {
     /// the enum body's identifiers to resolve carried payload types.)
     PoaOnboarding(crate::registry::poa_onboarding::PoAOnboardingTx),
     /// Bond into a permissionless role (testnet
-    ///): the role id and the bond amount in the signed
+    /// : the role id and the bond amount in the signed
     /// header, nothing else. The verifier family registers at the floor;
     /// the relayer, prover and storage operator roles also take a top-up of
     /// an active bond. The relayer, prover and storage operator seats were
@@ -674,8 +674,8 @@ pub enum TransactionType {
     RoleBond {
         role: u32,
     },
-    /// A bonded relayer registers a cross-domain message, applied in block
-    ///. The sender is `tx.from`, and the message's
+    /// A bonded relayer registers a cross-domain message, applied in block.
+    /// The sender is `tx.from`, and the message's
     /// own sender field must name the same account, so the transaction
     /// signature is the authentication; the message's separate signature
     /// envelope must be empty. Replaces the out-of-block registration the
@@ -699,7 +699,7 @@ pub enum TransactionType {
         role: u32,
     },
     /// An external-domain write, applied in block (,
-    ///): registration, evidence, a prover bond, readmission, a version
+    /// : registration, evidence, a prover bond, readmission, a version
     /// fork or a quorum policy. The sender is `tx.from`, and a payload that
     /// names an account (the poster, the submitter) must name the sender.
     /// The signing preimage commits every field. Replaces the operator RPCs
@@ -708,7 +708,7 @@ pub enum TransactionType {
     /// carried payload types.)
     ExternalDomain(crate::cross_domain::external::ExternalDomainTx),
     /// A domain settlement write, applied in block (,
-    ///): a domain registration, a commitment with its finality proof,
+    /// : a domain registration, a commitment with its finality proof,
     /// a sovereign template, a ZK program allowlist change or a ZK proof.
     /// The sender is `tx.from`; a payload that names an account (the
     /// operator, the proof submitter) must name the sender. Replaces the
@@ -779,7 +779,7 @@ pub enum TransactionType {
     /// root, so a node that served the call and one that did not must not
     /// disagree).
     CrossDomainMessage(crate::cross_domain::message::CrossDomainMessage),
-    /// The validator door (WP-08): registration, class change, operator key
+    /// The validator door: registration, class change, operator key
     /// rotation and the operator-signed custody quota increase. Appended last
     /// because `bincode` encodes the variant index. The owner is `tx.from`
     /// except for the quota update, whose payload names the owner and carries
@@ -1934,8 +1934,8 @@ impl Transaction {
         }
         // a mainnet genesis accepts the composite formats alone. V4
         // (Ed25519 only), V5 (ML-DSA-87 only) and V6 (ML-DSA-87 multisig) have
-        // no Ed25519 half or no PQ half, so none of them may stand on mainnet
-        //. They stay valid on devnet and testnet.
+        // no Ed25519 half or no PQ half, so none of them may stand on mainnet.
+        // They stay valid on devnet and testnet.
         if self.signature_version != SIGNATURE_VERSION_V7
             && self.signature_version != SIGNATURE_VERSION_V8
             && crate::core::chain_config::Network::from_chain_id(self.chain_id)

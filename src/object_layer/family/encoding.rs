@@ -3,14 +3,14 @@
 //! The families read four encodings: EVM ABI words, Cosmos bech32 strings,
 //! Solana base58 and Borsh, and Move BCS. Each helper here is the minimum a
 //! translator needs, written out so the object layer adds no dependency to
-//! the workspace (the dependency policy belongs to lane D). Every reader is
+//! the workspace (the dependency policy is set elsewhere). Every reader is
 //! bounds-checked and returns an error instead of panicking: these bytes come
 //! from another chain.
 //!
 //! WIRING: the block executor reaches this module through the
 //! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door, and RPC reads it
 //! through `bud_getCharter`, `bud_getAssetClass`, `bud_getAsset` and the
-//! other 9.5 item 4 methods. Both land in the next WP-49 step; until then
+//! other object-layer read methods. Both land in a later step; until then
 //! the state is held by `SettlementRegistries::object_layer` and closed on
 //! the testnet by `ACTIVATION`.
 

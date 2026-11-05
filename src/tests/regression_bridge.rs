@@ -1,8 +1,7 @@
-//! Lane C live-verification regression tests (WP-01 to WP-04).
+//! Bridge and settlement regression tests.
 //!
-//! Only "previously fixed" findings live here: each test is green and stays
-//! permanent (directive section 14.1 rule 7). Repro tests for findings that are
-//! still open live on the `audit/repro-c` branch and do not merge.
+//! Each test locks a fix that is already in the tree: it is green and stays
+//! permanent.
 
 use crate::chain::blockchain::Blockchain;
 use crate::consensus::pow::PoWEngine;
@@ -12,18 +11,18 @@ use crate::domain::plugin::default_domain;
 use crate::domain::ConsensusKind;
 use std::sync::Arc;
 
-fn lane_c_addr(b: u8) -> Address {
+fn fixture_addr(b: u8) -> Address {
     Address::from([b; 32])
 }
 
-fn lane_c_asset() -> AssetId {
+fn fixture_asset() -> AssetId {
     AssetId([42u8; 32])
 }
 
 /// A chain with two bridge-enabled PoW domains (1, 2) and one registered asset.
-fn lane_c_bridge_chain() -> Blockchain {
+fn fixture_bridge_chain() -> Blockchain {
     let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
-    for (id, operator) in [(1u32, lane_c_addr(11)), (2u32, lane_c_addr(12))] {
+    for (id, operator) in [(1u32, fixture_addr(11)), (2u32, fixture_addr(12))] {
         let mut d = default_domain(id, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 1);
         d.operator = Some(operator);
         d.operator_bond = 100_000;
@@ -31,20 +30,20 @@ fn lane_c_bridge_chain() -> Blockchain {
         bc.register_consensus_domain(d)
             .expect("domain must register");
     }
-    bc.register_bridge_asset(lane_c_asset(), 1)
+    bc.register_bridge_asset(fixture_asset(), 1)
         .expect("asset must register");
     bc
 }
 
-/// BLG-043: the burn debits the holder exactly what the mint credited and records it on
+/// The burn debits the holder exactly what the mint credited and records it on
 /// the row; the unlock refund basis is that recorded amount.
 #[test]
-fn audit_lane_c_blg_043_burn_records_the_debit_the_unlock_refunds() {
-    let mut bc = lane_c_bridge_chain();
-    let (owner, recipient) = (lane_c_addr(77), lane_c_addr(12));
+fn burn_records_the_debit_the_unlock_refunds() {
+    let mut bc = fixture_bridge_chain();
+    let (owner, recipient) = (fixture_addr(77), fixture_addr(12));
     bc.state.add_balance(&owner, 1_000);
     let (_, lock_event) = bc
-        .lock_bridge_transfer(1, 2, 20, 0, lane_c_asset(), owner, recipient, 400, 1_000)
+        .lock_bridge_transfer(1, 2, 20, 0, fixture_asset(), owner, recipient, 400, 1_000)
         .expect("lock");
     assert_eq!(bc.state.get_balance(&owner), 600, "lock debits the owner");
     let message = lock_event.message.expect("lock carries a message");
@@ -79,14 +78,14 @@ fn audit_lane_c_blg_043_burn_records_the_debit_the_unlock_refunds() {
     assert_eq!(row.burned_amount, held.get());
 }
 
-/// BLG-043: a mint carrying no committed proof is refused and creates no supply.
+/// A mint carrying no committed proof is refused and creates no supply.
 #[test]
-fn audit_lane_c_blg_043_unproven_mint_creates_no_supply() {
-    let mut bc = lane_c_bridge_chain();
-    let (owner, recipient) = (lane_c_addr(77), lane_c_addr(12));
+fn unproven_mint_creates_no_supply() {
+    let mut bc = fixture_bridge_chain();
+    let (owner, recipient) = (fixture_addr(77), fixture_addr(12));
     bc.state.add_balance(&owner, 1_000);
     let (_, lock_event) = bc
-        .lock_bridge_transfer(1, 2, 20, 0, lane_c_asset(), owner, recipient, 400, 1_000)
+        .lock_bridge_transfer(1, 2, 20, 0, fixture_asset(), owner, recipient, 400, 1_000)
         .expect("lock");
     let supply_before = bc.state.total_bud_committed();
     let refused = bc.mint_bridge_transfer_from_verified_event(
@@ -100,22 +99,22 @@ fn audit_lane_c_blg_043_unproven_mint_creates_no_supply() {
             index: 0,
             siblings: vec![],
         },
-        lane_c_addr(99),
+        fixture_addr(99),
     );
     assert!(refused.is_err());
     assert_eq!(bc.state.get_balance(&recipient), 0);
-    assert_eq!(bc.state.get_balance(&lane_c_addr(99)), 0);
+    assert_eq!(bc.state.get_balance(&fixture_addr(99)), 0);
     assert_eq!(bc.state.total_bud_committed(), supply_before);
 }
 
-/// BLG-057: expired and replayed messages cannot be minted; the fee split cannot overflow.
+/// Expired and replayed messages cannot be minted; the fee split cannot overflow.
 #[test]
-fn audit_lane_c_blg_057_mint_refuses_expired_and_replayed_messages() {
+fn mint_refuses_expired_and_replayed_messages() {
     use crate::cross_domain::BridgeState;
     let mut bs = BridgeState::new();
     let a = AssetId([3u8; 32]);
     bs.register_asset(a, 1).expect("asset");
-    let (owner, recipient) = (lane_c_addr(5), lane_c_addr(6));
+    let (owner, recipient) = (fixture_addr(5), fixture_addr(6));
     let (_, event) = bs
         .lock(1, 2, 20, 0, a, owner, recipient, 100, 1_000)
         .expect("lock");
@@ -136,21 +135,21 @@ fn audit_lane_c_blg_057_mint_refuses_expired_and_replayed_messages() {
     );
 }
 
-/// BLG-194: a refused relay keeps its pending entry, and the supply ceiling refuses a mint.
+/// A refused relay keeps its pending entry, and the supply ceiling refuses a mint.
 #[test]
-fn audit_lane_c_blg_194_refused_relay_keeps_pending_entry_and_ceiling_holds() {
-    let mut bc = lane_c_bridge_chain();
-    let (owner, recipient) = (lane_c_addr(77), lane_c_addr(12));
+fn refused_relay_keeps_pending_entry_and_ceiling_holds() {
+    let mut bc = fixture_bridge_chain();
+    let (owner, recipient) = (fixture_addr(77), fixture_addr(12));
     bc.state.add_balance(&owner, 1_000);
     let (_, lock_event) = bc
-        .lock_bridge_transfer(1, 2, 20, 0, lane_c_asset(), owner, recipient, 400, 1_000)
+        .lock_bridge_transfer(1, 2, 20, 0, fixture_asset(), owner, recipient, 400, 1_000)
         .expect("lock");
     let message_id = lock_event.message.expect("message").message_id;
     assert_eq!(bc.pending_relay_count(), 1);
     let refused = crate::cross_domain::bridge_tx::submit_relay_proof(
         &mut bc.state,
         message_id,
-        lane_c_addr(99),
+        fixture_addr(99),
         &crate::cross_domain::MerkleProof {
             leaf: [0u8; 32],
             index: 0,
@@ -163,16 +162,16 @@ fn audit_lane_c_blg_194_refused_relay_keeps_pending_entry_and_ceiling_holds() {
     assert_eq!(bc.pending_relay_count(), 1);
     assert!(!bc.state.settlement.relayer.is_relayed(&message_id));
     let mut full = crate::core::account::AccountState::new();
-    full.add_balance(&lane_c_addr(1), crate::tokenomics::BUD_TOTAL_SUPPLY);
+    full.add_balance(&fixture_addr(1), crate::tokenomics::BUD_TOTAL_SUPPLY);
     assert!(full.ensure_mint_headroom(1).is_err());
 }
 
-/// BLG-052: a compliance freeze has an unfreeze.
+/// A compliance freeze has an unfreeze.
 #[test]
-fn audit_lane_c_blg_052_compliance_freeze_can_be_lifted() {
+fn compliance_freeze_can_be_lifted() {
     use crate::registry::poa_compliance::{ComplianceDomainKind, PoaComplianceRegistry};
     let mut registry = PoaComplianceRegistry::new();
-    let (admin, subject) = (lane_c_addr(1), lane_c_addr(2));
+    let (admin, subject) = (fixture_addr(1), fixture_addr(2));
     let domain = ComplianceDomainKind::PoA;
     registry
         .freeze_suspicious(domain, admin, subject, [7u8; 32], 10)
@@ -188,9 +187,9 @@ fn audit_lane_c_blg_052_compliance_freeze_can_be_lifted() {
         .is_err());
 }
 
-/// BLG-054 and BLG-134: non-canonical RLP and hex-prefix paths are refused.
+/// Non-canonical RLP and hex-prefix paths are refused.
 #[test]
-fn audit_lane_c_blg_054_non_canonical_rlp_and_hp_are_refused() {
+fn non_canonical_rlp_and_hp_are_refused() {
     use crate::cross_domain::evm::{mpt, rlp};
     assert!(rlp::decode(&[0x81, 0x05]).is_err());
     assert!(rlp::decode(&[0x05]).is_ok());
@@ -198,9 +197,9 @@ fn audit_lane_c_blg_054_non_canonical_rlp_and_hp_are_refused() {
     assert!(mpt::hp_decode(&[0x00, 0x12]).is_ok());
 }
 
-/// BLG-130: the quorum short-circuit counts participants still out; rotation needs its branch.
+/// The quorum short-circuit counts participants still out; rotation needs its branch.
 #[test]
-fn audit_lane_c_blg_130_quorum_early_decision_and_rotation_branch() {
+fn quorum_early_decision_and_rotation_branch() {
     use crate::cross_domain::evm::sync_committee::{
         rotate_period, SyncCommitteeError, SyncCommitteeState, BLS_PUBKEY_LEN, SYNC_COMMITTEE_SIZE,
     };
@@ -221,9 +220,9 @@ fn audit_lane_c_blg_130_quorum_early_decision_and_rotation_branch() {
     assert_eq!(state.current_period, 0);
 }
 
-/// BLG-058: the domain registry leaf commits to the allowlist and the plugin code hash.
+/// The domain registry leaf commits to the allowlist and the plugin code hash.
 #[test]
-fn audit_lane_c_blg_058_domain_leaf_commits_allowlist_and_plugin_hash() {
+fn domain_leaf_commits_allowlist_and_plugin_hash() {
     use crate::domain::registry::domain_leaf_hash;
     let base = default_domain(7, ConsensusKind::Zk, 45262, "zk-adapter", 1);
     let mut with_program = base.clone();
@@ -245,7 +244,7 @@ fn audit_lane_c_blg_058_domain_leaf_commits_allowlist_and_plugin_hash() {
     }
 }
 
-// WP-33 testnet closures (directive 14.1 rule 8): the opcodes whose verification is not
+// The opcodes whose verification is not
 // finished stay refused on the testnet chain id.
 mod testnet_closures {
     use crate::core::account::AccountState;

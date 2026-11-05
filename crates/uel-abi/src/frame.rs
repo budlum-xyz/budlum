@@ -13,7 +13,7 @@ use std::io::{self, Read, Write};
 /// `ee.proto`; the golden vectors in `tests/frames.rs` are what notices one.
 pub const ABI_VERSION: u32 = 1;
 
-/// The largest frame body in bytes (directive 8.3.2 item 6).
+/// The largest frame body in bytes.
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 /// Why a frame could not be read or written.

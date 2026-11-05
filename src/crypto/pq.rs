@@ -96,7 +96,7 @@ pub enum PqError {
     /// The signer refused (context too long, or a library failure).
     Signing,
     /// The context string is not in the registered FIPS 204 / 205 context
-    /// table (`crypto::ctx::TABLE` and `EXTRAS`), BLG-009.
+    /// table (`crypto::ctx::TABLE` and `EXTRAS`).
     UnregisteredContext,
 }
 
@@ -163,7 +163,7 @@ fn check_context(ctx: &[u8]) -> Result<(), PqError> {
     if ctx.len() > MAX_CONTEXT_LEN {
         return Err(PqError::ContextTooLong(ctx.len()));
     }
-    // BLG-009: only a registered context is accepted. A free-form context
+    // Only a registered context is accepted. A free-form context
     // lets a signature made for one purpose verify under a name nobody
     // reviewed, which is the separation the context exists to give.
     if !super::ctx::is_registered(ctx) {
@@ -783,7 +783,7 @@ mod tests {
             ml_dsa_sign(scheme, &seed(1), MSG, b"", &[0u8; 32]),
             Err(PqError::EmptyContext)
         );
-        // BLG-009: a context of legal length that is not registered is
+        // A context of legal length that is not registered is
         // refused on both sides.
         let max = [b'a'; 255];
         assert_eq!(
@@ -793,7 +793,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_009_only_registered_contexts_sign_and_verify() {
+    fn only_registered_contexts_sign_and_verify() {
         let scheme = SchemeId::ML_DSA_65;
         let registered = ctx::TABLE[0];
         let sig = ml_dsa_sign(scheme, &seed(2), MSG, registered, &[0u8; 32]).unwrap();

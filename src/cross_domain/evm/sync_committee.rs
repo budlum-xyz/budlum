@@ -91,7 +91,7 @@ pub enum SyncCommitteeError {
     RotationBranchRequired,
     /// The finality branch does not place the finalized header's root at
     /// `finalized_checkpoint.root` inside the attested header's state
-    /// (BLG-235): the committee signed a head, not a finalized block.
+    ///: the committee signed a head, not a finalized block.
     NotFinalized,
 }
 
@@ -323,7 +323,7 @@ pub const FINALIZED_ROOT_GINDEX_DENEB: u64 = 105;
 /// fields, so the state tree is one level deeper: `84 * 2 + 1 = 169`.
 pub const FINALIZED_ROOT_GINDEX_ELECTRA: u64 = 169;
 
-/// The proof that the header a deposit is about is final (BLG-235).
+/// The proof that the header a deposit is about is final.
 ///
 /// A sync committee signs a recent *attested* header, which is the chain's
 /// head, not a finalized block. Finality is a fact inside the attested
@@ -489,7 +489,7 @@ impl BeaconBinding {
 /// block in its body. `finality` is the header the committee signed and the
 /// branch proving `binding` is that header's finalized checkpoint. The
 /// committee's signature is checked over `finality.attested`, never over
-/// `binding` itself (BLG-235).
+/// `binding` itself.
 ///
 /// This is the entry point a deposit proof uses; `verify_sync_aggregate`
 /// alone checks a signature over whatever bytes it is handed, and a caller
@@ -936,12 +936,12 @@ mod tests {
         );
     }
 
-    /// BLG-235: two thirds of the committee signing a header makes that
+    /// Two thirds of the committee signing a header makes that
     /// header the attested head, not a finalized block. A genuine aggregate
     /// over the very header the deposit names, with no finality branch to
     /// an attested state, is refused.
     #[test]
-    fn blg_235_a_signed_head_is_not_finality() {
+    fn a_signed_head_is_not_finality() {
         let params = BeaconChainParams {
             fork_version: [0x04, 0, 0, 0],
             genesis_validators_root: [0x42; 32],

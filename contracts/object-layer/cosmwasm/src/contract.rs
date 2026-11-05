@@ -1,4 +1,4 @@
-//! Budlum settlement endpoint, CosmWasm family (WP-62, directive 9.3.2).
+//! Budlum settlement endpoint, CosmWasm family.
 //!
 //! Takes custody of CW20 and CW721 assets that enter the Budlum Universal
 //! Object Layer, carries home calls, and tracks the last accepted Budlum
@@ -140,9 +140,9 @@ pub fn execute(deps: DepsMut, env: Env, info: MessageInfo, msg: ExecuteMsg) -> S
             Ok(Response::new())
         }
         // Both need an opening of the object-layer root in an accepted
-        // Budlum header (WP-49 step 5).
+        // Budlum header.
         ExecuteMsg::Release { .. } | ExecuteMsg::Escape { .. } => {
-            Err(StdError::generic_err("not open: WP-49 step 5"))
+            Err(StdError::generic_err("not open: needs the object-layer root opening"))
         }
     }
 }

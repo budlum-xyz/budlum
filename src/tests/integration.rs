@@ -47,12 +47,12 @@ mod integration_tests {
         validator.active = true;
     }
 
-    /// BLG-192: `bud_estimateGas` answers with `AccountState::required_fee`.
+    /// `bud_estimateGas` answers with `AccountState::required_fee`.
     /// That number must be exactly the admission floor: the estimate passes,
     /// one unit less is refused, for a proportionally priced transfer and an
     /// escalated governance proposal alike.
     #[test]
-    fn blg_192_required_fee_is_the_admission_floor() {
+    fn required_fee_is_the_admission_floor() {
         let mut state = AccountState::new();
         let sender_kp = crate::crypto::primitives::KeyPair::generate().unwrap();
         let sender = Address::from(sender_kp.public_key_bytes());

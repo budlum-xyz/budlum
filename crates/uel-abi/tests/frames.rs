@@ -1,4 +1,4 @@
-//! Framing contract of the worker socket (directive 8.3.2 item 6, WP-09 tests).
+//! Framing contract of the worker socket.
 
 // A panic is how a test reports a broken invariant; the node-wide panic gate is for
 // production code (the same exemption the root manifest documents for tests).
@@ -26,7 +26,7 @@ fn unhex(s: &str) -> Vec<u8> {
 
 #[test]
 fn uel_abi_frames_are_bounded() {
-    // The limit is the directive's 16 MiB.
+    // The limit is the protocol's 16 MiB.
     assert_eq!(MAX_FRAME_BYTES, 16 * 1024 * 1024);
 
     // A length header above the limit is refused from the header alone: the

@@ -1,4 +1,4 @@
-//! The EVM family (WP-49), the first family.
+//! The EVM family, the first family.
 //!
 //! * Addresses are 20 bytes, shown with the EIP-55 checksum.
 //! * A fungible class is an ERC-20; a unique class is an ERC-721 and each
@@ -10,13 +10,13 @@
 //!   is read with `eth_getProof` (`AccountAndStorageProof`).
 //! * The upgrade authority is the EIP-1967 admin slot of the class contract.
 //!
-//! The Ethereum finality leg (sync committee) depends on WP-60; until it
+//! The Ethereum finality leg (sync committee) depends on the succinct finality proof; until it
 //! lands the endpoint's `release` stays closed and only the escape opens.
 //!
 //! WIRING: the block executor reaches this module through the
 //! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door, and RPC reads it
 //! through `bud_getCharter`, `bud_getAssetClass`, `bud_getAsset` and the
-//! other 9.5 item 4 methods. Both land in the next WP-49 step; until then
+//! other object-layer read methods. Both land in a later step; until then
 //! the state is held by `SettlementRegistries::object_layer` and closed on
 //! the testnet by `ACTIVATION`.
 
@@ -347,7 +347,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn evm_caip19_matches_the_directive_example_shape() {
+    fn evm_caip19_matches_the_reference_example_shape() {
         let ctx = FamilyContext {
             chain_reference: "11155111",
             address_prefix: "",

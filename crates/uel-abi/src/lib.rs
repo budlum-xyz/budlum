@@ -1,4 +1,4 @@
-//! Universal Execution Layer ABI (directive section 8.3, work package WP-09).
+//! Universal Execution Layer ABI.
 //!
 //! The contract between the Execution Coordinator in the node process and the
 //! execution-environment workers (`budlum-ee-*`), one binary per environment:

@@ -1,4 +1,4 @@
-//! WP-42 closures: each test pins one finding of the CI, gate and supply-chain
+//! Each test pins one finding of the CI, gate and supply-chain
 //! family to the repository state, so the fix cannot silently regress.
 //!
 //! The tests read repository files only. They live in the gate crate so they
@@ -20,7 +20,7 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(root().join(rel)).unwrap_or_else(|e| panic!("cannot read {rel}: {e}"))
 }
 
-/// BLG-085: every standalone workspace that ships a binary pins the release
+/// Every standalone workspace that ships a binary pins the release
 /// hardening pair (`overflow-checks = true`, `panic = "abort"`).
 #[test]
 fn standalone_workspaces_pin_release_hardening() {
@@ -48,7 +48,7 @@ fn standalone_workspaces_pin_release_hardening() {
     );
 }
 
-/// BLG-086: the tool sources carry no leftover Turkish messages.
+/// The tool sources carry no leftover Turkish messages.
 #[test]
 fn tool_sources_have_no_turkish_messages() {
     let mut hits = Vec::new();
@@ -66,7 +66,7 @@ fn tool_sources_have_no_turkish_messages() {
     assert!(hits.is_empty(), "Turkish left in tools: {hits:?}");
 }
 
-/// BLG-095: no workflow names the deleted `fix/architecture-tip-adlari` branch,
+/// No workflow names the deleted `fix/architecture-tip-adlari` branch,
 /// and Dependabot covers every tracked `Cargo.lock` directory.
 #[test]
 fn workflows_and_dependabot_are_current() {
@@ -111,7 +111,7 @@ fn workflows_and_dependabot_are_current() {
     }
 }
 
-/// BLG-176: the throughput benchmarks do not clamp sizes and times to
+/// The throughput benchmarks do not clamp sizes and times to
 /// `u32::MAX`, which silently capped any larger measurement.
 #[test]
 fn micro_benches_do_not_clamp_to_u32_max() {
@@ -130,7 +130,7 @@ fn micro_benches_do_not_clamp_to_u32_max() {
     }
 }
 
-/// BLG-097: the kani workspace carries a `Cargo.lock`, so `--locked` resolves
+/// The kani workspace carries a `Cargo.lock`, so `--locked` resolves
 /// and the lock-freshness step in CI sees it.
 #[test]
 fn kani_workspace_has_a_lockfile() {
@@ -138,7 +138,7 @@ fn kani_workspace_has_a_lockfile() {
     assert!(lock.contains("name = \"budlum-kani\""));
 }
 
-/// DOC-GAP-07: the indexer binary has an explicit `[[bin]]` entry.
+/// The indexer binary has an explicit `[[bin]]` entry.
 #[test]
 fn indexer_binary_is_registered() {
     let manifest = read("Cargo.toml");

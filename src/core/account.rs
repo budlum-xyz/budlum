@@ -466,7 +466,7 @@ pub struct AccountState {
     /// freeze, travel-rule) in consensus state - rooted and snapshotted
     /// with everything else that decides writes.
     pub poa_compliance: crate::registry::PoaComplianceRegistry,
-    /// The validator directory (WP-08): class, operator key, quota and the
+    /// The validator directory: class, operator key, quota and the
     /// bond of every mobile validator. Rooted and snapshotted.
     pub validator_directory: crate::validators::ValidatorDirectory,
     /// Governance-queued compliance freezes/unfreezes awaiting
@@ -1428,7 +1428,7 @@ impl AccountState {
         amount: u64,
     ) -> Result<u64, crate::registry::RegistryError> {
         // STORAGE_OPERATOR (5) and CONTENT_VALIDATOR (9) are reserved ids: the
-        // validator who stores content is the validator (WP-08, section 7.3).
+        // validator who stores content is the validator .
         if role == crate::registry::role::roles::STORAGE_OPERATOR
             || role == crate::registry::role::roles::CONTENT_VALIDATOR
         {
@@ -1671,7 +1671,7 @@ impl AccountState {
     /// The smallest fee `tx` can carry and still pass the fee rules of
     /// [`Self::validate_transaction`]: the flat floor, plus the proportional
     /// cut on a value transfer, and the escalating proposal fee on a
-    /// governance proposal. `bud_estimateGas` answers with this (BLG-192), so
+    /// governance proposal. `bud_estimateGas` answers with this, so
     /// the estimate and the admission rule are one function.
     #[must_use]
     pub fn required_fee(&self, tx: &Transaction) -> u64 {
@@ -3716,8 +3716,8 @@ impl AccountState {
         self.record_destroyed(destroyed);
     }
 
-    /// Slash one application role bond and record the penalty as destroyed
-    ///. Every non-validator role bond counts toward committed supply,
+    /// Slash one application role bond and record the penalty as destroyed.
+    /// Every non-validator role bond counts toward committed supply,
     /// so the penalty is exactly what leaves it.
     ///
     /// # Errors

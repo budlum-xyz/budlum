@@ -1,4 +1,4 @@
-//! Class rules, templates, standard interfaces and conditions (9.3.4 - 9.3.6).
+//! Class rules, templates, standard interfaces and conditions.
 //!
 //! A class rule is a pure function. It reads the class slice, the asset
 //! slice and one verb, and either accepts the transition or refuses it. It
@@ -7,7 +7,7 @@
 //! WIRING: the block executor reaches this module through the
 //! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door, and RPC reads it
 //! through `bud_getCharter`, `bud_getAssetClass`, `bud_getAsset` and the
-//! other 9.5 item 4 methods. Both land in the next WP-49 step; until then
+//! other object-layer read methods. Both land in a later step; until then
 //! the state is held by `SettlementRegistries::object_layer` and closed on
 //! the testnet by `ACTIVATION`.
 
@@ -16,13 +16,13 @@ use crate::object_layer::ids::{AssetClassId, HomeIdentity};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// The audited template list (9.3.4 item 3). Closed: a new template is a
-/// directive change, not a registration parameter.
+/// The audited template list. Closed: a new template is a
+/// protocol change, not a registration parameter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum TemplateId {
     FungibleV1,
     UniqueV1,
-    /// Opens with WP-49 step 9. Registration refuses it until then.
+    /// Opens in a later step. Registration refuses it until then.
     RecordV1,
 }
 
@@ -42,7 +42,7 @@ pub struct TemplateParams {
     pub info_royalty_field: Option<String>,
 }
 
-/// The kinds of class rule (9.3.4 item 2).
+/// The kinds of class rule.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClassRule {
     /// A Budlum module's own code (BUD, SocialFi NFT, BNS name, data asset).
@@ -59,7 +59,7 @@ pub enum ClassRule {
 
 impl ClassRule {
     /// Whether the rule may be registered today. `Program` and `Replica`
-    /// are closed gates (9.8); `RecordV1` opens with step 9.
+    /// are closed gates; `RecordV1` opens with step 9.
     #[must_use]
     pub fn is_open(&self) -> bool {
         matches!(
@@ -82,11 +82,11 @@ pub type ClassSlice = BTreeMap<String, Vec<u8>>;
 pub enum Holder {
     /// A Budlum account (post-quantum keys).
     Account(Address),
-    /// A home identity: acts only by home call (9.3.10).
+    /// A home identity: acts only by home call.
     Home(HomeIdentity),
 }
 
-/// The standard interfaces (9.3.6).
+/// The standard interfaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Interface {
     Fungible,
@@ -105,7 +105,7 @@ impl TemplateId {
     }
 }
 
-/// The closed condition list (9.3.6).
+/// The closed condition list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Condition {
     Payment {
@@ -145,7 +145,7 @@ pub enum Verb {
     },
 }
 
-/// An accepted transition (9.3.4 item 1).
+/// An accepted transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transition {
     pub asset_slice: AssetSlice,
@@ -225,7 +225,7 @@ pub fn apply_rule(
     }
 }
 
-/// One reference transition sample (9.3.5 item 2): the slice before, the
+/// One reference transition sample: the slice before, the
 /// verbs the home domain ran, and the slice after.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReferenceSample {

@@ -1,6 +1,6 @@
 #![no_main]
 
-//! Worker-socket frame codec robustness target (WP-09).
+//! Worker-socket frame codec robustness target.
 //!
 //! The bytes come from another process. Success and typed `FrameError`s are
 //! both expected; a panic, an allocation past the 16 MiB bound, or a decode that

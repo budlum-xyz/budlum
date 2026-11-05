@@ -1,4 +1,4 @@
-//! Home VM families (directive 9.3.11).
+//! Home VM families.
 //!
 //! The object-layer core does not know any family. Everything that differs
 //! between an EVM chain, a Cosmos SDK chain with CosmWasm, a Solana-style SVM
@@ -24,7 +24,7 @@
 //! WIRING: the block executor reaches this module through the
 //! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door, and RPC reads it
 //! through `bud_getCharter`, `bud_getAssetClass`, `bud_getAsset` and the
-//! other 9.5 item 4 methods. Both land in the next WP-49 step; until then
+//! other object-layer read methods. Both land in a later step; until then
 //! the state is held by `SettlementRegistries::object_layer` and closed on
 //! the testnet by `ACTIVATION`.
 
@@ -63,8 +63,8 @@ impl HomeVmFamily {
     }
 }
 
-/// The two value shapes a template can hold. `Record` classes (9.3.6) join
-/// with `RecordV1` in step 9 of WP-49.
+/// The two value shapes a template can hold. `Record` classes join
+/// with `RecordV1` in a later step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum AssetKind {
     Fungible,
@@ -132,7 +132,7 @@ pub struct RawEndpointEvent {
     pub attributes: Vec<(String, String)>,
 }
 
-/// The family-neutral meaning of an endpoint event (9.3.2 item 4).
+/// The family-neutral meaning of an endpoint event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EndpointEvent {
     /// `budlum/object-layer/arrive/v1`: the endpoint took custody.
@@ -169,7 +169,7 @@ pub enum EndpointEvent {
     },
 }
 
-/// How the first class slice is read (9.3.4 item 4 and the family card).
+/// How the first class slice is read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SliceReadRule {
     /// The family's state root is bound to its finality proof, so the slice is
@@ -309,7 +309,7 @@ pub trait FamilyProfile: Sync {
     fn canonical_build(&self) -> CanonicalBuild;
     fn dev_chain(&self) -> DevChain;
 
-    /// The CAIP-19 display of an asset (9.3.3), for example
+    /// The CAIP-19 display of an asset, for example
     /// `eip155:11155111/erc721:0xabc.../7`.
     fn caip19(
         &self,

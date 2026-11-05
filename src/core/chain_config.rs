@@ -111,7 +111,7 @@ impl Network {
     }
 
     /// The bond floor of a Full validator. Same value as [`Self::min_stake`],
-    /// named for the class split (BLG-266).
+    /// named for the class split.
     pub fn min_stake_full(&self) -> u64 {
         self.consensus_params().min_stake
     }
@@ -146,8 +146,8 @@ impl Network {
         match self {
             Network::Mainnet => ConsensusParams {
                 epoch_len: 100,
-                // 1 BUD (10^6 atoms). Written in BUD so the unit is explicit
-                //; the mainnet value is Ayaz's decision (DECISIONS.md).
+                // 1 BUD (10^6 atoms). Written in BUD so the unit is explicit;
+                // the mainnet value is Ayaz's decision (DECISIONS.md).
                 min_stake: crate::tokenomics::bud(1),
                 // Never above the Full floor.
                 min_stake_mobile: crate::tokenomics::bud(1),
@@ -187,8 +187,8 @@ impl Network {
 
     /// The validation reward pool this profile pays from, if any.
     ///
-    /// Testnet: the default schedule, 10M BUD over 100 000 epochs
-    ///. Mainnet waits for Ayaz. Devnet has
+    /// Testnet: the default schedule, 10M BUD over 100 000 epochs.
+    /// Mainnet waits for Ayaz. Devnet has
     /// no distribution to fund a pool from.
     #[must_use]
     pub fn reward_pool(&self) -> Option<crate::tokenomics::reward_pool::RewardPoolSchedule> {
@@ -202,7 +202,7 @@ impl Network {
     ///
     /// The flag is a genesis parameter. Devnet has it on so the rehearsal can
     /// run the path; testnet keeps it off until the end-to-end Sepolia test
-    /// passes (10.7); the mainnet decision is Ayaz's.
+    /// passes; the mainnet decision is Ayaz's.
     /// `max_restaked_share_ppm = 300_000` and one weight atom per allocated
     /// unit are TESTNET-DEFAULT values.
     #[must_use]

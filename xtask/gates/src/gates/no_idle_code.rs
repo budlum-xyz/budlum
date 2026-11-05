@@ -1926,7 +1926,7 @@ pub fn self_test() -> Result<String, String> {
 mod test_attr_tests {
     use super::*;
 
-    /// BLG-180: `#[cfg(all(test))]` is a test-only item like `#[cfg(test)]`; it
+    /// `#[cfg(all(test))]` is a test-only item like `#[cfg(test)]`; it
     /// has no comma, so the `#[cfg(all(test,` opener missed it and a helper
     /// called only from such a block counted as production use.
     #[test]

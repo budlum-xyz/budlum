@@ -67,7 +67,7 @@ pub struct SettlementRegistries {
     /// absent from the serialization and from the root.
     #[serde(default, skip_serializing_if = "CanaryBook::is_empty")]
     pub quantum: CanaryBook,
-    /// The Universal Object Layer (directive 9.5 item 1). Written only by
+    /// The Universal Object Layer. Written only by
     /// `ObjectLayerTx`; closed on the testnet until its activation height.
     /// Empty: absent from the serialization and from the root.
     #[serde(default, skip_serializing_if = "ObjectLayerRegistry::is_empty")]

@@ -1,9 +1,9 @@
-//! WP-08: validator classes and the single registration door.
+//! Validator classes and the single registration door.
 //!
-//! Tests named by the work package card. The duty lane tests
+//! The duty lane tests
 //! (`mobile_duty_tx_lane_is_rate_limited`, `duty_lane_budget_is_twenty_percent`)
 //! come with the duty transactions themselves (`CustodyAck`,
-//! `CustodyProofBatch`, `PresenceSignal`), which belong to later packages.
+//! `CustodyProofBatch`, `PresenceSignal`), which land later.
 
 use crate::core::account::AccountState;
 use crate::core::address::Address;
@@ -380,6 +380,7 @@ fn operator_key_cannot_withdraw_stake() {
     )
     .unwrap();
     let before = state.validator_directory.get(&f.owner).unwrap().clone();
+    let owner_balance_before = state.get_balance(&f.owner);
 
     // Every owner-only operation names the sender as the owner. An account
     // that is not the owner, such as the operator's own account, is refused.
@@ -446,7 +447,7 @@ fn operator_key_cannot_withdraw_stake() {
     );
     assert_eq!(
         state.get_balance(&f.owner),
-        9_500,
+        owner_balance_before,
         "the owner balance is untouched"
     );
 }

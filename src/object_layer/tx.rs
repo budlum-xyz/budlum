@@ -1,13 +1,13 @@
-//! `ObjectLayerTx` (9.5 item 2) and the activation gate.
+//! `ObjectLayerTx` and the activation gate.
 //!
-//! The enum carries every variant the directive lists, in its order, so the
-//! wire codes are fixed from the first release. Variants whose WP-49 step
-//! has not landed are refused with [`TxRefusal::StepNotOpen`].
+//! The enum carries every planned variant, in a fixed order, so the
+//! wire codes are fixed from the first release. Variants whose step has not
+//! landed are refused with [`TxRefusal::StepNotOpen`].
 //!
 //! WIRING: the block executor reaches this module through the
 //! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door, and RPC reads it
 //! through `bud_getCharter`, `bud_getAssetClass`, `bud_getAsset` and the
-//! other 9.5 item 4 methods. Both land in the next WP-49 step; until then
+//! other object-layer read methods. Both land in a later step; until then
 //! the state is held by `SettlementRegistries::object_layer` and closed on
 //! the testnet by `ACTIVATION`.
 
@@ -102,7 +102,7 @@ pub enum ObjectLayerTx {
 pub enum TxRefusal {
     /// The object layer is not active at this height.
     Closed,
-    /// The variant's WP-49 step has not landed.
+    /// The variant's step has not landed.
     StepNotOpen,
     Refused(Refusal),
 }

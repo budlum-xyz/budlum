@@ -170,8 +170,8 @@ fn pq_vectors_acvp_mldsa_sigver() {
             );
             // The facade agrees whenever the context policy lets the call
             // through; a vector context that is not a registered Budlum
-            // context is refused by the facade before any key is read
-            // (BLG-009), while the primitive above still checks the vector.
+            // context is refused by the facade before any key is read,
+            // while the primitive above still checks the vector.
             if crate::crypto::ctx::is_registered(&ctx) {
                 assert_eq!(verify(scheme, &pk, &msg, &ctx, &sig).is_ok(), expected);
             } else if !ctx.is_empty() && ctx.len() <= 255 {

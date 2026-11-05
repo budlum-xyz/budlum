@@ -1,13 +1,13 @@
-/// Budlum finality on a Move home chain (WP-64, part 2).
+/// Budlum finality on a Move home chain.
 ///
 /// The endpoint asks one question: is this Budlum checkpoint final. The
-/// answer needs the succinct Budlum finality proof (WP-60); until it lands
+/// answer needs the succinct Budlum finality proof; until it lands
 /// the verifier is fail-closed and records nothing, so the endpoint's
 /// silence clock never restarts and no release can pass.
 module budlum::budlum_verifier {
     use aptos_std::table::{Self, Table};
 
-    /// The proof system is not open yet (WP-60).
+    /// The proof system is not open yet.
     const E_NOT_OPEN: u64 = 1;
     /// A different header was already recorded for this height.
     const E_CONFLICT: u64 = 2;
@@ -20,7 +20,7 @@ module budlum::budlum_verifier {
         move_to(publisher, Checkpoints { header_at: table::new() });
     }
 
-    /// Record a checkpoint with its proof. Fail-closed until WP-60.
+    /// Record a checkpoint with its proof. Fail-closed until the succinct finality proof lands.
     public entry fun record(_height: u64, _header_hash: vector<u8>, _proof: vector<u8>) {
         abort E_NOT_OPEN
     }

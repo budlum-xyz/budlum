@@ -1,4 +1,4 @@
-//! Budlum settlement endpoint, SVM family (WP-63, directive 9.3.2).
+//! Budlum settlement endpoint, SVM family.
 //!
 //! Takes custody of SPL tokens and NFT mints that enter the Budlum Universal
 //! Object Layer, carries home calls, and tracks the last accepted Budlum
@@ -29,7 +29,7 @@ pub const FUNGIBLE: u8 = 0;
 pub const UNIQUE: u8 = 1;
 /// Seconds without a newly accepted checkpoint before the exit opens.
 pub const SILENCE_WINDOW_SECS: i64 = 1_209_600;
-/// Custom error: release and escape open with WP-49 step 5.
+/// Custom error: release and escape open with the object-layer root opening.
 pub const NOT_OPEN: u32 = 0x4255_0002;
 pub const NOT_FINAL: u32 = 0x4255_0003;
 pub const NOT_NEWER: u32 = 0x4255_0004;
@@ -236,7 +236,7 @@ pub fn process_instruction(
                 .map_err(|_| ProgramError::AccountDataTooSmall)
         }
         // Both need an opening of the object-layer root in an accepted
-        // Budlum header (WP-49 step 5).
+        // Budlum header.
         Instruction::Release { .. } | Instruction::Escape { .. } => {
             Err(ProgramError::Custom(NOT_OPEN))
         }

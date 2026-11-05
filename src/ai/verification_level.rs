@@ -1,10 +1,9 @@
-//! Verification levels of an AI result (directive 10.6 item 3, WP-57 step 2).
+//! Verification levels of an AI result.
 //!
 //! WIRING: the AI registry records a level per finalized outcome and the
 //! value-bearing doors (data market, application payments) ask
-//! [`LevelRecord::may_carry_value`] once WP-57 step 3 lands the challenge
-//! window; until then the testnet AI layer runs at VL-1 or stays closed
-//! (directive 10.6 item 9).
+//! [`LevelRecord::may_carry_value`] once the challenge
+//! window lands; until then the testnet AI layer runs at VL-1 or stays closed.
 //!
 //! | Level | Meaning |
 //! |---|---|
@@ -45,7 +44,7 @@ impl VerificationLevel {
 }
 
 /// TESTNET-DEFAULT: the lowest level at which an AI result may move value
-/// (directive 10.6 and the WP-57 card: value-bearing AI use needs VL-2).
+/// (value-bearing AI use needs VL-2).
 pub const MIN_LEVEL_FOR_VALUE: VerificationLevel = VerificationLevel::ChallengeWindowClosed;
 
 /// Why a level change was refused.
@@ -88,7 +87,7 @@ impl LevelRecord {
         self.level
     }
 
-    /// WIRING: read by the RPC outcome view and the value doors (WP-57 step 3).
+    /// WIRING: read by the RPC outcome view and the value doors.
     #[must_use]
     pub fn is_refuted(&self) -> bool {
         self.refuted
@@ -112,8 +111,7 @@ impl LevelRecord {
 
     /// An upheld challenge. The level stays what it was, for the record;
     /// the result carries no value from now on.
-    /// WIRING: called by the challenge door when a challenge is upheld
-    /// (WP-57 step 3).
+    /// WIRING: called by the challenge door when a challenge is upheld.
     pub fn refute(&mut self) {
         self.refuted = true;
     }
@@ -173,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn labels_are_the_directive_names() {
+    fn labels_are_the_canonical_names() {
         let labels: Vec<_> = [
             Receipt,
             CommitteeAgreement,

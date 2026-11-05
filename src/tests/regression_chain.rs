@@ -1,8 +1,7 @@
-//! Lane A live-verification regression tests (WP-01 to WP-04).
+//! Chain, consensus and state regression tests.
 //!
-//! Only "previously fixed" findings live here: each test is green and stays
-//! permanent (directive section 14.1 rule 7). Repro tests for findings that are
-//! still open live on the `audit/repro-a` branch and do not merge.
+//! Each test locks a fix that is already in the tree: it is green and stays
+//! permanent.
 
 use crate::chain::blockchain::Blockchain;
 use crate::consensus::pow::PoWEngine;
@@ -30,11 +29,11 @@ fn window<'a>(src: &'a str, anchor: &str, len: usize) -> &'a str {
     &src[start..end]
 }
 
-/// BLG-001: a slot whose round-0 election is empty must be able to re-roll.
+/// A slot whose round-0 election is empty must be able to re-roll.
 /// The round is part of the VRF seed (a fresh draw per round), and the round
 /// ladder is priced by the parent's timestamp and capped.
 #[test]
-fn audit_lane_a_blg_001_leader_round_rerolls_seed_and_ladder_is_capped() {
+fn leader_round_rerolls_seed_and_ladder_is_capped() {
     use crate::consensus::pos::{PoSConfig, PoSEngine};
     use crate::consensus::{
         affordable_leader_round, MAX_LEADER_ROUNDS, MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS,
@@ -75,12 +74,12 @@ fn audit_lane_a_blg_001_leader_round_rerolls_seed_and_ladder_is_capped() {
     assert_eq!(affordable_leader_round(parent + 50_000, parent), 0);
 }
 
-/// BLG-017: a peer-controlled hash string in a vote log line must never be
+/// A peer-controlled hash string in a vote log line must never be
 /// cut at a byte offset (a multi-byte character on the cut would panic and
 /// abort a release node). Source-level lock: the in-file behavioural test is
 /// `network::node::tests::log_prefix_survives_multibyte_input`.
 #[test]
-fn audit_lane_a_blg_017_no_utf8_byte_slice_of_peer_strings_in_vote_handlers() {
+fn no_utf8_byte_slice_of_peer_strings_in_vote_handlers() {
     let node = production_part(include_str!("../network/node.rs"));
     assert!(node.contains("fn log_prefix(s: &str, max_chars: usize)"));
     assert!(
@@ -95,11 +94,11 @@ fn audit_lane_a_blg_017_no_utf8_byte_slice_of_peer_strings_in_vote_handlers() {
     }
 }
 
-/// BLG-019: `TransactionType::StateUpdate` no longer writes any account
+/// `TransactionType::StateUpdate` no longer writes any account
 /// nonce. Every sender is refused with `state_update_retired` before any
 /// state is touched (commitment nonce writes belong to the settlement door).
 #[test]
-fn audit_lane_a_blg_019_state_update_is_retired_for_every_sender() {
+fn state_update_is_retired_for_every_sender() {
     use crate::core::transaction::{Transaction, TransactionType};
     let mut node = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
     let attacker = Address::from([0xAD; 32]);
@@ -126,14 +125,14 @@ fn audit_lane_a_blg_019_state_update_is_retired_for_every_sender() {
     assert_eq!(node.state.get_nonce(&victim), 0, "victim nonce untouched");
 }
 
-/// BLG-020: the block producer executes every candidate transaction against a
+/// The block producer executes every candidate transaction against a
 /// disposable copy and publishes it only on success, so a transaction that
 /// fails halfway cannot leave partial writes in the selection prefix.
 /// Source-level lock (the failing-halfway fixture needs a bespoke executor
-/// arm); the residual `Executor` has no nonce or signature check of its own is
-/// recorded in the lane file.
+/// arm). The residual gap, that `Executor` has no nonce or signature check of
+/// its own, is still open.
 #[test]
-fn audit_lane_a_blg_020_producer_executes_on_a_disposable_candidate_state() {
+fn producer_executes_on_a_disposable_candidate_state() {
     let src = production_part(include_str!("../chain/blockchain.rs"));
     let body = window(src, "fn collect_block_transactions(", 5130);
     let clone_at = body
@@ -152,10 +151,10 @@ fn audit_lane_a_blg_020_producer_executes_on_a_disposable_candidate_state() {
     );
 }
 
-/// BLG-021: a bond adds to an existing role stake (no override), and the
+/// A bond adds to an existing role stake (no override), and the
 /// out-of-block RPC doors that wrote the registry on one node are refused.
 #[test]
-fn audit_lane_a_blg_021_role_bond_is_additive_and_rpc_doors_are_refused() {
+fn role_bond_is_additive_and_rpc_doors_are_refused() {
     use crate::core::account::AccountState;
     use crate::registry::role::roles;
     let mut state = AccountState::new();
@@ -177,14 +176,14 @@ fn audit_lane_a_blg_021_role_bond_is_additive_and_rpc_doors_are_refused() {
     assert!(rpc.contains("Out-of-block role unbonding is refused"));
 }
 
-/// BLG-031 (proposal history half): closed proposals are dropped after a
+/// Closed proposals are dropped after a
 /// retention window, so `GovernanceState::proposals` and the governance root
 /// stay bounded. (The `bpqs::EpochWindow` half is `u32::try_from` in
 /// `crates/bpqs/src/epoch.rs::epoch_of`, outside this crate's test target.)
-/// BLG-103 (proposal-slot lock half): one proposer cannot hold more than 8
+/// One proposer cannot hold more than 8
 /// active proposals.
 #[test]
-fn audit_lane_a_blg_031_103_closed_proposals_are_pruned_and_slots_are_capped() {
+fn closed_proposals_are_pruned_and_slots_are_capped() {
     use crate::core::governance::{GovernanceState, ProposalType};
     let proposer = Address::from([0x31; 32]);
     let param = || ProposalType::ParameterUpdate("min_stake".into(), "2000".into());
@@ -221,12 +220,12 @@ fn audit_lane_a_blg_031_103_closed_proposals_are_pruned_and_slots_are_capped() {
     );
 }
 
-/// BLG-041: the settlement root is derived from the chain prefix at one place
+/// The settlement root is derived from the chain prefix at one place
 /// (`apply_block_end_roots`), and every path that re-executes a block
 /// (production, validation, candidate validation, reorg persistence, replay)
 /// calls it before comparing the state root.
 #[test]
-fn audit_lane_a_blg_041_every_replay_path_derives_the_settlement_root_from_the_prefix() {
+fn every_replay_path_derives_the_settlement_root_from_the_prefix() {
     let src = production_part(include_str!("../chain/blockchain.rs"));
     let body = window(src, "fn apply_block_end_roots(", 700);
     assert!(body.contains("state.settlement_root ="));
@@ -237,12 +236,12 @@ fn audit_lane_a_blg_041_every_replay_path_derives_the_settlement_root_from_the_p
     );
 }
 
-/// BLG-042: a remote report of invalid BLS vote signatures cannot slash an
+/// A remote report of invalid BLS vote signatures cannot slash an
 /// innocent validator. The block door re-verifies the voter's own auth
 /// signature over the accused sample, binds sample to chain and vote, and
 /// refuses a sample whose vote signature is in fact valid.
 #[test]
-fn audit_lane_a_blg_042_invalid_signature_spam_proof_is_authenticated_and_bound() {
+fn invalid_signature_spam_proof_is_authenticated_and_bound() {
     let src = production_part(include_str!("../chain/blockchain.rs"));
     for needle in [
         "InvalidSignatureSpam auth signature failed verification",
@@ -255,12 +254,12 @@ fn audit_lane_a_blg_042_invalid_signature_spam_proof_is_authenticated_and_bound(
     }
 }
 
-/// BLG-089 (column binding half): a coding-audit answer is checked against the
+/// A coding-audit answer is checked against the
 /// column the registry drew (`audit.column`) and the manifest's column
 /// commitment, never against a column the answerer names. The replay half:
 /// reload derives the end-of-block roots and compares the whole state root.
 #[test]
-fn audit_lane_a_blg_089_coding_audit_column_is_bound_and_replay_derives_end_roots() {
+fn coding_audit_column_is_bound_and_replay_derives_end_roots() {
     let storage = production_part(include_str!("../domain/storage_deal.rs"));
     let body = window(storage, "pub fn verify_coding_audit(", 4500);
     assert!(body.contains("verify_column_proof("));
@@ -279,11 +278,11 @@ fn audit_lane_a_blg_089_coding_audit_column_is_bound_and_replay_derives_end_root
     );
 }
 
-/// BLG-107: the NftBoost share distribution runs in u128, reports overflow as
+/// The NftBoost share distribution runs in u128, reports overflow as
 /// an error instead of aborting, and hands the rounding dust to an operator so
 /// no part of the share is lost.
 #[test]
-fn audit_lane_a_blg_107_boost_share_math_is_u128_and_dust_is_not_burned() {
+fn boost_share_math_is_u128_and_dust_is_not_burned() {
     let src = production_part(include_str!("../chain/blockchain.rs"));
     let body = window(src, "fn distribute_bud_boost_share_in_state(", 3200);
     assert!(body.contains("let total_weight: u128"));
@@ -293,10 +292,10 @@ fn audit_lane_a_blg_107_boost_share_math_is_u128_and_dust_is_not_burned() {
     assert!(!body.contains(".sum::<u64>()"), "no unchecked u64 sum");
 }
 
-/// BLG-108: gossipsub holds a message until the application verdict, so an
+/// Gossipsub holds a message until the application verdict, so an
 /// honest validator's relay is never banned on a pre-validation guess.
 #[test]
-fn audit_lane_a_blg_108_gossip_forwarding_waits_for_the_application_verdict() {
+fn gossip_forwarding_waits_for_the_application_verdict() {
     let code = production_part(include_str!("../network/node.rs"));
     assert!(code.contains(".validate_messages()"));
     for verdict in ["Accept", "Reject", "Ignore"] {
@@ -312,11 +311,11 @@ fn audit_lane_a_blg_108_gossip_forwarding_waits_for_the_application_verdict() {
     assert!(accept_pos > match_pos && credit_pos > match_pos);
 }
 
-/// BLG-119: a validator cannot re-activate itself by adding stake mid-jail, a
+/// A validator cannot re-activate itself by adding stake mid-jail, a
 /// governance slash proposal has an execution arm, and a slash reaches stake
 /// that already moved into the unbonding queue.
 #[test]
-fn audit_lane_a_blg_119_jail_slash_and_unbonding_are_enforced() {
+fn jail_slash_and_unbonding_are_enforced() {
     let exec = production_part(include_str!("../execution/executor.rs"));
     let stake = window(exec, "TransactionType::Stake =>", 6000);
     assert!(stake.contains("validator_slashed"));
@@ -330,11 +329,11 @@ fn audit_lane_a_blg_119_jail_slash_and_unbonding_are_enforced() {
     );
 }
 
-/// BLG-125 (RPC-mutation half): no actor command writes state-root-bearing
+/// No actor command writes state-root-bearing
 /// storage state between blocks; each is refused with a pointer to the signed
 /// transaction door.
 #[test]
-fn audit_lane_a_blg_125_actor_commands_do_not_mutate_state_between_blocks() {
+fn actor_commands_do_not_mutate_state_between_blocks() {
     let src = production_part(include_str!("../chain/chain_actor.rs"));
     for (arm, refusal) in [
         (
@@ -362,11 +361,11 @@ fn audit_lane_a_blg_125_actor_commands_do_not_mutate_state_between_blocks() {
     assert!(credit.contains("self.devnet_chain_id()"));
 }
 
-/// BLG-183 (single slash path half): a missed storage challenge settles through
+/// A missed storage challenge settles through
 /// the one `apply_bond_slash` path, and the replayable-signature domain tag the
 /// ledger names is no longer in the tree.
 #[test]
-fn audit_lane_a_blg_183_missed_challenge_settles_through_one_slash_path() {
+fn missed_challenge_settles_through_one_slash_path() {
     let m = production_part(include_str!("../chain/storage_maintenance.rs"));
     let body = window(m, "pub(crate) fn finalize_missed_challenges(", 1800);
     assert!(body.contains("apply_bond_slash("));
@@ -380,15 +379,14 @@ fn audit_lane_a_blg_183_missed_challenge_settles_through_one_slash_path() {
     }
 }
 
-/// BLG-018 (round selection and vote depth): every node derives the same
+/// Every node derives the same
 /// finality round from the finalized height alone (the lowest unfinalized
 /// checkpoint), and a node votes only once the checkpoint has
 /// `FINALITY_VOTE_DEPTH` (4) blocks on top of it. Taking the round from the tip
 /// made nodes one block apart vote at different checkpoints and no quorum ever
-/// formed. This does not replace a four-node run, which was not possible in
-/// the lane environment (see the lane file).
+/// formed. This does not replace a four-node run.
 #[test]
-fn audit_lane_a_blg_018_finality_round_is_the_lowest_unfinalized_checkpoint_after_vote_depth() {
+fn finality_round_is_the_lowest_unfinalized_checkpoint_after_vote_depth() {
     let producer = Address::from([0x18; 32]);
     let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
     let interval = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
@@ -420,11 +418,11 @@ fn audit_lane_a_blg_018_finality_round_is_the_lowest_unfinalized_checkpoint_afte
     assert_eq!(next.checkpoint_height, interval * 2);
 }
 
-/// BLG-003: genesis supply is checked as one total. Plain allocations,
+/// Genesis supply is checked as one total. Plain allocations,
 /// the tokenomics distribution and bootstrap validator stake together may not
 /// exceed `BUD_TOTAL_SUPPLY`; each part was once checked alone.
 #[test]
-fn audit_lane_a_blg_003_genesis_issuance_is_checked_as_one_total() {
+fn genesis_issuance_is_checked_as_one_total() {
     let mut config = crate::chain::genesis::mainnet_genesis();
     config
         .validate_total_issuance()
@@ -436,21 +434,21 @@ fn audit_lane_a_blg_003_genesis_issuance_is_checked_as_one_total() {
     assert!(error.contains("above the fixed supply"), "{error}");
 }
 
-/// BLG-005: the default secret and data directories that every profile writes
+/// The default secret and data directories that every profile writes
 /// to are excluded from Git (closed in the ledger; this keeps it closed).
 #[test]
-fn audit_lane_a_blg_005_default_secret_and_data_dirs_are_git_ignored() {
+fn default_secret_and_data_dirs_are_git_ignored() {
     let ignore = include_str!("../../.gitignore");
     let lines: Vec<&str> = ignore.lines().map(str::trim).collect();
     assert!(lines.contains(&"/secrets/"), "/secrets/ must stay ignored");
     assert!(lines.contains(&"/data/"), "/data/ must stay ignored");
 }
 
-/// BLG-006: the verification reward pool is paid by the production epoch
+/// The verification reward pool is paid by the production epoch
 /// transition, not only by tests. Source lock: the epoch-close routine in
 /// `Blockchain` calls `reward_pool::pay_epoch` with the closed epoch.
 #[test]
-fn audit_lane_a_blg_006_reward_pool_is_paid_from_the_epoch_transition() {
+fn reward_pool_is_paid_from_the_epoch_transition() {
     let src = production_part(include_str!("../chain/blockchain.rs"));
     let at = src
         .find("crate::tokenomics::reward_pool::pay_epoch(state, &schedule, closed_epoch)")
@@ -466,10 +464,10 @@ fn audit_lane_a_blg_006_reward_pool_is_paid_from_the_epoch_transition() {
     assert!(pool.contains("state.get_balance(&pool)"));
 }
 
-/// BLG-094: the archive profile carries the testnet chain id (not 42), the
+/// The archive profile carries the testnet chain id (not 42), the
 /// shipped compose file runs PoS as it claims, and the Dockerfile is English.
 #[test]
-fn audit_lane_a_blg_094_archive_profile_compose_and_dockerfile_are_consistent() {
+fn archive_profile_compose_and_dockerfile_are_consistent() {
     let archive = include_str!("../../config/archive.toml");
     assert!(archive.contains("chain_id = 45261"));
     assert!(!archive.contains("chain_id = 42"));
@@ -492,12 +490,12 @@ fn audit_lane_a_blg_094_archive_profile_compose_and_dockerfile_are_consistent() 
     );
 }
 
-/// BLG-044: finality certificates are verified with stake weight and a signer
+/// Finality certificates are verified with stake weight and a signer
 /// count (not a bare head count), and the account-proof trie cache is keyed by
 /// the exact account list it was built from, so it cannot serve a stale trie
 /// at the same chain height.
 #[test]
-fn audit_lane_a_blg_044_qc_import_is_weighted_and_proof_cache_is_content_keyed() {
+fn qc_import_is_weighted_and_proof_cache_is_content_keyed() {
     let chain = production_part(include_str!("../chain/blockchain.rs"));
     assert!(chain.contains(
         "if stake < snapshot.quorum_stake() || verified_signers.len() < snapshot.quorum_count()"
@@ -508,10 +506,10 @@ fn audit_lane_a_blg_044_qc_import_is_weighted_and_proof_cache_is_content_keyed()
     assert!(cache.contains("l.1 == acct.balance && l.2 == acct.nonce"));
 }
 
-/// BULGU-006: an interrupted-commit marker that cannot be read or rolled back
+/// An interrupted-commit marker that cannot be read or rolled back
 /// stops the open instead of being swallowed.
 #[test]
-fn audit_lane_a_bulgu_006_interrupted_commit_recovery_errors_propagate() {
+fn interrupted_commit_recovery_errors_propagate() {
     let db = production_part(include_str!("../storage/db.rs"));
     assert!(
         db.matches("recover_interrupted_commit()?;").count() >= 2,
@@ -524,20 +522,20 @@ fn audit_lane_a_bulgu_006_interrupted_commit_recovery_errors_propagate() {
     );
 }
 
-/// BULGU-008: replay slices the chain by `block.index`; the loader only
+/// Replay slices the chain by `block.index`; the loader only
 /// returns a chain whose indices step by one from a verified walk, so the
 /// slice cannot go out of bounds.
 #[test]
-fn audit_lane_a_bulgu_008_stored_chain_is_walk_checked_before_replay_slices_it() {
+fn stored_chain_is_walk_checked_before_replay_slices_it() {
     let db = production_part(include_str!("../storage/db.rs"));
     let load = window(db, "pub fn load_chain(", 2600);
     assert!(load.contains("Self::check_walk_step("));
 }
 
-/// BULGU-013: the executor holds no lock of its own, so there is no lock error
+/// The executor holds no lock of its own, so there is no lock error
 /// left to swallow there (the finding is invalid on live).
 #[test]
-fn audit_lane_a_bulgu_013_executor_takes_no_locks() {
+fn executor_takes_no_locks() {
     let exec = production_part(include_str!("../execution/executor.rs"));
     for needle in [
         ".lock()",
@@ -551,10 +549,10 @@ fn audit_lane_a_bulgu_013_executor_takes_no_locks() {
     }
 }
 
-/// BULGU-022: every transaction type has an apply arm. Every variant of
+/// Every transaction type has an apply arm. Every variant of
 /// `TransactionType` is named inside `apply_transaction_checked`.
 #[test]
-fn audit_lane_a_bulgu_022_every_transaction_type_has_an_apply_arm() {
+fn every_transaction_type_has_an_apply_arm() {
     let tx_src = include_str!("../core/transaction.rs");
     let enum_start = tx_src.find("pub enum TransactionType {").expect("enum");
     let body = &tx_src[enum_start..];

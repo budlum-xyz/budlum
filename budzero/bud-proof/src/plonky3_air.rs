@@ -1934,7 +1934,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // (6b) A proven execution is a clean halt: `exit_code` is zero. The column above
         // was only compared with the public input the prover chose, so a clean run could
         // be proven as exit code 1 (and the reverse for a forged one). A failing run
-        // cannot be proven at all today (BLG-191: its synthetic Halt row disagrees with
+        // cannot be proven at all today (its synthetic Halt row disagrees with
         // the program lookup); when that is fixed the exit code must be tied to that
         // row, and this constraint becomes the "success" arm of it.
         builder

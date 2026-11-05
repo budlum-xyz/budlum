@@ -68,7 +68,7 @@ pub enum ChainCommand {
     TxPrecheck(Transaction, oneshot::Sender<serde_json::Value>),
     GetChainId(oneshot::Sender<u64>),
     GetBaseFee(oneshot::Sender<u64>),
-    /// The fee floor one transaction must clear (BLG-192).
+    /// The fee floor one transaction must clear.
     GetRequiredFee(Box<Transaction>, oneshot::Sender<u64>),
     GetValidatorSetHash(oneshot::Sender<String>),
     GetMempoolSize(oneshot::Sender<usize>),

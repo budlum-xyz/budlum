@@ -1,4 +1,4 @@
-//! Lane C regression tests for `verifier-registry` (WP-33).
+//! Regression tests for `verifier-registry`.
 
 use verifier_registry::address::Address;
 use verifier_registry::evidence::{EvidenceError, ProofProvenance, SlashingProof, SlashingReport};
@@ -20,9 +20,9 @@ fn liveness(missed: u64, expected: u64) -> SlashingReport {
     )
 }
 
-/// BLG-069: a liveness offence needs a window that expected duties and a miss.
+/// A liveness offence needs a window that expected duties and a miss.
 #[test]
-fn audit_lane_c_blg_069_zero_missed_liveness_report_is_refused() {
+fn zero_missed_liveness_report_is_refused() {
     assert!(liveness(0, 0).validate_shape().is_err());
     assert!(liveness(0, 10).validate_shape().is_err());
     assert_eq!(
@@ -33,9 +33,9 @@ fn audit_lane_c_blg_069_zero_missed_liveness_report_is_refused() {
     assert!(liveness(3, 10).validate_shape().is_ok());
 }
 
-/// BLG-148: a slashing deterrent cannot be configured to zero.
+/// A slashing deterrent cannot be configured to zero.
 #[test]
-fn audit_lane_c_blg_148_zero_slash_ratios_are_refused() {
+fn zero_slash_ratios_are_refused() {
     assert!(RegistryParams::default().validate().is_ok());
     let no_malicious = RegistryParams {
         malicious_slash_ratio_fixed: 0,

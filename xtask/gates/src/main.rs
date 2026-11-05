@@ -1414,7 +1414,7 @@ fn all_selection(self_test: bool) -> Vec<&'static Gate> {
 mod all_selection_tests {
     use super::*;
 
-    /// BLG-084: `budlum-gates --all` must run `tree-pin`, whose plain run
+    /// `budlum-gates --all` must run `tree-pin`, whose plain run
     /// (no `--pin`) is a verification that needs no argument.
     #[test]
     fn all_runs_tree_pin() {

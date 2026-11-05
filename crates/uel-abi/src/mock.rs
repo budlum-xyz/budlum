@@ -1,5 +1,5 @@
 //! A mock environment and an in-memory host, for the coordinator's tests
-//! (directive WP-09 item 5).
+//! .
 //!
 //! [`MockEe`] is driven by the first byte of the call input, so a test states
 //! the behaviour it wants in the call itself; faults and panics are injected

@@ -228,21 +228,20 @@ pub mod consensus_bypass_locks;
 pub mod block_clock;
 #[cfg(test)]
 pub mod real_chain_fixtures;
-// Effect-asserting locks for the slashing matrix and the overflow rule
-//.
+// Effect-asserting locks for the slashing matrix and the overflow rule.
 #[cfg(test)]
 pub mod refusal_locks;
 
-// WP-01..04 live-verification regression tests, one module per lane.
+// Regression locks for fixes already in the tree, one module per area.
 #[cfg(test)]
-pub mod audit_lane_a;
+pub mod regression_ai_storage;
 #[cfg(test)]
-pub mod audit_lane_b;
+pub mod regression_bridge;
 #[cfg(test)]
-pub mod audit_lane_c;
+pub mod regression_chain;
 #[cfg(test)]
-pub mod audit_lane_d;
+pub mod regression_ops_crypto;
 
-// WP-08: validator classes and the single registration door.
+// Validator classes and the single registration door.
 #[cfg(test)]
 pub mod validator_classes;
