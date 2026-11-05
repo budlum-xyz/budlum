@@ -47,3 +47,21 @@ fn standalone_workspaces_pin_release_hardening() {
         "no release hardening pins in {missing:?}"
     );
 }
+
+/// BLG-086: the tool sources carry no leftover Turkish messages.
+#[test]
+fn tool_sources_have_no_turkish_messages() {
+    let mut hits = Vec::new();
+    for file in [
+        "xtask/tools/src/prepush.rs",
+        "xtask/tools/src/seed_corpus.rs",
+    ] {
+        let text = read(file);
+        for word in ["bulunamadi", "Varsayilan", "cikti dizini"] {
+            if text.contains(word) {
+                hits.push(format!("{file}: {word}"));
+            }
+        }
+    }
+    assert!(hits.is_empty(), "Turkish left in tools: {hits:?}");
+}
