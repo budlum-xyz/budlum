@@ -5,6 +5,10 @@
 //! `budzero/` is a virtual workspace and a root-level `tests/` directory belongs to no
 //! package, so cargo would never compile it (see `budzero/tests/audit_lane_c.rs`).
 
+// A panic is how a test reports a broken invariant (the same exemption the other
+// budzero integration tests carry).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use bud_compiler::{compile, CompileError};
 use bud_isa::IsaProfile;
 
@@ -91,3 +95,28 @@ fn audit_lane_c_blg_198_unknown_struct_field_read_is_refused() {
     let src = "contract T { pub fn main() { let v = 1; let y = v.f; } }";
     assert!(compile(src, IsaProfile::Production).is_err());
 }
+
+/// BLG-338: a `let` inside a branch body must not keep its register after the branch,
+/// or many sequential branches run the compiler out of registers.
+#[test]
+fn audit_lane_c_blg_338_sequential_branches_release_their_registers() {
+    let mut body = String::from("let c = 1;\n");
+    for i in 0..200 {
+        body.push_str(&format!(
+            "if (c == 1) {{ let t{i} = {i}; emit Result(t{i}); }}\n"
+        ));
+    }
+    let src = format!("contract T {{ pub fn main() {{ {body} }} }}");
+    let res = compile(&src, IsaProfile::Production);
+    assert!(res.is_ok(), "register exhaustion: {:?}", res.err());
+    let mut body = String::from("let c = 1;\n");
+    for i in 0..200 {
+        body.push_str(&format!(
+            "while (c == 0) {{ let t{i} = {i}; emit Result(t{i}); }}\n"
+        ));
+    }
+    let src = format!("contract T {{ pub fn main() {{ {body} }} }}");
+    let res = compile(&src, IsaProfile::Production);
+    assert!(res.is_ok(), "register exhaustion in while: {:?}", res.err());
+}
+
