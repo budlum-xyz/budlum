@@ -520,6 +520,13 @@ impl RpcServer {
         }
     }
 
+    async fn finish_template(
+        &self,
+        tx: crate::core::transaction::Transaction,
+    ) -> Result<crate::core::transaction::Transaction, ErrorObjectOwned> {
+        finish_template(&self.chain, tx).await
+    }
+
     fn to_hex(n: u64) -> String {
         format!("0x{n:x}")
     }
@@ -1100,6 +1107,27 @@ fn clamp_feed_limit(limit: usize) -> usize {
 /// data assets, grants, rankings, slashing history), so response size and
 /// serialization cost do not grow with chain state.
 const MAX_LIST_RESPONSE_ITEMS: usize = 1000;
+
+/// Finish a `*_prepare_*` transaction template (BLG-032): the nonce is
+/// the sender's next nonce and the fee is the admission floor the chain
+/// enforces (`AccountState::required_fee`), with `max_fee == fee` as
+/// flat-fee mode requires. The templates used to carry hard-coded fees
+/// (500, 1000, 2000, `MIN_TX_FEE`) and a nonce of 0, so a wallet that
+/// signed one as given was refused, or overpaid.
+async fn finish_template(
+    chain: &ChainHandle,
+    mut tx: crate::core::transaction::Transaction,
+) -> Result<crate::core::transaction::Transaction, ErrorObjectOwned> {
+    tx.nonce = chain.get_nonce(&tx.from).await;
+    let fee = chain
+        .get_required_fee(tx.clone())
+        .await
+        .ok_or_else(|| ErrorObjectOwned::owned(-32603, "chain actor did not answer", None::<()>))?;
+    tx.fee = fee;
+    tx.max_fee = fee;
+    tx.priority_fee = 0;
+    Ok(tx)
+}
 
 /// Serialize one RPC result value. A value that cannot be encoded is an
 /// explicit `-32603` error naming what failed, never a silent `null`
@@ -4771,6 +4799,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsRegister,
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "name": name,
@@ -4795,8 +4824,17 @@ impl BudlumApiServer for RpcServer {
         let data = bincode::serialize(&(parent_name.clone(), sub_label.clone(), owner_addr))
             .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
 
+        // The executor requires the parent's owner as the sender
+        // (`register_subdomain` compares it with `tx.from`); a zero sender
+        // made the template unsignable (BLG-032).
+        let parent_owner = self
+            .chain
+            .bns_resolve_full(parent_name.clone())
+            .await
+            .map(|resolved| resolved.owner)
+            .ok_or_else(|| ErrorObjectOwned::owned(-32602, "Unknown parent name", None::<()>))?;
         let tx = crate::core::transaction::Transaction {
-            from: Address::zero(),
+            from: parent_owner,
             to: Address::zero(),
             amount: 0,
             fee: 500,
@@ -4816,6 +4854,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsRegisterSubdomain,
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "parent": parent_name,
@@ -4875,6 +4914,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsSetContent,
         };
+        let tx = self.finish_template(tx).await?;
         Ok(serde_json::json!({
             "name": name,
             "owner": owner,
@@ -4924,6 +4964,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsRenew,
         };
+        let tx = self.finish_template(tx).await?;
         Ok(serde_json::json!({
             "name": name,
             "owner": owner,
@@ -4981,6 +5022,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsTransfer,
         };
+        let tx = self.finish_template(tx).await?;
         Ok(serde_json::json!({
             "name": name,
             "owner": owner,
@@ -5093,6 +5135,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::NftMint,
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "author": author,
@@ -5136,6 +5179,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::NftBurn,
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "owner": owner,
@@ -5176,6 +5220,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::NftBoost { nft_id, amount },
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "booster": booster,
@@ -5234,6 +5279,7 @@ impl BudlumApiServer for RpcServer {
                 price,
             },
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "seller": seller,
@@ -5277,6 +5323,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::AiPurchaseData { offer_id },
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "buyer": buyer,
@@ -5566,6 +5613,7 @@ impl BudlumApiServer for RpcServer {
                 manifest_id: m_id,
             },
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "developer": developer,
@@ -5619,6 +5667,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::UniversalRelay(ext_tx),
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "from": from,
@@ -5918,6 +5967,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::AiModelRegister(spec),
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "model_id": model_id.to_hex(),
@@ -6115,6 +6165,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::AiInferenceRequest(req.clone()),
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "request_id": req.request_id.to_hex(),
@@ -6215,6 +6266,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::AiInferenceResult(res),
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "verifier": v_addr.to_hex(),
@@ -6470,6 +6522,7 @@ impl BudlumApiServer for RpcServer {
                 verifier: v_addr,
             },
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "submitter": submitter,
@@ -7221,6 +7274,43 @@ mod tests {
             cors_outcome(&config, &req),
             CorsOutcome::Allow("https://budscan.example".into())
         );
+    }
+
+    /// BLG-032: a prepared template carries the sender's next nonce and the
+    /// admission fee floor, with `max_fee == fee`, whatever the hard-coded
+    /// values in the template were.
+    #[tokio::test]
+    async fn blg_032_prepare_templates_carry_valid_nonce_and_fee() {
+        use crate::chain::chain_actor::ChainCommand;
+        let (sender, mut rx) = tokio::sync::mpsc::channel(4);
+        let chain = ChainHandle::new(sender);
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    ChainCommand::GetNonce(_, reply) => {
+                        let _ = reply.send(7);
+                    }
+                    ChainCommand::GetRequiredFee(_, reply) => {
+                        let _ = reply.send(13);
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let mut template = crate::core::transaction::Transaction::new(
+            Address::from([1; 32]),
+            Address::zero(),
+            0,
+            Vec::new(),
+        );
+        template.fee = 500;
+        template.max_fee = 500;
+        template.nonce = 0;
+        let done = finish_template(&chain, template).await.unwrap();
+        assert_eq!(done.nonce, 7);
+        assert_eq!(done.fee, 13);
+        assert_eq!(done.max_fee, 13);
+        assert_eq!(done.priority_fee, 0);
     }
 
     /// BULGU-012: a value that cannot be encoded is an explicit error, not a
