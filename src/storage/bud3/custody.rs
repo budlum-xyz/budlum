@@ -59,7 +59,7 @@ fn merkle(tag: &[u8], leaves: Vec<[u8; 32]>, want: Option<usize>) -> ([u8; 32], 
     let mut path = Vec::new();
     while level.len() > 1 {
         if let Some(p) = pos {
-            let sibling = if p % 2 == 0 { p + 1 } else { p - 1 };
+            let sibling = if p.is_multiple_of(2) { p + 1 } else { p - 1 };
             path.push(level.get(sibling).copied());
             pos = Some(p / 2);
         }
@@ -92,7 +92,7 @@ fn fold(tag: &[u8], count: u64, index: u64, leaf: [u8; 32], path: &[PathStep]) -
         let step = steps.next()?;
         match (has_sibling, step) {
             (true, Some(s)) => {
-                acc = if pos % 2 == 0 {
+                acc = if pos.is_multiple_of(2) {
                     node_hash(tag, &acc, s)
                 } else {
                     node_hash(tag, s, &acc)
@@ -349,7 +349,9 @@ mod tests {
             .collect()
     }
 
-    fn setup(n: u32, size: usize) -> (Vec<(u32, Vec<u8>)>, Vec<(u32, [u8; 32])>, ProofContext) {
+    type Setup = (Vec<(u32, Vec<u8>)>, Vec<(u32, [u8; 32])>, ProofContext);
+
+    fn setup(n: u32, size: usize) -> Setup {
         let syms = symbols(n, size);
         let leaves: Vec<(u32, [u8; 32])> = syms.iter().map(|(e, s)| (*e, symbol_leaf(s))).collect();
         let ctx = ProofContext {
@@ -365,9 +367,9 @@ mod tests {
         // 7 symbols (odd tree) of 2911 bytes (46 sub-blocks, last padded).
         let (syms, leaves, ctx) = setup(7, 2911);
         assert_eq!(ctx.sub_blocks, 46);
-        for pos in 0..7usize {
+        for (pos, (_, symbol)) in syms.iter().enumerate() {
             for sb in [0usize, 1, 44, 45] {
-                let proof = prove(3, &leaves, pos, &syms[pos].1, sb).unwrap();
+                let proof = prove(3, &leaves, pos, symbol, sb).unwrap();
                 let audit = Audit {
                     segment: 3,
                     position: pos as u64,
