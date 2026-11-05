@@ -110,6 +110,26 @@ impl Network {
         self.consensus_params().min_stake
     }
 
+    /// The bond floor of a Full validator. Same value as [`Self::min_stake`],
+    /// named for the class split (BLG-266).
+    pub fn min_stake_full(&self) -> u64 {
+        self.consensus_params().min_stake
+    }
+
+    /// The bond floor of a mobile validator (Android or iOS opportunistic).
+    pub fn min_stake_mobile(&self) -> u64 {
+        self.consensus_params().min_stake_mobile
+    }
+
+    /// The bond floor of a validator class on this profile.
+    pub fn class_floor(&self, class: crate::validators::ValidatorClass) -> u64 {
+        if class.holds_seat() {
+            self.min_stake_full()
+        } else {
+            self.min_stake_mobile()
+        }
+    }
+
     pub fn finality_quorum(&self) -> (u64, u64) {
         let params = self.consensus_params();
         (
@@ -129,6 +149,8 @@ impl Network {
                 // 1 BUD (10^6 atoms). Written in BUD so the unit is explicit
                 //; the mainnet value is Ayaz's decision (DECISIONS.md).
                 min_stake: crate::tokenomics::bud(1),
+                // Never above the Full floor.
+                min_stake_mobile: crate::tokenomics::bud(1),
                 slot_ms: 6_000,
                 finality_checkpoint_interval: 10,
                 finality_quorum_numerator: 2,
@@ -140,6 +162,8 @@ impl Network {
                 epoch_len: 50,
                 // TESTNET-DEFAULT: 1,000 BUD.
                 min_stake: crate::tokenomics::bud(1_000),
+                // TESTNET-DEFAULT: 10 BUD for a phone (section 11.6).
+                min_stake_mobile: crate::tokenomics::bud(10),
                 slot_ms: 3_000,
                 finality_checkpoint_interval: 5,
                 finality_quorum_numerator: 2,
@@ -150,6 +174,7 @@ impl Network {
             Network::Devnet => ConsensusParams {
                 epoch_len: 10,
                 min_stake: 1_000,
+                min_stake_mobile: 100,
                 slot_ms: 1_000,
                 finality_checkpoint_interval: 2,
                 finality_quorum_numerator: 1,
@@ -459,7 +484,10 @@ pub fn first_placeholder_peer(entries: &[String]) -> Option<String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConsensusParams {
     pub epoch_len: u64,
+    /// The bond floor of a Full validator.
     pub min_stake: u64,
+    /// The bond floor of a mobile validator; never above `min_stake`.
+    pub min_stake_mobile: u64,
     pub slot_ms: u64,
     pub finality_checkpoint_interval: u64,
     pub finality_quorum_numerator: u64,

@@ -242,3 +242,7 @@ pub mod audit_lane_b;
 pub mod audit_lane_c;
 #[cfg(test)]
 pub mod audit_lane_d;
+
+// WP-08: validator classes and the single registration door.
+#[cfg(test)]
+pub mod validator_classes;

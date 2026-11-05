@@ -779,6 +779,12 @@ pub enum TransactionType {
     /// root, so a node that served the call and one that did not must not
     /// disagree).
     CrossDomainMessage(crate::cross_domain::message::CrossDomainMessage),
+    /// The validator door (WP-08): registration, class change, operator key
+    /// rotation and the operator-signed custody quota increase. Appended last
+    /// because `bincode` encodes the variant index. The owner is `tx.from`
+    /// except for the quota update, whose payload names the owner and carries
+    /// the operator key's signature.
+    Validator(crate::validators::ValidatorTx),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2442,6 +2448,11 @@ impl Transaction {
             // registry arms already price.
             TransactionType::Vault(_) => schedule.contract_call_gas * 2,
             TransactionType::PoaOnboarding(_) => schedule.contract_call_gas * 2,
+            // A registry write; registration and a quota update also verify a
+            // BLS proof of possession or an ML-DSA-65 operator signature.
+            TransactionType::Validator(_) => {
+                schedule.contract_call_gas * 2 + schedule.gas_per_signature * 2
+            }
             TransactionType::RoleBond { .. } => schedule.contract_call_gas,
             // A registry write that re-derives the manifest id over every
             // shard: priced like the registry arms beside it. Opening a deal
@@ -2868,6 +2879,7 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::ClaimRewards { .. } => 66,
         TransactionType::RoleUnbond { .. } => 67,
         TransactionType::RoleWithdraw { .. } => 68,
+        TransactionType::Validator(_) => 69,
     }
 }
 fn encode_chain(chain: ExternalChain, out: &mut Vec<u8>) {
@@ -3257,6 +3269,78 @@ fn encode_manifest_body(manifest: &crate::storage::ContentManifest, out: &mut Ve
     put_u32(out, manifest.column_roots.len() as u32);
     for root in &manifest.column_roots {
         put_fixed(out, root);
+    }
+}
+
+/// Canonical preimage of a validator transaction: every field of every carried
+/// struct, written explicitly (the signature preimage is the consensus
+/// commitment; bincode is only the wire format).
+fn encode_validator_tx(tx: &crate::validators::ValidatorTx, out: &mut Vec<u8>) {
+    use crate::validators::ValidatorTx;
+    match tx {
+        ValidatorTx::Register(registration) => {
+            put_u8(out, 0);
+            put_fixed(out, registration.owner.as_bytes());
+            put_u8(out, registration.class.tag());
+            put_bytes(out, &registration.operator_key);
+            put_bytes(out, &registration.bls_key);
+            put_bytes(out, &registration.bls_pop);
+            encode_validator_seat(registration.seat.as_ref(), out);
+            put_u64(out, registration.custody_quota_bytes);
+            match &registration.relay_offer {
+                Some(relay) => {
+                    put_u8(out, 1);
+                    put_u64(out, relay.multiaddrs.len() as u64);
+                    for addr in &relay.multiaddrs {
+                        put_string(out, addr);
+                    }
+                    put_u64(out, relay.capacity_kbps);
+                }
+                None => put_u8(out, 0),
+            }
+            match &registration.gateway_offer {
+                Some(gateway) => {
+                    put_u8(out, 1);
+                    put_string(out, &gateway.address);
+                }
+                None => put_u8(out, 0),
+            }
+            put_fixed(out, &registration.peer_id);
+        }
+        ValidatorTx::ChangeClass { new_class, seat } => {
+            put_u8(out, 1);
+            put_u8(out, new_class.tag());
+            encode_validator_seat(seat.as_ref(), out);
+        }
+        ValidatorTx::RotateOperatorKey { new_operator_key } => {
+            put_u8(out, 2);
+            put_bytes(out, new_operator_key);
+        }
+        ValidatorTx::UpdateCustodyQuota {
+            owner,
+            new_quota_bytes,
+            seq,
+            operator_signature,
+        } => {
+            put_u8(out, 3);
+            put_fixed(out, owner.as_bytes());
+            put_u64(out, *new_quota_bytes);
+            put_u64(out, *seq);
+            put_bytes(out, operator_signature);
+        }
+    }
+}
+
+fn encode_validator_seat(seat: Option<&crate::validators::SeatFields>, out: &mut Vec<u8>) {
+    match seat {
+        Some(seat) => {
+            put_u8(out, 1);
+            put_bytes(out, &seat.vrf_key);
+            put_bytes(out, &seat.pq_vote_key);
+            put_fixed(out, &seat.leader_commitment.commitment);
+            put_u64(out, seat.leader_commitment.length);
+        }
+        None => put_u8(out, 0),
     }
 }
 
@@ -3748,6 +3832,7 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
             put_u8(out, 52);
             put_u32(out, *role);
         }
+        TransactionType::Validator(validator_tx) => encode_validator_tx(validator_tx, out),
         TransactionType::ExternalDomain(external_tx) => {
             put_u8(out, 53);
             encode_external_domain_tx(external_tx, out);

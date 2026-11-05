@@ -466,6 +466,9 @@ pub struct AccountState {
     /// freeze, travel-rule) in consensus state - rooted and snapshotted
     /// with everything else that decides writes.
     pub poa_compliance: crate::registry::PoaComplianceRegistry,
+    /// The validator directory (WP-08): class, operator key, quota and the
+    /// bond of every mobile validator. Rooted and snapshotted.
+    pub validator_directory: crate::validators::ValidatorDirectory,
     /// Governance-queued compliance freezes/unfreezes awaiting
     /// application (see [`PendingPoaCompliance`]).
     pub pending_poa_freezes: Vec<PendingPoaCompliance>,
@@ -538,6 +541,7 @@ impl AccountState {
             pending_bridge_burns: Vec::new(),
             pending_domain_unfreezes: Vec::new(),
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
+            validator_directory: crate::validators::ValidatorDirectory::new(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -601,6 +605,7 @@ impl AccountState {
             pending_bridge_burns: Vec::new(),
             pending_domain_unfreezes: Vec::new(),
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
+            validator_directory: crate::validators::ValidatorDirectory::new(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -673,6 +678,7 @@ impl AccountState {
             pending_bridge_burns: Vec::new(),
             pending_domain_unfreezes: Vec::new(),
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
+            validator_directory: crate::validators::ValidatorDirectory::new(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -788,6 +794,7 @@ impl AccountState {
             pending_bridge_burns: Vec::new(),
             pending_domain_unfreezes: Vec::new(),
             poa_compliance: snapshot.poa_compliance.clone().unwrap_or_default(),
+            validator_directory: snapshot.validator_directory.clone().unwrap_or_default(),
             burned_total: snapshot.burned_total,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -1420,6 +1427,13 @@ impl AccountState {
         role: crate::registry::role::RoleId,
         amount: u64,
     ) -> Result<u64, crate::registry::RegistryError> {
+        // STORAGE_OPERATOR (5) and CONTENT_VALIDATOR (9) are reserved ids: the
+        // validator who stores content is the validator (WP-08, section 7.3).
+        if role == crate::registry::role::roles::STORAGE_OPERATOR
+            || role == crate::registry::role::roles::CONTENT_VALIDATOR
+        {
+            return Err(crate::registry::RegistryError::UnsupportedRole { role });
+        }
         let required = self.registry.params().min_stake;
         let available = self.spendable_balance(address);
         if amount < required || available < amount {
@@ -1440,10 +1454,6 @@ impl AccountState {
             }
             roles::ATTESTER => {
                 self.registry.register_attester(*address, amount, epoch)?;
-            }
-            roles::CONTENT_VALIDATOR => {
-                self.registry
-                    .register_content_validator(*address, amount, epoch)?;
             }
             // DeEd participant roles: permissionless
             // seats at the same floor; the artifact bytes live in B.U.D.
@@ -1962,6 +1972,10 @@ impl AccountState {
                 if new_owner == Address::zero() {
                     return Err("BNS transfer new owner cannot be the zero address".into());
                 }
+            }
+            TransactionType::Validator(ref validator_tx) => {
+                self.check_validator_tx(tx, validator_tx)
+                    .map_err(|error| error.to_string())?;
             }
             TransactionType::RegisterConsensusKeys(ref registration) => {
                 if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
@@ -2528,6 +2542,256 @@ impl AccountState {
 
     /// Record consensus participation for the epoch that just completed and
     /// ... [doc continues]
+    /// The non-mutating checks of a validator transaction. Admission
+    /// (`validate_transaction`) and the executor both call it, so the two
+    /// cannot disagree about what a refusal is.
+    ///
+    /// # Errors
+    ///
+    /// A [`crate::validators::ValidatorError`] naming the refused rule.
+    pub fn check_validator_tx(
+        &self,
+        tx: &Transaction,
+        vtx: &crate::validators::ValidatorTx,
+    ) -> Result<(), crate::validators::ValidatorError> {
+        use crate::validators::{ValidatorError, ValidatorTx};
+        let refuse = |code: &'static str, message: &str| ValidatorError {
+            code,
+            message: message.to_string(),
+        };
+        vtx.validate_shape()?;
+        if tx.to != Address::zero() || !tx.data.is_empty() {
+            return Err(refuse(
+                "validator_tx_shape",
+                "a validator transaction needs a zero recipient and empty data",
+            ));
+        }
+        let network = crate::core::chain_config::Network::from_chain_id(tx.chain_id);
+        match vtx {
+            ValidatorTx::Register(registration) => {
+                if registration.owner != tx.from {
+                    return Err(refuse(
+                        "validator_owner_not_sender",
+                        "the owner of a registration must be the sender",
+                    ));
+                }
+                let floor = network.map_or(1, |n| n.class_floor(registration.class));
+                if tx.amount < floor {
+                    return Err(refuse(
+                        "validator_stake_below_class_floor",
+                        &format!(
+                            "{:?} validators bond at least {floor}, the transaction bonds {}",
+                            registration.class, tx.amount
+                        ),
+                    ));
+                }
+                if self.validator_directory.get(&tx.from).is_some()
+                    || self.validators.contains_key(&tx.from)
+                {
+                    return Err(refuse(
+                        "validator_already_registered",
+                        "the owner already has a validator record",
+                    ));
+                }
+                if self.validator_directory.iter().any(|r| {
+                    r.peer_id == registration.peer_id || r.operator_key == registration.operator_key
+                }) {
+                    return Err(refuse(
+                        "validator_peer_or_operator_key_in_use",
+                        "the peer id or the operator key belongs to another validator",
+                    ));
+                }
+                let entry = crate::chain::finality::ValidatorEntry {
+                    address: registration.owner,
+                    stake: 0,
+                    bls_public_key: registration.bls_key.clone(),
+                    pop_signature: registration.bls_pop.clone(),
+                    pq_public_key: Vec::new(),
+                };
+                if !crate::chain::finality::verify_pop(&entry, tx.chain_id) {
+                    return Err(refuse(
+                        "validator_bls_pop_invalid",
+                        "the BLS key or its proof of possession is invalid",
+                    ));
+                }
+                if let Some(seat) = &registration.seat {
+                    Self::check_seat_keys(
+                        &registration.owner,
+                        &registration.bls_key,
+                        &registration.bls_pop,
+                        seat,
+                        tx.chain_id,
+                    )?;
+                }
+            }
+            ValidatorTx::ChangeClass { .. } | ValidatorTx::RotateOperatorKey { .. } => {
+                if tx.amount != 0 {
+                    return Err(refuse(
+                        "validator_tx_shape",
+                        "this validator transaction moves no value",
+                    ));
+                }
+                if self.validator_directory.get(&tx.from).is_none() {
+                    return Err(refuse(
+                        "validator_not_registered",
+                        "only the owner account of a validator may send this",
+                    ));
+                }
+            }
+            ValidatorTx::UpdateCustodyQuota {
+                owner,
+                new_quota_bytes,
+                seq,
+                operator_signature,
+            } => {
+                if tx.amount != 0 {
+                    return Err(refuse(
+                        "validator_tx_shape",
+                        "this validator transaction moves no value",
+                    ));
+                }
+                let record = self.validator_directory.get(owner).ok_or_else(|| {
+                    refuse(
+                        "validator_not_registered",
+                        "the owner has no validator record",
+                    )
+                })?;
+                let message = crate::validators::quota_update_message(
+                    tx.chain_id,
+                    owner,
+                    *new_quota_bytes,
+                    *seq,
+                );
+                crate::crypto::pq::verify_in(
+                    &self.scheme_registry,
+                    crate::crypto::scheme::SchemeId::ML_DSA_65,
+                    &record.operator_key,
+                    &message,
+                    crate::crypto::ctx::VALIDATOR_V1,
+                    operator_signature,
+                )
+                .map_err(|_| {
+                    refuse(
+                        "validator_operator_signature_invalid",
+                        "the operator signature does not verify under the operator key",
+                    )
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    fn check_seat_keys(
+        owner: &Address,
+        bls_key: &[u8],
+        bls_pop: &[u8],
+        seat: &crate::validators::SeatFields,
+        chain_id: u64,
+    ) -> Result<(), crate::validators::ValidatorError> {
+        crate::core::transaction::ConsensusKeyRegistration {
+            scheme_id: crate::chain::finality::BLS_SCHEME_RFC9380_V1.to_string(),
+            vrf_public_key: seat.vrf_key.clone(),
+            bls_public_key: bls_key.to_vec(),
+            pop_signature: bls_pop.to_vec(),
+            pq_public_key: seat.pq_vote_key.clone(),
+        }
+        .validate(*owner, chain_id)
+        .map_err(|message| crate::validators::ValidatorError {
+            code: "validator_seat_keys_invalid",
+            message,
+        })
+    }
+
+    /// Put a Full validator into the consensus set: keys, stake, readiness and
+    /// the leader commitment. The caller has already moved `stake` out of the
+    /// balance (registration) or out of the directory record (class change).
+    ///
+    /// # Errors
+    ///
+    /// A message when the seat keys fail, the leader commitment is refused, or
+    /// the owner is already in the consensus set.
+    pub fn install_full_validator(
+        &mut self,
+        owner: Address,
+        stake: u64,
+        bls_key: &[u8],
+        bls_pop: &[u8],
+        seat: &crate::validators::SeatFields,
+        chain_id: u64,
+    ) -> Result<(), String> {
+        if self.validators.contains_key(&owner) {
+            return Err("the owner is already in the consensus set".into());
+        }
+        Self::check_seat_keys(&owner, bls_key, bls_pop, seat, chain_id).map_err(|e| e.message)?;
+        let floor = crate::core::chain_config::Network::from_chain_id(chain_id)
+            .map_or(1, |n| n.min_stake_full());
+        let epoch = self.epoch_index;
+        self.add_validator_with_floor(owner, stake, floor);
+        let validator = self
+            .validators
+            .get_mut(&owner)
+            .ok_or_else(|| "the validator was not created".to_string())?;
+        validator.vrf_public_key = seat.vrf_key.clone();
+        validator.bls_public_key = bls_key.to_vec();
+        validator.pop_signature = bls_pop.to_vec();
+        validator.pq_public_key = seat.pq_vote_key.clone();
+        validator.active = validator.stake >= floor
+            && validator.is_consensus_ready()
+            && validator.verify_pop_is_valid(chain_id)
+            && !validator.jailed;
+        validator
+            .filiz
+            .get_or_insert_with(Default::default)
+            .register(
+                owner.0,
+                seat.leader_commitment.commitment,
+                seat.leader_commitment.length,
+                epoch,
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        self.sync_validator_registration_with_floor(&owner, floor);
+        self.keys_dirty = true;
+        Ok(())
+    }
+
+    /// Carry out the validator directory changes whose epoch has come. Called
+    /// at the epoch boundary, after the epoch index moved.
+    fn activate_validator_changes(&mut self, chain_id: u64) {
+        let due = self.validator_directory.activate_due(self.epoch_index);
+        let network = crate::core::chain_config::Network::from_chain_id(chain_id);
+        for (owner, class, seat) in due {
+            if !class.holds_seat() {
+                self.validator_directory
+                    .finish_class_change(&owner, class, 0);
+                continue;
+            }
+            let (Some(seat), Some(record)) = (seat, self.validator_directory.get(&owner).cloned())
+            else {
+                continue;
+            };
+            let floor = network.map_or(1, |n| n.class_floor(class));
+            if record.stake < floor {
+                tracing::warn!(owner = %owner, "class change to Full dropped: the bond is below the Full floor");
+                continue;
+            }
+            match self.install_full_validator(
+                owner,
+                record.stake,
+                &record.bls_key,
+                &record.bls_pop,
+                &seat,
+                chain_id,
+            ) {
+                Ok(()) => self
+                    .validator_directory
+                    .finish_class_change(&owner, class, record.stake),
+                Err(error) => {
+                    tracing::warn!(owner = %owner, %error, "class change to Full dropped");
+                }
+            }
+        }
+    }
+
     pub fn advance_epoch(&mut self, current_timestamp: u128, chain_id: u64) {
         let total_stake = self.get_total_stake();
         let quorum_pct = 33; // 33% stake required for quorum
@@ -2560,6 +2824,9 @@ impl AccountState {
         tracing::info!("Epoch advanced to {}", self.epoch_index);
 
         self.process_unbonding();
+
+        // Validator directory changes requested an epoch ago take effect here.
+        self.activate_validator_changes(chain_id);
 
         // Mikoriza weights move only here, at the boundary.
         let shared_security = crate::core::chain_config::shared_security_for_chain_id(chain_id);
@@ -4053,6 +4320,12 @@ impl AccountState {
         if poa_compliance_root != crate::registry::PoaComplianceRegistry::new().root() {
             final_hasher.update(b"poa_compliance_v1");
             final_hasher.update(poa_compliance_root);
+        }
+        // The validator directory folds in once it holds a record, so a chain
+        // that never registered one keeps its pinned roots.
+        if !self.validator_directory.is_empty() {
+            final_hasher.update(b"validator_directory_v1");
+            final_hasher.update(self.validator_directory.root());
         }
         if !self.external_roots.is_empty() {
             final_hasher.update(b"external_roots_v1");

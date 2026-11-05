@@ -46,6 +46,22 @@ fn bincode_payload_or_log<T: serde::Serialize + ?Sized>(what: &str, value: &T) -
     }
 }
 
+/// The largest validator transaction payload a peer may send. A registration
+/// carries a few ML-DSA-65 public keys and short address strings, well under
+/// this bound; the bound is enforced inside the decoder, so a peer cannot make
+/// it allocate by lying about a length.
+const MAX_VALIDATOR_TX_BYTES: u64 = 64 * 1024;
+
+fn decode_validator_tx(data: &[u8]) -> Result<crate::validators::ValidatorTx, String> {
+    use bincode::Options as _;
+    bincode::options()
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+        .with_limit(MAX_VALIDATOR_TX_BYTES)
+        .deserialize(data)
+        .map_err(|e| format!("Invalid validator transaction payload: {e}"))
+}
+
 /// The only transaction wire version this node encodes and accepts.
 const TX_WIRE_VERSION: u32 = 2;
 
@@ -270,6 +286,14 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 Some(pb::proto_transaction::TypePayload::BridgeBurn(
                     pb::ProtoBridgeBurn {
                         data: bincode_payload_or_log("BridgeBurnTx", burn),
+                    },
+                )),
+            ),
+            TransactionType::Validator(validator_tx) => (
+                pb::ProtoTransactionType::Validator as i32,
+                Some(pb::proto_transaction::TypePayload::Validator(
+                    pb::ProtoValidatorTx {
+                        data: bincode_payload_or_log("ValidatorTx", validator_tx),
                     },
                 )),
             ),
@@ -1306,6 +1330,13 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     bincode::deserialize(&payload.data)
                         .map_err(|e| format!("Invalid bridge burn payload: {e}"))?,
                 )
+            }
+            pb::ProtoTransactionType::Validator => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::Validator(p)) => p,
+                    _ => return Err("Missing or mismatched Validator payload".into()),
+                };
+                TransactionType::Validator(decode_validator_tx(&payload.data)?)
             }
             pb::ProtoTransactionType::CrossDomainMessage => {
                 let payload = match proto.type_payload {
