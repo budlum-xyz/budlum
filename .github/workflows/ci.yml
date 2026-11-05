@@ -2037,6 +2037,8 @@ jobs:
         run: cargo clippy --release --manifest-path xtask/gates/Cargo.toml --all-targets -- -D warnings
       - name: Rust gates rustfmt
         run: cargo fmt --manifest-path xtask/gates/Cargo.toml --check
+      - name: Rust gates unit tests (concept-names canary and ratchet tests included)
+        run: cargo test --release --manifest-path xtask/gates/Cargo.toml
       # xtask/tools is its own workspace and runs five CI tools (audit-guard,
       # step-reachability, audit-deps, generate-sbom, the smoke tools). Its
       # lints are pedantic-deny and its unit tests (the committed FSF document

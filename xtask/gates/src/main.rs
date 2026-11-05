@@ -63,6 +63,7 @@ mod gates {
     pub mod classical_crypto_is_paired;
     pub mod clippy_extra;
     pub mod coding_audit_samples_the_relationship;
+    pub mod concept_names;
     pub mod consensus_maps_ordered;
     pub mod consensus_state_only_changes_in_blocks;
     pub mod containment_defaults;
@@ -947,6 +948,14 @@ const GATES: &[Gate] = &[
         run_log: Some(gates::badges_current::run),
         run_args: None,
         self_test: gates::badges_current::self_test,
+    },
+    Gate {
+        name: "concept-names",
+        replaces: None,
+        run: gates::concept_names::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::concept_names::self_test,
     },
     Gate {
         name: "containment-defaults",
