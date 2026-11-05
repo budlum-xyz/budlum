@@ -156,6 +156,12 @@ pub struct Blockchain {
     pub pending_registry_slashing_reports: Vec<crate::registry::evidence::SlashingReport>,
     pub local_invalid_votes: crate::registry::InvalidVoteTracker,
     pub finality_aggregator: Option<FinalityAggregator>,
+    /// The participation record of the last round this node concluded, kept for
+    /// the next checkpoint block it produces (section 7.5.1). A producer hint,
+    /// not consensus state: the seat table is derived from the records in
+    /// FINALIZED BLOCKS, never from this field, so losing it on restart only
+    /// costs one record and the handover skips that pair.
+    last_seat_participation: Option<crate::validators::committee::SeatParticipation>,
     /// Votes that reached this node before it had a round - or a prevote
     /// quorum - to put them in. A peer votes the moment it holds the
     /// checkpoint, which can be earlier than this node's own aggregator
@@ -1028,6 +1034,7 @@ impl Blockchain {
             pending_registry_slashing_reports: Vec::new(),
             local_invalid_votes: crate::registry::InvalidVoteTracker::new(),
             finality_aggregator: None,
+            last_seat_participation: None,
             early_finality_votes: EarlyFinalityVotes::default(),
             metrics: None,
             anchor_emission: AnchorEmission::default(),
@@ -7151,6 +7158,17 @@ impl Blockchain {
             "FinalityCert produced: epoch={}, height={}",
             cert.epoch, cert.checkpoint_height
         );
+        // Keep the concluded round's participation for the next checkpoint
+        // block. Only a round that reached precommit quorum is evidence of
+        // absence: below quorum the votes may simply not have arrived yet, and
+        // an empty record would mark every honest seat departed.
+        self.last_seat_participation = self.finality_aggregator.as_ref().map(|agg| {
+            crate::validators::committee::SeatParticipation::collect(
+                &agg.committee,
+                agg.checkpoint_height,
+                agg.precommits.keys(),
+            )
+        });
         self.finality_aggregator = None;
 
         // The QC blob this round's own precommits attested, imported through
@@ -7531,25 +7549,19 @@ impl Blockchain {
         &self,
         height: u64,
     ) -> Option<crate::validators::committee::SeatParticipation> {
-        use crate::validators::committee::SeatParticipation;
         let interval =
             crate::core::chain_config::finality_checkpoint_interval_for_chain_id(self.chain_id);
         if height == 0 || !height.is_multiple_of(interval) {
             return None;
         }
         let previous = height.checked_sub(interval).filter(|h| *h > 0)?;
-        // The votes are read from the round this node actually ran for that
-        // checkpoint. The aggregator keeps its own seat table, so the bitmap
-        // names the seats those votes were counted under.
-        let aggregator = self
-            .finality_aggregator
+        // The record of the round this node concluded for that checkpoint. It
+        // is kept when the certificate is produced, because the aggregator is
+        // cleared then and the next block is produced afterwards.
+        self.last_seat_participation
             .as_ref()
-            .filter(|a| a.checkpoint_height == previous)?;
-        Some(SeatParticipation::collect(
-            &aggregator.committee,
-            previous,
-            aggregator.precommits.keys(),
-        ))
+            .filter(|record| record.checkpoint == previous)
+            .cloned()
     }
 
     /// The seat table a checkpoint's votes are counted under, with Instant Seat
@@ -8166,6 +8178,7 @@ impl Clone for Blockchain {
             pending_registry_slashing_reports: self.pending_registry_slashing_reports.clone(),
             local_invalid_votes: self.local_invalid_votes.clone(),
             finality_aggregator: None,
+            last_seat_participation: None,
             early_finality_votes: EarlyFinalityVotes::default(),
             metrics: self.metrics.clone(),
             anchor_emission: self.anchor_emission.clone(),
