@@ -72,6 +72,22 @@ pub enum StorageTxV3 {
         /// The content.
         content: ContentId,
     },
+    /// Replace an object with a new representation of the same content. The
+    /// content id never changes. Signed by the proposing Full validator.
+    ReplaceObject {
+        /// The content id; the object's fixed identity.
+        content: ContentId,
+        /// The object being replaced, named by its old commitment.
+        old_object: ObjectKey,
+        /// The record of the new representation.
+        new_record: ObjectRecord,
+        /// The placement of the new representation: `(segment, share)`.
+        shares: Vec<(u64, Share)>,
+        /// `(validator, signature)` pairs over the replacement validation
+        /// message, from at least three independent Full holders of the old
+        /// placement.
+        validations: Vec<([u8; 32], [u8; 64])>,
+    },
 }
 
 /// What an applied transaction did.
@@ -85,6 +101,8 @@ pub enum Applied {
     Proved(usize),
     /// Repair recorded.
     Repaired,
+    /// Object replaced; the new object key.
+    Replaced(ObjectKey),
     /// NFT bound.
     Bound,
     /// Reference burned; `true` when the object was deleted.
@@ -114,7 +132,9 @@ pub fn apply(
         } => registry
             .register_object(signer, record, shares, epoch, lifetime_epochs)
             .map(Applied::Registered),
-        StorageTxV3::CustodyAck { object } => registry.ack(&object, &signer).map(Applied::Acked),
+        StorageTxV3::CustodyAck { object } => registry
+            .ack(&object, &signer, epoch)
+            .map(Applied::Acked),
         StorageTxV3::CustodyProofBatch { proofs } => registry
             .submit_proofs(&signer, &proofs, epoch)
             .map(Applied::Proved),
@@ -145,6 +165,15 @@ pub fn apply(
             object,
             extra_epochs,
         } => registry.renew(&object, extra_epochs).map(Applied::Renewed),
+        StorageTxV3::ReplaceObject {
+            content,
+            old_object,
+            new_record,
+            shares,
+            validations,
+        } => registry
+            .replace_object(&signer, content, &old_object, new_record, shares, &validations)
+            .map(Applied::Replaced),
         StorageTxV3::DeclineContent { content } => {
             registry.decline(signer, &content);
             Ok(Applied::Declined)

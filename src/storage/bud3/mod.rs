@@ -40,6 +40,7 @@ pub mod meter;
 pub mod pipeline;
 pub mod placement;
 pub mod registry;
+pub mod replace;
 pub mod segment;
 pub mod tx;
 pub mod varint;

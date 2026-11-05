@@ -114,6 +114,10 @@ pub struct ObjectEntry {
     /// Per segment, the next ESI never yet used. Repair takes new ESIs from
     /// here, so a lost ESI is never produced twice.
     pub next_esi: Vec<u32>,
+    /// The object this one replaced. It is deleted once every share here is
+    /// confirmed.
+    #[serde(default)]
+    pub supersedes: Option<ObjectKey>,
 }
 
 /// Audit windows and probabilities, in epochs and ppm.
@@ -177,6 +181,12 @@ pub enum RegistryError {
     /// The codec is not open: an object carrying it could never produce its
     /// content again on the viewer's device.
     CodecNotOpen(u16),
+    /// A replacement changes the content id. The content id is the object's
+    /// fixed identity; different content is a different object.
+    ContentIdChanged,
+    /// The replacement is refused: not enough independent Full validators,
+    /// a bad validation signature, or a self-replacement.
+    BadReplacement(&'static str),
 }
 
 /// An RPC read of the registry.
@@ -392,9 +402,147 @@ impl Bud3Registry {
                 shares,
                 roots,
                 next_esi,
+                supersedes: None,
             },
         );
         Ok(Registered::New(key))
+    }
+
+    /// `ReplaceObject`: a Full validator replaces the object with a new
+    /// representation of the same content (a layer transition, a new codec
+    /// or a new dedup match). The content id never changes; every bound NFT
+    /// moves to the new object atomically. The old shares stay until every
+    /// new share is confirmed.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::UnknownObject`], [`RegistryError::ContentIdChanged`],
+    /// [`RegistryError::BadReplacement`], [`RegistryError::Tombstoned`],
+    /// [`RegistryError::CodecNotOpen`], [`RegistryError::NotAuthorized`],
+    /// [`RegistryError::Declined`], [`RegistryError::BadPlacement`] or
+    /// [`RegistryError::BadRecord`].
+    pub fn replace_object(
+        &mut self,
+        proposer: &Address,
+        content: ContentId,
+        old_object: &ObjectKey,
+        new_record: ObjectRecord,
+        shares: Vec<(u64, Share)>,
+        validations: &[([u8; 32], [u8; 64])],
+    ) -> Result<ObjectKey, RegistryError> {
+        let old = self
+            .objects
+            .get(old_object)
+            .ok_or(RegistryError::UnknownObject)?;
+        // The content id is the object's fixed identity: a change of
+        // content is a different object and is refused.
+        if old.record.content_id != content || new_record.content_id != content {
+            return Err(RegistryError::ContentIdChanged);
+        }
+        if new_record.commitment == *old_object {
+            return Err(RegistryError::BadReplacement(
+                "the new commitment repeats the old one",
+            ));
+        }
+        if self.tombstones.contains_key(&new_record.commitment) {
+            return Err(RegistryError::Tombstoned);
+        }
+        // The new object must be able to produce its content again on the
+        // viewer's device.
+        if !super::bof1::codec_is_registered(new_record.codec)
+            || !bud_codec::is_open(new_record.codec)
+            || !super::bof1::codec_is_open_on_testnet(new_record.codec)
+        {
+            return Err(RegistryError::CodecNotOpen(new_record.codec));
+        }
+        // The proposer and the validating quorum are Full validators of the
+        // old placement group; the quorum decoded the new object.
+        let mut full_holders = BTreeSet::new();
+        for s in &old.shares {
+            if s.share.class == Class::Full {
+                full_holders.insert(s.share.validator);
+            }
+        }
+        if !full_holders.contains(proposer) {
+            return Err(RegistryError::NotAuthorized);
+        }
+        let owner = old.owner;
+        let expires_at = old.expires_at;
+        super::replace::verify_validations(
+            &content,
+            old_object,
+            &new_record,
+            &full_holders,
+            validations,
+        )?;
+        // The new representation is placed and must stand on its own.
+        check_placement(&new_record, &shares)?;
+        let digest = new_record.content_id.digest;
+        if shares
+            .iter()
+            .any(|(_, s)| self.declines.contains(&(digest, s.validator)))
+        {
+            return Err(RegistryError::Declined);
+        }
+        let new_shares = shares
+            .into_iter()
+            .map(|(segment, share)| ShareState {
+                segment,
+                share,
+                status: ShareStatus::Pending,
+                open_audit: None,
+                passes: 0,
+                misses: 0,
+                consecutive_misses: 0,
+                lost: false,
+                root: usize::try_from(segment).unwrap_or(usize::MAX),
+            })
+            .collect();
+        let roots = new_record
+            .symbol_roots
+            .iter()
+            .enumerate()
+            .map(|(i, r)| SymbolRoot {
+                segment: i as u64,
+                root: *r,
+                first_esi: 0,
+                count: new_record.symbols_per_segment,
+            })
+            .collect();
+        let next_esi = vec![new_record.symbols_per_segment; new_record.symbol_roots.len()];
+        let key = new_record.commitment;
+        // The NFT commitments move atomically: the references leave the old
+        // entry and the NFT map names the new key.
+        let references = {
+            let old = self
+                .objects
+                .get_mut(old_object)
+                .ok_or(RegistryError::UnknownObject)?;
+            std::mem::take(&mut old.references)
+        };
+        for nft in &references {
+            if let Some(entry) = self.nfts.get_mut(nft) {
+                entry.0 = key;
+            }
+        }
+        // The dedup index follows the new key.
+        if new_record.content_id.kind == ContentIdKind::Public {
+            self.public_index.insert(digest, key);
+        }
+        self.objects.insert(
+            key,
+            ObjectEntry {
+                record: new_record,
+                owner,
+                references,
+                expires_at,
+                shares: new_shares,
+                roots,
+                next_esi,
+                supersedes: Some(*old_object),
+            },
+        );
+        Ok(key)
     }
 
     /// `BindNft`: one more reference to a live object.
@@ -434,7 +582,11 @@ impl Bud3Registry {
 
     fn delete(&mut self, key: &ObjectKey, epoch: u64) {
         if let Some(obj) = self.objects.remove(key) {
-            if obj.record.content_id.kind == ContentIdKind::Public {
+            // The dedup entry is removed only while it still names this
+            // key: a replacement re-points it at the new object first.
+            if obj.record.content_id.kind == ContentIdKind::Public
+                && self.public_index.get(&obj.record.content_id.digest) == Some(key)
+            {
                 self.public_index.remove(&obj.record.content_id.digest);
             }
             for nft in obj.references {
@@ -512,12 +664,19 @@ impl Bud3Registry {
     }
 
     /// `CustodyAck`: the holder confirms its shares of `key`. Returns how many
-    /// moved from pending to confirmed.
+    /// moved from pending to confirmed. Once every share of `key` is
+    /// confirmed, the object it replaced (and its stale chain) is deleted:
+    /// the old shares stay until the new ones are in place.
     ///
     /// # Errors
     ///
     /// [`RegistryError::UnknownObject`].
-    pub fn ack(&mut self, key: &ObjectKey, holder: &Address) -> Result<usize, RegistryError> {
+    pub fn ack(
+        &mut self,
+        key: &ObjectKey,
+        holder: &Address,
+        epoch: u64,
+    ) -> Result<usize, RegistryError> {
         let obj = self
             .objects
             .get_mut(key)
@@ -531,6 +690,21 @@ impl Bud3Registry {
             if s.status == ShareStatus::Pending {
                 s.status = ShareStatus::Confirmed;
                 n += 1;
+            }
+        }
+        let settled = if obj.shares.iter().all(|s| s.status == ShareStatus::Confirmed) {
+            obj.supersedes
+        } else {
+            None
+        };
+        if let Some(mut old) = settled {
+            loop {
+                let next = self.objects.get(&old).and_then(|o| o.supersedes);
+                self.delete(&old, epoch);
+                match next {
+                    Some(k) => old = k,
+                    None => break,
+                }
             }
         }
         Ok(n)
@@ -919,6 +1093,9 @@ impl Bud3Registry {
                 &o.expires_at.to_le_bytes(),
                 &(o.references.len() as u64).to_le_bytes(),
             ]);
+            if let Some(old) = o.supersedes {
+                fold(&[b"supersedes", &old]);
+            }
             for r in &o.roots {
                 fold(&[
                     b"root",
@@ -1149,7 +1326,7 @@ mod tests {
         r.register_object(addr(1), up.record.clone(), shares, 0, 1000)
             .unwrap();
         for h in 0..4u8 {
-            r.ack(&key, &addr(10 + h)).unwrap();
+            r.ack(&key, &addr(10 + h), 0).unwrap();
         }
         let params = AuditParams {
             full_ppm: 1_000_000,
@@ -1244,7 +1421,7 @@ mod tests {
         r.register_object(addr(1), up.record.clone(), shares, 0, 1000)
             .unwrap();
         for h in 0..4u8 {
-            r.ack(&key, &addr(10 + h)).unwrap();
+            r.ack(&key, &addr(10 + h), 0).unwrap();
         }
         assert!(r.repairs_due(&key).is_empty());
         // k = 12 for this one-segment object; 20 symbols, four shares of 5:
@@ -1298,7 +1475,7 @@ mod tests {
 
         // The lost share stays until the new one is confirmed.
         assert_eq!(r.settle_repairs(), 0);
-        r.ack(&key, &addr(20)).unwrap();
+        r.ack(&key, &addr(20), 0).unwrap();
         assert_eq!(r.settle_repairs(), 1);
         assert!(r.object(&key).unwrap().shares.iter().all(|s| !s.lost));
         assert!(r.repairs_due(&key).is_empty());
@@ -1331,7 +1508,7 @@ mod tests {
         let key = up.record.commitment;
         r.register_object(addr(1), up.record, shares, 0, 1000)
             .unwrap();
-        r.ack(&key, &addr(10)).unwrap();
+        r.ack(&key, &addr(10), 0).unwrap();
         let params = AuditParams {
             full_ppm: 1_000_000,
             ..AuditParams::TESTNET_DEFAULT
