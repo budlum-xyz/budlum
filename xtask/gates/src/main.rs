@@ -63,6 +63,7 @@ mod gates {
     pub mod classical_crypto_is_paired;
     pub mod clippy_extra;
     pub mod coding_audit_samples_the_relationship;
+    pub mod concept_names;
     pub mod consensus_maps_ordered;
     pub mod consensus_state_only_changes_in_blocks;
     pub mod containment_defaults;
@@ -949,6 +950,14 @@ const GATES: &[Gate] = &[
         self_test: gates::badges_current::self_test,
     },
     Gate {
+        name: "concept-names",
+        replaces: None,
+        run: gates::concept_names::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::concept_names::self_test,
+    },
+    Gate {
         name: "containment-defaults",
         replaces: Some("check-containment-defaults.sh"),
         run: gates::containment_defaults::run,
@@ -1380,6 +1389,43 @@ const GATES: &[Gate] = &[
     },
 ];
 
+/// Gates that take extra arguments but whose plain run (no arguments) is a
+/// complete verification. `--all` runs them: leaving `tree-pin` out meant the
+/// aggregate run, the one CI relies on, never checked the budzero tree pins.
+const RUNS_WITHOUT_ARGUMENTS: &[&str] = &["tree-pin"];
+
+/// The gates `--all` runs.
+///
+/// On the run path the gates that take a log path or positional roots are left
+/// out: they cannot run without their argument, and their CI steps call them
+/// directly. A canary takes no argument, so the self-test path keeps them all.
+fn all_selection(self_test: bool) -> Vec<&'static Gate> {
+    GATES
+        .iter()
+        .filter(|g| {
+            self_test
+                || RUNS_WITHOUT_ARGUMENTS.contains(&g.name)
+                || (g.run_log.is_none() && g.run_args.is_none())
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod all_selection_tests {
+    use super::*;
+
+    /// BLG-084: `budlum-gates --all` must run `tree-pin`, whose plain run
+    /// (no `--pin`) is a verification that needs no argument.
+    #[test]
+    fn all_runs_tree_pin() {
+        let names: Vec<&str> = all_selection(false).iter().map(|g| g.name).collect();
+        assert!(names.contains(&"tree-pin"), "`--all` skips tree-pin");
+        let canaries: Vec<&str> = all_selection(true).iter().map(|g| g.name).collect();
+        assert!(canaries.contains(&"tree-pin"));
+        assert_eq!(canaries.len(), GATES.len(), "every canary runs");
+    }
+}
+
 fn usage() -> String {
     let mut s = String::from(
         "usage:\n  \
@@ -1448,10 +1494,7 @@ fn main() {
         // directly. A canary takes no argument, so the self-test path keeps
         // them; filtered there too, `--all --self-test` reported success
         // while about twenty gates had proven nothing.
-        Some(&"--all" | &"--self-test") => GATES
-            .iter()
-            .filter(|g| self_test || (g.run_log.is_none() && g.run_args.is_none()))
-            .collect(),
+        Some(&"--all" | &"--self-test") => all_selection(self_test),
         Some(name) => {
             if let Some(g) = GATES.iter().find(|g| g.name == *name) {
                 vec![g]

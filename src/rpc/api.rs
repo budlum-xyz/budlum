@@ -1435,6 +1435,19 @@ pub trait BudlumApi {
     #[method(name = "bud_getValidatorSet")]
     async fn get_validator_set(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// One validator's directory record (class, operator key, quota, offers,
+    /// pending changes), or null.
+    #[method(name = "bud_getValidator")]
+    async fn get_validator(&self, owner: String) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Validators that offer a relay.
+    #[method(name = "bud_listRelays")]
+    async fn list_relays(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Validators that offer an upload gateway.
+    #[method(name = "bud_listGateways")]
+    async fn list_gateways(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Domain info by ID.
     #[method(name = "bud_getDomainInfo")]
     async fn get_domain_info(&self, domain_id: u32) -> Result<serde_json::Value, ErrorObjectOwned>;
