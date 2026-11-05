@@ -339,10 +339,10 @@ impl CommitteeTable {
     /// covers every seat it holds (section 7.4.3); a voter outside the
     /// committee covers nothing.
     pub fn covered_seats(&self, voters: impl IntoIterator<Item = &Address>) -> usize {
-        voters
-            .into_iter()
-            .map(|voter| self.seats_of(voter).len())
-            .sum()
+        // Count through the bitmap, not by summing per voter: a seat is covered
+        // once however many times its holder appears in the input, so a
+        // repeated address cannot inflate the count toward the quorum.
+        self.seat_bitmap(voters).count()
     }
 
     /// The seat bitmap naming every seat held by the given voters.
@@ -398,7 +398,7 @@ impl CommitteeTable {
             if moved >= limit {
                 break;
             }
-            let Some(owner) = next.seats[index].owner else {
+            let Some(owner) = next.owner_of(index) else {
                 continue;
             };
             // Both records must miss the seat. One miss is a lost vote or a
@@ -414,7 +414,7 @@ impl CommitteeTable {
                 .standbys
                 .iter()
                 .find(|candidate| {
-                    !lost.contains(candidate) && next.seats_of(candidate).len() < cap
+                    !lost.contains(*candidate) && next.seats_of(*candidate).len() < cap
                 })
                 .copied();
             next.seats[index].owner = replacement;
@@ -649,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn quorum_ignores_validator_count() {
+    fn committee_quorum_ignores_validator_count() {
         // Eight validators hold 32 seats; the quorum is 22 seats, not a head
         // count. Three validators (12 seats) cannot finalize; six (24) can.
         let table = CommitteeTable::derive(
@@ -664,6 +664,24 @@ mod tests {
         let six: Vec<Address> = (1..=6).map(addr).collect();
         assert!(table.covered_seats(three.iter()) < table.quorum_seats());
         assert!(table.covered_seats(six.iter()) >= table.quorum_seats());
+    }
+
+    #[test]
+    fn a_repeated_signer_does_not_inflate_the_seat_quorum() {
+        // Three validators hold 12 of 32 seats, short of the 22-seat quorum.
+        // Listing them repeatedly must not reach it: a seat is covered once.
+        let table = CommitteeTable::derive(
+            1,
+            10,
+            &randomness(),
+            &equal_members(8, 1000),
+            &CommitteeParams::default(),
+        );
+        let once: Vec<Address> = (1..=3).map(addr).collect();
+        let repeated: Vec<Address> = once.iter().cycle().take(30).copied().collect();
+        assert_eq!(table.covered_seats(once.iter()), 12);
+        assert_eq!(table.covered_seats(repeated.iter()), 12);
+        assert!(table.covered_seats(repeated.iter()) < table.quorum_seats());
     }
 
     #[test]
