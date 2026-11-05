@@ -25,6 +25,7 @@ use crate::chain::finality::{
     Precommit, Prevote, ValidatorEntry, ValidatorSetSnapshot,
 };
 use crate::consensus::pow::PoWEngine;
+use crate::core::transaction::DEFAULT_CHAIN_ID;
 use crate::core::address::Address;
 #[cfg(test)]
 fn test_addr_from_byte(byte: u8) -> crate::core::address::Address {
@@ -205,13 +206,8 @@ fn finality_rejects_equivocating_voter() {
     let (snap, sks) = make_snapshot_with_keys(4, 1000);
     let epoch = 1;
     let height = 10;
-    let mut agg = FinalityAggregator::new(
-        crate::core::transaction::DEFAULT_CHAIN_ID,
-        epoch,
-        height,
-        "HASH_A".into(),
-        snap.clone(),
-    );
+    let mut agg =
+        FinalityAggregator::new(DEFAULT_CHAIN_ID, epoch, height, "HASH_A".into(), snap.clone());
 
     // Voter 0 votes for the correct hash (HASH_A) -> accepted, no evidence.
     let pv_a = signed_prevote(&sks[0], epoch, height, "HASH_A", snap.validators[0].address);
@@ -264,13 +260,8 @@ fn finality_stays_pending_below_quorum() {
     let epoch = 1;
     let height = 10;
     let hash = "cp";
-    let mut agg = FinalityAggregator::new(
-        crate::core::transaction::DEFAULT_CHAIN_ID,
-        epoch,
-        height,
-        hash.into(),
-        snap.clone(),
-    );
+    let mut agg =
+        FinalityAggregator::new(DEFAULT_CHAIN_ID, epoch, height, hash.into(), snap.clone());
 
     // Only 2/4 prevotes -> 2000 < 2667.
     drive_prevote_quorum(&mut agg, &snap, &sks, 2, epoch, height, hash);
@@ -299,13 +290,8 @@ fn finality_recovers_honest_subset_after_invalid_signature() {
     let epoch = 1;
     let height = 10;
     let hash = "cp";
-    let mut agg = FinalityAggregator::new(
-        crate::core::transaction::DEFAULT_CHAIN_ID,
-        epoch,
-        height,
-        hash.into(),
-        snap.clone(),
-    );
+    let mut agg =
+        FinalityAggregator::new(DEFAULT_CHAIN_ID, epoch, height, hash.into(), snap.clone());
 
     drive_prevote_quorum(&mut agg, &snap, &sks, 4, epoch, height, hash);
     assert!(agg.prevote_quorum_reached);
@@ -363,13 +349,8 @@ fn finality_valid_quorum_produces_verifiable_cert() {
     let epoch = 1;
     let height = 10;
     let hash = "cp";
-    let mut agg = FinalityAggregator::new(
-        crate::core::transaction::DEFAULT_CHAIN_ID,
-        epoch,
-        height,
-        hash.into(),
-        snap.clone(),
-    );
+    let mut agg =
+        FinalityAggregator::new(DEFAULT_CHAIN_ID, epoch, height, hash.into(), snap.clone());
 
     drive_prevote_quorum(&mut agg, &snap, &sks, 3, epoch, height, hash);
     for (sk, v) in sks.iter().zip(snap.validators.iter()).take(3) {
@@ -393,26 +374,16 @@ fn finality_prevents_split_brain_on_partition() {
     let height = 10;
 
     // Grup A: validator 0,1 -> HASH_A
-    let mut agg_a = FinalityAggregator::new(
-        crate::core::transaction::DEFAULT_CHAIN_ID,
-        epoch,
-        height,
-        "HASH_A".into(),
-        snap.clone(),
-    );
+    let mut agg_a =
+        FinalityAggregator::new(DEFAULT_CHAIN_ID, epoch, height, "HASH_A".into(), snap.clone());
     for (sk, v) in sks.iter().zip(snap.validators.iter()).take(2) {
         let pv = signed_prevote(sk, epoch, height, "HASH_A", v.address);
         agg_a.add_prevote(pv).expect("group A prevote");
     }
 
     // Grup B: validator 2,3 -> HASH_B
-    let mut agg_b = FinalityAggregator::new(
-        crate::core::transaction::DEFAULT_CHAIN_ID,
-        epoch,
-        height,
-        "HASH_B".into(),
-        snap.clone(),
-    );
+    let mut agg_b =
+        FinalityAggregator::new(DEFAULT_CHAIN_ID, epoch, height, "HASH_B".into(), snap.clone());
     for (sk, v) in sks.iter().zip(snap.validators.iter()).skip(2).take(2) {
         let pv = signed_prevote(sk, epoch, height, "HASH_B", v.address);
         agg_b.add_prevote(pv).expect("group B prevote");
@@ -442,13 +413,8 @@ fn finality_ignores_late_votes_after_cert() {
     let epoch = 1;
     let height = 10;
     let hash = "cp";
-    let mut agg = FinalityAggregator::new(
-        crate::core::transaction::DEFAULT_CHAIN_ID,
-        epoch,
-        height,
-        hash.into(),
-        snap.clone(),
-    );
+    let mut agg =
+        FinalityAggregator::new(DEFAULT_CHAIN_ID, epoch, height, hash.into(), snap.clone());
 
     drive_prevote_quorum(&mut agg, &snap, &sks, 3, epoch, height, hash);
     for (sk, v) in sks.iter().zip(snap.validators.iter()).take(3) {
@@ -496,13 +462,8 @@ fn finality_honest_quorum_survives_byzantine_noise() {
     let height = 10;
     let honest_hash = "HONEST";
     let byz_hash = "BYZANTINE";
-    let mut agg = FinalityAggregator::new(
-        crate::core::transaction::DEFAULT_CHAIN_ID,
-        epoch,
-        height,
-        honest_hash.into(),
-        snap.clone(),
-    );
+    let mut agg =
+        FinalityAggregator::new(DEFAULT_CHAIN_ID, epoch, height, honest_hash.into(), snap.clone());
 
     // Let the byzantine noise arrive FIRST (conflicting hash) -> must be refused.
     for (sk, v) in sks.iter().zip(snap.validators.iter()).skip(5).take(2) {
