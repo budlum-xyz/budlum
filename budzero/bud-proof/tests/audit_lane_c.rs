@@ -200,7 +200,11 @@ fn audit_lane_c_blg_142_trailing_bytes_after_a_valid_proof_are_refused() {
 fn audit_lane_c_blg_154_single_pin_source_is_not_unanimity() {
     use bud_proof::canonical_recovery::{reconcile, Reconciliation, MIN_PIN_SOURCES};
     let only = [7u8; 32];
-    assert!(MIN_PIN_SOURCES >= 2);
+    // The constant is what the behaviour below rests on.
+    assert_eq!(
+        reconcile(&[only; MIN_PIN_SOURCES - 1]),
+        Reconciliation::Split
+    );
     assert_eq!(reconcile(&[only]), Reconciliation::Split);
     assert_eq!(reconcile(&[]), Reconciliation::Split);
     // Control: two agreeing sources are unanimous, a 1-1 split fails closed.
