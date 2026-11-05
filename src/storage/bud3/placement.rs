@@ -96,6 +96,19 @@ impl PlacementRow {
         self.total_symbols() * 1000 / k as u64
     }
 
+    /// Symbols the Full shares hold on their own.
+    #[must_use]
+    pub const fn full_only_symbols(&self) -> u64 {
+        self.n_full as u64 * self.s_full as u64
+    }
+
+    /// Whether the segment survives every Mobile validator leaving at once:
+    /// the Full shares alone hold `k + 2` symbols.
+    #[must_use]
+    pub const fn survives_mobile_exit(&self, k: u32) -> bool {
+        self.full_only_symbols() >= k as u64 + 2
+    }
+
     /// The Mobile share of the symbols, in thousandths.
     #[must_use]
     pub const fn mobile_share_milli(&self) -> u64 {
@@ -382,6 +395,24 @@ mod tests {
             s_mobile: 0,
         });
         assert_eq!(bad.validate(), Err(PlacementError::RowTooSmall));
+    }
+
+    #[test]
+    fn mobile_exit_survival_is_measured_per_row() {
+        let t = PlacementTable::testnet_default();
+        let failing: Vec<_> = t
+            .rows
+            .iter()
+            .filter(|r| !r.survives_mobile_exit(t.k))
+            .collect();
+        // The mixed rows of the default table do not survive a full Mobile
+        // exit; this is the open table-versus-launch-gate decision.
+        assert!(failing.iter().all(|r| r.n_mobile > 0));
+        assert!(t
+            .rows
+            .iter()
+            .filter(|r| r.n_mobile == 0)
+            .all(|r| r.survives_mobile_exit(t.k)));
     }
 
     #[test]
