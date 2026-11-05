@@ -607,6 +607,7 @@ dependencies = [
  "qrcode",
  "rand 0.10.3",
  "rand_core 0.6.4",
+ "raptorq",
  "rayon",
  "rcgen",
  "reqwest",
@@ -4676,6 +4677,12 @@ checksum = "60aa6af80be32871323012e02e6e65f8a7cc7890931ae421d217ad8fe0df2ccf"
 dependencies = [
  "rand_core 0.10.1",
 ]
+
+[[package]]
+name = "raptorq"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90b1b1fad69672f0b901b5004863ea4307f03d168a3db5f2bcba4d3dfed88e97"
 
 [[package]]
 name = "rayon"

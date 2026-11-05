@@ -32,6 +32,9 @@ __bench_domain_throughput_disabled = []
 
 [dependencies]
 sha2 = "0.11"
+# B.U.D. 3.0 segment coding: RFC 6330 (RaptorQ), pinned exactly so the
+# golden symbol vectors lock the encoder version.
+raptorq = { version = "=2.0.0", default-features = false, features = ["std"] }
 # zlib for Three payload pack (only when it shrinks).
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # G1 payload AEAD (T11): content bytes encrypted before A1 pack.
