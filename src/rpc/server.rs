@@ -1032,12 +1032,15 @@ pub(crate) fn cors_outcome<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) 
     else {
         return CorsOutcome::NotApplicable;
     };
-    if config
-        .cors_origins
-        .iter()
-        .any(|allowed| allowed == "*" || allowed == origin)
-    {
+    // An origin listed by name is echoed: that is the one value the
+    // operator approved. A `*` entry answers with the literal `*` and never
+    // echoes the caller's header back (BULGU-011): a reflected wildcard turns
+    // "any origin" into "this exact origin", which caches and credential
+    // rules treat as a named grant.
+    if config.cors_origins.iter().any(|allowed| allowed == origin) {
         CorsOutcome::Allow(origin.to_string())
+    } else if config.cors_origins.iter().any(|allowed| allowed == "*") {
+        CorsOutcome::Allow("*".to_string())
     } else {
         CorsOutcome::Deny
     }
@@ -1098,6 +1101,22 @@ fn clamp_feed_limit(limit: usize) -> usize {
 /// serialization cost do not grow with chain state.
 const MAX_LIST_RESPONSE_ITEMS: usize = 1000;
 
+/// Serialize one RPC result value. A value that cannot be encoded is an
+/// explicit `-32603` error naming what failed, never a silent `null`
+/// (BULGU-012): a `null` reads as "absent", which is a different answer.
+pub(crate) fn to_json<T: serde::Serialize>(
+    what: &str,
+    value: &T,
+) -> Result<serde_json::Value, ErrorObjectOwned> {
+    serde_json::to_value(value).map_err(|e| {
+        ErrorObjectOwned::owned(
+            -32603,
+            format!("{what} serialization failed: {e}"),
+            None::<()>,
+        )
+    })
+}
+
 fn cap_list_response<T>(mut items: Vec<T>) -> Vec<T> {
     items.truncate(MAX_LIST_RESPONSE_ITEMS);
     items
@@ -1141,13 +1160,21 @@ fn is_per_ip_rate_limited(
             // Seen client instead of globally rejecting all new IPs. This keeps
             // The map bounded without letting a rotational-IP attacker pin the
             // Table forever and deny unrelated clients.
-            if let Some(oldest_ip) = rates
+            //
+            // The evicted client is the one with the fewest requests in its
+            // window (oldest first among equals), never a busy one
+            // (BLG-029): evicting a client at its quota resets its window,
+            // so an attacker rotating addresses could buy a fresh quota for
+            // its own saturated address by filling the table.
+            if let Some(quietest) = rates
                 .iter()
-                .filter_map(|(client, window)| window.front().map(|first| (*client, *first)))
-                .min_by_key(|(_, first)| *first)
-                .map(|(client, _)| client)
+                .filter_map(|(client, window)| {
+                    window.front().map(|first| (*client, window.len(), *first))
+                })
+                .min_by_key(|(_, len, first)| (*len, *first))
+                .map(|(client, _, _)| client)
             {
-                rates.remove(&oldest_ip);
+                rates.remove(&quietest);
             }
         }
         if rates.len() >= MAX_TRACKED_RPC_CLIENTS {
@@ -1983,13 +2010,13 @@ impl BudlumApiServer for RpcServer {
         let items: Vec<serde_json::Value> = profiles
             .into_iter()
             .map(|(profile, summary)| {
-                serde_json::json!({
+                Ok(serde_json::json!({
                     "domainKey": format!("0x{}", hex::encode(profile.domain.as_bytes())),
                     "summary": summary,
-                    "profile": serde_json::to_value(&profile).unwrap_or(serde_json::Value::Null),
-                })
+                    "profile": to_json("Profile", &profile)?,
+                }))
             })
-            .collect();
+            .collect::<Result<_, ErrorObjectOwned>>()?;
         Ok(serde_json::json!({ "domains": items }))
     }
 
@@ -2318,11 +2345,9 @@ impl BudlumApiServer for RpcServer {
                 let slashings: Vec<serde_json::Value> = bond
                     .slashings
                     .iter()
-                    .map(|s: &crate::cross_domain::external::Slashing| {
-                        serde_json::to_value(s).unwrap_or(serde_json::Value::Null)
-                    })
-                    .collect();
-                serde_json::json!({
+                    .map(|s: &crate::cross_domain::external::Slashing| to_json("Slashing", s))
+                    .collect::<Result<_, ErrorObjectOwned>>()?;
+                Ok(serde_json::json!({
                     "prover": format!("0x{}", hex::encode(bond.prover.as_bytes())),
                     "bondAtoms": bond.bond_atoms.to_string(),
                     "liveAtoms": bond.live_atoms().to_string(),
@@ -2331,9 +2356,9 @@ impl BudlumApiServer for RpcServer {
                     "accepted": bond.accepted,
                     "refused": bond.refused,
                     "slashings": slashings,
-                })
+                }))
             })
-            .collect();
+            .collect::<Result<_, ErrorObjectOwned>>()?;
         let latest = registration.latest_attestation();
         // "No backing yet" is a visible state, not an absent field: shown
         // with the same value an adapter reports before its first cycle.
@@ -5800,7 +5825,7 @@ impl BudlumApiServer for RpcServer {
             .get_ai_model(crate::ai::types::AiModelId(arr))
             .await
         {
-            Some(spec) => Ok(serde_json::to_value(&spec).unwrap_or(serde_json::Value::Null)),
+            Some(spec) => to_json("AI model", &spec),
             None => Ok(serde_json::Value::Null),
         }
     }
@@ -6225,7 +6250,7 @@ impl BudlumApiServer for RpcServer {
             .get_ai_outcome(crate::ai::types::AiRequestId(arr))
             .await
         {
-            Some(outcome) => Ok(serde_json::to_value(&outcome).unwrap_or(serde_json::Value::Null)),
+            Some(outcome) => to_json("AI outcome", &outcome),
             None => Ok(serde_json::Value::Null),
         }
     }
@@ -7170,6 +7195,34 @@ mod tests {
             .is_none());
     }
 
+    /// BULGU-011: a `*` configuration answers with the literal `*`; the
+    /// caller's `Origin` header is never echoed back.
+    #[test]
+    fn cors_wildcard_does_not_reflect_headers() {
+        let config = cors_config(&["*"]);
+        let req = request_from_origin("https://saldirgan.example");
+        assert_eq!(cors_outcome(&config, &req), CorsOutcome::Allow("*".into()));
+        // A named origin next to `*` still gets its own name back.
+        let config = cors_config(&["*", "https://budscan.example"]);
+        let req = request_from_origin("https://budscan.example");
+        assert_eq!(
+            cors_outcome(&config, &req),
+            CorsOutcome::Allow("https://budscan.example".into())
+        );
+    }
+
+    /// BULGU-012: a value that cannot be encoded is an explicit error, not a
+    /// `null` that reads as "absent".
+    #[test]
+    fn rpc_serialization_error_is_explicit() {
+        let mut unencodable = std::collections::BTreeMap::new();
+        unencodable.insert((1u8, 2u8), 3u8);
+        let err = to_json("Probe", &unencodable).unwrap_err();
+        assert_eq!(err.code(), -32603);
+        assert!(err.message().contains("Probe serialization failed"));
+        assert_eq!(to_json("Ok", &5u8).unwrap(), serde_json::json!(5));
+    }
+
     /// With CORS unconfigured no header is emitted - the default is closed.
     #[test]
     fn empty_cors_list_emits_no_headers() {
@@ -7442,6 +7495,53 @@ mod tests {
         assert!(is_per_ip_rate_limited(&config, &per_ip_rates, ip));
         // Third request: rate limited (exceeds limit of 2)
         assert!(!is_per_ip_rate_limited(&config, &per_ip_rates, ip));
+    }
+
+    /// BLG-029: when the table is full, the quietest client is evicted, never
+    /// one that sits at its quota: evicting a saturated client would reset its
+    /// window and hand it a fresh quota.
+    #[test]
+    fn blg_029_full_table_does_not_evict_a_saturated_client() {
+        let config = RpcSecurityConfig {
+            rate_limit_per_minute: Some(2),
+            ..Default::default()
+        };
+        let per_ip_rates = Arc::new(Mutex::new(HashMap::new()));
+        let saturated = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let now = Instant::now();
+        {
+            let mut rates = per_ip_rates.lock().unwrap();
+            for i in 0..MAX_TRACKED_RPC_CLIENTS {
+                let ip = IpAddr::V4(Ipv4Addr::new(
+                    10,
+                    ((i >> 8) & 0xff) as u8,
+                    (i & 0xff) as u8,
+                    1,
+                ));
+                let mut window = VecDeque::new();
+                // Every client but the saturated one made one recent request;
+                // the saturated one is the oldest and at its quota.
+                let first = now - Duration::from_secs(50) + Duration::from_millis(i as u64);
+                window.push_back(first);
+                if ip == saturated {
+                    window.push_back(first);
+                }
+                rates.insert(ip, window);
+            }
+        }
+        let newcomer = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+        assert!(is_per_ip_rate_limited(
+            &config,
+            &per_ip_rates,
+            Some(newcomer)
+        ));
+        assert!(per_ip_rates.lock().unwrap().contains_key(&saturated));
+        // The saturated client is still refused.
+        assert!(!is_per_ip_rate_limited(
+            &config,
+            &per_ip_rates,
+            Some(saturated)
+        ));
     }
 
     #[test]
