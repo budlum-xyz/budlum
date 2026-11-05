@@ -532,15 +532,21 @@ mod tests {
         (1..=count).map(|i| (addr(i), weight)).collect()
     }
 
-    #[test]
-    fn seat_count_is_four_per_validator_under_the_ceiling() {
-        let table = CommitteeTable::derive(
+    /// The table most cases reason about: eight equal validators, 32 seats,
+    /// four each, cap 8, quorum 22.
+    fn eight_equal() -> CommitteeTable {
+        CommitteeTable::derive(
             1,
             10,
             &randomness(),
             &equal_members(8, 1000),
             &CommitteeParams::default(),
-        );
+        )
+    }
+
+    #[test]
+    fn seat_count_is_four_per_validator_under_the_ceiling() {
+        let table = eight_equal();
         assert_eq!(table.seat_count(), 32);
         assert_eq!(table.active_seats(), 32);
     }
@@ -630,13 +636,7 @@ mod tests {
 
     #[test]
     fn standbys_exclude_the_owner_and_are_distinct() {
-        let table = CommitteeTable::derive(
-            1,
-            10,
-            &randomness(),
-            &equal_members(8, 1000),
-            &CommitteeParams::default(),
-        );
+        let table = eight_equal();
         for seat in &table.seats {
             let owner = seat.owner.unwrap();
             assert_eq!(seat.standbys.len(), SEAT_STANDBY_DEPTH);
@@ -652,13 +652,7 @@ mod tests {
     fn committee_quorum_ignores_validator_count() {
         // Eight validators hold 32 seats; the quorum is 22 seats, not a head
         // count. Three validators (12 seats) cannot finalize; six (24) can.
-        let table = CommitteeTable::derive(
-            1,
-            10,
-            &randomness(),
-            &equal_members(8, 1000),
-            &CommitteeParams::default(),
-        );
+        let table = eight_equal();
         assert_eq!(table.quorum_seats(), 22);
         let three: Vec<Address> = (1..=3).map(addr).collect();
         let six: Vec<Address> = (1..=6).map(addr).collect();
@@ -670,13 +664,7 @@ mod tests {
     fn a_repeated_signer_does_not_inflate_the_seat_quorum() {
         // Three validators hold 12 of 32 seats, short of the 22-seat quorum.
         // Listing them repeatedly must not reach it: a seat is covered once.
-        let table = CommitteeTable::derive(
-            1,
-            10,
-            &randomness(),
-            &equal_members(8, 1000),
-            &CommitteeParams::default(),
-        );
+        let table = eight_equal();
         let once: Vec<Address> = (1..=3).map(addr).collect();
         let repeated: Vec<Address> = once.iter().cycle().take(30).copied().collect();
         assert_eq!(table.covered_seats(once.iter()), 12);
@@ -706,13 +694,7 @@ mod tests {
 
     #[test]
     fn seat_bitmap_names_the_voters_seats() {
-        let table = CommitteeTable::derive(
-            1,
-            10,
-            &randomness(),
-            &equal_members(8, 1000),
-            &CommitteeParams::default(),
-        );
+        let table = eight_equal();
         let voters = vec![addr(1), addr(2)];
         let bitmap = table.seat_bitmap(voters.iter());
         assert_eq!(bitmap.count(), 8);
