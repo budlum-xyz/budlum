@@ -16,7 +16,7 @@ use super::placement::Share;
 use super::registry::{Address, Bud3Registry, NftId, ObjectKey, Registered, RegistryError};
 
 /// The `StorageTx` v3 transactions.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StorageTxV3 {
     /// Register an object. Signed by the uploader.
     RegisterObject {
@@ -251,6 +251,26 @@ mod tests {
             Ok(Applied::Burned(true))
         );
         assert_eq!(r.tombstone(&key), Some(3));
+    }
+
+    #[test]
+    fn transactions_round_trip_through_the_wire_codec() {
+        use super::super::custody::{prove, symbol_leaf};
+        let (tx, key) = register_tx();
+        let leaves = vec![(0u32, symbol_leaf(&[1u8; 100]))];
+        let proof = prove(0, &leaves, 0, &[1u8; 100], 1).unwrap();
+        for t in [
+            tx,
+            StorageTxV3::CustodyProofBatch {
+                proofs: vec![(key, proof)],
+            },
+        ] {
+            let bytes = bincode::serialize(&t).unwrap();
+            let back: StorageTxV3 = bincode::deserialize(&bytes).unwrap();
+            assert_eq!(back, t);
+            let json = serde_json::to_string(&t).unwrap();
+            assert_eq!(serde_json::from_str::<StorageTxV3>(&json).unwrap(), t);
+        }
     }
 
     #[test]

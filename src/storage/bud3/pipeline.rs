@@ -23,7 +23,7 @@ use super::meter::Meter;
 use super::segment::{commit_object, Segmentation};
 
 /// What the chain records for one object.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ObjectRecord {
     /// The content id.
     pub content_id: ContentId,

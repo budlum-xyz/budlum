@@ -29,7 +29,9 @@ use crate::core::hash::hash_fields_bytes;
 pub const PLACEMENT_TAG: &[u8] = b"BDLM_BUD3_PLACEMENT_V1";
 
 /// The validator class as placement sees it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum Class {
     /// Full validator.
     Full,
@@ -55,7 +57,7 @@ pub struct Candidate {
 }
 
 /// One custody share of the placement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Share {
     /// The holder.
     pub validator: [u8; 32],

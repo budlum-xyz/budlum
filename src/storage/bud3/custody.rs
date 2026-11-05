@@ -166,8 +166,24 @@ pub fn symbol_root(leaves: &[(u32, [u8; 32])]) -> [u8; 32] {
     merkle(SYMBOLS_TAG, symbol_root_leaves(leaves), None).0
 }
 
+/// Serde for a 64-byte sub-block (serde derives arrays only up to 32).
+mod sub_block_serde {
+    use super::SUB_BLOCK;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(b: &[u8; SUB_BLOCK], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_bytes(b)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; SUB_BLOCK], D::Error> {
+        let v: Vec<u8> = Vec::deserialize(d)?;
+        v.try_into()
+            .map_err(|_| serde::de::Error::custom("a sub-block is 64 bytes"))
+    }
+}
+
 /// One custody proof: a sub-block of a symbol and its two paths.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CustodyProof {
     /// Segment index.
     pub segment: u64,
@@ -178,6 +194,7 @@ pub struct CustodyProof {
     /// The sub-block index inside the symbol.
     pub sub_block: u64,
     /// The sub-block bytes.
+    #[serde(with = "sub_block_serde")]
     pub bytes: [u8; SUB_BLOCK],
     /// Path from the sub-block to the symbol leaf.
     pub symbol_path: Vec<PathStep>,
