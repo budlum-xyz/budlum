@@ -7201,6 +7201,22 @@ impl Blockchain {
         Ok(Some(cert))
     }
 
+    /// Sequential finality (section 7.4.5): a validator votes for `h_{j+1}`
+    /// only after `h_j` is final. The seat table is derived from finalized
+    /// participation records (7.5.1), so a vote cast ahead of the finalized
+    /// prefix would be weighed against a table this node cannot derive yet -
+    /// and would attest a checkpoint a reorg can still replace.
+    fn refuse_vote_ahead(&self, checkpoint_height: u64) -> Result<(), String> {
+        let next = self.next_finality_checkpoint();
+        if checkpoint_height > next {
+            return Err(format!(
+                "Sequential finality: checkpoint {checkpoint_height} is ahead of \
+                 the lowest unfinalized {next}"
+            ));
+        }
+        Ok(())
+    }
+
     pub fn sign_prevote(
         &self,
         epoch: u64,
@@ -7208,6 +7224,7 @@ impl Blockchain {
         checkpoint_hash: &str,
         voter_id: &Address,
     ) -> Result<Prevote, String> {
+        self.refuse_vote_ahead(checkpoint_height)?;
         let msg = {
             let dummy = Prevote {
                 epoch,
@@ -7266,6 +7283,7 @@ impl Blockchain {
         checkpoint_hash: &str,
         voter_id: &Address,
     ) -> Result<Precommit, String> {
+        self.refuse_vote_ahead(checkpoint_height)?;
         let msg = crate::chain::finality::checkpoint_signing_message(
             self.chain_id,
             epoch,
@@ -10071,6 +10089,34 @@ mod tests {
         assert_eq!(bc.next_finality_checkpoint(), interval * 2);
         bc.finalized_height = interval + 1;
         assert_eq!(bc.next_finality_checkpoint(), interval * 2);
+    }
+
+    /// Sequential finality (section 7.4.5): a validator signs for `h_{j+1}`
+    /// only once `h_j` is final. The guard sits in the signing path, so no
+    /// caller can produce a vote ahead of the finalized prefix even if it
+    /// names a height the chain has not reached.
+    #[test]
+    fn sequential_finality_refuses_vote_ahead() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
+        let interval = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
+        let voter = Address::from([1u8; 32]);
+        bc.finalized_height = interval;
+        let next = interval * 2;
+        // The round the chain is on is refused for the missing BLS key, not for
+        // being ahead: that is how the two refusals are told apart.
+        let at_round = bc.sign_prevote(0, next, "h", &voter).expect_err("no BLS key");
+        assert!(at_round.contains("No BLS signing capability"), "{at_round}");
+        // One checkpoint further is refused before any signing is attempted.
+        let ahead = next + interval;
+        let pv = bc.sign_prevote(0, ahead, "h", &voter).expect_err("ahead of finality");
+        assert!(pv.contains("Sequential finality"), "{pv}");
+        let pc = bc.sign_precommit(0, ahead, "h", &voter).expect_err("ahead of finality");
+        assert!(pc.contains("Sequential finality"), "{pc}");
+        // Finalizing the intervening checkpoint makes that height voteable.
+        bc.finalized_height = next;
+        let now = bc.sign_prevote(0, ahead, "h", &voter).expect_err("no BLS key");
+        assert!(now.contains("No BLS signing capability"), "{now}");
     }
 
     #[test]

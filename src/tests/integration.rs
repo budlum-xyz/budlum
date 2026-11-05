@@ -1076,7 +1076,9 @@ mod integration_tests {
         let voter = Address::from(keys.sig_key.public_key_bytes());
 
         let consensus = Arc::new(PoSEngine::new(PoSConfig::default(), Some(keys)));
-        let bc = Blockchain::new(consensus, None, 45262, None);
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
+        // Sequential finality (7.4.5): height 10 is voteable once 8 is final.
+        bc.finalized_height = 8;
 
         let prevote = bc.sign_prevote(1, 10, "test_cp_hash", &voter).unwrap();
 
@@ -1098,7 +1100,9 @@ mod integration_tests {
         let voter = Address::from(keys.sig_key.public_key_bytes());
 
         let consensus = Arc::new(PoSEngine::new(PoSConfig::default(), Some(keys)));
-        let bc = Blockchain::new(consensus, None, 45262, None);
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
+        // Sequential finality (7.4.5): height 10 is voteable once 8 is final.
+        bc.finalized_height = 8;
 
         let precommit = bc.sign_precommit(1, 10, "test_cp_hash", &voter).unwrap();
 
@@ -1434,7 +1438,10 @@ mod integration_tests {
         let consensus = Arc::new(PoWEngine::new(0));
         let bc = Blockchain::new(consensus, None, 45262, None);
 
-        let result = bc.sign_prevote(1, 10, "test", &voter);
+        // Vote at the round the chain is on, so the refusal is about the missing
+        // key and not about sequential finality.
+        let interval = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
+        let result = bc.sign_prevote(0, interval, "test", &voter);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("No BLS signing capability"));
     }
