@@ -6486,15 +6486,23 @@ impl Blockchain {
             Some(self.state.epoch_index),
         )?;
         if !bls_required {
-            let stake: u128 = verified_signers
+            // Under the quantum alarm the BLS half drops out and the ML-DSA QC
+            // alone decides, against the same seat quorum (section 7.4.3).
+            let committee = crate::validators::committee::CommitteeTable::for_snapshot(
+                &snapshot,
+                cert.checkpoint_height,
+                self.chain_id,
+            );
+            let signer_addresses: Vec<crate::core::address::Address> = verified_signers
                 .iter()
                 .filter_map(|idx| snapshot.validators.get(*idx))
-                .map(|validator| u128::from(validator.stake))
-                .sum();
-            if stake < snapshot.quorum_stake() || verified_signers.len() < snapshot.quorum_count() {
+                .map(|validator| validator.address)
+                .collect();
+            let covered = committee.covered_seats(signer_addresses.iter());
+            if covered < committee.quorum_seats() {
                 return Err(format!(
-                    "ML-DSA QC quorum not met under the quantum alarm: {} signers, stake {stake}",
-                    verified_signers.len()
+                    "ML-DSA QC seat quorum not met under the quantum alarm: {covered} < {} seats",
+                    committee.quorum_seats()
                 ));
             }
         }
@@ -7484,8 +7492,13 @@ impl Blockchain {
         // The round's own hash, kept for the replay below: the aggregator
         // takes ownership of the one it is built with.
         let round_hash = checkpoint_hash.clone();
-        let aggregator =
-            FinalityAggregator::new(epoch, checkpoint_height, checkpoint_hash, snapshot);
+        let aggregator = FinalityAggregator::new(
+            self.chain_id,
+            epoch,
+            checkpoint_height,
+            checkpoint_hash,
+            snapshot,
+        );
         self.finality_aggregator = Some(aggregator);
         info!("Started prevote task for checkpoint height={checkpoint_height} (epoch={epoch})");
         self.replay_early_prevotes(epoch, checkpoint_height, &round_hash);
