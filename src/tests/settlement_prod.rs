@@ -154,6 +154,7 @@ mod settlement_prod_tests {
             agg_sig_bls: vec![],
             bitmap: vec![0u8],
             set_hash: snapshot.set_hash.clone(),
+            seat_table_version: 0,
         };
         let msg = cert.signing_message();
         let mut agg = G1Projective::identity();
@@ -1186,6 +1187,7 @@ mod settlement_prod_tests {
                 agg_sig_bls: vec![0u8; 48],
                 bitmap: vec![0u8],
                 set_hash: ValidatorSetSnapshot::new(1, vec![]).set_hash,
+                seat_table_version: 0,
             },
             validator_snapshot: ValidatorSetSnapshot::new(1, vec![]),
         };

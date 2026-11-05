@@ -1555,6 +1555,7 @@ fn a_finality_cert_from_another_chain_is_refused() {
         agg_sig_bls: vec![0u8; 48],
         bitmap: vec![1],
         set_hash: String::new(),
+        seat_table_version: 0,
     };
     let err = bc
         .handle_finality_cert(cert)

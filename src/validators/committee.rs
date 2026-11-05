@@ -26,7 +26,7 @@
 use crate::core::address::Address;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The ceiling on the committee size, `S_max` (section 7.4.2).
 /// TESTNET-DEFAULT: governance replaces this once measured.
@@ -106,9 +106,69 @@ impl SeatBitmap {
 
     /// The raw bytes, for the wire and for hashing.
     #[must_use]
-    pub(crate) fn as_bytes(&self) -> &[u8] {
+    pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }
+
+    /// Read a bitmap off the wire, bounded by the committee ceiling.
+    ///
+    /// A peer sends these bytes, so the length is checked before allocating:
+    /// the most a honest record can name is `COMMITTEE_MAX_SEATS` seats.
+    ///
+    /// # Errors
+    ///
+    /// A byte string longer than the ceiling can hold.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        let max_bytes = COMMITTEE_MAX_SEATS.div_ceil(8);
+        if bytes.len() > max_bytes {
+            return Err(format!(
+                "seat bitmap is {} bytes, at most {max_bytes}",
+                bytes.len()
+            ));
+        }
+        Ok(Self {
+            bytes: bytes.to_vec(),
+        })
+    }
+}
+
+/// The participation record a checkpoint block carries (section 7.5.1).
+///
+/// The block at `h_j` names the seats whose precommits for `h_{j-1}` the
+/// proposer collected. An honest proposer records every vote it saw. The
+/// record is consensus data: the next seat table is derived from the records
+/// of two consecutive finalized blocks, so every honest node derives the same
+/// table (V-3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeatParticipation {
+    /// The checkpoint the recorded votes were cast for, `h_{j-1}`.
+    pub checkpoint: u64,
+    /// The seats those votes cover.
+    pub seats: SeatBitmap,
+}
+
+impl SeatParticipation {
+    /// The record a proposer builds from the precommits it collected for
+    /// `checkpoint`, mapped through the table those votes were counted under.
+    #[must_use]
+    pub fn collect(
+        table: &CommitteeTable,
+        checkpoint: u64,
+        voters: impl IntoIterator<Item = &Address>,
+    ) -> Self {
+        Self {
+            checkpoint,
+            seats: table.seat_bitmap(voters),
+        }
+    }
+}
+
+/// The most seats one checkpoint may hand over: `ceil(S / 10)` (section
+/// 7.5.1). A mass departure moves to the standbys over several checkpoints
+/// instead of reshaping the whole committee at once.
+#[must_use]
+pub fn handover_limit(seat_count: usize) -> usize {
+    seat_count.div_ceil(10)
 }
 
 /// The committee for one epoch, derived from finalized state.
@@ -294,6 +354,81 @@ impl CommitteeTable {
             }
         }
         bitmap
+    }
+
+    /// Apply Instant Seat Handover (section 7.5.1) and return the table for the
+    /// next checkpoint.
+    ///
+    /// `previous` and `current` are the participation records of the two
+    /// consecutive finalized blocks, older first. A seat missing from BOTH is
+    /// handed to its next standby; a seat missing from only one is kept, so a
+    /// single dropped vote never moves a seat. Standbys are tried in order and
+    /// one already holding a seat in this table is skipped, so a handover never
+    /// concentrates seats. When the list runs out the seat goes empty and
+    /// leaves the quorum denominator.
+    ///
+    /// At most `ceil(S / 10)` seats move per checkpoint, in seat-index order;
+    /// the rest wait for the next one. A standby already holding a quarter of
+    /// the seats is skipped, so a handover keeps the cap that makes one
+    /// departure survivable. `lost_this_epoch` carries the validators that
+    /// already lost a seat in this epoch: they do not regain one until the next
+    /// epoch recomputes eligibility. The returned set is that input plus the
+    /// validators this call displaced, so the caller threads it through the
+    /// epoch.
+    ///
+    /// `version` is the height of the finalized block carrying `current`: the
+    /// seat table version a vote for the next checkpoint binds to (7.4.4).
+    ///
+    /// The table is never mutated in place: the caller keeps the old one for
+    /// the checkpoint still in flight.
+    #[must_use]
+    pub fn hand_over(
+        &self,
+        previous: &SeatParticipation,
+        current: &SeatParticipation,
+        version: u64,
+        lost_this_epoch: &BTreeSet<Address>,
+    ) -> (Self, BTreeSet<Address>) {
+        let mut next = self.clone();
+        let mut lost = lost_this_epoch.clone();
+        let limit = handover_limit(self.seat_count());
+        let cap = self.seat_count() / 4;
+        let mut moved = 0usize;
+        for index in 0..next.seats.len() {
+            if moved >= limit {
+                break;
+            }
+            let Some(owner) = next.seats[index].owner else {
+                continue;
+            };
+            // Both records must miss the seat. One miss is a lost vote or a
+            // proposer that dropped it, not a departure.
+            if previous.seats.contains(index) || current.seats.contains(index) {
+                continue;
+            }
+            // The standbys are ranked at derivation; take the first that may
+            // still sit. A validator that already lost a seat this epoch does
+            // not come back through a standby slot, and none may cross the
+            // quarter cap by collecting handed-over seats.
+            let replacement = next.seats[index]
+                .standbys
+                .iter()
+                .find(|candidate| {
+                    !lost.contains(candidate) && next.seats_of(candidate).len() < cap
+                })
+                .copied();
+            next.seats[index].owner = replacement;
+            lost.insert(owner);
+            moved += 1;
+        }
+        // The version names the table, so it advances only when the seats
+        // actually moved. A checkpoint where everyone participated keeps the
+        // epoch's base version, and its certificates verify against the base
+        // table a snapshot-only verifier can derive.
+        if moved > 0 {
+            next.version = version;
+        }
+        (next, lost)
     }
 }
 
@@ -588,5 +723,164 @@ mod tests {
         // A different epoch reshuffles the standby order.
         let c = CommitteeTable::derive(2, 10, &randomness(), &members, &CommitteeParams::default());
         assert_ne!(a.seats[0].standbys, c.seats[0].standbys);
+    }
+
+    /// A table of eight equal validators, and a record naming every seat except
+    /// the ones `missing` holds.
+    fn table_and_record(missing: &[Address]) -> (CommitteeTable, SeatParticipation) {
+        let table = CommitteeTable::derive(
+            1,
+            5,
+            &randomness(),
+            &equal_members(8, 1000),
+            &CommitteeParams::default(),
+        );
+        let present: Vec<Address> = (1..=8)
+            .map(addr)
+            .filter(|a| !missing.contains(a))
+            .collect();
+        let record = SeatParticipation::collect(&table, 5, present.iter());
+        (table, record)
+    }
+
+    #[test]
+    fn seat_handover_limit_per_checkpoint() {
+        // Every validator but one departs at once. Only ceil(32 / 10) = 4 seats
+        // may move in one checkpoint; the rest wait for the next.
+        let missing: Vec<Address> = (2..=8).map(addr).collect();
+        let (table, record) = table_and_record(&missing);
+        let absent = SeatParticipation {
+            checkpoint: 0,
+            seats: record.seats.clone(),
+        };
+        let (next, _) = table.hand_over(&absent, &record, 10, &BTreeSet::new());
+        let moved = (0..table.seat_count())
+            .filter(|i| table.owner_of(*i) != next.owner_of(*i))
+            .count();
+        assert_eq!(moved, handover_limit(table.seat_count()));
+        assert_eq!(moved, 4);
+        // Seats moved, so the table names the block that moved them.
+        assert_eq!(next.version, 10);
+    }
+
+    #[test]
+    fn a_seat_missing_from_one_record_is_kept() {
+        // One dropped vote is not a departure: the two-record rule keeps the
+        // seat with its owner.
+        let (table, current) = table_and_record(&[addr(1)]);
+        let everyone: Vec<Address> = (1..=8).map(addr).collect();
+        let previous = SeatParticipation::collect(&table, 0, everyone.iter());
+        let (next, lost) = table.hand_over(&previous, &current, 10, &BTreeSet::new());
+        assert_eq!(next.seats, table.seats, "one miss must not move a seat");
+        assert!(lost.is_empty());
+        // Nothing moved, so the version stays the epoch's base one and the
+        // round's certificates verify against the base table.
+        assert_eq!(next.version, table.version);
+    }
+
+    #[test]
+    fn a_seat_missing_from_two_records_moves_to_a_standby() {
+        let (table, record) = table_and_record(&[addr(1)]);
+        let previous = SeatParticipation {
+            checkpoint: 0,
+            seats: record.seats.clone(),
+        };
+        let (next, lost) = table.hand_over(&previous, &record, 10, &BTreeSet::new());
+        assert!(lost.contains(&addr(1)));
+        for index in table.seats_of(&addr(1)) {
+            let new_owner = next.owner_of(index).expect("a standby takes the seat");
+            assert_ne!(new_owner, addr(1));
+            assert!(table.seats[index].standbys.contains(&new_owner));
+        }
+        // The occupied count is unchanged: the seats moved, they did not empty.
+        assert_eq!(next.active_seats(), table.active_seats());
+    }
+
+    #[test]
+    fn a_handover_never_crosses_the_quarter_cap() {
+        let (table, record) = table_and_record(&[addr(1)]);
+        let previous = SeatParticipation {
+            checkpoint: 0,
+            seats: record.seats.clone(),
+        };
+        let (next, _) = table.hand_over(&previous, &record, 10, &BTreeSet::new());
+        let cap = next.seat_count() / 4;
+        for i in 1..=8 {
+            assert!(next.seats_of(&addr(i)).len() <= cap);
+        }
+    }
+
+    #[test]
+    fn a_validator_that_lost_a_seat_does_not_regain_one_this_epoch() {
+        // addr(1) already lost a seat earlier in this epoch. Now addr(2)
+        // departs, and addr(1) sits in the standby list of one of its seats.
+        // The lost set must keep addr(1) out of that slot.
+        let (table, record) = table_and_record(&[addr(2)]);
+        let previous = SeatParticipation {
+            checkpoint: 0,
+            seats: record.seats.clone(),
+        };
+        let mut lost = BTreeSet::new();
+        lost.insert(addr(1));
+        let seat_naming_addr1 = (0..table.seat_count()).find(|i| {
+            table.owner_of(*i) == Some(addr(2)) && table.seats[*i].standbys.contains(&addr(1))
+        });
+        let (next, _) = table.hand_over(&previous, &record, 10, &lost);
+        if let Some(index) = seat_naming_addr1 {
+            assert_ne!(
+                next.owner_of(index),
+                Some(addr(1)),
+                "a validator that lost a seat came back through a standby slot"
+            );
+        }
+        // Whatever moved, addr(1) gained nothing.
+        assert!(next.seats_of(&addr(1)).len() <= table.seats_of(&addr(1)).len());
+    }
+
+    #[test]
+    fn an_exhausted_standby_list_empties_the_seat_and_the_denominator() {
+        // Two validators: S = 8, cap = 2, four seats empty. The occupied seats
+        // have a one-entry standby list whose only candidate is already at the
+        // cap, so a departure empties the seat instead.
+        let members = vec![(addr(1), 1000), (addr(2), 1000)];
+        let table =
+            CommitteeTable::derive(1, 5, &randomness(), &members, &CommitteeParams::default());
+        assert_eq!(table.active_seats(), 4);
+        let only_two = vec![addr(2)];
+        let record = SeatParticipation::collect(&table, 5, only_two.iter());
+        let previous = SeatParticipation {
+            checkpoint: 0,
+            seats: record.seats.clone(),
+        };
+        let (next, _) = table.hand_over(&previous, &record, 10, &BTreeSet::new());
+        assert!(next.active_seats() < table.active_seats());
+        assert!(next.quorum_seats() <= table.quorum_seats());
+    }
+
+    #[test]
+    fn handover_is_deterministic_and_leaves_the_old_table_intact() {
+        let (table, record) = table_and_record(&[addr(1), addr(2)]);
+        let previous = SeatParticipation {
+            checkpoint: 0,
+            seats: record.seats.clone(),
+        };
+        let lost = BTreeSet::new();
+        let (a, lost_a) = table.hand_over(&previous, &record, 10, &lost);
+        let (b, lost_b) = table.hand_over(&previous, &record, 10, &lost);
+        assert_eq!(a, b);
+        assert_eq!(lost_a, lost_b);
+        // The in-flight checkpoint still counts under the old table.
+        assert_eq!(table.version, 5);
+        assert!(table.seats_of(&addr(1)).len() > 0);
+    }
+
+    #[test]
+    fn participation_records_the_seats_of_the_votes_it_saw() {
+        let (table, record) = table_and_record(&[addr(8)]);
+        assert_eq!(record.checkpoint, 5);
+        assert_eq!(record.seats.count(), table.seats_of(&addr(1)).len() * 7);
+        for index in table.seats_of(&addr(8)) {
+            assert!(!record.seats.contains(index));
+        }
     }
 }

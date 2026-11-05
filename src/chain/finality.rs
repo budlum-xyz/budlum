@@ -204,6 +204,14 @@ pub struct FinalityCert {
     pub agg_sig_bls: Vec<u8>,
     pub bitmap: Vec<u8>,
     pub set_hash: String,
+    /// The seat table version the signers' seats were counted under (section
+    /// 7.4.4): the finalized checkpoint height the table derives from. A
+    /// checkpoint whose seats have moved carries the height of the block that
+    /// moved them, so a verifier knows it needs that table and not the epoch's
+    /// base one. `#[serde(default)]` reads an older certificate as version 0,
+    /// which the base-table path refuses rather than mis-counts.
+    #[serde(default)]
+    pub seat_table_version: u64,
 }
 
 /// Build the domain-separated, length-framed preimage signed by a validator's
@@ -693,6 +701,26 @@ impl FinalityAggregator {
             checkpoint_height,
             chain_id,
         );
+        Self::with_committee(
+            epoch,
+            checkpoint_height,
+            checkpoint_hash,
+            validator_snapshot,
+            committee,
+        )
+    }
+
+    /// Start a round under a seat table the caller already derived, so Instant
+    /// Seat Handover (section 7.5) is reflected in the quorum. The live path
+    /// uses this; [`Self::new`] derives the base table for callers that hold
+    /// only a snapshot.
+    pub fn with_committee(
+        epoch: u64,
+        checkpoint_height: u64,
+        checkpoint_hash: String,
+        validator_snapshot: ValidatorSetSnapshot,
+        committee: crate::validators::committee::CommitteeTable,
+    ) -> Self {
         FinalityAggregator {
             epoch,
             checkpoint_height,
@@ -951,6 +979,7 @@ impl FinalityAggregator {
             agg_sig_bls: G1Affine::from(agg_sig).to_compressed().to_vec(),
             bitmap,
             set_hash: snapshot.set_hash.clone(),
+            seat_table_version: self.committee.version,
         })
     }
 
@@ -1022,7 +1051,32 @@ impl FinalityAggregator {
 }
 
 impl FinalityCert {
+    /// Verify against the epoch's base seat table. A certificate whose seats
+    /// were counted under a handed-over table is refused here: this path holds
+    /// only a snapshot and cannot derive that table. A caller that holds the
+    /// chain uses [`Self::verify_with_committee`].
     pub fn verify(&self, snapshot: &ValidatorSetSnapshot) -> Result<(), String> {
+        let committee = crate::validators::committee::CommitteeTable::for_snapshot(
+            snapshot,
+            self.checkpoint_height,
+            self.chain_id,
+        );
+        self.verify_with_committee(snapshot, &committee)
+    }
+
+    /// Verify against the seat table the round actually counted under, so a
+    /// certificate produced after an Instant Seat Handover verifies (section
+    /// 7.5). The table's version must be the one the certificate names.
+    ///
+    /// # Errors
+    ///
+    /// A binding mismatch, a table version that is not the certificate's, a
+    /// seat quorum that is not met, or a BLS aggregate that does not verify.
+    pub fn verify_with_committee(
+        &self,
+        snapshot: &ValidatorSetSnapshot,
+        committee: &crate::validators::committee::CommitteeTable,
+    ) -> Result<(), String> {
         if self
             .epoch
             .checked_sub(BLS_RFC9380_ACTIVATION_EPOCH)
@@ -1101,13 +1155,15 @@ impl FinalityCert {
         }
 
         // The quorum is counted in seats, exactly as the aggregator that
-        // produced this certificate counted it (section 7.4.3). The same
-        // snapshot and epoch derive the same table on every verifying node.
-        let committee = crate::validators::committee::CommitteeTable::for_snapshot(
-            snapshot,
-            self.checkpoint_height,
-            self.chain_id,
-        );
+        // produced this certificate counted it (section 7.4.3). The table must
+        // be the one the certificate names: counting a handed-over round
+        // against the base table would credit the wrong validators.
+        if self.seat_table_version != 0 && self.seat_table_version != committee.version {
+            return Err(format!(
+                "Certificate names seat table version {}, the verifier holds {}",
+                self.seat_table_version, committee.version
+            ));
+        }
         let covered = committee.covered_seats(signer_addresses.iter());
         if covered < committee.quorum_seats() {
             return Err(format!(
@@ -1649,6 +1705,7 @@ mod tests {
             agg_sig_bls: sig_bytes,
             bitmap: vec![0b0000_0001],
             set_hash: snap.set_hash.clone(),
+            seat_table_version: 0,
         };
         let result = cert.verify(&snap);
         assert!(result.is_err());
@@ -1697,6 +1754,7 @@ mod tests {
                 agg_sig_bls: vec![0u8; 48],
                 bitmap: vec![bits],
                 set_hash: snap.set_hash.clone(),
+                seat_table_version: 0,
             };
             let mirrored = kani_mirror(&stakes, 4, &[bits]);
             let err = cert
@@ -1766,6 +1824,7 @@ mod tests {
             agg_sig_bls: sig_bytes,
             bitmap: vec![0b0000_0001],
             set_hash: snap.set_hash.clone(),
+            seat_table_version: 0,
         };
 
         let err = cert
@@ -1788,6 +1847,7 @@ mod tests {
             agg_sig_bls: vec![1; 48],
             bitmap: vec![0b0000_1111],
             set_hash: "wrong_hash".into(),
+            seat_table_version: 0,
         };
         let result = cert.verify(&snap);
         assert!(result.is_err());
