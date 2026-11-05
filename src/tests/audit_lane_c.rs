@@ -244,3 +244,70 @@ fn audit_lane_c_blg_058_domain_leaf_commits_allowlist_and_plugin_hash() {
         }
     }
 }
+
+// WP-33 testnet closures (directive 14.1 rule 8): the opcodes whose verification is not
+// finished stay refused on the testnet chain id.
+mod testnet_closures {
+    use crate::core::account::AccountState;
+    use crate::core::address::Address;
+    use crate::core::chain_config::Network;
+    use crate::core::transaction::{Transaction, TransactionType};
+    use crate::crypto::primitives::KeyPair;
+    use crate::execution::executor::Executor;
+    use bud_isa::{Instruction, Opcode};
+
+    fn program(opcode: Opcode) -> Vec<u8> {
+        [opcode, Opcode::Halt]
+            .into_iter()
+            .flat_map(|op| {
+                Instruction {
+                    opcode: op,
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3,
+                    imm: 0,
+                }
+                .encode()
+                .to_le_bytes()
+            })
+            .collect()
+    }
+
+    /// A signed `ContractCall` on the testnet chain id, applied to a funded account. The
+    /// transaction must be refused for the activation gate, and leave no trace.
+    fn refused_on_testnet(opcode: Opcode) {
+        let keypair = KeyPair::generate().expect("keypair");
+        let from = Address::from(keypair.public_key_bytes());
+        let mut state = AccountState::new();
+        state.add_balance(&from, 1_000);
+        let mut tx = Transaction::new_with_chain_id(
+            from,
+            Address::zero(),
+            0,
+            5,
+            0,
+            program(opcode),
+            Network::Testnet.chain_id().value(),
+            TransactionType::ContractCall,
+        );
+        tx.sign(&keypair);
+        let err = Executor::apply_transaction(&mut state, &tx)
+            .expect_err("a gated opcode must not run on the testnet");
+        assert!(
+            err.contains("activation") || err.contains("Activation"),
+            "{opcode:?} was refused for the wrong reason: {err}"
+        );
+        assert_eq!(state.get_balance(&from), 1_000, "no fee, no write");
+        assert_eq!(state.get_nonce(&from), 0);
+    }
+
+    #[test]
+    fn verify_merkle_is_closed_on_testnet() {
+        refused_on_testnet(Opcode::VerifyMerkle);
+    }
+
+    #[test]
+    fn verify_inference_is_closed_on_testnet() {
+        refused_on_testnet(Opcode::VerifyInference);
+    }
+}
