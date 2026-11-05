@@ -14,7 +14,14 @@ use tiny_keccak::{Hasher, Keccak};
 const GOLDILOCKS_P: u64 = 0xFFFF_FFFF_0000_0001;
 
 fn inst(opcode: Opcode, rd: u8, rs1: u8, rs2: u8, imm: i32) -> u64 {
-    Instruction { opcode, rd, rs1, rs2, imm }.encode()
+    Instruction {
+        opcode,
+        rd,
+        rs1,
+        rs2,
+        imm,
+    }
+    .encode()
 }
 
 fn program_hash(program: &[u64]) -> [u8; 32] {
@@ -34,8 +41,12 @@ fn honest_inputs(vm: &Vm, program: &[u64], events: &[u64]) -> ExecutionPublicInp
         chain_id: 1,
         program_hash: program_hash(program),
         initial_state_root: bud_proof::initial_state_root_of(
-            bud_proof::memory_image_commitment_of_reads(&bud_proof::initial_memory_reads(&vm.trace)),
-            bud_proof::register_image_commitment_of_reads(&bud_proof::initial_register_reads(&vm.trace)),
+            bud_proof::memory_image_commitment_of_reads(&bud_proof::initial_memory_reads(
+                &vm.trace,
+            )),
+            bud_proof::register_image_commitment_of_reads(&bud_proof::initial_register_reads(
+                &vm.trace,
+            )),
         ),
         final_state_root: [0u8; 32],
         sender: vm.context.sender,
@@ -65,7 +76,8 @@ fn logging_run() -> (Vec<u64>, Vm, Vec<u64>) {
 
 /// Prove with the (possibly forged) inputs baked in, then verify with the same inputs.
 fn prove_and_verify(vm: &Vm, pi: &ExecutionPublicInputs, program: &[u64]) -> Result<(), String> {
-    let envelope = Prover::prove(&vm.trace, pi, program).map_err(|e| format!("prove refused: {e:?}"))?;
+    let envelope =
+        Prover::prove(&vm.trace, pi, program).map_err(|e| format!("prove refused: {e:?}"))?;
     Prover::verify(&envelope, pi, program).map_err(|e| format!("verify refused: {e:?}"))
 }
 
@@ -93,16 +105,27 @@ fn audit_lane_c_blg_037_verify_inference_is_refused_in_any_trace() {
     vm.registers[1] = 64;
     let receipt = vm.run_receipt(&program);
     assert!(receipt.success);
-    assert!(vm.trace.iter().any(|s| s.instruction.opcode == Opcode::VerifyInference));
+    assert!(vm
+        .trace
+        .iter()
+        .any(|s| s.instruction.opcode == Opcode::VerifyInference));
     let pi = honest_inputs(&vm, &program, &receipt.events);
     let res = Plonky3Adapter::prove(&vm.trace, &pi, &program)
         .map_err(|e| format!("prove refused: {e:?}"))
         .and_then(|envelope| {
-            Plonky3Adapter::verify_with_activation(&envelope, &pi, &program, MainnetActivation::full())
-                .map_err(|e| format!("verify refused: {e:?}"))
+            Plonky3Adapter::verify_with_activation(
+                &envelope,
+                &pi,
+                &program,
+                MainnetActivation::full(),
+            )
+            .map_err(|e| format!("verify refused: {e:?}"))
         });
     let err = res.expect_err("a trace with VerifyInference must be refused");
-    assert!(err.starts_with("verify refused"), "the AIR must refuse it, got {err}");
+    assert!(
+        err.starts_with("verify refused"),
+        "the AIR must refuse it, got {err}"
+    );
 }
 
 /// BLG-039 / BLG-142: absurd claimed sizes are refused, never a panic.
@@ -115,10 +138,16 @@ fn audit_lane_c_blg_039_oversized_claims_are_refused_not_fatal() {
     huge.trace_len = u64::MAX;
     let mut forged: ProofEnvelope = envelope.clone();
     forged.public_inputs_hash = huge.hash();
-    assert!(Prover::verify(&forged, &huge, &program).is_err(), "trace_len = u64::MAX must be refused");
+    assert!(
+        Prover::verify(&forged, &huge, &program).is_err(),
+        "trace_len = u64::MAX must be refused"
+    );
     let mut deep = envelope.clone();
     deep.degree_bits = 255;
-    assert!(Prover::verify(&deep, &pi, &program).is_err(), "degree_bits = 255 must be refused");
+    assert!(
+        Prover::verify(&deep, &pi, &program).is_err(),
+        "degree_bits = 255 must be refused"
+    );
 }
 
 /// BLG-186: a public scalar at or above the Goldilocks modulus aliases `x - p`.
@@ -131,8 +160,12 @@ fn audit_lane_c_blg_186_non_canonical_public_scalars_are_refused() {
     let aliases: Vec<(&str, Alias)> = vec![
         ("sender", |p| p.sender = p.sender.wrapping_add(GOLDILOCKS_P)),
         ("nonce", |p| p.nonce = p.nonce.wrapping_add(GOLDILOCKS_P)),
-        ("block_height", |p| p.block_height = p.block_height.wrapping_add(GOLDILOCKS_P)),
-        ("gas_used", |p| p.gas_used = p.gas_used.wrapping_add(GOLDILOCKS_P)),
+        ("block_height", |p| {
+            p.block_height = p.block_height.wrapping_add(GOLDILOCKS_P)
+        }),
+        ("gas_used", |p| {
+            p.gas_used = p.gas_used.wrapping_add(GOLDILOCKS_P)
+        }),
     ];
     for (name, alias) in aliases {
         let mut forged_pi = pi.clone();
@@ -159,4 +192,21 @@ fn audit_lane_c_blg_142_trailing_bytes_after_a_valid_proof_are_refused() {
         Prover::verify(&padded, &pi, &program).is_err(),
         "a proof with a trailing byte must be refused"
     );
+}
+
+/// BLG-154: one pin source alone is not agreement. Reconciliation needs at least two
+/// sources, and two that differ fail closed.
+#[test]
+fn audit_lane_c_blg_154_single_pin_source_is_not_unanimity() {
+    use bud_proof::canonical_recovery::{reconcile, Reconciliation, MIN_PIN_SOURCES};
+    let only = [7u8; 32];
+    assert!(MIN_PIN_SOURCES >= 2);
+    assert_eq!(reconcile(&[only]), Reconciliation::Split);
+    assert_eq!(reconcile(&[]), Reconciliation::Split);
+    // Control: two agreeing sources are unanimous, a 1-1 split fails closed.
+    assert_eq!(
+        reconcile(&[only, only]),
+        Reconciliation::Unanimous { hash: only }
+    );
+    assert_eq!(reconcile(&[only, [8u8; 32]]), Reconciliation::Split);
 }
