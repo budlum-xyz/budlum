@@ -7,7 +7,7 @@ on:
     # Run on the normal protected bases and on stacked continuation bases.
     # `arena/**` covers this repository's generated continuation branches;
     # `consensus-of-consensuses` keeps upstream stack covered.
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, 'arena/**']
+    branches: [main, consensus-of-consensuses, 'arena/**']
 
 concurrency:
   group: ci-${{ github.ref }}

@@ -65,3 +65,48 @@ fn tool_sources_have_no_turkish_messages() {
     }
     assert!(hits.is_empty(), "Turkish left in tools: {hits:?}");
 }
+
+/// BLG-095: no workflow names the deleted `fix/architecture-tip-adlari` branch,
+/// and Dependabot covers every tracked `Cargo.lock` directory.
+#[test]
+fn workflows_and_dependabot_are_current() {
+    let dir = root().join(".github/workflows");
+    let mut stale = Vec::new();
+    for entry in std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("{e}"))
+        .flatten()
+    {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.ends_with(".yml")
+            && std::fs::read_to_string(entry.path())
+                .is_ok_and(|t| t.contains("fix/architecture-tip-adlari"))
+        {
+            stale.push(name);
+        }
+    }
+    stale.sort();
+    assert!(
+        stale.is_empty(),
+        "workflows naming the deleted branch: {stale:?}"
+    );
+
+    let dependabot = read(".github/dependabot.yml");
+    for lock_dir in [
+        "/bud",
+        "/budzero",
+        "/fuzz",
+        "/crates/ai-inference",
+        "/crates/bpqs",
+        "/crates/budscan",
+        "/crates/note-packing",
+        "/crates/wallet-core",
+        "/xtask/gates",
+        "/xtask/release",
+        "/xtask/tools",
+    ] {
+        assert!(
+            dependabot.contains(&format!("\"{lock_dir}\"")),
+            "dependabot.yml does not cover {lock_dir}"
+        );
+    }
+}
