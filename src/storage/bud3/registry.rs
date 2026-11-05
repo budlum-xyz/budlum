@@ -33,6 +33,11 @@ use super::segment::Segmentation;
 use crate::core::hash::hash_fields_bytes;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// A Full share is lost after this many missed windows in a row.
+pub const FULL_MISSES_TO_LOSS: u64 = 2;
+/// A Mobile share is lost after this many missed windows in a row.
+pub const MOBILE_MISSES_TO_LOSS: u64 = 3;
+
 /// The state-root tag.
 pub const REGISTRY_TAG: &[u8] = b"BDLM_BUD3_REGISTRY_V1";
 
@@ -67,6 +72,27 @@ pub struct ShareState {
     pub passes: u64,
     /// Audits missed.
     pub misses: u64,
+    /// Misses since the last pass.
+    pub consecutive_misses: u64,
+    /// The share is lost (missed windows or an unseen holder) and waits for
+    /// repair.
+    pub lost: bool,
+    /// Index of the symbol root this share's symbols are under.
+    pub root: usize,
+}
+
+/// A symbol root and the ESI range it covers. The upload root covers ESI
+/// `0..symbols_per_segment`; each repair adds one root over its new ESIs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SymbolRoot {
+    /// Segment index.
+    pub segment: u64,
+    /// The root.
+    pub root: [u8; 32],
+    /// First ESI under it; position = ESI - `first_esi`.
+    pub first_esi: u32,
+    /// Symbols under it.
+    pub count: u32,
 }
 
 /// One object.
@@ -82,6 +108,11 @@ pub struct ObjectEntry {
     pub expires_at: u64,
     /// Every share of every segment.
     pub shares: Vec<ShareState>,
+    /// The upload roots, then the repair roots.
+    pub roots: Vec<SymbolRoot>,
+    /// Per segment, the next ESI never yet used. Repair takes new ESIs from
+    /// here, so a lost ESI is never produced twice.
+    pub next_esi: Vec<u32>,
 }
 
 /// Audit windows and probabilities, in epochs and ppm.
@@ -140,6 +171,8 @@ pub enum RegistryError {
     Declined,
     /// The proof answers no open audit, or fails.
     BadProof,
+    /// The segment needs no repair, or the repair does not replace the loss.
+    BadRepair(&'static str),
 }
 
 /// What a registration did.
@@ -269,8 +302,23 @@ impl Bud3Registry {
                 open_audit: None,
                 passes: 0,
                 misses: 0,
+                consecutive_misses: 0,
+                lost: false,
+                root: usize::try_from(segment).unwrap_or(usize::MAX),
             })
             .collect();
+        let roots = record
+            .symbol_roots
+            .iter()
+            .enumerate()
+            .map(|(i, r)| SymbolRoot {
+                segment: i as u64,
+                root: *r,
+                first_esi: 0,
+                count: record.symbols_per_segment,
+            })
+            .collect();
+        let next_esi = vec![record.symbols_per_segment; record.symbol_roots.len()];
         if public {
             self.public_index.insert(digest, key);
         }
@@ -282,6 +330,8 @@ impl Bud3Registry {
                 references: BTreeSet::new(),
                 expires_at,
                 shares,
+                roots,
+                next_esi,
             },
         );
         Ok(Registered::New(key))
@@ -433,9 +483,12 @@ impl Bud3Registry {
         for obj in self.objects.values_mut() {
             let subs = sub_block_count(usize::from(obj.record.profile.symbol_size));
             for s in &mut obj.shares {
-                if s.status != ShareStatus::Confirmed || s.open_audit.is_some() {
+                if s.status != ShareStatus::Confirmed || s.open_audit.is_some() || s.lost {
                     continue;
                 }
+                let Some(root) = obj.roots.get(s.root) else {
+                    continue;
+                };
                 let (ppm, window) = match s.share.class {
                     Class::Full => (params.full_ppm, params.full_window),
                     Class::Mobile => (params.mobile_ppm, params.mobile_window),
@@ -443,7 +496,7 @@ impl Bud3Registry {
                 let r = ShareRef {
                     segment: s.segment,
                     holder: s.share.validator,
-                    first_position: u64::from(s.share.first_esi),
+                    first_position: u64::from(s.share.first_esi.saturating_sub(root.first_esi)),
                     symbols: u64::from(s.share.symbols),
                 };
                 if let Some(a) = audit_for(seed, &r, ppm, subs) {
@@ -472,16 +525,6 @@ impl Bud3Registry {
         let mut hits = Vec::new();
         for (key, proof) in proofs {
             let obj = self.objects.get(key).ok_or(RegistryError::UnknownObject)?;
-            let root = obj
-                .record
-                .symbol_roots
-                .get(usize::try_from(proof.segment).map_err(|_| RegistryError::BadProof)?)
-                .ok_or(RegistryError::BadProof)?;
-            let ctx = ProofContext {
-                symbol_root: *root,
-                symbol_count: u64::from(obj.record.symbols_per_segment),
-                sub_blocks: sub_block_count(usize::from(obj.record.profile.symbol_size)),
-            };
             let idx = obj
                 .shares
                 .iter()
@@ -492,11 +535,14 @@ impl Bud3Registry {
                             .is_some_and(|(a, last)| a.position == proof.position && epoch <= last)
                 })
                 .ok_or(RegistryError::BadProof)?;
-            let (audit, _) = obj
-                .shares
-                .get(idx)
-                .and_then(|s| s.open_audit)
-                .ok_or(RegistryError::BadProof)?;
+            let share = obj.shares.get(idx).ok_or(RegistryError::BadProof)?;
+            let (audit, _) = share.open_audit.ok_or(RegistryError::BadProof)?;
+            let root = obj.roots.get(share.root).ok_or(RegistryError::BadProof)?;
+            let ctx = ProofContext {
+                symbol_root: root.root,
+                symbol_count: u64::from(root.count),
+                sub_blocks: sub_block_count(usize::from(obj.record.profile.symbol_size)),
+            };
             proof
                 .verify(&audit, &ctx)
                 .map_err(|_| RegistryError::BadProof)?;
@@ -513,6 +559,7 @@ impl Bud3Registry {
             {
                 s.open_audit = None;
                 s.passes += 1;
+                s.consecutive_misses = 0;
             }
         }
         Ok(hits.len())
@@ -527,11 +574,190 @@ impl Bud3Registry {
                 if s.open_audit.is_some_and(|(_, last)| last < epoch) {
                     s.open_audit = None;
                     s.misses += 1;
+                    s.consecutive_misses += 1;
                     missed += 1;
+                    let limit = match s.share.class {
+                        Class::Full => FULL_MISSES_TO_LOSS,
+                        Class::Mobile => MOBILE_MISSES_TO_LOSS,
+                    };
+                    if s.consecutive_misses >= limit {
+                        s.lost = true;
+                    }
                 }
             }
         }
         missed
+    }
+
+    /// Mark every share of `holder` lost: the holder was unseen for its
+    /// class window (one day Full, seven days Mobile). Returns how many.
+    pub fn mark_unseen(&mut self, holder: &Address) -> usize {
+        let mut n = 0;
+        for obj in self.objects.values_mut() {
+            for s in obj
+                .shares
+                .iter_mut()
+                .filter(|s| s.share.validator == *holder)
+            {
+                if !s.lost {
+                    s.lost = true;
+                    s.open_audit = None;
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    /// The segments of `key` that need repair. Repair is lazy: a segment is
+    /// due once its lost shares reach half its tolerance `f`, where `f` is the
+    /// number of its largest shares it can lose and keep `k + 2` symbols.
+    #[must_use]
+    pub fn repairs_due(&self, key: &ObjectKey) -> Vec<u64> {
+        let Some(obj) = self.objects.get(key) else {
+            return Vec::new();
+        };
+        let Some(seg) = Segmentation::new(obj.record.object_len, &obj.record.profile) else {
+            return Vec::new();
+        };
+        (0..seg.count())
+            .filter(|&index| {
+                let need = seg
+                    .source_symbols(index)
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(2);
+                let mut sizes: Vec<u64> = obj
+                    .shares
+                    .iter()
+                    .filter(|s| s.segment == index)
+                    .map(|s| u64::from(s.share.symbols))
+                    .collect();
+                sizes.sort_unstable_by(|a, b| b.cmp(a));
+                let total: u64 = sizes.iter().sum();
+                let mut f = 0u64;
+                let mut left = total;
+                for sz in &sizes {
+                    if left.saturating_sub(*sz) < need {
+                        break;
+                    }
+                    left -= sz;
+                    f += 1;
+                }
+                let lost = obj
+                    .shares
+                    .iter()
+                    .filter(|s| s.segment == index && s.lost)
+                    .count() as u64;
+                lost > 0 && lost >= (f / 2).max(1)
+            })
+            .collect()
+    }
+
+    /// `RecordRepair`: a Full repairer decoded the segment and placed new
+    /// symbols with new ESIs on new holders. The new shares start pending;
+    /// the lost shares they replace stay until every new share is confirmed.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::BadRepair`] when the segment needs no repair, the new
+    /// ESIs reuse an old one or overlap, or the new symbols do not replace
+    /// the lost ones; [`RegistryError::UnknownObject`].
+    pub fn record_repair(
+        &mut self,
+        key: &ObjectKey,
+        segment: u64,
+        new_shares: Vec<Share>,
+        new_root: [u8; 32],
+    ) -> Result<(), RegistryError> {
+        if !self.repairs_due(key).contains(&segment) {
+            return Err(RegistryError::BadRepair("segment needs no repair"));
+        }
+        let obj = self
+            .objects
+            .get_mut(key)
+            .ok_or(RegistryError::UnknownObject)?;
+        let seg_idx = usize::try_from(segment).map_err(|_| RegistryError::BadRepair("segment"))?;
+        let first = *obj
+            .next_esi
+            .get(seg_idx)
+            .ok_or(RegistryError::BadRepair("segment"))?;
+        let mut sorted = new_shares.clone();
+        sorted.sort_by_key(|s| s.first_esi);
+        let mut next = u64::from(first);
+        for s in &sorted {
+            if s.symbols == 0 || u64::from(s.first_esi) != next {
+                return Err(RegistryError::BadRepair(
+                    "new ESIs must be fresh and contiguous",
+                ));
+            }
+            next += u64::from(s.symbols);
+        }
+        if next > u64::from(super::fountain::MAX_ESI) {
+            return Err(RegistryError::BadRepair("ESI range"));
+        }
+        let added = next - u64::from(first);
+        let lost: u64 = obj
+            .shares
+            .iter()
+            .filter(|s| s.segment == segment && s.lost)
+            .map(|s| u64::from(s.share.symbols))
+            .sum();
+        if added < lost {
+            return Err(RegistryError::BadRepair("fewer new symbols than lost"));
+        }
+        let count = u32::try_from(added).map_err(|_| RegistryError::BadRepair("ESI range"))?;
+        obj.roots.push(SymbolRoot {
+            segment,
+            root: new_root,
+            first_esi: first,
+            count,
+        });
+        let root = obj.roots.len() - 1;
+        for share in sorted {
+            obj.shares.push(ShareState {
+                segment,
+                share,
+                status: ShareStatus::Pending,
+                open_audit: None,
+                passes: 0,
+                misses: 0,
+                consecutive_misses: 0,
+                lost: false,
+                root,
+            });
+        }
+        if let Some(n) = obj.next_esi.get_mut(seg_idx) {
+            *n = first.saturating_add(count);
+        }
+        Ok(())
+    }
+
+    /// Drop the lost shares of every segment whose repair shares are all
+    /// confirmed. Old shares never go before the new ones hold. Returns how
+    /// many were dropped.
+    pub fn settle_repairs(&mut self) -> usize {
+        let mut dropped = 0;
+        for obj in self.objects.values_mut() {
+            let upload_roots = obj.record.symbol_roots.len();
+            let settled: BTreeSet<u64> = obj
+                .roots
+                .iter()
+                .enumerate()
+                .skip(upload_roots)
+                .filter(|(i, _)| {
+                    obj.shares
+                        .iter()
+                        .filter(|s| s.root == *i)
+                        .all(|s| s.status == ShareStatus::Confirmed)
+                })
+                .map(|(_, r)| r.segment)
+                .collect();
+            let before = obj.shares.len();
+            obj.shares
+                .retain(|s| !(s.lost && settled.contains(&s.segment)));
+            dropped += before - obj.shares.len();
+        }
+        dropped
     }
 
     /// The registry state root over every map, in order.
@@ -553,8 +779,17 @@ impl Bud3Registry {
                 &o.expires_at.to_le_bytes(),
                 &(o.references.len() as u64).to_le_bytes(),
             ]);
-            for r in &o.record.symbol_roots {
-                fold(&[b"root", r]);
+            for r in &o.roots {
+                fold(&[
+                    b"root",
+                    &r.segment.to_le_bytes(),
+                    &r.root,
+                    &r.first_esi.to_le_bytes(),
+                    &r.count.to_le_bytes(),
+                ]);
+            }
+            for n in &o.next_esi {
+                fold(&[b"next", &n.to_le_bytes()]);
             }
             for nft in &o.references {
                 fold(&[b"ref", nft]);
@@ -584,6 +819,9 @@ impl Bud3Registry {
                     &audit,
                     &s.passes.to_le_bytes(),
                     &s.misses.to_le_bytes(),
+                    &s.consecutive_misses.to_le_bytes(),
+                    &[u8::from(s.lost)],
+                    &(s.root as u64).to_le_bytes(),
                 ]);
             }
         }
@@ -853,6 +1091,123 @@ mod tests {
             .filter(|s| s.share.class == Class::Mobile)
             .count();
         assert_eq!(r.close_windows(26), mobile);
+    }
+
+    #[test]
+    fn lost_shares_are_repaired_with_fresh_esis_and_old_ones_go_last() {
+        use super::super::custody::symbol_root;
+        use super::super::fountain::SegmentEncoder;
+        let mut r = Bud3Registry::default();
+        let content: Vec<u8> = (0..1500u32).map(|i| (i % 249) as u8).collect();
+        let (up, shares) = upload(&content);
+        let key = up.record.commitment;
+        r.register_object(addr(1), up.record.clone(), shares, 0, 1000)
+            .unwrap();
+        for h in 0..4u8 {
+            r.ack(&key, &addr(10 + h)).unwrap();
+        }
+        assert!(r.repairs_due(&key).is_empty());
+        // k = 12 for this one-segment object; 20 symbols, four shares of 5:
+        // tolerance f = 1, so one lost share is due.
+        assert_eq!(r.mark_unseen(&addr(13)), 1);
+        assert_eq!(r.repairs_due(&key), vec![0]);
+
+        // The repairer decodes the segment and makes repair ESIs 20..25.
+        let seg_bytes = super::super::pipeline::view_public(
+            &up.record,
+            up.segments.concat().into_iter().filter(|s| s.esi < 15),
+        )
+        .unwrap();
+        assert_eq!(seg_bytes, content);
+        let obj_bytes = super::super::bof1::Object::raw_public(&content).encode();
+        let enc = SegmentEncoder::new(0, &obj_bytes, &P).unwrap();
+        let k = enc.k();
+        let fresh = enc.repair_symbols(20 - k, 5).unwrap();
+        assert_eq!(fresh[0].esi, 20);
+        let leaves: Vec<(u32, [u8; 32])> = fresh
+            .iter()
+            .map(|x| (x.esi, symbol_leaf(&x.data)))
+            .collect();
+        let new_root = symbol_root(&leaves);
+        let new_share = Share {
+            validator: addr(20),
+            class: Class::Full,
+            first_esi: 20,
+            symbols: 5,
+        };
+
+        // Reusing a lost ESI is refused.
+        let reuse = Share {
+            first_esi: 15,
+            ..new_share
+        };
+        assert!(matches!(
+            r.record_repair(&key, 0, vec![reuse], new_root),
+            Err(RegistryError::BadRepair(_))
+        ));
+        let short = Share {
+            symbols: 4,
+            ..new_share
+        };
+        assert!(matches!(
+            r.record_repair(&key, 0, vec![short], new_root),
+            Err(RegistryError::BadRepair("fewer new symbols than lost"))
+        ));
+        r.record_repair(&key, 0, vec![new_share], new_root).unwrap();
+        assert_eq!(r.object(&key).unwrap().next_esi, vec![25]);
+
+        // The lost share stays until the new one is confirmed.
+        assert_eq!(r.settle_repairs(), 0);
+        r.ack(&key, &addr(20)).unwrap();
+        assert_eq!(r.settle_repairs(), 1);
+        assert!(r.object(&key).unwrap().shares.iter().all(|s| !s.lost));
+        assert!(r.repairs_due(&key).is_empty());
+
+        // The new share is audited against the repair root.
+        let params = AuditParams {
+            full_ppm: 1_000_000,
+            mobile_ppm: 1_000_000,
+            ..AuditParams::TESTNET_DEFAULT
+        };
+        r.open_audits(&[8; 32], 5, &params);
+        let s = r
+            .object(&key)
+            .unwrap()
+            .shares
+            .iter()
+            .find(|s| s.share.validator == addr(20))
+            .unwrap()
+            .clone();
+        let (a, _) = s.open_audit.unwrap();
+        let pos = a.position as usize;
+        let proof = prove(0, &leaves, pos, &fresh[pos].data, a.sub_block as usize).unwrap();
+        assert_eq!(r.submit_proofs(&addr(20), &[(key, proof)], 6), Ok(1));
+    }
+
+    #[test]
+    fn missed_windows_in_a_row_lose_a_share() {
+        let mut r = Bud3Registry::default();
+        let (up, shares) = upload(b"miss");
+        let key = up.record.commitment;
+        r.register_object(addr(1), up.record, shares, 0, 1000)
+            .unwrap();
+        r.ack(&key, &addr(10)).unwrap();
+        let params = AuditParams {
+            full_ppm: 1_000_000,
+            ..AuditParams::TESTNET_DEFAULT
+        };
+        for epoch in [0u64, 10] {
+            r.open_audits(&[epoch as u8; 32], epoch, &params);
+            r.close_windows(epoch + 3);
+        }
+        let s = r
+            .object(&key)
+            .unwrap()
+            .shares
+            .iter()
+            .find(|s| s.share.validator == addr(10))
+            .unwrap();
+        assert_eq!((s.misses, s.lost), (2, true));
     }
 
     #[test]
