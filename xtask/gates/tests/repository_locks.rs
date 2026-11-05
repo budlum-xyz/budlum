@@ -77,7 +77,9 @@ fn workflows_and_dependabot_are_current() {
         .flatten()
     {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.ends_with(".yml")
+        if std::path::Path::new(&name)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("yml"))
             && std::fs::read_to_string(entry.path())
                 .is_ok_and(|t| t.contains("fix/architecture-tip-adlari"))
         {

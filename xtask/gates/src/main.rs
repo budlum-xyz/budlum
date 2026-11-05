@@ -1419,22 +1419,6 @@ fn all_selection(self_test: bool) -> Vec<&'static Gate> {
         .collect()
 }
 
-#[cfg(test)]
-mod all_selection_tests {
-    use super::*;
-
-    /// `budlum-gates --all` must run `tree-pin`, whose plain run
-    /// (no `--pin`) is a verification that needs no argument.
-    #[test]
-    fn all_runs_tree_pin() {
-        let names: Vec<&str> = all_selection(false).iter().map(|g| g.name).collect();
-        assert!(names.contains(&"tree-pin"), "`--all` skips tree-pin");
-        let canaries: Vec<&str> = all_selection(true).iter().map(|g| g.name).collect();
-        assert!(canaries.contains(&"tree-pin"));
-        assert_eq!(canaries.len(), GATES.len(), "every canary runs");
-    }
-}
-
 fn usage() -> String {
     let mut s = String::from(
         "usage:\n  \
@@ -1545,5 +1529,21 @@ fn main() {
             failed.join(", ")
         );
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod all_selection_tests {
+    use super::*;
+
+    /// `budlum-gates --all` must run `tree-pin`, whose plain run
+    /// (no `--pin`) is a verification that needs no argument.
+    #[test]
+    fn all_runs_tree_pin() {
+        let names: Vec<&str> = all_selection(false).iter().map(|g| g.name).collect();
+        assert!(names.contains(&"tree-pin"), "`--all` skips tree-pin");
+        let canaries: Vec<&str> = all_selection(true).iter().map(|g| g.name).collect();
+        assert!(canaries.contains(&"tree-pin"));
+        assert_eq!(canaries.len(), GATES.len(), "every canary runs");
     }
 }
