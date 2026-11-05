@@ -133,7 +133,7 @@ pub enum ChainCommand {
         oneshot::Sender<Option<crate::chain::finality::FinalityCert>>,
     ),
     GetPqStageObservation(
-        crate::domain::regeneration_stage::Stage,
+        crate::chain::state_recovery::regeneration_stage::Stage,
         u64,
         oneshot::Sender<crate::chain::blockchain::PqStageObservation>,
     ),
@@ -1340,7 +1340,7 @@ impl ChainHandle {
     /// commitment with its seal, for one regeneration stage and height.
     pub async fn pq_stage_observation(
         &self,
-        stage: crate::domain::regeneration_stage::Stage,
+        stage: crate::chain::state_recovery::regeneration_stage::Stage,
         height: u64,
     ) -> crate::chain::blockchain::PqStageObservation {
         let (tx, rx) = oneshot::channel();

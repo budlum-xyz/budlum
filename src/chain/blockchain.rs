@@ -2003,10 +2003,10 @@ impl Blockchain {
     /// there (a restart empties the memory source).
     pub fn pq_stage_observation(
         &mut self,
-        stage: crate::domain::regeneration_stage::Stage,
+        stage: crate::chain::state_recovery::regeneration_stage::Stage,
         height: u64,
     ) -> PqStageObservation {
-        use crate::domain::regeneration_stage::Stage;
+        use crate::chain::state_recovery::regeneration_stage::Stage;
         if stage == Stage::Medusa && self.pq_source.canonical(stage, height).is_none() {
             self.rehydrate_finality(height);
         }
@@ -2069,7 +2069,7 @@ impl Blockchain {
     /// or below `live` (Ephyra).
     #[must_use]
     pub fn pq_sealed_heights(&self, live: u64) -> (Option<u64>, Option<u64>) {
-        use crate::domain::regeneration_stage::Stage;
+        use crate::chain::state_recovery::regeneration_stage::Stage;
         (
             self.pq_source.latest_height(Stage::Polyp),
             self.pq_source.latest_at_or_below(Stage::Ephyra, live),

@@ -34,18 +34,18 @@
 //!
 //! A repair verdict opens a sync round, which is how the runtime fetches
 //! canonical blocks and replaces a diverged branch. A revert verdict moves
-//! the ledger through [`RegenerationLedger::revert`] (or
-//! [`RegenerationLedger::revert_after_forgery`] when the audit trail does not
+//! the ledger through [`RecoveryLedger::revert`] (or
+//! [`RecoveryLedger::revert_after_forgery`] when the audit trail does not
 //! validate) and also opens a sync round to re-grow. The ledger grows back
-//! through [`RegenerationLedger::grow`] only when the node's own block at the
+//! through [`RecoveryLedger::grow`] only when the node's own block at the
 //! next checkpoint matches the certificate. Rolling chain storage back to
 //! the target checkpoint is a chain state transition that the chain actor
 //! does not define, so this tick does not do it.
 
 use crate::domain::pq_canonical::SealId;
-use crate::domain::regen_health::{assess, AlarmReason, HealthPolicy, HealthVerdict};
-use crate::domain::regeneration_stage::{
-    RegenerationLedger, Reversion, ReversionError, Stage, StageSnapshot, Stress,
+use crate::chain::state_recovery::regen_health::{assess, AlarmReason, HealthPolicy, HealthVerdict};
+use crate::chain::state_recovery::regeneration_stage::{
+    RecoveryLedger, Reversion, ReversionError, Stage, StageSnapshot, Stress,
 };
 
 /// One sealed checkpoint of one stage as the node sees it.
@@ -158,7 +158,7 @@ impl TickOutcome {
 /// The node's reversion ledger and the policy the tick assesses it with.
 #[derive(Debug, Clone)]
 pub struct RegenHealthTick {
-    ledger: RegenerationLedger,
+    ledger: RecoveryLedger,
     policy: HealthPolicy,
 }
 
@@ -172,7 +172,7 @@ impl RegenHealthTick {
     #[must_use]
     pub fn new(policy: HealthPolicy) -> Self {
         Self {
-            ledger: RegenerationLedger::default(),
+            ledger: RecoveryLedger::default(),
             policy,
         }
     }
@@ -305,7 +305,7 @@ mod tests {
     use super::*;
     use crate::crypto::scheme::SchemeId;
     use crate::domain::pq_canonical::{test_seal, SealKind};
-    use crate::domain::regeneration_stage::ReversionPolicy;
+    use crate::chain::state_recovery::regeneration_stage::ReversionPolicy;
 
     const INTERVAL: u64 = 100;
 
