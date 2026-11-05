@@ -4803,6 +4803,12 @@ impl Blockchain {
                 }
             }
         }
+        // A checkpoint block carries the participation record for the previous
+        // checkpoint (section 7.5.1): the seats whose precommits this proposer
+        // collected. An honest proposer records every vote it saw. It is set
+        // before the roots and the hash, because the next seat table is derived
+        // from it and the block hash must seal it.
+        block.seat_participation = self.collect_seat_participation(block.index);
         Self::apply_block_end_roots(&mut committed_state, &block, &self.chain, self.chain_id);
         block.state_root = committed_state.calculate_state_root();
         if self.sharding.is_active_at(block.index) {
@@ -5128,7 +5134,11 @@ impl Blockchain {
         }
         self.require_checkpoint_epoch(cert.epoch, cert.checkpoint_height, "Segment certificate")?;
         let snapshot = self.require_validator_snapshot(cert.epoch)?;
-        cert.verify(&snapshot)?;
+        // Count under the table the round used, so a certificate produced after
+        // an Instant Seat Handover verifies (section 7.5).
+        let committee =
+            self.seat_table_for_checkpoint(cert.epoch, cert.checkpoint_height, &snapshot);
+        cert.verify_with_committee(&snapshot, &committee)?;
         Self::ensure_blob_matches_checkpoint(qc, &cert.checkpoint_hash)?;
         crate::domain::finality_adapter::verify_pq_quorum(
             &self.state.scheme_registry,
@@ -6453,7 +6463,9 @@ impl Blockchain {
             self.state.settlement.quantum.alarm(),
         );
         if bls_required {
-            cert.verify(&snapshot)?;
+            let committee =
+                self.seat_table_for_checkpoint(cert.epoch, cert.checkpoint_height, &snapshot);
+            cert.verify_with_committee(&snapshot, &committee)?;
         } else {
             if cert.set_hash != snapshot.set_hash {
                 return Err("Validator set hash mismatch".into());
@@ -7492,16 +7504,122 @@ impl Blockchain {
         // The round's own hash, kept for the replay below: the aggregator
         // takes ownership of the one it is built with.
         let round_hash = checkpoint_hash.clone();
-        let aggregator = FinalityAggregator::new(
-            self.chain_id,
+        // The table carries Instant Seat Handover: seats missing from the two
+        // previous finalized participation records have already moved to their
+        // standbys, so this round counts the votes of the validators that
+        // actually hold the seats now (section 7.5.1).
+        let committee = self.seat_table_for_checkpoint(epoch, checkpoint_height, &snapshot);
+        let aggregator = FinalityAggregator::with_committee(
             epoch,
             checkpoint_height,
             checkpoint_hash,
             snapshot,
+            committee,
         );
         self.finality_aggregator = Some(aggregator);
         info!("Started prevote task for checkpoint height={checkpoint_height} (epoch={epoch})");
         self.replay_early_prevotes(epoch, checkpoint_height, &round_hash);
+    }
+
+    /// The participation record a block at `height` carries (section 7.5.1).
+    ///
+    /// A checkpoint block reports the seats whose precommits for the PREVIOUS
+    /// checkpoint this node collected. `None` on a non-checkpoint height, and
+    /// on a checkpoint whose previous height is not one (the first checkpoint
+    /// of the chain has no earlier one to report).
+    fn collect_seat_participation(
+        &self,
+        height: u64,
+    ) -> Option<crate::validators::committee::SeatParticipation> {
+        use crate::validators::committee::SeatParticipation;
+        let interval =
+            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(self.chain_id);
+        if height == 0 || !height.is_multiple_of(interval) {
+            return None;
+        }
+        let previous = height.checked_sub(interval)?;
+        if previous == 0 {
+            return None;
+        }
+        // The votes are read from the round this node actually ran for that
+        // checkpoint. The aggregator keeps its own seat table, so the bitmap
+        // names the seats those votes were counted under.
+        let aggregator = self
+            .finality_aggregator
+            .as_ref()
+            .filter(|a| a.checkpoint_height == previous)?;
+        Some(SeatParticipation::collect(
+            &aggregator.committee,
+            previous,
+            aggregator.precommits.keys(),
+        ))
+    }
+
+    /// The seat table a checkpoint's votes are counted under, with Instant Seat
+    /// Handover applied (section 7.5.1).
+    ///
+    /// The base table comes from the epoch's eligible set. The epoch's finalized
+    /// checkpoint blocks then replay every handover in order: a seat missing
+    /// from two consecutive participation records moves to its standby, at most
+    /// `ceil(S / 10)` per checkpoint. Only finalized blocks are read (V-3), so
+    /// every honest node derives the same table and a block still in flight
+    /// cannot move a seat. Replaying from the epoch start rather than applying
+    /// one step keeps earlier handovers in force, and needs no mutable state
+    /// that a restart could lose.
+    fn seat_table_for_checkpoint(
+        &self,
+        epoch: u64,
+        checkpoint_height: u64,
+        snapshot: &ValidatorSetSnapshot,
+    ) -> crate::validators::committee::CommitteeTable {
+        use crate::validators::committee::CommitteeTable;
+        let interval =
+            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(self.chain_id);
+        let epoch_len = crate::core::chain_config::epoch_len_for_chain_id(self.chain_id);
+        let epoch_start = epoch.saturating_mul(epoch_len);
+        let mut table = CommitteeTable::for_snapshot(snapshot, checkpoint_height, self.chain_id);
+        let mut lost = std::collections::BTreeSet::new();
+        let record_at = |height: u64| {
+            self.chain
+                .get(usize::try_from(height).ok()?)
+                .filter(|block| block.index == height)
+                .and_then(|block| block.seat_participation.clone())
+        };
+        // A pair is (block at h-I, block at h): their records report the two
+        // checkpoints before h. Both must be finalized and inside this epoch.
+        let mut height = epoch_start.saturating_add(interval.saturating_mul(2));
+        let stop = checkpoint_height.min(self.finalized_height.saturating_add(interval));
+        while height <= stop {
+            let Some(current_height) = height.checked_sub(interval) else {
+                break;
+            };
+            let Some(previous_height) = current_height.checked_sub(interval) else {
+                break;
+            };
+            if previous_height < epoch_start {
+                height = height.saturating_add(interval);
+                continue;
+            }
+            if let (Some(previous), Some(current)) =
+                (record_at(previous_height), record_at(current_height))
+            {
+                // A record must name the checkpoint it reports for; a misplaced
+                // one is ignored rather than trusted to move a seat.
+                if previous.checkpoint == previous_height.saturating_sub(interval)
+                    && current.checkpoint == previous_height
+                {
+                    let (next, next_lost) =
+                        table.hand_over(&previous, &current, current_height, &lost);
+                    table = next;
+                    lost = next_lost;
+                }
+            }
+            height = height.saturating_add(interval);
+        }
+        // `hand_over` advances the version only when seats actually moved, so an
+        // epoch with no handover keeps the base version and its certificates
+        // verify against the base table a snapshot-only verifier can derive.
+        table
     }
 
     pub fn get_aggregator_state(&self) -> crate::chain::finality::AggregatorState {
@@ -9112,6 +9230,7 @@ mod tests {
             agg_sig_bls: vec![1],
             bitmap: vec![1],
             set_hash: "set".to_string(),
+            seat_table_version: 0,
         };
 
         let duplicate = make_cert("hash-0");

@@ -874,6 +874,7 @@ mod tests {
             agg_sig_bls: Vec::new(),
             bitmap: vec![1],
             set_hash: snapshot.set_hash.clone(),
+            seat_table_version: 0,
         };
         let err = client
             .verify_checkpoint(&header, &cert, &snapshot)
