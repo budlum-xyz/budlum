@@ -37,8 +37,8 @@ use crate::cross_domain::evm::header::{verify_chain, EthHeader};
 use crate::cross_domain::evm::mpt::{self, MptError};
 use crate::cross_domain::evm::receipt::{self, EthReceipt, ReceiptError};
 use crate::cross_domain::evm::sync_committee::{
-    verify_execution_block_finality, BeaconBinding, BeaconChainParams, SyncAggregate,
-    SyncCommitteeError, SyncCommitteeState,
+    verify_execution_block_finality, BeaconBinding, BeaconChainParams, FinalityUpdate,
+    SyncAggregate, SyncCommitteeError, SyncCommitteeState,
 };
 use serde::{Deserialize, Serialize};
 /// A `verify_evm_receipt` failure; every sub-step's error is wrapped here.
@@ -236,9 +236,13 @@ pub struct SyncAttestation<'a> {
     pub state: &'a SyncCommitteeState,
     /// The bitmap and aggregate signature the relayer observed.
     pub aggregate: &'a SyncAggregate,
-    /// The beacon header the committee signed and the branch that places
-    /// the target execution block inside it.
+    /// The finalized beacon header and the branch that places the target
+    /// execution block inside it.
     pub beacon: &'a BeaconBinding,
+    /// The header the committee signed and the branch proving `beacon` is
+    /// its finalized checkpoint (BLG-235). A signed head alone is not
+    /// finality.
+    pub finality: &'a FinalityUpdate,
     /// Fork version and genesis validators root. The adapter's, never the
     /// proof's: a proof choosing its own domain chooses which chain it is
     /// finalized on.
@@ -321,6 +325,7 @@ pub fn verify_evm_receipt(
                 attestation.state,
                 attestation.aggregate,
                 attestation.beacon,
+                attestation.finality,
                 attestation.chain,
                 &target.hash,
             )?;
@@ -747,12 +752,14 @@ mod tests {
     };
 
     use crate::cross_domain::evm::sync_committee::fixtures::{
-        binding_committing_to as beacon_for, first_slot_of_period,
+        binding_committing_to as beacon_for, finality_for, first_slot_of_period,
     };
 
     const TEST_CHAIN: BeaconChainParams = BeaconChainParams {
         fork_version: [0x04, 0, 0, 0],
         genesis_validators_root: [0x42; 32],
+        finalized_root_gindex:
+            crate::cross_domain::evm::sync_committee::FINALIZED_ROOT_GINDEX_DENEB,
     };
 
     fn empty_committee() -> SyncCommitteeState {
@@ -836,6 +843,7 @@ mod tests {
             crate::cross_domain::evm::mpt::keccak256(&f.target_header),
             0,
         );
+        let beacon_finality = finality_for(&beacon, TEST_CHAIN.finalized_root_gindex, 64);
         let proof = proof_with_attestation(
             &f,
             &confs,
@@ -845,6 +853,7 @@ mod tests {
                 state: &state,
                 aggregate: &aggregate,
                 beacon: &beacon,
+                finality: &beacon_finality,
                 chain: &TEST_CHAIN,
             }),
         );
@@ -887,6 +896,7 @@ mod tests {
             crate::cross_domain::evm::mpt::keccak256(&f.target_header),
             0,
         );
+        let beacon_finality = finality_for(&beacon, TEST_CHAIN.finalized_root_gindex, 64);
         let proof = proof_with_attestation(
             &f,
             &confs,
@@ -896,6 +906,7 @@ mod tests {
                 state: &state,
                 aggregate: &aggregate,
                 beacon: &beacon,
+                finality: &beacon_finality,
                 chain: &TEST_CHAIN,
             }),
         );
@@ -929,6 +940,7 @@ mod tests {
             crate::cross_domain::evm::mpt::keccak256(&f.target_header),
             0,
         );
+        let beacon_finality = finality_for(&beacon, TEST_CHAIN.finalized_root_gindex, 64);
         let proof = proof_with_attestation(
             &f,
             &confs,
@@ -938,6 +950,7 @@ mod tests {
                 state: &state,
                 aggregate: &aggregate,
                 beacon: &beacon,
+                finality: &beacon_finality,
                 chain: &TEST_CHAIN,
             }),
         );
@@ -969,6 +982,7 @@ mod tests {
         let aggregate = aggregate_with_participation(true);
 
         let other_block = beacon_for([0xEE; 32], 0);
+        let other_block_finality = finality_for(&other_block, TEST_CHAIN.finalized_root_gindex, 64);
         let proof = proof_with_attestation(
             &f,
             &confs,
@@ -978,6 +992,7 @@ mod tests {
                 state: &state,
                 aggregate: &aggregate,
                 beacon: &other_block,
+                finality: &other_block_finality,
                 chain: &TEST_CHAIN,
             }),
         );
@@ -990,6 +1005,8 @@ mod tests {
 
         let target_hash = crate::cross_domain::evm::mpt::keccak256(&f.target_header);
         let wrong_period = beacon_for(target_hash, first_slot_of_period(3));
+        let wrong_period_finality =
+            finality_for(&wrong_period, TEST_CHAIN.finalized_root_gindex, 64);
         let proof = proof_with_attestation(
             &f,
             &confs,
@@ -999,6 +1016,7 @@ mod tests {
                 state: &state,
                 aggregate: &aggregate,
                 beacon: &wrong_period,
+                finality: &wrong_period_finality,
                 chain: &TEST_CHAIN,
             }),
         );
@@ -1012,6 +1030,7 @@ mod tests {
         );
 
         let bound = beacon_for(target_hash, 0);
+        let bound_finality = finality_for(&bound, TEST_CHAIN.finalized_root_gindex, 64);
         let proof = proof_with_attestation(
             &f,
             &confs,
@@ -1021,6 +1040,7 @@ mod tests {
                 state: &state,
                 aggregate: &aggregate,
                 beacon: &bound,
+                finality: &bound_finality,
                 chain: &TEST_CHAIN,
             }),
         );
