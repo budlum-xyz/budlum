@@ -7537,10 +7537,7 @@ impl Blockchain {
         if height == 0 || !height.is_multiple_of(interval) {
             return None;
         }
-        let previous = height.checked_sub(interval)?;
-        if previous == 0 {
-            return None;
-        }
+        let previous = height.checked_sub(interval).filter(|h| *h > 0)?;
         // The votes are read from the round this node actually ran for that
         // checkpoint. The aggregator keeps its own seat table, so the bitmap
         // names the seats those votes were counted under.
