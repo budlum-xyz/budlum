@@ -13,3 +13,4 @@ description = "The single definition of how a privacy note's field element is pa
 
 [profile.release]
 overflow-checks = true
+panic = "abort"
