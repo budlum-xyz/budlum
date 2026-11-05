@@ -57,7 +57,7 @@ mod integration_tests {
         let sender_kp = crate::crypto::primitives::KeyPair::generate().unwrap();
         let sender = Address::from(sender_kp.public_key_bytes());
         state.add_balance(&sender, 10_000_000);
-        let mut params = state.registry.params().clone();
+        let mut params = *state.registry.params();
         params.transfer_fee_ppm = 200;
         state.registry.set_params(params);
 
