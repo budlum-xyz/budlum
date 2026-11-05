@@ -13,6 +13,7 @@
 //! | [`varint`] | Bounded LEB128 |
 //! | [`bof1`] | The BOF-1 object: canonical binary header and payload |
 //! | [`segment`] | Segmentation, segment digests and the object commitment |
+//! | [`custody`] | Sub-block tree, symbol root, the audit draw and custody proofs |
 //! | [`fountain`] | RFC 6330 per-segment encoder and decoder, and the streaming encoder |
 //!
 //! The commitment is fixed-size (32 bytes). The object is not fixed-size: it
@@ -26,6 +27,7 @@
 
 pub mod bof1;
 pub mod content_id;
+pub mod custody;
 pub mod fountain;
 pub mod limits;
 pub mod meter;
