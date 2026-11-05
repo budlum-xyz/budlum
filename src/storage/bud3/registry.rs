@@ -1,0 +1,866 @@
+//! The B.U.D. 3.0 chain state: objects, references, shares and audits.
+//!
+//! This is the state machine behind `StorageTx` v3. Every map is ordered, no
+//! step reads a clock (windows are epochs), and every refusal leaves the
+//! state unchanged, so two nodes that apply the same transactions reach the
+//! same [`Bud3Registry::state_root`].
+//!
+//! * Dedup: the public index maps a public content digest to the live object
+//!   that holds it. Registering public content that is already held stores
+//!   nothing new and returns the existing commitment. Sealed content never
+//!   reads or writes the public index, so dedup reveals nothing about it.
+//! * References: every bound NFT adds one reference. Burning an NFT, or the
+//!   expiry of the object, removes references; at zero the object's shares
+//!   are released and a tombstone is written. Deletion is final.
+//! * Shares: a share starts `Pending` and becomes `Confirmed` with the
+//!   holder's ack. Each epoch the audit seed draws audits for confirmed
+//!   shares; a valid proof inside the window marks a pass, a closed window
+//!   without one marks a miss. A miss withholds the window's reward; it never
+//!   slashes.
+//!
+//! WIRING: unwired - the `StorageTx` v3 transaction door and the block
+//! executor call these methods when the legacy storage registry is removed;
+//! until then the state machine is exercised by its tests.
+
+use super::content_id::{ContentId, ContentIdKind};
+use super::custody::{
+    audit_for, sub_block_count, Audit, CustodyProof, ProofContext, ShareRef, FULL_AUDIT_PPM,
+    MOBILE_AUDIT_PPM,
+};
+use super::pipeline::ObjectRecord;
+use super::placement::{Class, Share};
+use super::segment::Segmentation;
+use crate::core::hash::hash_fields_bytes;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// The state-root tag.
+pub const REGISTRY_TAG: &[u8] = b"BDLM_BUD3_REGISTRY_V1";
+
+/// An object is named by its commitment.
+pub type ObjectKey = [u8; 32];
+/// A validator or account address.
+pub type Address = [u8; 32];
+/// An NFT id.
+pub type NftId = [u8; 32];
+
+/// The life of a share.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShareStatus {
+    /// Placed, not yet acknowledged by the holder.
+    Pending,
+    /// The holder acknowledged it and is audited.
+    Confirmed,
+}
+
+/// One share as the chain tracks it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareState {
+    /// Segment index.
+    pub segment: u64,
+    /// Placement.
+    pub share: Share,
+    /// Status.
+    pub status: ShareStatus,
+    /// The open audit and the last epoch a proof is accepted.
+    pub open_audit: Option<(Audit, u64)>,
+    /// Audits passed.
+    pub passes: u64,
+    /// Audits missed.
+    pub misses: u64,
+}
+
+/// One object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectEntry {
+    /// The record the uploader registered.
+    pub record: ObjectRecord,
+    /// The uploader.
+    pub owner: Address,
+    /// Bound NFTs.
+    pub references: BTreeSet<NftId>,
+    /// The last epoch the object is paid for.
+    pub expires_at: u64,
+    /// Every share of every segment.
+    pub shares: Vec<ShareState>,
+}
+
+/// Audit windows and probabilities, in epochs and ppm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuditParams {
+    /// Full window, in epochs.
+    pub full_window: u64,
+    /// Mobile window, in epochs (24 hours converted to epochs).
+    pub mobile_window: u64,
+    /// Full audit probability.
+    pub full_ppm: u32,
+    /// Mobile audit probability.
+    pub mobile_ppm: u32,
+}
+
+impl AuditParams {
+    /// TESTNET-DEFAULT values; `mobile_window` assumes one-hour epochs.
+    pub const TESTNET_DEFAULT: Self = Self {
+        full_window: 2,
+        mobile_window: 24,
+        full_ppm: FULL_AUDIT_PPM,
+        mobile_ppm: MOBILE_AUDIT_PPM,
+    };
+
+    /// Convert an hour window to epochs: `ceil(hours x 3600 / (slot x epoch))`.
+    #[must_use]
+    pub const fn hours_to_epochs(hours: u64, slot_secs: u64, epoch_slots: u64) -> u64 {
+        let per = slot_secs.saturating_mul(epoch_slots);
+        if per == 0 {
+            return u64::MAX;
+        }
+        (hours.saturating_mul(3600)).div_ceil(per)
+    }
+}
+
+/// Why a storage transaction was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistryError {
+    /// The record is malformed (segment count, roots, lengths).
+    BadRecord(&'static str),
+    /// The placement does not give distinct ESIs covering `k + 2`.
+    BadPlacement(&'static str),
+    /// No such object.
+    UnknownObject,
+    /// The object was deleted.
+    Tombstoned,
+    /// No such NFT reference.
+    UnknownNft,
+    /// The NFT is already bound.
+    NftAlreadyBound,
+    /// The signer is not the one this transaction needs.
+    NotAuthorized,
+    /// A lifetime of zero, or one that overflows.
+    BadLifetime,
+    /// The validator declined this content.
+    Declined,
+    /// The proof answers no open audit, or fails.
+    BadProof,
+}
+
+/// What a registration did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Registered {
+    /// A new object was stored.
+    New(ObjectKey),
+    /// The public content is already held; nothing new was stored.
+    Deduplicated(ObjectKey),
+}
+
+/// The registry.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Bud3Registry {
+    objects: BTreeMap<ObjectKey, ObjectEntry>,
+    public_index: BTreeMap<[u8; 32], ObjectKey>,
+    nfts: BTreeMap<NftId, (ObjectKey, Address)>,
+    tombstones: BTreeMap<ObjectKey, u64>,
+    declines: BTreeSet<([u8; 32], Address)>,
+}
+
+fn check_placement(record: &ObjectRecord, shares: &[(u64, Share)]) -> Result<(), RegistryError> {
+    let seg = Segmentation::new(record.object_len, &record.profile)
+        .ok_or(RegistryError::BadRecord("profile"))?;
+    if record.symbol_roots.len() as u64 != seg.count() {
+        return Err(RegistryError::BadRecord("one symbol root per segment"));
+    }
+    for index in 0..seg.count() {
+        let k = seg
+            .source_symbols(index)
+            .ok_or(RegistryError::BadRecord("segment"))?;
+        if u64::from(record.symbols_per_segment) < k + 2 {
+            return Err(RegistryError::BadPlacement("fewer than k + 2 symbols"));
+        }
+        let mut ranges: Vec<(u32, u32)> = shares
+            .iter()
+            .filter(|(s, _)| *s == index)
+            .map(|(_, sh)| (sh.first_esi, sh.symbols))
+            .collect();
+        ranges.sort_unstable();
+        let mut next = 0u64;
+        let mut covered = 0u64;
+        for (first, n) in ranges {
+            if n == 0 {
+                return Err(RegistryError::BadPlacement("empty share"));
+            }
+            if u64::from(first) < next {
+                return Err(RegistryError::BadPlacement("overlapping ESIs"));
+            }
+            next = u64::from(first) + u64::from(n);
+            if next > u64::from(record.symbols_per_segment) {
+                return Err(RegistryError::BadPlacement("ESI past the coded symbols"));
+            }
+            covered += u64::from(n);
+        }
+        if covered < k + 2 {
+            return Err(RegistryError::BadPlacement("shares hold fewer than k + 2"));
+        }
+    }
+    if shares.iter().any(|(s, _)| *s >= seg.count()) {
+        return Err(RegistryError::BadPlacement("share of a missing segment"));
+    }
+    Ok(())
+}
+
+impl Bud3Registry {
+    /// A live object.
+    #[must_use]
+    pub fn object(&self, key: &ObjectKey) -> Option<&ObjectEntry> {
+        self.objects.get(key)
+    }
+
+    /// Whether `key` was deleted, and when.
+    #[must_use]
+    pub fn tombstone(&self, key: &ObjectKey) -> Option<u64> {
+        self.tombstones.get(key).copied()
+    }
+
+    /// `RegisterObject`. Public content already held is deduplicated.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError`] for a malformed record, a bad placement, a zero or
+    /// overflowing lifetime, a tombstoned commitment, or a share on a
+    /// validator that declined the content.
+    pub fn register_object(
+        &mut self,
+        owner: Address,
+        record: ObjectRecord,
+        shares: Vec<(u64, Share)>,
+        epoch: u64,
+        lifetime_epochs: u64,
+    ) -> Result<Registered, RegistryError> {
+        if lifetime_epochs == 0 {
+            return Err(RegistryError::BadLifetime);
+        }
+        let expires_at = epoch
+            .checked_add(lifetime_epochs)
+            .ok_or(RegistryError::BadLifetime)?;
+        let key = record.commitment;
+        if self.tombstones.contains_key(&key) {
+            return Err(RegistryError::Tombstoned);
+        }
+        let public = record.content_id.kind == ContentIdKind::Public;
+        if public {
+            if let Some(existing) = self.public_index.get(&record.content_id.digest) {
+                return Ok(Registered::Deduplicated(*existing));
+            }
+        }
+        if self.objects.contains_key(&key) {
+            return Ok(Registered::Deduplicated(key));
+        }
+        check_placement(&record, &shares)?;
+        let digest = record.content_id.digest;
+        if shares
+            .iter()
+            .any(|(_, s)| self.declines.contains(&(digest, s.validator)))
+        {
+            return Err(RegistryError::Declined);
+        }
+        let shares = shares
+            .into_iter()
+            .map(|(segment, share)| ShareState {
+                segment,
+                share,
+                status: ShareStatus::Pending,
+                open_audit: None,
+                passes: 0,
+                misses: 0,
+            })
+            .collect();
+        if public {
+            self.public_index.insert(digest, key);
+        }
+        self.objects.insert(
+            key,
+            ObjectEntry {
+                record,
+                owner,
+                references: BTreeSet::new(),
+                expires_at,
+                shares,
+            },
+        );
+        Ok(Registered::New(key))
+    }
+
+    /// `BindNft`: one more reference to a live object.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::UnknownObject`], [`RegistryError::Tombstoned`] or
+    /// [`RegistryError::NftAlreadyBound`].
+    pub fn bind_nft(
+        &mut self,
+        nft: NftId,
+        holder: Address,
+        key: &ObjectKey,
+    ) -> Result<(), RegistryError> {
+        if self.nfts.contains_key(&nft) {
+            return Err(RegistryError::NftAlreadyBound);
+        }
+        if self.tombstones.contains_key(key) {
+            return Err(RegistryError::Tombstoned);
+        }
+        let obj = self
+            .objects
+            .get_mut(key)
+            .ok_or(RegistryError::UnknownObject)?;
+        obj.references.insert(nft);
+        self.nfts.insert(nft, (*key, holder));
+        Ok(())
+    }
+
+    /// The reference count of an object.
+    #[must_use]
+    pub fn refcount(&self, key: &ObjectKey) -> u64 {
+        self.objects
+            .get(key)
+            .map_or(0, |o| o.references.len() as u64)
+    }
+
+    fn delete(&mut self, key: &ObjectKey, epoch: u64) {
+        if let Some(obj) = self.objects.remove(key) {
+            if obj.record.content_id.kind == ContentIdKind::Public {
+                self.public_index.remove(&obj.record.content_id.digest);
+            }
+            for nft in obj.references {
+                self.nfts.remove(&nft);
+            }
+            self.tombstones.insert(*key, epoch);
+        }
+    }
+
+    /// `BurnReference`. At zero references the object is deleted. Returns
+    /// whether it was.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::UnknownNft`] or [`RegistryError::NotAuthorized`].
+    pub fn burn_reference(
+        &mut self,
+        nft: &NftId,
+        signer: &Address,
+        epoch: u64,
+    ) -> Result<bool, RegistryError> {
+        let (key, holder) = *self.nfts.get(nft).ok_or(RegistryError::UnknownNft)?;
+        if holder != *signer {
+            return Err(RegistryError::NotAuthorized);
+        }
+        self.nfts.remove(nft);
+        let empty = self.objects.get_mut(&key).is_some_and(|o| {
+            o.references.remove(nft);
+            o.references.is_empty()
+        });
+        if empty {
+            self.delete(&key, epoch);
+        }
+        Ok(empty)
+    }
+
+    /// `RenewObject`: anyone may extend the paid lifetime.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::UnknownObject`] or [`RegistryError::BadLifetime`].
+    pub fn renew(&mut self, key: &ObjectKey, extra_epochs: u64) -> Result<u64, RegistryError> {
+        if extra_epochs == 0 {
+            return Err(RegistryError::BadLifetime);
+        }
+        let obj = self
+            .objects
+            .get_mut(key)
+            .ok_or(RegistryError::UnknownObject)?;
+        obj.expires_at = obj
+            .expires_at
+            .checked_add(extra_epochs)
+            .ok_or(RegistryError::BadLifetime)?;
+        Ok(obj.expires_at)
+    }
+
+    /// Expire every object past its paid lifetime; expiry is handled as a
+    /// burn of every reference. Returns the deleted keys.
+    pub fn expire(&mut self, epoch: u64) -> Vec<ObjectKey> {
+        let due: Vec<ObjectKey> = self
+            .objects
+            .iter()
+            .filter(|(_, o)| o.expires_at < epoch)
+            .map(|(k, _)| *k)
+            .collect();
+        for k in &due {
+            self.delete(k, epoch);
+        }
+        due
+    }
+
+    /// `DeclineContent`: a validator refuses future shares of a content id.
+    pub fn decline(&mut self, validator: Address, content: &ContentId) {
+        self.declines.insert((content.digest, validator));
+    }
+
+    /// `CustodyAck`: the holder confirms its shares of `key`. Returns how many
+    /// moved from pending to confirmed.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::UnknownObject`].
+    pub fn ack(&mut self, key: &ObjectKey, holder: &Address) -> Result<usize, RegistryError> {
+        let obj = self
+            .objects
+            .get_mut(key)
+            .ok_or(RegistryError::UnknownObject)?;
+        let mut n = 0;
+        for s in obj
+            .shares
+            .iter_mut()
+            .filter(|s| s.share.validator == *holder)
+        {
+            if s.status == ShareStatus::Pending {
+                s.status = ShareStatus::Confirmed;
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    /// Open this epoch's audits from `seed`. A share with an audit still
+    /// open is not drawn again. Returns the number opened.
+    pub fn open_audits(&mut self, seed: &[u8; 32], epoch: u64, params: &AuditParams) -> usize {
+        let mut opened = 0;
+        for obj in self.objects.values_mut() {
+            let subs = sub_block_count(usize::from(obj.record.profile.symbol_size));
+            for s in &mut obj.shares {
+                if s.status != ShareStatus::Confirmed || s.open_audit.is_some() {
+                    continue;
+                }
+                let (ppm, window) = match s.share.class {
+                    Class::Full => (params.full_ppm, params.full_window),
+                    Class::Mobile => (params.mobile_ppm, params.mobile_window),
+                };
+                let r = ShareRef {
+                    segment: s.segment,
+                    holder: s.share.validator,
+                    first_position: u64::from(s.share.first_esi),
+                    symbols: u64::from(s.share.symbols),
+                };
+                if let Some(a) = audit_for(seed, &r, ppm, subs) {
+                    s.open_audit = Some((a, epoch.saturating_add(window)));
+                    opened += 1;
+                }
+            }
+        }
+        opened
+    }
+
+    /// `CustodyProofBatch`: check each proof of `holder` against its open
+    /// audit. Valid proofs mark a pass; the batch refuses as a whole if any
+    /// proof is invalid, so a refused batch changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::BadProof`] or [`RegistryError::UnknownObject`].
+    pub fn submit_proofs(
+        &mut self,
+        holder: &Address,
+        proofs: &[(ObjectKey, CustodyProof)],
+        epoch: u64,
+    ) -> Result<usize, RegistryError> {
+        // Check everything first.
+        let mut hits = Vec::new();
+        for (key, proof) in proofs {
+            let obj = self.objects.get(key).ok_or(RegistryError::UnknownObject)?;
+            let root = obj
+                .record
+                .symbol_roots
+                .get(usize::try_from(proof.segment).map_err(|_| RegistryError::BadProof)?)
+                .ok_or(RegistryError::BadProof)?;
+            let ctx = ProofContext {
+                symbol_root: *root,
+                symbol_count: u64::from(obj.record.symbols_per_segment),
+                sub_blocks: sub_block_count(usize::from(obj.record.profile.symbol_size)),
+            };
+            let idx = obj
+                .shares
+                .iter()
+                .position(|s| {
+                    s.share.validator == *holder
+                        && s.segment == proof.segment
+                        && s.open_audit
+                            .is_some_and(|(a, last)| a.position == proof.position && epoch <= last)
+                })
+                .ok_or(RegistryError::BadProof)?;
+            let (audit, _) = obj
+                .shares
+                .get(idx)
+                .and_then(|s| s.open_audit)
+                .ok_or(RegistryError::BadProof)?;
+            proof
+                .verify(&audit, &ctx)
+                .map_err(|_| RegistryError::BadProof)?;
+            if hits.contains(&(*key, idx)) {
+                return Err(RegistryError::BadProof);
+            }
+            hits.push((*key, idx));
+        }
+        for (key, idx) in &hits {
+            if let Some(s) = self
+                .objects
+                .get_mut(key)
+                .and_then(|o| o.shares.get_mut(*idx))
+            {
+                s.open_audit = None;
+                s.passes += 1;
+            }
+        }
+        Ok(hits.len())
+    }
+
+    /// Close every audit window that ended before `epoch`: each is a miss.
+    /// Returns the number of misses.
+    pub fn close_windows(&mut self, epoch: u64) -> usize {
+        let mut missed = 0;
+        for obj in self.objects.values_mut() {
+            for s in &mut obj.shares {
+                if s.open_audit.is_some_and(|(_, last)| last < epoch) {
+                    s.open_audit = None;
+                    s.misses += 1;
+                    missed += 1;
+                }
+            }
+        }
+        missed
+    }
+
+    /// The registry state root over every map, in order.
+    #[must_use]
+    pub fn state_root(&self) -> [u8; 32] {
+        let mut acc = hash_fields_bytes(&[REGISTRY_TAG, b"empty"]);
+        let mut fold = |fields: &[&[u8]]| {
+            let mut all: Vec<&[u8]> = vec![REGISTRY_TAG, &acc];
+            all.extend_from_slice(fields);
+            acc = hash_fields_bytes(&all);
+        };
+        for (k, o) in &self.objects {
+            fold(&[
+                b"obj",
+                k,
+                &o.owner,
+                &o.record.content_id.digest,
+                &o.record.object_len.to_le_bytes(),
+                &o.expires_at.to_le_bytes(),
+                &(o.references.len() as u64).to_le_bytes(),
+            ]);
+            for r in &o.record.symbol_roots {
+                fold(&[b"root", r]);
+            }
+            for nft in &o.references {
+                fold(&[b"ref", nft]);
+            }
+            for s in &o.shares {
+                let status = [u8::from(s.status == ShareStatus::Confirmed)];
+                let audit = s.open_audit.map_or([0u8; 24], |(a, last)| {
+                    let mut b = [0u8; 24];
+                    for (d, v) in b.iter_mut().zip(
+                        a.position
+                            .to_le_bytes()
+                            .iter()
+                            .chain(a.sub_block.to_le_bytes().iter())
+                            .chain(last.to_le_bytes().iter()),
+                    ) {
+                        *d = *v;
+                    }
+                    b
+                });
+                fold(&[
+                    b"share",
+                    &s.segment.to_le_bytes(),
+                    &s.share.validator,
+                    &s.share.first_esi.to_le_bytes(),
+                    &s.share.symbols.to_le_bytes(),
+                    &status,
+                    &audit,
+                    &s.passes.to_le_bytes(),
+                    &s.misses.to_le_bytes(),
+                ]);
+            }
+        }
+        for (k, e) in &self.tombstones {
+            fold(&[b"tomb", k, &e.to_le_bytes()]);
+        }
+        for (d, v) in &self.declines {
+            fold(&[b"decline", d, v]);
+        }
+        acc
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::custody::prove;
+    use super::super::custody::symbol_leaf;
+    use super::super::limits::{Bud3Limits, Profile};
+    use super::super::pipeline::{prepare_public_upload, PreparedUpload};
+    use super::*;
+
+    const P: Profile = Profile {
+        id: 0,
+        qr_version: 40,
+        symbol_size: 128,
+        fps: 10,
+        k_max: 16,
+    };
+
+    fn addr(b: u8) -> Address {
+        [b; 32]
+    }
+
+    /// Upload content and spread each segment's 20 symbols over four
+    /// holders of five symbols.
+    fn upload(content: &[u8]) -> (PreparedUpload, Vec<(u64, Share)>) {
+        let up = prepare_public_upload(content, &P, &Bud3Limits::default(), 20).unwrap();
+        let mut shares = Vec::new();
+        for seg in 0..up.segments.len() as u64 {
+            for h in 0..4u8 {
+                shares.push((
+                    seg,
+                    Share {
+                        validator: addr(10 + h),
+                        class: if h == 3 { Class::Mobile } else { Class::Full },
+                        first_esi: u32::from(h) * 5,
+                        symbols: 5,
+                    },
+                ));
+            }
+        }
+        (up, shares)
+    }
+
+    #[test]
+    fn register_bind_burn_deletes_at_zero_references() {
+        let mut r = Bud3Registry::default();
+        let (up, shares) = upload(b"public content");
+        let key = up.record.commitment;
+        assert_eq!(
+            r.register_object(addr(1), up.record.clone(), shares.clone(), 0, 100),
+            Ok(Registered::New(key))
+        );
+        r.bind_nft([1; 32], addr(1), &key).unwrap();
+        r.bind_nft([2; 32], addr(2), &key).unwrap();
+        assert_eq!(r.refcount(&key), 2);
+        assert_eq!(
+            r.bind_nft([2; 32], addr(2), &key),
+            Err(RegistryError::NftAlreadyBound)
+        );
+        assert_eq!(
+            r.burn_reference(&[1; 32], &addr(2), 5),
+            Err(RegistryError::NotAuthorized)
+        );
+        assert_eq!(r.burn_reference(&[1; 32], &addr(1), 5), Ok(false));
+        assert_eq!(r.refcount(&key), 1);
+        assert_eq!(r.burn_reference(&[2; 32], &addr(2), 6), Ok(true));
+        assert!(r.object(&key).is_none());
+        assert_eq!(r.tombstone(&key), Some(6));
+        // Deletion is final.
+        assert_eq!(
+            r.register_object(addr(1), up.record, shares, 7, 100),
+            Err(RegistryError::Tombstoned)
+        );
+        assert_eq!(
+            r.bind_nft([3; 32], addr(1), &key),
+            Err(RegistryError::Tombstoned)
+        );
+    }
+
+    #[test]
+    fn public_content_is_deduplicated_and_sealed_never_reads_the_index() {
+        let mut r = Bud3Registry::default();
+        let (up, shares) = upload(b"same bytes");
+        let key = up.record.commitment;
+        r.register_object(addr(1), up.record.clone(), shares.clone(), 0, 10)
+            .unwrap();
+        let root = r.state_root();
+        // A second upload of the same public content stores nothing.
+        let mut again = up.record.clone();
+        again.commitment = [0xEE; 32];
+        assert_eq!(
+            r.register_object(addr(2), again, shares.clone(), 1, 10),
+            Ok(Registered::Deduplicated(key))
+        );
+        assert_eq!(r.state_root(), root, "a dedup writes nothing");
+        // Sealed content with the same digest bypasses the public index.
+        let mut sealed = up.record;
+        sealed.content_id.kind = ContentIdKind::Sealed;
+        sealed.commitment = [0xDD; 32];
+        assert_eq!(
+            r.register_object(addr(3), sealed, shares, 1, 10),
+            Ok(Registered::New([0xDD; 32]))
+        );
+    }
+
+    #[test]
+    fn bad_placements_and_lifetimes_are_refused_without_writing() {
+        let mut r = Bud3Registry::default();
+        let (up, shares) = upload(b"x");
+        let empty = r.state_root();
+        assert_eq!(
+            r.register_object(addr(1), up.record.clone(), shares.clone(), 0, 0),
+            Err(RegistryError::BadLifetime)
+        );
+        assert_eq!(
+            r.register_object(addr(1), up.record.clone(), shares.clone(), u64::MAX, 1),
+            Err(RegistryError::BadLifetime)
+        );
+        // One segment of k = 1 needs k + 2 = 3 symbols; one share of 2 is thin.
+        let mut thin: Vec<_> = shares.iter().take(1).cloned().collect();
+        thin[0].1.symbols = 2;
+        assert!(matches!(
+            r.register_object(addr(1), up.record.clone(), thin, 0, 10),
+            Err(RegistryError::BadPlacement(_))
+        ));
+        let mut overlap = shares.clone();
+        overlap[1].1.first_esi = 3;
+        assert!(matches!(
+            r.register_object(addr(1), up.record.clone(), overlap, 0, 10),
+            Err(RegistryError::BadPlacement("overlapping ESIs"))
+        ));
+        let mut past = shares.clone();
+        past[3].1.symbols = 6;
+        assert!(matches!(
+            r.register_object(addr(1), up.record.clone(), past, 0, 10),
+            Err(RegistryError::BadPlacement(_))
+        ));
+        let mut roots = up.record.clone();
+        roots.symbol_roots.push([0; 32]);
+        assert!(matches!(
+            r.register_object(addr(1), roots, shares.clone(), 0, 10),
+            Err(RegistryError::BadRecord(_))
+        ));
+        r.decline(addr(12), &up.record.content_id);
+        let after_decline = r.state_root();
+        assert_eq!(
+            r.register_object(addr(1), up.record, shares, 0, 10),
+            Err(RegistryError::Declined)
+        );
+        assert_ne!(empty, after_decline);
+        assert_eq!(r.state_root(), after_decline, "refusals write nothing");
+    }
+
+    #[test]
+    fn expiry_and_renewal() {
+        let mut r = Bud3Registry::default();
+        let (up, shares) = upload(b"lease");
+        let key = up.record.commitment;
+        r.register_object(addr(1), up.record, shares, 0, 10)
+            .unwrap();
+        assert_eq!(r.renew(&key, 5), Ok(15));
+        assert!(r.expire(15).is_empty());
+        assert_eq!(r.expire(16), vec![key]);
+        assert_eq!(r.tombstone(&key), Some(16));
+        assert_eq!(r.renew(&key, 1), Err(RegistryError::UnknownObject));
+    }
+
+    #[test]
+    fn audits_pass_with_a_proof_and_miss_without_one() {
+        let mut r = Bud3Registry::default();
+        let content: Vec<u8> = (0..5000u32).map(|i| (i % 253) as u8).collect();
+        let (up, shares) = upload(&content);
+        let key = up.record.commitment;
+        r.register_object(addr(1), up.record.clone(), shares, 0, 1000)
+            .unwrap();
+        for h in 0..4u8 {
+            r.ack(&key, &addr(10 + h)).unwrap();
+        }
+        let params = AuditParams {
+            full_ppm: 1_000_000,
+            mobile_ppm: 1_000_000,
+            ..AuditParams::TESTNET_DEFAULT
+        };
+        let opened = r.open_audits(&[5; 32], 1, &params);
+        assert_eq!(opened, r.object(&key).unwrap().shares.len());
+        assert_eq!(
+            r.open_audits(&[6; 32], 1, &params),
+            0,
+            "one open audit per share"
+        );
+
+        // Holder 10 answers every audit of its shares.
+        let mut proofs = Vec::new();
+        for s in r
+            .object(&key)
+            .unwrap()
+            .shares
+            .iter()
+            .filter(|s| s.share.validator == addr(10))
+        {
+            let (a, _) = s.open_audit.unwrap();
+            let syms = &up.segments[s.segment as usize];
+            let leaves: Vec<(u32, [u8; 32])> =
+                syms.iter().map(|x| (x.esi, symbol_leaf(&x.data))).collect();
+            let pos = a.position as usize;
+            proofs.push((
+                key,
+                prove(
+                    s.segment,
+                    &leaves,
+                    pos,
+                    &syms[pos].data,
+                    a.sub_block as usize,
+                )
+                .unwrap(),
+            ));
+        }
+        // A tampered proof refuses the whole batch.
+        let mut bad = proofs.clone();
+        bad[0].1.bytes[0] ^= 1;
+        let before = r.state_root();
+        assert_eq!(
+            r.submit_proofs(&addr(10), &bad, 2),
+            Err(RegistryError::BadProof)
+        );
+        assert_eq!(r.state_root(), before);
+        // Another holder cannot answer for holder 10.
+        assert_eq!(
+            r.submit_proofs(&addr(11), &proofs, 2),
+            Err(RegistryError::BadProof)
+        );
+        assert_eq!(r.submit_proofs(&addr(10), &proofs, 2), Ok(proofs.len()));
+
+        // Full windows close after 2 epochs; Mobile after 24.
+        let missed = r.close_windows(4);
+        let obj = r.object(&key).unwrap();
+        let full_others = obj
+            .shares
+            .iter()
+            .filter(|s| s.share.class == Class::Full && s.share.validator != addr(10))
+            .count();
+        assert_eq!(missed, full_others);
+        assert!(obj
+            .shares
+            .iter()
+            .filter(|s| s.share.validator == addr(10))
+            .all(|s| s.passes == 1 && s.misses == 0));
+        assert!(obj
+            .shares
+            .iter()
+            .filter(|s| s.share.class == Class::Mobile)
+            .all(|s| s.open_audit.is_some()));
+        let mobile = obj
+            .shares
+            .iter()
+            .filter(|s| s.share.class == Class::Mobile)
+            .count();
+        assert_eq!(r.close_windows(26), mobile);
+    }
+
+    #[test]
+    fn hour_windows_convert_to_epochs() {
+        // 24 h with 5 s slots and 720-slot epochs (one hour): 24 epochs.
+        assert_eq!(AuditParams::hours_to_epochs(24, 5, 720), 24);
+        // 48 h, 6 s slots, 100-slot epochs: ceil(172800 / 600) = 288.
+        assert_eq!(AuditParams::hours_to_epochs(48, 6, 100), 288);
+        assert_eq!(AuditParams::hours_to_epochs(1, 7, 1000), 1);
+    }
+}
