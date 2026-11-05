@@ -110,3 +110,22 @@ fn workflows_and_dependabot_are_current() {
         );
     }
 }
+
+/// BLG-176: the throughput benchmarks do not clamp sizes and times to
+/// `u32::MAX`, which silently capped any larger measurement.
+#[test]
+fn micro_benches_do_not_clamp_to_u32_max() {
+    for file in [
+        "benches/micro/ratio_rayon.rs",
+        "benches/micro/erasure_rows.rs",
+    ] {
+        let text = read(file);
+        for clamp in [
+            "u32::try_from(bytes)",
+            "u32::try_from(serial.as_micros())",
+            "u32::try_from(pool.as_micros())",
+        ] {
+            assert!(!text.contains(clamp), "{file} clamps with `{clamp}`");
+        }
+    }
+}
