@@ -91,7 +91,7 @@ pub enum ObjectLayerTx {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum TxRefusal {
     /// The object layer is not active at this height.
     Closed,
@@ -128,30 +128,55 @@ impl ObjectLayerTx {
         }
         let me = Holder::Account(ctx.signer);
         match self {
-            Self::Charter { domain, charter, proof } => {
-                registry.charter(*domain, charter.clone(), proof, (ctx.domain_active)(*domain))?;
+            Self::Charter {
+                domain,
+                charter,
+                proof,
+            } => {
+                registry.charter(
+                    *domain,
+                    charter.clone(),
+                    proof,
+                    (ctx.domain_active)(*domain),
+                )?;
             }
             Self::RegisterClass(reg) => {
                 registry.register_class(ctx.signer, reg.clone())?;
             }
-            Self::RefreshClass { class, updates, phase } => {
+            Self::RefreshClass {
+                class,
+                updates,
+                phase,
+            } => {
                 registry.refresh_class(*class, updates.clone(), *phase)?;
             }
-            Self::AuditCustody { class, home_custody } => {
+            Self::AuditCustody {
+                class,
+                home_custody,
+            } => {
                 registry.audit_custody(*class, *home_custody)?;
             }
             Self::Arrive(proof) => {
                 registry.arrive(proof, ctx.finality)?;
             }
             Self::Call { calls } => registry.call(me, calls)?,
-            Self::Offer { calls, wants, expiry } => {
+            Self::Offer {
+                calls,
+                wants,
+                expiry,
+            } => {
                 registry.offer(me, calls.clone(), wants.clone(), *expiry)?;
             }
             Self::Accept { offer, calls } => registry.accept(me, *offer, calls, ctx.height)?,
             Self::HomeCall(proof) => {
                 registry.home_call(proof, ctx.finality)?;
             }
-            Self::Depart { class, native_id, amount, home_to } => {
+            Self::Depart {
+                class,
+                native_id,
+                amount,
+                home_to,
+            } => {
                 registry.depart(me, *class, native_id, *amount, home_to.clone(), ctx.height)?;
             }
             Self::ConfirmDeparture(proof) => {

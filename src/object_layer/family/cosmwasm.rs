@@ -56,7 +56,9 @@ impl Attributes {
             if k == CONTRACT_ADDRESS_ATTRIBUTE {
                 let (_, bytes) = decode(ctx, v)?;
                 if bytes != raw.emitter {
-                    return Err(FamilyError::Malformed("_contract_address is not the emitter"));
+                    return Err(FamilyError::Malformed(
+                        "_contract_address is not the emitter",
+                    ));
                 }
                 continue;
             }
@@ -124,7 +126,9 @@ fn decimal(text: &str) -> Result<u128, FamilyError> {
 
 fn hex32(text: &str) -> Result<[u8; 32], FamilyError> {
     if text.len() != 64 || text.bytes().any(|b| b.is_ascii_uppercase()) {
-        return Err(FamilyError::Malformed("expected 64 lower-case hex characters"));
+        return Err(FamilyError::Malformed(
+            "expected 64 lower-case hex characters",
+        ));
     }
     let bytes = hex::decode(text).map_err(|_| FamilyError::Malformed("not hex"))?;
     let mut out = [0u8; 32];
@@ -138,7 +142,9 @@ fn token_id(kind: AssetKind, text: Option<&str>) -> Result<Vec<u8>, FamilyError>
         (AssetKind::Unique, Some(t)) if !t.is_empty() && t.len() <= MAX_TOKEN_ID_BYTES => {
             Ok(t.as_bytes().to_vec())
         }
-        _ => Err(FamilyError::Malformed("token_id does not match the asset kind")),
+        _ => Err(FamilyError::Malformed(
+            "token_id does not match the asset kind",
+        )),
     }
 }
 
@@ -185,7 +191,14 @@ impl FamilyProfile for CosmWasmFamily {
                 let a = Attributes::parse(
                     ctx,
                     raw,
-                    &["kind", "token", "token_id", "amount", "depositor", "recipient"],
+                    &[
+                        "kind",
+                        "token",
+                        "token_id",
+                        "amount",
+                        "depositor",
+                        "recipient",
+                    ],
                 )?;
                 let kind = kind(a.get("kind")?)?;
                 let amount = decimal(a.get("amount")?)?;
@@ -212,7 +225,8 @@ impl FamilyProfile for CosmWasmFamily {
                 Ok(EndpointEvent::Call {
                     sender: address(ctx, a.get("sender")?)?,
                     nonce,
-                    calls: hex::decode(calls).map_err(|_| FamilyError::Malformed("calls not hex"))?,
+                    calls: hex::decode(calls)
+                        .map_err(|_| FamilyError::Malformed("calls not hex"))?,
                 })
             }
             RELEASED_EVENT => {
@@ -261,7 +275,9 @@ impl FamilyProfile for CosmWasmFamily {
             {
                 Ok(())
             }
-            _ => Err(FamilyError::Malformed("token_id does not match the asset kind")),
+            _ => Err(FamilyError::Malformed(
+                "token_id does not match the asset kind",
+            )),
         }
     }
 
@@ -335,7 +351,7 @@ pub(crate) mod fixture {
     impl EventFixture for CosmWasmFixture {
         fn address(&self, seed: u8) -> Vec<u8> {
             // Contracts are 32 bytes, accounts 20; exercise both.
-            if seed % 2 == 0 {
+            if seed.is_multiple_of(2) {
                 vec![seed; 32]
             } else {
                 vec![seed; 20]
@@ -361,14 +377,23 @@ pub(crate) mod fixture {
                 ("depositor".into(), bech(depositor)),
             ];
             if !native_id.is_empty() {
-                a.push(("token_id".into(), String::from_utf8(native_id.to_vec()).unwrap()));
+                a.push((
+                    "token_id".into(),
+                    String::from_utf8(native_id.to_vec()).unwrap(),
+                ));
             }
             if let Some(r) = recipient {
                 a.push(("recipient".into(), hex::encode(r.0)));
             }
             event(endpoint, ARRIVE_EVENT, a)
         }
-        fn call(&self, endpoint: &[u8], sender: &[u8], nonce: u64, calls: &[u8]) -> RawEndpointEvent {
+        fn call(
+            &self,
+            endpoint: &[u8],
+            sender: &[u8],
+            nonce: u64,
+            calls: &[u8],
+        ) -> RawEndpointEvent {
             event(
                 endpoint,
                 HOME_CALL_EVENT,
@@ -400,7 +425,10 @@ pub(crate) mod fixture {
                 ("to".into(), bech(to)),
             ];
             if !native_id.is_empty() {
-                a.push(("token_id".into(), String::from_utf8(native_id.to_vec()).unwrap()));
+                a.push((
+                    "token_id".into(),
+                    String::from_utf8(native_id.to_vec()).unwrap(),
+                ));
             }
             event(endpoint, ESCAPED_EVENT, a)
         }
@@ -414,7 +442,10 @@ mod tests {
     use crate::object_layer::family::EventFixture;
 
     fn ctx() -> FamilyContext<'static> {
-        FamilyContext { chain_reference: "localwasm-1", address_prefix: PREFIX }
+        FamilyContext {
+            chain_reference: "localwasm-1",
+            address_prefix: PREFIX,
+        }
     }
 
     #[test]
@@ -422,7 +453,8 @@ mod tests {
         let ep = vec![2u8; 32];
         let mut raw = CosmWasmFixture.released(&ep, &DepartureId([1; 32]));
         assert!(CosmWasmFamily.translate_event(&ctx(), &raw).is_ok());
-        raw.attributes.push(("departure_id".into(), hex::encode([1u8; 32])));
+        raw.attributes
+            .push(("departure_id".into(), hex::encode([1u8; 32])));
         assert!(CosmWasmFamily.translate_event(&ctx(), &raw).is_err());
         raw.attributes.pop();
         raw.attributes.push(("extra".into(), "x".into()));
@@ -433,7 +465,10 @@ mod tests {
     fn cosmwasm_refuses_a_foreign_prefix_and_a_lying_contract_address() {
         let ep = vec![2u8; 32];
         let raw = CosmWasmFixture.released(&ep, &DepartureId([1; 32]));
-        let other = FamilyContext { chain_reference: "osmosis-1", address_prefix: "osmo" };
+        let other = FamilyContext {
+            chain_reference: "osmosis-1",
+            address_prefix: "osmo",
+        };
         assert_eq!(
             CosmWasmFamily.translate_event(&other, &raw),
             Err(FamilyError::WrongPrefix)
@@ -446,8 +481,18 @@ mod tests {
     #[test]
     fn cosmwasm_amounts_are_canonical_decimals() {
         assert_eq!(decimal("0"), Ok(0));
-        assert_eq!(decimal("340282366920938463463374607431768211455"), Ok(u128::MAX));
-        for bad in ["", "01", "+1", "-1", "1e3", "340282366920938463463374607431768211456"] {
+        assert_eq!(
+            decimal("340282366920938463463374607431768211455"),
+            Ok(u128::MAX)
+        );
+        for bad in [
+            "",
+            "01",
+            "+1",
+            "-1",
+            "1e3",
+            "340282366920938463463374607431768211456",
+        ] {
             assert!(decimal(bad).is_err(), "{bad}");
         }
     }

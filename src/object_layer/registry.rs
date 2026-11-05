@@ -18,9 +18,7 @@ use crate::object_layer::family::{
     class_ref_bytes, profile_for, AssetKind, EndpointEvent, FamilyError, HomeVmFamily,
     RawEndpointEvent, SliceSource,
 };
-use crate::object_layer::ids::{
-    ArrivalKey, AssetClassId, AssetId, DepartureId, HomeIdentity,
-};
+use crate::object_layer::ids::{ArrivalKey, AssetClassId, AssetId, DepartureId, HomeIdentity};
 use crate::object_layer::rule::{
     sample_commitment, transition, verify_samples, AssetSlice, ClassRule, ClassSlice, Condition,
     Holder, ReferenceSample, RuleRefusal, Verb,
@@ -171,7 +169,7 @@ impl Default for ObjectLayerParams {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum Refusal {
     Charter(CharterRefusal),
     NoCharter,
@@ -431,7 +429,11 @@ impl ObjectLayerRegistry {
             return Err(Refusal::TentativeClosed);
         }
         self.atomic(|r| {
-            let domain = r.classes.get(&class).ok_or(Refusal::UnknownClass)?.home_domain;
+            let domain = r
+                .classes
+                .get(&class)
+                .ok_or(Refusal::UnknownClass)?
+                .home_domain;
             let family = profile_for(r.active_charter(domain)?.vm_family);
             let field = family.upgrade_authority_field();
             let entry = r.classes.get_mut(&class).ok_or(Refusal::UnknownClass)?;
@@ -471,8 +473,7 @@ impl ObjectLayerRegistry {
         };
         self.atomic(|r| {
             r.use_arrival(proof)?;
-            let class_id =
-                AssetClassId::derive(proof.domain, &class_ref_bytes(kind, &contract));
+            let class_id = AssetClassId::derive(proof.domain, &class_ref_bytes(kind, &contract));
             let class = r.class(&class_id)?;
             if class.kind != kind {
                 return Err(Refusal::KindMismatch);
@@ -540,7 +541,7 @@ impl ObjectLayerRegistry {
         if class.status != ClassStatus::Active {
             return Err(Refusal::ClassFrozen);
         }
-        let Verb::Transfer { from, to, amount } = &call.verb;
+        let Verb::Transfer { from, to, .. } = &call.verb;
         // The only requirement the templates raise is `SignedBy { from }`,
         // and the acting holder is the only signer a call carries.
         if from != actor {
@@ -554,7 +555,12 @@ impl ObjectLayerRegistry {
                     return Err(Refusal::AssetNotHere);
                 }
                 let holder = asset.holder.ok_or(Refusal::AssetNotHere)?;
-                let t = transition(&class.rule, &class.slice, &AssetSlice::Unique { holder }, &call.verb)?;
+                let t = transition(
+                    &class.rule,
+                    &class.slice,
+                    &AssetSlice::Unique { holder },
+                    &call.verb,
+                )?;
                 let AssetSlice::Unique { holder } = t.asset_slice else {
                     return Err(Refusal::Rule(RuleRefusal::WrongShape));
                 };
@@ -614,7 +620,13 @@ impl ObjectLayerRegistry {
 
     /// `ObjectLayerTx::Offer`. The maker's calls are checked when the offer
     /// is accepted, not now, so an offer locks nothing.
-    pub fn offer(&mut self, maker: Holder, offer_calls: Vec<Call>, wants: Vec<Condition>, expiry: u64) -> Result<Hash32, Refusal> {
+    pub fn offer(
+        &mut self,
+        maker: Holder,
+        offer_calls: Vec<Call>,
+        wants: Vec<Condition>,
+        expiry: u64,
+    ) -> Result<Hash32, Refusal> {
         self.check_composite(&offer_calls)?;
         self.atomic(|r| {
             r.offer_seq = r.offer_seq.checked_add(1).ok_or(Refusal::Overflow)?;
@@ -641,13 +653,21 @@ impl ObjectLayerRegistry {
     /// `ObjectLayerTx::Accept`: both sides run, and every want of the maker
     /// holds afterwards, or nothing changes
     /// (`offer_accept_runs_both_sides_or_none`).
-    pub fn accept(&mut self, taker: Holder, offer_id: Hash32, calls: &[Call], height: u64) -> Result<(), Refusal> {
+    pub fn accept(
+        &mut self,
+        taker: Holder,
+        offer_id: Hash32,
+        calls: &[Call],
+        height: u64,
+    ) -> Result<(), Refusal> {
         self.atomic(|r| {
             let offer = r.offers.remove(&offer_id).ok_or(Refusal::UnknownOffer)?;
             if height > offer.expiry {
                 return Err(Refusal::OfferExpired);
             }
-            if offer.calls.len() + calls.len() > usize::from(r.params.max_composite_calls.min(MAX_COMPOSITE_CALLS)) {
+            if offer.calls.len() + calls.len()
+                > usize::from(r.params.max_composite_calls.min(MAX_COMPOSITE_CALLS))
+            {
                 return Err(Refusal::TooManyCalls);
             }
             let before = r.clone();
@@ -668,16 +688,29 @@ impl ObjectLayerRegistry {
 
     fn holds(&self, class: &AssetClassId, holder: &Holder) -> bool {
         self.balance(class, holder) > 0
-            || self
-                .unique
-                .values()
-                .any(|a| a.class == *class && a.location == Location::ObjectLayer && a.holder == Some(*holder))
+            || self.unique.values().any(|a| {
+                a.class == *class
+                    && a.location == Location::ObjectLayer
+                    && a.holder == Some(*holder)
+            })
     }
 
-    fn condition_holds(&self, before: &Self, condition: &Condition, maker: &Holder, taker: &Holder) -> bool {
+    fn condition_holds(
+        &self,
+        before: &Self,
+        condition: &Condition,
+        maker: &Holder,
+        taker: &Holder,
+    ) -> bool {
         match condition {
-            Condition::Payment { class, to, min_amount } => {
-                let gained = self.balance(class, to).saturating_sub(before.balance(class, to));
+            Condition::Payment {
+                class,
+                to,
+                min_amount,
+            } => {
+                let gained = self
+                    .balance(class, to)
+                    .saturating_sub(before.balance(class, to));
                 gained >= *min_amount
             }
             Condition::Holds { class, holder } => self.holds(class, holder),
@@ -696,7 +729,12 @@ impl ObjectLayerRegistry {
         finality: &dyn HomeFinality,
     ) -> Result<HomeIdentity, Refusal> {
         let (family, event) = self.read_event(proof, finality)?;
-        let EndpointEvent::Call { sender, nonce, calls } = event else {
+        let EndpointEvent::Call {
+            sender,
+            nonce,
+            calls,
+        } = event
+        else {
             return Err(Refusal::UnexpectedEvent);
         };
         profile_for(family).validate_address(&sender)?;
@@ -707,9 +745,13 @@ impl ObjectLayerRegistry {
             r.use_arrival(proof)?;
             let expected = r.home_nonces.get(&identity).copied().unwrap_or(0);
             if nonce != expected {
-                return Err(Refusal::HomeNonce { expected, got: nonce });
+                return Err(Refusal::HomeNonce {
+                    expected,
+                    got: nonce,
+                });
             }
-            r.home_nonces.insert(identity, expected.checked_add(1).ok_or(Refusal::Overflow)?);
+            r.home_nonces
+                .insert(identity, expected.checked_add(1).ok_or(Refusal::Overflow)?);
             let actor = Holder::Home(identity);
             for call in &calls {
                 r.run_call(&actor, call)?;
@@ -786,7 +828,10 @@ impl ObjectLayerRegistry {
         };
         self.atomic(|r| {
             r.use_arrival(proof)?;
-            let d = r.departures.remove(&departure).ok_or(Refusal::UnknownDeparture)?;
+            let d = r
+                .departures
+                .remove(&departure)
+                .ok_or(Refusal::UnknownDeparture)?;
             if r.class(&d.class)?.home_domain != proof.domain {
                 return Err(Refusal::WrongEmitter);
             }
@@ -807,7 +852,13 @@ impl ObjectLayerRegistry {
         finality: &dyn HomeFinality,
     ) -> Result<AssetId, Refusal> {
         let (_, event) = self.read_event(proof, finality)?;
-        let EndpointEvent::Escaped { kind, contract, native_id, .. } = event else {
+        let EndpointEvent::Escaped {
+            kind,
+            contract,
+            native_id,
+            ..
+        } = event
+        else {
             return Err(Refusal::UnexpectedEvent);
         };
         if kind != AssetKind::Unique {

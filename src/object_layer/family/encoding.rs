@@ -199,7 +199,12 @@ pub fn base58_encode(bytes: &[u8]) -> String {
     }
     let mut out = String::with_capacity(zeros + digits.len());
     out.extend(std::iter::repeat_n('1', zeros));
-    out.extend(digits.iter().rev().map(|d| BASE58_ALPHABET[*d as usize] as char));
+    out.extend(
+        digits
+            .iter()
+            .rev()
+            .map(|d| BASE58_ALPHABET[*d as usize] as char),
+    );
     out
 }
 
@@ -232,7 +237,13 @@ pub fn base58_decode(text: &str) -> Result<Vec<u8>, DecodeError> {
 const BECH32_CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
 
 fn bech32_polymod(values: &[u8]) -> u32 {
-    const GEN: [u32; 5] = [0x3b6a_57b2, 0x2650_8e6d, 0x1ea1_19fa, 0x3d42_33dd, 0x2a14_62b3];
+    const GEN: [u32; 5] = [
+        0x3b6a_57b2,
+        0x2650_8e6d,
+        0x1ea1_19fa,
+        0x3d42_33dd,
+        0x2a14_62b3,
+    ];
     let mut chk: u32 = 1;
     for v in values {
         let top = chk >> 25;
@@ -343,7 +354,10 @@ mod tests {
     #[test]
     fn base58_round_trips_and_keeps_leading_zeros() {
         // The Solana system program id is 32 zero bytes.
-        assert_eq!(base58_encode(&[0u8; 32]), "11111111111111111111111111111111");
+        assert_eq!(
+            base58_encode(&[0u8; 32]),
+            "11111111111111111111111111111111"
+        );
         let bytes = [0u8, 0, 1, 2, 3, 250, 255];
         assert_eq!(base58_decode(&base58_encode(&bytes)).unwrap(), bytes);
         assert_eq!(base58_encode(b"hello world"), "StV1DL6CwTryKyV");
@@ -368,7 +382,9 @@ mod tests {
     fn uleb128_refuses_non_canonical_forms() {
         assert_eq!(Reader::new(&[0x80, 0x01]).uleb128().unwrap(), 128);
         assert!(Reader::new(&[0x80, 0x00]).uleb128().is_err());
-        assert!(Reader::new(&[0xff, 0xff, 0xff, 0xff, 0x0f]).uleb128().is_err());
+        assert!(Reader::new(&[0xff, 0xff, 0xff, 0xff, 0x0f])
+            .uleb128()
+            .is_err());
     }
 
     #[test]

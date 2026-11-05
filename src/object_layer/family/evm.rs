@@ -249,7 +249,12 @@ pub(crate) mod fixture {
         w
     }
 
-    fn event(endpoint: &[u8], signature: &str, words: Vec<[u8; 32]>, tail: &[u8]) -> RawEndpointEvent {
+    fn event(
+        endpoint: &[u8],
+        signature: &str,
+        words: Vec<[u8; 32]>,
+        tail: &[u8],
+    ) -> RawEndpointEvent {
         let mut data: Vec<u8> = words.concat();
         data.extend_from_slice(tail);
         RawEndpointEvent {
@@ -289,7 +294,13 @@ pub(crate) mod fixture {
             ];
             event(endpoint, ARRIVE_SIGNATURE, words, &[])
         }
-        fn call(&self, endpoint: &[u8], sender: &[u8], nonce: u64, calls: &[u8]) -> RawEndpointEvent {
+        fn call(
+            &self,
+            endpoint: &[u8],
+            sender: &[u8],
+            nonce: u64,
+            calls: &[u8],
+        ) -> RawEndpointEvent {
             let words = vec![
                 word_addr(sender),
                 word_u(u128::from(nonce)),
@@ -328,7 +339,10 @@ mod tests {
 
     #[test]
     fn evm_caip19_matches_the_directive_example_shape() {
-        let ctx = FamilyContext { chain_reference: "11155111", address_prefix: "" };
+        let ctx = FamilyContext {
+            chain_reference: "11155111",
+            address_prefix: "",
+        };
         let mut id = [0u8; 32];
         id[31] = 7;
         let s = EvmFamily.caip19(&ctx, AssetKind::Unique, &[0xab; 20], &id);
@@ -348,7 +362,10 @@ mod tests {
     #[test]
     fn evm_refuses_a_fungible_event_with_a_token_id() {
         use crate::object_layer::family::EventFixture;
-        let ctx = FamilyContext { chain_reference: "31337", address_prefix: "" };
+        let ctx = FamilyContext {
+            chain_reference: "31337",
+            address_prefix: "",
+        };
         let raw = fixture::EvmFixture.arrive(
             &[1; 20],
             AssetKind::Fungible,

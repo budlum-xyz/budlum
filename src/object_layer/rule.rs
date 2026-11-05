@@ -295,8 +295,16 @@ mod tests {
             class_slice: ClassSlice::new(),
             before,
             verbs: vec![
-                Verb::Transfer { from: acct(1), to: acct(2), amount: 5 },
-                Verb::Transfer { from: acct(1), to: acct(2), amount: 2 },
+                Verb::Transfer {
+                    from: acct(1),
+                    to: acct(2),
+                    amount: 5,
+                },
+                Verb::Transfer {
+                    from: acct(1),
+                    to: acct(2),
+                    amount: 2,
+                },
             ],
             after,
         };
@@ -310,7 +318,11 @@ mod tests {
             before: AssetSlice::Fungible {
                 balances: [(acct(1), 10)].into_iter().collect(),
             },
-            verbs: vec![Verb::Transfer { from: acct(1), to: acct(2), amount: 5 }],
+            verbs: vec![Verb::Transfer {
+                from: acct(1),
+                to: acct(2),
+                amount: 5,
+            }],
             after: AssetSlice::Fungible {
                 balances: [(acct(1), 4), (acct(2), 6)].into_iter().collect(),
             },
@@ -326,7 +338,11 @@ mod tests {
             &unique(),
             &slice,
             &AssetSlice::Unique { holder: acct(1) },
-            &Verb::Transfer { from: acct(1), to: acct(2), amount: 1 },
+            &Verb::Transfer {
+                from: acct(1),
+                to: acct(2),
+                amount: 1,
+            },
         )
         .unwrap();
         assert_eq!(t.asset_slice, AssetSlice::Unique { holder: acct(2) });
@@ -344,7 +360,11 @@ mod tests {
         let before = AssetSlice::Fungible {
             balances: [(acct(1), 10)].into_iter().collect(),
         };
-        let verb = Verb::Transfer { from: acct(1), to: acct(2), amount: 1 };
+        let verb = Verb::Transfer {
+            from: acct(1),
+            to: acct(2),
+            amount: 1,
+        };
         assert_eq!(
             transition(&fungible(), &slice, &before, &verb),
             Err(RuleRefusal::Paused)
@@ -353,16 +373,29 @@ mod tests {
 
     #[test]
     fn unique_transfer_needs_the_holder() {
-        let verb = Verb::Transfer { from: acct(2), to: acct(3), amount: 1 };
+        let verb = Verb::Transfer {
+            from: acct(2),
+            to: acct(3),
+            amount: 1,
+        };
         assert_eq!(
-            transition(&unique(), &ClassSlice::new(), &AssetSlice::Unique { holder: acct(1) }, &verb),
+            transition(
+                &unique(),
+                &ClassSlice::new(),
+                &AssetSlice::Unique { holder: acct(1) },
+                &verb
+            ),
             Err(RuleRefusal::NotHolder)
         );
     }
 
     #[test]
     fn closed_rules_refuse_every_transition() {
-        let verb = Verb::Transfer { from: acct(1), to: acct(2), amount: 1 };
+        let verb = Verb::Transfer {
+            from: acct(1),
+            to: acct(2),
+            amount: 1,
+        };
         let before = AssetSlice::Unique { holder: acct(1) };
         for rule in [ClassRule::Program, ClassRule::Replica, ClassRule::Native] {
             assert!(!matches!(rule, ClassRule::Native) || !rule.is_open());
@@ -380,12 +413,22 @@ mod tests {
         let a = ReferenceSample {
             class_slice: ClassSlice::new(),
             before: AssetSlice::Unique { holder: acct(1) },
-            verbs: vec![Verb::Transfer { from: acct(1), to: acct(2), amount: 1 }],
+            verbs: vec![Verb::Transfer {
+                from: acct(1),
+                to: acct(2),
+                amount: 1,
+            }],
             after: AssetSlice::Unique { holder: acct(2) },
         };
         let mut b = a.clone();
         b.after = AssetSlice::Unique { holder: acct(3) };
-        assert_ne!(sample_commitment(&[a.clone()]), sample_commitment(&[b]));
-        assert_eq!(sample_commitment(&[a.clone()]), sample_commitment(&[a]));
+        assert_ne!(
+            sample_commitment(std::slice::from_ref(&a)),
+            sample_commitment(&[b])
+        );
+        assert_eq!(
+            sample_commitment(std::slice::from_ref(&a)),
+            sample_commitment(&[a])
+        );
     }
 }

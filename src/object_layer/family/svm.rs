@@ -65,7 +65,9 @@ fn kind(r: &mut Reader<'_>) -> Result<AssetKind, FamilyError> {
 fn native_id_matches_kind(kind: AssetKind, native_id: &[u8]) -> Result<(), FamilyError> {
     match (kind, native_id.is_empty()) {
         (AssetKind::Fungible, true) | (AssetKind::Unique, false) => Ok(()),
-        _ => Err(FamilyError::Malformed("native id does not match the asset kind")),
+        _ => Err(FamilyError::Malformed(
+            "native id does not match the asset kind",
+        )),
     }
 }
 
@@ -140,7 +142,11 @@ impl FamilyProfile for SvmFamily {
                 return Err(FamilyError::Malformed("call list too long"));
             }
             let calls = r.take(len)?.to_vec();
-            EndpointEvent::Call { sender, nonce, calls }
+            EndpointEvent::Call {
+                sender,
+                nonce,
+                calls,
+            }
         } else if disc == discriminator(RELEASED_EVENT) {
             EndpointEvent::Released {
                 departure: DepartureId(r.array32()?),
@@ -151,7 +157,12 @@ impl FamilyProfile for SvmFamily {
             let native_id = option_key(&mut r)?;
             native_id_matches_kind(kind, &native_id)?;
             let to = r.array32()?.to_vec();
-            EndpointEvent::Escaped { kind, contract, native_id, to }
+            EndpointEvent::Escaped {
+                kind,
+                contract,
+                native_id,
+                to,
+            }
         } else {
             return Err(FamilyError::UnknownEvent);
         };
@@ -278,7 +289,13 @@ pub(crate) mod fixture {
             }
             event(endpoint, ARRIVE_EVENT, d)
         }
-        fn call(&self, endpoint: &[u8], sender: &[u8], nonce: u64, calls: &[u8]) -> RawEndpointEvent {
+        fn call(
+            &self,
+            endpoint: &[u8],
+            sender: &[u8],
+            nonce: u64,
+            calls: &[u8],
+        ) -> RawEndpointEvent {
             let mut d = sender.to_vec();
             d.extend_from_slice(&nonce.to_le_bytes());
             d.extend_from_slice(&(calls.len() as u32).to_le_bytes());
@@ -323,19 +340,29 @@ mod tests {
 
     #[test]
     fn svm_refuses_an_oversized_call_list() {
-        let ctx = FamilyContext { chain_reference: "localnet", address_prefix: "" };
+        let ctx = FamilyContext {
+            chain_reference: "localnet",
+            address_prefix: "",
+        };
         let mut data = discriminator(HOME_CALL_EVENT).to_vec();
         data.extend([1u8; 32]);
         data.extend(0u64.to_le_bytes());
         data.extend(((MAX_CALL_BYTES + 1) as u32).to_le_bytes());
         data.extend(vec![0u8; MAX_CALL_BYTES + 1]);
-        let raw = RawEndpointEvent { emitter: vec![2; 32], data, ..Default::default() };
+        let raw = RawEndpointEvent {
+            emitter: vec![2; 32],
+            data,
+            ..Default::default()
+        };
         assert!(SvmFamily.translate_event(&ctx, &raw).is_err());
     }
 
     #[test]
     fn svm_caip19_uses_base58() {
-        let ctx = FamilyContext { chain_reference: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1", address_prefix: "" };
+        let ctx = FamilyContext {
+            chain_reference: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+            address_prefix: "",
+        };
         let s = SvmFamily.caip19(&ctx, AssetKind::Fungible, &[0u8; 32], &[]);
         assert_eq!(
             s,

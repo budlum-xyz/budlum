@@ -43,7 +43,7 @@ pub mod tx;
 
 pub use charter::{CanonicalCodeHashes, CharterStatus, CodeProof, DataPolicy, DomainCharter};
 pub use family::{profile_for, AssetKind, FamilyProfile, HomeVmFamily};
-pub use ids::{AssetClassId, AssetId, DependencyId, DepartureId, HomeIdentity};
+pub use ids::{AssetClassId, AssetId, DepartureId, DependencyId, HomeIdentity};
 pub use registry::{ObjectLayerParams, ObjectLayerRegistry, Refusal};
 pub use rule::{ClassRule, Holder, TemplateId};
 pub use tx::{ObjectLayerActivation, ObjectLayerTx, ACTIVATION};

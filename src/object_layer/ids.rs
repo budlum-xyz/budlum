@@ -178,7 +178,10 @@ mod tests {
 
         let asset = AssetId::derive(&class, b"1");
         assert_ne!(asset, AssetId::derive(&class, b"2"));
-        assert_ne!(asset, AssetId::derive(&AssetClassId::derive(8, b"ref"), b"1"));
+        assert_ne!(
+            asset,
+            AssetId::derive(&AssetClassId::derive(8, b"ref"), b"1")
+        );
 
         let dep = DependencyId::derive(7, 10, &[1; 32], b"e");
         assert_ne!(dep, DependencyId::derive(8, 10, &[1; 32], b"e"));

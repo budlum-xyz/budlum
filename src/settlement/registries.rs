@@ -17,6 +17,7 @@ use crate::core::hash::hash_fields_bytes;
 use crate::cross_domain::external::IntakeState;
 use crate::cross_domain::UniversalRelayer;
 use crate::domain::{ConsensusDomainRegistry, DomainCommitmentRegistry, SovereignDomainRegistry};
+use crate::object_layer::ObjectLayerRegistry;
 use crate::prover::ProofClaimRegistry;
 use crate::security::quantum_canary::CanaryBook;
 use crate::settlement::global_block::GlobalHeaderWindow;
@@ -66,6 +67,11 @@ pub struct SettlementRegistries {
     /// absent from the serialization and from the root.
     #[serde(default, skip_serializing_if = "CanaryBook::is_empty")]
     pub quantum: CanaryBook,
+    /// The Universal Object Layer (directive 9.5 item 1). Written only by
+    /// `ObjectLayerTx`; closed on the testnet until its activation height.
+    /// Empty: absent from the serialization and from the root.
+    #[serde(default, skip_serializing_if = "ObjectLayerRegistry::is_empty")]
+    pub object_layer: ObjectLayerRegistry,
 }
 
 impl SettlementRegistries {
@@ -92,6 +98,7 @@ impl SettlementRegistries {
             && self.global_headers.is_empty()
             && self.shared_security.is_empty()
             && self.quantum.is_empty()
+            && self.object_layer.is_empty()
     }
 
     /// True when the external intake holds any record. The block clock does
@@ -165,6 +172,13 @@ impl SettlementRegistries {
         if !self.quantum.is_empty() {
             fields.push(&quantum);
         }
+        // The object layer joins only once it holds a record, so a chain that
+        // never chartered a domain keeps its pinned roots.
+        let object_layer = self.object_layer.root();
+        if !self.object_layer.is_empty() {
+            fields.push(b"BDLM_OBJECT_LAYER_V1");
+            fields.push(&object_layer);
+        }
         hash_fields_bytes(&fields)
     }
 }
@@ -191,6 +205,34 @@ mod tests {
         assert_eq!(a.root(), b.root());
         b.on_block_end(4);
         assert_ne!(a.root(), b.root());
+    }
+
+    #[test]
+    fn object_layer_empty_registry_keeps_state_root() {
+        let plain = SettlementRegistries::new();
+        let mut with_params = SettlementRegistries::new();
+        // Genesis parameters alone are not a record.
+        with_params.object_layer.params.min_class_bond = 7;
+        assert!(with_params.is_empty());
+        assert_eq!(plain.root(), with_params.root());
+        // And an empty registry stays out of the serialization.
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("object_layer"));
+    }
+
+    #[test]
+    fn an_object_layer_record_changes_the_settlement_root() {
+        use crate::object_layer::ObjectLayerRegistry;
+        let mut registries = SettlementRegistries::new();
+        let before = registries.root();
+        registries.object_layer = ObjectLayerRegistry::default();
+        registries.object_layer.departure_seq = 0;
+        registries
+            .object_layer
+            .home_nonces
+            .insert(crate::object_layer::HomeIdentity([1; 32]), 1);
+        assert!(!registries.is_empty());
+        assert_ne!(before, registries.root());
     }
 
     #[test]

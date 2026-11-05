@@ -67,7 +67,9 @@ fn kind(r: &mut Reader<'_>) -> Result<AssetKind, FamilyError> {
 fn native_id_matches_kind(kind: AssetKind, native_id: &[u8]) -> Result<(), FamilyError> {
     match (kind, native_id.is_empty()) {
         (AssetKind::Fungible, true) | (AssetKind::Unique, false) => Ok(()),
-        _ => Err(FamilyError::Malformed("native id does not match the asset kind")),
+        _ => Err(FamilyError::Malformed(
+            "native id does not match the asset kind",
+        )),
     }
 }
 
@@ -135,9 +137,14 @@ impl FamilyProfile for MoveFamily {
         } else if is(HOME_CALL_EVENT) {
             let sender = r.array32()?.to_vec();
             let nonce = r.u64_le()?;
-            let len = usize::try_from(r.uleb128()?).map_err(|_| FamilyError::Malformed("length"))?;
+            let len =
+                usize::try_from(r.uleb128()?).map_err(|_| FamilyError::Malformed("length"))?;
             let calls = r.take(len)?.to_vec();
-            EndpointEvent::Call { sender, nonce, calls }
+            EndpointEvent::Call {
+                sender,
+                nonce,
+                calls,
+            }
         } else if is(RELEASED_EVENT) {
             EndpointEvent::Released {
                 departure: DepartureId(bytes32_vector(&mut r)?),
@@ -148,7 +155,12 @@ impl FamilyProfile for MoveFamily {
             let native_id = option_address(&mut r)?;
             native_id_matches_kind(kind, &native_id)?;
             let to = r.array32()?.to_vec();
-            EndpointEvent::Escaped { kind, contract, native_id, to }
+            EndpointEvent::Escaped {
+                kind,
+                contract,
+                native_id,
+                to,
+            }
         } else {
             return Err(FamilyError::UnknownEvent);
         };
@@ -286,7 +298,13 @@ pub(crate) mod fixture {
             }
             event(endpoint, ARRIVE_EVENT, d)
         }
-        fn call(&self, endpoint: &[u8], sender: &[u8], nonce: u64, calls: &[u8]) -> RawEndpointEvent {
+        fn call(
+            &self,
+            endpoint: &[u8],
+            sender: &[u8],
+            nonce: u64,
+            calls: &[u8],
+        ) -> RawEndpointEvent {
             let mut d = sender.to_vec();
             d.extend_from_slice(&nonce.to_le_bytes());
             uleb(&mut d, calls.len());
@@ -322,7 +340,10 @@ mod tests {
 
     #[test]
     fn move_type_tag_must_name_the_emitter() {
-        let ctx = FamilyContext { chain_reference: "4", address_prefix: "" };
+        let ctx = FamilyContext {
+            chain_reference: "4",
+            address_prefix: "",
+        };
         let mut raw = RawEndpointEvent {
             emitter: vec![1; 32],
             topics: vec![type_tag(&[2; 32], RELEASED_EVENT).into_bytes()],
@@ -333,11 +354,16 @@ mod tests {
             },
             attributes: Vec::new(),
         };
-        assert_eq!(MoveFamily.translate_event(&ctx, &raw), Err(FamilyError::UnknownEvent));
+        assert_eq!(
+            MoveFamily.translate_event(&ctx, &raw),
+            Err(FamilyError::UnknownEvent)
+        );
         raw.topics = vec![type_tag(&[1; 32], RELEASED_EVENT).into_bytes()];
         assert_eq!(
             MoveFamily.translate_event(&ctx, &raw),
-            Ok(EndpointEvent::Released { departure: DepartureId([9; 32]) })
+            Ok(EndpointEvent::Released {
+                departure: DepartureId([9; 32])
+            })
         );
         raw.data.push(0);
         assert!(MoveFamily.translate_event(&ctx, &raw).is_err());
@@ -345,7 +371,10 @@ mod tests {
 
     #[test]
     fn move_caip19_uses_the_long_address_form() {
-        let ctx = FamilyContext { chain_reference: "2", address_prefix: "" };
+        let ctx = FamilyContext {
+            chain_reference: "2",
+            address_prefix: "",
+        };
         let s = MoveFamily.caip19(&ctx, AssetKind::Unique, &[0xab; 32], &[0x01; 32]);
         assert_eq!(
             s,

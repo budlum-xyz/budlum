@@ -95,7 +95,9 @@ pub fn class_ref_bytes(kind: AssetKind, contract: &[u8]) -> Vec<u8> {
 
 /// Split canonical class reference bytes back into kind and contract.
 pub fn split_class_ref(class_ref: &[u8]) -> Result<(AssetKind, &[u8]), FamilyError> {
-    let (code, contract) = class_ref.split_first().ok_or(FamilyError::Malformed("empty class ref"))?;
+    let (code, contract) = class_ref
+        .split_first()
+        .ok_or(FamilyError::Malformed("empty class ref"))?;
     let kind = AssetKind::from_code(*code).ok_or(FamilyError::Malformed("unknown asset kind"))?;
     Ok((kind, contract))
 }
@@ -182,8 +184,10 @@ impl SliceReadRule {
     pub fn admits(&self, source: SliceSource) -> bool {
         matches!(
             (self, source),
-            (Self::AccountAndStorageProof, SliceSource::AccountAndStorageProof)
-                | (Self::EndpointEvent, SliceSource::EndpointEvent)
+            (
+                Self::AccountAndStorageProof,
+                SliceSource::AccountAndStorageProof
+            ) | (Self::EndpointEvent, SliceSource::EndpointEvent)
         )
     }
 }
@@ -222,7 +226,7 @@ pub struct DevChain {
     pub launch: &'static str,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum FamilyError {
     WrongLength { expected: usize, got: usize },
     Malformed(&'static str),
