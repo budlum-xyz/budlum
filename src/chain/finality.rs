@@ -1,4 +1,5 @@
 use crate::core::address::Address;
+use crate::core::transaction::DEFAULT_CHAIN_ID;
 use crate::registry::SlashingReport;
 use bls12_381::{
     hash_to_curve::{ExpandMsgXmd, HashToCurve},
@@ -1460,13 +1461,8 @@ mod tests {
     #[test]
     fn test_aggregator_prevote_flow() {
         let (snap, sks) = make_snapshot_with_keys(4, 1000);
-        let mut agg = FinalityAggregator::new(
-            crate::core::transaction::DEFAULT_CHAIN_ID,
-            1,
-            10,
-            "cp_hash".into(),
-            snap.clone(),
-        );
+        let mut agg =
+            FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "cp_hash".into(), snap.clone());
 
         for i in 0..3 {
             let vote = signed_prevote(&snap, &sks, i, 1, 10, "cp_hash");
@@ -1478,13 +1474,8 @@ mod tests {
     #[test]
     fn test_aggregator_rejects_duplicate() {
         let (snap, sks) = make_snapshot_with_keys(4, 1000);
-        let mut agg = FinalityAggregator::new(
-            crate::core::transaction::DEFAULT_CHAIN_ID,
-            1,
-            10,
-            "cp_hash".into(),
-            snap.clone(),
-        );
+        let mut agg =
+            FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "cp_hash".into(), snap.clone());
 
         let vote = signed_prevote(&snap, &sks, 0, 1, 10, "cp_hash");
         agg.add_prevote(vote.clone()).unwrap();
@@ -1494,13 +1485,8 @@ mod tests {
     #[test]
     fn test_aggregator_rejects_wrong_epoch() {
         let (snap, sks) = make_snapshot_with_keys(4, 1000);
-        let mut agg = FinalityAggregator::new(
-            crate::core::transaction::DEFAULT_CHAIN_ID,
-            1,
-            10,
-            "cp_hash".into(),
-            snap.clone(),
-        );
+        let mut agg =
+            FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "cp_hash".into(), snap.clone());
 
         // Wrong epoch: rejected before signature check.
         let vote = signed_prevote(&snap, &sks, 0, 99, 10, "cp_hash");
@@ -1512,13 +1498,8 @@ mod tests {
         // (Option A) a garbage signature is rejected AT INGEST and
         // Never enters the aggregate.
         let (snap, _) = make_snapshot_with_keys(4, 1000);
-        let mut agg = FinalityAggregator::new(
-            crate::core::transaction::DEFAULT_CHAIN_ID,
-            1,
-            10,
-            "cp_hash".into(),
-            snap.clone(),
-        );
+        let mut agg =
+            FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "cp_hash".into(), snap.clone());
 
         let vote = Prevote {
             chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
@@ -1539,13 +1520,8 @@ mod tests {
     #[test]
     fn test_precommit_requires_prevote_quorum() {
         let (snap, sks) = make_snapshot_with_keys(4, 1000);
-        let mut agg = FinalityAggregator::new(
-            crate::core::transaction::DEFAULT_CHAIN_ID,
-            1,
-            10,
-            "cp_hash".into(),
-            snap.clone(),
-        );
+        let mut agg =
+            FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "cp_hash".into(), snap.clone());
 
         // No prevote quorum yet: rejected before signature check.
         let pc = Precommit {
@@ -1572,13 +1548,8 @@ mod tests {
     #[test]
     fn test_full_finality_flow() {
         let (snap, sks) = make_snapshot_with_keys(4, 1000);
-        let mut agg = FinalityAggregator::new(
-            crate::core::transaction::DEFAULT_CHAIN_ID,
-            1,
-            10,
-            "cp_hash".into(),
-            snap.clone(),
-        );
+        let mut agg =
+            FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "cp_hash".into(), snap.clone());
 
         for i in 0..3 {
             let vote = signed_prevote(&snap, &sks, i, 1, 10, "cp_hash");

@@ -29,6 +29,7 @@ use std::fmt;
 use crate::chain::finality::{FinalityCert, ValidatorSetSnapshot};
 use crate::consensus::qc::QcBlob;
 use crate::core::block::BlockHeader;
+use crate::core::transaction::DEFAULT_CHAIN_ID;
 
 /// A 64-character lowercase hex digest.
 /// A 64-character lowercase hex digest. `const fn` so the trust-anchor check
