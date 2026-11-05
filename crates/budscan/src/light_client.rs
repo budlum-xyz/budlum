@@ -209,7 +209,7 @@ impl Default for HeaderStore {
 }
 
 // ---------------------------------------------------------------------------
-// Sparse Merkle trie proof: the same rule as `src/storage/merkle_trie.rs`.
+// Sparse Merkle trie proof: the same rule as `src/persistence/state_trie.rs`.
 // ---------------------------------------------------------------------------
 
 const TRIE_DEPTH: usize = 256;
@@ -217,7 +217,7 @@ const DOMAIN_PREFIX: &[u8] = b"BDLM_MERKLE_TRIE_V1";
 
 /// A state proof for one address.
 ///
-/// The same shape as the proof `src/storage/merkle_trie.rs` produces. That
+/// The same shape as the proof `src/persistence/state_trie.rs` produces. That
 /// module is **not wired** today - its own file says so: account state is still
 /// hashed through the old root - so this verifier does not run against the live
 /// chain yet. It is here so that the browser side is ready the day the trie is

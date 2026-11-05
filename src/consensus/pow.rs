@@ -508,7 +508,7 @@ impl ConsensusEngine for PoWEngine {
     fn record_block(
         &self,
         _block: &Block,
-        _storage: Option<&crate::storage::db::Storage>,
+        _storage: Option<&crate::persistence::db::Storage>,
     ) -> Result<(), ConsensusError> {
         // (security audit) the trait `record_block` hook is
         // Intentionally a no-op for PoW. The actual difficulty
@@ -526,7 +526,7 @@ impl ConsensusEngine for PoWEngine {
         &self,
         block: &Block,
         chain: &[Block],
-        _storage: Option<&crate::storage::db::Storage>,
+        _storage: Option<&crate::persistence::db::Storage>,
     ) {
         // See `record_block_with_chain` in `consensus/mod.rs` for the
         // Contract. The difficulty adjustment fires here, exactly
