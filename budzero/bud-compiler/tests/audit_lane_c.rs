@@ -127,3 +127,23 @@ fn audit_lane_c_blg_136_bare_call_statement_compiles_and_runs() {
     assert_eq!(run_events(src), vec![41, 1]);
 }
 
+/// BLG-162: a hexadecimal literal is a valid match pattern, equal to its decimal twin.
+#[test]
+fn audit_lane_c_blg_162_hex_match_pattern_matches() {
+    let src = r#"
+        contract T {
+            fn probe(x: u64) -> u64 {
+                match (x) {
+                    0x10 => { emit Result(1); },
+                    _ => { emit Result(0); },
+                };
+                return 0;
+            }
+            pub fn main() {
+                let a = probe(16);
+                let b = probe(17);
+            }
+        }
+    "#;
+    assert_eq!(run_events(src), vec![1, 0]);
+}
