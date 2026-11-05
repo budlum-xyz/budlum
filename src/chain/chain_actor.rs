@@ -143,6 +143,10 @@ pub enum ChainCommand {
         crate::validators::DirectoryQuery,
         oneshot::Sender<serde_json::Value>,
     ),
+    GetBud3(
+        crate::storage::bud3::registry::Bud3Query,
+        oneshot::Sender<serde_json::Value>,
+    ),
     GetValidatorAddress(oneshot::Sender<Option<Address>>),
     GetAggregatorState(oneshot::Sender<crate::chain::finality::AggregatorState>),
     GetStateRoot(u64, oneshot::Sender<Option<String>>),
@@ -1363,6 +1367,16 @@ impl ChainHandle {
             .tx
             .send(ChainCommand::GetValidatorDirectory(query, tx))
             .await;
+        rx.await.unwrap_or(serde_json::Value::Null)
+    }
+
+    /// A read of the B.U.D. 3.0 registry: one object or one validator's shares.
+    pub async fn bud3(
+        &self,
+        query: crate::storage::bud3::registry::Bud3Query,
+    ) -> serde_json::Value {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetBud3(query, tx)).await;
         rx.await.unwrap_or(serde_json::Value::Null)
     }
 
@@ -2841,6 +2855,9 @@ impl ChainActor {
                 }
                 ChainCommand::GetQuantumView(tx) => {
                     let _ = tx.send(self.blockchain.quantum_view());
+                }
+                ChainCommand::GetBud3(query, tx) => {
+                    let _ = tx.send(self.blockchain.state.bud3_registry.query_json(&query));
                 }
                 ChainCommand::GetValidatorDirectory(query, tx) => {
                     let _ = tx.send(self.blockchain.state.validator_directory.query_json(query));

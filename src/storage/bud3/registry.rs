@@ -175,6 +175,15 @@ pub enum RegistryError {
     BadRepair(&'static str),
 }
 
+/// An RPC read of the registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bud3Query {
+    /// One object by commitment.
+    Object(ObjectKey),
+    /// The shares one validator holds.
+    Custody(Address),
+}
+
 /// What a registration did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Registered {
@@ -794,6 +803,78 @@ impl Bud3Registry {
             dropped += before - obj.shares.len();
         }
         dropped
+    }
+
+    /// The RPC read: one object, or one validator's shares.
+    #[must_use]
+    pub fn query_json(&self, query: &Bud3Query) -> serde_json::Value {
+        match query {
+            Bud3Query::Object(key) => {
+                if let Some(o) = self.objects.get(key) {
+                    serde_json::json!({
+                        "commitment": hex::encode(key),
+                        "status": "live",
+                        "content_digest": hex::encode(o.record.content_id.digest),
+                        "content_len": o.record.content_id.len,
+                        "sealed": o.record.content_id.kind == ContentIdKind::Sealed,
+                        "object_len": o.record.object_len,
+                        "profile": o.record.profile.id,
+                        "symbols_per_segment": o.record.symbols_per_segment,
+                        "segments": o.record.symbol_roots.len(),
+                        "symbol_roots": o.roots.iter().map(|r| serde_json::json!({
+                            "segment": r.segment,
+                            "root": hex::encode(r.root),
+                            "first_esi": r.first_esi,
+                            "count": r.count,
+                        })).collect::<Vec<_>>(),
+                        "references": o.references.len(),
+                        "expires_at_epoch": o.expires_at,
+                        "repairs_due": self.repairs_due(key),
+                    })
+                } else if let Some(epoch) = self.tombstones.get(key) {
+                    serde_json::json!({
+                        "commitment": hex::encode(key),
+                        "status": "deleted",
+                        "deleted_at_epoch": epoch,
+                    })
+                } else {
+                    serde_json::Value::Null
+                }
+            }
+            Bud3Query::Custody(validator) => {
+                let shares: Vec<serde_json::Value> = self
+                    .objects
+                    .iter()
+                    .flat_map(|(k, o)| {
+                        o.shares
+                            .iter()
+                            .filter(|s| s.share.validator == *validator)
+                            .map(move |s| {
+                                serde_json::json!({
+                                    "commitment": hex::encode(k),
+                                    "segment": s.segment,
+                                    "first_esi": s.share.first_esi,
+                                    "symbols": s.share.symbols,
+                                    "confirmed": s.status == ShareStatus::Confirmed,
+                                    "lost": s.lost,
+                                    "open_audit": s.open_audit.map(|(a, last)| serde_json::json!({
+                                        "position": a.position,
+                                        "sub_block": a.sub_block,
+                                        "last_epoch": last,
+                                    })),
+                                    "passes": s.passes,
+                                    "misses": s.misses,
+                                })
+                            })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "validator": hex::encode(validator),
+                    "count": shares.len(),
+                    "shares": shares,
+                })
+            }
+        }
     }
 
     /// Whether the registry holds nothing.

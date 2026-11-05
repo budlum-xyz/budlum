@@ -1440,6 +1440,22 @@ pub trait BudlumApi {
     #[method(name = "bud_getValidator")]
     async fn get_validator(&self, owner: String) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// A B.U.D. 3.0 object record by commitment (hex): header facts, symbol
+    /// roots, references, expiry and due repairs; a deleted object shows its
+    /// tombstone; unknown is null.
+    #[method(name = "bud_storageGetObject")]
+    async fn storage_get_object(
+        &self,
+        commitment: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// The B.U.D. 3.0 shares a validator holds and their audit state.
+    #[method(name = "bud_storageGetCustody")]
+    async fn storage_get_custody(
+        &self,
+        validator: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Validators that offer a relay.
     #[method(name = "bud_listRelays")]
     async fn list_relays(&self) -> Result<serde_json::Value, ErrorObjectOwned>;

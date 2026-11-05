@@ -270,6 +270,8 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_getStatus", Public, Read),
     row("bud_getValidatorSet", Public, Read),
     row("bud_getValidator", Public, Read),
+    row("bud_storageGetObject", Public, Read),
+    row("bud_storageGetCustody", Public, Read),
     row("bud_listRelays", Public, Read),
     row("bud_listGateways", Public, Read),
     row("bud_getDomainInfo", Public, Read),

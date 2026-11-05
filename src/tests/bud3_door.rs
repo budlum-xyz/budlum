@@ -112,6 +112,20 @@ fn register_bind_and_view_through_the_executor() {
     .unwrap();
     assert_eq!(state.bud3_registry.refcount(&key), 1);
 
+    // The RPC reads.
+    use crate::storage::bud3::registry::Bud3Query;
+    let obj = state.bud3_registry.query_json(&Bud3Query::Object(key));
+    assert_eq!(obj["status"], "live");
+    assert_eq!(obj["references"], 1);
+    let custody = state
+        .bud3_registry
+        .query_json(&Bud3Query::Custody([10; 32]));
+    assert_eq!(custody["shares"][0]["confirmed"], true);
+    assert!(state
+        .bud3_registry
+        .query_json(&Bud3Query::Object([0; 32]))
+        .is_null());
+
     // A viewer rebuilds the content from the holders' symbols.
     let symbols = up.segments.concat().into_iter().filter(|s| s.esi % 4 != 0);
     assert_eq!(view_public(&up.record, symbols).unwrap(), content);

@@ -66,6 +66,16 @@ pub struct RpcSecurityConfig {
     pub max_connections: Option<u32>,
 }
 
+/// A 32-byte value from hex, with or without `0x`.
+fn parse_hex32(s: &str) -> Result<[u8; 32], ErrorObjectOwned> {
+    let clean = s.strip_prefix("0x").unwrap_or(s);
+    let bytes = hex::decode(clean)
+        .map_err(|e| ErrorObjectOwned::owned(-32602, format!("Invalid hex: {e}"), None::<()>))?;
+    bytes
+        .try_into()
+        .map_err(|_| ErrorObjectOwned::owned(-32602, "expected 32 bytes", None::<()>))
+}
+
 impl Default for RpcSecurityConfig {
     fn default() -> Self {
         // (security audit) secure default - auth ON, no API key
@@ -6982,6 +6992,28 @@ impl BudlumApiServer for RpcServer {
         Ok(self
             .chain
             .validator_directory(crate::validators::DirectoryQuery::One(owner))
+            .await)
+    }
+
+    async fn storage_get_object(
+        &self,
+        commitment: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let key = parse_hex32(&commitment)?;
+        Ok(self
+            .chain
+            .bud3(crate::storage::bud3::registry::Bud3Query::Object(key))
+            .await)
+    }
+
+    async fn storage_get_custody(
+        &self,
+        validator: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let key = parse_hex32(&validator)?;
+        Ok(self
+            .chain
+            .bud3(crate::storage::bud3::registry::Bud3Query::Custody(key))
             .await)
     }
 
