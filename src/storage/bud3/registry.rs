@@ -173,6 +173,9 @@ pub enum RegistryError {
     BadProof,
     /// The segment needs no repair, or the repair does not replace the loss.
     BadRepair(&'static str),
+    /// The codec is not open: an object carrying it could never produce its
+    /// content again on the viewer's device.
+    CodecNotOpen(u16),
 }
 
 /// An RPC read of the registry.
@@ -300,9 +303,9 @@ impl Bud3Registry {
     ///
     /// # Errors
     ///
-    /// [`RegistryError`] for a malformed record, a bad placement, a zero or
-    /// overflowing lifetime, a tombstoned commitment, or a share on a
-    /// validator that declined the content.
+    /// [`RegistryError`] for a codec that is not open, a malformed record, a
+    /// bad placement, a zero or overflowing lifetime, a tombstoned commitment,
+    /// or a share on a validator that declined the content.
     pub fn register_object(
         &mut self,
         owner: Address,
@@ -311,6 +314,15 @@ impl Bud3Registry {
         epoch: u64,
         lifetime_epochs: u64,
     ) -> Result<Registered, RegistryError> {
+        // An object must be able to produce its content again on the
+        // viewer's device. Its codec must be registered, open in the codec
+        // crate and open at testnet; anything else is refused here.
+        if !super::bof1::codec_is_registered(record.codec)
+            || !bud_codec::is_open(record.codec)
+            || !super::bof1::codec_is_open_on_testnet(record.codec)
+        {
+            return Err(RegistryError::CodecNotOpen(record.codec));
+        }
         if lifetime_epochs == 0 {
             return Err(RegistryError::BadLifetime);
         }
@@ -819,6 +831,8 @@ impl Bud3Registry {
                         "sealed": o.record.content_id.kind == ContentIdKind::Sealed,
                         "object_len": o.record.object_len,
                         "profile": o.record.profile.id,
+                        "codec": o.record.codec,
+                        "codec_name": bud_codec::registry::entry(o.record.codec).map_or("unknown", |row| row.name),
                         "symbols_per_segment": o.record.symbols_per_segment,
                         "segments": o.record.symbol_roots.len(),
                         "symbol_roots": o.roots.iter().map(|r| serde_json::json!({

@@ -50,7 +50,7 @@ pub const CODEC_RAW: CodecId = 0;
 /// The registered codec ids. Id 9 is reserved and never valid.
 #[must_use]
 pub const fn codec_is_registered(id: CodecId) -> bool {
-    id <= 26 && id != 9
+    bud_codec::registry::is_registered(id)
 }
 
 /// Codecs open at testnet launch. The format-specific codecs 14 to 22 open
@@ -258,6 +258,48 @@ impl Object {
         }
     }
 
+    /// A public object whose payload is `payload`, coded with `codec`. The
+    /// payload must decode to exactly `content` under the codec: an object
+    /// never carries a payload that produces different content.
+    ///
+    /// # Errors
+    ///
+    /// [`Bof1Error::ContentMismatch`] when the payload does not decode to the
+    /// content under the codec.
+    pub fn public_coded(
+        codec: CodecId,
+        payload: Vec<u8>,
+        content: &[u8],
+    ) -> Result<Self, Bof1Error> {
+        let id = ContentId::public(content);
+        if codec == CODEC_RAW {
+            if payload != content {
+                return Err(Bof1Error::ContentMismatch);
+            }
+            return Ok(Self::raw_public(content));
+        }
+        let decoded = bud_codec::decode(codec, &payload, id.len)
+            .map_err(|_| Bof1Error::ContentMismatch)?;
+        if decoded != content {
+            return Err(Bof1Error::ContentMismatch);
+        }
+        Ok(Self {
+            header: Header {
+                flags: Flags::default(),
+                profile: Profile::P0.id,
+                codec,
+                dictionary: 0,
+                base: None,
+                content_len: id.len,
+                content_digest: id.digest,
+                payload_len: payload.len() as u64,
+                prev_object: None,
+                context_manifest: None,
+            },
+            payload,
+        })
+    }
+
     /// The canonical binary encoding. A field is written exactly when its
     /// flag is set, so the encoding never disagrees with the flags.
     #[must_use]
@@ -385,6 +427,36 @@ impl Object {
             return Err(Bof1Error::ContentMismatch);
         }
         Ok(&self.payload)
+    }
+
+    /// The content of a public object, checked against its header. The
+    /// payload decodes under the header's codec to exactly the content the
+    /// header commits to.
+    ///
+    /// # Errors
+    ///
+    /// [`Bof1Error::ContentMismatch`] when the object is sealed, the payload
+    /// does not decode under the codec, or the decoded content does not match
+    /// the content length and digest.
+    pub fn public_content(&self) -> Result<Vec<u8>, Bof1Error> {
+        let h = &self.header;
+        if h.is_sealed() {
+            return Err(Bof1Error::ContentMismatch);
+        }
+        if h.codec == CODEC_RAW {
+            return self.raw_public_content().map(|bytes| bytes.to_vec());
+        }
+        let content = bud_codec::decode(h.codec, &self.payload, h.content_len)
+            .map_err(|_| Bof1Error::ContentMismatch)?;
+        let id = ContentId {
+            kind: ContentIdKind::Public,
+            digest: h.content_digest,
+            len: h.content_len,
+        };
+        if !id.matches_public(&content) {
+            return Err(Bof1Error::ContentMismatch);
+        }
+        Ok(content)
     }
 }
 

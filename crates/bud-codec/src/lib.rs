@@ -104,13 +104,17 @@ pub fn decode(codec: CodecId, payload: &[u8], content_len: u64) -> Result<Vec<u8
     Ok(out)
 }
 
-fn zstd_encode(content: &[u8], level: i32) -> Result<Vec<u8>, CodecError> {
+/// Encode with zstd. `long_range` turns on long distance matching and the
+/// fixed window: the stored candidate uses it, the quick probe does not.
+fn zstd_encode(content: &[u8], level: i32, long_range: bool) -> Result<Vec<u8>, CodecError> {
     let mut enc = zstd::stream::Encoder::new(Vec::new(), level)
         .map_err(|e| CodecError::Encode(e.to_string()))?;
-    enc.long_distance_matching(true)
-        .map_err(|e| CodecError::Encode(e.to_string()))?;
-    enc.window_log(ZSTD_WINDOW_LOG)
-        .map_err(|e| CodecError::Encode(e.to_string()))?;
+    if long_range {
+        enc.long_distance_matching(true)
+            .map_err(|e| CodecError::Encode(e.to_string()))?;
+        enc.window_log(ZSTD_WINDOW_LOG)
+            .map_err(|e| CodecError::Encode(e.to_string()))?;
+    }
     enc.include_checksum(false)
         .map_err(|e| CodecError::Encode(e.to_string()))?;
     std::io::Write::write_all(&mut enc, content).map_err(|e| CodecError::Encode(e.to_string()))?;
@@ -167,7 +171,7 @@ pub fn select(content: &[u8]) -> Selected {
     let verified = |codec: CodecId, payload: Vec<u8>| -> Option<Selected> {
         (decode(codec, &payload, len).ok()? == content).then_some(Selected { codec, payload })
     };
-    let Some(probe) = zstd_encode(content, PROBE_LEVEL)
+    let Some(probe) = zstd_encode(content, PROBE_LEVEL, false)
         .ok()
         .and_then(|p| verified(ZSTD, p))
     else {
@@ -181,7 +185,7 @@ pub fn select(content: &[u8]) -> Selected {
     // Quick probe: a gain of 5 % or less does not justify the slow levels.
     let gain_ok = (best.payload.len() as u64) * 100 < len * 95;
     if gain_ok {
-        if let Some(c) = zstd_encode(content, STORE_LEVEL)
+        if let Some(c) = zstd_encode(content, STORE_LEVEL, true)
             .ok()
             .and_then(|p| verified(ZSTD, p))
         {
@@ -242,7 +246,7 @@ mod tests {
     #[test]
     fn the_decoder_never_writes_past_the_declared_length() {
         let c = text(10_000);
-        let s = zstd_encode(&c, 3).unwrap();
+        let s = zstd_encode(&c, 3, false).unwrap();
         assert_eq!(
             decode(ZSTD, &s, 9_999),
             Err(CodecError::TooLong { max: 9_999 })
@@ -263,11 +267,99 @@ mod tests {
     fn a_small_bomb_is_refused_without_growing() {
         // 64 MiB of zeros compresses to a few kilobytes; declared as 1 KiB it
         // is refused after at most 1 KiB + 1 of output.
-        let bomb = zstd_encode(&vec![0u8; 64 << 20], 3).unwrap();
+        let bomb = zstd_encode(&vec![0u8; 64 << 20], 3, false).unwrap();
         assert!(bomb.len() < 64 << 10);
         assert_eq!(
             decode(ZSTD, &bomb, 1024),
             Err(CodecError::TooLong { max: 1024 })
+        );
+    }
+
+    /// Bytes drawn uniformly from a two-hundred-symbol alphabet. The byte
+    /// entropy sits just under the ceiling, so the general compressors run,
+    /// and there is almost no local match structure for a quick compressor.
+    fn small_alphabet(n: usize) -> Vec<u8> {
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut out = Vec::with_capacity(n);
+        while out.len() < n {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let b = (x >> 24) as u8;
+            if b < 200 {
+                out.push(b);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn bud3_codec_vectors() {
+        // Frozen decoder vectors: payloads that never change decode to the
+        // content they carry. The raw codec is the content itself.
+        assert_eq!(decode(RAW, b"hello", 5).unwrap(), b"hello".to_vec());
+        assert_eq!(decode(RAW, b"", 0).unwrap(), Vec::<u8>::new());
+        // A zstd frame with one raw block: magic, a frame header with a
+        // single segment and a one-byte content size, a last raw block
+        // header of five bytes, then the five literal bytes.
+        let frame: [u8; 14] = [
+            0x28, 0xB5, 0x2F, 0xFD, // magic
+            0x20,                   // single segment, one-byte content size
+            0x05,                   // content size 5
+            0x29, 0x00, 0x00,       // last block, raw, size 5
+            b'h', b'e', b'l', b'l', b'o',
+        ];
+        assert_eq!(decode(ZSTD, &frame, 5).unwrap(), b"hello".to_vec());
+        // Every open codec carries a vector here, so the set cannot grow
+        // silently without its frozen vector landing in this test.
+        let open: Vec<CodecId> = registry::REGISTER
+            .iter()
+            .filter(|row| row.state == registry::CodecState::Open)
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(
+            open,
+            vec![RAW, ZSTD],
+            "every open codec needs a frozen vector here"
+        );
+        // And every open codec round-trips its encoder to its decoder.
+        let content = text(10_000);
+        let selected = select(&content);
+        assert_eq!(
+            decode(selected.codec, &selected.payload, content.len() as u64).unwrap(),
+            content
+        );
+    }
+
+    #[test]
+    fn bud3_fast_probe_skips_slow_candidates() {
+        // Two copies of the same low-entropy block, one megabyte apart. The
+        // byte entropy is under the ceiling, so the general compressors run.
+        // The quick probe is plain zstd and only sees its own window, so it
+        // gains less than five percent; the slow long-range candidate must
+        // then not run. It would halve the payload through the far copy.
+        let half = small_alphabet(1 << 20);
+        let mut content = half.clone();
+        content.extend_from_slice(&half);
+        assert!(entropy_millibits(&content) <= 7_900);
+        let probe = zstd_encode(&content, PROBE_LEVEL, false).unwrap();
+        let gain_over_five_percent = (probe.len() as u64) * 100 < (content.len() as u64) * 95;
+        assert!(
+            !gain_over_five_percent,
+            "the fixture must sit in the five percent skip branch"
+        );
+        let selected = select(&content);
+        assert!(
+            selected.codec == RAW || selected.codec == ZSTD,
+            "the slow candidates must not run"
+        );
+        assert!(
+            selected.payload.len() * 2 >= content.len(),
+            "the long-range candidate ran: the payload is near half the content"
+        );
+        assert!(
+            selected.payload == probe || selected.payload == content,
+            "selection holds the probe candidate or raw, nothing else"
         );
     }
 }

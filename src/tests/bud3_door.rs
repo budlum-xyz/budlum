@@ -189,3 +189,60 @@ fn the_epoch_boundary_expires_and_audits() {
     );
     assert!(state.bud3_registry.tombstone(&key).is_some());
 }
+
+#[test]
+fn closed_codecs_refuse_on_testnet() {
+    use crate::core::chain_config::Network;
+
+    let uploader = Address::from([4u8; 32]);
+    let mut state = AccountState::new();
+    state.add_balance(&uploader, 1_000);
+    let root = state.calculate_state_root();
+    let content = b"closed codecs carry no content".repeat(20);
+    let up = prepare_public_upload(&content, &P, &Bud3Limits::default(), 12).unwrap();
+    let shares: Vec<(u64, Share)> = (0..up.segments.len() as u64)
+        .flat_map(|seg| {
+            (0..2u8).map(move |h| {
+                (
+                    seg,
+                    Share {
+                        validator: [10 + h; 32],
+                        class: Class::Full,
+                        first_esi: u32::from(h) * 6,
+                        symbols: 6,
+                    },
+                )
+            })
+        })
+        .collect();
+    // Ids the codec register marks closed at testnet launch. The expansion
+    // work may open some of them later; until a decoder lands, an object that
+    // carries one is refused with the codec named in the reason.
+    for closed in [6u16, 8, 23, 26] {
+        let mut record = up.record.clone();
+        record.codec = closed;
+        let tx = Transaction::new_with_chain_id(
+            uploader,
+            Address::zero(),
+            0,
+            1,
+            0,
+            Vec::new(),
+            Network::Testnet.chain_id().value(),
+            TransactionType::StorageV3(Box::new(StorageTxV3::RegisterObject {
+                record,
+                shares: shares.clone(),
+                lifetime_epochs: 100,
+            })),
+        );
+        let err = Executor::apply_transaction(&mut state, &tx)
+            .expect_err("a closed codec must not register");
+        assert!(
+            err.contains("CodecNotOpen"),
+            "id {closed} refused for the wrong reason: {err}"
+        );
+    }
+    assert_eq!(state.calculate_state_root(), root, "a refusal writes nothing");
+    assert_eq!(state.get_balance(&uploader), 1_000, "no fee, no write");
+    assert_eq!(state.get_nonce(&uploader), 0);
+}

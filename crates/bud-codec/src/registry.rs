@@ -57,7 +57,7 @@ pub struct CodecEntry {
 
 /// The register, in id order. The rows carry the frozen meaning of the ids
 /// 0 through 26; the id 9 is reserved and has no codec.
-pub const REGISTER: [CodecEntry; 27] = [
+pub static REGISTER: [CodecEntry; 27] = [
     CodecEntry {
         id: 0,
         name: "raw",

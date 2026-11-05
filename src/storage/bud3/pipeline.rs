@@ -11,10 +11,11 @@
 //! BOF-1 parsed -> content checked against the content id. Content is shown
 //! only when every check passes.
 //!
-//! This path uses the raw codec. Compressing codecs plug in between content
-//! and payload without changing anything after the object.
+//! The codec register sits between content and payload: the upload path
+//! selects the codec and stores its payload, the view path decodes it back.
+//! Nothing after the object changes with the codec.
 
-use super::bof1::{Bof1Error, Object};
+use super::bof1::{Bof1Error, CodecId, Object};
 use super::content_id::ContentId;
 use super::custody::{symbol_leaf, symbol_root};
 use super::fountain::{FountainError, SegmentDecoder, SegmentEncoder, Symbol};
@@ -33,6 +34,8 @@ pub struct ObjectRecord {
     pub commitment: [u8; 32],
     /// The profile the object is coded with.
     pub profile: Profile,
+    /// The A0 codec the object payload carries.
+    pub codec: CodecId,
     /// Symbols per segment in the placement.
     pub symbols_per_segment: u32,
     /// The symbol root of every segment.
@@ -98,7 +101,12 @@ pub fn prepare_public_upload(
     limits
         .admit_content(content.len() as u64)
         .map_err(PipelineError::Limit)?;
-    let object = Object::raw_public(content);
+    // The codec register picks the shortest verified representation; the
+    // object carries the codec and its payload, and nothing after the
+    // object changes with the codec.
+    let selected = bud_codec::select(content);
+    let codec = selected.codec;
+    let object = Object::public_coded(codec, selected.payload, content)?;
     let bytes = object.encode();
     let seg = Segmentation::new(bytes.len() as u64, profile)
         .ok_or(PipelineError::Fountain(FountainError::InvalidProfile))?;
@@ -135,6 +143,7 @@ pub fn prepare_public_upload(
             object_len: bytes.len() as u64,
             commitment,
             profile: *profile,
+            codec,
             symbols_per_segment,
             symbol_roots,
         },
@@ -191,13 +200,16 @@ where
     }
     let mut parse_meter = Meter::for_object(record.object_len);
     let parsed = Object::decode(&object, &mut parse_meter)?;
-    let content = parsed
-        .raw_public_content()
-        .map_err(|_| PipelineError::ContentMismatch)?;
-    if !record.content_id.matches_public(content) {
+    if parsed.header.codec != record.codec {
         return Err(PipelineError::ContentMismatch);
     }
-    Ok(content.to_vec())
+    let content = parsed
+        .public_content()
+        .map_err(|_| PipelineError::ContentMismatch)?;
+    if !record.content_id.matches_public(&content) {
+        return Err(PipelineError::ContentMismatch);
+    }
+    Ok(content)
 }
 
 #[cfg(test)]
