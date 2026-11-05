@@ -1329,7 +1329,7 @@ mod tests {
         assert!(!is_scannable(Path::new(
             "xtask/gates/src/gates/regeneration.rs"
         )));
-        assert!(is_scannable(Path::new("src/domain/regeneration_stage.rs")));
+        assert!(is_scannable(Path::new("src/chain/state_recovery/regeneration_stage.rs")));
         assert!(is_scannable(Path::new("src/regeneration.rs.bak.rs")));
     }
 
