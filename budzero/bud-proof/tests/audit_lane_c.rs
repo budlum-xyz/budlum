@@ -214,3 +214,36 @@ fn audit_lane_c_blg_154_single_pin_source_is_not_unanimity() {
     );
     assert_eq!(reconcile(&[only, [8u8; 32]]), Reconciliation::Split);
 }
+
+/// BLG-182: public inputs that nothing in the trace supports are refused when they are
+/// baked in before proving (a post-hoc change is already caught by Fiat-Shamir).
+#[test]
+fn audit_lane_c_blg_182_unsupported_public_inputs_are_refused() {
+    let (program, vm, events) = logging_run();
+    let honest = honest_inputs(&vm, &program, &events);
+    prove_and_verify(&vm, &honest, &program).expect("control: the honest proof verifies");
+
+    // exit_code: a proven execution is a clean halt.
+    let mut forged = honest.clone();
+    forged.exit_code = 1;
+    assert!(
+        prove_and_verify(&vm, &forged, &program).is_err(),
+        "exit_code = 1 was accepted for a run that halted cleanly"
+    );
+    // initial_state_root bytes 16..32 carry no commitment and must be zero.
+    for byte in [16usize, 20, 31] {
+        let mut forged = honest.clone();
+        forged.initial_state_root[byte] = 1;
+        assert!(
+            prove_and_verify(&vm, &forged, &program).is_err(),
+            "initial_state_root[{byte}] was accepted as free data"
+        );
+    }
+    // gas_limit below the gas the execution used cannot be a true statement.
+    let mut forged = honest.clone();
+    forged.gas_limit = forged.gas_used - 1;
+    assert!(
+        prove_and_verify(&vm, &forged, &program).is_err(),
+        "gas_limit below gas_used was accepted"
+    );
+}
