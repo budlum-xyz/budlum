@@ -677,3 +677,39 @@ fn the_validator_transaction_survives_the_wire() {
     let back = Transaction::try_from(proto).expect("the payload decodes");
     assert_eq!(back.tx_type, original.tx_type);
 }
+
+#[test]
+fn the_directory_answers_get_validator_list_relays_and_list_gateways() {
+    use crate::validators::{DirectoryQuery, GatewayOffer, RelayOffer};
+    let f = fixture(15, DEFAULT_CHAIN_ID);
+    let mut state = funded(&f.owner, 10_000);
+    let mut reg = registration(&f, ValidatorClass::Full, 15);
+    reg.relay_offer = Some(RelayOffer {
+        multiaddrs: vec!["/ip4/203.0.113.7/tcp/5001".into()],
+        capacity_kbps: 5_000,
+    });
+    reg.gateway_offer = Some(GatewayOffer {
+        address: "https://gw.example".into(),
+    });
+    apply(
+        &mut state,
+        &tx(
+            f.owner,
+            1_000,
+            0,
+            DEFAULT_CHAIN_ID,
+            ValidatorTx::Register(reg),
+        ),
+    )
+    .unwrap();
+
+    let directory = &state.validator_directory;
+    let one = directory.query_json(DirectoryQuery::One(f.owner));
+    assert_eq!(one["class"], "full");
+    assert_eq!(one["relayOffer"]["capacityKbps"], 5_000);
+    assert_eq!(directory.query_json(DirectoryQuery::Relays)["count"], 1);
+    assert_eq!(directory.query_json(DirectoryQuery::Gateways)["count"], 1);
+    assert!(directory
+        .query_json(DirectoryQuery::One(Address::from([0x55; 32])))
+        .is_null());
+}

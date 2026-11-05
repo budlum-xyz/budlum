@@ -137,6 +137,10 @@ pub enum ChainCommand {
     ),
     GetPqSealedHeights(u64, oneshot::Sender<(Option<u64>, Option<u64>)>),
     GetQuantumView(oneshot::Sender<serde_json::Value>),
+    GetValidatorDirectory(
+        crate::validators::DirectoryQuery,
+        oneshot::Sender<serde_json::Value>,
+    ),
     GetValidatorAddress(oneshot::Sender<Option<Address>>),
     GetAggregatorState(oneshot::Sender<crate::chain::finality::AggregatorState>),
     GetStateRoot(u64, oneshot::Sender<Option<String>>),
@@ -1333,6 +1337,20 @@ impl ChainHandle {
                 canonical: None,
                 seal: None,
             })
+    }
+
+    /// A read of the validator directory: one validator, the relays or the
+    /// gateways.
+    pub async fn validator_directory(
+        &self,
+        query: crate::validators::DirectoryQuery,
+    ) -> serde_json::Value {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetValidatorDirectory(query, tx))
+            .await;
+        rx.await.unwrap_or(serde_json::Value::Null)
     }
 
     /// The quantum alarm and the observed crypto facts of the native domains.
@@ -2807,6 +2825,9 @@ impl ChainActor {
                 }
                 ChainCommand::GetQuantumView(tx) => {
                     let _ = tx.send(self.blockchain.quantum_view());
+                }
+                ChainCommand::GetValidatorDirectory(query, tx) => {
+                    let _ = tx.send(self.blockchain.state.validator_directory.query_json(query));
                 }
                 ChainCommand::GetPqSealedHeights(live, tx) => {
                     let res = self.blockchain.pq_sealed_heights(live);
