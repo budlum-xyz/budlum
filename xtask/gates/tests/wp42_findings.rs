@@ -137,3 +137,13 @@ fn kani_workspace_has_a_lockfile() {
     let lock = read("kani/Cargo.lock");
     assert!(lock.contains("name = \"budlum-kani\""));
 }
+
+/// DOC-GAP-07: the indexer binary has an explicit `[[bin]]` entry.
+#[test]
+fn indexer_binary_is_registered() {
+    let manifest = read("Cargo.toml");
+    assert!(
+        manifest.contains("name = \"budlum-indexer\"\npath = \"src/bin/budlum-indexer.rs\""),
+        "no explicit [[bin]] for budlum-indexer"
+    );
+}

@@ -243,6 +243,13 @@ name = "budlum-domain-reporter"
 path = "src/bin/budlum-domain-reporter.rs"
 required-features = ["wallet-ml-dsa"]
 
+# The public-service indexer reads the node over JSON-RPC and signs nothing, so it
+# needs no feature. It is registered by name so a build or a package listing
+# shows it (DOC-GAP-07); Cargo would otherwise only discover it by directory.
+[[bin]]
+name = "budlum-indexer"
+path = "src/bin/budlum-indexer.rs"
+
 [[bin]]
 name = "bench_sig_verify"
 path = "benches/micro/sig_verify.rs"
