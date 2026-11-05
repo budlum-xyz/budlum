@@ -72,6 +72,7 @@ term_en = "Budlum Explorer"
 term_tr = "Budlum Gezgini"
 area = "application"
 reason = "Standard industry term."
+allow_paths = ["xtask/gates/tests/repository_locks.rs"]
 
 [[concept]]
 old = ["Atlas"]
@@ -156,6 +157,7 @@ term_en = "signature aggregation proof"
 term_tr = "İmza toplama kanıtı"
 area = "budzero"
 reason = "The name states the function."
+allow_paths = ["xtask/gates/src/gates/module_coverage.rs"]
 
 [[concept]]
 old = ["Tarif", "Recipe", "TARIF-3", "VideoRecipe"]
@@ -165,7 +167,7 @@ term_en = "B.U.D. 3.0 object, object commitment, BUD3 Object Format 1 (BOF-1)"
 term_tr = "B.U.D. 3.0 nesnesi, nesne taahhüdü, BOF-1"
 area = "storage"
 reason = "One storage object, one term."
-allow_paths = ["mobile/android/fdroid/"]
+allow_paths = ["mobile/android/fdroid/", "xtask/gates/src/gates/bud3_forbidden_phrases.rs"]
 
 [[concept]]
 old = ["three_* modules"]
@@ -248,6 +250,7 @@ term_en = "BudZero core, BudZero RV32, BudZero guest SDK, mobile prover profile"
 term_tr = "BudZero çekirdeği, BudZero RV32, BudZero konuk SDK, mobil kanıtlayıcı profili"
 area = "budzero"
 reason = "BudZero is the concept term."
+allow_paths = ["xtask/gates/src/gates/bud3_forbidden_phrases.rs"]
 
 [[concept]]
 old = ["Sera", "Greenhouse", "Floem", "Phloem", "Ksilem", "Xylem", "Genotip", "Genotype", "Fenotip", "Phenotype", "Tomurcuk", "Çiçek", "Meyve", "Kök Sözleşmesi", "Yuva", "Nakil"]

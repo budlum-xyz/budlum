@@ -142,11 +142,11 @@ fn forwarded_for_uses_the_rightmost_entry() {
     assert!(body.contains("request_came_from_trusted_proxy(config, req)"));
 }
 
-/// Budscan refuses a resolver-supplied `storage_root` the registry
+/// The Budlum Explorer refuses a resolver-supplied `storage_root` the registry
 /// does not hold, requires the explicit `bud://` mark for a content id, and
 /// refuses bidi-override and path-traversal spellings.
 #[test]
-fn budscan_does_not_badge_unproven_roots() {
+fn explorer_does_not_badge_unproven_roots() {
     let bns = read_repo("crates/budscan/src/bns_proof.rs");
     assert!(bns.contains("fn a_storage_root_the_registry_does_not_hold_is_refused"));
     assert!(bns.contains("e.storage_root == resolved.storage_root"));
@@ -156,11 +156,11 @@ fn budscan_does_not_badge_unproven_roots() {
     assert!(query.contains("fn path_traversal_never_becomes_a_name"));
 }
 
-/// Budscan checks the 48-byte Arweave data root, refuses a truncated
+/// The Budlum Explorer checks the 48-byte Arweave data root, refuses a truncated
 /// root, treats an expired name as bound to nothing, and keeps patch paths
 /// inside their tree.
 #[test]
-fn budscan_arweave_expiry_and_patch_paths() {
+fn explorer_arweave_expiry_and_patch_paths() {
     let arweave = read_repo("crates/budscan/src/arweave.rs");
     assert!(arweave.contains("pub fn data_root(data: &[u8]) -> [u8; 48]"));
     assert!(arweave.contains("fn a_truncated_expected_root_is_rejected_not_verified"));
