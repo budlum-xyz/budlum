@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Edit",
+      "Write",
+      "Read",
+      "Bash(cd *)",
+      "Read(//tmp/lb/**)",
+      "Bash(python3 -)",
+      "Read(//tmp/**)",
+      "Bash(timeout 285 bash -c 'until grep -qE \"^DONE|^COMPILE_ERROR|attempt [3-9]|^test result\" /tmp/repro-b-run.log 2>/dev/null; do sleep 5; done'; tail -3 /tmp/repro-b-run.log | cut -c1-140)",
+      "Bash(timeout 285 bash -c 'until grep -qE \"^DONE|^COMPILE_ERROR|attempt [4-9]|^test result\" /tmp/repro-b-run.log 2>/dev/null; do sleep 5; done'; grep -E \"^=== attempt|^test result|^DONE|^error\" /tmp/repro-b-run.log | tail -5)"
+    ],
+    "additionalDirectories": ["/tmp", "/workspaces"]
+  }
+}
