@@ -799,13 +799,7 @@ mod tests {
         }
         // The occupied count is unchanged: the seats moved, they did not empty.
         assert_eq!(next.active_seats(), table.active_seats());
-    }
-
-    #[test]
-    fn a_handover_never_crosses_the_quarter_cap() {
-        let (table, record) = table_and_record(&[addr(1)]);
-        let previous = prior(&record);
-        let (next, _) = table.hand_over(&previous, &record, 10, &BTreeSet::new());
+        // And no receiver crossed the quarter cap collecting them.
         let cap = next.seat_count() / 4;
         for i in 1..=8 {
             assert!(next.seats_of(&addr(i)).len() <= cap);
@@ -819,13 +813,9 @@ mod tests {
         // The lost set must keep addr(1) out of that slot.
         let (table, record) = table_and_record(&[addr(2)]);
         let previous = prior(&record);
-        let mut lost = BTreeSet::new();
-        lost.insert(addr(1));
-        let seat_naming_addr1 = (0..table.seat_count()).find(|i| {
-            table.owner_of(*i) == Some(addr(2)) && table.seats[*i].standbys.contains(&addr(1))
-        });
+        let lost = BTreeSet::from([addr(1)]);
         let (next, _) = table.hand_over(&previous, &record, 10, &lost);
-        if let Some(index) = seat_naming_addr1 {
+        for index in table.seats_of(&addr(2)) {
             assert_ne!(
                 next.owner_of(index),
                 Some(addr(1)),
@@ -857,14 +847,12 @@ mod tests {
     fn handover_is_deterministic_and_leaves_the_old_table_intact() {
         let (table, record) = table_and_record(&[addr(1), addr(2)]);
         let previous = prior(&record);
-        let lost = BTreeSet::new();
-        let (a, lost_a) = table.hand_over(&previous, &record, 10, &lost);
-        let (b, lost_b) = table.hand_over(&previous, &record, 10, &lost);
-        assert_eq!(a, b);
-        assert_eq!(lost_a, lost_b);
+        let (a, lost_a) = table.hand_over(&previous, &record, 10, &BTreeSet::new());
+        let (b, lost_b) = table.hand_over(&previous, &record, 10, &BTreeSet::new());
+        assert_eq!((a, lost_a), (b, lost_b));
         // The in-flight checkpoint still counts under the old table.
         assert_eq!(table.version, 5);
-        assert!(table.seats_of(&addr(1)).len() > 0);
+        assert!(!table.seats_of(&addr(1)).is_empty());
     }
 
     #[test]
