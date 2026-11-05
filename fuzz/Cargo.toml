@@ -35,6 +35,8 @@ bud-vm = { path = "../budzero/bud-vm" }
 # F2 pre-registration. The crate stays research-gated in the root package;
 # here it fuzzes its own verify walk, which the root never links.
 budlum-bpqs = { path = "../crates/bpqs" }
+# The worker-socket frame codec reads bytes from a peer process.
+budlum-uel-abi = { path = "../crates/uel-abi" }
 libfuzzer-sys = "0.4"
 libp2p = { git = "https://github.com/libp2p/rust-libp2p", rev = "38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd" }
 
@@ -153,6 +155,27 @@ bench = false
 [[bin]]
 name = "bpqs_wots_reject"
 path = "fuzz_targets/bpqs_wots_reject.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "uel_abi_frame"
+path = "fuzz_targets/uel_abi_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bud3_bof1_decode"
+path = "fuzz_targets/bud3_bof1_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bud3_symbol_decode"
+path = "fuzz_targets/bud3_symbol_decode.rs"
 test = false
 doc = false
 bench = false

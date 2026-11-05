@@ -211,12 +211,22 @@ impl ExecutionPublicInputs {
 
     /// Reject a public-input shape that a verifier must not act on: a
     /// `trace_len` above [`MAX_TRACE_LEN`] would overflow the degree
-    /// derivation before any proof bytes are read.
+    /// derivation before any proof bytes are read, and a `gas_used` above the
+    /// `gas_limit` is not a statement about any execution.
     pub fn validate_shape(&self) -> Result<(), VerifyError> {
         if self.trace_len as usize > MAX_TRACE_LEN {
             return Err(VerifyError::InvalidEnvelope(format!(
                 "trace_len {} exceeds the {MAX_TRACE_LEN} cap",
                 self.trace_len
+            )));
+        }
+        // `gas_used` is bound inside the proof; `gas_limit` is what the verifier
+        // holds the execution to. A claim whose limit is below the gas it used is
+        // not a statement about any execution.
+        if self.gas_used > self.gas_limit {
+            return Err(VerifyError::InvalidEnvelope(format!(
+                "gas_used {} exceeds gas_limit {}",
+                self.gas_used, self.gas_limit
             )));
         }
         Ok(())
