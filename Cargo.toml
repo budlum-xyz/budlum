@@ -201,6 +201,8 @@ budlum-note-packing = { path = "crates/note-packing" }
 # types, framing and socket transport between the Execution Coordinator in this
 # process and the `budlum-ee-*` worker binaries.
 budlum-uel-abi = { path = "crates/uel-abi" }
+# B.U.D. 3.0 A0 codec registry.
+bud-codec = { path = "crates/bud-codec" }
 # In-tree, feature-gated (2026-09-19 user decision: no separate repository).
 budlum-bpqs = { path = "crates/bpqs", optional = true }
 
