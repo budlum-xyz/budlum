@@ -165,3 +165,17 @@ path = "fuzz_targets/uel_abi_frame.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "bud3_bof1_decode"
+path = "fuzz_targets/bud3_bof1_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bud3_symbol_decode"
+path = "fuzz_targets/bud3_symbol_decode.rs"
+test = false
+doc = false
+bench = false

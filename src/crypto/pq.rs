@@ -802,7 +802,7 @@ mod tests {
         // The same signature under a free-form context name nobody reviewed
         // is refused before any key is decoded.
         assert_eq!(
-            verify(scheme, &pk, MSG, b"BDLM_MADE_UP_CTX_V1", &sig),
+            verify(scheme, &pk, MSG, b"UNREGISTERED_TEST_CTX_V1", &sig),
             Err(PqError::UnregisteredContext)
         );
     }
