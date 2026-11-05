@@ -129,3 +129,11 @@ fn micro_benches_do_not_clamp_to_u32_max() {
         }
     }
 }
+
+/// BLG-097: the kani workspace carries a `Cargo.lock`, so `--locked` resolves
+/// and the lock-freshness step in CI sees it.
+#[test]
+fn kani_workspace_has_a_lockfile() {
+    let lock = read("kani/Cargo.lock");
+    assert!(lock.contains("name = \"budlum-kani\""));
+}
