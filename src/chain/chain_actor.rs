@@ -68,6 +68,8 @@ pub enum ChainCommand {
     TxPrecheck(Transaction, oneshot::Sender<serde_json::Value>),
     GetChainId(oneshot::Sender<u64>),
     GetBaseFee(oneshot::Sender<u64>),
+    /// The fee floor one transaction must clear (BLG-192).
+    GetRequiredFee(Box<Transaction>, oneshot::Sender<u64>),
     GetValidatorSetHash(oneshot::Sender<String>),
     GetMempoolSize(oneshot::Sender<usize>),
     /// Whether the mempool still holds the transaction with this hash.
@@ -727,6 +729,17 @@ impl ChainHandle {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetBaseFee(tx)).await;
         rx.await.unwrap_or(1)
+    }
+
+    /// The fee floor `candidate` must clear under the current state. `None`
+    /// when the chain actor did not answer.
+    pub async fn get_required_fee(&self, candidate: Transaction) -> Option<u64> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetRequiredFee(Box::new(candidate), tx))
+            .await;
+        rx.await.ok()
     }
 
     pub async fn get_validator_set_hash(&self) -> String {
@@ -2601,6 +2614,9 @@ impl ChainActor {
                 }
                 ChainCommand::GetBaseFee(tx) => {
                     let _ = tx.send(self.blockchain.state.base_fee);
+                }
+                ChainCommand::GetRequiredFee(candidate, tx) => {
+                    let _ = tx.send(self.blockchain.state.required_fee(&candidate));
                 }
                 ChainCommand::GetValidatorSetHash(tx) => {
                     let _ = tx.send(self.blockchain.get_validator_set_hash());

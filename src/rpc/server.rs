@@ -1767,8 +1767,20 @@ impl BudlumApiServer for RpcServer {
         // So the estimate is the fee floor the caller's transaction must
         // Clear. If the caller already set a fee at or above the floor, that
         // Fee is what will be charged and it is returned unchanged.
-        let base_fee = self.chain.get_base_fee().await;
-        Ok(Self::to_hex(tx.fee.max(base_fee)))
+        //
+        // The floor is `AccountState::required_fee`, the same function the
+        // admission rule uses (BLG-192): base fee plus the proportional cut
+        // on a transfer, the escalating fee on a governance proposal. A
+        // floor of `base_fee` alone under-quoted both, and the wallet's
+        // transaction was then refused for a fee the RPC had just suggested.
+        let required = self
+            .chain
+            .get_required_fee(tx.clone())
+            .await
+            .ok_or_else(|| {
+                ErrorObjectOwned::owned(-32603, "chain actor did not answer", None::<()>)
+            })?;
+        Ok(Self::to_hex(tx.fee.max(required)))
     }
 
     async fn tx_precheck(&self, tx: Transaction) -> Result<serde_json::Value, ErrorObjectOwned> {

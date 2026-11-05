@@ -1658,6 +1658,25 @@ impl AccountState {
         self.dirty_accounts.len()
     }
 
+    /// The smallest fee `tx` can carry and still pass the fee rules of
+    /// [`Self::validate_transaction`]: the flat floor, plus the proportional
+    /// cut on a value transfer, and the escalating proposal fee on a
+    /// governance proposal. `bud_estimateGas` answers with this (BLG-192), so
+    /// the estimate and the admission rule are one function.
+    #[must_use]
+    pub fn required_fee(&self, tx: &Transaction) -> u64 {
+        match tx.tx_type {
+            TransactionType::Transfer => self
+                .registry
+                .params()
+                .required_transfer_fee(tx.amount, self.base_fee),
+            TransactionType::Vote if tx.data.len() > 9 => self
+                .base_fee
+                .max(self.required_governance_proposal_fee(&tx.from)),
+            _ => self.base_fee,
+        }
+    }
+
     pub fn required_governance_proposal_fee(&self, proposer: &Address) -> u64 {
         self.base_fee.saturating_mul(
             self.governance
