@@ -149,6 +149,18 @@ fn hash_block_preimage(p: &BlockPreimage<'_>) -> [u8; 32] {
         .map(|r| bincode::serialize(r).unwrap_or_else(|_| EVIDENCE_SERIALIZE_FAILED.to_vec()));
 
     let storage_root_bytes = presence_tagged(p.storage_root);
+    // The seat participation record is consensus data: the next seat table is
+    // derived from it, so the block hash seals it. Encoded here beside the
+    // other buffers so the borrow outlives `fields`.
+    let participation_bytes = p.seat_participation.map(|record| {
+        let seats = record.seats.as_bytes();
+        let mut bytes = Vec::with_capacity(16 + seats.len());
+        bytes.extend_from_slice(&record.checkpoint.to_le_bytes());
+        let seat_len = u64::try_from(seats.len()).unwrap_or(u64::MAX);
+        bytes.extend_from_slice(&seat_len.to_le_bytes());
+        bytes.extend_from_slice(seats);
+        bytes
+    });
     let mut fields: Vec<&[u8]> = vec![
         b"BDLM_BLOCK_V4",
         &index_bytes,
@@ -179,19 +191,8 @@ fn hash_block_preimage(p: &BlockPreimage<'_>) -> [u8; 32] {
         fields.push(b"BDLM_WITNESS_ROOT_V1");
         fields.push(witness_root.as_slice());
     }
-    // The seat participation record is consensus data: the next seat table is
-    // derived from it, so it is sealed by the block hash and the finality
-    // certificate over it. Tagged like the roots above, and folded only when
-    // present, so a block that carries none hashes as it did before.
-    let participation_bytes = p.seat_participation.map(|record| {
-        let seats = record.seats.as_bytes();
-        let mut bytes = Vec::with_capacity(16 + seats.len());
-        bytes.extend_from_slice(&record.checkpoint.to_le_bytes());
-        let seat_len = u64::try_from(seats.len()).unwrap_or(u64::MAX);
-        bytes.extend_from_slice(&seat_len.to_le_bytes());
-        bytes.extend_from_slice(seats);
-        bytes
-    });
+    // Tagged and folded only when present, so a block that carries no record
+    // hashes exactly as it did before the field existed.
     if let Some(bytes) = &participation_bytes {
         fields.push(b"BDLM_SEAT_PARTICIPATION_V1");
         fields.push(bytes.as_slice());
