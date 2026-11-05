@@ -562,7 +562,8 @@ mod tests {
         // A whale among eight validators cannot hold more than floor(S / 4).
         let mut members = equal_members(7, 1000);
         members.push((addr(8), 1_000_000_000));
-        let table = CommitteeTable::derive(1, 10, &randomness(), &members, &CommitteeParams::default());
+        let table =
+            CommitteeTable::derive(1, 10, &randomness(), &members, &CommitteeParams::default());
         let cap = table.seat_count() / 4;
         assert_eq!(table.seats_of(&addr(8)).len(), cap);
         // No validator exceeds the cap.
@@ -590,7 +591,8 @@ mod tests {
     fn allocation_is_proportional_by_largest_remainder() {
         // Weights 3:1 over 16 seats give 12 and 4 exactly.
         let members = vec![(addr(1), 3000), (addr(2), 1000)];
-        let table = CommitteeTable::derive(1, 10, &randomness(), &members, &CommitteeParams::default());
+        let table =
+            CommitteeTable::derive(1, 10, &randomness(), &members, &CommitteeParams::default());
         // Two validators: S = 8, cap = 2, so the cap binds and both fill to 2.
         assert_eq!(table.seat_count(), 8);
         assert_eq!(table.seats_of(&addr(1)).len(), 2);
@@ -606,7 +608,8 @@ mod tests {
             (addr(3), 1500),
             (addr(4), 500),
         ];
-        let table = CommitteeTable::derive(1, 10, &randomness(), &members, &CommitteeParams::default());
+        let table =
+            CommitteeTable::derive(1, 10, &randomness(), &members, &CommitteeParams::default());
         assert_eq!(table.seat_count(), 16);
         assert_eq!(table.active_seats(), 16);
         let total: usize = (1..=4).map(|i| table.seats_of(&addr(i)).len()).sum();
@@ -743,17 +746,22 @@ mod tests {
         (table, record)
     }
 
+    /// The same seats seen one checkpoint earlier: the two-record rule needs a
+    /// pair, and most cases hold the seat set steady across it.
+    fn prior(record: &SeatParticipation) -> SeatParticipation {
+        SeatParticipation {
+            checkpoint: record.checkpoint.saturating_sub(5),
+            seats: record.seats.clone(),
+        }
+    }
+
     #[test]
     fn seat_handover_limit_per_checkpoint() {
         // Every validator but one departs at once. Only ceil(32 / 10) = 4 seats
         // may move in one checkpoint; the rest wait for the next.
         let missing: Vec<Address> = (2..=8).map(addr).collect();
         let (table, record) = table_and_record(&missing);
-        let absent = SeatParticipation {
-            checkpoint: 0,
-            seats: record.seats.clone(),
-        };
-        let (next, _) = table.hand_over(&absent, &record, 10, &BTreeSet::new());
+        let (next, _) = table.hand_over(&prior(&record), &record, 10, &BTreeSet::new());
         let moved = (0..table.seat_count())
             .filter(|i| table.owner_of(*i) != next.owner_of(*i))
             .count();
@@ -781,10 +789,7 @@ mod tests {
     #[test]
     fn a_seat_missing_from_two_records_moves_to_a_standby() {
         let (table, record) = table_and_record(&[addr(1)]);
-        let previous = SeatParticipation {
-            checkpoint: 0,
-            seats: record.seats.clone(),
-        };
+        let previous = prior(&record);
         let (next, lost) = table.hand_over(&previous, &record, 10, &BTreeSet::new());
         assert!(lost.contains(&addr(1)));
         for index in table.seats_of(&addr(1)) {
@@ -799,10 +804,7 @@ mod tests {
     #[test]
     fn a_handover_never_crosses_the_quarter_cap() {
         let (table, record) = table_and_record(&[addr(1)]);
-        let previous = SeatParticipation {
-            checkpoint: 0,
-            seats: record.seats.clone(),
-        };
+        let previous = prior(&record);
         let (next, _) = table.hand_over(&previous, &record, 10, &BTreeSet::new());
         let cap = next.seat_count() / 4;
         for i in 1..=8 {
@@ -816,10 +818,7 @@ mod tests {
         // departs, and addr(1) sits in the standby list of one of its seats.
         // The lost set must keep addr(1) out of that slot.
         let (table, record) = table_and_record(&[addr(2)]);
-        let previous = SeatParticipation {
-            checkpoint: 0,
-            seats: record.seats.clone(),
-        };
+        let previous = prior(&record);
         let mut lost = BTreeSet::new();
         lost.insert(addr(1));
         let seat_naming_addr1 = (0..table.seat_count()).find(|i| {
@@ -848,10 +847,7 @@ mod tests {
         assert_eq!(table.active_seats(), 4);
         let only_two = vec![addr(2)];
         let record = SeatParticipation::collect(&table, 5, only_two.iter());
-        let previous = SeatParticipation {
-            checkpoint: 0,
-            seats: record.seats.clone(),
-        };
+        let previous = prior(&record);
         let (next, _) = table.hand_over(&previous, &record, 10, &BTreeSet::new());
         assert!(next.active_seats() < table.active_seats());
         assert!(next.quorum_seats() <= table.quorum_seats());
@@ -860,10 +856,7 @@ mod tests {
     #[test]
     fn handover_is_deterministic_and_leaves_the_old_table_intact() {
         let (table, record) = table_and_record(&[addr(1), addr(2)]);
-        let previous = SeatParticipation {
-            checkpoint: 0,
-            seats: record.seats.clone(),
-        };
+        let previous = prior(&record);
         let lost = BTreeSet::new();
         let (a, lost_a) = table.hand_over(&previous, &record, 10, &lost);
         let (b, lost_b) = table.hand_over(&previous, &record, 10, &lost);
