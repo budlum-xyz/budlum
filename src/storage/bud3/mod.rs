@@ -13,6 +13,7 @@
 //! | [`varint`] | Bounded LEB128 |
 //! | [`bof1`] | The BOF-1 object: canonical binary header and payload |
 //! | [`segment`] | Segmentation, segment digests and the object commitment |
+//! | [`placement`] | Stake-weighted rendezvous placement, diversity caps, the placement table |
 //! | [`custody`] | Sub-block tree, symbol root, the audit draw and custody proofs |
 //! | [`fountain`] | RFC 6330 per-segment encoder and decoder, and the streaming encoder |
 //!
@@ -31,6 +32,7 @@ pub mod custody;
 pub mod fountain;
 pub mod limits;
 pub mod meter;
+pub mod placement;
 pub mod segment;
 pub mod varint;
 
