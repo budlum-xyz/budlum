@@ -21,11 +21,15 @@
 //! smaller id. Content above 7.9 bits of entropy per byte skips the general
 //! compressor and stays raw. The quick probe: when zstd level 3 saves 5 % or
 //! less, the slow candidates are not run.
+//!
+//! Every codec id, its frozen meaning and its state live in [`registry`].
 
 use std::io::Read;
 
 /// A codec id.
 pub type CodecId = u16;
+
+pub mod registry;
 
 /// Raw: the payload is the content.
 pub const RAW: CodecId = 0;
