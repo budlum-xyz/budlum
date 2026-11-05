@@ -177,7 +177,7 @@ fn strip_cfg_test(src: &str) -> String {
 }
 
 /// Attribute openers that mark an item as compiled only under test.
-const TEST_ATTRS: &[&str] = &["#[cfg(test)]", "#[cfg(all(test,"];
+const TEST_ATTRS: &[&str] = &["#[cfg(test)]", "#[cfg(all(test))]", "#[cfg(all(test,"];
 
 /// The earliest test-only attribute at or after `from`: its start and the
 /// offset just past the marker text.
@@ -1920,4 +1920,20 @@ pub fn self_test() -> Result<String, String> {
          ambiguous name FAILs, a mentioned one PASSes, empty tree FAILs, a WIRING: note \
          PASSes at item and module level, an expired or foreign note FAILs).",
     ))
+}
+
+#[cfg(test)]
+mod test_attr_tests {
+    use super::*;
+
+    /// BLG-180: `#[cfg(all(test))]` is a test-only item like `#[cfg(test)]`; it
+    /// has no comma, so the `#[cfg(all(test,` opener missed it and a helper
+    /// called only from such a block counted as production use.
+    #[test]
+    fn cfg_all_test_without_a_second_condition_is_stripped() {
+        let src = "pub fn live() {}\n#[cfg(all(test))]\nmod only_tests { pub fn helper() {} }\npub fn after() {}\n";
+        let stripped = strip_cfg_test(src);
+        assert!(!stripped.contains("helper"), "stripped: {stripped}");
+        assert!(stripped.contains("live") && stripped.contains("after"));
+    }
 }
