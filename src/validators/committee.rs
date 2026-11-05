@@ -532,16 +532,15 @@ mod tests {
         (1..=count).map(|i| (addr(i), weight)).collect()
     }
 
+    /// The derivation every epoch-1 case uses, at the shared version 10.
+    fn table_of(members: &[(Address, u64)]) -> CommitteeTable {
+        CommitteeTable::derive(1, 10, &randomness(), members, &CommitteeParams::default())
+    }
+
     /// The table most cases reason about: eight equal validators, 32 seats,
     /// four each, cap 8, quorum 22.
     fn eight_equal() -> CommitteeTable {
-        CommitteeTable::derive(
-            1,
-            10,
-            &randomness(),
-            &equal_members(8, 1000),
-            &CommitteeParams::default(),
-        )
+        table_of(&equal_members(8, 1000))
     }
 
     #[test]
@@ -553,13 +552,7 @@ mod tests {
 
     #[test]
     fn seat_count_stops_at_the_ceiling() {
-        let table = CommitteeTable::derive(
-            1,
-            10,
-            &randomness(),
-            &equal_members(64, 1000),
-            &CommitteeParams::default(),
-        );
+        let table = table_of(&equal_members(64, 1000));
         assert_eq!(table.seat_count(), COMMITTEE_MAX_SEATS);
     }
 
@@ -569,7 +562,7 @@ mod tests {
         let mut members = equal_members(7, 1000);
         members.push((addr(8), 1_000_000_000));
         let table =
-            CommitteeTable::derive(1, 10, &randomness(), &members, &CommitteeParams::default());
+            table_of(&members);
         let cap = table.seat_count() / 4;
         assert_eq!(table.seats_of(&addr(8)).len(), cap);
         // No validator exceeds the cap.
@@ -581,13 +574,7 @@ mod tests {
     #[test]
     fn lone_validator_cannot_fill_the_committee() {
         // S = 4, cap = 1: one validator holds one seat, three stay empty.
-        let table = CommitteeTable::derive(
-            1,
-            10,
-            &randomness(),
-            &equal_members(1, 1000),
-            &CommitteeParams::default(),
-        );
+        let table = table_of(&equal_members(1, 1000));
         assert_eq!(table.seat_count(), 4);
         assert_eq!(table.active_seats(), 1);
         assert_eq!(table.quorum_seats(), 1);
@@ -598,7 +585,7 @@ mod tests {
         // Weights 3:1 over 16 seats give 12 and 4 exactly.
         let members = vec![(addr(1), 3000), (addr(2), 1000)];
         let table =
-            CommitteeTable::derive(1, 10, &randomness(), &members, &CommitteeParams::default());
+            table_of(&members);
         // Two validators: S = 8, cap = 2, so the cap binds and both fill to 2.
         assert_eq!(table.seat_count(), 8);
         assert_eq!(table.seats_of(&addr(1)).len(), 2);
@@ -615,7 +602,7 @@ mod tests {
             (addr(4), 500),
         ];
         let table =
-            CommitteeTable::derive(1, 10, &randomness(), &members, &CommitteeParams::default());
+            table_of(&members);
         assert_eq!(table.seat_count(), 16);
         assert_eq!(table.active_seats(), 16);
         let total: usize = (1..=4).map(|i| table.seats_of(&addr(i)).len()).sum();
@@ -629,8 +616,8 @@ mod tests {
         b.reverse();
         a[0].1 = 9000;
         b.last_mut().unwrap().1 = 9000;
-        let ta = CommitteeTable::derive(1, 10, &randomness(), &a, &CommitteeParams::default());
-        let tb = CommitteeTable::derive(1, 10, &randomness(), &b, &CommitteeParams::default());
+        let ta = table_of(&a);
+        let tb = table_of(&b);
         assert_eq!(ta, tb);
     }
 
@@ -685,7 +672,7 @@ mod tests {
 
     #[test]
     fn empty_committee_never_finalizes() {
-        let table = CommitteeTable::derive(1, 10, &randomness(), &[], &CommitteeParams::default());
+        let table = table_of(&[]);
         assert_eq!(table.seat_count(), 0);
         assert_eq!(table.active_seats(), 0);
         assert_eq!(table.covered_seats([]), 0);
@@ -720,8 +707,8 @@ mod tests {
     #[test]
     fn standby_order_is_deterministic() {
         let members = equal_members(8, 1000);
-        let a = CommitteeTable::derive(1, 10, &randomness(), &members, &CommitteeParams::default());
-        let b = CommitteeTable::derive(1, 10, &randomness(), &members, &CommitteeParams::default());
+        let a = table_of(&members);
+        let b = table_of(&members);
         assert_eq!(a.seats[0].standbys, b.seats[0].standbys);
         // A different epoch reshuffles the standby order.
         let c = CommitteeTable::derive(2, 10, &randomness(), &members, &CommitteeParams::default());
