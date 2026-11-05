@@ -2780,6 +2780,32 @@ impl AccountState {
         Ok(())
     }
 
+    /// The B.U.D. 3.0 epoch step, at the epoch boundary after the index
+    /// moved: expire unpaid objects, close the audit windows that ended,
+    /// settle repairs whose new shares all hold, then draw this epoch's
+    /// audits. The audit seed binds the block entropy and the epoch, so no
+    /// holder knows its audit before the epoch opens.
+    fn advance_bud3_epoch(&mut self) {
+        let epoch = self.epoch_index;
+        let registry = &mut self.bud3_registry;
+        if registry.is_empty() {
+            return;
+        }
+        registry.expire(epoch);
+        registry.close_windows(epoch);
+        registry.settle_repairs();
+        let seed = crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_BUD3_AUDIT_SEED_V1",
+            &self.current_block_entropy,
+            &epoch.to_le_bytes(),
+        ]);
+        registry.open_audits(
+            &seed,
+            epoch,
+            &crate::storage::bud3::registry::AuditParams::TESTNET_DEFAULT,
+        );
+    }
+
     /// Carry out the validator directory changes whose epoch has come. Called
     /// at the epoch boundary, after the epoch index moved.
     fn activate_validator_changes(&mut self, chain_id: u64) {
@@ -2853,6 +2879,7 @@ impl AccountState {
 
         // Validator directory changes requested an epoch ago take effect here.
         self.activate_validator_changes(chain_id);
+        self.advance_bud3_epoch();
 
         // Mikoriza weights move only here, at the boundary.
         let shared_security = crate::core::chain_config::shared_security_for_chain_id(chain_id);

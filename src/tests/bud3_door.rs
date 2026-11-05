@@ -135,3 +135,43 @@ fn the_door_refuses_value_and_bad_steps_without_writing() {
     assert_eq!(state.calculate_state_root(), root);
     assert_eq!(state.get_balance(&from), 1_000);
 }
+
+#[test]
+fn the_epoch_boundary_expires_and_audits() {
+    let uploader = Address::from([3u8; 32]);
+    let mut state = AccountState::new();
+    state.add_balance(&uploader, 1_000);
+    let up = prepare_public_upload(b"short lease", &P, &Bud3Limits::default(), 6).unwrap();
+    let key = up.record.commitment;
+    let shares = vec![(
+        0,
+        Share {
+            validator: [11; 32],
+            class: Class::Full,
+            first_esi: 0,
+            symbols: 6,
+        },
+    )];
+    let t = storage_tx(
+        uploader,
+        0,
+        1,
+        0,
+        StorageTxV3::RegisterObject {
+            record: up.record,
+            shares,
+            lifetime_epochs: 2,
+        },
+    );
+    apply(&mut state, &t).unwrap();
+    let start = state.epoch_index;
+    for _ in 0..3 {
+        state.advance_epoch(0, DEFAULT_CHAIN_ID);
+    }
+    assert!(state.epoch_index > start + 2);
+    assert!(
+        state.bud3_registry.object(&key).is_none(),
+        "the unpaid object expired"
+    );
+    assert!(state.bud3_registry.tombstone(&key).is_some());
+}
