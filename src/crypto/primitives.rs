@@ -130,23 +130,26 @@ impl BlsKeypair {
         use rand::Rng;
         let mut seed = [0u8; 64];
         rand::rng().fill_bytes(&mut seed);
-        let sk = Scalar::from_bytes_wide(&seed);
+        Self::from_seed(&seed)
+    }
+
+    /// Derive a key pair from a 64-byte seed. A seed that reduces to the
+    /// zero scalar (the all-zero seed, or any multiple of the group order) is
+    /// refused (BLG-200): its public key is the identity point, which signs
+    /// every message and aggregates into any set without changing it.
+    pub fn from_seed(seed: &[u8; 64]) -> Result<Self, CryptoError> {
+        let sk = Scalar::from_bytes_wide(seed);
+        if sk == Scalar::zero() {
+            return Err(CryptoError::InvalidKey(
+                "Refusing a BLS seed that reduces to the zero scalar".into(),
+            ));
+        }
         let pk = G2Affine::from(G2Projective::generator() * sk);
         let pk_compressed = pk.to_compressed().to_vec();
         Ok(BlsKeypair {
             secret_key: sk,
             public_key: pk_compressed,
         })
-    }
-
-    pub fn from_seed(seed: &[u8; 64]) -> Self {
-        let sk = Scalar::from_bytes_wide(seed);
-        let pk = G2Affine::from(G2Projective::generator() * sk);
-        let pk_compressed = pk.to_compressed().to_vec();
-        BlsKeypair {
-            secret_key: sk,
-            public_key: pk_compressed,
-        }
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -994,6 +997,28 @@ pub fn verify_ml_dsa_87_signature(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn blg_200_zero_seed_is_refused() {
+        // The all-zero seed and a seed equal to the group order both reduce
+        // to the zero scalar, whose public key is the identity point.
+        assert!(super::BlsKeypair::from_seed(&[0u8; 64]).is_err());
+        let order_le = {
+            // r = 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001
+            let be =
+                hex::decode("73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001")
+                    .unwrap();
+            let mut le = [0u8; 64];
+            for (i, b) in be.iter().rev().enumerate() {
+                le[i] = *b;
+            }
+            le
+        };
+        assert!(super::BlsKeypair::from_seed(&order_le).is_err());
+        let mut one = [0u8; 64];
+        one[0] = 1;
+        assert!(super::BlsKeypair::from_seed(&one).is_ok());
+    }
+
     use super::*;
 
     // ---- (F10): key-file parsing is exact. ----

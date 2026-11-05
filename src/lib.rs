@@ -30,6 +30,7 @@ pub mod gateway;
 pub mod light_client;
 pub mod mempool;
 pub mod network;
+pub mod object_layer;
 pub mod pollen;
 pub mod privacy;
 pub mod prover;
@@ -90,5 +91,27 @@ mod bls_keypair_integrity_test {
             !is_some,
             "all-zero G1 must NOT decode (identity uses a different flag)"
         );
+    }
+
+    /// BLG-200: the test above was green for the wrong reason. All-zero bytes
+    /// are simply not an encoding; the identity point has its own encoding
+    /// (compression and infinity flags, `0xc0` first byte) and that one
+    /// *does* decode. The defence is the verifier's identity check, so that
+    /// is what this test drives: an identity public key with an identity
+    /// signature must be refused for any message.
+    #[test]
+    fn blg_200_identity_points_are_refused_by_the_verifier() {
+        let identity_pk = G2Affine::identity().to_compressed();
+        let identity_sig = G1Affine::identity().to_compressed();
+        assert_eq!(identity_pk[0], 0xc0);
+        assert!(bool::from(
+            G2Affine::from_compressed(&identity_pk).is_some()
+        ));
+        assert!(crate::chain::finality::verify_bls_sig(
+            &identity_pk,
+            b"any message at all",
+            &identity_sig
+        )
+        .is_err());
     }
 }

@@ -1,0 +1,13 @@
+[package]
+name = "BudlumObjectLayer"
+version = "0.1.0"
+# No upgrades: the package is published immutable (directive 9.3.2 item 2).
+upgrade_policy = "immutable"
+
+[addresses]
+budlum = "_"
+
+[dependencies.AptosFramework]
+git = "https://github.com/aptos-labs/aptos-core.git"
+rev = "mainnet"
+subdir = "aptos-move/framework/aptos-framework"

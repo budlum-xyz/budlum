@@ -47,6 +47,58 @@ mod integration_tests {
         validator.active = true;
     }
 
+    /// BLG-192: `bud_estimateGas` answers with `AccountState::required_fee`.
+    /// That number must be exactly the admission floor: the estimate passes,
+    /// one unit less is refused, for a proportionally priced transfer and an
+    /// escalated governance proposal alike.
+    #[test]
+    fn blg_192_required_fee_is_the_admission_floor() {
+        let mut state = AccountState::new();
+        let sender_kp = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let sender = Address::from(sender_kp.public_key_bytes());
+        state.add_balance(&sender, 10_000_000);
+        let mut params = *state.registry.params();
+        params.transfer_fee_ppm = 200;
+        state.registry.set_params(params);
+
+        let probe = Transaction::new(sender, Address::from([0x6C; 32]), 1_000_000, Vec::new());
+        let floor = state.required_fee(&probe);
+        assert_eq!(
+            floor,
+            state.base_fee + 200,
+            "base plus 200 ppm of 1_000_000"
+        );
+        let signed = |fee: u64| {
+            let mut tx = Transaction::new_with_fee(
+                sender,
+                Address::from([0x6C; 32]),
+                1_000_000,
+                fee,
+                0,
+                vec![],
+            );
+            tx.sign(&sender_kp);
+            tx
+        };
+        let at_floor = state.validate_transaction(&signed(floor));
+        assert!(at_floor.is_ok(), "{at_floor:?}");
+        assert!(state.validate_transaction(&signed(floor - 1)).is_err());
+
+        let proposer = Address::from([0x6A; 32]);
+        state.add_balance(&proposer, 100);
+        state.add_validator(proposer, 1_000);
+        let first = Transaction::new_proposal(proposer, ProposalType::ChangeBaseFee(10), 10, 0);
+        Executor::apply_transaction(&mut state, &first).expect("first proposal at 1x");
+        let mut second =
+            Transaction::new_proposal(proposer, ProposalType::ChangeBaseFee(11), 10, 1);
+        let floor = state.required_fee(&second);
+        assert_eq!(floor, 2, "the second proposal pays the escalated fee");
+        second.fee = floor - 1;
+        assert!(Executor::apply_transaction(&mut state.clone(), &second).is_err());
+        second.fee = floor;
+        assert!(Executor::apply_transaction(&mut state, &second).is_ok());
+    }
+
     #[test]
     fn governance_proposal_fee_escalates_without_hidden_second_debit() {
         let mut state = AccountState::new();
