@@ -112,7 +112,7 @@ fn validator_registration_requires_class_min_stake() {
         999,
         0,
         DEFAULT_CHAIN_ID,
-        ValidatorTx::Register(full.clone()),
+        ValidatorTx::Register(Box::new(full.clone())),
     );
     assert_eq!(
         apply(&mut state, &below).unwrap_err(),
@@ -123,7 +123,7 @@ fn validator_registration_requires_class_min_stake() {
         1_000,
         0,
         DEFAULT_CHAIN_ID,
-        ValidatorTx::Register(full),
+        ValidatorTx::Register(Box::new(full)),
     );
     apply(&mut state, &at_floor).unwrap();
     let validator = state
@@ -145,7 +145,7 @@ fn validator_registration_requires_class_min_stake() {
         99,
         0,
         DEFAULT_CHAIN_ID,
-        ValidatorTx::Register(mobile.clone()),
+        ValidatorTx::Register(Box::new(mobile.clone())),
     );
     assert_eq!(
         apply(&mut state, &below).unwrap_err(),
@@ -156,7 +156,7 @@ fn validator_registration_requires_class_min_stake() {
         100,
         0,
         DEFAULT_CHAIN_ID,
-        ValidatorTx::Register(mobile),
+        ValidatorTx::Register(Box::new(mobile)),
     );
     apply(&mut state, &ok).unwrap();
     assert!(
@@ -172,7 +172,13 @@ fn the_testnet_floors_are_ten_bud_for_a_phone_and_a_thousand_for_a_full_validato
     let m = fixture(3, TESTNET);
     let mut state = funded(&m.owner, bud(2_000));
     let mobile = registration(&m, ValidatorClass::Mobile, 3);
-    let ten = tx(m.owner, bud(10), 0, TESTNET, ValidatorTx::Register(mobile));
+    let ten = tx(
+        m.owner,
+        bud(10),
+        0,
+        TESTNET,
+        ValidatorTx::Register(Box::new(mobile)),
+    );
     apply(&mut state, &ten).unwrap();
 
     let f = fixture(4, TESTNET);
@@ -183,13 +189,19 @@ fn the_testnet_floors_are_ten_bud_for_a_phone_and_a_thousand_for_a_full_validato
         bud(10),
         0,
         TESTNET,
-        ValidatorTx::Register(full.clone()),
+        ValidatorTx::Register(Box::new(full.clone())),
     );
     assert_eq!(
         apply(&mut state, &ten).unwrap_err(),
         "validator_stake_below_class_floor"
     );
-    let thousand = tx(f.owner, bud(1_000), 0, TESTNET, ValidatorTx::Register(full));
+    let thousand = tx(
+        f.owner,
+        bud(1_000),
+        0,
+        TESTNET,
+        ValidatorTx::Register(Box::new(full)),
+    );
     apply(&mut state, &thousand).unwrap();
 }
 
@@ -205,7 +217,7 @@ fn mobile_registration_refuses_seat_fields() {
         100,
         0,
         DEFAULT_CHAIN_ID,
-        ValidatorTx::Register(with_seat),
+        ValidatorTx::Register(Box::new(with_seat)),
     );
     assert_eq!(
         apply(&mut state, &t).unwrap_err(),
@@ -222,7 +234,7 @@ fn mobile_registration_refuses_seat_fields() {
         100,
         0,
         DEFAULT_CHAIN_ID,
-        ValidatorTx::Register(with_relay),
+        ValidatorTx::Register(Box::new(with_relay)),
     );
     assert_eq!(
         apply(&mut state, &t).unwrap_err(),
@@ -238,7 +250,7 @@ fn mobile_registration_refuses_seat_fields() {
         100,
         0,
         DEFAULT_CHAIN_ID,
-        ValidatorTx::Register(with_gateway),
+        ValidatorTx::Register(Box::new(with_gateway)),
     );
     assert_eq!(
         apply(&mut state, &t).unwrap_err(),
@@ -253,7 +265,7 @@ fn mobile_registration_refuses_seat_fields() {
         1_000,
         0,
         DEFAULT_CHAIN_ID,
-        ValidatorTx::Register(no_seat),
+        ValidatorTx::Register(Box::new(no_seat)),
     );
     assert_eq!(
         apply(&mut state, &t).unwrap_err(),
@@ -274,7 +286,7 @@ fn change_class_activates_next_epoch() {
             1_000,
             0,
             DEFAULT_CHAIN_ID,
-            ValidatorTx::Register(reg),
+            ValidatorTx::Register(Box::new(reg)),
         ),
     )
     .unwrap();
@@ -343,7 +355,7 @@ fn a_full_validator_does_not_change_class_through_the_directory() {
             1_000,
             0,
             DEFAULT_CHAIN_ID,
-            ValidatorTx::Register(reg),
+            ValidatorTx::Register(Box::new(reg)),
         ),
     )
     .unwrap();
@@ -375,7 +387,7 @@ fn operator_key_cannot_withdraw_stake() {
             500,
             0,
             DEFAULT_CHAIN_ID,
-            ValidatorTx::Register(reg),
+            ValidatorTx::Register(Box::new(reg)),
         ),
     )
     .unwrap();
@@ -494,7 +506,7 @@ fn rotate_operator_key_takes_effect_next_epoch() {
             500,
             0,
             DEFAULT_CHAIN_ID,
-            ValidatorTx::Register(reg),
+            ValidatorTx::Register(Box::new(reg)),
         ),
     )
     .unwrap();
@@ -568,7 +580,7 @@ fn quota_increase_activates_next_epoch() {
             500,
             0,
             DEFAULT_CHAIN_ID,
-            ValidatorTx::Register(reg),
+            ValidatorTx::Register(Box::new(reg)),
         ),
     )
     .unwrap();
@@ -637,7 +649,7 @@ fn the_directory_is_part_of_the_state_root_and_the_snapshot() {
             500,
             0,
             DEFAULT_CHAIN_ID,
-            ValidatorTx::Register(reg),
+            ValidatorTx::Register(Box::new(reg)),
         ),
     )
     .unwrap();
@@ -672,7 +684,7 @@ fn the_validator_transaction_survives_the_wire() {
         1_000,
         0,
         DEFAULT_CHAIN_ID,
-        ValidatorTx::Register(reg),
+        ValidatorTx::Register(Box::new(reg)),
     );
     let proto = crate::network::proto_conversions::pb::ProtoTransaction::from(&original);
     let back = Transaction::try_from(proto).expect("the payload decodes");
@@ -699,7 +711,7 @@ fn the_directory_answers_get_validator_list_relays_and_list_gateways() {
             1_000,
             0,
             DEFAULT_CHAIN_ID,
-            ValidatorTx::Register(reg),
+            ValidatorTx::Register(Box::new(reg)),
         ),
     )
     .unwrap();

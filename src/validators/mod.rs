@@ -142,7 +142,7 @@ pub struct ValidatorRegistration {
 pub enum ValidatorTx {
     /// Register and bond the sender as a validator. The signed amount is the
     /// stake.
-    Register(ValidatorRegistration),
+    Register(Box<ValidatorRegistration>),
     /// Change class; takes effect one epoch later. A move to `Full` carries
     /// the seat fields.
     ChangeClass {
