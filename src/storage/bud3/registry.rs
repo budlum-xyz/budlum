@@ -27,6 +27,7 @@ use super::custody::{
     audit_for, sub_block_count, Audit, CustodyProof, ProofContext, ShareRef, FULL_AUDIT_PPM,
     MOBILE_AUDIT_PPM,
 };
+use super::dedup_index::DedupIndex;
 use super::pipeline::ObjectRecord;
 use super::placement::{Class, Share};
 use super::segment::Segmentation;
@@ -202,7 +203,9 @@ pub enum Registered {
 #[serde(from = "FlatRegistry", into = "FlatRegistry")]
 pub struct Bud3Registry {
     objects: BTreeMap<ObjectKey, ObjectEntry>,
-    public_index: BTreeMap<[u8; 32], ObjectKey>,
+    /// Content digest to the live object holding it. Lookups run through the
+    /// node-local filter in front of it (the dedup index module).
+    public_index: DedupIndex,
     nfts: BTreeMap<NftId, (ObjectKey, Address)>,
     tombstones: BTreeMap<ObjectKey, u64>,
     declines: BTreeSet<([u8; 32], Address)>,

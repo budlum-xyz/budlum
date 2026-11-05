@@ -32,6 +32,7 @@
 pub mod bof1;
 pub mod content_id;
 pub mod custody;
+pub mod dedup_index;
 pub mod fountain;
 pub mod limits;
 pub mod meter;
