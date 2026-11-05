@@ -16,7 +16,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::bud_format_container::content_id;
+use crate::container::content_id;
 
 pub const FASTCDC_MAGIC: [u8; 8] = *b"\xB5FCDC\0\0\0";
 pub const FASTCDC_VERSION: u8 = 1;

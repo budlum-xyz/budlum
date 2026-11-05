@@ -9,7 +9,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::bud_format_container::StructuralKind;
+use crate::container::StructuralKind;
 
 /// The content class (the codec choice depends on the content).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -4,7 +4,7 @@
 //! zstd/xz MAGIC and returned the first 100 bytes - it was not real compression,
 //! it produced a fake envelope (no real decompressor could open it). This
 //! version REPLACES it: the real, lossless, zero-dependency Huffman codec
-//! (bud_format_huffman) is used, and the magic is specific to B.U.D. (no
+//! (the huffman module) is used, and the magic is specific to B.U.D. (no
 //! imitation). Real zstd/xz/avif FFI integration is a separate step (its
 //! measurements are documented separately).
 //! Exposed for the B.U.D. 3.0 codec registry: the registry wires these
@@ -12,7 +12,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::bud_format_huffman::{HuffmanCoder, BUD_HFM_MAGIC};
+use crate::huffman::{HuffmanCoder, BUD_HFM_MAGIC};
 
 /// A real lossless compressor (Huffman based, no unsafe, deterministic).
 pub struct RealCompressor;

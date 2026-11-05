@@ -31,6 +31,37 @@ pub type CodecId = u16;
 
 pub mod registry;
 
+// The adopted compression methods, migrated from the old tree: lossless
+// transforms, wired into the registry by the candidate-encoder packages.
+pub mod autozstd;
+pub mod bloom;
+pub mod catalog;
+pub mod columnar;
+pub mod container;
+pub mod crop;
+pub mod dbdelta;
+pub mod dictionary;
+pub mod exepdf;
+pub mod fastcdc;
+pub mod genomic;
+pub mod huffman;
+pub mod jpegre;
+pub mod logfield;
+pub mod markdown;
+pub mod media;
+pub mod model;
+pub mod multifile;
+pub mod office;
+pub mod pcap;
+pub mod pgm;
+pub mod pointcloud;
+pub mod r3fix;
+pub mod ratioconsensus;
+pub mod real;
+pub mod timeseries;
+pub mod tiny;
+pub mod wal;
+
 /// Raw: the payload is the content.
 pub const RAW: CodecId = 0;
 /// zstd.

@@ -5,10 +5,10 @@
 //!   2) Huffman roundtrip - the losslessness property (a break is a fuzz crash)
 //!   3) structural chunking is lossless for every kind (split+join == d)
 #![no_main]
-use bud_core::bud_format_container::{
+use bud_codec::container::{
     structural_join, structural_split, structural_split_compact, StructuralKind,
 };
-use bud_core::bud_format_huffman::HuffmanCoder;
+use bud_codec::huffman::HuffmanCoder;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

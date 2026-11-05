@@ -37,7 +37,6 @@ const CHECKOUT: &str = "actions/checkout@";
 const ACTIVE_PREFIXES: &[&str] = &[
     "src/",
     "crates/",
-    "bud/",
     "budzero/",
     "xtask/",
     // `contracts/` is compile-only in CI

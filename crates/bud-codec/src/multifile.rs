@@ -23,7 +23,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::bud_format_container::content_id;
+use crate::container::content_id;
 use sha3::{Digest, Sha3_256};
 
 // OOM protection: a ceiling on the caller-controlled chunk count
@@ -521,6 +521,6 @@ fn oom_chunk_count_is_refused() {
     let mut bytes = vec![0u8; 64];
     bytes[0..8].copy_from_slice(b"\xB5MFLE\0\0\0");
     bytes[9..13].copy_from_slice(&u32::MAX.to_le_bytes());
-    let _ = crate::bud_format_multifile::TenantMultifileStore::from_blob(&bytes);
+    let _ = crate::multifile::TenantMultifileStore::from_blob(&bytes);
     // no panic, it returns None or Err
 }

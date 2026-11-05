@@ -83,14 +83,14 @@ impl ChainRecord {
         compress: impl FnOnce(&[u8]) -> Vec<u8>,
         qr_derivative: &[u8],
     ) -> Self {
-        let commitment = crate::bud_format_container::content_id(original);
+        let commitment = crate::container::content_id(original);
         let codec = Codec::for_mime(mime);
         let body = if codec == Codec::None {
             original.to_vec()
         } else {
             compress(original)
         };
-        let qr_derivative_commit = crate::bud_format_container::content_id(qr_derivative);
+        let qr_derivative_commit = crate::container::content_id(qr_derivative);
         Self {
             commitment,
             codec,
@@ -143,10 +143,10 @@ mod tests {
             b"qr-derivative",
         );
         assert_eq!(t.codec, Codec::Zstd19);
-        assert_eq!(t.commitment, crate::bud_format_container::content_id(&original));
+        assert_eq!(t.commitment, crate::container::content_id(&original));
         assert_eq!(
             t.qr_derivative_commit,
-            crate::bud_format_container::content_id(b"qr-derivative")
+            crate::container::content_id(b"qr-derivative")
         );
         assert!(t.qr_is_not_stored(), "the QR derivative is not kept");
     }

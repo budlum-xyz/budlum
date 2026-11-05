@@ -10,6 +10,10 @@ description = "B.U.D. 3.0 A0 codec registry: the frozen decoders and the candida
 # Encoder only. Compressor output may differ between versions; the decoder
 # below is the frozen side.
 zstd = { version = "=0.13.3", default-features = false }
+# The content ids and the deterministic digests of the migrated transforms.
+sha3 = "0.12"
+# The columnar transform reads and writes JSON with stable key order.
+serde_json = { version = "1", features = ["preserve_order"] }
 # Pure-Rust decoder: it runs on the viewer's phone, so no C and no unsafe in
 # our tree.
 ruzstd = { version = "=0.8.1", default-features = false, features = ["std"] }

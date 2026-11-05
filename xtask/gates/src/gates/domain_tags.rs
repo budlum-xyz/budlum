@@ -49,7 +49,7 @@ const INVENTORY: &str = "src/crypto/domain_tags.rs";
 /// that cannot look is not a clean scan.
 fn tags_under(root: &Path, exclude: Option<&str>) -> Result<BTreeSet<String>, String> {
     let mut tags = BTreeSet::new();
-    for dir in ["src", "budzero", "crates", "bud"] {
+    for dir in ["src", "budzero", "crates"] {
         let base = root.join(dir);
         if !base.is_dir() {
             return Err(format!(
@@ -185,7 +185,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 /// passes, an unlisted used tag is caught, a listed-but-unused tag is caught.
 pub fn self_test() -> Result<String, String> {
     let tmp = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-dtags")?;
-    for d in ["src/crypto", "budzero", "crates/wallet-core/src", "bud/src"] {
+    for d in ["src/crypto", "budzero", "crates/wallet-core/src", "crates/bud-codec/src"] {
         fs::create_dir_all(tmp.join(d)).map_err(|e| format!("cannot create fixture dir: {e}"))?;
     }
     fs::write(
@@ -244,22 +244,23 @@ pub fn self_test() -> Result<String, String> {
         ));
     }
 
-    // A tag under `bud/` must be seen too: the B.U.D. workspace was
-    // exempted as "having its own gates", and it has none for this.
+    // A tag under the codec crate must be seen too: the old B.U.D. tree was
+    // exempted as "having its own gates", and it has none for this. The
+    // exemption died with the tree; the codec crate inherits the coverage.
     fs::remove_file(tmp.join("crates/wallet-core/src/lib.rs")).map_err(|e| e.to_string())?;
     fs::write(
-        tmp.join("bud/src/lib.rs"),
+        tmp.join("crates/bud-codec/src/lib.rs"),
         "const D: &[u8] = b\"BDLM_BUD_UNLISTED_V1\";\n",
     )
     .map_err(|e| e.to_string())?;
     if run(&tmp).is_ok() {
         let _ = fs::remove_dir_all(&tmp);
         return Err(String::from(
-            "self-test: tag under bud/ was not seen (workspace blind spot)",
+            "self-test: tag under the codec crate was not seen (workspace blind spot)",
         ));
     }
 
-    fs::remove_file(tmp.join("bud/src/lib.rs")).map_err(|e| e.to_string())?;
+    fs::remove_file(tmp.join("crates/bud-codec/src/lib.rs")).map_err(|e| e.to_string())?;
     fs::write(
         tmp.join("src/crypto/domain_tags.rs"),
         "pub const DOMAIN_TAGS: &[&str] = &[\"BDLM_LISTED_V1\", \"BDLM_GONE_V1\"];\n",

@@ -1,6 +1,6 @@
 # The cargo-fuzz target (run with cargo +nightly fuzz check/run).
 [package]
-name = "bud-core-fuzz"
+name = "bud-codec-fuzz"
 version = "0.0.0"
 edition = "2021"
 publish = false
@@ -11,7 +11,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-bud-core = { path = ".." }
+bud-codec = { path = ".." }
 
 [[bin]]
 name = "fuzz_bud_format"
