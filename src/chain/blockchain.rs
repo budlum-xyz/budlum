@@ -7593,7 +7593,12 @@ impl Blockchain {
             let Some(previous_height) = current_height.checked_sub(interval) else {
                 break;
             };
-            if previous_height < epoch_start {
+            // The older block's record reports the checkpoint one interval
+            // before it. That reported checkpoint must also sit in this epoch:
+            // at the epoch's first checkpoints the older block still carries a
+            // record for the PREVIOUS epoch, whose seat indices name a table
+            // that no longer applies.
+            if previous_height.saturating_sub(interval) < epoch_start {
                 height = height.saturating_add(interval);
                 continue;
             }
