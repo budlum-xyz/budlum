@@ -85,22 +85,64 @@ const MAX_DEPTH: usize = 32;
 const MAX_ITEMS: usize = 100_000;
 
 /// Encodes an RLP `Item` canonically.
+///
+/// Two passes (BLG-200): the first measures every list's payload once,
+/// bottom-up; the second writes each byte once, top-down. The old shape
+/// encoded every list into a scratch buffer and copied it into its parent,
+/// so a byte at depth `D` was copied `D` times: `O(D * N)` work and
+/// allocation for an input of `N` bytes.
 pub fn encode(item: &Item) -> Vec<u8> {
-    let mut out = Vec::new();
-    encode_into(item, &mut out);
+    let mut list_payloads = Vec::new();
+    let total = measure(item, &mut list_payloads);
+    let mut out = Vec::with_capacity(total);
+    let mut next = 0usize;
+    write(item, &list_payloads, &mut next, &mut out);
     out
 }
 
-fn encode_into(item: &Item, out: &mut Vec<u8>) {
+/// The length of a length prefix for `len` bytes of payload.
+fn prefix_len(len: usize) -> usize {
+    if len < 56 {
+        1
+    } else {
+        1 + trim_leading_zeros(len).len()
+    }
+}
+
+/// The encoded length of `item`. Each list's payload length is stored in
+/// `list_payloads` in pre-order, so `write` can read them back in the same
+/// order without measuring again.
+fn measure(item: &Item, list_payloads: &mut Vec<usize>) -> usize {
+    match item {
+        Item::String(bytes) => {
+            if bytes.len() == 1 && bytes.first().is_some_and(|b| *b < 0x80) {
+                1
+            } else {
+                prefix_len(bytes.len()) + bytes.len()
+            }
+        }
+        Item::List(items) => {
+            let slot = list_payloads.len();
+            list_payloads.push(0);
+            let payload: usize = items.iter().map(|c| measure(c, list_payloads)).sum();
+            if let Some(entry) = list_payloads.get_mut(slot) {
+                *entry = payload;
+            }
+            prefix_len(payload) + payload
+        }
+    }
+}
+
+fn write(item: &Item, list_payloads: &[usize], next: &mut usize, out: &mut Vec<u8>) {
     match item {
         Item::String(bytes) => encode_string(bytes, out),
         Item::List(items) => {
-            let mut payload = Vec::new();
+            let payload = list_payloads.get(*next).copied().unwrap_or(0);
+            *next += 1;
+            encode_length(payload, 0xc0, out);
             for child in items {
-                encode_into(child, &mut payload);
+                write(child, list_payloads, next, out);
             }
-            encode_length(payload.len(), 0xc0, out);
-            out.extend_from_slice(&payload);
         }
     }
 }
@@ -531,6 +573,49 @@ mod tests {
 
     /// The item budget bounds the decode, whatever the
     /// caller's byte limit is.
+    #[test]
+    fn blg_200_encode_matches_the_nested_copy_encoder_and_is_linear() {
+        // The reference: the old encoder, kept here as the oracle.
+        fn naive(item: &Item, out: &mut Vec<u8>) {
+            match item {
+                Item::String(bytes) => encode_string(bytes, out),
+                Item::List(items) => {
+                    let mut payload = Vec::new();
+                    for child in items {
+                        naive(child, &mut payload);
+                    }
+                    encode_length(payload.len(), 0xc0, out);
+                    out.extend_from_slice(&payload);
+                }
+            }
+        }
+        let mut deep = Item::String(vec![0xaa; 300]);
+        for i in 0..200 {
+            deep = Item::List(vec![
+                Item::String(vec![i as u8]),
+                deep,
+                Item::String(Vec::new()),
+            ]);
+        }
+        let samples = [
+            Item::String(Vec::new()),
+            Item::String(vec![0x7f]),
+            Item::String(vec![0x80]),
+            Item::String(vec![1; 56]),
+            Item::List(Vec::new()),
+            Item::List(vec![Item::String(vec![2; 60]); 3]),
+            deep,
+        ];
+        for item in &samples {
+            let mut want = Vec::new();
+            naive(item, &mut want);
+            let got = encode(item);
+            assert_eq!(got, want);
+            // One allocation of the exact size: no scratch buffers.
+            assert_eq!(got.capacity(), got.len());
+        }
+    }
+
     #[test]
     fn decode_refuses_an_item_flood() {
         // A long flat list of one-byte items: each byte becomes an item,
