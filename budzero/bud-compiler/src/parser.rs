@@ -534,6 +534,13 @@ impl<'a> Parser<'a> {
                 self.expect(Token::Semicolon)?;
                 Ok(Stmt::Emit(event_name, args))
             }
+            // A call used as a statement: `f(1);`. An identifier followed by an
+            // opening parenthesis is never an assignment target.
+            Token::Ident(_) if self.tokens.get(self.pos + 1) == Some(&Token::ParenOpen) => {
+                let expr = self.parse_expr()?;
+                self.expect(Token::Semicolon)?;
+                Ok(Stmt::Expr(expr))
+            }
             Token::Ident(name) => {
                 let name = name.clone();
                 self.consume();

@@ -120,3 +120,10 @@ fn audit_lane_c_blg_338_sequential_branches_release_their_registers() {
     assert!(res.is_ok(), "register exhaustion in while: {:?}", res.err());
 }
 
+/// BLG-136: a call used as a statement (`f(1);`) parses and runs.
+#[test]
+fn audit_lane_c_blg_136_bare_call_statement_compiles_and_runs() {
+    let src = "contract T { fn f(a: u64) { emit Result(a); } pub fn main() { f(41); f(1); } }";
+    assert_eq!(run_events(src), vec![41, 1]);
+}
+
