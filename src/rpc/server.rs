@@ -5,6 +5,7 @@ use crate::core::block::Block;
 use crate::core::transaction::Transaction;
 use crate::domain::storage_deal::{RetrievalChallengeRequest, RetrievalResponse, StorageDeal};
 use crate::network::node::NodeClient;
+use crate::rpc::compat::aptos::{self, AptosGateway};
 use crate::rpc::compat::solana;
 use crate::storage::content_id::ContentId;
 use crate::storage::{emit_hook, NopThreeHook, ThreeEventHook, ThreeHookEvent, ThreeHookKind};
@@ -455,6 +456,13 @@ impl RpcServer {
             RpcMode::Operator => "operator",
         };
         validate_operator_bind_address(&self.mode, &addr)?;
+        aptos::check_routes().map_err(|problem| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Aptos REST route classification refused this listener: {problem}"),
+            )
+        })?;
+        let aptos_gateway = AptosGateway::new(self.chain.clone(), self.node.clone());
         // Every served method must be classified (`src/rpc/method_class.rs`).
         let methods: Methods = self.into_rpc().into();
         crate::rpc::method_class::check_served_methods(methods.method_names()).map_err(|e| {
@@ -490,12 +498,23 @@ impl RpcServer {
                 let stop_handle_for_service = stop_handle.clone();
                 let svc_builder_for_service = svc_builder.clone();
                 let methods_for_service = methods.clone();
+                let aptos_for_service = aptos_gateway.clone();
                 let svc = tower::service_fn(move |mut req: HttpRequest<hyper::body::Incoming>| {
                     req.extensions_mut().insert::<SocketAddr>(remote_addr);
+                    let is_aptos = aptos::owns_path(req.uri().path());
+                    let method = req.method().clone();
+                    let path = req.uri().path().to_string();
+                    let aptos_for_request = aptos_for_service.clone();
                     let mut svc = svc_builder_for_service
                         .clone()
                         .build(methods_for_service.clone(), stop_handle_for_service.clone());
-                    async move { svc.call(req).await }
+                    async move {
+                        if is_aptos {
+                            Ok(aptos_for_request.handle(&method, &path).await)
+                        } else {
+                            svc.call(req).await
+                        }
+                    }
                 });
 
                 let shutdown = stop_handle.clone().shutdown();
