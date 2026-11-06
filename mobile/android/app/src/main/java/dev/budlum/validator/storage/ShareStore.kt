@@ -65,8 +65,11 @@ class ShareStore(
         for (file in files) {
             if (total <= quotaBytes) break
             val id = file.name.hexToByteArray()
+            // A deleted file's length is zero. Capture it before deletion or
+            // the loop will keep releasing shares after it reaches the quota.
+            val size = file.length()
             if (file.delete()) {
-                total -= file.length()
+                total -= size
                 released.add(id)
             }
         }
