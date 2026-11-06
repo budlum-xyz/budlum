@@ -44,25 +44,26 @@ class ValidatorPolicyTest {
     }
 
     @Test
-    fun android_low_space_releases_shares() {
+    fun android_low_space_retains_unreleased_shares() {
         val dir = Files.createTempDirectory("bud3_low_space").toFile()
         val store = CustodyShareStore(dir, ValidatorPolicy.DEFAULT_QUOTA_BYTES)
         val segHex = "a".repeat(64)
         store.writeSegmentShare(segHex, ByteArray(4096) { 1 })
         val released = store.releaseForLowSpace(1024L)
-        assertEquals(listOf(segHex), released)
+        assertTrue(released.isEmpty())
+        assertEquals(4096L, store.usedBytes())
         dir.deleteRecursively()
     }
 
     @Test
-    fun android_leave_releases_shares_and_unbonds() {
+    fun android_leave_retains_unreleased_shares() {
         val dir = Files.createTempDirectory("bud3_leave").toFile()
         val store = CustodyShareStore(dir, ValidatorPolicy.DEFAULT_QUOTA_BYTES)
         val segHex = "b".repeat(64)
         store.writeSegmentShare(segHex, ByteArray(2048) { 2 })
         val released = store.releaseAllForLeave()
-        assertEquals(listOf(segHex), released)
-        assertEquals(0L, store.usedBytes())
+        assertTrue(released.isEmpty())
+        assertEquals(2048L, store.usedBytes())
         dir.deleteRecursively()
     }
 }

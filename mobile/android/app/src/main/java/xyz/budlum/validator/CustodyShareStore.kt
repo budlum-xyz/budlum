@@ -7,8 +7,8 @@ import java.io.File
  * (Section 7.9.5, R-34).
  *
  * One file per segment share named after the lowercase hex segment identifier.
- * Enforces `quotaBytes` and releases shares via `ReleaseShares` whenever free
- * storage drops below `2 GiB` (`R-34`) or the user taps `Leave`.
+ * Enforces `quotaBytes`. Shares must not be deleted until the network has
+ * accepted a release and repair can be scheduled. That flow is not yet wired.
  */
 class CustodyShareStore(
     noBackupRoot: File,
@@ -26,29 +26,15 @@ class CustodyShareStore(
         File(shareDir, segmentHex).writeBytes(payload)
     }
 
+    // Retain local shares until a confirmed network release is available.
     fun releaseForLowSpace(initialFreeBytes: Long): List<String> {
-        var free = initialFreeBytes
-        val released = mutableListOf<String>()
-        val files = shareDir.listFiles()?.sortedBy { it.lastModified() }?.toMutableList()
-            ?: return emptyList()
-        while (free < ValidatorPolicy.LOW_FREE_SPACE_THRESHOLD_BYTES && files.isNotEmpty()) {
-            val victim = files.removeAt(0)
-            val len = victim.length()
-            if (victim.delete()) {
-                free += len
-                released.add(victim.name)
-            }
+        if (initialFreeBytes >= ValidatorPolicy.LOW_FREE_SPACE_THRESHOLD_BYTES) {
+            return emptyList()
         }
-        return released
+        return emptyList()
     }
 
-    fun releaseAllForLeave(): List<String> {
-        val released = mutableListOf<String>()
-        shareDir.listFiles()?.forEach { file ->
-            if (file.isFile && file.delete()) {
-                released.add(file.name)
-            }
-        }
-        return released
-    }
+    // Leaving also requires an on-chain release and unbond; neither is wired yet.
+    fun releaseAllForLeave(): List<String> = emptyList()
+
 }

@@ -18,8 +18,8 @@ import java.util.concurrent.TimeUnit
  * 15-minute `WorkManager` periodic fallback constrained to unmetered Wi-Fi
  * (`NetworkType.UNMETERED`, Section 7.9.3 item 6).
  *
- * Answers pending B.U.D. 3.0 custody audits, emits BLS presence heartbeats, and
- * accepts assigned segment shares whenever `ValidatorService` is stopped.
+ * Audit, presence, and network release handling are not yet connected. The job
+ * retries rather than reporting those duties as successfully completed.
  */
 class ValidatorAuditWorker(
     appContext: Context,
@@ -32,7 +32,7 @@ class ValidatorAuditWorker(
             ValidatorPolicy.DEFAULT_QUOTA_BYTES,
         )
         store.releaseForLowSpace(applicationContext.noBackupFilesDir.usableSpace)
-        return Result.success()
+        return Result.retry()
     }
 
     companion object {
