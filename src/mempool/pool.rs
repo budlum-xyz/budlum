@@ -430,10 +430,9 @@ impl Mempool {
                 .saturating_add(batch.block_bytes);
             let cap = self.duty_lane_cap();
             if lane_bytes > cap {
-                return Err(MempoolError::DutyLaneRefused(DutyRefusal::LaneBytesFull {
-                    lane_bytes,
-                    cap,
-                }));
+                return Err(MempoolError::DutyLaneRefused(
+                    DutyRefusal::LaneBytesFull { lane_bytes, cap },
+                ));
             }
         }
 

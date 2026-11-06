@@ -781,14 +781,13 @@ fn mobile_duty_tx_lane_is_rate_limited() {
     // A second batch in the same window is refused, and the refusal says which
     // window and which batch is in the way.
     let second = duty_ack(&keypair, 1, [2u8; 32]);
+    let refused = pool.admit_at(second, now).unwrap_err();
     assert_eq!(
-        pool.admit_at(second, now),
-        Err(MempoolError::DutyLaneRefused(
-            DutyRefusal::SecondBatchInWindow {
-                window,
-                open_nonce: 0,
-            }
-        ))
+        refused,
+        MempoolError::DutyLaneRefused(DutyRefusal::SecondBatchInWindow {
+            window,
+            open_nonce: 0,
+        })
     );
 
     // A replacement of the pending batch is admitted: the rule is one batch
@@ -811,9 +810,9 @@ fn mobile_duty_tx_lane_is_rate_limited() {
         duty_block_bytes: 1,
         ..MempoolConfig::default()
     });
-    let refusal = tiny.admit_at(duty_ack(&keypair, 0, [5u8; 32]), now);
+    let refused = tiny.admit_at(duty_ack(&keypair, 0, [5u8; 32]), now);
     assert!(matches!(
-        refusal,
+        refused,
         Err(MempoolError::DutyLaneRefused(DutyRefusal::LaneBytesFull { .. }))
     ));
     assert_eq!(tiny.len(), 0);

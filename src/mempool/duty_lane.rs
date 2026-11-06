@@ -50,6 +50,7 @@
 //! byte that separates array entries in `validate_block_size`.
 
 use crate::core::transaction::{Transaction, TransactionType};
+use crate::storage::bud3::tx::StorageTxV3;
 
 /// The share of a block's bytes the duty lane may occupy (section 7.3, item
 /// 6: 20 percent, TESTNET-DEFAULT).
@@ -142,8 +143,7 @@ pub fn is_duty(tx: &Transaction) -> bool {
     };
     matches!(
         payload.as_ref(),
-        crate::storage::bud3::tx::StorageTxV3::CustodyAck { .. }
-            | crate::storage::bud3::tx::StorageTxV3::CustodyProofBatch { .. }
+        StorageTxV3::CustodyAck { .. } | StorageTxV3::CustodyProofBatch { .. }
     )
 }
 
@@ -203,14 +203,14 @@ mod tests {
             tx
         };
 
-        let ack = build(TransactionType::StorageV3(Box::new(
-            crate::storage::bud3::tx::StorageTxV3::CustodyAck { object: [1u8; 32] },
-        )));
+        let ack = build(TransactionType::StorageV3(Box::new(StorageTxV3::CustodyAck {
+            object: [1u8; 32],
+        })));
         assert!(is_duty(&ack));
         assert!(block_bytes(&ack) > 1);
 
         let batch = build(TransactionType::StorageV3(Box::new(
-            crate::storage::bud3::tx::StorageTxV3::CustodyProofBatch { proofs: Vec::new() },
+            StorageTxV3::CustodyProofBatch { proofs: Vec::new() },
         )));
         assert!(is_duty(&batch));
 
