@@ -151,7 +151,11 @@ impl MobileCore {
         next.network = policy.network;
         next.power = policy.power;
         next.serve_symbols = policy.serve_symbols;
+        let released = self.release_until_quota(next.quota_bytes);
         self.policy = next;
+        if !released.is_empty() {
+            self.pending.push(DutyTx::ReleaseShares { shares: released });
+        }
         Ok(())
     }
 
@@ -278,6 +282,23 @@ impl MobileCore {
         fetch_from_holders(holders, source)
     }
 
+    // Drop the largest shares first so a quota reduction is immediately
+    // reflected in the store. The caller queues the corresponding duty.
+    fn release_until_quota(&mut self, quota: u64) -> Vec<ShareId> {
+        let mut released = Vec::new();
+        while self.store.stored_bytes() > quota {
+            let Some(id) = self.store.largest_id() else {
+                break;
+            };
+            let Some(size) = self.store.release(id) else {
+                break;
+            };
+            self.available_bytes = self.available_bytes.saturating_add(size);
+            released.push(id);
+        }
+        released
+    }
+
     /// Release largest shares until free space is at least 2 GB, and lower
     /// the quota to the bytes that remain. Returns the duty if anything was
     /// released.
@@ -327,5 +348,46 @@ impl MobileCore {
     #[must_use]
     pub fn policy(&self) -> Policy {
         self.policy
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::custody::symbol_leaf;
+    use crate::quota::FREE_SPACE_FLOOR_BYTES;
+
+    fn assignment(object: u8, size: usize) -> AssignedShare {
+        let symbol = vec![object; size];
+        AssignedShare {
+            object: [object; 32],
+            segment: 0,
+            esi: 0,
+            position: 0,
+            placed: vec![(0, symbol_leaf(&symbol))],
+            symbol,
+        }
+    }
+
+    #[test]
+    fn quota_reduction_releases_largest_shares_and_restores_space() {
+        let mut core = MobileCore::new(
+            [0; 32],
+            ValidatorClass::Mobile,
+            Vec::new(),
+            FREE_SPACE_FLOOR_BYTES + 1_000,
+        );
+        core.accept_share(assignment(1, 100)).expect("first");
+        let DutyTx::CustodyAck { share: largest, .. } =
+            core.accept_share(assignment(2, 200)).expect("second")
+        else {
+            panic!("expected an acknowledgement");
+        };
+        assert_eq!(core.status().stored_bytes, 300);
+        let released = core.release_until_quota(100);
+        assert_eq!(released, vec![largest]);
+        assert_eq!(core.status().stored_bytes, 100);
+        assert_eq!(core.available_bytes(), FREE_SPACE_FLOOR_BYTES + 900);
+        assert!(core.release_until_quota(100).is_empty());
     }
 }
