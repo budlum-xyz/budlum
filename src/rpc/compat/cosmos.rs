@@ -224,3 +224,49 @@ fn execute_abci_query(path: &str, data: &[u8], state: &AccountState) -> Vec<u8> 
         _ => b"{}".to_vec(),
     }
 }
+
+/// Evaluates a Cosmos LCD gRPC-REST request against read-only `state` (`18551`).
+///
+/// exposed for: wire-level Cosmos LCD REST handler (`WP-29`, `WP-48`).
+#[must_use]
+pub fn handle_cosmos_rest(
+    state: &AccountState,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+) -> (u16, String) {
+    if body.is_some_and(|b| b.len() > crate::rpc::compat::ethereum::MAX_COMPAT_REQUEST_BYTES) {
+        return (
+            413,
+            serde_json::json!({ "message": "payload too large" }).to_string(),
+        );
+    }
+    match (method, path) {
+        ("GET", "/cosmos/base/tendermint/v1beta1/node_info") => (
+            200,
+            serde_json::json!({
+                "default_node_info": {
+                    "network": BUDLUM_COSMOS_CHAIN_ID,
+                    "version": "0.50.0-budlum",
+                }
+            })
+            .to_string(),
+        ),
+        ("GET", p) if p.starts_with("/cosmwasm/wasm/v1/contract/") => {
+            let rest = p.trim_start_matches("/cosmwasm/wasm/v1/contract/");
+            let info = execute_abci_query(
+                "/cosmwasm.wasm.v1.Query/ContractInfo",
+                rest.as_bytes(),
+                state,
+            );
+            (
+                200,
+                serde_json::json!({ "data": hex::encode(info) }).to_string(),
+            )
+        }
+        _ => (
+            404,
+            serde_json::json!({ "message": "cosmos LCD route not found" }).to_string(),
+        ),
+    }
+}

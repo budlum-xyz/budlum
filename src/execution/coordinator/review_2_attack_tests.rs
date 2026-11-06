@@ -23,7 +23,9 @@ use crate::execution::coordinator::foreign::{
     adopt_signing_digest, AdoptForeignAccountTx, ClassicalAdoptProof, ForeignAdmissionError,
     ForeignTx, QuantumAlertLevel,
 };
-use crate::execution::coordinator::gas::{BlockBguMeter, MIN_UEL_BASE_FEE_ATTOS, SOFT_EE_BGU_CAP};
+use crate::execution::coordinator::gas::{
+    BlockBguMeter, EVM_SOFT_BGU_LIMIT, MIN_UEL_BASE_FEE_ATTOS,
+};
 use crate::execution::coordinator::move_ee::MOVE_BINARY_MAGIC;
 use crate::execution::coordinator::svm_ee::{SvmInstructionEnvelope, SVM_MEMO_PROGRAM_ID};
 use crate::execution::coordinator::universal_call::{
@@ -846,9 +848,9 @@ fn review_2_risk_matrix_r01_r08_r18_r21_and_rpc_isolation() {
     ));
     assert_eq!(total_supply_invariant_attos(&state), supply_before);
 
-    // R-18: Per-EE soft BGU cap (`40_000_000 BGU`) refuses single-EE block monopolization.
+    // R-18: Per-EE soft BGU cap (`30_000_000 BGU` for EVM) refuses single-EE block monopolization.
     let mut meter = BlockBguMeter::new();
-    assert!(meter.record_used(EeId::EVM, SOFT_EE_BGU_CAP).is_ok());
+    assert!(meter.record_used(EeId::EVM, EVM_SOFT_BGU_LIMIT).is_ok());
     assert!(meter.check_admissible(EeId::EVM, 1).is_err());
     assert!(meter.check_admissible(EeId::WASM, 10_000_000).is_ok());
 

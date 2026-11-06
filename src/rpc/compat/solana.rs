@@ -200,3 +200,25 @@ fn parse_pubkey_hex(params: &serde_json::Value, idx: usize) -> Option<[u8; 32]> 
     let b = hex::decode(s.trim_start_matches("0x")).ok()?;
     <[u8; 32]>::try_from(b.as_slice()).ok()
 }
+
+/// Evaluates a raw Solana JSON-RPC 2.0 request string against read-only `state` (`18548`).
+///
+/// exposed for: wire-level Solana JSON-RPC handler (`WP-28`, `WP-48`).
+#[must_use]
+pub fn handle_solana_jsonrpc(state: &AccountState, raw_json: &str) -> String {
+    if raw_json.len() > crate::rpc::compat::ethereum::MAX_COMPAT_REQUEST_BYTES {
+        let resp = JsonRpcResponse::err(
+            serde_json::Value::Null,
+            crate::rpc::compat::JSONRPC_LIMIT_EXCEEDED,
+            "request payload exceeds MAX_COMPAT_REQUEST_BYTES",
+        );
+        return serde_json::to_string(&resp).unwrap_or_default();
+    }
+    let Ok(req) = serde_json::from_str::<JsonRpcRequest>(raw_json) else {
+        let resp = JsonRpcResponse::err(serde_json::Value::Null, -32700, "Parse error");
+        return serde_json::to_string(&resp).unwrap_or_default();
+    };
+    let mut gw = SolanaCompatGateway::new(SolanaCompatConfig::default(), 0, [0u8; 32]);
+    let resp = gw.handle_request(&req, state);
+    serde_json::to_string(&resp).unwrap_or_default()
+}

@@ -71,7 +71,7 @@ exactly that agreement.
 ## Acceptance criteria
 
 - [x] `fuzz/Cargo.toml` exists.
-- [x] 14 targets exist under `fuzz/fuzz_targets/`.
+- [x] 16 targets exist under `fuzz/fuzz_targets/`.
 - [x] Every target is registered as an explicit `[[bin]]` in `Cargo.toml`.
 - [x] The F10.1 RLP and MPT panic/DoS targets are registered; the MPT input is
       bounded to 64 nodes and 128 bytes per node.

@@ -121,6 +121,10 @@ pub struct ExecutionState {
     /// Foreign Compatibility Lane account nonces, quantum alert level, and replay window.
     #[serde(default)]
     pub foreign_lane: ForeignLaneState,
+    /// Staged multi-chunk EVM contract imports awaiting `FinalizeEvmImport` (`WP-34`).
+    #[serde(default)]
+    pub pending_evm_migrations:
+        BTreeMap<String, crate::execution::coordinator::migration::MigrationPlan>,
 }
 
 impl ExecutionState {
@@ -138,6 +142,7 @@ impl ExecutionState {
             && self.deploy_frozen_ees.is_empty()
             && self.base_fee_per_bgu_attos == 0
             && self.foreign_lane == ForeignLaneState::default()
+            && self.pending_evm_migrations.is_empty()
     }
 
     /// Reads one raw key from a canonical UEL namespace.

@@ -170,3 +170,24 @@ impl AptosCompatGateway {
         }
     }
 }
+
+/// Evaluates an Aptos REST v1 HTTP request against read-only `state` (`18549`).
+///
+/// exposed for: wire-level Aptos REST handler (`WP-28`, `WP-48`).
+#[must_use]
+pub fn handle_aptos_rest(
+    state: &AccountState,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+) -> (u16, String) {
+    if body.is_some_and(|b| b.len() > crate::rpc::compat::ethereum::MAX_COMPAT_REQUEST_BYTES) {
+        return (
+            413,
+            serde_json::json!({ "message": "payload too large" }).to_string(),
+        );
+    }
+    let mut gw = AptosCompatGateway::new(AptosCompatConfig::default(), 0, 0);
+    let resp = gw.handle_rest(method, path, body, state);
+    (resp.status, resp.body.to_string())
+}

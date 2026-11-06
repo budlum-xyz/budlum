@@ -111,10 +111,13 @@ pub fn compute_create2_address(
     addr
 }
 
+/// On-chain EVM account metadata stored under `ee/evm/account`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct EvmAccountRecord {
-    nonce: u64,
-    code_hash: Option<String>,
+pub struct EvmAccountRecord {
+    pub nonce: u64,
+    pub code_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_from: Option<crate::execution::coordinator::migration::ImportSource>,
 }
 
 /// Stateless EVM execution environment worker (`budlum-ee-evm`, Prague fork).
@@ -1241,6 +1244,7 @@ fn deploy_runtime_code(
     let rec = EvmAccountRecord {
         nonce: 1,
         code_hash: Some(hex::encode(code_hash)),
+        imported_from: None,
     };
     write_account_rec(host, target20, &rec).map_err(|e| e.to_string())?;
 

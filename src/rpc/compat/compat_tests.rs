@@ -280,3 +280,70 @@ fn eth_send_raw_transaction_and_other_compat_gateways_work() {
         Some(hex::encode(b"merhaba").as_str())
     );
 }
+
+#[test]
+fn eth_filters_are_peer_isolated_and_bud_execution_proof_verifies() {
+    let mut gw = EthereumCompatGateway::new(EthereumCompatConfig::default());
+    let mut state = AccountState::new();
+    state
+        .execution_state
+        .write(NS_WASM_STORE, b"k1", Some(b"v1"))
+        .expect("write");
+
+    // Peer A creates filter 0x1; Peer B cannot poll or uninstall Peer A's filter (#76).
+    let created = gw.handle_request(
+        CompatListener::Public,
+        "10.0.0.1",
+        100,
+        &rpc_req("eth_newBlockFilter", serde_json::json!([])),
+        &state,
+    );
+    let fid = created.result.expect("filter id").as_str().expect("str").to_string();
+
+    let poll_other_peer = gw.handle_request(
+        CompatListener::Public,
+        "10.0.0.2",
+        101,
+        &rpc_req("eth_getFilterChanges", serde_json::json!([fid])),
+        &state,
+    );
+    assert!(poll_other_peer.error.is_some());
+
+    let uninst_other = gw.handle_request(
+        CompatListener::Public,
+        "10.0.0.2",
+        102,
+        &rpc_req("eth_uninstallFilter", serde_json::json!([fid])),
+        &state,
+    );
+    assert_eq!(uninst_other.result, Some(serde_json::json!(false)));
+
+    let poll_owner = gw.handle_request(
+        CompatListener::Public,
+        "10.0.0.1",
+        103,
+        &rpc_req("eth_getFilterChanges", serde_json::json!([fid])),
+        &state,
+    );
+    assert!(poll_owner.error.is_none());
+
+    // `bud_getExecutionProof` returns a verifiable `UelExecutionProof` anchored at
+    // `execution_root`.
+    let proof_resp = gw.handle_request(
+        CompatListener::Public,
+        "10.0.0.1",
+        104,
+        &rpc_req(
+            "bud_getExecutionProof",
+            serde_json::json!([NS_WASM_STORE, format!("0x{}", hex::encode(b"k1"))]),
+        ),
+        &state,
+    );
+    let res = proof_resp.result.expect("proof result");
+    let proof: crate::execution::coordinator::state::UelExecutionProof =
+        serde_json::from_value(res["proof"].clone()).expect("decode proof");
+    assert!(crate::execution::coordinator::state::uel_proof_matches_root(
+        &proof,
+        &state.execution_state.execution_root(),
+    ));
+}

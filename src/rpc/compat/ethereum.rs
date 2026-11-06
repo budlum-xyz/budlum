@@ -7,11 +7,14 @@
 
 use crate::core::account::AccountState;
 use crate::execution::coordinator::alias::{derive_foreign_account, ForeignScheme};
+use crate::execution::coordinator::evm_ee::EvmAccountRecord;
 use crate::execution::coordinator::foreign::ethereum::{
     DecodedEthereumTx, BUDLUM_EVM_CHAIN_ID,
 };
 use crate::execution::coordinator::foreign::{ForeignTx, VerifiedForeignOutcome};
-use crate::execution::coordinator::state::{NS_EVM_CODE, NS_EVM_STORAGE};
+use crate::execution::coordinator::state::{
+    NS_EVM_ACCOUNT, NS_EVM_CODE, NS_EVM_STORAGE,
+};
 use crate::execution::coordinator::ExecutionCoordinator;
 use crate::rpc::compat::{
     CompatEffect, CompatListener, CompatMethodClass, EthereumCompatConfig, JsonRpcRequest,
@@ -67,6 +70,8 @@ pub const ETH_METHOD_CLASSES: &[CompatMethodClass] = &[
     row("debug_traceTransaction", CompatListener::Operator, CompatEffect::Read),
     row("debug_traceCall", CompatListener::Operator, CompatEffect::Read),
     row("eth_getProof", CompatListener::Public, CompatEffect::Refused),
+    row("bud_getExecutionProof", CompatListener::Public, CompatEffect::Read),
+    row("bud_getImportedContract", CompatListener::Public, CompatEffect::Read),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,11 +139,17 @@ impl EthFilterRegistry {
         Ok(format!("0x{id:x}"))
     }
 
-    fn remove_hex_id(&mut self, hex_id: &str) -> bool {
+    fn remove_hex_id(&mut self, peer: &str, hex_id: &str) -> bool {
         let trimmed = hex_id.trim_start_matches("0x");
         let Ok(id) = u64::from_str_radix(trimmed, 16) else {
             return false;
         };
+        let Some(existing) = self.filters.get(&id) else {
+            return false;
+        };
+        if existing.owner_peer != peer {
+            return false;
+        }
         self.filters.remove(&id).is_some()
     }
 
@@ -286,12 +297,23 @@ impl EthereumCompatGateway {
                 let Some(addr20) = parse_param_addr20(&req.params, 0) else {
                     return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "bad 20-byte address");
                 };
-                let code = state
+                let by_hash = state
                     .execution_state
-                    .read(NS_EVM_CODE, &addr20)
+                    .read(NS_EVM_ACCOUNT, &addr20)
                     .ok()
                     .flatten()
-                    .unwrap_or_default();
+                    .and_then(|raw| serde_json::from_slice::<EvmAccountRecord>(&raw).ok())
+                    .and_then(|rec| rec.code_hash)
+                    .and_then(|ch| hex::decode(ch).ok())
+                    .and_then(|key| state.execution_state.read(NS_EVM_CODE, &key).ok().flatten());
+                let code = by_hash.unwrap_or_else(|| {
+                    state
+                        .execution_state
+                        .read(NS_EVM_CODE, &addr20)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default()
+                });
                 JsonRpcResponse::ok(id, serde_json::json!(format!("0x{}", hex::encode(code))))
             }
             "eth_getStorageAt" => {
@@ -456,6 +478,9 @@ impl EthereumCompatGateway {
                 let Some(entry) = self.filters.filters.get(&fid_num) else {
                     return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "filter not found");
                 };
+                if entry.owner_peer != peer {
+                    return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "filter not found");
+                }
                 let _ = &entry.kind;
                 JsonRpcResponse::ok(id, serde_json::json!([]))
             }
@@ -464,7 +489,7 @@ impl EthereumCompatGateway {
                     .params
                     .get(0)
                     .and_then(serde_json::Value::as_str)
-                    .is_some_and(|s| self.filters.remove_hex_id(s));
+                    .is_some_and(|s| self.filters.remove_hex_id(peer, s));
                 JsonRpcResponse::ok(id, serde_json::json!(removed))
             }
             "eth_subscribe" => {
@@ -495,8 +520,56 @@ impl EthereumCompatGateway {
                     .params
                     .get(0)
                     .and_then(serde_json::Value::as_str)
-                    .is_some_and(|s| self.filters.remove_hex_id(s));
+                    .is_some_and(|s| self.filters.remove_hex_id(peer, s));
                 JsonRpcResponse::ok(id, serde_json::json!(removed))
+            }
+            "bud_getExecutionProof" => {
+                let Some(ns) = req.params.get(0).and_then(serde_json::Value::as_str) else {
+                    return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "missing namespace");
+                };
+                let Some(key_hex) = req.params.get(1).and_then(serde_json::Value::as_str) else {
+                    return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "missing hex key");
+                };
+                let Ok(key_bytes) = hex::decode(key_hex.trim_start_matches("0x")) else {
+                    return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "invalid hex key");
+                };
+                match state.execution_state.build_execution_proof(ns, &key_bytes) {
+                    Ok(proof) => {
+                        let root = state.execution_state.execution_root();
+                        let val_json = serde_json::to_value(&proof).unwrap_or_default();
+                        JsonRpcResponse::ok(
+                            id,
+                            serde_json::json!({
+                                "executionRoot": format!("0x{}", hex::encode(root)),
+                                "proof": val_json,
+                            }),
+                        )
+                    }
+                    Err(msg) => JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, msg),
+                }
+            }
+            "bud_getImportedContract" => {
+                let Some(addr20) = parse_param_addr20(&req.params, 0) else {
+                    return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "bad 20-byte address");
+                };
+                let imported = state
+                    .execution_state
+                    .read(NS_EVM_ACCOUNT, &addr20)
+                    .ok()
+                    .flatten()
+                    .and_then(|raw| serde_json::from_slice::<EvmAccountRecord>(&raw).ok())
+                    .and_then(|rec| rec.imported_from);
+                let Some(src) = imported else {
+                    return JsonRpcResponse::ok(id, serde_json::Value::Null);
+                };
+                JsonRpcResponse::ok(
+                    id,
+                    serde_json::json!({
+                        "domain": src.domain,
+                        "block": src.block,
+                        "address": format!("0x{}", hex::encode(src.address)),
+                    }),
+                )
             }
             "debug_traceTransaction" | "debug_traceCall" => JsonRpcResponse::ok(
                 id,
@@ -544,4 +617,30 @@ fn parse_filter_range(params: &serde_json::Value, head: u64) -> (u64, u64) {
     let from_b = parse_hex_u64(obj.get("fromBlock"), head);
     let to_b = parse_hex_u64(obj.get("toBlock"), head);
     (from_b, to_b)
+}
+
+/// Maximum raw JSON-RPC request body accepted by compatibility gateways (`R-08`).
+pub const MAX_COMPAT_REQUEST_BYTES: usize = 256 * 1024;
+
+/// Evaluates a raw JSON-RPC 2.0 request string against read-only `state` on the public
+/// Ethereum compatibility surface (`127.0.0.1:18547`).
+///
+/// exposed for: wire-level Ethereum JSON-RPC handler (`WP-28`, `WP-34`, `WP-48`).
+#[must_use]
+pub fn handle_eth_jsonrpc(state: &AccountState, raw_json: &str) -> String {
+    if raw_json.len() > MAX_COMPAT_REQUEST_BYTES {
+        let resp = JsonRpcResponse::err(
+            serde_json::Value::Null,
+            JSONRPC_LIMIT_EXCEEDED,
+            "request payload exceeds MAX_COMPAT_REQUEST_BYTES",
+        );
+        return serde_json::to_string(&resp).unwrap_or_default();
+    }
+    let Ok(req) = serde_json::from_str::<JsonRpcRequest>(raw_json) else {
+        let resp = JsonRpcResponse::err(serde_json::Value::Null, -32700, "Parse error");
+        return serde_json::to_string(&resp).unwrap_or_default();
+    };
+    let mut gw = EthereumCompatGateway::new(EthereumCompatConfig::default());
+    let resp = gw.handle_request(CompatListener::Public, "127.0.0.1", 0, &req, state);
+    serde_json::to_string(&resp).unwrap_or_default()
 }

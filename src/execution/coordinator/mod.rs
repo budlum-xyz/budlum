@@ -8,6 +8,7 @@ pub mod conformance;
 pub mod evm_ee;
 pub mod foreign;
 pub mod gas;
+pub mod migration;
 pub mod move_ee;
 pub mod overlay;
 pub mod scheduler;
@@ -407,6 +408,27 @@ impl ExecutionCoordinator {
     #[must_use]
     pub const fn supervisor(&self) -> &WorkerSupervisor {
         &self.supervisor
+    }
+
+    /// Applies a verified EVM contract migration transaction (`WP-34` 2/3 door).
+    ///
+    /// exposed for: EVM Migration Kit consensus block execution (`WP-34`).
+    pub fn apply_evm_migration(
+        &mut self,
+        state: &mut AccountState,
+        migrator: &Address,
+        tx: crate::execution::coordinator::migration::MigrationTx,
+        fee_schedule: &crate::execution::coordinator::migration::MigrationFeeSchedule,
+    ) -> Result<
+        crate::execution::coordinator::migration::MigrationTxOutcome,
+        crate::execution::coordinator::migration::ImportError,
+    > {
+        crate::execution::coordinator::migration::apply_migration_tx(
+            state,
+            migrator,
+            tx,
+            fee_schedule,
+        )
     }
 
     /// Admits and applies a foreign Compatibility Lane envelope against `state`.

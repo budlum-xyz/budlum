@@ -137,12 +137,20 @@ while keeping existing contracts live.
     enforcement in `classical_crypto_is_paired`.
 - **Compatibility RPC/REST Gateways (`src/rpc/compat/`)**:
   - Ethereum JSON-RPC (`127.0.0.1:18547`, `WP-28`): all 34 T-Launch public
-    methods + operator `debug_traceTransaction` / `debug_traceCall`; `eth_getProof`
-    returns `-32601` (`Method not found; use bud_getExecutionProof`); block
-    `stateRoot` equals `execution_root` (sparse binary Merkle commitment, not an
-    Ethereum MPT).
+    methods + operator `debug_traceTransaction` / `debug_traceCall` +
+    `bud_getExecutionProof` / `bud_getImportedContract`; filters are strictly
+    bound to their owning peer; `eth_getProof` returns `-32601` (`Method not
+    found; use bud_getExecutionProof`); block `stateRoot` equals
+    `execution_root` (sparse binary Merkle commitment, not an Ethereum MPT).
   - Solana JSON-RPC (`127.0.0.1:18548`, `WP-31`), Aptos REST (`127.0.0.1:18549`,
     `WP-32`), and CometBFT RPC + Cosmos LCD (`127.0.0.1:18550` / `18551`, `WP-29`).
+- **EVM Migration Kit (`src/execution/coordinator/migration/`, `src/bin/bud-migrate.rs`, `WP-34`)**:
+  - Verifies source deployment MPT proof (direct `CREATE` or proven factory
+    `CREATE`/`CREATE2`), EIP-712 `MigrationAuthorization`, finalized account
+    proof (`src/cross_domain/evm/account_proof.rs`), and multi-chunk storage MPT
+    proofs (`ImportEvmStorageChunk` -> `FinalizeEvmImport`), installing exact
+    20-byte address, bytecode, storage, and `imported_from` with zero native
+    balance (`docs/EVM_MIGRATION.md`).
 - **Remaining wire integration (`WP-26` slice 2/2, deferred due to active
   lock-path PRs `#9` and `#14`)**: wiring `TransactionType::{Execute,Foreign}`
   in `src/core/transaction.rs` and `src/execution/executor.rs`, and adding
