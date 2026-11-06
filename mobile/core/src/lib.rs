@@ -27,18 +27,15 @@ pub use presence::{
     is_presence_double_sign, presence_preimage, PresenceSignal, ResumeValidator, ValidatorClass,
     PRESENCE_TAG, PRESENCE_TOPIC,
 };
-pub use quota::{
-    FREE_SPACE_FLOOR_BYTES, QUOTA_DEFAULT_BYTES, QUOTA_MAX_BYTES, QUOTA_MIN_BYTES,
-};
+pub use quota::{FREE_SPACE_FLOOR_BYTES, QUOTA_DEFAULT_BYTES, QUOTA_MAX_BYTES, QUOTA_MIN_BYTES};
 pub use relay::{RelayOffer, RelayPool};
 pub use store::{AssignedShare, ShareId, ShareRecord, ShareStore};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::custody::{prove, symbol_leaf, symbol_root, sub_block_count};
+    use crate::custody::{prove, sub_block_count, symbol_leaf, symbol_root};
     use crate::hash::sha256;
-    use crate::quota::below_floor;
 
     const OWNER: [u8; 32] = [9u8; 32];
     const SECRET: [u8; 32] = [7u8; 32];
@@ -50,7 +47,7 @@ mod tests {
     }
 
     fn mock_verify(public: &[u8], preimage: &[u8; 32], sig: &[u8]) -> bool {
-        public == OWNER.as_slice() && sig.as_slice() == mock_sign(preimage).as_slice()
+        public == OWNER.as_slice() && sig == mock_sign(preimage).as_slice()
     }
 
     fn placed_symbol(symbol: &[u8], esi: u32) -> (AssignedShare, Audit) {
@@ -97,7 +94,7 @@ mod tests {
         core.start();
         let ack = core.accept_share(assigned.clone()).expect("accept");
         assert!(matches!(ack, DutyTx::CustodyAck { .. }));
-        let duty = core.answer_audit(audit).expect("audit");
+        let duty = core.answer_audit(assigned.object, audit).expect("audit");
         let DutyTx::CustodyProofBatch(batch) = duty else {
             panic!("expected a proof batch");
         };
@@ -121,6 +118,79 @@ mod tests {
                 &ctx,
             )
             .expect("second sub-block verifies");
+    }
+
+    #[test]
+    fn mobile_core_refuses_unprovable_share_placements() {
+        let symbol = vec![0xabu8; 64];
+        let (assigned, audit) = placed_symbol(&symbol, 7);
+        let mut core = fixture(8 * QUOTA_MIN_BYTES);
+
+        let mut out_of_range = assigned.clone();
+        out_of_range.position = 1;
+        assert_eq!(
+            core.accept_share(out_of_range).expect_err("position").code,
+            "mobile_share_leaf_mismatch"
+        );
+
+        let mut wrong_position = assigned.clone();
+        wrong_position.placed.insert(0, (3, symbol_leaf(b"other")));
+        assert_eq!(
+            core.accept_share(wrong_position)
+                .expect_err("wrong entry")
+                .code,
+            "mobile_share_leaf_mismatch"
+        );
+
+        let mut duplicate = assigned.clone();
+        duplicate.placed.push(duplicate.placed[0]);
+        assert_eq!(
+            core.accept_share(duplicate)
+                .expect_err("duplicate ESI")
+                .code,
+            "mobile_share_placement_order"
+        );
+
+        let mut unordered = assigned.clone();
+        unordered.placed.push((3, symbol_leaf(b"other")));
+        assert_eq!(
+            core.accept_share(unordered).expect_err("unordered").code,
+            "mobile_share_placement_order"
+        );
+        assert_eq!(core.status().stored_bytes, 0);
+        core.accept_share(assigned.clone())
+            .expect("valid placement");
+        core.answer_audit(assigned.object, audit)
+            .expect("valid proof");
+    }
+
+    #[test]
+    fn mobile_core_audits_the_requested_object() {
+        let (first, audit) = placed_symbol(&[1; 64], 7);
+        let (mut second, _) = placed_symbol(&[2; 64], 7);
+        second.object = [4; 32];
+        let mut core = fixture(8 * QUOTA_MIN_BYTES);
+        core.accept_share(first.clone()).expect("first object");
+        core.accept_share(second.clone()).expect("second object");
+
+        let DutyTx::CustodyProofBatch(batch) = core
+            .answer_audit(second.object, audit)
+            .expect("second object's audit")
+        else {
+            panic!("expected a proof batch");
+        };
+        let context = ProofContext {
+            symbol_root: symbol_root(&second.placed),
+            symbol_count: 1,
+            sub_blocks: sub_block_count(second.symbol.len()),
+        };
+        batch.proofs[0].verify(&audit, &context).expect("proof");
+        assert_eq!(
+            core.answer_audit([5; 32], audit)
+                .expect_err("unknown object")
+                .code,
+            "mobile_audit_unknown_share"
+        );
     }
 
     #[test]
@@ -178,10 +248,13 @@ mod tests {
         assert!(core.status().stored_bytes > 0);
         // Free space below 2 GB: the core releases shares.
         core.set_available_bytes(FREE_SPACE_FLOOR_BYTES - 1);
-        assert!(below_floor(core.available_bytes()));
-        let released = core.release_for_floor().expect("release");
-        assert!(matches!(released, DutyTx::ReleaseShares { .. }));
+        let released = core.drain_duties();
+        assert!(matches!(
+            released.as_slice(),
+            [DutyTx::ReleaseShares { .. }]
+        ));
         assert_eq!(core.status().stored_bytes, 0);
+        assert_eq!(core.policy().quota_bytes, QUOTA_MIN_BYTES);
         assert!(core.available_bytes() >= FREE_SPACE_FLOOR_BYTES);
         // After the floor fire, a new share is refused until space returns.
         core.set_available_bytes(FREE_SPACE_FLOOR_BYTES - 1);
@@ -199,6 +272,25 @@ mod tests {
         assert!(p.set_thermal_pause(false).is_err());
         assert!(p.set_quota(QUOTA_MIN_BYTES - 1).is_err());
         assert!(p.set_quota(QUOTA_MAX_BYTES + 1).is_err());
+    }
+
+    #[test]
+    fn mobile_core_refuses_share_that_would_cross_free_space_floor() {
+        let symbol = vec![0x44; 100];
+        let (assigned, _) = placed_symbol(&symbol, 4);
+        let mut core = fixture(FREE_SPACE_FLOOR_BYTES + 99);
+        assert_eq!(
+            core.accept_share(assigned.clone()).expect_err("floor").code,
+            "mobile_free_space_floor"
+        );
+        assert_eq!(core.status().stored_bytes, 0);
+        assert_eq!(core.available_bytes(), FREE_SPACE_FLOOR_BYTES + 99);
+        assert!(core.drain_duties().is_empty());
+
+        core.set_available_bytes(FREE_SPACE_FLOOR_BYTES + 100);
+        core.accept_share(assigned).expect("exactly at floor");
+        assert_eq!(core.available_bytes(), FREE_SPACE_FLOOR_BYTES);
+        assert_eq!(core.status().stored_bytes, 100);
     }
 
     struct Silent;

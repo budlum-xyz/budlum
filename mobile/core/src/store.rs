@@ -2,7 +2,7 @@
 //!
 //! WIRING: [`crate::duty::MobileCore`] is the only caller.
 
-use crate::custody::{symbol_leaf, symbol_root, Audit, CustodyProof, ProofContext, prove};
+use crate::custody::{prove, symbol_leaf, symbol_root, Audit, CustodyProof, ProofContext};
 use crate::error::CoreError;
 use crate::quota::fits;
 use std::collections::BTreeMap;
@@ -115,16 +115,26 @@ impl ShareStore {
                 "accepting this share would exceed the custody quota",
             ));
         }
-        let leaf = symbol_leaf(&assigned.symbol);
-        let expected = assigned
+        // The position used by audit proofs must identify this exact ESI and
+        // leaf, not merely some matching entry elsewhere in the placement.
+        // Strict ordering also rules out ambiguous duplicate ESIs.
+        if assigned
             .placed
-            .iter()
-            .find(|(esi, _)| *esi == assigned.esi)
-            .map(|(_, l)| *l);
-        if expected != Some(leaf) {
+            .windows(2)
+            .any(|pair| pair[0].0 >= pair[1].0)
+        {
+            return Err(CoreError::new(
+                "mobile_share_placement_order",
+                "the placement must contain unique ESIs in ascending order",
+            ));
+        }
+        let expected = usize::try_from(assigned.position)
+            .ok()
+            .and_then(|position| assigned.placed.get(position));
+        if expected != Some(&(assigned.esi, symbol_leaf(&assigned.symbol))) {
             return Err(CoreError::new(
                 "mobile_share_leaf_mismatch",
-                "the assigned symbol does not match the placed leaf",
+                "the assigned position, ESI and symbol must match the placed leaf",
             ));
         }
         let id = self.next_id;
@@ -156,44 +166,34 @@ impl ShareStore {
     /// Id of the largest share, if any.
     #[must_use]
     pub fn largest_id(&self) -> Option<ShareId> {
-        self.shares
-            .values()
-            .max_by_key(|s| s.size())
-            .map(|s| s.id)
+        self.shares.values().max_by_key(|s| s.size()).map(|s| s.id)
     }
 
     /// The share that matches `audit`, if any.
     #[must_use]
-    pub fn matching_audit(&self, audit: &Audit) -> Option<&ShareRecord> {
-        self.shares
-            .values()
-            .find(|s| s.segment == audit.segment && s.position == audit.position)
+    pub fn matching_audit(&self, object: &[u8; 32], audit: &Audit) -> Option<&ShareRecord> {
+        self.shares.values().find(|s| {
+            &s.object == object && s.segment == audit.segment && s.position == audit.position
+        })
     }
 
-    /// Answer an audit that names a share this store holds.
+    /// Answer an audit for an object and a share this store holds.
     ///
     /// # Errors
     ///
     /// [`CoreError`] when no share matches, or the proof cannot be built.
-    pub fn answer(&self, audit: &Audit) -> Result<CustodyProof, CoreError> {
-        let share = self
-            .shares
-            .values()
-            .find(|s| s.segment == audit.segment && s.position == audit.position)
-            .ok_or_else(|| {
-                CoreError::new(
-                    "mobile_audit_unknown_share",
-                    "no stored share matches this audit",
-                )
-            })?;
+    pub fn answer(&self, object: &[u8; 32], audit: &Audit) -> Result<CustodyProof, CoreError> {
+        let share = self.matching_audit(object, audit).ok_or_else(|| {
+            CoreError::new(
+                "mobile_audit_unknown_share",
+                "no stored share matches this audit",
+            )
+        })?;
         let position = usize::try_from(share.position).map_err(|_| {
             CoreError::new("mobile_audit_position", "the share position does not fit")
         })?;
         let sub = usize::try_from(audit.sub_block).map_err(|_| {
-            CoreError::new(
-                "mobile_audit_sub_block",
-                "the sub-block index does not fit",
-            )
+            CoreError::new("mobile_audit_sub_block", "the sub-block index does not fit")
         })?;
         prove(share.segment, &share.placed, position, &share.symbol, sub).ok_or_else(|| {
             CoreError::new(

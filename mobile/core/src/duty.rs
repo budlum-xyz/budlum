@@ -5,7 +5,7 @@ use crate::error::CoreError;
 use crate::handover::{fetch_from_holders, Holder, ShareSource};
 use crate::policy::Policy;
 use crate::presence::{network_hint_ipv4, PresenceSignal, ResumeValidator, ValidatorClass};
-use crate::quota::below_floor;
+use crate::quota::{below_floor, QUOTA_MIN_BYTES};
 use crate::relay::{RelayOffer, RelayPool};
 use crate::store::{AssignedShare, ShareId, ShareStore};
 
@@ -151,7 +151,12 @@ impl MobileCore {
         next.network = policy.network;
         next.power = policy.power;
         next.serve_symbols = policy.serve_symbols;
+        let released = self.release_until_quota(next.quota_bytes);
         self.policy = next;
+        if !released.is_empty() {
+            self.pending
+                .push(DutyTx::ReleaseShares { shares: released });
+        }
         Ok(())
     }
 
@@ -172,6 +177,16 @@ impl MobileCore {
             ));
         }
         let incoming = assigned.symbol.len() as u64;
+        if self
+            .available_bytes
+            .checked_sub(incoming)
+            .is_none_or(below_floor)
+        {
+            return Err(CoreError::new(
+                "mobile_free_space_floor",
+                "accepting this share would reduce free space below 2 GB",
+            ));
+        }
         let record = self.store.accept(assigned, self.policy.quota_bytes)?;
         self.available_bytes = self.available_bytes.saturating_sub(incoming);
         Ok(DutyTx::CustodyAck {
@@ -180,24 +195,24 @@ impl MobileCore {
         })
     }
 
-    /// Answer an audit. The proof is checked against the stored symbol root
-    /// before it leaves the core.
+    /// Answer an audit for `object`. Segment and position are scoped to an
+    /// object, so the host must supply the object associated with the audit.
+    /// The proof is checked against the stored symbol root before it leaves
+    /// the core; that self-check does not authenticate the root.
     ///
     /// # Errors
     ///
     /// [`CoreError`] when the share is missing or the proof does not verify.
-    pub fn answer_audit(&mut self, audit: Audit) -> Result<DutyTx, CoreError> {
-        match self.store.answer(&audit) {
+    pub fn answer_audit(&mut self, object: [u8; 32], audit: Audit) -> Result<DutyTx, CoreError> {
+        match self.store.answer(&object, &audit) {
             Ok(proof) => {
-                if let Some(share) = self.store.matching_audit(&audit) {
-                    proof
-                        .verify(&audit, &share.proof_context())
-                        .map_err(|_| {
-                            CoreError::new(
-                                "mobile_audit_self_check",
-                                "a proof this core built did not verify",
-                            )
-                        })?;
+                if let Some(share) = self.store.matching_audit(&object, &audit) {
+                    proof.verify(&audit, &share.proof_context()).map_err(|_| {
+                        CoreError::new(
+                            "mobile_audit_self_check",
+                            "a proof this core built did not verify",
+                        )
+                    })?;
                 }
                 self.last_audit = LastAudit::Passed;
                 Ok(DutyTx::CustodyProofBatch(CustodyProofBatch {
@@ -266,9 +281,26 @@ impl MobileCore {
         fetch_from_holders(holders, source)
     }
 
+    // Drop the largest shares first so a quota reduction is immediately
+    // reflected in the store. The caller queues the corresponding duty.
+    fn release_until_quota(&mut self, quota: u64) -> Vec<ShareId> {
+        let mut released = Vec::new();
+        while self.store.stored_bytes() > quota {
+            let Some(id) = self.store.largest_id() else {
+                break;
+            };
+            let Some(size) = self.store.release(id) else {
+                break;
+            };
+            self.available_bytes = self.available_bytes.saturating_add(size);
+            released.push(id);
+        }
+        released
+    }
+
     /// Release largest shares until free space is at least 2 GB, and lower
-    /// the quota to the bytes that remain. Returns the duty if anything was
-    /// released.
+    /// the quota to the bytes that remain, subject to the 1 GiB minimum.
+    /// Returns the duty if anything was released.
     pub fn release_for_floor(&mut self) -> Option<DutyTx> {
         if !below_floor(self.available_bytes) {
             return None;
@@ -286,7 +318,7 @@ impl MobileCore {
                 None => break,
             }
         }
-        self.policy.quota_bytes = self.store.stored_bytes().max(1);
+        self.policy.quota_bytes = self.store.stored_bytes().max(QUOTA_MIN_BYTES);
         if released.is_empty() {
             None
         } else {
@@ -300,9 +332,12 @@ impl MobileCore {
         core::mem::take(&mut self.pending)
     }
 
-    /// Inject host-measured free space. Tests and the Android host call this.
+    /// Update host-measured free space and queue any required floor releases.
     pub fn set_available_bytes(&mut self, available_bytes: u64) {
         self.available_bytes = available_bytes;
+        if let Some(tx) = self.release_for_floor() {
+            self.pending.push(tx);
+        }
     }
 
     /// Current free space as the core sees it.
@@ -315,5 +350,46 @@ impl MobileCore {
     #[must_use]
     pub fn policy(&self) -> Policy {
         self.policy
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::custody::symbol_leaf;
+    use crate::quota::FREE_SPACE_FLOOR_BYTES;
+
+    fn assignment(object: u8, size: usize) -> AssignedShare {
+        let symbol = vec![object; size];
+        AssignedShare {
+            object: [object; 32],
+            segment: 0,
+            esi: 0,
+            position: 0,
+            placed: vec![(0, symbol_leaf(&symbol))],
+            symbol,
+        }
+    }
+
+    #[test]
+    fn quota_reduction_releases_largest_shares_and_restores_space() {
+        let mut core = MobileCore::new(
+            [0; 32],
+            ValidatorClass::Mobile,
+            Vec::new(),
+            FREE_SPACE_FLOOR_BYTES + 1_000,
+        );
+        core.accept_share(assignment(1, 100)).expect("first");
+        let DutyTx::CustodyAck { share: largest, .. } =
+            core.accept_share(assignment(2, 200)).expect("second")
+        else {
+            panic!("expected an acknowledgement");
+        };
+        assert_eq!(core.status().stored_bytes, 300);
+        let released = core.release_until_quota(100);
+        assert_eq!(released, vec![largest]);
+        assert_eq!(core.status().stored_bytes, 100);
+        assert_eq!(core.available_bytes(), FREE_SPACE_FLOOR_BYTES + 900);
+        assert!(core.release_until_quota(100).is_empty());
     }
 }

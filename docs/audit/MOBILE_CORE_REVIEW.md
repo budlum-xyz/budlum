@@ -4,8 +4,10 @@
 
 WP-11 continuation of PR #82, based on
 `5685e03d87c257e7e1ecc6fd3355eee5cebdbf94`. The session branch is
-`arena/dc0a724c-budlum`. The continuation targets the existing mobile-core
-branch rather than copying an unrelated package onto `main`.
+`arena/dc0a724c-budlum`. The continuation now targets PR #85 at
+`0a3cf5fc3ac0a242a36f129a27b9fc39698e0055`, itself stacked on #82.
+#85 appeared during this review and already implements several planned
+corrections. Its commits are carried intact rather than reimplemented.
 
 The initial live survey found 64 open pull requests and a clean worktree.
 Of those pull requests, only #82 changes `mobile/core/`. Other open work
@@ -51,3 +53,26 @@ assertion failed: !fits(u64::MAX, 1, u64::MAX)
 The remaining new regressions have not yet been executed at this checkpoint.
 No performance measurement, green CI result, completed package, or testnet
 readiness is claimed.
+
+## Concurrent continuation and inherited build failure
+
+PR #85 implements exact placement binding, object-scoped audit selection,
+post-admission free-space checks, immediate floor release, and quota reduction.
+This continuation adopts that branch and retains regression controls. Those
+changes are not claimed as new implementation here.
+
+The first full mobile test compile found an inherited test-only error:
+
+```text
+error[E0658]: use of unstable library feature `str_as_str`
+mobile/core/src/lib.rs:53:43
+public == OWNER.as_slice() && sig.as_slice() == mock_sign(preimage).as_slice()
+```
+
+`sig` is already a byte slice. Removing its unnecessary `as_slice()` fixes
+the compile without changing signature verification behavior. Dependencies
+for local checks are exact-version upstream GitHub source archives in an
+external source-replacement directory, not a crates.io lockfile verification.
+Only inherited workspace lint tables are stripped from those external
+archives so isolated manifests can load. No repository dependency, pin, or
+CI gate is relaxed.

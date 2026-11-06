@@ -18,3 +18,8 @@ SHA and a CI run number.
   refusal atomicity and quota/free-space boundaries. The first quota overflow
   regression is executed red. No finding is closed and WP-11 is not complete.
 - Evidence and environment restrictions: `docs/audit/MOBILE_CORE_REVIEW.md`.
+
+- Concurrent continuation #85 was discovered after the first claim. PR #88
+  now continues #85 without recreating its fixes. The inherited presence
+  test compile error was reproduced and corrected. Local checks use upstream
+  GitHub dependency archives; CI remains authoritative.
