@@ -3701,18 +3701,8 @@ impl AccountState {
     #[must_use]
     pub fn total_bud_committed_attos(&self) -> u128 {
         let q = u128::from(ATTOS_PER_ATOM);
-        let bonded_atoms = self
-            .total_staked_supply()
-            .saturating_add(self.total_unbonding_supply())
-            .saturating_add(self.total_registry_role_bonded_supply())
-            .saturating_add(self.registry.total_delegation_unbonding_supply())
-            .saturating_add(self.total_external_bonded_supply())
-            .saturating_add(self.proof_market.total_locked_supply())
-            .saturating_add(self.settlement.relayer_policy.total_escrowed_supply())
-            .saturating_add(self.settlement.graft.total_escrowed_supply())
-            .saturating_add(self.total_storage_escrowed_supply());
         self.circulating_supply_attos()
-            .saturating_add(bonded_atoms.saturating_mul(q))
+            .saturating_add(self.non_liquid_committed_atoms().saturating_mul(q))
     }
 
     /// Exact attoBUD balance of `address` (`balance * 10^12 + frac_attos`).
@@ -3886,9 +3876,8 @@ impl AccountState {
     /// Burn and reopen false minting headroom. Delegation exits, proof-market
     /// escrow, relayer-intent escrow and Graft intent escrow are counted for the
     /// same reason.
-    pub fn total_bud_committed(&self) -> u128 {
-        self.circulating_supply()
-            .saturating_add(self.total_staked_supply())
+    fn non_liquid_committed_atoms(&self) -> u128 {
+        self.total_staked_supply()
             .saturating_add(self.total_unbonding_supply())
             .saturating_add(self.total_registry_role_bonded_supply())
             .saturating_add(self.registry.total_delegation_unbonding_supply())
@@ -3897,6 +3886,11 @@ impl AccountState {
             .saturating_add(self.settlement.relayer_policy.total_escrowed_supply())
             .saturating_add(self.settlement.graft.total_escrowed_supply())
             .saturating_add(self.total_storage_escrowed_supply())
+    }
+
+    pub fn total_bud_committed(&self) -> u128 {
+        self.circulating_supply()
+            .saturating_add(self.non_liquid_committed_atoms())
     }
 
     /// Total $BUD held in storage-deal escrow: the operator bond and the part
