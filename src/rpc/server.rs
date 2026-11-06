@@ -346,6 +346,9 @@ pub struct RpcServer {
     /// are served through sessions opened by `bud_storageOpenReveal`, never
     /// as raw handle-passing.
     reveal_gateway: Arc<Mutex<crate::storage::RevealGateway>>,
+    /// Bounded, expiring, per-peer filter table of the Ethereum gateway
+    /// (WP-28, 2/N). It is node-local bookkeeping, never consensus state.
+    eth_filters: Arc<Mutex<ethereum::filters::FilterPool>>,
     /// Prometheus metrics handle for RPC latency and rate-limit counters.
     /// If `None`, metrics are silently skipped (e.g. in tests without a
     /// Global registry).
@@ -363,6 +366,7 @@ impl RpcServer {
             security: RpcSecurityConfig::default(),
             mode: RpcMode::Public,
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
+            eth_filters: Arc::new(Mutex::new(ethereum::filters::FilterPool::new())),
             metrics: None,
             tls: None,
         }
@@ -379,6 +383,7 @@ impl RpcServer {
             security,
             mode: RpcMode::Public,
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
+            eth_filters: Arc::new(Mutex::new(ethereum::filters::FilterPool::new())),
             metrics: None,
             tls: None,
         }
@@ -396,6 +401,7 @@ impl RpcServer {
             security,
             mode,
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
+            eth_filters: Arc::new(Mutex::new(ethereum::filters::FilterPool::new())),
             metrics: None,
             tls: None,
         }
@@ -6613,36 +6619,99 @@ impl BudlumApiServer for RpcServer {
         Err(ethereum::ee_unavailable("eth_getLogs", "bud_getTransactionReceipt"))
     }
 
+    // WP-28, 2/N: the five filter methods use one bounded, expiring,
+    // per-peer table. The peer key comes from the connection extension; when
+    // it is absent, all callers share the anonymous bucket, which is tighter
+    // rather than looser. No handler invents log data before WP-27.
+
     async fn eth_new_filter(
         &self,
-        _filter: serde_json::Value,
+        ext: &jsonrpsee::Extensions,
+        filter: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(ethereum::ee_unavailable("eth_newFilter", "bud_subscribe"))
+        let peer = ethereum::filters::peer_of(ext);
+        let spec = serde_json::to_string(&filter).unwrap_or_default();
+        let mut pool = self
+            .eth_filters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let id = pool
+            .create(
+                &peer,
+                ethereum::filters::FilterKind::Log,
+                &spec,
+                ethereum::filters::now_secs(),
+            )
+            .map_err(|error| ethereum::filter_error("eth_newFilter", error))?;
+        Ok(serde_json::json!({ "id": id }))
     }
 
-    async fn eth_new_block_filter(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(ethereum::ee_unavailable("eth_newBlockFilter", "bud_subscribe"))
+    async fn eth_new_block_filter(
+        &self,
+        ext: &jsonrpsee::Extensions,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let peer = ethereum::filters::peer_of(ext);
+        let mut pool = self
+            .eth_filters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let id = pool
+            .create(
+                &peer,
+                ethereum::filters::FilterKind::Block,
+                "{}",
+                ethereum::filters::now_secs(),
+            )
+            .map_err(|error| ethereum::filter_error("eth_newBlockFilter", error))?;
+        Ok(serde_json::json!({ "id": id }))
     }
 
     async fn eth_get_filter_changes(
         &self,
-        _filter_id: String,
+        ext: &jsonrpsee::Extensions,
+        filter_id: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(ethereum::ee_unavailable("eth_getFilterChanges", "bud_subscribe"))
+        let peer = ethereum::filters::peer_of(ext);
+        let mut pool = self
+            .eth_filters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let changes = pool
+            .changes(&peer, &filter_id, ethereum::filters::now_secs())
+            .map_err(|error| ethereum::filter_error("eth_getFilterChanges", error))?;
+        Ok(serde_json::json!(changes))
     }
 
     async fn eth_get_filter_logs(
         &self,
-        _filter_id: String,
+        ext: &jsonrpsee::Extensions,
+        filter_id: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(ethereum::ee_unavailable("eth_getFilterLogs", "bud_subscribe"))
+        let peer = ethereum::filters::peer_of(ext);
+        let mut pool = self
+            .eth_filters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let changes = pool
+            .changes(&peer, &filter_id, ethereum::filters::now_secs())
+            .map_err(|error| ethereum::filter_error("eth_getFilterLogs", error))?;
+        Ok(serde_json::json!(changes))
     }
 
     async fn eth_uninstall_filter(
         &self,
-        _filter_id: String,
+        ext: &jsonrpsee::Extensions,
+        filter_id: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(ethereum::ee_unavailable("eth_uninstallFilter", "bud_subscribe"))
+        let peer = ethereum::filters::peer_of(ext);
+        let mut pool = self
+            .eth_filters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let removed = pool
+            .uninstall(&peer, &filter_id, ethereum::filters::now_secs())
+            .map_err(|error| ethereum::filter_error("eth_uninstallFilter", error))?;
+        Ok(serde_json::Value::Bool(removed))
     }
 
     async fn debug_trace_transaction(

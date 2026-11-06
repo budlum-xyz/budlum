@@ -183,6 +183,7 @@ mod ethereum_compat_tests {
                 Answer::Pending { .. } => None,
                 Answer::ChainRead => Some("Read"),
                 Answer::MethodNotFound | Answer::EeUnavailable { .. } => Some("Refused"),
+                Answer::BoundedFilter => Some("LocalAdmin"),
             };
             let found = rows.iter().find(|(name, _, _)| name.as_str() == entry.name);
             match (expected, found) {
@@ -238,7 +239,7 @@ mod ethereum_compat_tests {
         }
         assert_eq!(
             pending, 2,
-            "eth_subscribe and eth_unsubscribe are the 2/2 pair"
+            "eth_subscribe and eth_unsubscribe are the pending pair"
         );
     }
 
@@ -264,6 +265,27 @@ mod ethereum_compat_tests {
     }
 
     #[test]
+    fn eth_filter_rows_use_the_bounded_pool() {
+        let expected = [
+            "eth_newFilter",
+            "eth_newBlockFilter",
+            "eth_getFilterChanges",
+            "eth_getFilterLogs",
+            "eth_uninstallFilter",
+        ];
+        let rows = class_rows();
+        for name in expected {
+            let entry = row(name).expect("a filter method has a gateway row");
+            assert_eq!(entry.answer, Answer::BoundedFilter, "{name}");
+            let class = rows
+                .iter()
+                .find(|(candidate, _, _)| candidate == name)
+                .expect("a filter method has a class row");
+            assert_eq!(class.2, "LocalAdmin", "{name} changes node-local state only");
+        }
+    }
+
+    #[test]
     fn eth_check_served_refuses_a_foreign_method_with_no_row() {
         let served: Vec<&str> = served_names();
         super::super::check_served(served.iter().copied())
@@ -273,6 +295,6 @@ mod ethereum_compat_tests {
         assert!(err.contains("eth_notAThing"), "{err}");
         let err = super::super::check_served(["eth_subscribe"])
             .expect_err("a pending row cannot be served");
-        assert!(err.contains("WP-28, 2/2"), "{err}");
+        assert!(err.contains("WP-28"), "{err}");
     }
 }

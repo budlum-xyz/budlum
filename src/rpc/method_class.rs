@@ -289,11 +289,15 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("eth_getTransactionReceipt", Public, Refused),
     row("eth_getBlockReceipts", Public, Refused),
     row("eth_getLogs", Public, Refused),
-    row("eth_newFilter", Public, Refused),
-    row("eth_newBlockFilter", Public, Refused),
-    row("eth_getFilterChanges", Public, Refused),
-    row("eth_getFilterLogs", Public, Refused),
-    row("eth_uninstallFilter", Public, Refused),
+    // WP-28, 2/N: the five filter methods admit records into the bounded,
+    // expiring, per-peer table in `src/rpc/compat/ethereum/filters.rs`. That is
+    // node-local bookkeeping, the same class as reveal sessions. Their log
+    // data still refuses with -32004 until WP-27.
+    row("eth_newFilter", Public, LocalAdmin),
+    row("eth_newBlockFilter", Public, LocalAdmin),
+    row("eth_getFilterChanges", Public, LocalAdmin),
+    row("eth_getFilterLogs", Public, LocalAdmin),
+    row("eth_uninstallFilter", Public, LocalAdmin),
     row("eth_accounts", Public, Read),
     row("debug_traceTransaction", Operator, Refused),
     row("debug_traceCall", Operator, Refused),

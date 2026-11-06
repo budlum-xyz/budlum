@@ -28,16 +28,23 @@
 //! `eth_getProof` is not a refusal and not a wait: Section 8.10.6 makes it
 //! `-32601` for good at the opening layer, because the Budlum state root is not an
 //! MPT root and an MPT proof over it would be a false proof. The Budlum
-//! native proof is `bud_getExecutionProof`.
+//! native proof is `bud_getAccountProof`.
 //!
-//! # What waits for 2/2
+//! # What delivery 2/N adds
+//!
+//! [`filters`] is the bounded, expiring, per-peer filter table the card asks
+//! for. The five filter methods now admit filters through it. A read of a
+//! filter still answers `-32004`: log data needs the EVM execution environment
+//! of WP-27, and an empty change list would be a false answer.
+//!
+//! # What still waits
 //!
 //! The dedicated listeners (`127.0.0.1:18547`, HTTP and WebSocket), the
-//! bounded filter and subscription pool, the block and receipt shapes with
-//! `stateRoot` set to `execution_root`, and the per-peer quota. `eth_subscribe`
-//! and `eth_unsubscribe` are in the table and marked [`Answer::Pending`], so
-//! a client that asks for them gets `-32601` from the dispatcher instead of a
-//! filter table that nothing bounds.
+//! subscription pool, the block and receipt shapes with `stateRoot` set to
+//! `execution_root`, and the nightly tool tests. `eth_subscribe` and
+//! `eth_unsubscribe` stay in the table marked [`Answer::Pending`], so a client
+//! that asks for them gets `-32601` from the dispatcher. Those rows name their
+//! owner package in the error, not a delivery number that has already landed.
 //!
 //! # The three tables agree
 //!
@@ -50,6 +57,7 @@
 
 use jsonrpsee::types::error::ErrorObjectOwned;
 
+pub mod filters;
 pub mod tests;
 
 /// The code for a method this node cannot answer, with the door named in the
@@ -76,9 +84,14 @@ enum Answer {
         /// The `bud_*` method that answers the same question on Budlum.
         door: &'static str,
     },
+    /// Admitted through the bounded filter table in [`filters`]. Creating a
+    /// filter is node-local work; reading its log data still refuses with
+    /// `-32004` until WP-27 (see [`filters::FilterError`]). The class table
+    /// calls this effect `LocalAdmin`, the same class as reveal sessions.
+    BoundedFilter,
     /// Not served yet. A client gets `-32601` from the dispatcher.
     Pending {
-        /// The work package and delivery that serves it.
+        /// The work left before this row can be served.
         package: &'static str,
     },
 }
@@ -241,44 +254,34 @@ const METHODS: &[MethodRow] = &[
     },
     MethodRow {
         name: "eth_newFilter",
-        answer: Answer::EeUnavailable {
-            door: "bud_subscribe",
-        },
+        answer: Answer::BoundedFilter,
     },
     MethodRow {
         name: "eth_newBlockFilter",
-        answer: Answer::EeUnavailable {
-            door: "bud_subscribe",
-        },
+        answer: Answer::BoundedFilter,
     },
     MethodRow {
         name: "eth_getFilterChanges",
-        answer: Answer::EeUnavailable {
-            door: "bud_subscribe",
-        },
+        answer: Answer::BoundedFilter,
     },
     MethodRow {
         name: "eth_getFilterLogs",
-        answer: Answer::EeUnavailable {
-            door: "bud_subscribe",
-        },
+        answer: Answer::BoundedFilter,
     },
     MethodRow {
         name: "eth_uninstallFilter",
-        answer: Answer::EeUnavailable {
-            door: "bud_subscribe",
-        },
+        answer: Answer::BoundedFilter,
     },
     MethodRow {
         name: "eth_subscribe",
         answer: Answer::Pending {
-            package: "WP-28, 2/2",
+            package: "WP-28 subscription listener and WP-27 log data",
         },
     },
     MethodRow {
         name: "eth_unsubscribe",
         answer: Answer::Pending {
-            package: "WP-28, 2/2",
+            package: "WP-28 subscription listener and WP-27 log data",
         },
     },
     MethodRow {
@@ -361,6 +364,25 @@ pub fn ee_unavailable(method: &str, door: &'static str) -> ErrorObjectOwned {
         EE_UNAVAILABLE,
         message,
         Some(serde_json::json!({ "door": door, "package": "WP-27" })),
+    )
+}
+
+/// Turn a bounded-filter failure into a JSON-RPC error.
+///
+/// The reason is machine-readable, so a wallet can tell a quota refusal from
+/// a missing execution environment. The door is present only for the reason
+/// that has a Budlum answer, and `WP-27` names the package that will remove
+/// the refusal.
+pub fn filter_error(method: &str, error: filters::FilterError) -> ErrorObjectOwned {
+    let mut data = serde_json::json!({ "reason": error.reason() });
+    if let Some(door) = error.door() {
+        data["door"] = serde_json::Value::String(door.to_string());
+        data["package"] = serde_json::Value::String("WP-27".to_string());
+    }
+    ErrorObjectOwned::owned(
+        error.code(),
+        format!("{method}: {}", error.message()),
+        Some(data),
     )
 }
 

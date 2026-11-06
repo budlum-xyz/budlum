@@ -2618,3 +2618,23 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- genesis-schema --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- genesis-schema
+
+  # WP-04 / WP-42 continuation: the integrated tree is checked without a Rust
+  # toolchain. Several open pull requests are merged into one branch here, and
+  # a merge can break a cross-file table without breaking any single file.
+  # The self-test injects a real violation for every check, then the plain run
+  # audits this checkout.
+  integration-audit:
+    name: Integrated tree consistency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Audit canary (an injected violation must fail)
+        run: python3 ops/scripts/integration_audit.py --self-test
+      - name: Audit the integrated tree
+        run: python3 ops/scripts/integration_audit.py --root .

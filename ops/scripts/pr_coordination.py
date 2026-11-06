@@ -17,6 +17,12 @@ guessing at it:
 Usage:
 
     python3 ops/scripts/pr_coordination.py [--base main] [--remote origin]
+    python3 ops/scripts/pr_coordination.py --prs-only
+
+By default every remote branch is measured, including dependabot branches and
+branches with no pull request. `--prs-only` limits the measurement to the heads
+of the open pull requests reported by `gh`, which is the scope a coordination
+report claims when it says "open pull requests".
 
 The output is stable enough to paste into `docs/work/PR_COORDINATION.md`: it
 sorts every list, so two runs on the same refs print the same text.
@@ -26,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import json
 import subprocess
 import sys
 
@@ -53,6 +60,35 @@ def branches(base: str, remote: str) -> list[str]:
             continue
         keep.append(name)
     return sorted(keep)
+
+
+def open_pull_requests(remote: str) -> tuple[list[str], list[tuple[int, str]]]:
+    """(remote refs of open PR heads, PRs whose base is not main).
+
+    `gh` is available where the report is produced. A PR head on a fork has no
+    local remote ref and is named in the returned diagnostics instead of being
+    silently dropped.
+    """
+    done = subprocess.run(
+        [
+            "gh", "pr", "list", "--state", "open", "--limit", "200",
+            "--json", "number,headRefName,baseRefName",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if done.returncode != 0:
+        raise SystemExit(f"gh pr list failed: {done.stderr.strip()}")
+    refs: list[str] = []
+    non_main: list[tuple[int, str]] = []
+    for pr in json.loads(done.stdout):
+        if pr["baseRefName"] != "main":
+            non_main.append((pr["number"], pr["baseRefName"]))
+        ref = f"{remote}/{pr['headRefName']}"
+        if git_try("rev-parse", "--verify", f"{ref}^{{commit}}") is None:
+            continue
+        refs.append(ref)
+    return sorted(set(refs)), sorted(non_main)
 
 
 def changes(base: str, branch: str) -> list[tuple[str, str]]:
@@ -91,9 +127,18 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", default="main")
     parser.add_argument("--remote", default="origin")
+    parser.add_argument(
+        "--prs-only",
+        action="store_true",
+        help="measure only the heads of open pull requests, not every remote branch",
+    )
     args = parser.parse_args()
 
-    names = branches(args.base, args.remote)
+    non_main: list[tuple[int, str]] = []
+    if args.prs_only:
+        names, non_main = open_pull_requests(args.remote)
+    else:
+        names = branches(args.base, args.remote)
     if not names:
         print("no branches to compare; is the remote fetched?", file=sys.stderr)
         return 1
@@ -123,6 +168,11 @@ def main() -> int:
     }
 
     print(f"branches compared against {args.base}: {len(names)}")
+    if args.prs_only:
+        print(f"scope: heads of open pull requests ({len(names)} distinct refs)")
+        print(f"open pull requests based on a branch other than main: {len(non_main)}")
+        for number, base in non_main:
+            print(f"     #{number} base={base}")
     if orphan:
         print(f"branches with no merge base against the base: {len(orphan)}")
         for name in sorted(orphan):

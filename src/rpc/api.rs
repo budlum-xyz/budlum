@@ -1488,35 +1488,34 @@ pub trait BudlumApi {
         filter: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// `eth_newFilter`: refuses until the bounded pool lands in 2/2
-    /// (door: `bud_subscribe`).
-    #[method(name = "eth_newFilter")]
+    /// `eth_newFilter`: admits one record into the bounded filter table.
+    /// `with_extensions` gives the handler the peer key for the quota.
+    #[method(name = "eth_newFilter", with_extensions)]
     async fn eth_new_filter(
         &self,
         filter: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// `eth_newBlockFilter`: refuses until the bounded pool lands in 2/2
-    /// (door: `bud_subscribe`).
-    #[method(name = "eth_newBlockFilter")]
+    /// `eth_newBlockFilter`: admits one block-head filter record.
+    #[method(name = "eth_newBlockFilter", with_extensions)]
     async fn eth_new_block_filter(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// `eth_getFilterChanges`: refuses until 2/2 (door: `bud_subscribe`).
-    #[method(name = "eth_getFilterChanges")]
+    /// `eth_getFilterChanges`: refuses log data until WP-27 (door: `bud_subscribe`).
+    #[method(name = "eth_getFilterChanges", with_extensions)]
     async fn eth_get_filter_changes(
         &self,
         filter_id: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// `eth_getFilterLogs`: refuses until 2/2 (door: `bud_subscribe`).
-    #[method(name = "eth_getFilterLogs")]
+    /// `eth_getFilterLogs`: refuses log data until WP-27 (door: `bud_subscribe`).
+    #[method(name = "eth_getFilterLogs", with_extensions)]
     async fn eth_get_filter_logs(
         &self,
         filter_id: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// `eth_uninstallFilter`: refuses until 2/2 (door: `bud_subscribe`).
-    #[method(name = "eth_uninstallFilter")]
+    /// `eth_uninstallFilter`: releases the slot of one filter id.
+    #[method(name = "eth_uninstallFilter", with_extensions)]
     async fn eth_uninstall_filter(
         &self,
         filter_id: String,
