@@ -146,6 +146,20 @@ fn binding_directive_stays_outside_repository() {
     );
 }
 
+/// Keep future uploads from adding the external planning input back to git.
+/// The absence check above catches a tracked copy; this pins the ignore rule
+/// that prevents an accidental re-upload from entering the index.
+#[test]
+fn binding_directive_has_a_root_ignore_rule() {
+    let ignore = read(".gitignore");
+    assert!(
+        ignore
+            .lines()
+            .any(|line| line.trim() == "/THE_BUDLUM_DIREKTIF.md"),
+        ".gitignore must ignore only the root binding directive"
+    );
+}
+
 /// The kani workspace carries a `Cargo.lock`, so `--locked` resolves
 /// and the lock-freshness step in CI sees it.
 #[test]
