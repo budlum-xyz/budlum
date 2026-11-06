@@ -192,7 +192,7 @@ def stage_public_records(registrations_dir, staging_dir):
         with destination.open("x", encoding="utf-8") as output:
             json.dump(record, output, sort_keys=True, separators=(",", ":"))
             output.write("\n")
-    return len(records)
+    return {record["validator"]: record["registration"] for record in records}
 
 
 def reserved_address(tag):
@@ -251,7 +251,8 @@ def reject_secret_fields(value):
             reject_secret_fields(child)
 
 
-def finalize_genesis(template, assembled_path, expected_count):
+def finalize_genesis(template, assembled_path, expected_records):
+    expected_count = len(expected_records)
     genesis = load_json(assembled_path, "assembled genesis")
     if not isinstance(genesis, dict):
         refuse("assembled genesis must be a JSON object")
@@ -265,8 +266,7 @@ def finalize_genesis(template, assembled_path, expected_count):
         refuse("assembled genesis validator count differs from the validated records")
     if not isinstance(keys, list) or len(keys) != expected_count:
         refuse("assembled genesis must include one public consensus-key record per validator")
-    if any(not isinstance(address, str) for address in validators):
-        refuse("assembled genesis validators must be address strings")
+    validators = [normalize_address(address, "assembled genesis") for address in validators]
     if len(set(validators)) != len(validators):
         refuse("assembled genesis contains duplicate validators")
 
@@ -274,10 +274,8 @@ def finalize_genesis(template, assembled_path, expected_count):
     for entry in keys:
         if not isinstance(entry, dict) or set(entry) != {"validator", "registration"}:
             refuse("assembled genesis contains a malformed consensus-key record")
-        address = entry["validator"]
+        address = normalize_address(entry["validator"], "assembled consensus-key record")
         registration = entry["registration"]
-        if not isinstance(address, str):
-            refuse("assembled genesis contains a malformed validator address")
         if address in keys_by_validator:
             refuse("assembled genesis contains duplicate consensus-key registrations")
         if not isinstance(registration, dict) or set(registration) != {
@@ -290,9 +288,13 @@ def finalize_genesis(template, assembled_path, expected_count):
             refuse("assembled genesis contains an incomplete consensus-key registration")
         if registration["scheme_id"] != BLS_SCHEME:
             refuse("assembled genesis contains an unexpected BLS scheme")
+        for field in PUBLIC_KEY_LENGTHS:
+            public_bytes(registration[field], field, "assembled consensus-key record")
         keys_by_validator[address] = registration
     if set(keys_by_validator) != set(validators):
         refuse("assembled genesis validator addresses and consensus-key records disagree")
+    if keys_by_validator != expected_records:
+        refuse("assembled genesis does not match the validated public operator records")
 
     expected_addresses = {
         name: reserved_address(tag)
@@ -369,7 +371,8 @@ def main(argv):
             temporary_dir = Path(temporary)
             staging_dir = temporary_dir / "operators"
             assembled_path = temporary_dir / "assembled-genesis.json"
-            record_count = stage_public_records(registrations_dir, staging_dir)
+            records = stage_public_records(registrations_dir, staging_dir)
+            record_count = len(records)
             print(
                 f"preflight accepted {record_count} complete public operator records; "
                 "the node CLI will validate their proofs",
@@ -380,7 +383,7 @@ def main(argv):
             )
             if assembler_status != 0:
                 return assembler_status
-            genesis_bytes = finalize_genesis(template, assembled_path, record_count)
+            genesis_bytes = finalize_genesis(template, assembled_path, records)
         digest = publish(output_dir, genesis_bytes)
     except Refusal as error:
         print(f"genesis rehearsal refused: {error}", file=sys.stderr)
