@@ -27,7 +27,7 @@ merge order resolve the shared files. This file is the queue record for that cho
 
 | Package | Title | Lane | Status | Pull request | Lock paths | Findings |
 |---|---|---|---|---|---|---|
-| WP-61 | RPC and crypto hardening | D | in review, deliveries 1/2 and 2/2 | #41 | `src/rpc/tests.rs`, `src/rpc/server.rs` (test module), `src/rpc/method_class.rs` (append), `src/crypto/{primitives,signer,pq,pkcs11}.rs` (test modules), `.github/rpc-method-coverage-baseline.txt` (new) | BLG-004, BLG-009, BLG-010, BLG-029, BLG-030, BLG-032, BLG-099, BLG-192, BLG-200, BULGU-011, BULGU-012 locked; TEST-GAP-07 ratcheted; BLG-150 and BLG-200 keep open feet in other lanes; TEST-GAP-07 at 204 recorded lines of 264 |
+| WP-61 | RPC and crypto hardening | D | in review, deliveries 1/2 and 2/2 | #41 | `src/rpc/tests.rs`, `src/rpc/server.rs` (test module), `src/rpc/method_class.rs` (append), `src/crypto/{primitives,signer,pq,pkcs11}.rs` (test modules), `.github/rpc-method-coverage-baseline.txt` (new) | BLG-004, BLG-009, BLG-010, BLG-029, BLG-030, BLG-032, BLG-099, BLG-192, BLG-200, BULGU-011, BULGU-012 locked; TEST-GAP-07 ratcheted; BLG-150 and BLG-200 keep open feet in other lanes; TEST-GAP-07 at 177 recorded lines of 264, 73 rows covered |
 
 Last commit of the WP-61 row: `git log -1 --format=%H` on the branch, written by
 the push that updates this row. CI run: the run number of the `Tests` job on the
@@ -39,9 +39,11 @@ proposed.
 1. `2/2` landed the first descent: the registry reads, the validator reads, the
    BNS reads and the storage deal, shard and custody reads now carry their answer
    and refusal tests, and the rule stopped demanding a refusal test from methods
-   the trait declares with the receiver alone. 60 recorded lines left the file.
-   The next descent is the AI verifier reads, the pollen listing reads and the
-   external domain reads, in that order of size.
+   the trait declares with the receiver alone. A second descent added the node
+   status reads, the AI reads and the Pollen and marketplace listings. 87 of the
+   264 recorded lines left the file, and 73 rows are now covered on both sides.
+   The next descent is the external domain reads, the gateway content reads and
+   the reveal session, in that order of size.
 2. The feet of BLG-150 and BLG-200 that sit outside the lock paths of WP-61 stay
    open and are recorded in `docs/audit/FINDINGS.md` with their owning package:
    `src/privacy/` and `src/relayer/` for the nullifier, `src/chain/finality.rs` for
