@@ -1449,4 +1449,66 @@ mod rpc_tests {
         assert!(refused.message().contains("verify cap"));
         assert_eq!(refused.code(), -32602);
     }
+
+    #[tokio::test]
+    async fn aptos_dedicated_listener_serves_rest_without_json_rpc() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn free_loopback() -> std::net::SocketAddr {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("an ephemeral loopback port");
+            listener.local_addr().expect("the bound socket address")
+        }
+
+        async fn request(addr: std::net::SocketAddr, path: &str) -> String {
+            let mut stream = tokio::net::TcpStream::connect(addr)
+                .await
+                .expect("the server accepted a connection");
+            let request = format!(
+                "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+            );
+            stream
+                .write_all(request.as_bytes())
+                .await
+                .expect("the request was written");
+            let mut response = Vec::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                stream.read_to_end(&mut response),
+            )
+            .await
+            .expect("the server closed the response")
+            .expect("the response was read");
+            String::from_utf8(response).expect("the test response is UTF-8")
+        }
+
+        let consensus = Arc::new(PoWEngine::new(0));
+        let blockchain = Blockchain::new(consensus, None, 45267, None);
+        let (chain_actor, chain) = ChainActor::new(blockchain);
+        tokio::spawn(async move {
+            chain_actor.run().await;
+        });
+        let node_struct = Node::new(chain.clone()).unwrap();
+        let server = RpcServer::with_security_and_mode(
+            chain,
+            node_struct.get_client(),
+            RpcSecurityConfig::operator_default(),
+            RpcMode::Public,
+        );
+        let rpc_addr = free_loopback().await;
+        let aptos_addr = free_loopback().await;
+        server
+            .with_aptos_listener(aptos_addr.to_string())
+            .run(rpc_addr.to_string())
+            .await
+            .expect("both listeners bind");
+
+        let health = request(aptos_addr, "/v1/-/healthy").await;
+        assert!(health.starts_with("HTTP/1.1 200"), "{health}");
+        assert!(health.ends_with("aptos-node:ok"), "{health}");
+        let not_json_rpc = request(aptos_addr, "/").await;
+        assert!(not_json_rpc.starts_with("HTTP/1.1 404"), "{not_json_rpc}");
+        assert!(not_json_rpc.contains("No Aptos REST route"));
+    }
 }

@@ -8,8 +8,8 @@
 //! Delivery 1/N serves the two node-health routes. Routes that need the Move
 //! account model, Move resources, BCS transactions, events, or table state
 //! answer HTTP 503 and name the native Budlum door. They do not invent an
-//! Aptos-shaped answer from a different ledger. The dedicated
-//! `127.0.0.1:18549` listener and the Move worker belong to the next delivery.
+//! Aptos-shaped answer from a different ledger. Delivery 2/N opens the
+//! dedicated loopback listener. The Move worker belongs to a later delivery.
 
 use crate::chain::chain_actor::ChainHandle;
 use crate::core::block::Block;
@@ -210,6 +210,21 @@ const ENDPOINTS: &[Endpoint] = &[
 /// path that must receive this gateway's 404 rather than a JSON-RPC error.
 pub fn owns_path(path: &str) -> bool {
     path == "/v1" || path.starts_with("/v1/")
+}
+
+/// Validate the dedicated Aptos bind address before any listener starts.
+/// The public endpoint is exposed by the reverse proxy, never by binding this
+/// unauthenticated REST service to a non-loopback interface.
+pub fn validate_listener(addr: &str) -> Result<std::net::SocketAddr, String> {
+    let socket = addr
+        .parse::<std::net::SocketAddr>()
+        .map_err(|error| format!("Aptos REST listener must be an IP:port socket: {error}"))?;
+    if !socket.ip().is_loopback() {
+        return Err(format!(
+            "Aptos REST listener must bind a loopback IP, not {socket}"
+        ));
+    }
+    Ok(socket)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
