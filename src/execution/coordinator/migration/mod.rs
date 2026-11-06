@@ -117,8 +117,8 @@ pub struct DeploymentEvidence {
     pub contract: [u8; 20],
     /// The account with migration authority.
     pub deployer: [u8; 20],
-    /// The source block the deployment was finalised in.
-    pub source_block: u64,
+    /// The historical block whose transaction and receipt roots prove deployment.
+    pub deployment_block: u64,
 }
 
 /// Why a migration was refused.
@@ -128,8 +128,13 @@ pub enum ImportError {
     ChainMismatch { signed: u64, expected: u64 },
     /// The authorization names another contract than the deployment.
     ContractMismatch,
-    /// The authorization and the deployment name different source blocks.
+    /// The authorization and the migrated state name different source blocks.
     SourceBlockMismatch,
+    /// The historical deployment is after the state being migrated.
+    DeploymentAfterSource {
+        deployment_block: u64,
+        source_block: u64,
+    },
     /// The signature is not a recoverable secp256k1 signature.
     Signature(RecoverError),
     /// The signing account is not the account with migration authority.
@@ -191,6 +196,13 @@ impl std::fmt::Display for ImportError {
             ImportError::ChainMismatch { signed, expected } => {
                 write!(f, "migration: signed for chain {signed}, running {expected}")
             }
+            ImportError::DeploymentAfterSource {
+                deployment_block,
+                source_block,
+            } => write!(
+                f,
+                "migration: deployment block {deployment_block} is after source state block {source_block}"
+            ),
             ImportError::Signature(e) => write!(f, "migration: signature: {e}"),
             ImportError::Deployment(e) => write!(f, "migration: {e}"),
             ImportError::Proof(e) => write!(f, "migration: {e}"),
@@ -282,7 +294,9 @@ pub struct MigrationRequest {
     /// The EVM source chain id the deployment transaction must be signed for.
     pub source_chain_id: u64,
     pub source_domain: String,
-    /// The proven source deployment transaction and successful receipt.
+    /// The finalized source block whose account and storage state is migrated.
+    pub source_block: u64,
+    /// The proven historical deployment transaction and successful receipt.
     pub deployment: DeploymentProof,
     /// The deploying account's EIP-712 authorization.
     pub authorization: MigrationAuthorization,
@@ -351,8 +365,14 @@ pub fn begin_import(request: MigrationRequest) -> Result<MigrationPlan, ImportEr
             expected: request.chain_id,
         });
     }
-    if request.authorization.source_block != request.deployment.source_block {
+    if request.authorization.source_block != request.source_block {
         return Err(ImportError::SourceBlockMismatch);
+    }
+    if request.deployment.deployment_block > request.source_block {
+        return Err(ImportError::DeploymentAfterSource {
+            deployment_block: request.deployment.deployment_block,
+            source_block: request.source_block,
+        });
     }
     if request.occupied {
         return Err(ImportError::AddressOccupied);
@@ -387,7 +407,7 @@ pub fn begin_import(request: MigrationRequest) -> Result<MigrationPlan, ImportEr
     Ok(MigrationPlan {
         source: ImportSource {
             domain: request.source_domain,
-            block: evidence.source_block,
+            block: request.source_block,
             address: evidence.contract,
         },
         account,
@@ -581,7 +601,7 @@ mod tests {
             Item::String(receipt),
         ]));
         DeploymentProof {
-            source_block: SOURCE_BLOCK,
+            deployment_block: SOURCE_BLOCK - 1_000,
             transaction_index: 0,
             transaction,
             transaction_proof: vec![transaction_node.clone()],
@@ -650,6 +670,7 @@ mod tests {
             chain_id: CHAIN_ID,
             source_chain_id: SOURCE_CHAIN_ID,
             source_domain: "sepolia".to_string(),
+            source_block: SOURCE_BLOCK,
             deployment: deployment_proof(),
             authorization: authorization(),
             state_root,
@@ -703,6 +724,19 @@ mod tests {
             begin_import(truncated),
             Err(ImportError::Signature(RecoverError::Length))
         ));
+    }
+
+    #[test]
+    fn migration_deployment_precedes_the_migrated_state() {
+        let mut request = request().0;
+        request.deployment.deployment_block = SOURCE_BLOCK + 1;
+        assert_eq!(
+            begin_import(request),
+            Err(ImportError::DeploymentAfterSource {
+                deployment_block: SOURCE_BLOCK + 1,
+                source_block: SOURCE_BLOCK,
+            })
+        );
     }
 
     #[test]

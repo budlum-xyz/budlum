@@ -41,6 +41,7 @@ struct RequestJson {
 /// The source transaction and receipt proofs, with every byte string in hex.
 #[derive(Debug, Deserialize)]
 struct DeploymentJson {
+    deployment_block: u64,
     transaction_index: u64,
     transaction: String,
     transaction_proof: Vec<String>,
@@ -79,7 +80,7 @@ impl RequestJson {
     fn into_parts(self) -> Result<(MigrationRequest, Vec<ImportEvmStorageChunk>), String> {
         let contract = decode_address(&self.contract)?;
         let deployment = DeploymentProof {
-            source_block: self.source_block,
+            deployment_block: self.deployment.deployment_block,
             transaction_index: self.deployment.transaction_index,
             transaction: decode_hex(&self.deployment.transaction)?,
             transaction_proof: decode_nodes(&self.deployment.transaction_proof)?,
@@ -115,6 +116,7 @@ impl RequestJson {
             chain_id: self.chain_id,
             source_chain_id: self.source_chain_id,
             source_domain: self.domain,
+            source_block: self.source_block,
             deployment,
             authorization: MigrationAuthorization {
                 contract,

@@ -29,7 +29,7 @@ fuzz_target!(|data: &[u8]| {
         Item::String(receipt),
     ]));
     let proof = DeploymentProof {
-        source_block: 0,
+        deployment_block: 0,
         transaction_index: 0,
         transaction: data.to_vec(),
         transaction_proof: vec![transaction_node.clone()],

@@ -20,7 +20,7 @@ const MAX_PROOF_NODES: usize = 64;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeploymentProof {
     /// The finalized source block that supplied both trie roots.
-    pub source_block: u64,
+    pub deployment_block: u64,
     /// The transaction's index in that block.
     pub transaction_index: u64,
     /// The raw signed legacy, EIP-2930, or EIP-1559 transaction.
@@ -177,7 +177,7 @@ pub fn verify_deployment(
     Ok(DeploymentEvidence {
         contract,
         deployer,
-        source_block: proof.source_block,
+        deployment_block: proof.deployment_block,
     })
 }
 
@@ -390,7 +390,7 @@ mod tests {
             Item::String(receipt),
         ]));
         DeploymentProof {
-            source_block: 19_000_000,
+            deployment_block: 18_999_000,
             transaction_index: 0,
             transaction,
             transaction_proof: vec![transaction_node.clone()],
@@ -407,7 +407,7 @@ mod tests {
                 .expect("the independently signed transaction verifies");
             assert_eq!(evidence.contract, address(CONTRACT));
             assert_eq!(evidence.deployer, address(DEPLOYER));
-            assert_eq!(evidence.source_block, 19_000_000);
+            assert_eq!(evidence.deployment_block, 18_999_000);
         }
     }
 
