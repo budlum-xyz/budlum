@@ -1542,6 +1542,8 @@ jobs:
           - { name: wallet-core, manifest: "crates/wallet-core/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: xtask-gates, manifest: "xtask/gates/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: xtask-tools, manifest: "xtask/tools/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: budlum-types, manifest: "crates/budlum-types/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: mobile-core, manifest: "mobile/core/Cargo.toml", config: "--config .quality/deny.toml" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1581,6 +1583,8 @@ jobs:
           - { name: wallet-core, manifest: "crates/wallet-core/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: xtask-gates, manifest: "xtask/gates/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: xtask-tools, manifest: "xtask/tools/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: budlum-types, manifest: "crates/budlum-types/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: mobile-core, manifest: "mobile/core/Cargo.toml", config: "--config .quality/deny.toml" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
