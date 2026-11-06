@@ -129,9 +129,9 @@ Two rule bugs were found while wiring the rows, which is what the rows are for:
   `increase()` on a falling gauge reports a negative number, so the rule either
   never fired or fired on the reset. It now compares the depth and uses `for:`
   for the part that is not a burst being worked through.
-* `BudlumDiskFillingUp` is in the same shape and is left as it is, with a note
-  in the row: `node_filesystem_avail_bytes` is an exporter gauge, and it is
-  steady in production, so the expression is right for the reading it takes.
+* `BudlumDiskFillingUp` was left alone after checking it: it reads
+  `node_filesystem_*` with arithmetic, not `increase()`, so it was never in the
+  same shape.
 
 `src/tests/alerts_have_runbook_entries.rs` holds both directions: an alert with
 no row fails, a row whose alert no longer exists fails, the severities are the

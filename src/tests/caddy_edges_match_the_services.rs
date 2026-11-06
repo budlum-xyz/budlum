@@ -37,7 +37,8 @@ fn proxied_hosts() -> Vec<(String, u16)> {
             site = None;
             continue;
         }
-        let (Some(host), Some(rest)) = (site.as_ref(), trimmed.strip_prefix("reverse_proxy ")) else {
+        let (Some(host), Some(rest)) = (site.as_ref(), trimmed.strip_prefix("reverse_proxy "))
+        else {
             continue;
         };
         let target = rest.split_whitespace().next().unwrap_or_default();
