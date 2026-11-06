@@ -53,7 +53,7 @@ F-Droid, and direct signed APK releases.
    - `packaging.jniLibs.useLegacyPackaging = false` ensures deterministic 16 KiB
      page-aligned uncompressed `.so` storage.
 3. **Verification (`android_reproducible_build_matches`):**
-   - Exercised both by `bash mobile/android/fdroid/verify-reproducible-apk.sh --self-test`
-     and by `MobileValidatorUnitTest.android_reproducible_build_matches` in CI.
+   - Exercised by `MobileValidatorUnitTest.android_reproducible_build_matches` in
+     CI (in keeping with the `no-new-shell-gates` policy against shell scripts).
    - Direct APK releases publish `<apk>.sha256` alongside a detached composite
      (`ML-DSA-87 + Ed25519`) release signature verified prior to sideload updates.
