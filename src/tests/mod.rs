@@ -284,3 +284,8 @@ pub mod scrape_topology_covers_the_rules;
 // runs, and both scrape with the same pinned Prometheus.
 #[cfg(test)]
 pub mod compose_topology_matches_services;
+
+// İP-20: B.U.D. 3.0 custody, repair and placement - the tests the card names
+// (T17, T26, T34-T40) and the §11.7 penalties behind them.
+#[cfg(test)]
+pub mod bud3_custody_and_repair;

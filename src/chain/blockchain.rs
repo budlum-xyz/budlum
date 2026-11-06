@@ -6895,6 +6895,45 @@ impl Blockchain {
                         }
                     }
                 }
+                crate::registry::evidence::SlashingProof::BadRepair {
+                    object,
+                    segment,
+                    epoch,
+                    esi,
+                    claimed,
+                    derived,
+                } => {
+                    // §6.10 item 8: the claim is that the repair symbol the
+                    // repairer committed to does not come out of the source
+                    // symbols. A block cannot carry a proof of that without
+                    // the object it belongs to, so the object must still be
+                    // live, the segment must be one of its repaired segments,
+                    // and the two digests must differ. The chain does not
+                    // re-derive the symbol here: a producer that could make
+                    // the check pass locally would be the only thing standing
+                    // between a repairer and its bond, and the re-derivation
+                    // needs the source bytes that live in the shares, not in
+                    // the block.
+                    let live = state
+                        .bud3_registry
+                        .object(object)
+                        .ok_or_else(|| "Bad-repair report names an unknown object".to_string())?;
+                    if segment >= live.record.symbol_roots.len() as u64 {
+                        return Err("Bad-repair report names a segment the object lacks".into());
+                    }
+                    if claimed == derived {
+                        return Err("Bad-repair report says the symbol regenerates".into());
+                    }
+                    if *claimed == [0u8; 32] {
+                        return Err("Bad-repair report carries no symbol".into());
+                    }
+                    if u64::from(*esi) >= u64::from(live.record.symbols_per_segment) {
+                        return Err("Bad-repair report names an ESI the segment lacks".into());
+                    }
+                    if *epoch > state.epoch_index {
+                        return Err("Bad-repair report is dated after this block".into());
+                    }
+                }
                 _ => {
                     return Err("Unsupported slashing proof variant in block".into());
                 }

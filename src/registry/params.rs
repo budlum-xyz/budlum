@@ -65,6 +65,14 @@ pub struct RegistryParams {
     pub liveness_slash_ratio_fixed: u64,
     /// Penalty ratio for provable malicious behaviour (maximal).
     pub malicious_slash_ratio_fixed: u64,
+    /// Penalty ratio for a proved bad repair (§11.7: 1% of stake).
+    ///
+    /// Its own field rather than a reuse of `liveness_slash_ratio_fixed`,
+    /// which happens to be 1% today. The two are different offences with
+    /// different reasons to move: downtime tolerates a flaky operator, a bad
+    /// repair is a payment for work not done. Sharing one number would make
+    /// tuning either one silently retune the other.
+    pub bad_repair_slash_ratio_fixed: u64,
     /// Number of *consecutive* epochs a validator may miss expected consensus
     /// Participation before a liveness fault is raised (and slashed). Counted
     /// Consecutively and reset on any participation, never cumulative, so a
@@ -235,6 +243,9 @@ impl RegistryParams {
             super::permissionless::SlashingCondition::MaliciousBehaviour => {
                 self.malicious_slash_ratio_fixed
             }
+            super::permissionless::SlashingCondition::BadRepair => {
+                self.bad_repair_slash_ratio_fixed
+            }
         }
     }
 
@@ -388,6 +399,9 @@ impl RegistryParams {
         if self.malicious_slash_ratio_fixed > FIXED_POINT_SCALE {
             return Err("malicious_slash_ratio_fixed cannot exceed FIXED_POINT_SCALE".into());
         }
+        if self.bad_repair_slash_ratio_fixed > FIXED_POINT_SCALE {
+            return Err("bad_repair_slash_ratio_fixed cannot exceed FIXED_POINT_SCALE".into());
+        }
         // A bridge fee at or above 100% would take the whole arriving amount
         // and credit the recipient nothing, which is indistinguishable from
         // theft by governance parameter.
@@ -443,6 +457,13 @@ impl Default for RegistryParams {
             liveness_slash_ratio_fixed: FIXED_POINT_SCALE / 100,
             // 100% - proven malice burns the whole bond.
             malicious_slash_ratio_fixed: FIXED_POINT_SCALE,
+            // 1% - §11.7 prices a proved bad repair at 1% of the repairer's
+            // stake. Cheap next to malice, because a bad repair is a wasted
+            // payment rather than an attempt to break the chain, and because
+            // the repair itself is what protects the content: pricing it at
+            // the malice rate would make one transient bug in a repairer
+            // destroy a Full validator's whole bond.
+            bad_repair_slash_ratio_fixed: FIXED_POINT_SCALE / 100,
             // 20 consecutive missed epochs. Aligned with mainnet readiness decision
             // For operator tolerance and reliability.
             liveness_max_missed_epochs: 20,
@@ -526,8 +547,13 @@ mod tests {
     fn registry_params_serialized_shape_is_pinned() {
         let encoded =
             bincode::serialize(&RegistryParams::default()).expect("RegistryParams is serializable");
-        // 24 u64 fields + 1 bool. bincode writes u64 as 8 bytes, bool as 1.
+        // 25 u64 fields + 1 bool. bincode writes u64 as 8 bytes, bool as 1.
         // (the comment said 15; the pin now counts 24.)
+        //
+        // The count moved from 24 when `bad_repair_slash_ratio_fixed` was
+        // added: §11.7 prices a proved bad repair at 1% and nothing in the
+        // tree modelled that condition, so the number had no home. The same
+        // deliberate shape change as the ones below.
         //
         // The count moved from 22 when the two delegation bounds
         // (`min_delegation_amount`, `max_delegations_per_validator`) were
@@ -555,7 +581,7 @@ mod tests {
         // would never fail, so it would not be a pin at all.
         assert_eq!(
             encoded.len(),
-            24 * 8 + 1,
+            25 * 8 + 1,
             "RegistryParams changed shape: old snapshots can no longer be \
              deserialized and the state root moves. See the type's docs."
         );
@@ -573,8 +599,8 @@ mod tests {
             bincode::serialize(&RegistryParams::default()).expect("RegistryParams is serializable");
         assert_ne!(
             encoded.len(),
-            23 * 8 + 1,
-            "a twenty-third u64 field would have to update the pin above, \
+            24 * 8 + 1,
+            "a twenty-fourth u64 field would have to update the pin above, \
              which is the signal that snapshot compatibility broke"
         );
         assert_ne!(

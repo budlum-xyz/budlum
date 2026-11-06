@@ -1021,3 +1021,55 @@ downgrade, and the count above is the tree's, not a report's.
    as an open item with the tool named. The testnet participation document is complete
    in every other respect: endpoints, ports, genesis, wallet, faucet, transaction,
    staking, joining, upgrades and the two rehearsals.
+
+---
+
+### AF-32 - §11.7's slash table had one row with no code, and another whose code disagrees with the table (`registry`, `high`)
+
+Read while implementing İP-20's repair-verification leg. §11.7 enumerates seven
+behaviours; four of them had no representation anywhere in the tree.
+
+**Closed here.**
+
+`Kanıtlı hatalı onarım` (§6.10 item 8, 1% of stake) had no `SlashingCondition`,
+no `SlashingProof`, no parameter and no verifier, so a bad repair produced no
+penalty at all - the whole reason a repairer has an incentive to produce correct
+symbols was missing. Closed by:
+
+- `SlashingCondition::BadRepair` (`src/registry/permissionless.rs`), its own
+  condition because §11.7 prices it at 1% while the only alternative
+  (`MaliciousBehaviour`, via a fourth `Other` tag) is 100%: filing a 1% offence
+  under a 100% condition would take a Full validator's whole bond.
+- `SlashingProof::BadRepair` (`src/registry/evidence.rs`) carrying the object,
+  segment, epoch, ESI and the two digests, with a shape check that refuses a
+  report whose claimed symbol equals its own re-derivation.
+- `RegistryParams::bad_repair_slash_ratio_fixed`, default 1%, whitelisted for
+  governance in `core/governance.rs` **and** applied in
+  `AccountState::apply_registry_parameter_update` (the pair that has drifted
+  before: a name whitelisted but not applied passes the vote and does nothing).
+- `src/storage/bud3/repair.rs`: the assignment order (§6.10 item 3, Full only,
+  20-block deadline), the 1-in-100 verification draw over consensus data, the
+  re-derivation and the report. This file is in İP-20's lock list and did not
+  exist.
+- Block validation of a `BadRepair` report in
+  `Blockchain::apply_block_slashing_reports_in_state`: the object must be live,
+  the segment and ESI inside it, the two digests different, and the epoch not
+  after the block's.
+
+`Denetim kaçırma` (missed audit) and `İçerik reddi` (declining content) already
+produced no penalty, which is what the table says; both are now held by
+`bud3_missed_audit_does_not_slash` and `bud3_decline_content_reassigns`.
+
+**Open, and it is a decision rather than a fix.**
+
+§11.7's first row reads *Blok veya kesinlik oyunda çift imza | Tam | Stake'in
+yüzde 5'i kesilir. 7 dönem hapis.* The code cuts **50%**
+(`RegistryParams::double_sign_slash_ratio_fixed = FIXED_POINT_SCALE / 2`,
+pinned by `pos_default_fixed_point_constants_are_exact_integers` and described as
+50% in three places in `src/network/node.rs`). A tenfold disagreement between the
+directive and the code on a consensus-critical number is not something to change
+as a side effect of a storage package: the jailing term in the same row (7
+epochs) is the `LIVENESS_JAIL_EPOCHS` constant, already flagged as a
+deliberate deviation, and the ratio is İP-16 item 6 ("Kesinti tablosu (Bölüm
+11.7) parametreleri"). Recorded here so the number is not discovered by an
+operator reading the directive during an incident.

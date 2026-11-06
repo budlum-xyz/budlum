@@ -80,6 +80,7 @@ pub const GOVERNANCE_PARAMETER_WHITELIST: &[&str] = &[
     "double_sign_slash_ratio_fixed",
     "liveness_slash_ratio_fixed",
     "malicious_slash_ratio_fixed",
+    "bad_repair_slash_ratio_fixed",
     "bridge_relayer_fee_ppm",
     "bridge_relayer_min_fee",
     "max_invalid_votes_per_epoch",
@@ -161,6 +162,11 @@ pub fn validate_governance_parameter_update(key: &str, value: &str) -> Result<()
             params.malicious_slash_ratio_fixed = value
                 .parse::<u64>()
                 .map_err(|e| format!("invalid malicious_slash_ratio_fixed: {e}"))?;
+        }
+        "bad_repair_slash_ratio_fixed" => {
+            params.bad_repair_slash_ratio_fixed = value
+                .parse::<u64>()
+                .map_err(|e| format!("invalid bad_repair_slash_ratio_fixed: {e}"))?;
         }
         "ai_model_register_fee" => {
             params.ai_model_register_fee = value

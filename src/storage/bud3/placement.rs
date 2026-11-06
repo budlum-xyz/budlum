@@ -111,6 +111,35 @@ impl PlacementRow {
         self.full_only_symbols() >= k as u64 + 2
     }
 
+    /// The physical bytes the user pays for (§6.9.5 item 1): the smallest
+    /// placement that rebuilds a segment, `k + 2` symbols.
+    ///
+    /// The Mobile floor is a protocol choice, not something the content needs,
+    /// so the fee record charges the user for what a floorless placement would
+    /// have held and nothing more. Expressed in bytes because that is the unit
+    /// the quota and the storage bill use.
+    #[must_use]
+    pub const fn user_physical_bytes(&self, k: u32, symbol_size: u32) -> u64 {
+        (k as u64 + 2) * symbol_size as u64
+    }
+
+    /// The physical bytes the Mobile floor adds (§6.9.5 item 2), paid from the
+    /// Network Security Pool (Bölüm 11.4).
+    ///
+    /// The fee record carries this as its own field, so a user bill and a
+    /// protocol subsidy can never be confused for one another - and so a table
+    /// row that made the floor free would be visible as one.
+    #[must_use]
+    pub const fn decentralization_physical_bytes(&self, k: u32, symbol_size: u32) -> u64 {
+        let total = self.total_symbols() * symbol_size as u64;
+        let user = self.user_physical_bytes(k, symbol_size);
+        if total < user {
+            0
+        } else {
+            total - user
+        }
+    }
+
     /// The Mobile share of the symbols, in thousandths.
     #[must_use]
     pub const fn mobile_share_milli(&self) -> u64 {
@@ -397,6 +426,30 @@ mod tests {
             s_mobile: 0,
         });
         assert_eq!(bad.validate(), Err(PlacementError::RowTooSmall));
+    }
+
+    /// §6.9.5: the fee record's two terms are the user's minimum and the
+    /// floor's extra bytes, and they add up to the row.
+    #[test]
+    fn the_fee_record_splits_user_bytes_from_the_floor() {
+        let t = PlacementTable::testnet_default();
+        for row in &t.rows {
+            let user = row.user_physical_bytes(t.k, 128);
+            let floor = row.decentralization_physical_bytes(t.k, 128);
+            assert_eq!(user + floor, row.total_symbols() * 128);
+            assert_eq!(user, (u64::from(t.k) + 2) * 128);
+        }
+        // An all-Full row still needs redundancy above `k + 2`; that excess is
+        // a placement choice, and it lands in the floor term rather than
+        // silently repricing the user. The floor term is only zero for a row
+        // that holds exactly the minimum.
+        let minimal = PlacementRow {
+            n_full: 1,
+            s_full: t.k + 2,
+            n_mobile: 0,
+            s_mobile: 0,
+        };
+        assert_eq!(minimal.decentralization_physical_bytes(t.k, 128), 0);
     }
 
     #[test]

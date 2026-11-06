@@ -79,6 +79,15 @@ pub enum SlashingCondition {
     /// Provably malicious behaviour (invalid proof, equivocation, censorship
     /// Evidence, etc.).
     MaliciousBehaviour,
+    /// A repair symbol that does not regenerate from the source symbols
+    /// (directive §6.10 item 8, §11.7 "Kanıtlı hatalı onarım").
+    ///
+    /// Its own condition rather than a fourth `Other` tag because the penalty
+    /// is its own number: §11.7 sets a proved bad repair at 1% of stake, while
+    /// `Other` reads as `MaliciousBehaviour` at 100%. Filing a 1% offence
+    /// under a 100% condition would take a Full validator's whole bond for a
+    /// bad repair at a fee that costs more than the storage it protects.
+    BadRepair,
 }
 
 /// Stand-in bytes hashed when a registry entry cannot be serialized.
@@ -95,6 +104,7 @@ impl SlashingCondition {
             SlashingCondition::DoubleSign => b"double_sign",
             SlashingCondition::LivenessFault => b"liveness_fault",
             SlashingCondition::MaliciousBehaviour => b"malicious_behaviour",
+            SlashingCondition::BadRepair => b"bad_repair",
         }
     }
 }
@@ -383,6 +393,7 @@ fn permissionless_offence_window(
         } => Some((1, *window_start_epoch, *window_end_epoch)),
         SlashingProof::DoubleSign { height, .. } => Some((2, *height, *height)),
         SlashingProof::InvalidSignatureSpam { epoch, .. } => Some((3, *epoch, *epoch)),
+        SlashingProof::BadRepair { segment, epoch, .. } => Some((4, *segment, *epoch)),
         SlashingProof::Other { .. } => None,
     }
 }
