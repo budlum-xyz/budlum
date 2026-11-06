@@ -367,10 +367,10 @@ impl EeClient {
         body: pb::envelope::Body,
     ) -> Result<(u64, Instant), TransportError> {
         let deadline = match deadline_after(self.timeout) {
-            Some(deadline) => deadline,
-            None => {
+            Ok(deadline) => deadline,
+            Err(error) => {
                 self.stream = None;
-                return Err(TransportError::Timeout);
+                return Err(error);
             }
         };
         let id = self.open_request(body, deadline)?;
