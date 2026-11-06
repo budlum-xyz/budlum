@@ -144,3 +144,36 @@ inherits a to-do list rather than a false claim.
 - It did not edit `src/storage/bud3/registry.rs` for the reference-counter
   finding recorded in `docs/work/PACKAGES.md`: that path is a lock path of five
   open pull requests and section 15.3 item 3 gives it to one package.
+
+## BLG-272 (High) - two methods classified `Refused` are fully implemented
+
+Found by the gate written for BLG-268 (`refused_methods_refuse`, parked with the
+fix), and confirmed by reading both bodies:
+
+| Row | Classification | Handler |
+|---|---|---|
+| `bud_storageRevokeViewGrant` | `Public, Refused` (`method_class.rs:184`) | `server.rs:3719` parses the authorization, calls `chain.revoke_view_grant`, drops the reveal gateway's sessions for the content, fires `ThreeHookKind::GrantRevoked`, and returns `{"revoked": true, ...}` |
+| `bud_storageSocialDelete` | `Public, Refused` (`method_class.rs:185`) | `server.rs:3778` parses the content id and authorization, calls `chain.social_delete`, and returns `{"grantsRevoked": n, "keyRotated": b}` |
+
+Both are classified with the effect the type reserves for "the method exists and
+refuses every call, saying which door to use", and neither refuses anything.
+
+**Why this is High and not Medium.** The class is not decoration: it is what
+`RpcServer::run`'s startup check and every client-facing method listing read. A
+client that trusts the table will not call these two methods at all; a client
+that calls them anyway gets a working door that the documentation says is
+closed. Either the rows are wrong or the implementations are; one of the two
+must go, and the choice is a design decision for WP-22 and WP-25, which own
+grants and deletion.
+
+**Measured.** 183 rows, 36 classified `Refused`, 178 rows matched to a handler
+in `server.rs` (5 names - `bud_hubGetApps`, `bud_hubGetGraftApps`,
+`bud_hubPrepareRegister`, `bud_aiInferenceStats`, `bud_unsubscribe` - have their
+handlers elsewhere; the subscription pair is served by jsonrpsee's macro and the
+other three by the hub module). Of the 178, two disagree.
+
+**Why the fix is not on this branch.** `src/rpc/method_class.rs` and
+`src/rpc/server.rs` are both lock paths of open pull requests (#45 claims the
+bud3 RPC doors; several others touch `server.rs`), and section 15.3 item 3 gives
+a lock path to one package. The gate is written, canaried and parked at
+`/tmp/parked/refused_methods_refuse.rs.pending`; it lands with the fix.
