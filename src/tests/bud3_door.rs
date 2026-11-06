@@ -1182,8 +1182,7 @@ fn bud3_e2e_upload_register_view() {
     let mut upload_mgr = UploadSessionManager::new(Bud3Limits::default());
     let sid = upload_mgr
         .open_session(
-            *uploader.as_bytes(),
-            [1; 16],
+            (*uploader.as_bytes(), [1; 16]),
             original.len() as u64,
             0,
             25,
@@ -1233,9 +1232,7 @@ fn bud3_e2e_upload_register_view() {
             }),
             &state.bud3_registry,
             &net,
-            &row,
-            &candidates,
-            1_005,
+            (&row, &candidates, 1_005),
         )
         .is_err());
     let paid_resp = rpc
@@ -1248,9 +1245,7 @@ fn bud3_e2e_upload_register_view() {
             }),
             &state.bud3_registry,
             &net,
-            &row,
-            &candidates,
-            1_005,
+            (&row, &candidates, 1_005),
         )
         .unwrap();
     assert_eq!(
@@ -1271,13 +1266,36 @@ fn bud3_e2e_replace_object_preserves_nft_binding_and_slashes_mismatch() {
     state.add_balance(&proposer, 100_000);
 
     let body = b"replaceable canonical payload".repeat(40);
-    // Initial upload with raw codec (0) vs zstd/default upload - different profile/symbol layout or second commitment.
-    let old_up = prepare_public_upload(&body, &P, &Bud3Limits::default()).unwrap();
+    let old_up = prepare_public_upload(&body, &P, &Bud3Limits::default(), 48).unwrap();
     let old_key = old_up.record.commitment;
     let old_shares = vec![
-        (0, share(201, Class::Full, 0, 2)),
-        (0, share(202, Class::Full, 2, 2)),
-        (0, share(203, Class::Full, 4, 2)),
+        (
+            0,
+            Share {
+                validator: [201; 32],
+                class: Class::Full,
+                first_esi: 0,
+                symbols: 16,
+            },
+        ),
+        (
+            0,
+            Share {
+                validator: [202; 32],
+                class: Class::Full,
+                first_esi: 16,
+                symbols: 16,
+            },
+        ),
+        (
+            0,
+            Share {
+                validator: [203; 32],
+                class: Class::Full,
+                first_esi: 32,
+                symbols: 16,
+            },
+        ),
     ];
     let nft = [0x99u8; 32];
     apply(
@@ -1289,7 +1307,7 @@ fn bud3_e2e_replace_object_preserves_nft_binding_and_slashes_mismatch() {
             0,
             StorageTxV3::RegisterObject {
                 record: old_up.record.clone(),
-                shares: old_shares.clone(),
+                shares: old_shares,
                 lifetime_epochs: 20,
             },
         ),
@@ -1318,7 +1336,7 @@ fn bud3_e2e_replace_object_preserves_nft_binding_and_slashes_mismatch() {
         fps: 10,
         k_max: 64,
     };
-    let new_up = prepare_public_upload(&body, &p_alt, &Bud3Limits::default()).unwrap();
+    let new_up = prepare_public_upload(&body, &p_alt, &Bud3Limits::default(), 24).unwrap();
     let new_key = new_up.record.commitment;
     assert_ne!(old_key, new_key);
     assert_eq!(old_up.record.content_id, new_up.record.content_id);
@@ -1337,9 +1355,15 @@ fn bud3_e2e_replace_object_preserves_nft_binding_and_slashes_mismatch() {
             verified_content_id: old_up.record.content_id,
         },
     ];
-    let new_shares = vec![
-        (0, share(201, Class::Full, 0, new_up.record.symbols_per_segment)),
-    ];
+    let new_shares = vec![(
+        0,
+        Share {
+            validator: [201; 32],
+            class: Class::Full,
+            first_esi: 0,
+            symbols: new_up.record.symbols_per_segment,
+        },
+    )];
     apply(
         &mut state,
         &storage_tx(
@@ -1359,8 +1383,15 @@ fn bud3_e2e_replace_object_preserves_nft_binding_and_slashes_mismatch() {
     .unwrap();
 
     assert!(state.bud3_registry.object(&old_key).is_none());
-    assert!(state.bud3_registry.object(&new_key).is_some());
-    assert_eq!(state.bud3_registry.refcount(&new_key), 1);
+    assert_eq!(
+        state
+            .bud3_registry
+            .object(&new_key)
+            .unwrap()
+            .references
+            .len(),
+        1
+    );
 }
 
 

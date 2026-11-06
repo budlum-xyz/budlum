@@ -113,6 +113,30 @@ impl GrantRow {
     }
 }
 
+/// Construct and validate an unlinkable [`GrantRow`] for `(nft_id, grant_nonce)` at `current_epoch`.
+/// Convenience: exposed for Data Market grant settlement and CLI grant issuance.
+///
+/// # Errors
+///
+/// Returns [`GrantBud3Error`] if expiry, ML-DSA-65 key, or HPKE `0x647a` validation fails.
+pub fn build_grant_row(
+    nft_id: &[u8; 32],
+    grant_nonce: &[u8; 32],
+    one_time_pk: Vec<u8>,
+    sealed_key_package: Vec<u8>,
+    expires_at_epoch: u64,
+    current_epoch: u64,
+) -> Result<GrantRow, GrantBud3Error> {
+    let row = GrantRow {
+        grant_tag: compute_grant_tag(nft_id, grant_nonce),
+        one_time_pk,
+        sealed_key_package,
+        expires_at_epoch,
+    };
+    row.validate_for_issue(current_epoch)?;
+    Ok(row)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::keys::{

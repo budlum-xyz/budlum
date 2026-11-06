@@ -71,19 +71,17 @@ pub fn prioritize_shrink_repairs(segments: &[SegmentRisk]) -> Vec<SegmentRisk> {
 /// Select replacement holders for lost/declined/released shares of `(object, segment)`
 /// via stake-weighted rendezvous hashing, skipping the repairer, existing segment
 /// holders, declined validators, and candidates without enough free quota.
+/// Convenience: exposed for repair reassignment scheduler.
 #[must_use]
 pub fn select_reassignment_holders(
-    object: &ObjectKey,
-    segment: u64,
-    class: Class,
-    symbols_per_share: u32,
-    symbol_size: u32,
-    want_shares: usize,
-    repairer: &Address,
-    existing_holders: &BTreeSet<Address>,
-    declined_validators: &BTreeSet<Address>,
+    target: (&ObjectKey, u64),
+    spec: (Class, u32, u32, usize),
+    excluded: (&Address, &BTreeSet<Address>, &BTreeSet<Address>),
     candidates: &[Candidate],
 ) -> Vec<(Address, Class, u32)> {
+    let (object, segment) = target;
+    let (class, symbols_per_share, symbol_size, want_shares) = spec;
+    let (repairer, existing_holders, declined_validators) = excluded;
     let share_bytes = u64::from(symbols_per_share).saturating_mul(u64::from(symbol_size));
     let key = segment_key(object, segment);
     let ordered = rank(&key, candidates);

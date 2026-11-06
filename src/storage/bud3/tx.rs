@@ -226,8 +226,7 @@ pub fn apply(
             proposer_stake,
         } => registry
             .replace_object(
-                signer,
-                proposer_stake,
+                (signer, proposer_stake),
                 &old_object,
                 new_record,
                 new_shares,

@@ -1,5 +1,4 @@
 // Churn integration test suite (Section 7.6, Section 7.7, WP-14).
-#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use budlum_core::core::address::Address;
 use budlum_core::core::metrics::Metrics;

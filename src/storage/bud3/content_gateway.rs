@@ -84,19 +84,16 @@ impl Bud3ContentGateway {
     /// Enforce peer symbol-request rate limits, Mobile Wi-Fi/cellular link policy,
     /// and Merkle range verification on `/budlum/bud3/symbols/1`.
     /// Convenience: exposed for symbol request-response handler and RPC symbol serving.
-    #[allow(clippy::too_many_arguments)]
     pub fn serve_verified_symbol_exchange(
         limiter: &mut SymbolPeerLimiter,
         mobile_policy: &mut MobileServePolicy,
-        link: LinkMetering,
-        peer: &[u8; 32],
+        peer_link: (&[u8; 32], LinkMetering, u64),
         req: &SymbolRangeRequest,
         resp: &SymbolRangeResponse,
-        symbol_root: [u8; 32],
-        symbol_count: u64,
-        symbol_size: u16,
-        now_sec: u64,
+        root_meta: ([u8; 32], u64, u16),
     ) -> Result<bool, SymbolProtocolError> {
+        let (peer, link, now_sec) = peer_link;
+        let (symbol_root, symbol_count, symbol_size) = root_meta;
         limiter.check_symbol_request(peer, req, now_sec)?;
         let bytes = u64::from(req.count).saturating_mul(u64::from(symbol_size));
         if !mobile_policy.admit_serve(link, bytes) {

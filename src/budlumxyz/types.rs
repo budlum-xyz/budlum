@@ -30,13 +30,25 @@ pub struct AppRecord {
 }
 
 impl AppRecord {
-    /// Convert the optional frontend content digest into a B.U.D. 3.0 [`ContentRef`](crate::storage::bud3::ContentRef).
+    /// Convert the optional frontend content digest and object commitment into a B.U.D. 3.0 [`ContentRef`](crate::storage::bud3::ContentRef).
     /// exposed for app registry frontend resolution over `Bud3ContentGateway`.
     #[must_use]
-    pub fn bud3_content_ref(&self) -> Option<crate::storage::bud3::ContentRef> {
-        self.manifest_id.map(|cid| {
-            crate::storage::bud3::ContentRef::new(crate::storage::bud3::ContentId(cid.0))
-        })
+    pub fn bud3_content_ref(
+        &self,
+        object_commitment: [u8; 32],
+        content_len: u64,
+    ) -> Option<crate::storage::bud3::ContentRef> {
+        let cid = self.manifest_id?;
+        crate::storage::bud3::ContentRef::new(
+            crate::storage::bud3::ContentId {
+                kind: crate::storage::bud3::content_id::ContentIdKind::Public,
+                digest: cid.0,
+                len: content_len,
+            },
+            object_commitment,
+            None,
+        )
+        .ok()
     }
 }
 

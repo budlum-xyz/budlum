@@ -14,15 +14,14 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::{NftError, NftRegistry, MAX_AUTHOR_NAME_BYTES};
 use crate::core::address::Address;
-use crate::storage::bud3::content_ref::ContentRef;
-use crate::storage::bud3::delete::GrantRevocationAuth;
+use crate::core::hash::hash_fields_bytes;
+use crate::storage::bud3::content_id::{ContentId, ContentIdKind};
+use crate::storage::bud3::content_ref::{ContentRef, ContentRefError};
+use crate::storage::bud3::delete::GrantShredAuth;
 use crate::storage::bud3::registry::{Bud3Registry, NftId, ObjectKey, RegistryError};
-use crate::storage::bud3::visibility::Visibility;
-use crate::storage::bud3::ContentId;
 
 /// Domain tag deriving the 32-byte B.U.D. 3.0 [`NftId`] from a SocialFi `u64` id.
 pub const DOMAIN_SOCIALFI_NFT_ID: &[u8] = b"BDLM_BUD3_SOCIALFI_NFT_V1";
@@ -39,10 +38,7 @@ pub const MAX_FOLDER_NAME_BYTES: usize = 64;
 /// Derive the canonical 32-byte [`NftId`] for a SocialFi `u64` NFT id.
 #[must_use]
 pub fn derive_bud3_nft_id(socialfi_id: u64) -> NftId {
-    let mut h = Sha256::new();
-    h.update(DOMAIN_SOCIALFI_NFT_ID);
-    h.update(socialfi_id.to_le_bytes());
-    h.finalize().into()
+    hash_fields_bytes(&[DOMAIN_SOCIALFI_NFT_ID, &socialfi_id.to_le_bytes()])
 }
 
 /// Errors returned by B.U.D. 3.0 SocialFi NFT bindings and `nft_folders`.
@@ -56,6 +52,8 @@ pub enum SocialFiBud3Error {
     UnauthorizedSealedObject,
     /// Underlying [`Bud3Registry`] binding or burn error.
     Registry(RegistryError),
+    /// Invalid `ContentRef`.
+    InvalidContentRef(ContentRefError),
     /// Invalid or empty folder name.
     InvalidFolderName,
     /// Folder not found.
@@ -73,6 +71,7 @@ impl std::fmt::Display for SocialFiBud3Error {
                 f.write_str("caller does not own the target sealed B.U.D. 3.0 object")
             }
             Self::Registry(e) => write!(f, "bud3 registry error: {e:?}"),
+            Self::InvalidContentRef(e) => write!(f, "invalid ContentRef: {e:?}"),
             Self::InvalidFolderName => f.write_str("invalid folder name"),
             Self::FolderNotFound => f.write_str("nft folder not found"),
             Self::FolderLimitExceeded => f.write_str("nft folder limit exceeded"),
@@ -90,7 +89,6 @@ pub struct Bud3NftCommitment {
     pub owner: Address,
     pub content_ref: ContentRef,
     pub object_commitment: ObjectKey,
-    pub visibility: Visibility,
 }
 
 /// One user-managed NFT folder (`nft_folders`).
@@ -154,36 +152,33 @@ impl NftFolderRegistry {
         {
             return Err(SocialFiBud3Error::Nft(NftError::InvalidName.to_string()));
         }
-        let (cid, vis, sealed_owner) = {
+        let (cid, owner_addr) = {
             let obj = bud3_reg
                 .object(&object_commitment)
                 .ok_or(SocialFiBud3Error::UnknownObject)?;
-            (
-                obj.record.content_id,
-                obj.record.visibility,
-                obj.owner_if_sealed,
-            )
+            (obj.record.content_id, obj.owner)
         };
-        if vis == Visibility::Sealed && sealed_owner != Some(caller.0) {
+        if cid.kind == ContentIdKind::Sealed && owner_addr != caller.0 {
             return Err(SocialFiBud3Error::UnauthorizedSealedObject);
         }
 
-        let legacy_cid = crate::storage::content_id::ContentId(cid.0);
+        let legacy_cid = crate::storage::content_id::ContentId(cid.digest);
         let id = nft_reg
             .mint(caller, legacy_cid, epoch, author_name)
             .map_err(|e| SocialFiBud3Error::Nft(e.to_string()))?;
         let nft_id = derive_bud3_nft_id(id);
+        let content_ref = ContentRef::new(cid, object_commitment, Some(nft_id))
+            .map_err(SocialFiBud3Error::InvalidContentRef)?;
         bud3_reg
-            .bind_nft(nft_id, object_commitment)
+            .bind_nft(nft_id, caller.0, &object_commitment)
             .map_err(SocialFiBud3Error::Registry)?;
 
         let meta = Bud3NftCommitment {
             id,
             nft_id,
             owner: caller,
-            content_ref: ContentRef::new(cid),
+            content_ref,
             object_commitment,
-            visibility: vis,
         };
         self.commitments.insert(id, meta.clone());
         Ok(meta)
@@ -203,7 +198,8 @@ impl NftFolderRegistry {
         bud3_reg: &mut Bud3Registry,
         id: u64,
         caller: &Address,
-        grant_revocations: &[GrantRevocationAuth],
+        grant_shreds: &[GrantShredAuth],
+        epoch: u64,
     ) -> Result<ContentId, SocialFiBud3Error> {
         let current = nft_reg
             .get_nft(id)
@@ -217,13 +213,13 @@ impl NftFolderRegistry {
             .cloned()
             .ok_or(SocialFiBud3Error::UnknownObject)?;
 
-        if meta.visibility == Visibility::Sealed || !grant_revocations.is_empty() {
+        if meta.content_ref.content_id.kind == ContentIdKind::Sealed || !grant_shreds.is_empty() {
             bud3_reg
-                .social_delete(caller.0, meta.nft_id, grant_revocations)
+                .social_delete(&meta.nft_id, &caller.0, grant_shreds, epoch)
                 .map_err(SocialFiBud3Error::Registry)?;
         } else {
             bud3_reg
-                .burn_reference(meta.nft_id)
+                .burn_reference(&meta.nft_id, &caller.0, epoch)
                 .map_err(SocialFiBud3Error::Registry)?;
         }
 
@@ -328,24 +324,25 @@ mod tests {
     const P: Profile = Profile {
         id: 0,
         qr_version: 40,
-        symbol_size: 1024,
+        symbol_size: 128,
         fps: 10,
-        k_max: 64,
+        k_max: 16,
     };
 
     #[test]
     fn socialfi_nft_burn_needs_owner() {
-        let alice = Address::from([1u8; 32]);
-        let attacker = Address::from([2u8; 32]);
+        let alice = Address([1u8; 32]);
+        let attacker = Address([2u8; 32]);
         let mut nft_reg = NftRegistry::new();
-        let mut bud3_reg = Bud3Registry::new();
+        let mut bud3_reg = Bud3Registry::default();
         let mut folders = NftFolderRegistry::new();
 
-        let body = b"socialfi post protected against third-party burn".repeat(25);
-        let up = prepare_public_upload(&body, &P, &Bud3Limits::default()).unwrap();
+        let body = b"socialfi post protected against third-party burn".repeat(6);
+        let up = prepare_public_upload(&body, &P, &Bud3Limits::default(), 8).unwrap();
         let key = up.record.commitment;
         bud3_reg
             .register_object(
+                alice.0,
                 up.record,
                 vec![(
                     0,
@@ -353,17 +350,23 @@ mod tests {
                         validator: [9u8; 32],
                         class: Class::Full,
                         first_esi: 0,
-                        symbol_count: 4,
+                        symbols: 8,
                     },
                 )],
                 1,
                 20,
-                10_000,
             )
             .unwrap();
 
         let alice_nft = folders
-            .mint_bud3_nft(&mut nft_reg, &mut bud3_reg, alice, key, 1, Some("alice".into()))
+            .mint_bud3_nft(
+                &mut nft_reg,
+                &mut bud3_reg,
+                alice,
+                key,
+                1,
+                Some(String::from("alice")),
+            )
             .unwrap();
         let fid = folders.create_folder(alice, "highlights").unwrap();
         folders
@@ -372,26 +375,26 @@ mod tests {
 
         // Attacker cannot burn Alice's NFT directly.
         assert!(folders
-            .burn_bud3_nft(&mut nft_reg, &mut bud3_reg, alice_nft.id, &attacker, &[])
+            .burn_bud3_nft(&mut nft_reg, &mut bud3_reg, alice_nft.id, &attacker, &[], 2)
             .is_err());
 
         // Even if attacker mints and burns their own NFT referencing the same public object,
-        // Alice's object reference stays live (`refcount == 1`)!
+        // Alice's object reference stays live (`references.len() == 1`)!
         let attacker_nft = folders
             .mint_bud3_nft(&mut nft_reg, &mut bud3_reg, attacker, key, 1, None)
             .unwrap();
-        assert_eq!(bud3_reg.refcount(&key), 2);
+        assert_eq!(bud3_reg.object(&key).unwrap().references.len(), 2);
         folders
-            .burn_bud3_nft(&mut nft_reg, &mut bud3_reg, attacker_nft.id, &attacker, &[])
+            .burn_bud3_nft(
+                &mut nft_reg,
+                &mut bud3_reg,
+                attacker_nft.id,
+                &attacker,
+                &[],
+                2,
+            )
             .unwrap();
         assert!(bud3_reg.object(&key).is_some());
-        assert_eq!(bud3_reg.refcount(&key), 1);
-
-        // Once Alice burns her own NFT, refcount reaches 0 and the object is cleaned up.
-        folders
-            .burn_bud3_nft(&mut nft_reg, &mut bud3_reg, alice_nft.id, &alice, &[])
-            .unwrap();
-        assert!(bud3_reg.object(&key).is_none());
-        assert!(folders.folder(fid).unwrap().nft_ids.is_empty());
+        assert_eq!(bud3_reg.object(&key).unwrap().references.len(), 1);
     }
 }

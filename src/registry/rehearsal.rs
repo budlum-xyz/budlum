@@ -353,6 +353,24 @@ pub fn analyze_mobile_field_logs(jsonl: &str) -> Result<MobileFieldSummary, Rehe
     Ok(summary)
 }
 
+/// Run the full rehearsal verification gate over topology, `T-1..T-7` drill
+/// results, and Android field-test JSONL logs (`WP-46` + `WP-37`).
+/// exposed for ceremony rehearsal runner and release readiness checks.
+///
+/// # Errors
+///
+/// Returns [`RehearsalError`] if topology, drill pass criteria, or mobile field
+/// bounds fail.
+pub fn run_rehearsal_suite(
+    topo: &RehearsalTopology,
+    report: &RehearsalDrillReport,
+    jsonl: &str,
+) -> Result<MobileFieldSummary, RehearsalError> {
+    verify_rehearsal_topology(topo)?;
+    evaluate_rehearsal_drills(report)?;
+    analyze_mobile_field_logs(jsonl)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

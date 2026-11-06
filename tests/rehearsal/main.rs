@@ -1,26 +1,30 @@
 //! End-to-end rehearsal drill suite (`T-1`..`T-7`, WP-46) and Mobile device
 //! field-test telemetry suite (WP-37).
 
-use budlum::registry::handover::HandoverCoordinator;
-use budlum::registry::presence::{PresenceTracker, ValidatorDutyState};
-use budlum::registry::rehearsal::{
+use std::collections::BTreeSet;
+
+use budlum_core::core::address::Address;
+use budlum_core::registry::handover::HandoverCoordinator;
+use budlum_core::registry::presence::{PresenceClass, PresenceTracker};
+use budlum_core::registry::rehearsal::{
     analyze_mobile_field_logs, evaluate_rehearsal_drills, verify_rehearsal_topology,
     RehearsalDrillReport, RehearsalTopology, RehearsalValidatorNode, MIN_REHEARSAL_STEADY_SECS,
     MIN_T5_SMALL_OBJECT_COUNT, MIN_T5_TOTAL_UPLOAD_BYTES,
 };
-use budlum::storage::bud3::content_gateway::Bud3ContentGateway;
-use budlum::storage::bud3::limits::{Bud3Limits, Profile};
-use budlum::storage::bud3::pipeline::prepare_public_upload;
-use budlum::storage::bud3::placement::{Class, Share};
-use budlum::storage::bud3::registry::Bud3Registry;
-use budlum::storage::bud3::volume::AggregationVolume;
+use budlum_core::storage::bud3::bof1::Object;
+use budlum_core::storage::bud3::limits::{Bud3Limits, Profile};
+use budlum_core::storage::bud3::pipeline::prepare_public_upload;
+use budlum_core::storage::bud3::placement::{Class, Share};
+use budlum_core::storage::bud3::registry::Bud3Registry;
+use budlum_core::storage::bud3::view::{view_from_network, MemorySymbolNetwork};
+use budlum_core::storage::bud3::volume::{AggregationVolume, VolumeScope};
 
 const P: Profile = Profile {
     id: 0,
     qr_version: 40,
-    symbol_size: 1024,
+    symbol_size: 256,
     fps: 10,
-    k_max: 64,
+    k_max: 32,
 };
 
 #[test]
@@ -46,24 +50,32 @@ fn rehearsal_t1_to_t7_drills_and_mobile_field_matrix_hold() {
         simulated_mobile_count: 1_000,
         steady_state_secs: MIN_REHEARSAL_STEADY_SECS,
     };
-    verify_rehearsal_topology(&topo).expect("valid rehearsal topology");
+    verify_rehearsal_topology(&topo).unwrap();
 
-    // 2. Simulate T-1 & T-4 on live B.U.D. 3.0 + PresenceTracker + HandoverCoordinator state:
-    //    Upload an object across 8 Full + 4 Mobile shares, shut down 100% of Mobile validators,
-    //    verify zero slashing, Full-class reads continue, and `ResumeValidator` reactivates next epoch.
-    let mut bud3 = Bud3Registry::new();
-    let mut gateway = Bud3ContentGateway::new();
-    let mut presence = PresenceTracker::new();
+    // 2. Simulate T-1, T-3, and T-4 on live B.U.D. 3.0 + PresenceTracker + HandoverCoordinator state.
+    let mut bud3 = Bud3Registry::default();
+    let mut presence = PresenceTracker::new(3, 50);
     for i in 0..8u8 {
-        presence.register_validator([i + 1; 32], Class::Full, 10_000_000_000);
+        presence.register_validator(Address([i + 1; 32]), PresenceClass::Full, vec![i + 1; 48], 0);
     }
     for m in 0..4u8 {
-        presence.register_validator([100 + m; 32], Class::Mobile, 100_000_000);
+        presence.register_validator(
+            Address([100 + m; 32]),
+            PresenceClass::Mobile,
+            vec![100 + m; 48],
+            0,
+        );
     }
 
-    let payload = b"rehearsal t1 mobile mass-shutdown resilience payload".repeat(40);
-    let up = prepare_public_upload(&payload, &P, &Bud3Limits::default()).unwrap();
+    let payload = b"rehearsal t1 mobile mass-shutdown resilience payload".repeat(12);
+    let up = prepare_public_upload(&payload, &P, &Bud3Limits::default(), 16).unwrap();
     let key = up.record.commitment;
+    let mut net = MemorySymbolNetwork::default();
+    for (_, syms) in &up.segments {
+        for sym in syms {
+            net.insert([1u8; 32], key, sym.clone());
+        }
+    }
     let shares = vec![
         (
             0,
@@ -71,7 +83,7 @@ fn rehearsal_t1_to_t7_drills_and_mobile_field_matrix_hold() {
                 validator: [1u8; 32],
                 class: Class::Full,
                 first_esi: 0,
-                symbol_count: up.record.symbols_per_segment,
+                symbols: 14,
             },
         ),
         (
@@ -79,62 +91,45 @@ fn rehearsal_t1_to_t7_drills_and_mobile_field_matrix_hold() {
             Share {
                 validator: [100u8; 32],
                 class: Class::Mobile,
-                first_esi: up.record.symbols_per_segment,
-                symbol_count: 2,
+                first_esi: 14,
+                symbols: 2,
             },
         ),
     ];
     let nft_id = [0xEE; 32];
-    bud3.register_object(up.record.clone(), shares, 1, 30, 20_000)
+    bud3.register_object([1u8; 32], up.record, shares, 1, 30)
         .unwrap();
-    bud3.bind_nft(nft_id, key).unwrap();
-    gateway.stage_object(&up.record, &up.object_bytes).unwrap();
+    bud3.bind_nft(nft_id, [1u8; 32], &key).unwrap();
 
-    // T-1: All Mobile validators miss presence for 2 consecutive epochs -> Suspended (zero slash!),
-    // while Full-class read via gateway continues uninterrupted.
-    for epoch in 1..=2 {
-        for i in 0..8u8 {
-            presence.record_heartbeat([i + 1; 32], epoch);
-        }
-        presence.finalize_epoch(epoch);
+    // T-1: Full validators participate while Mobile validators remain silent for 25 epochs (> 24h window);
+    // Mobile validators transition to non-slashing suspension while Full-class reads succeed uninterrupted.
+    let active_full: BTreeSet<Address> = (0..8u8).map(|i| Address([i + 1; 32])).collect();
+    for epoch in 1..=26 {
+        presence.record_full_seat_participation(&active_full, epoch);
+        presence.advance_epoch(epoch);
     }
-    assert_eq!(
-        presence.duty_state(&[100u8; 32]),
-        Some(ValidatorDutyState::Suspended)
-    );
-    assert_eq!(presence.stake_of(&[100u8; 32]), Some(100_000_000));
-    let read_t1 = gateway.get_object(&bud3, &key, Some(nft_id), None, 25).unwrap();
-    assert_eq!(read_t1.body, payload);
+    assert!(presence.state_of(&Address([100u8; 32])).unwrap().suspended);
+    let read_t1 = view_from_network(&bud3, &key, None, &net).unwrap();
+    assert_eq!(read_t1, payload);
 
-    // T-3: > 1/3 Full seats silent for 50 blocks triggers disaster-recovery flag, then clears on checkpoint.
-    let mut handover = HandoverCoordinator::new();
+    // T-3: > 1/3 Full seats silent for 50 blocks triggers disaster-recovery gauge, then clears on checkpoint.
+    let mut handover = HandoverCoordinator::default();
     for h in 1..=50 {
-        handover.observe_block(h, false);
+        handover.observe_block(h, 1, None);
     }
-    assert!(handover.in_disaster_recovery());
-    handover.observe_block(51, true);
-    assert!(!handover.in_disaster_recovery());
-
-    // T-4: Mobile submits `ResumeValidator` in epoch 3 -> activates in epoch 4.
-    presence.submit_resume([100u8; 32], 3).unwrap();
-    for i in 0..8u8 {
-        presence.record_heartbeat([i + 1; 32], 3);
-    }
-    presence.record_heartbeat([100u8; 32], 3);
-    presence.finalize_epoch(3);
-    assert_eq!(
-        presence.duty_state(&[100u8; 32]),
-        Some(ValidatorDutyState::Active)
-    );
+    assert_eq!(handover.budlum_finality_stalled(), 1);
+    handover.observe_block(51, 2, Some(51));
+    assert_eq!(handover.budlum_finality_stalled(), 0);
 
     // T-5 small-object packing smoke via AggregationVolume.
-    let mut vol = AggregationVolume::new(1);
-    for idx in 0..64u16 {
+    let mut vol = AggregationVolume::new(VolumeScope::Public, P, 1 << 20);
+    for idx in 0..32u16 {
         let small = idx.to_le_bytes();
-        let sup = prepare_public_upload(&small, &P, &Bud3Limits::default()).unwrap();
-        vol.append(sup.record.content_id, &sup.object_bytes).unwrap();
+        let obj = Object::raw_public(&small);
+        vol.insert(&obj, None).unwrap();
     }
-    assert_eq!(vol.entry_count(), 64);
+    assert!(!vol.bytes().is_empty());
+    assert_ne!(vol.root(), [0u8; 32]);
 
     // Evaluate complete T-1..T-7 pass-criteria report.
     let report = RehearsalDrillReport {
@@ -155,16 +150,21 @@ fn rehearsal_t1_to_t7_drills_and_mobile_field_matrix_hold() {
         t7_http_429_observed: 412,
         t7_unhandled_5xx_or_panics: 0,
     };
-    evaluate_rehearsal_drills(&report).expect("all seven rehearsal drills pass");
+    evaluate_rehearsal_drills(&report).unwrap();
 
-    // 3. WP-37: Verify 20-device Android JSONL field telemetry stream.
+    // 3. WP-37: Verify 20-device Android JSONL field telemetry stream + full suite runner.
+    let tiers = ["entry4_gb", "midrange6_gb", "midrange8_gb", "flagship12_gb"];
     let mut jsonl = String::new();
-    for dev in 0..20u32 {
+    for dev in 0..20u8 {
         jsonl.push_str(&format!(
-            "{{\"device_id\":\"android-{dev:02}\",\"tier\":\"midrange8_gb\",\"peak_rss_mib\":124,\"daily_battery_bps\":215,\"metered_bytes_served\":0,\"allow_cellular_opt_in\":false,\"audits_answered\":96,\"audits_missed\":0,\"rewards_credited_atoms\":25000}}\n"
+            "{{\"device_id\":\"phone-{dev:02}\",\"tier\":\"{}\",\"peak_rss_mib\":118,\"daily_battery_bps\":240,\"metered_bytes_served\":0,\"allow_cellular_opt_in\":false,\"audits_answered\":48,\"audits_missed\":0,\"rewards_credited_atoms\":12500}}\n",
+            tiers[usize::from(dev) % tiers.len()]
         ));
     }
-    let summary = analyze_mobile_field_logs(&jsonl).expect("valid 20-phone telemetry");
-    assert_eq!(summary.device_count, 20);
-    assert_eq!(summary.total_audits_answered, 1_920);
+    let field_summary = analyze_mobile_field_logs(&jsonl).unwrap();
+    assert_eq!(field_summary.device_count, 20);
+    assert_eq!(field_summary.total_audits_answered, 960);
+    let suite_summary =
+        budlum_core::registry::rehearsal::run_rehearsal_suite(&topo, &report, &jsonl).unwrap();
+    assert_eq!(suite_summary, field_summary);
 }

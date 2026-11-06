@@ -9,16 +9,16 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::{ArtifactKind, Visibility as DomainVisibility};
 use crate::core::address::Address;
-use crate::storage::bud3::content_ref::ContentRef;
+use crate::core::hash::hash_fields_bytes;
+use crate::storage::bud3::content_id::ContentId;
+use crate::storage::bud3::content_ref::{ContentRef, ContentRefError};
 use crate::storage::bud3::pipeline::ObjectRecord;
 use crate::storage::bud3::placement::Share;
 use crate::storage::bud3::registry::{Bud3Registry, ObjectKey, RegistryError};
 use crate::storage::bud3::tx::{apply as apply_bud3_tx, Applied, StorageTxV3};
-use crate::storage::bud3::ContentId;
 
 /// Domain tag committing an Education Domain artifact record.
 pub const DOMAIN_EDUCATION_ARTIFACT: &[u8] = b"BDLM_BUD3_EDUCATION_ARTIFACT_V1";
@@ -30,6 +30,8 @@ pub enum EducationDomainError {
     InvalidArtifact(&'static str),
     /// Supplied `ObjectRecord.content_id` does not match the artifact `ContentId`.
     ContentIdMismatch,
+    /// Invalid `ContentRef`.
+    InvalidContentRef(ContentRefError),
     /// `StorageTxV3::RegisterObject` execution failed in [`Bud3Registry`].
     Storage(RegistryError),
 }
@@ -41,6 +43,7 @@ impl std::fmt::Display for EducationDomainError {
             Self::ContentIdMismatch => {
                 f.write_str("education artifact ContentId does not match B.U.D. 3.0 ObjectRecord")
             }
+            Self::InvalidContentRef(e) => write!(f, "invalid ContentRef: {e:?}"),
             Self::Storage(e) => write!(f, "bud3 register_object error: {e:?}"),
         }
     }
@@ -72,7 +75,7 @@ impl EducationArtifact {
                 "contributor cannot be zero",
             ));
         }
-        if self.content_ref.content_id.0 == [0u8; 32] {
+        if self.content_ref.content_id.digest == [0u8; 32] {
             return Err(EducationDomainError::InvalidArtifact(
                 "content_id cannot be zero",
             ));
@@ -91,13 +94,9 @@ impl EducationArtifact {
     }
 
     /// Deterministic 32-byte artifact id bound to `ContentId` and `object_commitment`.
+    /// exposed for Education Domain indexing and attestation verification.
     #[must_use]
     pub fn artifact_id(&self) -> [u8; 32] {
-        let mut h = Sha256::new();
-        h.update(DOMAIN_EDUCATION_ARTIFACT);
-        h.update(self.contributor.as_bytes());
-        h.update(self.content_ref.content_id.0);
-        h.update(self.object_commitment);
         let kind_tag: u8 = match self.artifact_kind {
             ArtifactKind::Dataset => 1,
             ArtifactKind::Research => 2,
@@ -109,11 +108,28 @@ impl EducationArtifact {
             DomainVisibility::EducatorOnly => 2,
             DomainVisibility::PeerOnly => 3,
         };
-        h.update([kind_tag, vis_tag]);
-        h.update(self.metadata_hash);
-        h.update(self.created_at.to_le_bytes());
-        h.finalize().into()
+        hash_fields_bytes(&[
+            DOMAIN_EDUCATION_ARTIFACT,
+            self.contributor.as_bytes(),
+            &self.content_ref.content_id.digest,
+            &self.content_ref.content_id.len.to_le_bytes(),
+            &self.object_commitment,
+            &[kind_tag, vis_tag],
+            &self.metadata_hash,
+            &self.created_at.to_le_bytes(),
+        ])
     }
+}
+
+/// Parameters describing an Education Domain artifact registration.
+#[derive(Debug, Clone)]
+pub struct ArtifactRegistrationSpec {
+    pub contributor: Address,
+    pub content_id: ContentId,
+    pub artifact_kind: ArtifactKind,
+    pub visibility: DomainVisibility,
+    pub metadata_hash: [u8; 32],
+    pub created_at: u64,
 }
 
 /// Education Domain registry storing artifacts backed by `StorageTxV3::RegisterObject`.
@@ -150,48 +166,35 @@ impl EducationDomainRegistry {
     /// # Errors
     ///
     /// Returns [`EducationDomainError`] if validation or `RegisterObject` fails.
-    #[allow(clippy::too_many_arguments)]
     pub fn register_artifact(
         &mut self,
         bud3: &mut Bud3Registry,
-        contributor: Address,
-        content_id: ContentId,
+        spec: ArtifactRegistrationSpec,
         record: ObjectRecord,
         shares: Vec<(u64, Share)>,
         lifetime_epochs: u64,
         current_epoch: u64,
-        current_height: u64,
-        fee_paid_bud: u64,
-        artifact_kind: ArtifactKind,
-        visibility: DomainVisibility,
-        metadata_hash: [u8; 32],
-        created_at: u64,
     ) -> Result<([u8; 32], Applied), EducationDomainError> {
-        if record.content_id != content_id {
+        if record.content_id != spec.content_id {
             return Err(EducationDomainError::ContentIdMismatch);
         }
         let commitment = record.commitment;
+        let content_ref = ContentRef::new(spec.content_id, commitment, None)
+            .map_err(EducationDomainError::InvalidContentRef)?;
         let artifact = EducationArtifact {
-            contributor,
-            content_ref: ContentRef::new(content_id),
+            contributor: spec.contributor,
+            content_ref,
             object_commitment: commitment,
-            artifact_kind,
-            visibility,
-            metadata_hash,
-            created_at,
+            artifact_kind: spec.artifact_kind,
+            visibility: spec.visibility,
+            metadata_hash: spec.metadata_hash,
+            created_at: spec.created_at,
         };
         artifact.validate()?;
 
         let tx = Self::build_register_tx(record, shares, lifetime_epochs);
-        let applied = apply_bud3_tx(
-            bud3,
-            contributor.0,
-            tx,
-            current_epoch,
-            current_height,
-            fee_paid_bud,
-        )
-        .map_err(EducationDomainError::Storage)?;
+        let applied = apply_bud3_tx(bud3, spec.contributor.0, tx, current_epoch)
+            .map_err(EducationDomainError::Storage)?;
 
         let id = artifact.artifact_id();
         self.artifacts.insert(id, artifact);
@@ -211,31 +214,38 @@ mod tests {
     use crate::storage::bud3::limits::{Bud3Limits, Profile};
     use crate::storage::bud3::pipeline::prepare_public_upload;
     use crate::storage::bud3::placement::Class;
+    use crate::storage::bud3::registry::Registered;
 
     const P: Profile = Profile {
         id: 0,
         qr_version: 40,
-        symbol_size: 1024,
+        symbol_size: 128,
         fps: 10,
-        k_max: 64,
+        k_max: 16,
     };
 
     #[test]
     fn education_domain_registers_object() {
-        let scholar = Address::from([0x33; 32]);
-        let mut bud3 = Bud3Registry::new();
+        let scholar = Address([0x33; 32]);
+        let mut bud3 = Bud3Registry::default();
         let mut domain = EducationDomainRegistry::new();
 
-        let paper = b"open-access post-quantum cryptography lecture notes".repeat(30);
-        let up = prepare_public_upload(&paper, &P, &Bud3Limits::default()).unwrap();
+        let paper = b"open-access post-quantum cryptography lecture notes".repeat(6);
+        let up = prepare_public_upload(&paper, &P, &Bud3Limits::default(), 8).unwrap();
         let cid = up.record.content_id;
         let obj_key = up.record.commitment;
 
         let (artifact_id, applied) = domain
             .register_artifact(
                 &mut bud3,
-                scholar,
-                cid,
+                ArtifactRegistrationSpec {
+                    contributor: scholar,
+                    content_id: cid,
+                    artifact_kind: ArtifactKind::Educational,
+                    visibility: DomainVisibility::Public,
+                    metadata_hash: [0xAB; 32],
+                    created_at: 1_700_000_000,
+                },
                 up.record,
                 vec![(
                     0,
@@ -243,21 +253,15 @@ mod tests {
                         validator: [5u8; 32],
                         class: Class::Full,
                         first_esi: 0,
-                        symbol_count: 4,
+                        symbols: 8,
                     },
                 )],
                 20,
                 1,
-                10,
-                10_000,
-                ArtifactKind::Educational,
-                DomainVisibility::Public,
-                [0xAB; 32],
-                1_700_000_000,
             )
             .unwrap();
 
-        assert!(matches!(applied, Applied::Registered { key, .. } if key == obj_key));
+        assert_eq!(applied, Applied::Registered(Registered::New(obj_key)));
         assert!(bud3.object(&obj_key).is_some());
         let stored = domain.artifact(&artifact_id).unwrap();
         assert_eq!(stored.content_ref.content_id, cid);

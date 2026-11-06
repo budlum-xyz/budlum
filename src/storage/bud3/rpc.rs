@@ -16,7 +16,7 @@ use super::content_ref::ContentRef;
 use super::fountain::Symbol;
 use super::grants::GrantRow;
 use super::limits::{Bud3Limits, Profile};
-use super::maintenance::Bud3MaintenanceMetrics;
+use super::maintenance::Bud3StorageMetrics;
 use super::placement::{Candidate, PlacementRow};
 use super::registry::{Address, Bud3Query, Bud3Registry, NftId, ObjectKey};
 use super::repair::verify_repaired_symbol;
@@ -79,7 +79,7 @@ pub struct Bud3RpcService {
     reveals: RevealSessionManager,
     tiers: AccessTierTracker,
     limiter: SymbolPeerLimiter,
-    metrics: Bud3MaintenanceMetrics,
+    metrics: Bud3StorageMetrics,
 }
 
 impl Default for Bud3RpcService {
@@ -89,7 +89,7 @@ impl Default for Bud3RpcService {
             reveals: RevealSessionManager::default(),
             tiers: AccessTierTracker::default(),
             limiter: SymbolPeerLimiter::default(),
-            metrics: Bud3MaintenanceMetrics::default(),
+            metrics: Bud3StorageMetrics::default(),
         }
     }
 }
@@ -101,17 +101,15 @@ impl Bud3RpcService {
     ///
     /// Returns an actionable error string if parameters are malformed, session
     /// limits trigger, or G8 paid/public rules refuse the request.
-    #[allow(clippy::too_many_lines)]
     pub fn handle<N: NetworkSymbolSource>(
         &mut self,
         method: &str,
         params: &Value,
         registry: &Bud3Registry,
         network: &N,
-        placement_row: &PlacementRow,
-        candidates: &[Candidate],
-        now_sec: u64,
+        placement_ctx: (&PlacementRow, &[Candidate], u64),
     ) -> Result<Value, String> {
+        let (placement_row, candidates, now_sec) = placement_ctx;
         match method {
             "bud_storageUploadOpen" => {
                 let account: Address = parse_hex32(params.get("account"), "account")?;
@@ -138,8 +136,7 @@ impl Bud3RpcService {
                     let days = u32::try_from(days_u64).map_err(|_| String::from("invalid `lifetime_days`"))?;
                     self.uploads
                         .open_session_for_days(
-                            account,
-                            [0u8; 16],
+                            (account, [0u8; 16]),
                             declared_len,
                             raw_flags,
                             days,
@@ -150,8 +147,7 @@ impl Bud3RpcService {
                 } else {
                     self.uploads
                         .open_session(
-                            account,
-                            [0u8; 16],
+                            (account, [0u8; 16]),
                             declared_len,
                             raw_flags,
                             lifetime_epochs,
@@ -260,6 +256,32 @@ impl Bud3RpcService {
                 let _ = self.tiers.record_access(object, false, now_sec);
                 Ok(json!({ "content_hex": hex::encode(content) }))
             }
+            "bud_storagePrepareBurn"
+            | "bud_storagePrepareRenew"
+            | "bud_storagePrepareRegister"
+            | "bud_storageIssueViewGrant"
+            | "bud_storageRevokeViewGrant"
+            | "bud_storageMayView"
+            | "bud_storageListViewGrants"
+            | "bud_storageOpenReveal"
+            | "bud_storageRevealFrames"
+            | "bud_storageCloseReveal"
+            | "bud_storageFetchBundle"
+            | "bud_storageAuditRepairSymbol" => {
+                self.handle_grants_and_reveal(method, params, registry, network)
+            }
+            other => Err(format!("unknown B.U.D. 3.0 RPC method `{other}`")),
+        }
+    }
+
+    fn handle_grants_and_reveal<N: NetworkSymbolSource>(
+        &mut self,
+        method: &str,
+        params: &Value,
+        registry: &Bud3Registry,
+        network: &N,
+    ) -> Result<Value, String> {
+        match method {
             "bud_storagePrepareBurn" => {
                 let nft: NftId = parse_hex32(params.get("nft"), "nft")?;
                 let tx = StorageTxV3::BurnReference { nft };
@@ -365,7 +387,7 @@ impl Bud3RpcService {
                 let entry = registry
                     .object(&object)
                     .ok_or_else(|| String::from("unknown object"))?;
-                let cref = ContentRef::new(entry.record.content_id, object)
+                let cref = ContentRef::new(entry.record.content_id, object, None)
                     .map_err(|e| format!("{e:?}"))?;
                 let bundle = Bud3ContentGateway::fetch_symbol_bundle(registry, &cref, network)
                     .map_err(|e| format!("{e:?}"))?;

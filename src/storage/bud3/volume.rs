@@ -406,9 +406,9 @@ mod tests {
     #[test]
     fn bud3_aggregation_volume() {
         let mut vol = AggregationVolume::new(VolumeScope::Public, Profile::P0, DEFAULT_VOLUME_BYTES);
-        let o1 = Object::public_raw(b"tiny object one");
-        let o2 = Object::public_raw(b"tiny object two");
-        let o3 = Object::public_raw(b"tiny object three");
+        let o1 = Object::raw_public(b"tiny object one");
+        let o2 = Object::raw_public(b"tiny object two");
+        let o3 = Object::raw_public(b"tiny object three");
 
         let e1 = vol.insert(&o1, None).unwrap();
         let e2 = vol.insert(&o2, None).unwrap();

@@ -215,7 +215,7 @@ mod tests {
 
     #[test]
     fn closed_codecs_refuse_on_testnet() {
-        let cid = ContentId::for_public(b"closed codec test");
+        let cid = ContentId::public(b"closed codec test");
         let old_rec = sample_record([1u8; 32], cid, 0);
         let pg: BTreeSet<Address> = [[1u8; 32], [2u8; 32], [3u8; 32]].into();
         let atts = vec![
@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     fn bud3_object_replacement() {
-        let cid = ContentId::for_public(b"canonical object bytes");
+        let cid = ContentId::public(b"canonical object bytes");
         let old_rec = sample_record([10u8; 32], cid, 0);
         let new_rec = sample_record([20u8; 32], cid, 1);
         let pg: BTreeSet<Address> = [[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]].into();
@@ -267,7 +267,7 @@ mod tests {
         three_att.push(ReplaceAttestation { validator: [3u8; 32], verified_content_id: cid });
         admit_object_replacement(&[9u8; 32], &[1u8; 32], 100_000, &old_rec, &new_rec, &pg, &three_att).unwrap();
 
-        let bad_cid = ContentId::for_public(b"corrupted object bytes");
+        let bad_cid = ContentId::public(b"corrupted object bytes");
         let bad_rec = sample_record([30u8; 32], bad_cid, 1);
         assert_eq!(
             admit_object_replacement(&[9u8; 32], &[1u8; 32], 100_000, &old_rec, &bad_rec, &pg, &three_att),

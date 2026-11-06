@@ -252,17 +252,16 @@ impl UploadSessionManager {
     /// # Errors
     ///
     /// [`UploadError`] if any gateway, account, IP, daily, or content-size limit is exceeded.
-    #[allow(clippy::too_many_arguments)]
     pub fn open_session(
         &mut self,
-        account: Address,
-        ip_key: [u8; 16],
+        client: (Address, [u8; 16]),
         declared_len: u64,
         raw_flags: u8,
         lifetime_epochs: u64,
         pre_sealed_object: bool,
         now_sec: u64,
     ) -> Result<u64, UploadError> {
+        let (account, ip_key) = client;
         self.purge_expired(now_sec);
         let _ = admit_testnet_flags(raw_flags)?;
         if declared_len > MAX_UPLOAD_SESSION_BYTES {
@@ -324,11 +323,9 @@ impl UploadSessionManager {
 
     /// Open an upload session parameterized in storage `lifetime_days` (`[30, 3650]` on testnet),
     /// enforcing [`Bud3Limits::admit_lifetime`] and converting days to 150-second epochs.
-    #[allow(clippy::too_many_arguments)]
     pub fn open_session_for_days(
         &mut self,
-        account: Address,
-        ip_key: [u8; 16],
+        client: (Address, [u8; 16]),
         declared_len: u64,
         raw_flags: u8,
         lifetime_days: u32,
@@ -338,8 +335,7 @@ impl UploadSessionManager {
         self.limits.admit_lifetime(lifetime_days)?;
         let lifetime_epochs = u64::from(lifetime_days).saturating_mul(576);
         self.open_session(
-            account,
-            ip_key,
+            client,
             declared_len,
             raw_flags,
             lifetime_epochs,
@@ -445,7 +441,7 @@ impl UploadSessionManager {
         let symbols_per_segment =
             u32::try_from(row.total_symbols()).map_err(|_| UploadError::TooLarge)?;
 
-        let two_segment_ceiling = usize::try_from(profile.max_segment_bytes().saturating_mul(2))
+        let two_segment_ceiling = usize::try_from(profile.segment_bytes().saturating_mul(2))
             .unwrap_or(usize::MAX);
         let mut peak_working_bytes = 0usize;
         let mut segments = Vec::new();
@@ -496,7 +492,7 @@ impl UploadSessionManager {
                         let back = png_to_frame(&png)?;
                         if back != *frame {
                             return Err(UploadError::PixelVerifyFailed {
-                                segment: frame.segment_index,
+                                segment: frame.segment,
                                 esi: frame.esi,
                             });
                         }
@@ -543,7 +539,7 @@ impl UploadSessionManager {
 /// Convenience: convert [`PipelineError`] when callers bridge upload helpers.
 #[must_use]
 pub const fn max_two_segment_memory_bytes(profile: &Profile) -> u64 {
-    profile.max_segment_bytes().saturating_mul(2)
+    profile.segment_bytes().saturating_mul(2)
 }
 
 #[cfg(test)]
@@ -579,27 +575,27 @@ mod tests {
 
         // T41: bit1 (LIVE) and bit3 (0x08) refuse on testnet.
         assert!(matches!(
-            mgr.open_session(acc, [1; 16], 16, Flags::LIVE, 10, false, 100),
+            mgr.open_session((acc, [1; 16]), 16, Flags::LIVE, 10, false, 100),
             Err(UploadError::ClosedFeatureFlag(_))
         ));
         assert!(matches!(
-            mgr.open_session(acc, [1; 16], 16, CLOSED_FLAG_BIT3, 10, false, 100),
+            mgr.open_session((acc, [1; 16]), 16, CLOSED_FLAG_BIT3, 10, false, 100),
             Err(UploadError::ClosedFeatureFlag(_))
         ));
 
         // Per-IP cap = 2 concurrent sessions.
-        let _s1 = mgr.open_session(acc, [9; 16], 100, 0, 10, false, 100).unwrap();
-        let _s2 = mgr.open_session(acc, [9; 16], 100, 0, 10, false, 100).unwrap();
+        let _s1 = mgr.open_session((acc, [9; 16]), 100, 0, 10, false, 100).unwrap();
+        let _s2 = mgr.open_session((acc, [9; 16]), 100, 0, 10, false, 100).unwrap();
         assert_eq!(
-            mgr.open_session(acc, [9; 16], 100, 0, 10, false, 100),
+            mgr.open_session((acc, [9; 16]), 100, 0, 10, false, 100),
             Err(UploadError::TooManyIpSessions)
         );
 
         // Per-account cap = 4 concurrent sessions across distinct IPs.
-        let _s3 = mgr.open_session(acc, [8; 16], 100, 0, 10, false, 100).unwrap();
-        let _s4 = mgr.open_session(acc, [7; 16], 100, 0, 10, false, 100).unwrap();
+        let _s3 = mgr.open_session((acc, [8; 16]), 100, 0, 10, false, 100).unwrap();
+        let _s4 = mgr.open_session((acc, [7; 16]), 100, 0, 10, false, 100).unwrap();
         assert_eq!(
-            mgr.open_session(acc, [6; 16], 100, 0, 10, false, 100),
+            mgr.open_session((acc, [6; 16]), 100, 0, 10, false, 100),
             Err(UploadError::TooManyAccountSessions)
         );
     }
@@ -610,7 +606,7 @@ mod tests {
         let reg = Bud3Registry::default();
         let data = b"multi-segment upload streamed chunk by chunk".repeat(120);
         let sid = mgr
-            .open_session([2; 32], [3; 16], data.len() as u64, 0, 20, false, 500)
+            .open_session(([2; 32], [3; 16]), data.len() as u64, 0, 20, false, 500)
             .unwrap();
         for chunk in data.chunks(257) {
             mgr.append_chunk(sid, chunk, 501).unwrap();

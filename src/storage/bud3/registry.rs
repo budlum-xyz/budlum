@@ -777,17 +777,16 @@ impl Bud3Registry {
     /// carrying the identical `ContentId`, verified by `>= 3` Full validators from
     /// `old_key`'s placement group. Bound NFTs re-point to `new_record.commitment`;
     /// prior fees are never refunded (`no_refund_on_replace`).
-    #[allow(clippy::too_many_arguments)]
     pub fn replace_object(
         &mut self,
-        sender: Address,
-        proposer_stake: u64,
+        proposer: (Address, u64),
         old_key: &ObjectKey,
         new_record: ObjectRecord,
         new_shares: Vec<(u64, Share)>,
         attestations: &[super::replace::ReplaceAttestation],
         epoch: u64,
     ) -> Result<ObjectKey, RegistryError> {
+        let (sender, proposer_stake) = proposer;
         let old_entry = self.objects.get(old_key).ok_or(RegistryError::UnknownObject)?;
         let pg_full: BTreeSet<Address> = old_entry
             .shares
@@ -939,6 +938,20 @@ impl Bud3Registry {
     #[must_use]
     pub fn validator_quota(&self, validator: &Address) -> u64 {
         self.validator_quotas.get(validator).copied().unwrap_or(0)
+    }
+
+    /// Look up the live `ObjectKey` indexed under a public content digest.
+    /// Convenience: exposed for upload-session deduplication and RPC lookup.
+    #[must_use]
+    pub fn public_object(&self, public_digest: &[u8; 32]) -> Option<ObjectKey> {
+        self.public_index.get(public_digest).copied()
+    }
+
+    /// Whether `key` has been deleted and recorded in the tombstone map.
+    /// Convenience: exposed for deletion verification and RPC inspection.
+    #[must_use]
+    pub fn is_tombstoned(&self, key: &ObjectKey) -> bool {
+        self.tombstones.contains_key(key)
     }
 
     /// `ReleaseShares`: `holder` voluntarily releases its share(s) of `key`
