@@ -78,10 +78,25 @@ pub struct StateEvent {
     pub reason: String,
 }
 
+fn deserialize_bond_unit<'de, D>(deserializer: D) -> Result<&'static str, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let unit = String::deserialize(deserializer)?;
+    if unit == BOND_UNIT {
+        Ok(BOND_UNIT)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "unsupported bond_unit {unit:?}; expected {BOND_UNIT:?}"
+        )))
+    }
+}
+
 /// What the profile shows. Constructed by [`profile_of`], which reads only the
 /// domain's own record - it takes no argument that represents Budlum's
 /// opinion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound(deserialize = ""))]
 pub struct DomainProfile {
     pub domain: DomainKey,
     pub state: DomainState,
@@ -107,6 +122,7 @@ pub struct DomainProfile {
     /// smallest unit, named so it cannot be read as whole tokens.
     pub bond_atoms: u128,
     /// The unit `bond_atoms` is denominated in.
+    #[serde(deserialize_with = "deserialize_bond_unit")]
     pub bond_unit: &'static str,
     /// How many distinct addresses posted it. One address posting 1,000 and
     /// fifty posting 20 are different facts about who would have to collude.
@@ -245,3 +261,40 @@ pub fn profile_of(record: &DomainRecord) -> DomainProfile {
 /// The unit every bond in this module is denominated in. Named once so no
 /// display surface can present atoms as tokens.
 pub const BOND_UNIT: &str = "atoms";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cross_domain::external::spec::AdapterId;
+
+    #[test]
+    fn blg_143_domain_profile_deserializes_from_non_static_json() {
+        let profile = DomainProfile {
+            domain: DomainKey::from_parts(&AdapterId::from_name("eth"), "mainnet"),
+            state: DomainState::Active,
+            consensus_kind: String::from("gasper-pos"),
+            finality_kind: FinalityKind::Probabilistic,
+            required_depth: 2,
+            trust_model: TrustModel::Trustless,
+            accepted_evidence_versions: vec![1],
+            evidence_forks: 0,
+            bond_atoms: 500,
+            bond_unit: BOND_UNIT,
+            bond_posters: 2,
+            attestations_accepted: 4,
+            attestations_refused: 0,
+            last_accepted_height: Some(12),
+            last_verified_at: Some(8),
+            last_backing: None,
+            history: Vec::new(),
+            crypto_facts: CryptoFacts::new(),
+            quantum_class: None,
+        };
+        let owned_json = serde_json::to_string(&profile).unwrap();
+        let decoded: DomainProfile = serde_json::from_str(&owned_json).unwrap();
+        assert_eq!(decoded, profile);
+
+        let wrong_unit = owned_json.replace("\"atoms\"", "\"tokens\"");
+        assert!(serde_json::from_str::<DomainProfile>(&wrong_unit).is_err());
+    }
+}

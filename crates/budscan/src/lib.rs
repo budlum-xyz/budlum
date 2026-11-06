@@ -1,6 +1,7 @@
 // Unsafe lock: this crate is at 0 unsafe today. The moment an `unsafe` block
 // enters, compilation FAILS (a regression gate). The same policy as the main
 // crate.
+#![forbid(unsafe_code)]
 
 //! Budscan: Budlum's decentralised browser core.
 //!

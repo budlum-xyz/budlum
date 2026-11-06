@@ -208,6 +208,46 @@ pub fn check_resolvable(name: &str) -> Result<(), NameRejection> {
     }
 }
 
+fn is_ascii_scheme(scheme: &str) -> bool {
+    let mut chars = scheme.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_alphabetic()
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
+fn display_labels(labels: &str) -> String {
+    let mut out = String::with_capacity(labels.len() + 8);
+    for (i, label) in labels.split('.').enumerate() {
+        if i > 0 {
+            out.push('.');
+        }
+        if label.chars().any(char::is_control) {
+            // A control character or an escape sequence never reaches the
+            // address bar or a terminal.
+            out.push_str("[?]");
+        } else if label.is_ascii() {
+            out.push_str(label);
+        } else {
+            // Lowercase before punycode encoding so mixed-case Unicode labels
+            // normalize to lowercase IDNA labels without uppercase ASCII inside
+            // `xn--...`.
+            let folded = label.to_lowercase();
+            if let Some(encoded) = crate::punycode::encode_label(&folded) {
+                out.push_str("xn--");
+                out.push_str(&encoded);
+            } else {
+                // Showing the raw bytes of a label that cannot be encoded opens
+                // the very gap between displayed and resolved that we are
+                // trying to close.
+                out.push_str("[?]");
+            }
+        }
+    }
+    out
+}
+
 /// The form shown in the address bar.
 ///
 /// A name that passes the rule is shown as it is. A name that does not **is not
@@ -220,28 +260,24 @@ pub fn display_form(name: &str) -> String {
     if check_name(name).is_ok() {
         return name.to_string();
     }
-    let mut out = String::with_capacity(name.len() + 8);
-    for (i, label) in name.split('.').enumerate() {
-        if i > 0 {
-            out.push('.');
-        }
-        if label.chars().any(char::is_control) {
-            // A control character or an escape sequence never reaches the
-            // address bar or a terminal.
-            out.push_str("[?]");
-        } else if label.is_ascii() {
-            out.push_str(label);
-        } else if let Some(encoded) = crate::punycode::encode_label(label) {
-            out.push_str("xn--");
-            out.push_str(&encoded);
-        } else {
-            // Showing the raw bytes of a label that cannot be encoded opens
-            // the very gap between displayed and resolved that we are trying to
-            // close.
-            out.push_str("[?]");
+    if let Some((scheme, rest)) = name.split_once("://") {
+        if is_ascii_scheme(scheme) {
+            let split_at = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+            let authority = &rest[..split_at];
+            let tail = &rest[split_at..];
+            let safe_tail = if tail.chars().any(char::is_control) {
+                "/[?]"
+            } else {
+                tail
+            };
+            return format!(
+                "{}://{}{safe_tail}",
+                scheme.to_ascii_lowercase(),
+                display_labels(authority)
+            );
         }
     }
-    out
+    display_labels(name)
 }
 
 #[cfg(test)]
@@ -339,5 +375,23 @@ mod tests {
         // in the `punycode` test. The architecture document writes
         // `xn--yaz-hlc.bud` here, and that is wrong.
         assert_eq!(display_form("\u{0430}yaz.bud"), "xn--yaz-5cd.bud");
+    }
+
+    #[test]
+    fn blg_169_display_form_preserves_scheme_and_lowercases_punycode() {
+        assert_eq!(
+            display_form("https://\u{0430}yaz.bud/index.html"),
+            "https://xn--yaz-5cd.bud/index.html"
+        );
+        assert_eq!(
+            display_form("HTTPS://\u{0430}yaz.bud"),
+            "https://xn--yaz-5cd.bud"
+        );
+        // Capital Cyrillic A (`\u{0410}`) folds to lowercase `\u{0430}` before punycode.
+        assert_eq!(display_form("\u{0410}yaz.bud"), "xn--yaz-5cd.bud");
+        // Mixed uppercase ASCII + non-ASCII folds to lowercase inside `xn--...`.
+        let mixed = display_form("A\u{044F}z.bud");
+        assert_eq!(mixed, mixed.to_ascii_lowercase());
+        assert!(mixed.starts_with("xn--"));
     }
 }

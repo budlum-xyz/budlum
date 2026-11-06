@@ -277,12 +277,38 @@ const MAX_MANIFEST_SHARDS: usize = 65_536;
 /// false. Labelling the bytes rather than discarding them leaves the caller able
 /// to show what was refused, so an error page can say "3 KB arrived, the hash
 /// did not match".
+fn validate_https_url(url: &str) -> Result<(), String> {
+    let Some(head) = url.get(..8) else {
+        return Err(format!(
+            "Target::Https requires an https:// URL, got {url:?}"
+        ));
+    };
+    if !head.eq_ignore_ascii_case("https://") {
+        return Err(format!(
+            "Target::Https requires an https:// URL, got {url:?}"
+        ));
+    }
+    let rest = &url[8..];
+    if rest.is_empty() || rest.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(format!("Target::Https URL is malformed: {url:?}"));
+    }
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    if rest[..authority_end].is_empty() {
+        return Err(format!("Target::Https URL has an empty host: {url:?}"));
+    }
+    Ok(())
+}
+
+/// Fetch, check the size, verify the content, and write down the evidence.
 ///
 /// # Errors
 ///
 /// A transport error, a size overrun, or a target identifier that cannot be
 /// parsed.
 pub fn fetch_and_verify<T: Transport>(transport: &T, target: &Target) -> Result<Fetched, String> {
+    if let Target::Https(url) = target {
+        validate_https_url(url)?;
+    }
     let bytes = transport.fetch(target, MAX_CONTENT_BYTES)?;
     if bytes.len() > MAX_CONTENT_BYTES {
         return Err(format!(
@@ -347,20 +373,40 @@ pub fn fetch_and_verify<T: Transport>(transport: &T, target: &Target) -> Result<
                 )),
             }
         }
-        Target::Arweave(root) => match arweave::verify(root, &bytes) {
-            ArweaveVerdict::Verified => Evidence::new().with(Claim::new(
-                "arweave",
-                Strength::Verified,
-                "the data_root derived from the bytes equals the one in the transaction",
-            )),
-            ArweaveVerdict::RootMismatch { expected, produced } => {
-                Evidence::new().with(Claim::new(
-                    "arweave",
-                    Strength::Refused,
-                    &format!("the data_root is {produced}, expected {expected}"),
-                ))
+        Target::Arweave(root) => {
+            if root.len() == 32 {
+                if root.iter().all(|&b| b == 0) {
+                    Evidence::new().with(Claim::new(
+                        "arweave",
+                        Strength::Refused,
+                        "an all-zero 32-byte Arweave transaction id cannot name a real object",
+                    ))
+                } else {
+                    Evidence::new().with(Claim::new(
+                        "arweave",
+                        Strength::RpcClaimOnly,
+                        "arweave-ns carries a 32-byte transaction id rather than a 48-byte \
+                         data_root; without a verified transaction header the content bytes \
+                         cannot be bound to the id",
+                    ))
+                }
+            } else {
+                match arweave::verify(root, &bytes) {
+                    ArweaveVerdict::Verified => Evidence::new().with(Claim::new(
+                        "arweave",
+                        Strength::Verified,
+                        "the data_root derived from the bytes equals the one in the transaction",
+                    )),
+                    ArweaveVerdict::RootMismatch { expected, produced } => {
+                        Evidence::new().with(Claim::new(
+                            "arweave",
+                            Strength::Refused,
+                            &format!("the data_root is {produced}, expected {expected}"),
+                        ))
+                    }
+                }
             }
-        },
+        }
         Target::Https(url) => Evidence::new().with(Claim::new(
             "https",
             Strength::TransportOnly,
@@ -645,5 +691,37 @@ mod tests {
         let mut manifest = BudManifest::single_shard(body);
         manifest.shards[0].size = u32::MAX;
         assert!(!manifest.describes(body));
+    }
+
+    #[test]
+    fn blg_143_https_target_rejects_missing_or_wrong_scheme() {
+        for bad in [
+            "http://example.com/",
+            "javascript:alert(1)",
+            "example.com/",
+            "https://",
+            "https:///path",
+            "https://example.com/a b",
+        ] {
+            let t = Table::with(bad, b"<html></html>");
+            assert!(
+                fetch_and_verify(&t, &Target::Https(bad.to_string())).is_err(),
+                "{bad:?} must be rejected before transport fetch"
+            );
+        }
+    }
+
+    #[test]
+    fn blg_121_arweave_tx_id_32b_is_labelled_rpc_claim_only_not_refused() {
+        let tx_id = vec![0x42u8; 32];
+        let t = Table::with(&hex::encode(&tx_id), b"permaweb via arweave-ns");
+        let got = fetch_and_verify(&t, &Target::Arweave(tx_id)).unwrap();
+        assert_eq!(got.evidence.weakest(), Strength::RpcClaimOnly);
+        assert!(got.is_displayable());
+
+        let zero_tx = vec![0u8; 32];
+        let tz = Table::with(&hex::encode(&zero_tx), b"permaweb");
+        let zero_got = fetch_and_verify(&tz, &Target::Arweave(zero_tx)).unwrap();
+        assert_eq!(zero_got.evidence.weakest(), Strength::Refused);
     }
 }

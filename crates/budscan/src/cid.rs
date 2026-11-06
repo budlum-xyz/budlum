@@ -85,16 +85,24 @@ fn b58_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Decode multibase base32 (RFC 4648, lowercase, unpadded).
-fn b32_decode(s: &str) -> Option<Vec<u8>> {
+/// Decode multibase base32 (RFC 4648, unpadded).
+fn b32_decode_alphabet(s: &str, uppercase: bool) -> Option<Vec<u8>> {
     let mut acc: u32 = 0;
     let mut bits: u32 = 0;
     let mut out = Vec::with_capacity(s.len() * 5 / 8);
     for ch in s.chars() {
-        let v = match ch {
-            'a'..='z' => ch as u32 - 'a' as u32,
-            '2'..='7' => ch as u32 - '2' as u32 + 26,
-            _ => return None,
+        let v = if uppercase {
+            match ch {
+                'A'..='Z' => u32::from(ch) - u32::from('A'),
+                '2'..='7' => u32::from(ch) - u32::from('2') + 26,
+                _ => return None,
+            }
+        } else {
+            match ch {
+                'a'..='z' => u32::from(ch) - u32::from('a'),
+                '2'..='7' => u32::from(ch) - u32::from('2') + 26,
+                _ => return None,
+            }
         };
         acc = (acc << 5) | v;
         bits += 5;
@@ -103,15 +111,24 @@ fn b32_decode(s: &str) -> Option<Vec<u8>> {
             out.push(((acc >> bits) & 0xff) as u8);
         }
     }
+    // RFC 4648 canonical unpadded check: fewer than 5 leftover bits, all zero.
+    if bits >= 5 || (bits > 0 && (acc & ((1u32 << bits) - 1)) != 0) {
+        return None;
+    }
     Some(out)
 }
 
-/// Read an unsigned varint; returns (value, bytes consumed).
+/// Read a minimal unsigned varint; returns (value, bytes consumed).
 fn read_varint(bytes: &[u8]) -> Option<(u64, usize)> {
     let mut value: u64 = 0;
-    let mut shift = 0;
+    let mut shift: u32 = 0;
     for (i, b) in bytes.iter().enumerate() {
         if shift >= 64 {
+            return None;
+        }
+        // Multiformats unsigned-varint forbids overlong trailing zero bytes
+        // and overflow past u64::MAX on the 10th byte (shift == 63).
+        if (i > 0 && *b == 0) || (shift == 63 && (*b & 0x7f) > 1) {
             return None;
         }
         value |= u64::from(b & 0x7f) << shift;
@@ -138,10 +155,14 @@ pub fn parse(s: &str) -> Result<Cid, String> {
     let bytes = if s.len() == 46 && s.starts_with("Qm") {
         b58_decode(s).ok_or_else(|| String::from("base58btc could not be decoded"))?
     } else if let Some(rest) = s.strip_prefix('b') {
-        b32_decode(rest).ok_or_else(|| String::from("base32 could not be decoded"))?
+        b32_decode_alphabet(rest, false)
+            .ok_or_else(|| String::from("base32 could not be decoded"))?
+    } else if let Some(rest) = s.strip_prefix('B') {
+        b32_decode_alphabet(rest, true)
+            .ok_or_else(|| String::from("base32upper could not be decoded"))?
     } else if let Some(rest) = s.strip_prefix('z') {
         b58_decode(rest).ok_or_else(|| String::from("base58btc could not be decoded"))?
-    } else if let Some(rest) = s.strip_prefix('f') {
+    } else if let Some(rest) = s.strip_prefix('f').or_else(|| s.strip_prefix('F')) {
         hex::decode(rest).map_err(|e| format!("base16 could not be decoded: {e}"))?
     } else {
         return Err(format!(
@@ -299,5 +320,27 @@ mod tests {
         let mut bytes = vec![0x01, 0x55, 0x12, 0x20];
         bytes.extend_from_slice(&[0u8; 31]);
         assert!(parse_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn blg_068_cid_rejects_noncanonical_base32_and_overlong_varint() {
+        let valid = "bafkreibm6jg3ux5qumhcn2b3flc3tyu6dmlb4xa7u5bf44yegnrjhc4yeq";
+        assert!(parse(valid).is_ok());
+        // Uppercase multibase `B` for the exact same CIDv1 raw digest.
+        let upper = format!("B{}", valid[1..].to_ascii_uppercase());
+        assert_eq!(parse(&upper).unwrap(), parse(valid).unwrap());
+
+        // Non-zero trailing padding bit ('r' = 17 = 0b10001 instead of 'q' = 16 = 0b10000).
+        let noncanonical = "bafkreibm6jg3ux5qumhcn2b3flc3tyu6dmlb4xa7u5bf44yegnrjhc4yer";
+        assert!(parse(noncanonical).is_err());
+
+        // Extra trailing 5-bit group (`bits == 5`) must not be silently truncated.
+        let extra_char = format!("{valid}a");
+        assert!(parse(&extra_char).is_err());
+
+        // Overlong varint version `0x81 0x00` for version 1 must be rejected.
+        let mut overlong = vec![0x81, 0x00, 0x55, 0x12, 0x20];
+        overlong.extend_from_slice(&[0u8; 32]);
+        assert!(parse_bytes(&overlong).is_err());
     }
 }
