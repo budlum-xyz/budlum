@@ -504,12 +504,12 @@ mod integration_tests {
             agg_sig_bls: Vec::new(),
             bitmap: vec![0b0000_0001],
             set_hash: blockchain
-            seat_table_version: 0,
                 .validator_snapshots
                 .get(&1)
                 .unwrap()
                 .set_hash
                 .clone(),
+            seat_table_version: 0,
         };
 
         let msg = cert.signing_message();
@@ -755,12 +755,12 @@ mod integration_tests {
             agg_sig_bls: Vec::new(),
             bitmap: vec![0b0000_0001],
             set_hash: blockchain
-            seat_table_version: 0,
                 .validator_snapshots
                 .get(&1)
                 .unwrap()
                 .set_hash
                 .clone(),
+            seat_table_version: 0,
         };
 
         let msg = cert.signing_message();
