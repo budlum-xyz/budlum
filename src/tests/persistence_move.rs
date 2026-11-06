@@ -23,7 +23,7 @@ fn persistence_move_is_behaviour_neutral() {
     let root_before = harness.chain.state.calculate_state_root();
     let height_before = harness.chain.chain.len();
 
-    let harness = harness.restart();
+    let mut harness = harness.restart();
     assert_eq!(harness.chain.chain.len(), height_before);
     assert_eq!(
         harness.chain.state.calculate_state_root(),

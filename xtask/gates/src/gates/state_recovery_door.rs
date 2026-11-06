@@ -1,16 +1,16 @@
-//! Gate: the regeneration health layer stays wired, blocked, and provable.
+//! Gate: the state-recovery health layer stays wired, blocked, and provable.
 //!
 //! What this gate promises, per the 2026-09-17 decision record (item 11):
-//! code that is incompatible with the regeneration layer's wiring is BLOCKED
+//! code that is incompatible with the state-recovery layer's wiring is BLOCKED
 //! at CI - the gate turns red and the merge cannot proceed - and the gate
 //! proves it is not vacuous by corrupting its own fixture set in
 //! `self_test` and requiring every corruption to be caught.
 //!
 //! What it checks:
 //!
-//! 1. The health layer exists and is exported (`src/domain/mod.rs` declares
+//! 1. The health layer exists and is exported (`src/chain/mod.rs` declares
 //!    it; the door cannot be deleted silently).
-//! 2. The ledger's old "unwired" doors are gone: `regeneration_stage.rs` no
+//! 2. The ledger's old "unwired" doors are gone: `state_recovery/stage.rs` no
 //!    longer marks `cheapest_target` or `reversion_beats_repair` as unwired,
 //!    and the forgery door (`revert_after_forgery` plus its two refusal
 //!    variants) exists.
@@ -359,7 +359,7 @@ pub fn self_test() -> Result<String, String> {
         return Err(problems.join("\n  "));
     }
     Ok(String::from(
-        "regen-health-door gate canaries all caught: deletion, re-unwiring, forgery-door \
+        "state-recovery-door gate canaries all caught: deletion, re-unwiring, forgery-door \
          removal, order scramble, test dissolution",
     ))
 }

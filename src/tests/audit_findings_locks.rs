@@ -93,7 +93,7 @@ mod tests {
     /// a height it had already ruled out.
     #[test]
     fn consensus_writes_flush_before_returning() {
-        let db_rs = include_str!("../storage/db.rs");
+        let db_rs = include_str!("../persistence/db.rs");
 
         for func in [
             "pub fn save_checkpoint",
@@ -102,7 +102,7 @@ mod tests {
         ] {
             let start = db_rs
                 .find(func)
-                .unwrap_or_else(|| panic!("{func} not found in storage/db.rs"));
+                .unwrap_or_else(|| panic!("{func} not found in persistence/db.rs"));
             // Look at the function body only, not the whole file.
             let body = &db_rs[start..];
             let end = body.find("\n    pub fn ").unwrap_or(body.len());
