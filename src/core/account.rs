@@ -127,7 +127,7 @@ pub struct Validator {
     /// Multi-role architecture: tracks which roles this validator has bonded for.
     /// A single validator can simultaneously serve as:
     /// - VALIDATOR (RoleId 1): consensus block production + finality
-    /// - STORAGE_OPERATOR (RoleId 5): B.U.D. storage verification
+    /// Storage custody is part of this role (the retired RoleId 5 stays reserved).
     /// - AI_OPERATOR (RoleId 8): AI inference layer AI compute provider
     ///
     /// Cross-role slashing: slashing any role jails ALL roles.
@@ -160,7 +160,7 @@ impl Validator {
         }
     }
 
-    /// Add a role to this validator (e.g. STORAGE_OPERATOR, AI_OPERATOR).
+    /// Add a role to this validator (e.g. AI_OPERATOR).
     /// Returns true if the role was newly added, false if already present.
     pub fn add_role(&mut self, role: RoleId) -> bool {
         self.roles.insert(role)
@@ -183,9 +183,6 @@ impl Validator {
     }
 
     /// Check if this validator is a B.U.D. storage operator.
-    pub fn is_storage_operator(&self) -> bool {
-        self.has_role(&roles::STORAGE_OPERATOR)
-    }
 
     /// Check if this validator is an AI inference layer compute provider.
     pub fn is_ai_operator(&self) -> bool {
@@ -1267,24 +1264,10 @@ impl AccountState {
         self.bond_independent_role(address, crate::registry::role::roles::PROVER, amount)
     }
 
-    /// Bond `amount` into the STORAGE_OPERATOR role (permissionless).
-    /// Used for B.U.D. operator reward eligibility.
-    pub fn bond_storage_operator(
-        &mut self,
-        address: &Address,
-        amount: u64,
-    ) -> Result<u64, crate::registry::RegistryError> {
-        self.bond_independent_role(
-            address,
-            crate::registry::role::roles::STORAGE_OPERATOR,
-            amount,
-        )
-    }
-
     /// Begin unbonding an independently-debited role bond (`RELAYER`,
-    /// `PROVER`, `STORAGE_OPERATOR`).
+    /// `PROVER`).
     ///
-    /// `bond_relayer` / `bond_prover` / `bond_storage_operator` each debit the
+    /// `bond_relayer` / `bond_prover` each debit the
     /// Account balance and register the bond, and `bond_relayer` documents that
     /// The bond "remains locked but slashable until the relayer begins
     /// Unbonding". There was no path that begins unbonding: no `ChainCommand`,
@@ -1363,11 +1346,9 @@ impl AccountState {
         match role {
             roles::RELAYER
             | roles::PROVER
-            | roles::STORAGE_OPERATOR
             | roles::VERIFIER
             | roles::AI_VERIFIER
-            | roles::ATTESTER
-            | roles::CONTENT_VALIDATOR => Ok(()),
+            | roles::ATTESTER => Ok(()),
             roles::VALIDATOR => Err(
                 "validator stake unwinds through Unstake and the unbonding queue, not this path"
                     .to_string(),

@@ -549,20 +549,6 @@ impl PermissionlessRegistry {
         )
     }
 
-    pub fn register_storage_operator(
-        &mut self,
-        account: Address,
-        stake: u64,
-        current_epoch: u64,
-    ) -> Result<(), RegistryError> {
-        self.register(
-            account,
-            crate::registry::role::roles::STORAGE_OPERATOR,
-            stake,
-            current_epoch,
-        )
-    }
-
     pub fn register_ai_verifier(
         &mut self,
         account: Address,
@@ -602,21 +588,6 @@ impl PermissionlessRegistry {
         self.register(
             account,
             crate::registry::role::roles::AI_OPERATOR,
-            stake,
-            current_epoch,
-        )
-    }
-
-    /// SocialFi content validator (RoleId 9)
-    pub fn register_content_validator(
-        &mut self,
-        account: Address,
-        stake: u64,
-        current_epoch: u64,
-    ) -> Result<(), RegistryError> {
-        self.register(
-            account,
-            crate::registry::role::roles::CONTENT_VALIDATOR,
             stake,
             current_epoch,
         )
@@ -1038,11 +1009,6 @@ impl PermissionlessRegistry {
 
     pub fn is_active_ai_operator(&self, account: &Address) -> bool {
         self.get(account, crate::registry::role::roles::AI_OPERATOR)
-            .is_some_and(Registration::is_slashable)
-    }
-
-    pub fn is_active_content_validator(&self, account: &Address) -> bool {
-        self.get(account, crate::registry::role::roles::CONTENT_VALIDATOR)
             .is_some_and(Registration::is_slashable)
     }
 
@@ -2501,20 +2467,17 @@ mod tests {
     }
 
     #[test]
-    fn d4_attester_ai_content_validator_roles() {
+    fn d4_attester_and_ai_operator_roles() {
         let mut reg = PermissionlessRegistry::new();
         reg.register_attester(addr(20), MIN_REGISTRATION_STAKE, 0)
             .unwrap();
         reg.register_ai_operator(addr(21), MIN_REGISTRATION_STAKE, 0)
             .unwrap();
-        reg.register_content_validator(addr(22), MIN_REGISTRATION_STAKE, 0)
-            .unwrap();
 
         assert!(reg.is_active_attester(&addr(20)));
         assert!(reg.is_active_ai_operator(&addr(21)));
-        assert!(reg.is_active_content_validator(&addr(22)));
 
-        // Same account can hold all three new roles
+        // Same account can hold both new roles
         reg.register_attester(addr(30), 5_000, 0).unwrap();
         // Bond on bond is refused - a second
         // registration of the same role must not stack stake or reset
@@ -2524,19 +2487,16 @@ mod tests {
             "bonding an attester role twice must refuse"
         );
         reg.register_ai_operator(addr(30), 3_000, 0).unwrap();
-        reg.register_content_validator(addr(30), 2_000, 0).unwrap();
         assert!(reg.is_active_attester(&addr(30)));
         assert!(reg.is_active_ai_operator(&addr(30)));
-        assert!(reg.is_active_content_validator(&addr(30)));
     }
 
     #[test]
-    fn d4_cross_role_slash_jails_attester_and_content_validator() {
+    fn d4_cross_role_slash_jails_attester() {
         let mut reg = PermissionlessRegistry::new();
         reg.register_validator(addr(77), 10_000, 0).unwrap();
         reg.register_attester(addr(77), MIN_REGISTRATION_STAKE, 0)
             .unwrap();
-        reg.register_content_validator(addr(77), 2_000, 0).unwrap();
 
         reg.slash(
             addr(77),
@@ -2547,7 +2507,6 @@ mod tests {
         .unwrap();
 
         assert!(!reg.is_active_attester(&addr(77)));
-        assert!(!reg.is_active_content_validator(&addr(77)));
     }
 
     // ---: permissionless relayer bond + malicious-relayer slash ---

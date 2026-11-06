@@ -588,30 +588,21 @@ fn a_relayer_bond_can_be_unbonded_and_withdrawn() {
     assert!(state.registry.get(&relayer, roles::RELAYER).is_none());
 }
 
-/// The same exit must exist for `PROVER` and `STORAGE_OPERATOR`, which are debited
-/// By the same one-way pattern.
+/// The same exit must exist for `PROVER`, which is debited by the same
+/// one-way pattern.
 #[test]
-fn prover_and_storage_operator_bonds_can_also_be_withdrawn() {
-    for (role, bond_amount) in [
-        (roles::PROVER, 1_500u64),
-        (roles::STORAGE_OPERATOR, 3_000u64),
-    ] {
-        let account = addr(0x62);
-        let mut state = funded_state(account, 10_000);
-        if role == roles::PROVER {
-            state.bond_prover(&account, bond_amount).unwrap();
-        } else {
-            state.bond_storage_operator(&account, bond_amount).unwrap();
-        }
-        assert_eq!(state.get_balance(&account), 10_000 - bond_amount);
+fn prover_bonds_can_also_be_withdrawn() {
+    let account = addr(0x62);
+    let mut state = funded_state(account, 10_000);
+    state.bond_prover(&account, 1_500).unwrap();
+    assert_eq!(state.get_balance(&account), 10_000 - 1_500);
 
-        let release = state.begin_role_bond_unbonding(&account, role).unwrap();
-        state.epoch_index = release;
-        let withdrawn = state.withdraw_role_bond(&account, role).unwrap();
+    let release = state.begin_role_bond_unbonding(&account, roles::PROVER).unwrap();
+    state.epoch_index = release;
+    let withdrawn = state.withdraw_role_bond(&account, roles::PROVER).unwrap();
 
-        assert_eq!(withdrawn, bond_amount, "role {role}");
-        assert_eq!(state.get_balance(&account), 10_000, "role {role}");
-    }
+    assert_eq!(withdrawn, 1_500);
+    assert_eq!(state.get_balance(&account), 10_000);
 }
 
 /// Withdrawal before the release epoch must fail, and must not credit anything.
@@ -1062,18 +1053,6 @@ fn onboarding_rejects_below_floor_as_active() {
         !bc.state.registry.is_active(&staker, roles::VALIDATOR),
         "below-floor stake must not yield Active VALIDATOR"
     );
-}
-
-#[test]
-fn storage_operator_active_members() {
-    let mut reg = PermissionlessRegistry::new();
-    let op = addr(0x55);
-    let floor = reg.params().min_stake;
-    reg.register_storage_operator(op, floor, 0).unwrap();
-    let active = reg.active_members(roles::STORAGE_OPERATOR);
-    assert_eq!(active.len(), 1);
-    assert_eq!(active[0].account, op);
-    assert!(reg.is_active(&op, roles::STORAGE_OPERATOR));
 }
 
 #[test]

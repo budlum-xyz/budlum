@@ -512,22 +512,6 @@ impl SlashingReport {
     }
 
     /// Content validator invalid validation - SocialFi content forgery.
-    pub fn consensus_invalid_content_validation(
-        offender: Address,
-        reason: String,
-        reporter: Option<Address>,
-    ) -> Self {
-        Self::new_verified(
-            offender,
-            roles::CONTENT_VALIDATOR,
-            SlashingProof::Other {
-                tag: "content_validator_malicious".into(),
-                data: reason.into_bytes(),
-            },
-            reporter,
-        )
-    }
-
     /// The condition this report attests to.
     pub fn condition(&self) -> SlashingCondition {
         self.proof.condition()

@@ -1010,17 +1010,6 @@ mod rpc_tests {
         assert_eq!(domains["domains"], serde_json::json!([]));
     }
 
-    /// the five storage writes are `StorageTx` transactions applied in
-    /// block (covered in `src/domain/storage_tx.rs`). Their operator RPCs
-    /// refuse every call, name the transaction door, and change nothing:
-    /// the manifest stays unregistered and no balance moves.
-    #[tokio::test]
-    #[tokio::test]
-    /// Empty registry → count 0, empty operators list.
-    #[tokio::test]
-    /// Registered STORAGE_OPERATOR appears in RPC listing.
-    #[tokio::test]
-    #[tokio::test]
     /// The operator-only admin surface refuses on a public listener: the
     /// mode gate runs before any peer-state work and answers with the
     /// static -32004 string shared by every admin endpoint, so clients do
@@ -1111,11 +1100,6 @@ mod rpc_tests {
         assert_eq!(empty.code(), -32602);
     }
 
-    /// Zero bytes are content too: the sealed RPC path emits a feed for them.
-    #[tokio::test]
-    /// Without a seed the gated preview of empty content is still refused as a
-    /// bad request, as it is for any other body.
-    #[tokio::test]
     /// The external evidence intake carries an unsigned submitter, so the
     /// public listener must refuse it before the payload is even parsed.
     #[tokio::test]
@@ -1141,10 +1125,4 @@ mod rpc_tests {
         assert_eq!(refused.code(), -32004);
     }
 
-    /// Storage calls that change node-local state outside a block are
-    /// operator-only: the public listener refuses them with -32004.
-    #[tokio::test]
-    /// The re-encode check refuses a body over the shared 1 MiB cap before
-    /// it decodes or encodes anything.
-    #[tokio::test]
 }

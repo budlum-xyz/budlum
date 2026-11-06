@@ -1,13 +1,15 @@
 //! Verifier registry merge scenario tests.
 //!
 //! These tests prove the *single* stake-based [`PermissionlessRegistry`] serves
-//! All four v1 application domains from one primitive, as required by
+//! All v1 application domains from one primitive, as required by
 //! Decision (2026-07-22):
 //!
 //! 1. DeEd master verifier → `MASTER_VERIFIER` (RoleId 2, alias of `VERIFIER`)
-//! 2. SocialFi content validator → `CONTENT_VALIDATOR` (RoleId 9)
-//! 3. Permissionless relayer → `RELAYER` (RoleId 3)
-//! 4. Supply-chain attester → `ATTESTER` (RoleId 7)
+//! 2. Permissionless relayer → `RELAYER` (RoleId 3)
+//! 3. Supply-chain attester → `ATTESTER` (RoleId 7)
+//!
+//! The SocialFi content-validator role is retired (its RoleId 9 stays
+//! reserved), so the legs that registered it are gone.
 //!
 //! And that `AI_OPERATOR` (RoleId 8) is preserved (never removed).
 //!
@@ -32,14 +34,12 @@ fn addr(b: u8) -> Address {
 /// One registry instance simultaneously serves all four v1 domains plus the
 /// Preserved `AI_OPERATOR` role. This is the core "merge" assertion.
 #[test]
-fn d4_single_registry_serves_all_four_domains() {
+fn d4_single_registry_serves_all_domains() {
     let mut reg = PermissionlessRegistry::new();
 
-    // Four distinct v1 domains registered on the SAME registry primitive.
+    // The v1 domains registered on the SAME registry primitive.
     reg.register_master_verifier(addr(1), MIN_REGISTRATION_STAKE, 0)
         .expect("master verifier (DeEd) registration");
-    reg.register_content_validator(addr(2), MIN_REGISTRATION_STAKE, 0)
-        .expect("content validator (SocialFi) registration");
     reg.register_relayer(addr(3), MIN_REGISTRATION_STAKE, 0)
         .expect("relayer registration");
     reg.register_attester(addr(4), MIN_REGISTRATION_STAKE, 0)
@@ -50,32 +50,29 @@ fn d4_single_registry_serves_all_four_domains() {
         .expect("ai_inference operator registration");
 
     assert!(reg.is_active_master_verifier(&addr(1)));
-    assert!(reg.is_active_content_validator(&addr(2)));
     assert!(reg.is_active_relayer(&addr(3)));
     assert!(reg.is_active_attester(&addr(4)));
     assert!(reg.is_active_ai_operator(&addr(5)));
 
     // Exactly one registry holds every entry (no per-domain split).
-    assert_eq!(reg.len(), 5);
+    assert_eq!(reg.len(), 4);
 }
 
-/// The same account can hold all four domain roles simultaneously under the
-/// Merged model, with independent stakes but unified slashing.
+/// The same account can hold all domain roles simultaneously under the
+/// merged model, with independent stakes but unified slashing.
 #[test]
-fn d4_same_account_holds_all_four_domains() {
+fn d4_same_account_holds_all_domains() {
     let mut reg = PermissionlessRegistry::new();
     let a = addr(42);
 
     reg.register_master_verifier(a, 10_000, 0).unwrap();
-    reg.register_content_validator(a, 2_000, 0).unwrap();
     reg.register_relayer(a, MIN_REGISTRATION_STAKE, 0).unwrap();
     reg.register_attester(a, 5_000, 0).unwrap();
 
     assert!(reg.is_active_master_verifier(&a));
-    assert!(reg.is_active_content_validator(&a));
     assert!(reg.is_active_relayer(&a));
     assert!(reg.is_active_attester(&a));
-    assert_eq!(reg.len(), 4);
+    assert_eq!(reg.len(), 3);
 }
 
 /// `MASTER_VERIFIER` (RoleId 2) is a true alias of `VERIFIER` - DeEd master
@@ -132,16 +129,15 @@ fn d4_attester_gate_enforces_active_registration() {
 }
 
 /// Unified slashing: slashing an account on ANY role jails every other role it
-/// Holds across all four domains - proving the merged stake model is shared.
+/// holds across all domains - proving the merged stake model is shared.
 #[test]
-fn d4_cross_role_slash_jails_all_four_domains() {
+fn d4_cross_role_slash_jails_all_domains() {
     let mut reg = PermissionlessRegistry::new();
     let a = addr(77);
 
     reg.register_validator(a, 10_000, 0).unwrap();
     reg.register_master_verifier(a, MIN_REGISTRATION_STAKE, 0)
         .unwrap();
-    reg.register_content_validator(a, 2_000, 0).unwrap();
     reg.register_relayer(a, MIN_REGISTRATION_STAKE, 0).unwrap();
     reg.register_attester(a, 5_000, 0).unwrap();
 
@@ -157,7 +153,6 @@ fn d4_cross_role_slash_jails_all_four_domains() {
     // Every domain role the account held is now jailed.
     assert!(!reg.is_active(&a, roles::VALIDATOR));
     assert!(!reg.is_active_master_verifier(&a));
-    assert!(!reg.is_active_content_validator(&a));
     assert!(!reg.is_active_relayer(&a));
     assert!(!reg.is_active_attester(&a));
 
@@ -201,7 +196,6 @@ fn d4_malicious_relayer_slash_jails_other_domains() {
 
     reg.register_relayer(a, MIN_REGISTRATION_STAKE, 0).unwrap();
     reg.register_attester(a, 5_000, 0).unwrap();
-    reg.register_content_validator(a, 2_000, 0).unwrap();
 
     reg.slash(
         a,
@@ -213,5 +207,4 @@ fn d4_malicious_relayer_slash_jails_other_domains() {
 
     assert!(!reg.is_active_relayer(&a));
     assert!(!reg.is_active_attester(&a));
-    assert!(!reg.is_active_content_validator(&a));
 }

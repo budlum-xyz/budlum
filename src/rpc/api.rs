@@ -745,9 +745,6 @@ pub trait BudlumApi {
     /// and useless to an operator asking a fixed question like "what is within
     /// two shards of trouble?". Both lists come back separately: an object
     /// below `k` cannot be repaired at all, and must not read as one that can.
-    /// Query active storage operators (STORAGE_OPERATOR RoleId=5).
-    /// Previously documented as ghost RPC, now implemented.
-    /// Returns active `PermissionlessRegistry` members filtered by storage operator role.
     // --- B.U.D. Name Service (BNS) ---
 
     /// Resolve a human-readable name to an address.
