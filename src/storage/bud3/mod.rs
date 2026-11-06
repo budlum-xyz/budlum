@@ -13,6 +13,7 @@
 //! | [`varint`] | Bounded LEB128 |
 //! | [`bof1`] | The BOF-1 object: canonical binary header and payload |
 //! | [`compression_context`] | The shared compression context: manifest, corpus, renewal, savings fee |
+//! | [`private_dedup`] | Sealed cross-owner dedup: threshold OPRF, rate limit, proof, blinded field, aggregate |
 //! | [`segment`] | Segmentation, segment digests and the object commitment |
 //! | [`placement`] | Stake-weighted rendezvous placement, diversity caps, the placement table |
 //! | [`registry`] | Chain state: objects, dedup, references, deletion, shares, audits |
@@ -48,6 +49,7 @@ pub mod meter;
 pub mod object;
 pub mod pipeline;
 pub mod placement;
+pub mod private_dedup;
 pub mod registry;
 pub mod segment;
 pub mod stages;

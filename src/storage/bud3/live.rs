@@ -408,7 +408,7 @@ impl LiveStream {
 
     /// WIRING: RPC reads the budget from here so one number serves both doors.
     ///
-    /// The delay budget a viewer at `segment_index` may see, in segments.
+    /// The delay budget a viewer may see, in segments.
     ///
     /// The target is at most two segment durations (Section 6.16 item 4); the
     /// function returns how many segments behind the source a viewer may be
