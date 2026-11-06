@@ -1,0 +1,16 @@
+# bud3_object_is_universal baseline (shrinking).
+# Files that still reference legacy B.U.D. 2.0 class-specific content
+# registration transaction variants (RegisterManifest, RegisterThreeRecipe,
+# bud_storageRegisterManifest). WP-07 retires these; WP-19 confirms every
+# content class enters through bud3::Object::RegisterObject.
+#
+# Remove lines as each file is migrated; do NOT add.
+src/core/transaction.rs
+src/deed/mod.rs
+src/domain/storage_tx.rs
+src/network/proto_conversions.rs
+src/rpc/api.rs
+src/rpc/method_class.rs
+src/rpc/server.rs
+src/rpc/tests.rs
+src/tests/storage_tx_door.rs

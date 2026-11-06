@@ -98,15 +98,46 @@ is done", "what is in flight", and "what is blocked".
 
 ## Gates wired in this delivery
 
-* `no-legacy-storage` (İP-07, Section 5.4/5.5): identifier and path ban with a
-  shrinking ratchet and canary.
-* `no-float-in-consensus-paths` (İP-42, Section 16.3): refuses `f32`/`f64`
-  tokens under consensus-critical roots with a shrinking baseline.
-* Gate renames queued (delivered when İP-06 moves the files):
-  * `regeneration` -> `canonical_programs_reproduce`
-  * `zkvm_immune_regeneration` -> `zkvm_refuses_untrusted_proofs`
-  * `regen_health_door` -> `state_recovery_door`
-  * `budscan_parity`/`budscan_patchset` -> `explorer_parity`/`explorer_patchset` (İP-40)
+Section 5.4 and Section 16.3 of the directive name every CI gate. Status:
+
+* **Full (self_test exercised):**
+  * `no-legacy-storage` (İP-07): identifier + path bans, shrinking baseline.
+  * `no-float-in-consensus-paths` (İP-42): `f32`/`f64` word-boundary scan over
+    consensus roots, shrinking baseline.
+  * `bud3-object-is-universal` (İP-19): refuses legacy B.U.D. 2.0
+    `RegisterManifest`/`RegisterThreeRecipe`/`bud_storageRegisterManifest`
+    tx variants; shrinking baseline tracks WP-07/WP-19 cleanup.
+  * `readme-has-no-placeholders` (İP-43): scans README.md / README.tr.md for
+    TODO/TBD/FIXME/XXX/LATER and Turkish equivalents.
+* **Alias (wired to existing gate body):**
+  * `canonical-programs-reproduce` → `regeneration`
+  * `zkvm-refuses-untrusted-proofs` → `zkvm-immune-regeneration`
+  * `state-recovery-door` → `regen-health-door`
+  * `explorer-parity` → `budscan-parity`
+  * `explorer-patchset` → `budscan-patchset`
+  * `bud3-qr-is-presentation` → `qr-is-derivative-only` (İP-19 rewrite pending)
+  * `bud3-fee-uses-physical-bytes` → `storage-is-priced-by-size` (İP-25 rewrite pending)
+  * `bud3-placement` → `shard-placement-is-sticky-and-staked` (İP-20 rewrite pending)
+  * `bud3-repair-fires` → `repair-fires-on-loss` (İP-20 rewrite pending)
+  * `bud3-custody-rewards` → `storage-penalties-are-enforced` (İP-25 rewrite pending)
+* **Skeleton (self_test no-op until the owning İP lands the real check):**
+  * `bud3-custody-proofs` (İP-20, replaces `storage-proof-boundary`)
+  * `bud3-paid-view` (İP-21, replaces `paid-content-cannot-be-read-for-free`)
+  * `ee-workers-build-with-unwind` (İP-26)
+  * `workflows-cover-every-workspace` (İP-42)
+  * `readme-definition-block-is-verbatim` (İP-43)
+  * `readme-claims-are-wired` (İP-43)
+
+Deferred to owning İP (T-Genişletme / İP-56 privacy gates land with BudZero work):
+`proof-class-matches-witness`, `no-64bit-commitments`, `no-witness-in-public-inputs`,
+`commitments-carry-hash-suite`, `privacy-claims-cite-tests`, `no-unconstrained-air-columns`,
+`key-release-needs-consent-proof`, `consent-records-have-no-open-identities`.
+
+The §5.4 gates slated for deletion (`three-is-recipe-only`, `zero-storage-frozen`,
+`generated-content`, `storage-provider-gate`, `coding-audit-samples-the-relationship`)
+are removed from CI when WP-07 deletes the underlying legacy files; their
+replacements (`bud3-object-is-universal`, `bud3-custody-proofs`, `bud3-paid-view`)
+are wired in this delivery.
 
 ## Directories introduced in this delivery
 

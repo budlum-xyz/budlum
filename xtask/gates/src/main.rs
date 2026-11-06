@@ -53,7 +53,10 @@ mod gates {
     pub mod bns_gate;
     pub mod bns_names_are_safe_in_an_address_bar;
     pub mod bridge_dual_tree;
+    pub mod bud3_custody_proofs;
     pub mod bud3_forbidden_phrases;
+    pub mod bud3_object_is_universal;
+    pub mod bud3_paid_view;
     pub mod bud_e2e;
     pub mod budscan_parity;
     pub mod budscan_patchset;
@@ -76,6 +79,7 @@ mod gates {
     pub mod docker_toolchain;
     pub mod domain_tags;
     pub mod economy_invariants;
+    pub mod ee_workers_build_with_unwind;
     pub mod every_fuzz_target_is_run;
     pub mod every_opcode_forgery;
     pub mod evidence_provenance;
@@ -136,6 +140,9 @@ mod gates {
     pub mod proof_deps_are_exactly_pinned;
     pub mod qr_is_derivative_only;
     pub mod quantum_account;
+    pub mod readme_claims_are_wired;
+    pub mod readme_definition_block_is_verbatim;
+    pub mod readme_has_no_placeholders;
     pub mod readme_no_deny;
     pub mod reduction_claims;
     pub mod refusals_no_mutate;
@@ -178,6 +185,7 @@ mod gates {
     pub mod wallet_core_gate;
     pub mod wallet_node_address_agree;
     pub mod wire_fields_are_signed;
+    pub mod workflows_cover_every_workspace;
     pub mod workflows_produce_jobs;
     pub mod zero_address_sender_is_verified;
     pub mod zero_storage_frozen;
@@ -467,6 +475,15 @@ const GATES: &[Gate] = &[
         self_test: gates::workflows_produce_jobs::self_test,
         run_log: None,
     },
+    // §16.3 / İP-42: every workspace member is built in CI.
+    Gate {
+        name: "workflows-cover-every-workspace",
+        replaces: None,
+        run: gates::workflows_cover_every_workspace::run,
+        run_args: None,
+        self_test: gates::workflows_cover_every_workspace::self_test,
+        run_log: None,
+    },
     Gate {
         name: "hash-inputs-length-prefixed",
         replaces: Some("check-hash-inputs-are-length-prefixed.sh"),
@@ -489,6 +506,15 @@ const GATES: &[Gate] = &[
         run: gates::the_image_builds_what_the_manifest_declares::run,
         run_args: None,
         self_test: gates::the_image_builds_what_the_manifest_declares::self_test,
+        run_log: None,
+    },
+    // §16.3 / İP-26: EE-worker binaries build with panic = "unwind".
+    Gate {
+        name: "ee-workers-build-with-unwind",
+        replaces: None,
+        run: gates::ee_workers_build_with_unwind::run,
+        run_args: None,
+        self_test: gates::ee_workers_build_with_unwind::self_test,
         run_log: None,
     },
     Gate {
@@ -609,6 +635,33 @@ const GATES: &[Gate] = &[
         run: gates::bud3_forbidden_phrases::run,
         run_args: None,
         self_test: gates::bud3_forbidden_phrases::self_test,
+        run_log: None,
+    },
+    // §16.3 / İP-19: one object model for every content class.
+    Gate {
+        name: "bud3-object-is-universal",
+        replaces: None,
+        run: gates::bud3_object_is_universal::run,
+        run_args: None,
+        self_test: gates::bud3_object_is_universal::self_test,
+        run_log: None,
+    },
+    // §16.3 / İP-20: every custody proof anchors in a sub-block.
+    Gate {
+        name: "bud3-custody-proofs",
+        replaces: Some("storage-proof-boundary"),
+        run: gates::bud3_custody_proofs::run,
+        run_args: None,
+        self_test: gates::bud3_custody_proofs::self_test,
+        run_log: None,
+    },
+    // §16.3 / İP-21: paid view; replaces legacy paid_content gate.
+    Gate {
+        name: "bud3-paid-view",
+        replaces: Some("paid-content-cannot-be-read-for-free"),
+        run: gates::bud3_paid_view::run,
+        run_args: None,
+        self_test: gates::bud3_paid_view::self_test,
         run_log: None,
     },
     Gate {
@@ -1280,6 +1333,33 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::readme_no_deny::self_test,
+    },
+    // §16.3 / İP-43: README contains no placeholders.
+    Gate {
+        name: "readme-has-no-placeholders",
+        replaces: None,
+        run: gates::readme_has_no_placeholders::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::readme_has_no_placeholders::self_test,
+    },
+    // §16.3 / İP-43: README definition blocks byte-identical to in-code constants.
+    Gate {
+        name: "readme-definition-block-is-verbatim",
+        replaces: None,
+        run: gates::readme_definition_block_is_verbatim::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::readme_definition_block_is_verbatim::self_test,
+    },
+    // §16.3 / İP-43: every "works" claim has a production call path and test.
+    Gate {
+        name: "readme-claims-are-wired",
+        replaces: None,
+        run: gates::readme_claims_are_wired::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::readme_claims_are_wired::self_test,
     },
     Gate {
         name: "guards-are-reachable",
