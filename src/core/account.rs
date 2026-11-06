@@ -1865,22 +1865,13 @@ impl AccountState {
                 tx.fee, required_fee, self.base_fee, tx.amount
             ));
         }
-        // Overflow guard (security): reject amount+fee > u64::MAX explicitly
-        // for transaction types that actually debit the signed amount. An
-        // undelegation/withdrawal moves already-locked value and only debits
-        // its fee, so its amount must not be treated as liquid cost.
-        let debits_amount = !matches!(
-            &tx.tx_type,
-            TransactionType::Undelegate { .. }
-                | TransactionType::WithdrawDelegation { .. }
-                | TransactionType::SetValidatorCommission { .. }
-        );
-        let total_cost = if debits_amount {
-            tx.checked_total_cost()
-                .ok_or_else(|| "Transaction amount + fee overflows u64".to_string())?
-        } else {
-            tx.fee
-        };
+        // One cost classification for admission, pending-balance projection
+        // and execution. Fee-only doors do not debit their signed amount a
+        // second time; amount-bearing doors reject overflow rather than
+        // charging a saturated estimate.
+        let total_cost = tx
+            .checked_liquid_cost()
+            .ok_or_else(|| "Transaction amount + fee overflows u64".to_string())?;
         if spendable_balance < total_cost {
             return Err(format!(
                 "Insufficient balance: {} < {} (amount: {}, fee: {})",

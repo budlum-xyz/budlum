@@ -212,21 +212,12 @@ impl Executor {
             _ => {}
         }
 
-        let total_cost = match tx.tx_type {
-            TransactionType::Unstake
-            | TransactionType::Vote
-            | TransactionType::Undelegate { .. }
-            | TransactionType::WithdrawDelegation { .. }
-            | TransactionType::SetValidatorCommission { .. }
-            | TransactionType::Redelegate { .. }
-            | TransactionType::ClaimRewards { .. } => tx.fee,
-            _ => tx.checked_total_cost().ok_or_else(|| {
-                BudlumError::validation(
-                    "transaction_cost_overflow",
-                    "Transaction amount plus fee overflows u64",
-                )
-            })?,
-        };
+        let total_cost = tx.checked_liquid_cost().ok_or_else(|| {
+            BudlumError::validation(
+                "transaction_cost_overflow",
+                "Transaction amount plus fee overflows u64",
+            )
+        })?;
 
         {
             // Combine #66's overflow-checked debit with #67's spendable-balance

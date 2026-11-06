@@ -2363,10 +2363,31 @@ impl Transaction {
         self.amount.checked_add(self.fee)
     }
 
+    /// The liquid debit this transaction actually charges.
+    ///
+    /// Fee-only doors move bonded, delegated or reward value inside the state
+    /// machine; their signed `amount` is not a second debit from the sender's
+    /// liquid balance. Admission, pending-balance projection and execution
+    /// must all use this one classification. `None` is a refusal, never a
+    /// saturated cost.
+    #[must_use]
+    pub fn checked_liquid_cost(&self) -> Option<u64> {
+        match self.tx_type {
+            TransactionType::Unstake
+            | TransactionType::Vote
+            | TransactionType::Undelegate { .. }
+            | TransactionType::WithdrawDelegation { .. }
+            | TransactionType::SetValidatorCommission { .. }
+            | TransactionType::Redelegate { .. }
+            | TransactionType::ClaimRewards { .. } => Some(self.fee),
+            _ => self.checked_total_cost(),
+        }
+    }
+
     /// Return a compatibility estimate of the transaction debit.
     ///
     /// Do not use this helper for admission or state transitions. Those paths
-    /// must use `checked_total_cost` and reject overflow.
+    /// must use `checked_liquid_cost` and reject overflow.
     pub fn total_cost(&self) -> u64 {
         self.checked_total_cost().unwrap_or(u64::MAX)
     }
@@ -2714,14 +2735,8 @@ mod tests {
             tx.amount = u64::MAX;
             assert_eq!(tx.checked_liquid_cost(), Some(5));
         }
-        let mut transfer = Transaction::new_with_fee(
-            test_addr_from_byte(1u8),
-            validator,
-            u64::MAX,
-            1,
-            1,
-            vec![],
-        );
+        let mut transfer =
+            Transaction::new_with_fee(test_addr_from_byte(1u8), validator, u64::MAX, 1, 1, vec![]);
         transfer.tx_type = TransactionType::Transfer;
         assert_eq!(transfer.checked_liquid_cost(), None);
     }
