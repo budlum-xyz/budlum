@@ -5,6 +5,8 @@ use crate::core::block::Block;
 use crate::core::transaction::Transaction;
 use crate::domain::storage_deal::{RetrievalChallengeRequest, RetrievalResponse, StorageDeal};
 use crate::network::node::NodeClient;
+use crate::rpc::compat::aptos::{self, AptosGateway};
+use crate::rpc::compat::solana;
 use crate::storage::content_id::ContentId;
 use crate::storage::{emit_hook, NopThreeHook, ThreeEventHook, ThreeHookEvent, ThreeHookKind};
 use bincode;
@@ -22,7 +24,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
-use tower::{Layer, Service, ServiceBuilder};
+use tower::{Layer, Service};
 use tracing::info;
 
 /// Hard ceiling for the per-IP sliding-window map. Without a bound, an attacker
@@ -353,6 +355,185 @@ pub struct RpcServer {
     /// In-process TLS acceptor. `None` serves plain HTTP, which the
     /// mainnet config check allows on loopback only.
     tls: Option<tokio_rustls::TlsAcceptor>,
+    /// Dedicated Aptos REST bind address. Only the public node startup sets
+    /// this; test and embedded servers keep the opt-in default of `None`.
+    aptos_listener: Option<String>,
+    /// Dedicated Solana JSON-RPC/WebSocket bind address (WP-31, 2/N). Only the
+    /// public node startup sets this.
+    solana_listener: Option<String>,
+}
+
+/// One dedicated, loopback-only Aptos HTTP listener. It reuses the RPC
+/// admission layer and TLS acceptor, but it has no JSON-RPC dispatcher.
+struct AptosListener {
+    addr: String,
+    gateway: AptosGateway,
+    security: RpcSecurityConfig,
+    metrics: Option<Arc<crate::core::metrics::Metrics>>,
+    tls: Option<tokio_rustls::TlsAcceptor>,
+}
+
+impl AptosListener {
+    async fn start(self) -> Result<SocketAddr, Box<dyn std::error::Error + Send + Sync>> {
+        use jsonrpsee::server::serve_with_graceful_shutdown;
+
+        let listener = tokio::net::TcpListener::bind(self.addr.clone()).await?;
+        let local_addr = listener.local_addr()?;
+        let connection_limit = self
+            .security
+            .max_connections
+            .unwrap_or(RPC_CONNECTION_LIMIT_CEILING) as usize;
+        let connections = Arc::new(tokio::sync::Semaphore::new(connection_limit));
+        let security = RpcSecurityLayer::new(
+            self.security,
+            self.metrics,
+            RpcMode::Public,
+        );
+        let tls = self.tls;
+        let gateway = self.gateway;
+        info!(
+            "Aptos REST Server started on {local_addr} ({})",
+            if tls.is_some() { "tls" } else { "plain" }
+        );
+
+        tokio::spawn(async move {
+            loop {
+                let (socket, remote_addr) = match listener.accept().await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::error!("Aptos REST accept failed: {error}");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                };
+                let permit = match connections.clone().acquire_owned().await {
+                    Ok(permit) => permit,
+                    Err(_) => break,
+                };
+                let gateway_for_service = gateway.clone();
+                let service = security.clone().layer(tower::service_fn(
+                    move |mut req: HttpRequest<hyper::body::Incoming>| {
+                        req.extensions_mut().insert::<SocketAddr>(remote_addr);
+                        let method = req.method().clone();
+                        let path = req.uri().path().to_string();
+                        let gateway_for_request = gateway_for_service.clone();
+                        async move {
+                            Ok::<_, std::convert::Infallible>(
+                                gateway_for_request.handle(&method, &path).await,
+                            )
+                        }
+                    },
+                ));
+                match tls.clone() {
+                    Some(acceptor) => {
+                        tokio::spawn(async move {
+                            let _permit = permit;
+                            serve_tls_connection(
+                                acceptor,
+                                socket,
+                                remote_addr,
+                                service,
+                                std::future::pending::<()>(),
+                            )
+                            .await;
+                        });
+                    }
+                    None => {
+                        tokio::spawn(async move {
+                            let _permit = permit;
+                            let _ = serve_with_graceful_shutdown(
+                                socket,
+                                service,
+                                std::future::pending::<()>(),
+                            )
+                            .await;
+                        });
+                    }
+                }
+            }
+        });
+
+        Ok(local_addr)
+    }
+}
+
+/// The dedicated Solana JSON-RPC/WebSocket listener (WP-31, 2/N).
+///
+/// It registers only the Solana method table, so a Solana client cannot reach
+/// Budlum or operator methods through the compatibility port. Admission, body
+/// limits, connection limits and optional TLS are the same controls as the
+/// primary public listener.
+struct SolanaListener {
+    addr: String,
+    methods: jsonrpsee::core::server::Methods,
+    security: RpcSecurityConfig,
+    metrics: Option<Arc<crate::core::metrics::Metrics>>,
+    tls: Option<tokio_rustls::TlsAcceptor>,
+}
+
+impl SolanaListener {
+    async fn start(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use jsonrpsee::server::{serve_with_graceful_shutdown, stop_channel, ServerBuilder, ServerConfig};
+
+        let listener = tokio::net::TcpListener::bind(self.addr.clone()).await?;
+        let local_addr = listener.local_addr()?;
+        let max_conns = self
+            .security
+            .max_connections
+            .unwrap_or(RPC_CONNECTION_LIMIT_CEILING) as usize;
+        let connections = Arc::new(tokio::sync::Semaphore::new(max_conns));
+        let security = RpcSecurityLayer::new(self.security, self.metrics, RpcMode::Public);
+        let max_body = self
+            .security
+            .max_request_body_size
+            .unwrap_or(RPC_DEFAULT_BODY_LIMIT);
+        let mut cfg = ServerConfig::builder();
+        cfg = cfg.max_request_body_size(max_body);
+        cfg = cfg.max_connections(max_conns as u32);
+        cfg = cfg.set_batch_request_config(
+            jsonrpsee::server::BatchRequestConfig::Limit(100),
+        );
+        let server_cfg = cfg.build();
+        let builder = ServerBuilder::default().set_config(server_cfg).to_service_builder();
+        let (stop_handle, server_handle) = stop_channel();
+        let methods = self.methods;
+        let tls = self.tls;
+        info!(
+            "Solana compatibility RPC listening on http://{} ({})",
+            local_addr,
+            if tls.is_some() { "tls" } else { "plain" }
+        );
+        tokio::spawn(async move {
+            let _keep = server_handle;
+            loop {
+                let Ok((socket, remote_addr)) = listener.accept().await else {
+                    continue;
+                };
+                let permit = match connections.clone().try_acquire_owned().await {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                let service = security.clone().layer(
+                    builder.clone().build(methods.clone(), stop_handle.clone()),
+                );
+                let stopped = stop_handle.clone().shutdown();
+                let acceptor = tls.clone();
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    if let Some(acceptor) = acceptor {
+                        serve_tls_connection(acceptor, socket, remote_addr, service, stopped).await;
+                    } else {
+                        let _ = socket.set_nodelay(true);
+                        let hyper_service =
+                            hyper_util::service::TowerToHyperService::new(service);
+                        serve_with_graceful_shutdown(socket, hyper_service, stopped).await;
+                    }
+                });
+            }
+        });
+        let _ = local_addr;
+        Ok(())
+    }
 }
 
 impl RpcServer {
@@ -365,6 +546,8 @@ impl RpcServer {
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
             metrics: None,
             tls: None,
+            aptos_listener: None,
+            solana_listener: None,
         }
     }
 
@@ -381,6 +564,8 @@ impl RpcServer {
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
             metrics: None,
             tls: None,
+            aptos_listener: None,
+            solana_listener: None,
         }
     }
 
@@ -398,6 +583,8 @@ impl RpcServer {
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
             metrics: None,
             tls: None,
+            aptos_listener: None,
+            solana_listener: None,
         }
     }
 
@@ -412,6 +599,20 @@ impl RpcServer {
         self
     }
 
+    /// Open the dedicated Aptos REST listener when this public server runs.
+    /// The address is validated before either listener starts.
+    pub fn with_aptos_listener(mut self, addr: String) -> Self {
+        self.aptos_listener = Some(addr);
+        self
+    }
+
+    /// Open the dedicated Solana JSON-RPC/WebSocket listener when this public server runs (WP-31, 2/N).
+    /// Only the Solana method table is registered on that listener.
+    pub fn with_solana_listener(mut self, addr: String) -> Self {
+        self.solana_listener = Some(addr);
+        self
+    }
+
     pub async fn run(self, addr: String) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use jsonrpsee::core::server::Methods;
         use jsonrpsee::server::BatchRequestConfig;
@@ -421,11 +622,14 @@ impl RpcServer {
 
         validate_rpc_security_config(&self.security)?;
         let tls = self.tls.clone();
-        let http_middleware = ServiceBuilder::new().layer(RpcSecurityLayer::new(
+        // Wrap the combined REST/JSON-RPC service, not only jsonrpsee's inner
+        // dispatcher. Otherwise the compatibility branch would bypass IP,
+        // origin, rate and authentication admission on the shared listener.
+        let security = RpcSecurityLayer::new(
             self.security.clone(),
             self.metrics.clone(),
             self.mode.clone(),
-        ));
+        );
 
         // jsonrpsee 0.26 moved the transport limits off the server builder and
         // onto `ServerConfig`; the defaults are unchanged, so only the values
@@ -445,15 +649,51 @@ impl RpcServer {
         // oversized batches are rejected wholesale instead of partially
         // executed (jsonrpsee drops the whole batch at `Limit`).
         config = config.set_batch_request_config(BatchRequestConfig::Limit(100));
-        let builder = ServerBuilder::default()
-            .set_config(config.build())
-            .set_http_middleware(http_middleware);
+        let builder = ServerBuilder::default().set_config(config.build());
 
         let mode_label = match self.mode {
             RpcMode::Public => "public",
             RpcMode::Operator => "operator",
         };
         validate_operator_bind_address(&self.mode, &addr)?;
+        aptos::check_routes().map_err(|problem| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Aptos REST route classification refused this listener: {problem}"),
+            )
+        })?;
+        if self.mode != RpcMode::Public
+            && (self.aptos_listener.is_some() || self.solana_listener.is_some())
+        {
+            return Err("dedicated compatibility listeners belong to the public RPC server".into());
+        }
+        if let Some(aptos_addr) = self.aptos_listener.as_ref() {
+            if aptos_addr == &addr {
+                return Err("Aptos REST and JSON-RPC listeners need distinct addresses".into());
+            }
+            aptos::validate_listener(aptos_addr)?;
+        }
+        if let Some(solana_addr) = self.solana_listener.as_ref() {
+            if solana_addr == &addr {
+                return Err("Solana JSON-RPC and primary listeners need distinct addresses".into());
+            }
+            aptos::validate_listener(solana_addr)?;
+        }
+        if let (Some(a), Some(b)) = (self.aptos_listener.as_ref(), self.solana_listener.as_ref()) {
+            if a == b {
+                return Err("the Aptos and Solana compatibility listeners need different addresses".into());
+            }
+        }
+        let serve_aptos_on_primary = self.aptos_listener.is_none();
+        let aptos_gateway = AptosGateway::new(self.chain.clone(), self.node.clone());
+        let dedicated_aptos = self.aptos_listener.as_ref().map(|aptos_addr| AptosListener {
+            addr: aptos_addr.clone(),
+            gateway: aptos_gateway.clone(),
+            security: self.security.clone(),
+            metrics: self.metrics.clone(),
+            tls: self.tls.clone(),
+        });
+        let dedicated_solana_addr = self.solana_listener.clone();
         // Every served method must be classified (`src/rpc/method_class.rs`).
         let methods: Methods = self.into_rpc().into();
         crate::rpc::method_class::check_served_methods(methods.method_names()).map_err(|e| {
@@ -462,6 +702,23 @@ impl RpcServer {
                 format!("RPC method classification refused this listener: {e}"),
             )
         })?;
+        crate::rpc::compat::solana::check_served(methods.method_names()).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Solana gateway check refused this listener: {e}"),
+            )
+        })?;
+        // The Solana listener reuses the same callbacks but only the Solana table.
+        let solana_methods = if dedicated_solana_addr.is_some() {
+            Some(crate::rpc::compat::solana::dedicated_methods(&methods).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Solana dedicated methods: {e}"),
+                )
+            })?)
+        } else {
+            None
+        };
         let svc_builder = builder.to_service_builder();
         let listener = tokio::net::TcpListener::bind(addr.clone()).await?;
         let (stop_handle, server_handle) = stop_channel();
@@ -489,13 +746,27 @@ impl RpcServer {
                 let stop_handle_for_service = stop_handle.clone();
                 let svc_builder_for_service = svc_builder.clone();
                 let methods_for_service = methods.clone();
-                let svc = tower::service_fn(move |mut req: HttpRequest<hyper::body::Incoming>| {
-                    req.extensions_mut().insert::<SocketAddr>(remote_addr);
-                    let mut svc = svc_builder_for_service
-                        .clone()
-                        .build(methods_for_service.clone(), stop_handle_for_service.clone());
-                    async move { svc.call(req).await }
-                });
+                let aptos_for_service = aptos_gateway.clone();
+                let svc = security.clone().layer(tower::service_fn(
+                    move |mut req: HttpRequest<hyper::body::Incoming>| {
+                        req.extensions_mut().insert::<SocketAddr>(remote_addr);
+                        let is_aptos =
+                            serve_aptos_on_primary && aptos::owns_path(req.uri().path());
+                        let method = req.method().clone();
+                        let path = req.uri().path().to_string();
+                        let aptos_for_request = aptos_for_service.clone();
+                        let mut svc = svc_builder_for_service
+                            .clone()
+                            .build(methods_for_service.clone(), stop_handle_for_service.clone());
+                        async move {
+                            if is_aptos {
+                                Ok(aptos_for_request.handle(&method, &path).await)
+                            } else {
+                                svc.call(req).await
+                            }
+                        }
+                    },
+                ));
 
                 let shutdown = stop_handle.clone().shutdown();
                 match tls.clone() {
@@ -514,6 +785,21 @@ impl RpcServer {
                 }
             }
         });
+
+        if let Some(dedicated_aptos) = dedicated_aptos {
+            dedicated_aptos.start().await?;
+        }
+        if let (Some(solana_addr), Some(solana_methods)) = (dedicated_solana_addr, solana_methods) {
+            SolanaListener {
+                addr: solana_addr,
+                methods: solana_methods,
+                security: self.security.clone(),
+                metrics: self.metrics.clone(),
+                tls: self.tls.clone(),
+            }
+            .start()
+            .await?;
+        }
 
         Ok(())
     }
@@ -1101,7 +1387,7 @@ const MAX_SOCIAL_FEED_LIMIT: usize = 200;
 const MAX_SUBSCRIPTION_FEEDS: usize = 128;
 
 /// Take one of the node's subscription feed slots, or `None` when full.
-fn feed_slot() -> Option<tokio::sync::OwnedSemaphorePermit> {
+pub(crate) fn feed_slot() -> Option<tokio::sync::OwnedSemaphorePermit> {
     static FEED_SLOTS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
         std::sync::OnceLock::new();
     let slots = FEED_SLOTS
@@ -7112,6 +7398,261 @@ impl BudlumApiServer for RpcServer {
             .await;
         let chain_id = self.chain.get_chain_id().await;
         Ok(Self::ai_readiness_json(chain_id, active_operators.len()))
+    }
+
+    // ---- Solana JSON-RPC compatibility gateway (WP-31, 1/N) ----
+    //
+    // Every answer here is a node or chain fact, or a refusal that names the
+    // Budlum door (see `src/rpc/compat/solana/mod.rs`). The SVM account model,
+    // token programs, message fees and transactions wait for WP-31 2/N and
+    // the SVM worker; a balance read here would be a number no SVM account
+    // backs.
+
+    async fn solana_get_health(&self) -> Result<String, ErrorObjectOwned> {
+        Ok("ok".to_string())
+    }
+
+    async fn solana_get_version(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Ok(serde_json::json!({
+            "solana-core": format!("budlum-core/{}", env!("CARGO_PKG_VERSION")),
+            "feature-set": 0,
+        }))
+    }
+
+    async fn solana_get_genesis_hash(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::not_exposed("getGenesisHash", "bud_getBlockByNumber"))
+    }
+
+    async fn solana_get_slot(
+        &self,
+        _config: Option<serde_json::Value>,
+    ) -> Result<u64, ErrorObjectOwned> {
+        Ok(self.chain.get_height().await)
+    }
+
+    async fn solana_get_block_height(
+        &self,
+        _config: Option<serde_json::Value>,
+    ) -> Result<u64, ErrorObjectOwned> {
+        Ok(self.chain.get_height().await)
+    }
+
+    async fn solana_get_epoch_info(
+        &self,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::not_exposed("getEpochInfo", "bud_getStatus"))
+    }
+
+    async fn solana_get_latest_blockhash(
+        &self,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::not_exposed("getLatestBlockhash", "bud_getBlockByNumber"))
+    }
+
+    async fn solana_is_blockhash_valid(
+        &self,
+        _blockhash: String,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::not_exposed("isBlockhashValid", "bud_getBlockByNumber"))
+    }
+
+    async fn solana_get_balance(
+        &self,
+        _address: String,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getBalance", "bud_getBalance"))
+    }
+
+    async fn solana_get_account_info(
+        &self,
+        _address: String,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getAccountInfo", "bud_getAccountProof"))
+    }
+
+    async fn solana_get_multiple_accounts(
+        &self,
+        _addresses: Vec<String>,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getMultipleAccounts", "bud_getAccountProof"))
+    }
+
+    async fn solana_get_program_accounts(
+        &self,
+        _program_id: String,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getProgramAccounts", "bud_getAccountProof"))
+    }
+
+    async fn solana_get_token_accounts_by_owner(
+        &self,
+        _owner: String,
+        _token_accounts_filter: serde_json::Value,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable(
+            "getTokenAccountsByOwner",
+            "bud_getAccountProof",
+        ))
+    }
+
+    async fn solana_get_token_account_balance(
+        &self,
+        _token_account: String,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getTokenAccountBalance", "bud_getBalance"))
+    }
+
+    async fn solana_get_token_supply(
+        &self,
+        _mint: String,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getTokenSupply", "bud_getStatus"))
+    }
+
+    async fn solana_get_minimum_balance_for_rent_exemption(
+        &self,
+        _data_size: u64,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable(
+            "getMinimumBalanceForRentExemption",
+            "bud_getStatus",
+        ))
+    }
+
+    async fn solana_get_fee_for_message(
+        &self,
+        _message: String,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getFeeForMessage", "bud_gasPrice"))
+    }
+
+    async fn solana_get_recent_prioritization_fees(
+        &self,
+        _addresses: Option<Vec<String>>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable(
+            "getRecentPrioritizationFees",
+            "bud_gasPrice",
+        ))
+    }
+
+    async fn solana_send_transaction(
+        &self,
+        _transaction: String,
+        _options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("sendTransaction", "bud_sendRawTransaction"))
+    }
+
+    async fn solana_simulate_transaction(
+        &self,
+        _transaction: String,
+        _options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("simulateTransaction", "bud_txPrecheck"))
+    }
+
+    async fn solana_get_signature_statuses(
+        &self,
+        _signatures: Vec<String>,
+        _options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable(
+            "getSignatureStatuses",
+            "bud_getTransactionReceipt",
+        ))
+    }
+
+    async fn solana_get_signatures_for_address(
+        &self,
+        _address: String,
+        _options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable(
+            "getSignaturesForAddress",
+            "bud_getTransactionByHash",
+        ))
+    }
+
+    async fn solana_get_transaction(
+        &self,
+        _signature: String,
+        _options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getTransaction", "bud_getTransactionByHash"))
+    }
+
+    async fn solana_get_block(
+        &self,
+        _slot: u64,
+        _options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getBlock", "bud_getBlockByNumber"))
+    }
+
+    async fn solana_request_airdrop(
+        &self,
+        _address: String,
+        _lamports: u64,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::faucet_unavailable("requestAirdrop"))
+    }
+
+    async fn solana_account_subscribe(
+        &self,
+        pending: jsonrpsee::PendingSubscriptionSink,
+        _address: String,
+        _config: Option<serde_json::Value>,
+    ) -> jsonrpsee::core::SubscriptionResult {
+        solana::subscriptions::reject_svm(pending, "accountSubscribe", "bud_getAccountProof").await
+    }
+
+    async fn solana_signature_subscribe(
+        &self,
+        pending: jsonrpsee::PendingSubscriptionSink,
+        _signature: String,
+        _config: Option<serde_json::Value>,
+    ) -> jsonrpsee::core::SubscriptionResult {
+        solana::subscriptions::reject_svm(pending, "signatureSubscribe", "bud_getTransactionReceipt").await
+    }
+
+    async fn solana_slot_subscribe(
+        &self,
+        pending: jsonrpsee::PendingSubscriptionSink,
+        config: Option<solana::subscriptions::SlotConfig>,
+    ) -> jsonrpsee::core::SubscriptionResult {
+        solana::subscriptions::accept_slots(pending, self.chain.clone(), config).await
+    }
+
+    async fn solana_logs_subscribe(
+        &self,
+        pending: jsonrpsee::PendingSubscriptionSink,
+        _filter: serde_json::Value,
+        _config: Option<serde_json::Value>,
+    ) -> jsonrpsee::core::SubscriptionResult {
+        solana::subscriptions::reject_svm(pending, "logsSubscribe", "bud_getTransactionReceipt").await
+    }
+
+    async fn solana_program_subscribe(
+        &self,
+        pending: jsonrpsee::PendingSubscriptionSink,
+        _program_id: String,
+        _config: Option<serde_json::Value>,
+    ) -> jsonrpsee::core::SubscriptionResult {
+        solana::subscriptions::reject_svm(pending, "programSubscribe", "bud_getAccountProof").await
     }
 }
 

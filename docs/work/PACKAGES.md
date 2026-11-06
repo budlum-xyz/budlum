@@ -114,3 +114,10 @@ Corrections to the live claim map above, from the mechanical audit
 - WP-61 is a T-Launch package (directive 15.7), not T-Expansion; the row above
   mislabels its layer.
 - The live open-PR count at this session's snapshot is 75, not 70 (BLG-297).
+
+### Slice 6/N corrections (PR #96)
+
+| WP | Live correction |
+|---|---|
+| WP-31 | 1/N (#83) and 2/N (#95: dedicated listener, slot feed, named subscription refusals) are carried. The remaining SVM worker and four state-dependent subscriptions stay owed. |
+| WP-32 | 1/N (#89, #95: REST route table, dedicated listener, shared admission) is carried. 2/N (Move worker, BCS, `Foreign::Aptos`, the 0xBD alias and the pinned framework) follows on this branch. |
