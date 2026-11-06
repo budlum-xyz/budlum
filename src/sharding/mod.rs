@@ -219,7 +219,9 @@ pub fn apply_cross_shard_transfer(
         return Err("apply_cross_shard_transfer requires a Transfer".into());
     }
 
-    let total_cost = tx.total_cost();
+    let total_cost = tx
+        .checked_total_cost()
+        .ok_or_else(|| "cross-shard transfer amount + fee overflows u64".to_string())?;
     // Read-only checks: `get_or_create` would insert empty accounts into
     // the state on a rejected transfer.
     if state.get_balance(&tx.from) < total_cost {
