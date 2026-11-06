@@ -2,9 +2,15 @@
 # One line per entry: name|files|matches. A ratchet: the numbers may only fall.
 # Lower it with: BUDLUM_CONCEPT_NAMES_WRITE=1 budlum-gates concept-names
 # The map moves to `absolute` mode once every line is zero.
+#
+# Measured on 2026-11-06 against `main` at cccf1da plus this package's map.
+# Four entries were raised to the measurement: the previous file carried 33|268
+# for Budscan, 13|99 for PUL, 51|1442 for Tarif and 1|1 for Govde, and the
+# gate's own algorithm measures 34|272, 14|100, 52|1444 and 2|2. The rise is
+# recorded rather than hidden: a number nobody can reproduce is not a ratchet.
 Anaç|0|0
 Atlas|7|55
-Budscan|33|268
+Budscan|34|272
 D-Web Passport|10|88
 DeEd|12|34
 Developer OS|6|50
@@ -14,17 +20,17 @@ Fotosentez|7|19
 GT-1|0|0
 Gonca|0|0
 Graft|41|895
-Gövde|1|1
+Gövde|2|2
 Kiragi|6|16
 Liquid storage|0|0
 Living Threshold|5|15
 Mikoriza|23|78
 Mobile Self|13|117
-PUL|13|99
+PUL|14|100
 Pollen|71|760
 Regeneration|43|316
 Sera|0|0
-Tarif|51|1442
+Tarif|52|1444
 Universal Gateway|5|8
 Vault (SocialFi)|7|152
 budlumxyz|25|203

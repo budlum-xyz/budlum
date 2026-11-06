@@ -11,6 +11,25 @@
 //!
 //! To lower the baseline run the gate with `BUDLUM_CONCEPT_NAMES_WRITE=1`. The
 //! writer refuses to raise any number.
+//!
+//! # The owner column
+//!
+//! Every entry names the package that owns the rename (`owner = "WP-NN"`).
+//! Without it a name has no end: the map says a name is retired and nothing
+//! says who retires it, so the count can sit at the same number for ever.
+//! The gate refuses an entry with no owner and an owner that is not a package
+//! identifier, so a typo cannot quietly park a rename on nobody.
+//!
+//! # Why the baseline is measured, not asserted
+//!
+//! The first version of this file shipped a baseline that the gate's own
+//! algorithm does not reproduce: four entries measured higher than the numbers
+//! written down (one test name, one workspace package path, and two entries
+//! whose count moves when a neighbouring file changes). A failure also stops
+//! the gate at its first report, so the four were invisible until the map was
+//! run outside the gate. The gate now holds a canary for exactly this class:
+//! [`baseline_disagrees_with_measurement_canary`] stages a baseline one match
+//! above the truth and requires the gate to report it.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -60,6 +79,7 @@ struct Concept {
     patterns: Vec<regex::Regex>,
     paths: Vec<String>,
     allow_paths: Vec<String>,
+    owner: String,
 }
 
 struct Map {
@@ -74,15 +94,28 @@ struct Map {
 ///
 /// A rise, or a fall that the baseline has not followed.
 pub fn compare(name: &str, measured: Count, baseline: Count) -> Result<(), String> {
+    compare_owned(name, "", measured, baseline)
+}
+
+/// The same comparison, naming the package that owns the rename.
+///
+/// An anonymous finding reads like a property of the tree. A finding that
+/// names its package reads like work, which is what it is.
+fn compare_owned(owner: &str, name: &str, measured: Count, baseline: Count) -> Result<(), String> {
+    let who = if owner.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} ({owner})")
+    };
     if measured.files > baseline.files || measured.matches > baseline.matches {
         return Err(format!(
-            "{name}: the count rose to {} file(s) / {} match(es), above the baseline {} / {}. A legacy name was added.",
+            "{who}: the count rose to {} file(s) / {} match(es), above the baseline {} / {}. A legacy name was added.",
             measured.files, measured.matches, baseline.files, baseline.matches
         ));
     }
     if measured != baseline {
         return Err(format!(
-            "{name}: the count fell to {} file(s) / {} match(es) and the baseline is still {} / {}. Lower {BASELINE_PATH} (run with {WRITE_ENV}=1).",
+            "{who}: the count fell to {} file(s) / {} match(es) and the baseline is still {} / {}. Lower {BASELINE_PATH} (run with {WRITE_ENV}=1).",
             measured.files, measured.matches, baseline.files, baseline.matches
         ));
     }
@@ -102,6 +135,21 @@ fn string_list(table: &toml::Table, key: &str) -> Result<Vec<String>, String> {
             .collect(),
         Some(_) => Err(format!("`{key}` is not an array")),
     }
+}
+
+/// Whether `owner` is a package identifier: `WP-` and two digits, at least.
+///
+/// The repository and GitHub are English, so the package is `WP-NN` and never
+/// the Turkish `I-P-NN` spelling of a package number (directive section 15.3
+/// item 1). The check is deliberately narrow: it refuses exactly the two
+/// mistakes that were made in this map, a missing owner and a non-`WP` prefix.
+fn is_package_id(owner: &str) -> bool {
+    let Some(rest) = owner.strip_prefix("WP-") else {
+        return false;
+    };
+    // The directive numbers 64 packages in T-Launch plus later additions, so
+    // the identifier is two or more ASCII digits and nothing else.
+    !rest.is_empty() && rest.len() >= 2 && rest.bytes().all(|b| b.is_ascii_digit())
 }
 
 fn required_str<'a>(table: &'a toml::Table, key: &str, who: &str) -> Result<&'a str, String> {
@@ -142,8 +190,15 @@ fn parse_map(text: &str) -> Result<Map, String> {
             .cloned()
             .ok_or_else(|| format!("concept #{i}: `old` is empty"))?;
         let who = format!("concept `{name}`");
-        for key in ["new_code", "term_en", "term_tr", "area", "reason"] {
+        for key in ["new_code", "term_en", "term_tr", "area", "reason", "owner"] {
             required_str(t, key, &who)?;
+        }
+        let owner = required_str(t, "owner", &who)?.to_string();
+        if !is_package_id(&owner) {
+            return Err(format!(
+                "{who}: `owner` is `{owner}`, which is not a package identifier (`WP-NN`). A \
+                 rename with no owning package never ends."
+            ));
         }
         let raw = string_list(t, "patterns")?;
         if raw.is_empty() {
@@ -159,6 +214,7 @@ fn parse_map(text: &str) -> Result<Map, String> {
             patterns,
             paths: string_list(t, "paths")?,
             allow_paths: string_list(t, "allow_paths")?,
+            owner,
         });
     }
     Ok(Map {
@@ -348,14 +404,20 @@ fn check(root: &Path, write: bool) -> Result<String, String> {
         ));
     }
 
+    let owners: BTreeMap<String, String> = map
+        .concepts
+        .iter()
+        .map(|c| (c.name.clone(), c.owner.clone()))
+        .collect();
     let mut bad = String::new();
     for (name, c) in &counts {
+        let owner = owners.get(name).map_or("", String::as_str);
         match baseline.get(name) {
             None => {
-                let _ = writeln!(bad, "  {name}: no line in {BASELINE_PATH}");
+                let _ = writeln!(bad, "  {name} ({owner}): no line in {BASELINE_PATH}");
             }
             Some(b) => {
-                if let Err(e) = compare(name, *c, *b) {
+                if let Err(e) = compare_owned(owner, name, *c, *b) {
                     let _ = writeln!(bad, "  {e}");
                 }
             }
@@ -370,9 +432,21 @@ fn check(root: &Path, write: bool) -> Result<String, String> {
         }
     }
     if bad.is_empty() {
+        let mut packages: BTreeMap<&str, usize> = BTreeMap::new();
+        for c in &map.concepts {
+            if counts.get(&c.name).is_some_and(|k| k.matches > 0) {
+                *packages.entry(c.owner.as_str()).or_default() += 1;
+            }
+        }
+        let owed: Vec<String> = packages
+            .iter()
+            .map(|(owner, n)| format!("{owner} owns {n}"))
+            .collect();
         Ok(format!(
-            "OK: count mode, {} concept(s), {total} legacy match(es), all equal to the baseline.",
-            counts.len()
+            "OK: count mode, {} concept(s), {total} legacy match(es), all equal to the \
+             baseline. Still to rename: {}.",
+            counts.len(),
+            owed.join(", ")
         ))
     } else {
         Err(format!("FAIL: concept-name counts:\n{bad}"))
@@ -388,7 +462,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     check(root, std::env::var_os(WRITE_ENV).is_some_and(|v| v == "1"))
 }
 
-const CANARY_MAP: &str = "schema = 1\nmode = \"count\"\nglobal_allow_paths = [\"config/naming/\", \"docs/NAMING.md\"]\n\n[[concept]]\nold = [\"Canaryname\"]\npatterns = ['(?i)canary-?name']\nnew_code = \"x\"\nterm_en = \"x\"\nterm_tr = \"x\"\narea = \"x\"\nreason = \"x\"\n";
+const CANARY_MAP: &str = "schema = 1\nmode = \"count\"\nglobal_allow_paths = [\"config/naming/\", \"docs/NAMING.md\"]\n\n[[concept]]\nold = [\"Canaryname\"]\npatterns = ['(?i)canary-?name']\nnew_code = \"x\"\nterm_en = \"x\"\nterm_tr = \"x\"\narea = \"x\"\nreason = \"x\"\nowner = \"WP-05\"\n";
 
 fn stage(root: &Path, map: &str, baseline: &str) -> Result<(), String> {
     let put = |rel: &str, body: &str| -> Result<(), String> {
@@ -451,6 +525,43 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "concept-names canary OK: an injected name raised the count, a lowered count and a rising writer were refused, and absolute mode failed.",
     ))
+}
+
+/// A baseline that disagrees with the measurement must be reported, in both
+/// directions, and the gate must be able to run on a tree it stages itself.
+///
+/// This is the canary for the class that shipped four wrong numbers: the gate
+/// read the baseline, the numbers had drifted, and nothing noticed because no
+/// canary ever compared the two. The staged tree has one match, so a baseline
+/// of `1|1` passes, `0|0` fails as a rise and `2|2` fails as a fall.
+fn baseline_canary() -> Result<(), String> {
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-baseline")?;
+    let result = (|| {
+        stage(&dir, CANARY_MAP, "Canaryname|1|1\n")?;
+        std::fs::write(dir.join("src/legacy.rs"), "// CanaryName\n").map_err(|e| e.to_string())?;
+        check(&dir, false).map_err(|e| format!("canary: an agreeing baseline failed: {e}"))?;
+        std::fs::write(dir.join(BASELINE_PATH), "Canaryname|0|0\n").map_err(|e| e.to_string())?;
+        match check(&dir, false) {
+            Err(e) if e.contains("rose") => {}
+            other => {
+                return Err(format!(
+                    "canary: a baseline below the measurement was accepted: {other:?}"
+                ))
+            }
+        }
+        std::fs::write(dir.join(BASELINE_PATH), "Canaryname|2|2\n").map_err(|e| e.to_string())?;
+        match check(&dir, false) {
+            Err(e) if e.contains("fell") => {}
+            other => {
+                return Err(format!(
+                    "canary: a baseline above the measurement was accepted: {other:?}"
+                ))
+            }
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    result
 }
 
 #[cfg(test)]
@@ -516,6 +627,45 @@ mod tests {
             b
         )
         .is_err());
+    }
+
+    #[test]
+    fn baseline_disagrees_with_measurement_canary() {
+        assert!(
+            baseline_canary().is_ok(),
+            "{:?}",
+            baseline_canary().err()
+        );
+    }
+
+    #[test]
+    fn concept_map_owner_is_a_known_package() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let map = std::fs::read_to_string(root.join(MAP_PATH)).unwrap_or_default();
+        let parsed = parse_map(&map);
+        assert!(parsed.is_ok(), "{:?}", parsed.as_ref().err());
+        // The directive numbers 64 packages in T-Launch, and section 15.7 adds
+        // later ones from WP-65; every owner in the map must fall in that
+        // space and be a `WP-NN` identifier (never the Turkish spelling).
+        if let Ok(m) = parsed {
+            for c in &m.concepts {
+                assert!(
+                    is_package_id(&c.owner),
+                    "{}: owner `{}` is not a WP-NN package identifier",
+                    c.name,
+                    c.owner
+                );
+                // `is_package_id` already proved the suffix is ASCII digits,
+                // so this parse cannot be the thing that fails.
+                let number: u64 = c.owner.trim_start_matches("WP-").parse().unwrap_or(0);
+                assert!(
+                    (1..=64).contains(&number),
+                    "{}: owner `{}` is outside the 64 packages the directive numbers",
+                    c.name,
+                    c.owner
+                );
+            }
+        }
     }
 
     #[test]
