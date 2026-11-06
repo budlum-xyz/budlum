@@ -45,7 +45,7 @@ The root `README.md` is a dashboard only; maturity and risk warnings live here.
    hash, N operators storing the same shard hold byte-identical data. One physical copy can
    satisfy N deals and one machine can collect N rewards under N identities. Filecoin's PoRep
    solves this with per-replica encoding; B.U.D. has **no** such encoding. Detail and roadmap:
-   `docs/BUD_STORAGE_ROADMAP.md`.
+   `docs/STORAGE.md` (in construction).
 5. **Erasure coding exists, but parity generation is not wired into the production flow.**
    `ShardRef` now carries a `kind` (`Data` / `Parity`) and `ContentManifest`
    carries an `ErasureScheme { k, n }`; `src/storage/erasure.rs` is a real Reed-Solomon
@@ -138,7 +138,7 @@ add a 16-byte tag, so an object declaring `ClientSide` and shorter than 16 bytes
 is refused. This catches the careless client, not the
 determined liar.
 
-Detail, what is not claimed, and why: `docs/BUD_CONTENT_ENCRYPTION.md`.
+Detail, what is not claimed, and why: `docs/STORAGE.md` (in construction).
 Gate: `scripts/check-content-encryption-is-declared-and-bound.sh` (14 canaries).
 
 ## Coding audit: is the parity really parity
@@ -163,7 +163,7 @@ What it does not prove: that the operator STORES anything. Parity can be compute
 someone holding nothing. Replicated objects are not audited but refused: if every shard is data
 there is no `i`, and saying "passed" would report a check that was never performed.
 
-Detail and probability table: `docs/BUD_STORAGE_ROADMAP.md` Gap 3b.
+Detail and probability table: `docs/STORAGE.md` (in construction).Gap 3b.
 Gate: `scripts/check-coding-audit-samples-the-relationship.sh` (13 canaries).
 
 ## Roadmap markers

@@ -1159,6 +1159,10 @@ pub enum StorageError {
     /// The primary is the copy a reader reaches first and a repair rebuilds
     /// from. A device that is online when its owner is awake cannot be it.
     MobileOperatorCannotHoldPrimary(Address),
+    /// A content-registration request arrived while B.U.D. 3.0 is not wired
+    /// into the transaction envelope. Every legacy registration path refuses
+    /// with this until the `StorageTx` v3 door replaces it.
+    Bud3NotReady,
 }
 
 impl std::fmt::Display for StorageError {
@@ -1190,6 +1194,10 @@ impl std::fmt::Display for StorageError {
                 "operator {operator} is registered as mobile and cannot hold \
                  replica_index 0; a phone is online when its owner is, which \
                  is not what a primary copy means"
+            ),
+            Self::Bud3NotReady => write!(
+                f,
+                "content registration is refused until B.U.D. 3.0 is ready"
             ),
             Self::ZeroOpenerBond => write!(f, "opener_bond must be > 0"),
             Self::IdSpaceExhausted => write!(f, "registry id counter is exhausted"),

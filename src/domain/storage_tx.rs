@@ -916,11 +916,19 @@ fn declare_self_host_policy(
         .map_err(|e| StorageTxError::Refused(e.to_string()))
 }
 
+#[allow(unreachable_code)]
 fn register_manifest(
     state: &mut AccountState,
     sender: &Address,
     manifest: &ContentManifest,
 ) -> Result<(), StorageTxError> {
+    // B.U.D. 3.0 is not wired into the transaction envelope yet: every
+    // content-registration request is refused until the `StorageTx` v3 door
+    // replaces this legacy path.
+    let _ = (state, sender, manifest);
+    return Err(StorageTxError::Refused(
+        StorageError::Bud3NotReady.to_string(),
+    ));
     // The id is re-derived from the contents, so a manifest whose id does not
     // match what it carries never reaches the registry. The signing preimage
     // commits the whole manifest as well.
@@ -1076,6 +1084,23 @@ mod tests {
             StorageTxError::AlreadyRegistered
         );
         assert_eq!(state.storage_registry.root(), root);
+    }
+
+    #[test]
+    fn content_registration_refused_until_bud3_ready() {
+        let mut state = AccountState::new();
+        let m = manifest_owned_by(owner());
+        let err = execute_storage_tx(
+            &mut state,
+            &ctx(owner()),
+            &StorageTx::RegisterManifest { manifest: m },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, StorageTxError::Refused(ref msg) if msg.contains("B.U.D. 3.0")),
+            "expected Bud3NotReady refusal, got {err:?}"
+        );
+        assert!(state.storage_registry.is_empty());
     }
 
     fn registered(state: &mut AccountState) -> ContentManifest {

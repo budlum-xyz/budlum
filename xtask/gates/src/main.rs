@@ -114,6 +114,7 @@ mod gates {
     pub mod no_conflict_markers;
     pub mod no_constant_security_verdicts;
     pub mod no_idle_code;
+    pub mod no_legacy_storage;
     pub mod no_new_shell_gates;
     pub mod no_orphan_source_files;
     pub mod no_out_of_block_consensus_writes;
@@ -504,6 +505,14 @@ const GATES: &[Gate] = &[
         run: gates::no_idle_code::run,
         run_args: None,
         self_test: gates::no_idle_code::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "no-legacy-storage",
+        replaces: None,
+        run: gates::no_legacy_storage::run,
+        run_args: None,
+        self_test: gates::no_legacy_storage::self_test,
         run_log: None,
     },
     Gate {

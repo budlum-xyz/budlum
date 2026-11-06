@@ -198,7 +198,7 @@ impl std::fmt::Display for ContentEncryption {
 /// Replication is the degenerate case `k = n = shard_count`, where losing one
 /// shard loses part of the object and durability has to come from storing the
 /// whole thing again. Erasure coding reaches the same durability at a fraction
-/// of the stored bytes, which is the point of `docs/BUD_STORAGE_ROADMAP.md`
+/// of the stored bytes, which is the point of the single-storage model in `docs/STORAGE.md`
 /// Gap 3 - and it is what makes Gap 4 expressible at all, because a repair
 /// trigger needs something to reconstruct *from*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

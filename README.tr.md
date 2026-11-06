@@ -511,7 +511,7 @@ etmeyecektir.
 | [PROVENANCE_NOTES.md](docs/PROVENANCE_NOTES.md) | Her önemsiz olmayan uygulamanın neye dayandığının modül başına kaydı |
 | [docs/VALIDATOR_ROLES.md](docs/VALIDATOR_ROLES.md) | Düğüm rolleri ve işletme gereksinimleri |
 | [docs/AI_VERIFICATION_STATUS.md](docs/AI_VERIFICATION_STATUS.md) | Yapay zeka katmanının tam olarak neyi doğrulayıp neyi doğrulamadığı |
-| [docs/BUD_STORAGE_ROADMAP.md](docs/BUD_STORAGE_ROADMAP.md) | Depolama katmanı yol haritası |
+| [docs/STORAGE.md](docs/STORAGE.md) | Tek depolama sistemi (B.U.D. 3.0), yapım aşamasında |
 | [budzero/ARCHITECTURE.md](budzero/ARCHITECTURE.md) | BudZKVM ISA, VM, kanıtlayıcı ve doğrulayıcı tasarımı |
 
 ---
