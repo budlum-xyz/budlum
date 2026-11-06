@@ -249,3 +249,8 @@ pub mod validator_classes;
 // The B.U.D. 3.0 storage door end to end.
 #[cfg(test)]
 pub mod bud3_door;
+
+// Object replacement: the second representation of one content id
+// (section 6.14).
+#[cfg(test)]
+pub mod bud3_replace;
