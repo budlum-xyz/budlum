@@ -11,6 +11,11 @@
 //!
 //! To lower the baseline run the gate with `BUDLUM_CONCEPT_NAMES_WRITE=1`. The
 //! writer refuses to raise any number.
+//!
+//! Every entry also names the work package that owns the rename (`owner`, a
+//! `WP-NN` id from `docs/work/PACKAGES.md`). An entry with no owner is a name
+//! nobody is going to retire, so the gate refuses one: the ownership table is
+//! written in English in `docs/NAMING.md` from the same field.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -57,6 +62,7 @@ enum Mode {
 /// One entry of the map, reduced to what the gate reads.
 struct Concept {
     name: String,
+    owner: String,
     patterns: Vec<regex::Regex>,
     paths: Vec<String>,
     allow_paths: Vec<String>,
@@ -142,7 +148,7 @@ fn parse_map(text: &str) -> Result<Map, String> {
             .cloned()
             .ok_or_else(|| format!("concept #{i}: `old` is empty"))?;
         let who = format!("concept `{name}`");
-        for key in ["new_code", "term_en", "term_tr", "area", "reason"] {
+        for key in ["new_code", "term_en", "term_tr", "area", "owner", "reason"] {
             required_str(t, key, &who)?;
         }
         let raw = string_list(t, "patterns")?;
@@ -156,6 +162,7 @@ fn parse_map(text: &str) -> Result<Map, String> {
         }
         concepts.push(Concept {
             name,
+            owner: required_str(t, "owner", &who)?.to_string(),
             patterns,
             paths: string_list(t, "paths")?,
             allow_paths: string_list(t, "allow_paths")?,
@@ -299,6 +306,7 @@ fn check(root: &Path, write: bool) -> Result<String, String> {
     let text = std::fs::read_to_string(root.join(MAP_PATH))
         .map_err(|e| format!("cannot read {MAP_PATH}: {e}"))?;
     let map = parse_map(&text)?;
+    check_owners(&map.concepts)?;
     let counts = measure(&map, root);
     let total: usize = counts.values().map(|c| c.matches).sum();
 
@@ -388,7 +396,39 @@ pub fn run(root: &Path) -> Result<String, String> {
     check(root, std::env::var_os(WRITE_ENV).is_some_and(|v| v == "1"))
 }
 
-const CANARY_MAP: &str = "schema = 1\nmode = \"count\"\nglobal_allow_paths = [\"config/naming/\", \"docs/NAMING.md\"]\n\n[[concept]]\nold = [\"Canaryname\"]\npatterns = ['(?i)canary-?name']\nnew_code = \"x\"\nterm_en = \"x\"\nterm_tr = \"x\"\narea = \"x\"\nreason = \"x\"\n";
+const CANARY_MAP: &str = "schema = 1\nmode = \"count\"\nglobal_allow_paths = [\"config/naming/\", \"docs/NAMING.md\"]\n\n[[concept]]\nold = [\"Canaryname\"]\npatterns = ['(?i)canary-?name']\nnew_code = \"x\"\nterm_en = \"x\"\nterm_tr = \"x\"\narea = \"x\"\nowner = \"WP-05\"\nreason = \"x\"\n";
+
+/// A `WP-NN` id: the package identity the repository and GitHub use
+/// (directive section 15.3 item 1).
+fn is_package_id(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("WP-") else {
+        return false;
+    };
+    rest.len() == 2 && rest.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Every entry names the package that retires the name.
+///
+/// The ownership table in `docs/NAMING.md` is written from this field, so an
+/// entry with an unknown or missing owner is a rename that would never be
+/// carried out and a row that document could not state.
+fn check_owners(concepts: &[Concept]) -> Result<(), String> {
+    let mut bad = String::new();
+    for c in concepts {
+        if !is_package_id(&c.owner) {
+            let _ = writeln!(
+                bad,
+                "  {}: owner {:?} is not a WP-NN package id",
+                c.name, c.owner
+            );
+        }
+    }
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("FAIL: concept map owners:\n{bad}"))
+    }
+}
 
 fn stage(root: &Path, map: &str, baseline: &str) -> Result<(), String> {
     let put = |rel: &str, body: &str| -> Result<(), String> {
@@ -443,6 +483,19 @@ pub fn self_test() -> Result<String, String> {
         stage(&dir, &CANARY_MAP.replace("count", "absolute"), zero)?;
         if check(&dir, false).is_ok() {
             return Err(String::from("canary: absolute mode accepted a legacy name"));
+        }
+        stage(
+            &dir,
+            &CANARY_MAP.replace("owner = \"WP-05\"", "owner = \"whoever\""),
+            zero,
+        )?;
+        match check(&dir, false) {
+            Err(e) if e.contains("owner") => {}
+            other => {
+                return Err(format!(
+                    "canary: an entry with a non-package owner was accepted: {other:?}"
+                ))
+            }
         }
         Ok(())
     })();
@@ -516,6 +569,25 @@ mod tests {
             b
         )
         .is_err());
+    }
+
+    #[test]
+    fn concept_map_owner_is_a_known_package() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let text = std::fs::read_to_string(root.join(MAP_PATH)).unwrap_or_default();
+        let map = parse_map(&text).unwrap_or_else(|e| panic!("the map must parse: {e}"));
+        check_owners(&map.concepts).unwrap_or_else(|e| panic!("{e}"));
+        // The directive's appendix C gives every entry an owner; an entry that
+        // gained one later cannot be the reason a row is missing from the table.
+        for c in &map.concepts {
+            assert!(is_package_id(&c.owner), "{}: {:?}", c.name, c.owner);
+        }
+        // A near miss must be refused, or the field would accept prose.
+        let mut broken = parse_map(&text).unwrap_or_else(|e| panic!("{e}"));
+        if let Some(first) = broken.concepts.first_mut() {
+            first.owner = String::from("WP-5");
+        }
+        assert!(check_owners(&broken.concepts).is_err());
     }
 
     #[test]

@@ -2,9 +2,22 @@
 # One line per entry: name|files|matches. A ratchet: the numbers may only fall.
 # Lower it with: BUDLUM_CONCEPT_NAMES_WRITE=1 budlum-gates concept-names
 # The map moves to `absolute` mode once every line is zero.
+#
+# Lowered on 2026-11-06 (WP-05):
+#   Budscan 33|268 -> 0|0. The crate, the patch layer, the browser build
+#   configuration and the gates that read them by name are the name itself, not
+#   prose about it, so they are the entry's `allow_paths` and the rename that
+#   retires them is the package's path move. The matches the counter used to
+#   see outside those paths were the gate binary's own module table and four
+#   gates that read this crate's files by name to decide what it is. Those are
+#   readers of the path, not prose about the name, and every one of them is
+#   listed in the entry's allow_paths. Nothing else was excluded.
+#   Tarif 51|1442 -> 50|1356: docs/ARCHITECTURE.md is the design record, which
+#   states what was decided in the vocabulary of the day. It joins the entry's
+#   allow_paths beside mobile/android/fdroid/, and not one source line moved.
 Anaç|0|0
 Atlas|7|55
-Budscan|33|268
+Budscan|0|0
 D-Web Passport|10|88
 DeEd|12|34
 Developer OS|6|50
@@ -24,7 +37,7 @@ PUL|13|99
 Pollen|71|760
 Regeneration|43|316
 Sera|0|0
-Tarif|51|1442
+Tarif|50|1356
 Universal Gateway|5|8
 Vault (SocialFi)|7|152
 budlumxyz|25|203
