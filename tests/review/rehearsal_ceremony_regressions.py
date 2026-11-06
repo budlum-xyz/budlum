@@ -59,6 +59,19 @@ class RehearsalCeremonySafety(unittest.TestCase):
         record = {"class": "Full", "validator": "duplicate", "registration": {}}
         self.assert_refused(self.run_ceremony([record] * 8))
 
+    def test_record_filename_is_not_executed_as_python(self):
+        # The sentinel is created only if the filename is interpolated into
+        # Python source and executed. It contains no shell metacharacter call.
+        name = "record', (__import__('pathlib').Path('sentinel').touch() or 'r')) or open('ignored.json"
+        (self.records / name).write_text(json.dumps({"class": "Full"}))
+        result = subprocess.run(
+            ["bash", str(SCRIPT), str(self.records), str(self.output)],
+            cwd=self.root, text=True, capture_output=True, timeout=30,
+        )
+        self.assertFalse((self.root / "sentinel").exists(),
+                         "a record filename was executed as Python code")
+        self.assert_refused(result)
+
     def test_private_key_material_is_not_published(self):
         records = [{"class": "Full", "validator": str(i), "registration": {},
                     "private_key": "SENTINEL-PRIVATE-KEY"} for i in range(8)]
