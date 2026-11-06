@@ -131,9 +131,9 @@ const READ_PREFIXES: &[&str] = &[
 ];
 
 /// Read methods whose names no prefix above covers, matched exactly: an
-/// identity record and credential lookup, a protected-content lookup, and
-/// the coding-audit answer check (`&self`, it judges an answer and stores
-/// nothing).
+/// identity record and credential lookup, a protected-content lookup, the
+/// coding-audit answer check and the transaction fee quote. Both are `&self`
+/// reads and store nothing.
 const READ_NAMES: &[&str] = &[
     "record",
     "credential",
@@ -145,6 +145,7 @@ const READ_NAMES: &[&str] = &[
     "deals_for_manifest",
     "deals_for_shard",
     "under_replicated_shards",
+    "required_fee",
 ];
 
 /// Calls on `self.state` inside a `Blockchain` method body that write it.
@@ -510,5 +511,14 @@ mod tests {
         assert!(check_actor_state_access("self.blockchain.state.add_balance(&a, 1);").is_err());
         assert!(check_actor_state_access("self.blockchain.state.epoch_index = 3;").is_err());
         assert!(check_actor_state_access("if self.blockchain.state.epoch_index == 3 {}").is_ok());
+    }
+
+    #[test]
+    fn fee_quote_is_a_read_but_similarly_named_calls_are_not() {
+        assert!(check_actor_state_access("self.blockchain.state.required_fee(&tx);").is_ok());
+        assert!(
+            check_actor_state_access("self.blockchain.state.required_fee_override(&tx);").is_err()
+        );
+        assert!(check_actor_state_access("self.blockchain.state.set_required_fee(&tx);").is_err());
     }
 }
