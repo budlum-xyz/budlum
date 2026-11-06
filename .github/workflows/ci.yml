@@ -602,6 +602,16 @@ jobs:
       # its "placeholder-free and exactly fielded" claim checkable: an
       # unreachable message, a reused field number, a BOF-1 header field or a
       # raster on the wire all fail here.
+      - name: B.U.D. 3.0 module claims do not collide canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-module-claims-do-not-collide --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: B.U.D. 3.0 module claims do not collide
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-module-claims-do-not-collide 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: B.U.D. 3.0 wire contract is total canary
         if: always() && steps.build.outcome == 'success'
         run: |

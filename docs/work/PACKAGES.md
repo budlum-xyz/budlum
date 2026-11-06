@@ -53,3 +53,49 @@ each, recorded here rather than left to be discovered:
 - `src/storage/bud3/mod.rs`, `src/tests/mod.rs`, `xtask/gates/src/main.rs` and
   `.github/workflows/ci.yml` are shared append-only paths; this row's pull request adds
   lines to each and rewrites none.
+
+## WP-28 (lane C, T-Open), 1/N and 2/N, this pull request
+
+The Ethereum JSON-RPC compatibility gateway. `src/rpc/compat/` did not exist on this
+branch and is claimed by no open pull request among the 52 measured on 2026-11-06.
+
+| Row | What it lands | State |
+|---|---|---|
+| WP-28 1/N | `src/rpc/compat/ethereum/{methods,limits}.rs`: section 8.11.2's 37 methods with listener and effect, the `eth_getProof` refusal at `-32601`, and rule 3's filter bounds | in this PR |
+| WP-28 2/N | `config.rs`: section 8.11.1's loopback bind, enforced, and the foreign chain id kept apart from this chain's answer | in this PR |
+
+Deliberately not in this slice, with the reason beside each:
+
+- **Handlers, transport and block encoding.** `eth_call` and `eth_estimateGas` need
+  WP-27's EVM worker; `eth_getBalance` needs the execution-state view; a block response's
+  `stateRoot` is `execution_root`, which is header V8 (WP-35) and does not exist yet.
+  Registering handlers that answer "not available" would put stubs in the served set,
+  which the directive forbids. The table is complete and every handler is absent, so
+  `is_served` is the only thing that says a method is reachable.
+- **`bud_getExecutionProof`.** The `eth_getProof` refusal message points at it and it is
+  not served anywhere yet. That is a live contradiction between section 8.10 rule 6 and
+  the native surface; it is recorded here rather than left for a reviewer to find.
+
+## Module-tree collisions in the open queue, measured 2026-11-06
+
+Section 15.3 item 3 gives a lock path to one package. Measured across the 52 open pull
+requests (`gh pr list --json files`, 597 distinct paths), two paths are claimed by more
+than one, and both are declared in `src/storage/bud3/mod.rs`:
+
+| Path | Claimed by | What a merge produces |
+|---|---|---|
+| `src/storage/bud3/volume.rs` | #45, #55 (WP-19), #57 (WP-21) | three `pub mod volume;` lines, or two files claiming one module |
+| `src/storage/bud3/content_ref.rs` | #45, #69 (WP-07) | the same, and the second package's `ContentRef` meaning |
+
+All three volume patches apply cleanly to `main` on their own, so no build catches this:
+the collision exists only in the queue. The fix belongs on the pull requests that own
+the paths, not on a new branch: #57 is titled for WP-21 and #55 for WP-19, and section
+15.5 requires one package per pull request, so one of them must drop the file before
+either merges. This session cannot push to those branches (each is another session's),
+so the finding is recorded here with the evidence and the fix is named.
+
+`bud3-module-claims-do-not-collide` (`xtask/gates/src/gates/bud3_module_claims.rs`) is the
+durable half of that rule: it fails when a `mod.rs` declares one module twice, declares
+one name at two visibilities, or leaves a module file that no declaration reaches. Those
+are the shapes the collisions produce once they land, and they are visible from the tree
+without asking GitHub what is open.
