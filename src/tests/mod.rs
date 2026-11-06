@@ -254,3 +254,9 @@ pub mod bud3_door;
 // counter and a volume, each built from the parts the pipeline produces.
 #[cfg(test)]
 pub mod bud3_types;
+
+// The Ethereum compatibility gateway's surface: section 8.11.2's method table,
+// the refusal of a Merkle-Patricia proof, and the bounds on a stranger's
+// filters.
+#[cfg(test)]
+pub mod eth_gateway;

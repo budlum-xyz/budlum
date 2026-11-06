@@ -1,4 +1,5 @@
 pub mod api;
+pub mod compat;
 pub mod method_class;
 pub mod server;
 pub mod subscriptions;
