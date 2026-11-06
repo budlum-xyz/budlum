@@ -19,7 +19,7 @@ Budlum's architecture names say what a thing does. Metaphor names are retired. T
 | Filiz (faucet) | `faucet` | testnet faucet | operations |
 | Kiragi, Don, Zemheri | alert level enum with the variants `Advisory`, `Restricted`, `Isolated` (exact code name in the map) | alert level 1, 2, 3 | security |
 | Mikoriza, Mycorrhiza | `shared_security` | shared security | settlement |
-| Graft, Aşı | `app_binding` | remote app binding | settlement |
+| Graft and a [Turkish alias](../config/naming/concept_map.toml) | `app_binding` | remote app binding | settlement |
 | Pollen | `data_market` | Data Market | application |
 | Budscan, BudScan | `budlum-explorer` | Budlum Explorer | application |
 | Atlas | `explorer_evidence` | explorer evidence model | application |
@@ -36,11 +36,11 @@ Budlum's architecture names say what a thing does. Metaphor names are retired. T
 | Liquid storage | `wide_stripe` | class-aware wide-stripe placement | storage |
 | Living Threshold, temperature transition | `access_tiering, TierTransition` | access tiering policy | storage |
 | Mobile Self, Server Admission | (removed) | removed; replaced by the Mobile validator class | storage |
-| Gonca, Kabuk, Kabuk-A, Kabuk-Z, Öz kökü, Mezar kümesi, Emanet açma, Gonca kanıtı | `sealed_object, ciphertext_chunks, CipherProfile::{Aead, FieldNative}, plaintext_root, deletion_set, EscrowedDisclosure, PredicateProof` | sealed object and its parts | budzero privacy |
+| Gonca, Kabuk, Kabuk-A, Kabuk-Z and [Turkish aliases](../config/naming/concept_map.toml) | `sealed_object, ciphertext_chunks, CipherProfile::{Aead, FieldNative}, plaintext_root, deletion_set, EscrowedDisclosure, PredicateProof` | sealed object and its parts | budzero privacy |
 | GT-1 | `private_transfer_v1` | Private Transfer Protocol 1 (PTP-1) | budzero privacy |
-| Anaç, Anaç kanıtı, Tek kanıt, Kök görünüm | `DomainFinalityProof, BlockAggregateProof, RemoteStateView` | domain finality proof, block aggregate proof, remote state view | budzero |
-| Fotosentez, DS-0..DS-3, BÇP, YKP, Lubot | `ai_verification, VerificationLevel, DeterministicInferenceProfile, AnswerProofBundle, on_device_assistant` | AI Verification Layer, verification level VL-0..VL-3, Deterministic Inference Profile (DIP), Answer Proof Bundle (APB), on-device assistant | ai |
-| Gövde, Gövde-RV32, govde-konuk, Cep kanıtçısı | `budzero core, budzero-rv32, budzero-guest, MobileProverProfile` | BudZero core, BudZero RV32, BudZero guest SDK, mobile prover profile | budzero |
-| Sera, Greenhouse, Floem, Phloem, Ksilem, Xylem, Genotip, Genotype, Fenotip, Phenotype, Tomurcuk, Çiçek, Meyve, Kök Sözleşmesi, Yuva, Nakil | `object_layer and Section 2.2 object layer terms` | Universal Object Layer (UOL) terms | object layer |
+| [Turkish aliases](../config/naming/concept_map.toml) | `DomainFinalityProof, BlockAggregateProof, RemoteStateView` | domain finality proof, block aggregate proof, remote state view | budzero |
+| Fotosentez, DS-0..DS-3, YKP, Lubot and a [Turkish alias](../config/naming/concept_map.toml) | `ai_verification, VerificationLevel, DeterministicInferenceProfile, AnswerProofBundle, on_device_assistant` | AI Verification Layer, verification level VL-0..VL-3, Deterministic Inference Profile (DIP), Answer Proof Bundle (APB), on-device assistant | ai |
+| govde-konuk and [Turkish aliases](../config/naming/concept_map.toml) | `budzero core, budzero-rv32, budzero-guest, MobileProverProfile` | BudZero core, BudZero RV32, BudZero guest SDK, mobile prover profile | budzero |
+| Sera, Greenhouse, Floem, Phloem, Ksilem, Xylem, Genotip, Genotype, Fenotip, Phenotype, Tomurcuk, Meyve, Yuva, Nakil and [Turkish aliases](../config/naming/concept_map.toml) | `object_layer and Section 2.2 object layer terms` | Universal Object Layer (UOL) terms | object layer |
 
 Brands and standards that stay: Budlum, BUD (token symbol), BudL, the `bud-*` crate prefix, BUD3, EVM, SVM, Move, CosmWasm, WASM, BNS, SocialFi, PoW, PoS, PoA, BFT, ZK.
