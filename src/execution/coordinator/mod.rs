@@ -3,6 +3,7 @@
 //! stateful BudZero contract execution (closing BLG-248), and worker supervision.
 
 pub mod alias;
+pub mod foreign;
 pub mod gas;
 pub mod overlay;
 pub mod scheduler;
@@ -13,6 +14,9 @@ use crate::core::account::{AccountState, BudEnvUnit};
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
 use crate::execution::coordinator::alias::derive_contract_account;
+use crate::execution::coordinator::foreign::{
+    ForeignAdmissionError, ForeignTx, VerifiedForeignOutcome,
+};
 use crate::execution::coordinator::gas::{
     effective_priority_fee_attos, next_uel_base_fee_attos, settle_uel_fee_attos, BlockBguMeter,
     UelFeeSettlement, MIN_UEL_BASE_FEE_ATTOS,
@@ -317,6 +321,22 @@ impl ExecutionCoordinator {
         &self.supervisor
     }
 
+    /// Admits and applies a foreign Compatibility Lane envelope against `state`.
+    ///
+    /// exposed for: foreign mempool lane and Compatibility Lane RPC gateways (`WP-27`..`WP-32`).
+    pub fn process_foreign_envelope(
+        &mut self,
+        state: &mut AccountState,
+        tx: &ForeignTx,
+        now_timestamp_secs: u64,
+    ) -> Result<VerifiedForeignOutcome, ForeignAdmissionError> {
+        let exec_snapshot = state.execution_state.clone();
+        let mut lane = state.execution_state.foreign_lane.clone();
+        let outcome = lane.process_foreign_tx(tx, &exec_snapshot, state, now_timestamp_secs)?;
+        state.execution_state.foreign_lane = lane;
+        Ok(outcome)
+    }
+
     /// Executes `txs` sequentially inside `ctx`, retrying the whole block up to
     /// 3 times on non-deterministic worker death without ever committing partial state.
     pub fn execute_block(
@@ -530,6 +550,7 @@ impl ExecutionCoordinator {
                 &ctx,
                 tx.ee,
                 &ee_call,
+                tx.sender,
             )?;
 
             match exec_res {
@@ -647,6 +668,7 @@ struct HostBridge<'a> {
     overlay: &'a mut TxOverlay,
     ctx: &'a BlockContext,
     tx_hash: [u8; 32],
+    root_actor: Address,
     transport_failure: Option<WorkerError>,
 }
 
@@ -658,6 +680,7 @@ fn run_ee_call(
     ctx: &BlockContext,
     ee: EeId,
     call: &EeCall,
+    root_actor: Address,
 ) -> Result<Result<EeOutcome, EeFault>, AttemptError> {
     let mut endpoint = supervisor
         .take_endpoint(ee)
@@ -669,6 +692,7 @@ fn run_ee_call(
         overlay,
         ctx,
         tx_hash: call.tx_hash,
+        root_actor,
         transport_failure: None,
     };
     let res = endpoint.execute(ctx, call, &mut bridge);
@@ -734,6 +758,7 @@ impl HostApi for HostBridge<'_> {
             self.ctx,
             call.to_ee,
             &child_call,
+            self.root_actor,
         ) {
             Ok(Ok(outcome)) => {
                 let extra = outcome
@@ -800,6 +825,11 @@ impl HostApi for HostBridge<'_> {
             .ok_or_else(|| HostError::Invalid(String::from("unsupported EE unit")))?;
         let src = resolve_identity_address(from.ee, &from.id);
         let dst = resolve_identity_address(to.ee, &to.id);
+        self.state
+            .execution_state
+            .foreign_lane
+            .authorize_holding_access(&self.root_actor, &src)
+            .map_err(|e| HostError::Denied(e.to_string()))?;
         self.overlay
             .transfer_attos(self.state, &src, &dst, attos, unit)
     }

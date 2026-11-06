@@ -305,6 +305,54 @@ fn uel_abi_watchdog_trips_the_nondeterministic_class() {
 }
 
 #[test]
+fn uel_abi_handshake_response_must_match_request_id() {
+    let path = socket_path();
+    let _ = std::fs::remove_file(&path);
+    let listener = UnixListener::bind(&path).expect("bind");
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let hello = read_frame(&mut stream).expect("hello");
+        write_frame(
+            &mut stream,
+            &pb::Envelope {
+                abi_version: ABI_VERSION,
+                request_id: hello.request_id.wrapping_add(1),
+                body: Some(pb::envelope::Body::Hello(pb::Hello { ee: 1 })),
+            },
+        )
+        .expect("mismatched hello reply");
+
+        if let Ok(request) = read_frame(&mut stream) {
+            let response = pb::ValidateDeployResponse {
+                result: Some(pb::validate_deploy_response::Result::Info(pb::CodeInfo {
+                    code_hash: vec![0; 32],
+                    abi_tag: "unexpected/1".into(),
+                })),
+            };
+            let _ = write_frame(
+                &mut stream,
+                &pb::Envelope {
+                    abi_version: ABI_VERSION,
+                    request_id: request.request_id,
+                    body: Some(pb::envelope::Body::ValidateDeployResponse(response)),
+                },
+            );
+        }
+    });
+
+    let mut client = EeClient::new(&path, EeId::EVM);
+    let error = client
+        .validate_deploy(b"x")
+        .expect_err("a response to another request is not a valid handshake");
+    assert!(matches!(
+        error,
+        TransportError::Protocol(message)
+            if message.contains("handshake response for request")
+    ));
+    assert!(!client.is_connected());
+}
+
+#[test]
 fn uel_abi_wrong_environment_is_refused() {
     let path = spawn_worker(|| MockEe::new(EeId::WASM));
     let mut client = EeClient::new(&path, EeId::EVM);

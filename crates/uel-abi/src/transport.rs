@@ -266,6 +266,12 @@ impl EeClient {
             ),
         )?;
         let reply = read_frame(&mut stream)?;
+        if reply.request_id != id {
+            return Err(TransportError::Protocol(format!(
+                "handshake response for request {} while waiting for {id}",
+                reply.request_id
+            )));
+        }
         let Some(pb::envelope::Body::Hello(hello)) = reply.body else {
             return Err(TransportError::Protocol(
                 "handshake reply is not a hello".into(),

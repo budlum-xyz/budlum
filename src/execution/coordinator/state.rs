@@ -15,6 +15,7 @@ use crate::core::hash::hash_fields_bytes;
 use crate::execution::coordinator::alias::{
     alias_storage_key, derive_alias_bytes, ALIAS_NAMESPACE,
 };
+use crate::execution::coordinator::foreign::ForeignLaneState;
 use budlum_uel_abi::EeId;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
@@ -117,6 +118,9 @@ pub struct ExecutionState {
     /// Current UEL EIP-1559 base fee in attoBUD per BGU (`0` means genesis floor).
     #[serde(default)]
     pub base_fee_per_bgu_attos: u128,
+    /// Foreign Compatibility Lane account nonces, quantum alert level, and replay window.
+    #[serde(default)]
+    pub foreign_lane: ForeignLaneState,
 }
 
 impl ExecutionState {
@@ -133,6 +137,7 @@ impl ExecutionState {
         self.namespaces.values().all(BTreeMap::is_empty)
             && self.deploy_frozen_ees.is_empty()
             && self.base_fee_per_bgu_attos == 0
+            && self.foreign_lane == ForeignLaneState::default()
     }
 
     /// Reads one raw key from a canonical UEL namespace.
