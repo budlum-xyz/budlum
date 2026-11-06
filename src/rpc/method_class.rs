@@ -66,6 +66,10 @@ const fn row(name: &'static str, listener: Listener, effect: Effect) -> MethodCl
     }
 }
 
+/// The ratchet file that records the coverage gaps TEST-GAP-07 cannot close yet.
+#[cfg(test)]
+const COVERAGE_BASELINE_PATH: &str = ".github/rpc-method-coverage-baseline.txt";
+
 /// Every method `src/rpc/api.rs` declares, in declaration order.
 const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_chainId", Public, Read),
@@ -408,6 +412,7 @@ mod tests {
 
     #[test]
     fn the_startup_check_refuses_a_gap_in_either_direction() {
+
         let all: Vec<&str> = METHOD_CLASSES.iter().map(|row| row.name).collect();
         assert!(check_served_methods(all.iter().copied()).is_ok());
 
@@ -419,5 +424,269 @@ mod tests {
         let missing = &all[1..];
         let err = check_served_methods(missing.iter().copied()).unwrap_err();
         assert!(err.contains(&format!("{} has a row", all[0])));
+    }
+
+    /// The rows the coverage ratchet reads: the method name, and whether a
+    /// success answer exists at all. A `Refused` row answers every call with a
+    /// refusal, so it has no success test to have.
+    fn coverage_targets() -> Vec<(&'static str, bool)> {
+        use super::Effect;
+        METHOD_CLASSES
+            .iter()
+            .map(|row| (row.name, row.effect != Effect::Refused))
+            .collect()
+    }
+
+    /// The RPC behaviour corpus: the test functions that answer and refuse
+    /// methods. Both files of the RPC test surface are read, so a coverage claim
+    /// is a claim about a test a reader can open.
+    fn coverage_corpus() -> Vec<(String, String)> {
+        let mut files = vec![(
+            "src/rpc/tests.rs".to_string(),
+            include_str!("tests.rs").to_string(),
+        )];
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tests");
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .expect("src/tests is the second half of the coverage corpus")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".rs"))
+            .collect();
+        names.sort();
+        for name in names {
+            let shown = format!("src/tests/{name}");
+            let text = std::fs::read_to_string(dir.join(&name))
+                .unwrap_or_else(|e| panic!("{shown} is unreadable: {e}"));
+            files.push((format!("src/tests/{name}"), text));
+        }
+        files
+    }
+
+    /// The `#[test]` and `#[tokio::test]` functions of one file: the name, and
+    /// the text from the `fn` line to the brace that closes the function.
+    fn test_functions(text: &str) -> Vec<(String, String)> {
+        let lines: Vec<&str> = text.lines().collect();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let head = lines[i].trim();
+            if head == "#[test]" || head == "#[tokio::test]" {
+                let mut j = i + 1;
+                while j < lines.len()
+                    && !lines[j].trim().starts_with("fn ")
+                    && !lines[j].trim().starts_with("async fn ")
+                {
+                    j += 1;
+                }
+                if j < lines.len() {
+                    let decl = lines[j].trim();
+                    let name: String = decl[decl.find("fn ").map_or(0, |at| at + 3)..]
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .collect();
+                    let mut body = Vec::new();
+                    let mut depth: i32 = 0;
+                    let mut opened = false;
+                    let mut k = j;
+                    while k < lines.len() {
+                        body.push(lines[k]);
+                        for ch in lines[k].chars() {
+                            match ch {
+                                '{' => {
+                                    depth += 1;
+                                    opened = true;
+                                }
+                                '}' => depth -= 1,
+                                _ => {}
+                            }
+                        }
+                        if opened && depth <= 0 {
+                            break;
+                        }
+                        k += 1;
+                    }
+                    out.push((name, body.join("\n")));
+                    i = k + 1;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// `bud_estimateGas` to `estimate_gas`: the handler name a test calls.
+    fn handler_name(method: &str) -> String {
+        let tail = method.strip_prefix("bud_").unwrap_or(method);
+        let mut out = String::with_capacity(tail.len() + 4);
+        for ch in tail.chars() {
+            if ch.is_ascii_uppercase() {
+                if !out.is_empty() {
+                    out.push('_');
+                }
+                out.push(ch.to_ascii_lowercase());
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    /// Where a test names a method: the JSON-RPC name in quotes, which a
+    /// dispatch test uses, or a call to the handler.
+    fn mention_offsets(body: &str, method: &str) -> Vec<usize> {
+        let quoted = format!("\"{method}\"");
+        let called = format!(".{}(", handler_name(method));
+        let mut hits: Vec<usize> = body
+            .match_indices(quoted.as_str())
+            .chain(body.match_indices(called.as_str()))
+            .map(|(at, _)| at)
+            .collect();
+        hits.sort_unstable();
+        hits
+    }
+
+    /// The statement that starts at `from`, to and including its next `;`. The
+    /// 400 byte cap keeps a call in a loop head from swallowing the loop body,
+    /// so a mark found here is a mark on this method's own answer.
+    fn statement_at(body: &str, from: usize) -> &str {
+        let bytes = body.as_bytes();
+        let start = from.min(bytes.len());
+        let limit = (start + 400).min(bytes.len());
+        let mut end = limit;
+        if let Some(at) = bytes[start..limit].iter().position(|b| *b == b';') {
+            end = start + at + 1;
+        }
+        while !body.is_char_boundary(end) {
+            end -= 1;
+        }
+        &body[start..end]
+    }
+
+    /// What proves that a method was answered.
+    const SUCCESS_MARKS: [&str; 3] = [".unwrap()", ".expect(", ".is_ok()"];
+    /// What proves that a method refused a call.
+    const REFUSAL_MARKS: [&str; 4] = [".is_err()", ".unwrap_err()", ".expect_err(", ".code()"];
+
+    /// The rows whose required kind of test is missing, one
+    /// `"<method> missing=<kind>"` line each, sorted so the output is stable.
+    fn missing_coverage(targets: &[(&str, bool)], tests: &[(String, String)]) -> Vec<String> {
+        let mut missing = Vec::new();
+        for (name, needs_success) in targets {
+            let mut saw_success = false;
+            let mut saw_refusal = false;
+            for (_, body) in tests {
+                for at in mention_offsets(body, name) {
+                    let statement = statement_at(body, at);
+                    saw_success |= SUCCESS_MARKS.iter().any(|mark| statement.contains(mark));
+                    saw_refusal |= REFUSAL_MARKS.iter().any(|mark| statement.contains(mark));
+                }
+            }
+            if !saw_refusal {
+                missing.push(format!("{name} missing=refusal"));
+            }
+            if *needs_success && !saw_success {
+                missing.push(format!("{name} missing=success"));
+            }
+        }
+        missing.sort();
+        missing
+    }
+
+    /// The recorded gaps, one line each. Comments and blanks are dropped.
+    fn read_coverage_baseline() -> Vec<String> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(COVERAGE_BASELINE_PATH);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} must exist: {e}", path.display()));
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// TEST-GAP-07. Every row of the table has a test that answers it and a test
+    /// that refuses it, except a `Refused` row, which has no success answer to
+    /// give. The gaps this delivery cannot close are recorded in the baseline
+    /// file, and that file is a ratchet in the same shape as the concept-name
+    /// counter: a row that gains its test must leave the file in the same change,
+    /// so the only way to keep this green is to write tests.
+    ///
+    /// The rule is a coverage rule, not a proof. It reads whether a test calls
+    /// the method and asserts on the answer; what each assertion establishes is
+    /// the review of the test itself, and the directive's closure protocol
+    /// (section 14.1 item 5) is where a finding is argued.
+    #[test]
+    fn rpc_every_method_has_success_and_refusal_test() {
+        let corpus = coverage_corpus();
+        let tests: Vec<(String, String)> = corpus
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .flat_map(test_functions)
+            .collect();
+        assert!(
+            tests.len() > 400,
+            "the corpus scan found {} test functions; it is reading the wrong text",
+            tests.len()
+        );
+        let missing = missing_coverage(&coverage_targets(), &tests);
+        let baseline = read_coverage_baseline();
+        let missing_set: BTreeSet<&str> = missing.iter().map(String::as_str).collect();
+        let baseline_set: BTreeSet<&str> = baseline.iter().map(String::as_str).collect();
+        let path = COVERAGE_BASELINE_PATH;
+        for line in &baseline {
+            assert!(
+                missing_set.contains(line.as_str()),
+                "{line} is recorded as a gap but is covered now: delete the line from {path} \
+                 in the same change"
+            );
+        }
+        for line in &missing {
+            assert!(
+                !baseline_set.contains(line.as_str()),
+                "{line} has neither a test nor a recorded gap: write the test, or record the \
+                 gap in {path} with a reason"
+            );
+        }
+    }
+
+    /// The ratchet's own canary. A row that loses its refusal test is reported,
+    /// a `Refused` row is not asked for a success test, and a mark sitting on a
+    /// different statement covers nothing.
+    #[test]
+    fn rpc_method_coverage_catches_an_injected_gap() {
+        let tests = vec![
+            (
+                "both_kinds".to_string(),
+                "let ok = server.bns_resolve(name).await.unwrap();\n\
+                 let bad = server.bns_resolve(bad_name).await.unwrap_err();"
+                    .to_string(),
+            ),
+            (
+                "success_only".to_string(),
+                "let v = server.bns_resolve_full(n).await.unwrap();".to_string(),
+            ),
+            (
+                "wrong_statement".to_string(),
+                "let other = server.node_info().await.unwrap();\n\
+                 let refused = server.bns_resolve_content(n).await;"
+                    .to_string(),
+            ),
+        ];
+        let targets = [
+            ("bud_bnsResolve", true),
+            ("bud_bnsResolveFull", true),
+            ("bud_bnsResolveContent", true),
+            ("bud_registerBridgeAsset", false),
+        ];
+        assert_eq!(
+            missing_coverage(&targets, &tests),
+            vec![
+                "bud_bnsResolveContent missing=refusal".to_string(),
+                "bud_bnsResolveContent missing=success".to_string(),
+                "bud_bnsResolveFull missing=refusal".to_string(),
+                "bud_registerBridgeAsset missing=refusal".to_string(),
+            ]
+        );
     }
 }

@@ -177,8 +177,7 @@ mod tests {
 
     #[test]
     fn keypair_signer_advertises_bls_pq_capabilities_only_when_bound() {
-        let keypair = KeyPair::generate().expect("ed25519 key");
-        let signer = KeyPairSigner::new(keypair.clone());
+        let signer = KeyPairSigner::new(KeyPair::generate().expect("ed25519 key"));
         assert!(!signer.has_bls_key());
         assert!(!signer.has_pq_key());
         assert!(signer.bls_public_key().is_none());
