@@ -68,7 +68,7 @@ impl Policy {
     ///
     /// [`CoreError`] when the quota is outside 1 GiB..64 GiB.
     pub fn set_quota(&mut self, quota_bytes: u64) -> Result<(), CoreError> {
-        if quota_bytes < QUOTA_MIN_BYTES || quota_bytes > QUOTA_MAX_BYTES {
+        if !(QUOTA_MIN_BYTES..=QUOTA_MAX_BYTES).contains(&quota_bytes) {
             return Err(CoreError::new(
                 "mobile_quota_out_of_range",
                 "a mobile quota is 1 GiB to 64 GiB",
