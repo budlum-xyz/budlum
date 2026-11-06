@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Budlum Doğrulayıcı</string>
+    <string name="channel_service_name">Doğrulayıcı hizmeti</string>
+    <string name="channel_alerts_name">Doğrulayıcı uyarıları</string>
+    <string name="notification_service_title">Budlum doğrulayıcı çalışıyor</string>
+    <string name="notification_service_text">Saklanan: %1$d bayt · Son denetim: %2$s · %3$s</string>
+    <string name="notification_boot_title">Budlum doğrulayıcı duraklatıldı</string>
+    <string name="notification_boot_text">Doğrulayıcı hizmetini sürdürmek için uygulamayı yeniden açın. Arka plan denetimleri otomatik devam eder.</string>
+    <string name="state_connected">bağlı</string>
+    <string name="state_disconnected">bağlantı yok</string>
+    <string name="audit_result_none_yet">henüz yok</string>
+    <string name="disclosure_registration">Telefonunuz içerik parçaları saklar. Bu parçalar tek başına içeriği açmaz. Genel içerik herkesin içeriğidir; mühürlü içerik şifrelidir.</string>
+    <string name="security_tradeoff">İşletmeci anahtarı bu cihazda Android Keystore ile sarılı olarak saklanır (varsa StrongBox kullanılır). Arka planda kullanıcı doğrulaması olmadan kullanılabilir; bu nedenle kilidi açık cihazı ele geçiren biri görev işlemleri imzalayabilir ama stake\'inizi harcayamaz. Cihazı kaybederseniz başka bir cihazdaki cüzdanınızdan RotateOperatorKey gönderin.</string>
+</resources>
