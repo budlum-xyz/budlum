@@ -102,6 +102,11 @@ pub struct AssetClass {
     /// The reference samples the class registered with, kept so a rebuttal can
     /// be measured against them (Section 9.3.5 item 3). `sample_commitment` is
     /// their hash; the samples themselves are what the rule executes.
+    ///
+    /// `serde(default)`: a snapshot written before this field existed loads
+    /// with no samples, and a class with no samples cannot be rebutted, so the
+    /// challenge against it stands rather than passing by absence.
+    #[serde(default)]
     pub reference_samples: Vec<ReferenceSample>,
 }
 
@@ -176,7 +181,17 @@ pub struct ObjectLayerParams {
     /// settles it (Section 9.3.5 item 3). TESTNET-DEFAULT: 100, the same
     /// window the AI verification layer uses for its 1 % sampling
     /// (Section 10.6, KR-27).
+    ///
+    /// `serde(default)`: a snapshot written before this field existed takes
+    /// the testnet default rather than a zero window, which would settle every
+    /// challenge in the block it opened.
+    #[serde(default = "default_challenge_window")]
     pub challenge_window: u64,
+}
+
+/// The serde fallback for [`ObjectLayerParams::challenge_window`].
+fn default_challenge_window() -> u64 {
+    DEFAULT_CHALLENGE_WINDOW
 }
 
 impl Default for ObjectLayerParams {
