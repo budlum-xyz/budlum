@@ -1,12 +1,16 @@
 //! The node-health layer: the caller that decides *when* a node reverts.
 //!
 //! WIRING: wired - the production caller is the node runtime's health tick,
+<<<<<<<< HEAD:src/chain/state_recovery/regen_health.rs
 //! `crate::chain::state_recovery::regen_health_tick`, which `Node::run` drives once per
+========
+//! `crate::chain::state_recovery::tick`, which `Node::run` drives once per
+>>>>>>>> refs/pr/11:src/chain/state_recovery/health.rs
 //! finality beat and which executes the verdict through the ledger. The rules
 //! are pinned by this file's tests, the chaos acceptance suite, and the
-//! `regen-health-door` gate.
+//! `state-recovery-door` gate.
 //!
-//! `regeneration_stage` holds the reversion ledger and every rule that makes
+//! `stage` holds the reversion ledger and every rule that makes
 //! reversion safe, and it said so in its own header: the ledger is driven by
 //! a node-health layer that did not exist. This module is that layer. It owns
 //! exactly one decision class - given what the node currently holds and what
@@ -52,14 +56,18 @@
 //! tampering. This module answers all three through one observation: each of
 //! them ultimately presents as a commitment that diverges from the canonical
 //! source - corrupt state recomputes to a wrong commitment, an incompatible
-//! artifact fails the regeneration pact upstream and lands here as damage,
+//! artifact fails the artifact reproduction pact upstream and lands here as damage,
 //! and a tampered network view cannot match a canonical commitment by
 //! construction. The canonicality check is the single tripwire; the verdict
 //! ladder is what keeps the response proportionate.
 
 use serde::{Deserialize, Serialize};
 
+<<<<<<<< HEAD:src/chain/state_recovery/regen_health.rs
 use super::regeneration_stage::{
+========
+use crate::chain::state_recovery::stage::{
+>>>>>>>> refs/pr/11:src/chain/state_recovery/health.rs
     reversion_beats_repair, RecoveryLedger, ReversionPolicy, Stage, StageSnapshot, Stress,
 };
 
@@ -100,10 +108,10 @@ impl AlarmReason {
     #[must_use]
     pub fn kind(&self) -> &'static str {
         match self {
-            Self::AuditTrailCorrupt { .. } => "regen-alarm-audit-trail-corrupt",
-            Self::NoCanonicalSource { .. } => "regen-alarm-no-canonical-source",
-            Self::ReversionBudgetExhausted { .. } => "regen-alarm-budget-exhausted",
-            Self::FullReversionForbidden { .. } => "regen-alarm-full-reversion-forbidden",
+            Self::AuditTrailCorrupt { .. } => "recovery-alarm-audit-trail-corrupt",
+            Self::NoCanonicalSource { .. } => "recovery-alarm-no-canonical-source",
+            Self::ReversionBudgetExhausted { .. } => "recovery-alarm-budget-exhausted",
+            Self::FullReversionForbidden { .. } => "recovery-alarm-full-reversion-forbidden",
         }
     }
 }
@@ -116,7 +124,7 @@ pub enum HealthVerdict {
     Healthy,
     /// Damage exists but repair is cheaper than reversion by the configured
     /// ratio. Recorded rather than executed - the repair path is the
-    /// artifact-level regeneration layer, not this module.
+    /// artifact-level reproduction layer, not this module.
     RepairRecommended {
         /// Which stress class the assessment observed.
         stress: Stress,
@@ -361,7 +369,11 @@ pub fn assess(
 #[cfg(test)]
 mod tests {
     use super::*;
+<<<<<<<< HEAD:src/chain/state_recovery/regen_health.rs
     use crate::chain::state_recovery::regeneration_stage::Transdifferentiated;
+========
+    use crate::chain::state_recovery::stage::Transdifferentiated;
+>>>>>>>> refs/pr/11:src/chain/state_recovery/health.rs
 
     const C_POLYP: [u8; 32] = [0xA1; 32];
     const C_EPHYRA: [u8; 32] = [0xB2; 32];
@@ -464,7 +476,7 @@ mod tests {
         );
         match v {
             HealthVerdict::Alarm { reason, .. } => {
-                assert_eq!(reason.kind(), "regen-alarm-no-canonical-source");
+                assert_eq!(reason.kind(), "recovery-alarm-no-canonical-source");
             }
             other => panic!("expected Alarm, got {other:?}"),
         }
@@ -479,7 +491,7 @@ mod tests {
         let v = assess(&ledger, &tight, &canonical, &stage_height, 1000, 10);
         match v {
             HealthVerdict::Alarm { reason, stress } => {
-                assert_eq!(reason.kind(), "regen-alarm-budget-exhausted");
+                assert_eq!(reason.kind(), "recovery-alarm-budget-exhausted");
                 assert_eq!(stress, Some(Stress::Divergence));
             }
             other => panic!("expected Alarm, got {other:?}"),
@@ -514,7 +526,7 @@ mod tests {
         assert_ne!(v, HealthVerdict::Healthy);
         match v {
             HealthVerdict::Alarm { reason, .. } => {
-                assert_eq!(reason.kind(), "regen-alarm-full-reversion-forbidden");
+                assert_eq!(reason.kind(), "recovery-alarm-full-reversion-forbidden");
             }
             other => panic!("expected Alarm, got {other:?}"),
         }
@@ -541,7 +553,11 @@ mod tests {
         let mut forged = ledger.clone();
         forged
             .reversion_events
+<<<<<<<< HEAD:src/chain/state_recovery/regen_health.rs
             .push(crate::chain::state_recovery::regeneration_stage::Reversion {
+========
+            .push(crate::chain::state_recovery::stage::Reversion {
+>>>>>>>> refs/pr/11:src/chain/state_recovery/health.rs
                 from: Stage::Medusa,
                 to: Stage::Ephyra,
                 stress: Stress::Divergence,
@@ -582,14 +598,14 @@ mod tests {
                 limit: 4
             }
             .kind(),
-            "regen-alarm-budget-exhausted"
+            "recovery-alarm-budget-exhausted"
         );
         assert_eq!(
             AlarmReason::AuditTrailCorrupt {
                 rule: "x".to_string()
             }
             .kind(),
-            "regen-alarm-audit-trail-corrupt"
+            "recovery-alarm-audit-trail-corrupt"
         );
     }
 }

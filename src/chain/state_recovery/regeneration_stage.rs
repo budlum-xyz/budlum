@@ -1,11 +1,15 @@
 //! Stage reversion: what a node does when in-place repair cannot save it.
 //!
 //! WIRING: the reversion ledger is driven by the node-health layer at
-//! [`super::regen_health`], which decides *when* a node reverts against the
+//! [`super::health`], which decides *when* a node reverts against the
 //! canonical commitment source. The node runtime's health tick,
+<<<<<<<< HEAD:src/chain/state_recovery/regeneration_stage.rs
 //! `crate::chain::state_recovery::regen_health_tick`, calls `assess` once per finality beat
+========
+//! `crate::chain::state_recovery::tick`, calls `assess` once per finality beat
+>>>>>>>> refs/pr/11:src/chain/state_recovery/stage.rs
 //! and executes the verdict here. Rules stay pinned by this module's tests and
-//! by `regen_health`'s.
+//! by `health`'s.
 //!
 //! # The biological model, and why it is not decoration
 //!
@@ -28,9 +32,13 @@
 //!    expensive enough that nodes would avoid it - which is how a node ends up
 //!    limping on with corrupt state instead.
 //!
-//! # What this adds to the regeneration layer
+//! # What this adds to the state recovery layer
 //!
+<<<<<<<< HEAD:src/chain/state_recovery/regeneration_stage.rs
 //! The removed artifact-repair layer (gone with the legacy removal) did
+========
+//! The existing artifact reproduction layer (`bud/src/bud_format_regeneration.rs`) does
+>>>>>>>> refs/pr/11:src/chain/state_recovery/stage.rs
 //! something different and complementary: given a damaged *input*, it
 //! regenerated the canonical bytes and refused to let a divergent version be
 //! published. That was repair at the level of one artifact.
@@ -167,7 +175,7 @@ pub struct Transdifferentiated {
     pub records_refiled: u64,
     /// Classical-family proofs about heights at or below the target. They are
     /// not reusable: their soundness rests on an assumption a quantum computer
-    /// breaks, so regeneration re-derives them from the post-quantum stage
+    /// breaks, so recovery re-derives them from the post-quantum stage
     /// instead of trusting them.
     #[serde(default)]
     pub proofs_classical_rederive: u64,
@@ -188,7 +196,7 @@ impl ProofFamily {
     /// the table does not list is classical: an unknown scheme earns no
     /// trust.
     #[must_use]
-    /// WIRING: the scheme-aware repair assessment consumes this - the production caller lands with the regen-health wiring.
+    /// WIRING: the scheme-aware repair assessment consumes this - the production caller lands with the state-recovery wiring.
     pub fn of_scheme(scheme: SchemeId) -> Self {
         match scheme.info().map(|info| info.family) {
             Some(
@@ -240,7 +248,7 @@ impl Transdifferentiated {
 /// `ledger_height`: only a post-quantum proof about a height the ledger still
 /// holds. A classical proof is never used directly.
 #[must_use]
-/// WIRING: the repair verdict consumes this after a reversion - the production caller lands with the regen-health wiring.
+/// WIRING: the repair verdict consumes this after a reversion - the production caller lands with the state-recovery wiring.
 pub fn proof_usable_after_reversion(
     family: ProofFamily,
     proof_height: u64,
@@ -256,7 +264,7 @@ pub fn proof_usable_after_reversion(
 pub enum Stress {
     /// The node's view diverged from the canonical one.
     Divergence,
-    /// In-place regeneration failed to restore a canonical artifact.
+    /// In-place recovery failed to restore a canonical artifact.
     RepairFailed,
     /// The node cannot serve the heights it claims: data missing, not corrupt.
     Starvation,
@@ -336,7 +344,7 @@ pub enum ReversionError {
     InvalidPolicy { rule: &'static str },
     /// The serialized ledger is internally inconsistent and must not be used
     /// as a recovery starting point.
-    #[error("invalid regeneration ledger: {rule}")]
+    #[error("invalid recovery ledger: {rule}")]
     InvalidLedger { rule: &'static str },
     /// The target stage is not earlier than the current one. Re-growth is a
     /// different operation and is not this one.
@@ -754,7 +762,7 @@ impl RecoveryLedger {
     /// right answer, because anything shallower than necessary is re-growth
     /// nobody asked for and anything deeper leaves the damage in place.
     #[must_use]
-    /// WIRING: wired through [`super::regen_health::assess`], which calls
+    /// WIRING: wired through [`super::health::assess`], which calls
     /// this with the caller's snapshot table, and the node runtime's health
     /// tick calls `assess`. The selection rule is pinned here by tests.
     pub fn cheapest_target(
@@ -792,8 +800,8 @@ fn saturating_event_count(len: usize) -> u32 {
 
 /// Whether a reversion is cheaper than repairing in place.
 ///
-/// The regeneration layer already has the analogous question for artifacts
-/// (`regeneration_beats_proof`): produce rather than prove when producing is
+/// The artifact reproduction layer already has the analogous question
+/// (produce rather than prove when producing is
 /// more than a hundred times cheaper. The same shape applies one level up. If
 /// re-growing from an earlier stage costs less than the repair would, revert;
 /// if not, repair. Without this comparison a node reverts on principle and pays
@@ -810,7 +818,7 @@ fn saturating_event_count(len: usize) -> u32 {
 /// repair to be an order of magnitude more expensive before heights are given
 /// up.
 #[must_use]
-/// WIRING: wired through [`super::regen_health::assess`], which prices the
+/// WIRING: wired through [`super::health::assess`], which prices the
 /// converged decision, and the node runtime's health tick calls `assess`.
 /// The economics are pinned here by tests.
 pub fn reversion_beats_repair(

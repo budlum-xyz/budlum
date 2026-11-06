@@ -918,7 +918,7 @@ impl ChainHandle {
     }
 
     /// The commitment this node holds and the post-quantum canonical
-    /// commitment with its seal, for one regeneration stage and height.
+    /// commitment with its seal, for one recovery stage and height.
     pub async fn pq_stage_observation(
         &self,
         stage: crate::chain::state_recovery::regeneration_stage::Stage,

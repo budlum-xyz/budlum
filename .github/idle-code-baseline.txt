@@ -979,6 +979,13 @@ src/sharding/mod.rs	fn	shard_state_root
 src/sharding/mod.rs	fn	tx_destination_shard
 src/sharding/mod.rs	fn	tx_source_shard
 src/sharding/mod.rs	struct	ShardId
+src/persistence/db.rs	fn	apply_migrations
+src/persistence/db.rs	fn	put_content
+src/persistence/db.rs	fn	recover_interrupted_commit
+src/persistence/state_trie.rs	fn	bulk_insert
+src/persistence/state_trie.rs	fn	root_ref
+src/persistence/pruning.rs	fn	archive_node_default
+src/persistence/pruning.rs	fn	full_node_default
 src/tokenomics/mod.rs	const	BUD_DECIMALS
 src/tokenomics/mod.rs	enum	Allocation
 src/tokenomics/mod.rs	fn	address_of

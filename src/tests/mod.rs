@@ -266,3 +266,8 @@ pub mod audit_lane_c;
 // Lane D live-audit regression evidence (WP-04).
 #[cfg(test)]
 pub mod audit_lane_d;
+
+// The persistence move is behaviour-neutral.
+#[cfg(test)]
+pub mod persistence_move;
+

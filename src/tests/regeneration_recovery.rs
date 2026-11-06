@@ -1,4 +1,4 @@
-//! Chaos acceptance for the regeneration layer (decision record 2026-09-17,
+//! Chaos acceptance for the state recovery layer (decision record 2026-09-17,
 //! item 12): a node that suffers damage must re-enter serving from a
 //! canonical stage within N blocks, never from a state it invented.
 //!
@@ -19,6 +19,7 @@
 
 use crate::chain::state_recovery::regen_health::{assess, HealthPolicy, HealthVerdict};
 use crate::chain::state_recovery::regeneration_stage::{
+
     RecoveryLedger, Reversion, Stage, StageSnapshot, Stress, Transdifferentiated,
 };
 

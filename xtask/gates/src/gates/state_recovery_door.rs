@@ -30,6 +30,7 @@ const STAGE_RS: &str = "src/chain/state_recovery/regeneration_stage.rs";
 const HEALTH_RS: &str = "src/chain/state_recovery/regen_health.rs";
 const CHAOS_RS: &str = "src/tests/regeneration_recovery.rs";
 
+
 /// The decision-order tokens inside `assess`, in the required order. Each is
 /// a code token (not a comment), so rewording prose cannot weaken the pin.
 const ASSESS_ORDER: &[&str] = &[
@@ -116,9 +117,9 @@ fn is_live_test(src: &str, name: &str) -> bool {
 
 /// The whole check, factored out so `self_test` can feed it tampered copies.
 fn probe(mod_rs: &str, stage: &str, health: &str, chaos: &str, problems: &mut Vec<String>) {
-    if !declares_module(mod_rs, "pub mod regen_health;") {
+    if !declares_module(mod_rs, "pub mod state_recovery;") {
         problems.push(format!(
-            "{MOD_RS}: regen_health no longer declared - the health layer was removed silently"
+            "{MOD_RS}: state_recovery no longer declared - the health layer was removed silently"
         ));
     }
     if stage.contains("WIRING: unwired") {
@@ -289,7 +290,7 @@ fn self_test_late(
     }
     {
         let mut p: Vec<String> = Vec::new();
-        let gated = "#[cfg(any())]\npub mod regen_health;\n";
+        let gated = "#[cfg(any())]\npub mod state_recovery;\n";
         probe(gated, good_stage, good_health, good_chaos, &mut p);
         if p.is_empty() {
             problems.push("canary failed: a gated module declaration not caught".into());
@@ -298,7 +299,7 @@ fn self_test_late(
 }
 
 pub fn self_test() -> Result<String, String> {
-    let good_mod = "pub mod regen_health;\npub mod regeneration_stage;\n";
+    let good_mod = "pub mod state_recovery;\n";
     let good_stage = concat!(
         "pub fn revert_after_forgery( self ) ReversionError::LedgerIsValid ",
         "ForgedTrailTargetNotPolyp { to } wired through the health layer"
@@ -325,7 +326,7 @@ pub fn self_test() -> Result<String, String> {
     {
         let mut p: Vec<String> = Vec::new();
         probe(
-            "pub mod regeneration_stage;\n",
+            "pub mod blockchain;\n",
             good_stage,
             good_health,
             good_chaos,
