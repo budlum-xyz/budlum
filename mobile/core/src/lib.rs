@@ -247,6 +247,7 @@ mod tests {
         let released = core.release_for_floor().expect("release");
         assert!(matches!(released, DutyTx::ReleaseShares { .. }));
         assert_eq!(core.status().stored_bytes, 0);
+        assert_eq!(core.policy().quota_bytes, QUOTA_MIN_BYTES);
         assert!(core.available_bytes() >= FREE_SPACE_FLOOR_BYTES);
         // After the floor fire, a new share is refused until space returns.
         core.set_available_bytes(FREE_SPACE_FLOOR_BYTES - 1);
