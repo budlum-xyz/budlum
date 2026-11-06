@@ -14,8 +14,9 @@
 - The `concept-names` gate (`xtask/gates/src/gates/concept_names.rs`, run by `budlum-gates --all` in the CI job `Gates`) searches `src`, `crates`, `budzero`, `execution`, `mobile`, `xtask`, `docs`, `config`, `proto` and `contracts`. Files under `global_allow_paths` (the map itself, this file, `docs/audit/`, the baseline) are skipped, and so are an entry's `allow_paths`.
 - `mode = "count"` (now): per entry, the number of files and of matches must equal `.github/concept-names-baseline.txt`. A rise fails CI. A fall also fails until the baseline is lowered, so the numbers only decrease. Lower it with `BUDLUM_CONCEPT_NAMES_WRITE=1 cargo run --release --manifest-path xtask/gates/Cargo.toml -- concept-names`; the writer refuses to raise any number.
 - `mode = "absolute"` (set once every count is zero): any match fails.
+- Every entry names the package that owns the rename (`owner`, a `WP-NN` id). The gate refuses an entry with no owner or with an owner that is not a package id, so a name cannot be recorded without someone responsible for retiring it. An entry with no owner is a rename nobody would carry out.
 - Every rename lowers the baseline in the same pull request.
-- A newly found legacy name gets an entry in the map.
+- A newly found legacy name gets an entry in the map, with its owner.
 
 ## Entries
 
@@ -28,7 +29,7 @@
 | Graft, Aşı | `app_binding` | remote app binding | settlement | WP-44 |
 | Pollen | `data_market` | Data Market | application | WP-23 |
 | Budscan, BudScan | `budlum-explorer` | Budlum Explorer | application | WP-40 |
-| Atlas | `explorer_evidence` | explorer evidence model | application | WP-40 |
+| Atlas | `explorer_evidence` | explorer evidence model | application | WP-23 |
 | D-Web Passport | `identity_profile` | identity profile | application | WP-23 |
 | Vault (SocialFi) | `nft_folders` | NFT folders | application | WP-23 |
 | DeEd | `education_domain` | education domain | application | WP-23 |

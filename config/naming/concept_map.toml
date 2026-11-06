@@ -1,10 +1,13 @@
 schema = 1
-mode = "count"            # WP-43 sets "absolute" at the end of T-Launch
+mode = "count"            # WP-43 sets "absolute" at the end of T-Launch (once every count is zero)
 global_allow_paths = [
   "config/naming/",
   "docs/NAMING.md",
   "docs/audit/",
   ".github/concept-names-baseline.txt",
+  # The gate that forbids the B.U.D. 3.0 phrases has to write the Turkish form
+  # of each phrase in its list: the list IS what it bans. It is not prose.
+  "xtask/gates/src/gates/bud3_forbidden_phrases.rs",
 ]
 
 [[concept]]
@@ -50,6 +53,7 @@ new_code = "shared_security"
 term_en = "shared security"
 term_tr = "Paylaşılan güvenlik"
 area = "settlement"
+owner = "WP-44"
 reason = "Standard industry term."
 owner = "WP-44"
 
@@ -60,6 +64,7 @@ new_code = "app_binding"
 term_en = "remote app binding"
 term_tr = "Uzak Uygulama Bağı"
 area = "settlement"
+owner = "WP-44"
 reason = "The name states the function."
 owner = "WP-44"
 
@@ -70,16 +75,41 @@ new_code = "data_market"
 term_en = "Data Market"
 term_tr = "Veri Pazarı"
 area = "application"
+owner = "WP-23"
 reason = "The name states the function."
 owner = "WP-23"
 
 [[concept]]
 old = ["Budscan", "BudScan"]
 patterns = ['(?i)budscan']
+# The rename moves the crate, the patch layer, the browser build configuration
+# and every gate that reads those files by name. Those paths ARE the name, so
+# renaming them is the package's own path move; this entry does not count them
+# as prose that still has to be translated. Also here: the design record, an
+# RPC origin example in a test, and a test that reads the crate by path.
+allow_paths = [
+  "crates/budscan/",
+  "xtask/gates/src/gates/budscan_",
+  "xtask/gates/pins/",
+  "xtask/gates/tests/repository_locks.rs",
+  # The gate binary's module table and the gates beside the two named above.
+  "xtask/gates/src/main.rs",
+  "xtask/gates/src/gates/geiger.rs",
+  "xtask/gates/src/gates/lock_failures.rs",
+  "xtask/gates/src/gates/suppressions_are_justified.rs",
+  # The gate that reports Turkish must not report its own exemption table.
+  "xtask/gates/src/gates/tree_is_english.rs",
+  "docs/ARCHITECTURE.md",
+  "docs/CONTRIBUTING.md",
+  "src/storage/manifest.rs",
+  "src/tests/regression_ops_crypto.rs",
+  "src/rpc/server.rs",
+]
 new_code = "budlum-explorer"
 term_en = "Budlum Explorer"
 term_tr = "Budlum Gezgini"
 area = "application"
+owner = "WP-40"
 reason = "Standard industry term."
 owner = "WP-40"
 allow_paths = ["xtask/gates/tests/repository_locks.rs"]
@@ -92,6 +122,7 @@ new_code = "explorer_evidence"
 term_en = "explorer evidence model"
 term_tr = "Gezgin kanıt modeli"
 area = "application"
+owner = "WP-23"
 reason = "The name states the function."
 owner = "WP-40"
 
@@ -103,6 +134,7 @@ new_code = "identity_profile"
 term_en = "identity profile"
 term_tr = "Kimlik profili"
 area = "application"
+owner = "WP-23"
 reason = "The name states the function."
 owner = "WP-23"
 
@@ -114,6 +146,7 @@ new_code = "nft_folders"
 term_en = "NFT folders"
 term_tr = "NFT klasörleri"
 area = "application"
+owner = "WP-23"
 reason = "The name states the function."
 owner = "WP-23"
 
@@ -124,6 +157,7 @@ new_code = "education_domain"
 term_en = "education domain"
 term_tr = "Eğitim domaini"
 area = "application"
+owner = "WP-23"
 reason = "The name states the function."
 owner = "WP-23"
 
@@ -134,6 +168,7 @@ new_code = "app_registry"
 term_en = "app registry"
 term_tr = "Uygulama kaydı"
 area = "application"
+owner = "WP-23"
 reason = "The name states the function."
 owner = "WP-23"
 
@@ -144,6 +179,7 @@ new_code = "project_manifest"
 term_en = "project manifest"
 term_tr = "Proje bildirimi"
 area = "tooling"
+owner = "WP-39"
 reason = "The name states the function."
 owner = "WP-39"
 
@@ -154,6 +190,7 @@ new_code = "content_gateway"
 term_en = "content gateway"
 term_tr = "İçerik ağ geçidi"
 area = "storage"
+owner = "WP-23"
 reason = "The name states the function."
 owner = "WP-23"
 
@@ -164,6 +201,7 @@ new_code = "state_recovery"
 term_en = "node state recovery"
 term_tr = "Düğüm durum kurtarma"
 area = "node"
+owner = "WP-06"
 reason = "Standard industry term."
 owner = "WP-06"
 
@@ -174,6 +212,7 @@ new_code = "sigagg (crate bud-sigagg)"
 term_en = "signature aggregation proof"
 term_tr = "İmza toplama kanıtı"
 area = "budzero"
+owner = "WP-33"
 reason = "The name states the function."
 owner = "WP-33"
 allow_paths = ["xtask/gates/src/gates/module_coverage.rs"]
@@ -185,9 +224,12 @@ new_code = "bud3::Object, ObjectCommitment, bof1"
 term_en = "B.U.D. 3.0 object, object commitment, BUD3 Object Format 1 (BOF-1)"
 term_tr = "B.U.D. 3.0 nesnesi, nesne taahhüdü, BOF-1"
 area = "storage"
+owner = "WP-19"
 reason = "One storage object, one term."
 owner = "WP-19"
-allow_paths = ["mobile/android/fdroid/", "xtask/gates/src/gates/bud3_forbidden_phrases.rs"]
+# The design record states what was decided in the vocabulary of the day; WP-19
+# retires the living name, not the record of it.
+allow_paths = ["mobile/android/fdroid/", "docs/ARCHITECTURE.md", "xtask/gates/src/gates/bud3_forbidden_phrases.rs"]
 
 [[concept]]
 old = ["three_* modules"]
@@ -196,6 +238,7 @@ new_code = "src/storage/bud3/*"
 term_en = "bud3 modules"
 term_tr = "bud3 modülleri"
 area = "storage"
+owner = "WP-21"
 reason = "One implementation of B.U.D. 3.0."
 owner = "WP-21"
 
@@ -206,6 +249,7 @@ new_code = "wide_stripe"
 term_en = "class-aware wide-stripe placement"
 term_tr = "Geniş şeritli yerleşim"
 area = "storage"
+owner = "WP-20"
 reason = "Standard industry term."
 owner = "WP-20"
 
@@ -216,6 +260,7 @@ new_code = "access_tiering, TierTransition"
 term_en = "access tiering policy"
 term_tr = "Erişim katmanı politikası"
 area = "storage"
+owner = "WP-24"
 reason = "Standard industry term."
 owner = "WP-24"
 
@@ -226,6 +271,7 @@ new_code = "(removed)"
 term_en = "removed; replaced by the Mobile validator class"
 term_tr = "Kaldırılır; yerine Mobil doğrulayıcı sınıfı"
 area = "storage"
+owner = "WP-07"
 reason = "B.U.D. 1.0 model is removed."
 owner = "WP-07"
 
@@ -236,6 +282,7 @@ new_code = "sealed_object, ciphertext_chunks, CipherProfile::{Aead, FieldNative}
 term_en = "sealed object and its parts"
 term_tr = "Mühürlü nesne ve parçaları"
 area = "budzero privacy"
+owner = "WP-56"
 reason = "Standard cryptographic terms."
 owner = "WP-22"
 
@@ -246,6 +293,7 @@ new_code = "private_transfer_v1"
 term_en = "Private Transfer Protocol 1 (PTP-1)"
 term_tr = "Gizli Transfer Protokolü 1 (PTP-1)"
 area = "budzero privacy"
+owner = "WP-56"
 reason = "The name states the function."
 owner = "WP-56"
 
@@ -256,6 +304,7 @@ new_code = "DomainFinalityProof, BlockAggregateProof, RemoteStateView"
 term_en = "domain finality proof, block aggregate proof, remote state view"
 term_tr = "Domain kesinlik kanıtı, blok toplu kanıtı, uzak durum görünümü"
 area = "budzero"
+owner = "WP-60"
 reason = "The names state the function."
 owner = "WP-60"
 
@@ -266,6 +315,7 @@ new_code = "ai_verification, VerificationLevel, DeterministicInferenceProfile, A
 term_en = "AI Verification Layer, verification level VL-0..VL-3, Deterministic Inference Profile (DIP), Answer Proof Bundle (APB), on-device assistant"
 term_tr = "AI Doğrulama Katmanı, VL-0 ile VL-3, DIP, APB, cihaz içi asistan"
 area = "ai"
+owner = "WP-45"
 reason = "The names state the function."
 owner = "WP-45"
 allow_paths = ["xtask/gates/src/gates/no_upstream_brands.rs", ".quality/typos.toml"]
@@ -277,6 +327,7 @@ new_code = "budzero core, budzero-rv32, budzero-guest, MobileProverProfile"
 term_en = "BudZero core, BudZero RV32, BudZero guest SDK, mobile prover profile"
 term_tr = "BudZero çekirdeği, BudZero RV32, BudZero konuk SDK, mobil kanıtlayıcı profili"
 area = "budzero"
+owner = "WP-56"
 reason = "BudZero is the concept term."
 owner = "WP-33"
 allow_paths = ["xtask/gates/src/gates/bud3_forbidden_phrases.rs"]
@@ -288,5 +339,6 @@ new_code = "object_layer and Section 2.2 object layer terms"
 term_en = "Universal Object Layer (UOL) terms"
 term_tr = "Evrensel Nesne Katmanı (UOL) terimleri"
 area = "object layer"
+owner = "WP-49"
 reason = "Professional terms replace metaphors."
 owner = "WP-49"
