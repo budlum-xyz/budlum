@@ -602,7 +602,8 @@ fn bud3_shape_is_stable_across_profiles() {
     let narrow = round_trip_shape(&bytes, &NARROW).unwrap();
     let canonical = round_trip_shape(&bytes, &Profile::P0).unwrap();
     assert!(narrow.0 >= canonical.0, "a smaller symbol needs more segments");
-    assert_eq!(narrow.1, (bytes.len() as u64).div_ceil(u64::from(NARROW.symbol_size)));
+    let per_symbol = (bytes.len() as u64).div_ceil(u64::from(NARROW.symbol_size));
+    assert_eq!(narrow.1, per_symbol);
     // The fold of an empty frame list is not a video.
     assert!(fold_frame_digests(&[]).is_err());
 }
