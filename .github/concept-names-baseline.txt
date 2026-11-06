@@ -27,13 +27,13 @@ Fotosentez|7|19
 GT-1|0|0
 Gonca|0|0
 Graft|41|895
-Gövde|1|1
+Gövde|2|2
 Kiragi|6|16
 Liquid storage|0|0
 Living Threshold|5|15
 Mikoriza|23|78
 Mobile Self|13|117
-PUL|13|99
+PUL|14|100
 Pollen|71|760
 Regeneration|33|138
 Sera|0|0

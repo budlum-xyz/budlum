@@ -67,6 +67,7 @@ struct Concept {
     patterns: Vec<regex::Regex>,
     paths: Vec<String>,
     allow_paths: Vec<String>,
+    owner: String,
 }
 
 struct Map {
@@ -81,15 +82,28 @@ struct Map {
 ///
 /// A rise, or a fall that the baseline has not followed.
 pub fn compare(name: &str, measured: Count, baseline: Count) -> Result<(), String> {
+    compare_owned(name, "", measured, baseline)
+}
+
+/// The same comparison, naming the package that owns the rename.
+///
+/// An anonymous finding reads like a property of the tree. A finding that
+/// names its package reads like work, which is what it is.
+fn compare_owned(owner: &str, name: &str, measured: Count, baseline: Count) -> Result<(), String> {
+    let who = if owner.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} ({owner})")
+    };
     if measured.files > baseline.files || measured.matches > baseline.matches {
         return Err(format!(
-            "{name}: the count rose to {} file(s) / {} match(es), above the baseline {} / {}. A legacy name was added.",
+            "{who}: the count rose to {} file(s) / {} match(es), above the baseline {} / {}. A legacy name was added.",
             measured.files, measured.matches, baseline.files, baseline.matches
         ));
     }
     if measured != baseline {
         return Err(format!(
-            "{name}: the count fell to {} file(s) / {} match(es) and the baseline is still {} / {}. Lower {BASELINE_PATH} (run with {WRITE_ENV}=1).",
+            "{who}: the count fell to {} file(s) / {} match(es) and the baseline is still {} / {}. Lower {BASELINE_PATH} (run with {WRITE_ENV}=1).",
             measured.files, measured.matches, baseline.files, baseline.matches
         ));
     }
@@ -109,6 +123,21 @@ fn string_list(table: &toml::Table, key: &str) -> Result<Vec<String>, String> {
             .collect(),
         Some(_) => Err(format!("`{key}` is not an array")),
     }
+}
+
+/// Whether `owner` is a package identifier: `WP-` and two digits, at least.
+///
+/// The repository and GitHub are English, so the package is `WP-NN` and never
+/// the Turkish `I-P-NN` spelling of a package number (directive section 15.3
+/// item 1). The check is deliberately narrow: it refuses exactly the two
+/// mistakes that were made in this map, a missing owner and a non-`WP` prefix.
+fn is_package_id(owner: &str) -> bool {
+    let Some(rest) = owner.strip_prefix("WP-") else {
+        return false;
+    };
+    // The directive numbers 64 packages in T-Launch plus later additions, so
+    // the identifier is two or more ASCII digits and nothing else.
+    !rest.is_empty() && rest.len() >= 2 && rest.bytes().all(|b| b.is_ascii_digit())
 }
 
 fn required_str<'a>(table: &'a toml::Table, key: &str, who: &str) -> Result<&'a str, String> {
@@ -190,6 +219,7 @@ fn parse_map(text: &str) -> Result<Map, String> {
             patterns,
             paths: string_list(t, "paths")?,
             allow_paths: string_list(t, "allow_paths")?,
+            owner,
         });
     }
     Ok(Map {
@@ -312,12 +342,47 @@ fn parse_baseline(text: &str) -> Result<BTreeMap<String, Count>, String> {
     Ok(out)
 }
 
+/// Keep the comment block of `previous` and take the data lines of `rendered`.
+///
+/// The writer must not delete a sentence somebody wrote about the numbers it is
+/// about to replace: the recorded measurement is the only evidence that a
+/// baseline was ever measured rather than guessed. Everything above the first
+/// line that is not a comment is carried over; if there is no such block, the
+/// rendered header is used.
+fn merge_comment_head(previous: &str, rendered: &str) -> String {
+    let head: String = previous
+        .lines()
+        .take_while(|l| {
+            let t = l.trim();
+            t.is_empty() || t.starts_with('#')
+        })
+        .map(|l| format!("{l}\n"))
+        .collect();
+    if !head.contains('#') {
+        return rendered.to_string();
+    }
+    let body: String = rendered
+        .lines()
+        .skip_while(|l| {
+            let t = l.trim();
+            t.is_empty() || t.starts_with('#')
+        })
+        .map(|l| format!("{l}\n"))
+        .collect();
+    format!("{head}{body}")
+}
+
 fn render_baseline(counts: &BTreeMap<String, Count>) -> String {
     let mut s = String::from(
         "# Legacy concept-name counts per entry of config/naming/concept_map.toml.\n\
          # One line per entry: name|files|matches. A ratchet: the numbers may only fall.\n\
          # Lower it with: BUDLUM_CONCEPT_NAMES_WRITE=1 budlum-gates concept-names\n\
-         # The map moves to `absolute` mode once every line is zero.\n",
+         # The map moves to `absolute` mode once every line is zero.\n\
+         #\n\
+         # A first write over a file that already existed keeps its prose: the\n\
+         # writer replaces the data lines and leaves every comment above them, so\n\
+         # the measurement recorded here is not silently dropped when the numbers\n\
+         # fall. A reader that cannot find the data block rewrites the header.\n",
     );
     for (name, c) in counts {
         let _ = writeln!(s, "{name}|{}|{}", c.files, c.matches);
@@ -377,21 +442,29 @@ fn check(root: &Path, write: bool) -> Result<String, String> {
                 }
             }
         }
-        std::fs::write(&base_path, render_baseline(&counts))
+        let previous = std::fs::read_to_string(&base_path).unwrap_or_default();
+        let rendered = render_baseline(&counts);
+        std::fs::write(&base_path, merge_comment_head(&previous, &rendered))
             .map_err(|e| format!("cannot write {BASELINE_PATH}: {e}"))?;
         return Ok(format!(
             "wrote {BASELINE_PATH}: {total} legacy match(es) in total."
         ));
     }
 
+    let owners: BTreeMap<String, String> = map
+        .concepts
+        .iter()
+        .map(|c| (c.name.clone(), c.owner.clone()))
+        .collect();
     let mut bad = String::new();
     for (name, c) in &counts {
+        let owner = owners.get(name).map_or("", String::as_str);
         match baseline.get(name) {
             None => {
-                let _ = writeln!(bad, "  {name}: no line in {BASELINE_PATH}");
+                let _ = writeln!(bad, "  {name} ({owner}): no line in {BASELINE_PATH}");
             }
             Some(b) => {
-                if let Err(e) = compare(name, *c, *b) {
+                if let Err(e) = compare_owned(owner, name, *c, *b) {
                     let _ = writeln!(bad, "  {e}");
                 }
             }
@@ -406,6 +479,16 @@ fn check(root: &Path, write: bool) -> Result<String, String> {
         }
     }
     if bad.is_empty() {
+        let mut packages: BTreeMap<&str, usize> = BTreeMap::new();
+        for c in &map.concepts {
+            if counts.get(&c.name).is_some_and(|k| k.matches > 0) {
+                *packages.entry(c.owner.as_str()).or_default() += 1;
+            }
+        }
+        let owed: Vec<String> = packages
+            .iter()
+            .map(|(owner, n)| format!("{owner} owns {n}"))
+            .collect();
         Ok(format!(
             "OK: count mode, {} concept(s), {} owner package(s), {total} legacy match(es), all equal to the baseline.",
             counts.len(),
@@ -496,6 +579,43 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "concept-names canary OK: an injected name raised the count, a lowered count and a rising writer were refused, and absolute mode failed.",
     ))
+}
+
+/// A baseline that disagrees with the measurement must be reported, in both
+/// directions, and the gate must be able to run on a tree it stages itself.
+///
+/// This is the canary for the class that shipped four wrong numbers: the gate
+/// read the baseline, the numbers had drifted, and nothing noticed because no
+/// canary ever compared the two. The staged tree has one match, so a baseline
+/// of `1|1` passes, `0|0` fails as a rise and `2|2` fails as a fall.
+fn baseline_canary() -> Result<(), String> {
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-baseline")?;
+    let result = (|| {
+        stage(&dir, CANARY_MAP, "Canaryname|1|1\n")?;
+        std::fs::write(dir.join("src/legacy.rs"), "// CanaryName\n").map_err(|e| e.to_string())?;
+        check(&dir, false).map_err(|e| format!("canary: an agreeing baseline failed: {e}"))?;
+        std::fs::write(dir.join(BASELINE_PATH), "Canaryname|0|0\n").map_err(|e| e.to_string())?;
+        match check(&dir, false) {
+            Err(e) if e.contains("rose") => {}
+            other => {
+                return Err(format!(
+                    "canary: a baseline below the measurement was accepted: {other:?}"
+                ))
+            }
+        }
+        std::fs::write(dir.join(BASELINE_PATH), "Canaryname|2|2\n").map_err(|e| e.to_string())?;
+        match check(&dir, false) {
+            Err(e) if e.contains("fell") => {}
+            other => {
+                return Err(format!(
+                    "canary: a baseline above the measurement was accepted: {other:?}"
+                ))
+            }
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    result
 }
 
 #[cfg(test)]
