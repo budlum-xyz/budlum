@@ -186,6 +186,9 @@ pub enum Bud3Query {
     Object(ObjectKey),
     /// The shares one validator holds.
     Custody(Address),
+    /// A read-only what-if: the repairs due if this holder went unseen.
+    /// The transition is computed on a clone, so a query never writes state.
+    RepairPlan(Address),
 }
 
 /// What a registration did.
@@ -199,8 +202,7 @@ pub enum Registered {
 
 /// The registry. It serializes as flat lists, so a JSON snapshot (which
 /// cannot key a map by a byte array) carries it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(from = "FlatRegistry", into = "FlatRegistry")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Bud3Registry {
     objects: BTreeMap<ObjectKey, ObjectEntry>,
     /// Content digest to the live object holding it. Lookups run through the
@@ -209,6 +211,24 @@ pub struct Bud3Registry {
     nfts: BTreeMap<NftId, (ObjectKey, Address)>,
     tombstones: BTreeMap<ObjectKey, u64>,
     declines: BTreeSet<([u8; 32], Address)>,
+}
+
+impl serde::Serialize for Bud3Registry {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        FlatRegistry::from(self.clone()).serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Bud3Registry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        FlatRegistry::deserialize(deserializer).map(Self::from)
+    }
 }
 
 /// The serialized form of [`Bud3Registry`].
@@ -820,7 +840,8 @@ impl Bud3Registry {
         dropped
     }
 
-    /// The RPC read: one object, or one validator's shares.
+    /// The RPC read: one object, one validator's shares, or a what-if
+    /// repair plan for an unseen holder.
     #[must_use]
     pub fn query_json(&self, query: &Bud3Query) -> serde_json::Value {
         match query {
@@ -858,6 +879,28 @@ impl Bud3Registry {
                     serde_json::Value::Null
                 }
             }
+            Bud3Query::RepairPlan(holder) => {
+                let mut probe = self.clone();
+                let lost = probe.mark_unseen(holder);
+                let due: Vec<serde_json::Value> = probe
+                    .objects
+                    .keys()
+                    .filter_map(|key| {
+                        let segments = probe.repairs_due(key);
+                        (!segments.is_empty()).then(|| {
+                            serde_json::json!({
+                                "commitment": hex::encode(key),
+                                "segments": segments,
+                            })
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "holder": hex::encode(holder),
+                    "shares_marked_lost": lost,
+                    "objects_needing_repair": due,
+                })
+            }
             Bud3Query::Custody(validator) => {
                 let shares: Vec<serde_json::Value> = self
                     .objects
@@ -894,7 +937,7 @@ impl Bud3Registry {
         }
     }
 
-    /// Whether the registry holds nothing.
+    /// Whether the registry has no registered objects, tombstones, or declines.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.objects.is_empty() && self.tombstones.is_empty() && self.declines.is_empty()
