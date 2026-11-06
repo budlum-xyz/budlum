@@ -196,7 +196,9 @@ fn fundable_bond(
 ) -> Result<u64, ExternalDomainTxError> {
     let bond =
         u64::try_from(bond_atoms).map_err(|_| ExternalDomainTxError::BondTooLarge(bond_atoms))?;
-    let balance = state.get_balance(&ctx.sender);
+    // The spendable balance, not the raw one: a bond is a spend, and the
+    // locked part of a vesting account does not fund collateral (BULGU-019).
+    let balance = state.spendable_balance(&ctx.sender);
     let needed = bond.saturating_add(ctx.fee);
     if balance < needed {
         return Err(ExternalDomainTxError::BondUnfunded { needed, balance });

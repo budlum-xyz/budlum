@@ -3648,10 +3648,14 @@ impl AccountState {
         if amount == 0 {
             return Err("a zero bond escrows nothing".to_string());
         }
+        // The spendable balance gates the bond: the locked part of a vesting
+        // account is not collateral (BULGU-019). The raw balance is what the
+        // debit below reads.
         let balance = self.get_balance(poster);
-        if balance < amount {
+        let spendable = self.spendable_balance(poster);
+        if spendable < amount {
             return Err(format!(
-                "bond of {amount} exceeds the poster's balance of {balance}"
+                "bond of {amount} exceeds the poster's spendable balance of {spendable}"
             ));
         }
         let account = self.get_or_create(poster);

@@ -221,8 +221,9 @@ pub fn apply_cross_shard_transfer(
 
     let total_cost = tx.total_cost();
     // Read-only checks: `get_or_create` would insert empty accounts into
-    // the state on a rejected transfer.
-    if state.get_balance(&tx.from) < total_cost {
+    // the state on a rejected transfer. The sender's spendable balance is
+    // read, not its raw balance: the vesting lock holds on this path too.
+    if state.spendable_balance(&tx.from) < total_cost {
         return Err("insufficient balance for cross-shard transfer".into());
     }
     state
