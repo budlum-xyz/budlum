@@ -27,19 +27,19 @@ fn declared_alerts() -> Vec<&'static str> {
 /// (`BudlumForkSuspected` / `BudlumNodesDisagreeOnHeight`), because the two
 /// rules share a first check, so the cell is split on the slash as well.
 fn documented_alerts() -> Vec<String> {
-    RUNBOOK
-        .lines()
-        .filter_map(|line| line.trim_start().strip_prefix("| "))
-        .filter_map(|rest| rest.split('|').next())
-        .flat_map(|cell| {
-            cell.replace('`', "")
-                .split('/')
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .collect()
+    let mut names = Vec::new();
+    for line in RUNBOOK.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("| ") else {
+            continue;
+        };
+        let cell = rest.split('|').next().unwrap_or_default().replace('`', "");
+        for name in cell.split('/').map(str::trim) {
+            if !name.is_empty() {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
 }
 
 /// Each rule names its first check and its action in the runbook.
@@ -52,9 +52,10 @@ fn every_alert_has_a_runbook_row() {
         rules.len()
     );
     let documented = documented_alerts();
-    let missing: Vec<&&str> = rules
+    let missing: Vec<&str> = rules
         .iter()
-        .filter(|name| !documented.iter().any(|row| row == **name))
+        .copied()
+        .filter(|name| !documented.iter().any(|row| row.as_str() == *name))
         .collect();
     assert!(
         missing.is_empty(),
@@ -74,7 +75,7 @@ fn every_runbook_row_names_a_live_alert() {
             continue;
         }
         assert!(
-            rules.iter().any(|name| *name == row),
+            rules.iter().any(|name| *name == row.as_str()),
             "docs/OPERATIONS.md documents {row}, which no rule in \
              ops/monitoring/alerts.yml declares"
         );
@@ -82,8 +83,7 @@ fn every_runbook_row_names_a_live_alert() {
 }
 
 /// The severities an operator sorts a page by are the ones a pager knows, and
-/// the two readiness rules the directive makes mandatory are critical rather
-/// than informational.
+/// the conditions only a person can resolve are critical rather than notes.
 #[test]
 fn every_rule_carries_a_severity() {
     let mut pending = "<unknown>";
@@ -119,7 +119,7 @@ fn every_rule_carries_a_severity() {
 
 /// A gauge is not a counter. `increase()` on a gauge that falls reports a
 /// negative number and fires on the reset, so the reservation rule - whose
-/// series is the depth of the pending table - must compare the value instead.
+/// series is the depth of the pending table - compares the value instead.
 #[test]
 fn no_rule_calls_increase_on_a_gauge() {
     let gauges = [
@@ -132,8 +132,7 @@ fn no_rule_calls_increase_on_a_gauge() {
         "budlum_bud3_objects",
     ];
     for line in ALERT_RULES.lines() {
-        let trimmed = line.trim_start();
-        let Some(expression) = trimmed.strip_prefix("expr: ") else {
+        let Some(expression) = line.trim_start().strip_prefix("expr: ") else {
             continue;
         };
         for gauge in gauges {

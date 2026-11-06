@@ -71,6 +71,12 @@ Prometheus scrapes each node's metrics listener (loopback; scrape through a
 local agent). Rules: `ops/monitoring/alerts.yml`. Dashboard:
 `ops/monitoring/grafana/budlum-testnet.json`.
 
+The public edge is `ops/Caddyfile.testnet`: TLS, a 2 MB body cap and HSTS on
+`rpc.`, `faucet.` and `explorer-api.` under `TESTNET_DOMAIN`, forwarding to the
+loopback listeners the node, the faucet and the indexer bind. The operator
+listener and the metrics listener are never proxied. `src/tests/caddy_edges_match_the_services.rs`
+holds the ports on both sides to each other.
+
 ### RPC transport security
 
 The public RPC listener can terminate TLS itself: set `rpc.tls_cert_file` and
