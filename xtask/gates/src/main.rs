@@ -1381,6 +1381,14 @@ const GATES: &[Gate] = &[
         self_test: gates::nightly_workflows_are_required::self_test,
     },
     Gate {
+        name: "no-legacy-storage",
+        replaces: None,
+        run: gates::no_legacy_storage::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::no_legacy_storage::self_test,
+    },
+    Gate {
         name: "release-profile-pins",
         replaces: None,
         run: gates::release_profile_pins::run,
