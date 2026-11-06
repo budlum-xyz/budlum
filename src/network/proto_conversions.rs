@@ -14,6 +14,32 @@ fn decode_optional_hash32(bytes: Vec<u8>, field: &str) -> Result<Option<[u8; 32]
         .map(Some)
         .map_err(|_| format!("Invalid {field} length: expected 32 bytes, got {actual_len}"))
 }
+/// Encode the seat participation record for the wire. Absent stays absent.
+fn encode_seat_participation(
+    record: &Option<crate::validators::committee::SeatParticipation>,
+) -> Option<pb::ProtoSeatParticipation> {
+    record.as_ref().map(|r| pb::ProtoSeatParticipation {
+        checkpoint: r.checkpoint,
+        seats: r.seats.as_bytes().to_vec(),
+    })
+}
+
+/// Decode a seat participation record, bounding the bitmap before it allocates.
+fn decode_seat_participation(
+    proto: Option<pb::ProtoSeatParticipation>,
+    field: &str,
+) -> Result<Option<crate::validators::committee::SeatParticipation>, String> {
+    let Some(r) = proto else {
+        return Ok(None);
+    };
+    let seats = crate::validators::committee::SeatBitmap::from_bytes(&r.seats)
+        .map_err(|e| format!("Invalid {field}: {e}"))?;
+    Ok(Some(crate::validators::committee::SeatParticipation {
+        checkpoint: r.checkpoint,
+        seats,
+    }))
+}
+
 use crate::network::protocol::NetworkMessage;
 
 #[allow(clippy::all, clippy::pedantic, clippy::nursery)]
@@ -2038,6 +2064,7 @@ impl From<&BlockHeader> for pb::ProtoBlockHeader {
             storage_root: header.storage_root.map(Vec::from).unwrap_or_default(),
             shards_root: header.shards_root.map(Vec::from).unwrap_or_default(),
             witness_root: header.witness_root.map(Vec::from).unwrap_or_default(),
+            seat_participation: encode_seat_participation(&header.seat_participation),
             producer_public_key: header.producer_public_key.clone(),
             slashing_reports: header
                 .slashing_reports
@@ -2114,6 +2141,10 @@ impl TryFrom<pb::ProtoBlockHeader> for BlockHeader {
             storage_root: decode_optional_hash32(proto.storage_root, "block header storage_root")?,
             shards_root: decode_optional_hash32(proto.shards_root, "block header shards_root")?,
             witness_root: decode_optional_hash32(proto.witness_root, "block header witness_root")?,
+            seat_participation: decode_seat_participation(
+                proto.seat_participation,
+                "block header seat_participation",
+            )?,
         })
     }
 }
@@ -2151,6 +2182,7 @@ impl From<&Block> for pb::ProtoBlock {
             storage_root: block.storage_root.map(Vec::from).unwrap_or_default(),
             shards_root: block.shards_root.map(Vec::from).unwrap_or_default(),
             witness_root: block.witness_root.map(Vec::from).unwrap_or_default(),
+            seat_participation: encode_seat_participation(&block.seat_participation),
             producer_public_key: block.producer_public_key.clone(),
             slashing_reports: block
                 .slashing_reports
@@ -2241,6 +2273,10 @@ impl TryFrom<pb::ProtoBlock> for Block {
             storage_root: decode_optional_hash32(proto.storage_root, "block storage_root")?,
             shards_root: decode_optional_hash32(proto.shards_root, "block shards_root")?,
             witness_root: decode_optional_hash32(proto.witness_root, "block witness_root")?,
+            seat_participation: decode_seat_participation(
+                proto.seat_participation,
+                "block seat_participation",
+            )?,
         })
     }
 }
@@ -2395,6 +2431,7 @@ impl From<&NetworkMessage> for pb::ProtoNetworkMessage {
                 bitmap,
                 set_hash,
                 scheme_id,
+                seat_table_version,
             } => pb::proto_network_message::Payload::FinalityCert(pb::ProtoFinalityCert {
                 epoch: *epoch,
                 checkpoint_height: *checkpoint_height,
@@ -2403,6 +2440,7 @@ impl From<&NetworkMessage> for pb::ProtoNetworkMessage {
                 bitmap: bitmap.clone(),
                 set_hash: set_hash.clone(),
                 scheme_id: scheme_id.clone(),
+                seat_table_version: *seat_table_version,
             }),
             NetworkMessage::GetQcBlob {
                 epoch,
@@ -2605,6 +2643,7 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                     bitmap: f.bitmap,
                     set_hash: f.set_hash,
                     scheme_id: f.scheme_id,
+                    seat_table_version: f.seat_table_version,
                 })
             }
             pb::proto_network_message::Payload::GetQcBlob(q) => Ok(NetworkMessage::GetQcBlob {

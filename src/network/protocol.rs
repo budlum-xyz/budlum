@@ -125,6 +125,9 @@ pub enum NetworkMessage {
         bitmap: Vec<u8>,
         set_hash: String,
         scheme_id: String,
+        /// The seat table version the seats were counted under (section
+        /// 7.4.4); zero means the epoch's base table.
+        seat_table_version: u64,
     },
 
     GetQcBlob {

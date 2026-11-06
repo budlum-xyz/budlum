@@ -436,16 +436,14 @@ fn archive_profile_compose_and_dockerfile_are_consistent() {
     );
 }
 
-/// Finality certificates are verified with stake weight and a signer
-/// count (not a bare head count), and the account-proof trie cache is keyed by
+/// Finality certificates are verified with a seat quorum (not a bare head
+/// count and not raw stake), and the account-proof trie cache is keyed by
 /// the exact account list it was built from, so it cannot serve a stale trie
 /// at the same chain height.
 #[test]
 fn qc_import_is_weighted_and_proof_cache_is_content_keyed() {
     let chain = production_part(include_str!("../chain/blockchain.rs"));
-    assert!(chain.contains(
-        "if stake < snapshot.quorum_stake() || verified_signers.len() < snapshot.quorum_count()"
-    ));
+    assert!(chain.contains("if covered < committee.quorum_seats()"));
     let actor = production_part(include_str!("../chain/chain_actor.rs"));
     let cache = window(actor, "fn account_proof(&mut self", 1200);
     assert!(cache.contains("cached.leaves.len() == accounts.len()"));

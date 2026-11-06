@@ -504,6 +504,18 @@ message ProtoBlockHeader {
     // Producer key of a composite (0x06) or ML-DSA-87 (0x05) block
     // signature; empty for Ed25519.
     bytes producer_public_key = 20;
+    // Seat participation record (directive section 7.5.1). Absent on a block
+    // that is not a checkpoint.
+    ProtoSeatParticipation seat_participation = 21;
+}
+
+// The seats whose precommits for `checkpoint` the proposer collected. The
+// next seat table is derived from this record, so it is consensus data and is
+// folded into the block hash.
+message ProtoSeatParticipation {
+  uint64 checkpoint = 1;
+  // One bit per seat, least significant bit first within each byte.
+  bytes seats = 2;
 }
 
 message ProtoBlock {
@@ -534,6 +546,9 @@ message ProtoBlock {
     repeated bytes slashing_reports = 22;
     // Witness root. Empty when the block carries none.
     bytes witness_root = 23;
+    // Seat participation record (directive section 7.5.1). Absent on a block
+    // that is not a checkpoint.
+    ProtoSeatParticipation seat_participation = 24;
 }
 
 
@@ -771,6 +786,9 @@ message ProtoFinalityCert {
     bytes bitmap = 5;
     string set_hash = 6;
     string scheme_id = 7;
+    // The seat table version the signers' seats were counted under (directive
+    // section 7.4.4). Zero means the epoch's base table.
+    uint64 seat_table_version = 8;
 }
 
 message ProtoGetQcBlob {
