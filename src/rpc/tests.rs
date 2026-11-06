@@ -1636,4 +1636,204 @@ mod rpc_tests {
             -32602
         );
     }
+
+    /// TEST-GAP-07, first descent: the registry and validator reads. Each row
+    /// answers on a fresh chain, and each read that parses an address refuses a
+    /// malformed one by naming the field. An empty object for a typo would read
+    /// to a caller as "no such validator", which is a different answer than the
+    /// one the node is able to give.
+    #[tokio::test]
+    async fn rpc_registry_and_validator_reads_answer_and_refuse_a_malformed_address() {
+        let (server, _chain) = setup().await;
+        let owner = Address([7u8; 32]);
+        let owner_hex = owner.to_hex();
+
+        assert_eq!(
+            server
+                .registry_query(owner_hex.clone(), 0)
+                .await
+                .unwrap()["registered"],
+            serde_json::json!(false),
+            "an address with no registry row answers with the shape, not an error"
+        );
+        assert!(
+            server
+                .registry_query("0xzz".to_string(), 0)
+                .await
+                .unwrap_err()
+                .message()
+                .contains("Invalid address"),
+            "a malformed address is invalid params, naming the field that failed"
+        );
+        assert_eq!(
+            server.registry_active_members(0).await.unwrap()["count"],
+            serde_json::json!(0),
+            "an empty role answers with a zero count"
+        );
+        assert!(
+            server
+                .get_validator(owner_hex.clone())
+                .await
+                .unwrap()
+                .is_object(),
+            "one validator record is an object, not a one-element list"
+        );
+        assert!(
+            server
+                .get_validator("0xzz".to_string())
+                .await
+                .unwrap_err()
+                .message()
+                .contains("Invalid address"),
+            "the validator read refuses a malformed owner like its siblings"
+        );
+        assert_eq!(
+            server.validator_list().await.unwrap()["total"],
+            serde_json::json!(0),
+            "a fresh chain has no validators to list"
+        );
+        assert!(
+            server
+                .validator_profile(owner)
+                .await
+                .unwrap()["found"]
+                .is_boolean(),
+            "a profile lookup for an unknown validator says so in the record"
+        );
+        assert!(
+            server
+                .get_validator_delegations(owner)
+                .await
+                .unwrap()
+                .is_object(),
+            "delegations answer with the totals object even when empty"
+        );
+    }
+
+    /// TEST-GAP-07, second descent: the name reads. An unregistered name is a
+    /// null answer, never an error: absence is what the caller asked about. The
+    /// prepare half keeps its refusal, because a template built over a broken
+    /// owner address would be signed and broadcast as is.
+    #[tokio::test]
+    async fn rpc_bns_reads_answer_null_and_the_prepare_refuses_a_malformed_owner() {
+        let (server, _chain) = setup().await;
+        let owner = Address([9u8; 32]);
+
+        assert!(
+            server
+                .bns_resolve("nothing-here".to_string())
+                .await
+                .unwrap()
+                .is_none(),
+            "an unregistered name resolves to nothing, not to an error"
+        );
+        assert!(
+            server
+                .bns_resolve_full("nothing-here".to_string())
+                .await
+                .unwrap()
+                .is_null(),
+            "the full record of an absent name is JSON null"
+        );
+        assert!(
+            server
+                .bns_resolve_content("nothing-here".to_string())
+                .await
+                .unwrap()
+                .is_none(),
+            "an absent name carries no content id"
+        );
+        assert!(
+            server
+                .bns_resolve_subdomain("nothing-here".to_string(), "shop".to_string())
+                .await
+                .unwrap()
+                .is_none(),
+            "a subdomain of an absent parent is absent too"
+        );
+        let prepared = server
+            .bns_prepare_register("bids".to_string(), owner.to_hex(), 365)
+            .await
+            .unwrap();
+        assert!(
+            prepared["tx_template"].is_object() && prepared["cost"].is_number(),
+            "a prepare answer carries the template and its cost: {prepared}"
+        );
+        assert!(
+            server
+                .bns_prepare_register("bids".to_string(), "0xzz".to_string(), 365)
+                .await
+                .unwrap_err()
+                .message()
+                .contains("Invalid owner address"),
+            "the template door names the owner field it could not parse"
+        );
+    }
+
+    /// TEST-GAP-07, third descent: the storage deal and custody reads. A content
+    /// id is 32 bytes and the handler says so; a short or unpaired hex id is a
+    /// refusal rather than a lookup on a truncated key, which would answer about
+    /// some other object.
+    #[tokio::test]
+    async fn rpc_storage_deal_and_custody_reads_refuse_a_short_content_id() {
+        let (server, _chain) = setup().await;
+        let id = hex::encode([3u8; 32]);
+
+        assert_eq!(
+            server
+                .storage_get_deals_by_manifest(format!("0x{id}"))
+                .await
+                .unwrap()["count"],
+            serde_json::json!(0),
+            "an unknown manifest has no deals, and says it with a zero count"
+        );
+        assert!(
+            server
+                .storage_get_deals_by_manifest("0x1234".to_string())
+                .await
+                .unwrap_err()
+                .message()
+                .contains("must be 32 bytes"),
+            "a truncated id is refused before the lookup, naming the length"
+        );
+        assert!(
+            server
+                .storage_get_deals_by_shard(format!("0x{id}"), format!("0x{id}"))
+                .await
+                .unwrap()["deals"]
+                .is_array(),
+            "the shard view answers with its deal list"
+        );
+        assert!(
+            server
+                .storage_get_deals_by_shard(format!("0x{id}"), "not hex".to_string())
+                .await
+                .unwrap_err()
+                .code()
+                == -32602,
+            "both halves of the key are parsed, so a bad shard id is refused too"
+        );
+        assert!(
+            server
+                .storage_get_custody(format!("0x{id}"))
+                .await
+                .unwrap()
+                .is_object(),
+            "custody for a validator with no deals answers with the empty record"
+        );
+        assert!(
+            server
+                .storage_get_custody("0x1234".to_string())
+                .await
+                .unwrap_err()
+                .message()
+                .contains("expected 32 bytes"),
+            "the custody read uses the shared hex32 rule, including its message"
+        );
+        assert_eq!(
+            server.storage_repair_band(0).await.unwrap()["margin"],
+            serde_json::json!(0),
+            "the repair band echoes the margin it was asked about"
+        );
+    }
 }

@@ -429,12 +429,50 @@ mod tests {
     /// The rows the coverage ratchet reads: the method name, and whether a
     /// success answer exists at all. A `Refused` row answers every call with a
     /// refusal, so it has no success test to have.
-    fn coverage_targets() -> Vec<(&'static str, bool)> {
+    fn coverage_targets() -> Vec<(&'static str, bool, bool)> {
         use super::Effect;
         METHOD_CLASSES
             .iter()
-            .map(|row| (row.name, row.effect != Effect::Refused))
+            .map(|row| {
+                // A `Refused` row is asked for the refusal only: every call to
+                // it is a refusal, so a success test would assert the row was
+                // misclassified.
+                let refused_row = row.effect == Effect::Refused;
+                (row.name, !refused_row, wants_refusal(row.name))
+            })
             .collect()
+    }
+
+    /// Whether a row is asked for a refusal test, which the trait declaration of
+    /// `src/rpc/api.rs` decides. A method the trait declares with `&self` alone
+    /// has no invalid call at this layer, so asking for a refusal test would ask
+    /// for an invented one; the answer test is the whole requirement. A name the
+    /// trait does not declare (a subscription, a method that arrives through an
+    /// alias) is asked for both, because the rule cannot see its shape.
+    fn wants_refusal(method: &str) -> bool {
+        match declared_arguments(method) {
+            Some(count) => count > 0,
+            None => true,
+        }
+    }
+
+    /// The number of parameters a method takes, as the trait declares them, with
+    /// the receiver excluded. `None` says the declaration was not found.
+    fn declared_arguments(method: &str) -> Option<usize> {
+        let api = include_str!("api.rs");
+        let marker = format!("#[method(name = \"{method}\")]");
+        let at = api.find(&marker)? + marker.len();
+        let rest = &api[at..];
+        let fn_at = rest.find("fn ")? + 3;
+        let open = rest[fn_at..].find('(')? + fn_at;
+        let close = rest[open..].find(')')? + open;
+        Some(
+            rest[open + 1..close]
+                .split(',')
+                .map(str::trim)
+                .filter(|param| !param.is_empty() && !param.starts_with('&') && *param != "self")
+                .count(),
+        )
     }
 
     /// The RPC behaviour corpus: the test functions that answer and refuse
@@ -570,9 +608,12 @@ mod tests {
 
     /// The rows whose required kind of test is missing, one
     /// `"<method> missing=<kind>"` line each, sorted so the output is stable.
-    fn missing_coverage(targets: &[(&str, bool)], tests: &[(String, String)]) -> Vec<String> {
+    fn missing_coverage(
+        targets: &[(&str, bool, bool)],
+        tests: &[(String, String)],
+    ) -> Vec<String> {
         let mut missing = Vec::new();
-        for (name, needs_success) in targets {
+        for (name, needs_success, needs_refusal) in targets {
             let mut saw_success = false;
             let mut saw_refusal = false;
             for (_, body) in tests {
@@ -582,7 +623,7 @@ mod tests {
                     saw_refusal |= REFUSAL_MARKS.iter().any(|mark| statement.contains(mark));
                 }
             }
-            if !saw_refusal {
+            if *needs_refusal && !saw_refusal {
                 missing.push(format!("{name} missing=refusal"));
             }
             if *needs_success && !saw_success {
@@ -674,10 +715,14 @@ mod tests {
             ),
         ];
         let targets = [
-            ("bud_bnsResolve", true),
-            ("bud_bnsResolveFull", true),
-            ("bud_bnsResolveContent", true),
-            ("bud_registerBridgeAsset", false),
+            ("bud_bnsResolve", true, true),
+            ("bud_bnsResolveFull", true, true),
+            ("bud_bnsResolveContent", true, true),
+            ("bud_registerBridgeAsset", false, true),
+            // The shape a `Read` row with no argument takes: the answer test is
+            // required, the refusal test is not, and a missing answer is still
+            // reported.
+            ("bud_gasPrice", true, false),
         ];
         assert_eq!(
             missing_coverage(&targets, &tests),
@@ -685,6 +730,7 @@ mod tests {
                 "bud_bnsResolveContent missing=refusal".to_string(),
                 "bud_bnsResolveContent missing=success".to_string(),
                 "bud_bnsResolveFull missing=refusal".to_string(),
+                "bud_gasPrice missing=success".to_string(),
                 "bud_registerBridgeAsset missing=refusal".to_string(),
             ]
         );

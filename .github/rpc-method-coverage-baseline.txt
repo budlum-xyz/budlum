@@ -5,18 +5,24 @@
 # A row of `METHOD_CLASSES` is covered when a test function in `src/rpc/tests.rs`
 # or `src/tests/*.rs` names the method (its JSON-RPC name in quotes, or a call to
 # its handler) and the statement that names it unwraps an answer (success) or
-# reads the error (refusal). A `Refused` row is not asked for a success test: it
-# refuses every call by design, and its refusal must name the transaction door.
+# reads the error (refusal).
+#
+# Two kinds of row carry a smaller demand, and the rule encodes both, so a line
+# here is always work a later change can finish:
+#   * a `Refused` row is not asked for a success test, because it refuses every
+#     call by design and its refusal must name the transaction door;
+#   * a method `src/rpc/api.rs` declares with the receiver alone is not asked for
+#     a refusal test, because it has no invalid call at that layer and an error
+#     case for it would be an invention.
 #
 # The file only shrinks. A line whose test exists must be deleted in the same
 # change, and a method that loses its test must be recorded here with a reason in
 # the pull request that does it. The gate's own behaviour is locked by
 # `rpc_method_coverage_catches_an_injected_gap`.
 #
-# Measured against the tree at 2026-11-06: 183 rows, 31 rows
-# covered on both sides, 152 rows carrying 264 gap lines.
+# Measured against the tree on 2026-11-06: 183 rows, 48 rows covered
+# on both sides the rule asks for, 135 rows carrying 204 gap lines.
 bud_adminBanPeer missing=success
-bud_adminListBannedPeers missing=refusal
 bud_adminListBannedPeers missing=success
 bud_adminUnbanPeer missing=refusal
 bud_adminUnbanPeer missing=success
@@ -24,7 +30,6 @@ bud_aiAgentPayment missing=refusal
 bud_aiAgentPayment missing=success
 bud_aiAgentPayments missing=refusal
 bud_aiAgentPayments missing=success
-bud_aiAgentRanking missing=refusal
 bud_aiAgentRanking missing=success
 bud_aiAgentReputation missing=refusal
 bud_aiAgentReputation missing=success
@@ -38,15 +43,12 @@ bud_aiEquivocationStatus missing=refusal
 bud_aiEquivocationStatus missing=success
 bud_aiExecutionProof missing=refusal
 bud_aiExecutionProof missing=success
-bud_aiGetActiveVerifiers missing=refusal
 bud_aiGetActiveVerifiers missing=success
 bud_aiGetModel missing=refusal
 bud_aiGetModel missing=success
 bud_aiGetOutcome missing=refusal
 bud_aiGetOutcome missing=success
-bud_aiInferenceStats missing=refusal
 bud_aiInferenceStats missing=success
-bud_aiOpenRequests missing=refusal
 bud_aiOpenRequests missing=success
 bud_aiReclaimFee missing=refusal
 bud_aiReclaimFee missing=success
@@ -60,17 +62,12 @@ bud_aiSubmitResult missing=refusal
 bud_aiSubmitResult missing=success
 bud_aiVerifierQos missing=refusal
 bud_aiVerifierQos missing=success
-bud_aiVerifierRanking missing=refusal
 bud_aiVerifierRanking missing=success
 bud_aiVerifierStake missing=refusal
 bud_aiVerifierStake missing=success
-bud_aiVerifierWhitelist missing=refusal
 bud_aiVerifierWhitelist missing=success
 bud_atlasGetWalletContext missing=refusal
 bud_atlasGetWalletContext missing=success
-bud_blockNumber missing=refusal
-bud_bnsPrepareRegister missing=refusal
-bud_bnsPrepareRegister missing=success
 bud_bnsPrepareRegisterSubdomain missing=refusal
 bud_bnsPrepareRegisterSubdomain missing=success
 bud_bnsPrepareRenew missing=refusal
@@ -80,20 +77,14 @@ bud_bnsPrepareSetContent missing=success
 bud_bnsPrepareTransfer missing=refusal
 bud_bnsPrepareTransfer missing=success
 bud_bnsResolve missing=refusal
-bud_bnsResolve missing=success
 bud_bnsResolveContent missing=refusal
-bud_bnsResolveContent missing=success
 bud_bnsResolveFull missing=refusal
-bud_bnsResolveFull missing=success
 bud_bnsResolveSubdomain missing=refusal
-bud_bnsResolveSubdomain missing=success
 bud_burnBridgeTransfer missing=refusal
 bud_burnBridgeTransferWithEvent missing=refusal
-bud_chainId missing=refusal
 bud_encodeExternalEvidence missing=refusal
 bud_encodeExternalEvidence missing=success
 bud_estimateGas missing=refusal
-bud_gasPrice missing=refusal
 bud_gatewayFetchContent missing=refusal
 bud_gatewayFetchContent missing=success
 bud_gatewayRenderContent missing=refusal
@@ -103,17 +94,13 @@ bud_getAccountProof missing=success
 bud_getBalance missing=refusal
 bud_getBlockByHash missing=refusal
 bud_getBlockByNumber missing=refusal
-bud_getConsensusDomains missing=refusal
 bud_getCrossDomainMessage missing=refusal
-bud_getDomainCommitments missing=refusal
 bud_getDomainInfo missing=refusal
 bud_getDomainInfo missing=success
 bud_getExternalDomainProfile missing=refusal
 bud_getExternalDomainProfile missing=success
 bud_getExternalDomainStatus missing=refusal
 bud_getExternalDomainStatus missing=success
-bud_getExternalDomains missing=refusal
-bud_getExternalIntakeDigest missing=refusal
 bud_getExternalIntakeDigest missing=success
 bud_getExternalQuorumRound missing=refusal
 bud_getExternalQuorumRound missing=success
@@ -126,35 +113,24 @@ bud_getGraftApplication missing=refusal
 bud_getGraftApplication missing=success
 bud_getNonce missing=refusal
 bud_getNonce missing=success
-bud_getQuantumAlarm missing=refusal
 bud_getQuantumAlarm missing=success
 bud_getRelayerIntent missing=refusal
 bud_getRelayerIntent missing=success
-bud_getRestakedValidators missing=refusal
 bud_getRestakedValidators missing=success
-bud_getSettlementInfo missing=refusal
-bud_getSlashingHistory missing=refusal
 bud_getSlashingHistory missing=success
 bud_getSovereignTemplate missing=refusal
 bud_getSovereignTemplate missing=success
 bud_getStateSnapshot missing=refusal
 bud_getStateSnapshot missing=success
-bud_getStatus missing=refusal
 bud_getStatus missing=success
 bud_getTransactionByHash missing=refusal
 bud_getTransactionReceipt missing=refusal
-bud_getValidator missing=refusal
 bud_getValidatorDelegations missing=refusal
-bud_getValidatorDelegations missing=success
-bud_getValidatorSet missing=refusal
 bud_getValidatorSet missing=success
 bud_graftPaymentProof missing=refusal
 bud_graftPaymentProof missing=success
-bud_health missing=refusal
 bud_health missing=success
-bud_hubGetApps missing=refusal
 bud_hubGetApps missing=success
-bud_hubGetGraftApps missing=refusal
 bud_hubGetGraftApps missing=success
 bud_hubPrepareRegister missing=refusal
 bud_hubPrepareRegister missing=success
@@ -162,24 +138,17 @@ bud_identityCredential missing=refusal
 bud_identityVerifyPresentation missing=refusal
 bud_inspectEthereumUpdate missing=refusal
 bud_inspectEthereumUpdate missing=success
-bud_listGateways missing=refusal
 bud_listGateways missing=success
-bud_listRelays missing=refusal
 bud_listRelays missing=success
-bud_marketGetOffers missing=refusal
 bud_marketGetOffers missing=success
 bud_marketPrepareOffer missing=refusal
 bud_marketPrepareOffer missing=success
 bud_marketPreparePurchase missing=refusal
 bud_marketPreparePurchase missing=success
 bud_mintBridgeTransfer missing=refusal
-bud_netListening missing=refusal
 bud_netListening missing=success
-bud_netPeerCount missing=refusal
 bud_netPeerCount missing=success
-bud_netVersion missing=refusal
 bud_netVersion missing=success
-bud_nodeInfo missing=refusal
 bud_nodeInfo missing=success
 bud_passportGetProfile missing=refusal
 bud_passportGetProfile missing=success
@@ -189,25 +158,17 @@ bud_planEvmVerification missing=refusal
 bud_planEvmVerification missing=success
 bud_pollenBuildAiInputRef missing=refusal
 bud_pollenBuildAiInputRef missing=success
-bud_pollenGetAccessGrants missing=refusal
 bud_pollenGetAccessGrants missing=success
-bud_pollenGetDataAssets missing=refusal
 bud_pollenGetDataAssets missing=success
-bud_pollenGetPurchaseReceipts missing=refusal
 bud_pollenGetPurchaseReceipts missing=success
-bud_pollenGetSaleAuthorizations missing=refusal
 bud_pollenGetSaleAuthorizations missing=success
 bud_pollenPreparePurchase missing=refusal
 bud_pollenPreparePurchase missing=success
 bud_pollenPrepareSaleAuthorization missing=refusal
 bud_pollenPrepareSaleAuthorization missing=success
-bud_pruneStatus missing=refusal
 bud_pruneStatus missing=success
 bud_registryActiveMembers missing=refusal
-bud_registryActiveMembers missing=success
 bud_registryBeginRoleBondUnbonding missing=refusal
-bud_registryQuery missing=refusal
-bud_registryQuery missing=success
 bud_registryRegister missing=refusal
 bud_registryRegister missing=success
 bud_registryWithdrawRoleBond missing=refusal
@@ -232,21 +193,12 @@ bud_socialPrepareBurn missing=success
 bud_socialPreparePost missing=refusal
 bud_socialPreparePost missing=success
 bud_storageAcceptReallocation missing=refusal
-bud_storageActiveOperators missing=refusal
 bud_storageCloseReveal missing=refusal
 bud_storageCloseReveal missing=success
 bud_storageGetChallenges missing=refusal
 bud_storageGetChallenges missing=success
 bud_storageGetConfidentialCommit missing=refusal
 bud_storageGetConfidentialCommit missing=success
-bud_storageGetCustody missing=refusal
-bud_storageGetCustody missing=success
-bud_storageGetDealsByManifest missing=refusal
-bud_storageGetDealsByManifest missing=success
-bud_storageGetDealsByShard missing=refusal
-bud_storageGetDealsByShard missing=success
-bud_storageGetEconomicsEvents missing=refusal
-bud_storageGetEconomicsSummary missing=refusal
 bud_storageGetManifest missing=refusal
 bud_storageGetObject missing=refusal
 bud_storageGetObject missing=success
@@ -259,7 +211,6 @@ bud_storageOpenReveal missing=refusal
 bud_storageOpenReveal missing=success
 bud_storageQrFeedFrames missing=refusal
 bud_storageRepairBand missing=refusal
-bud_storageRepairBand missing=success
 bud_storageRevealFrames missing=refusal
 bud_storageRevealFrames missing=success
 bud_storageVerifyEncoding missing=refusal
@@ -268,14 +219,10 @@ bud_submitQcFaultProof missing=refusal
 bud_submitSlashingReport missing=refusal
 bud_subscribe missing=refusal
 bud_subscribe missing=success
-bud_syncing missing=refusal
 bud_syncing missing=success
 bud_txPrecheck missing=refusal
 bud_unlockBridgeTransfer missing=refusal
 bud_unlockBridgeTransferVerified missing=refusal
 bud_unsubscribe missing=refusal
 bud_unsubscribe missing=success
-bud_validatorList missing=refusal
-bud_validatorList missing=success
 bud_validatorProfile missing=refusal
-bud_validatorProfile missing=success
