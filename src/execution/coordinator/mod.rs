@@ -7,3 +7,4 @@
 
 pub mod migration;
 pub mod scheduler;
+pub mod foreign;
