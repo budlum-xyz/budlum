@@ -115,3 +115,11 @@ other PR was closed, merged, retargeted or edited.
 | BLG-299 / BLG-318 | closed in code here: `rust-syntax-is-parseable` is registered in `xtask/gates/src/main.rs`, carries six canaries and is locked by `xtask/gates/tests/stack_compatibility.rs`. CI run number owed. Local replica evidence: `docs/audit/RUST_SYNTAX_GATE_VERIFICATION_2026-11-06.md`. |
 | BLG-314 | still open: PR #55's broken blob is reproduced and named, the branch itself is not modified. |
 | BLG-298 | reproduced mechanically with exact line numbers; the third broken branch (#55) is BLG-314. |
+
+### Slice 3/N updates (PR #96)
+
+| ID | State after the slice |
+|---|---|
+| BLG-315 | **closed in code here**: the WP-46 ceremony is fail-closed. Red: PR #94's harness fails 4/4 against #92 head `9d532a8a`; Green: the extended 10-test harness passes 10/10 on this branch. Exact outputs in `docs/audit/CEREMONY_DEFECT_REPAIR_2026-11-06.md`. CI run number owed; the harness is wired by `.github/workflows/ceremony.yml`. |
+| BLG-321 | High. PR #92's `mobile.yml` used four unpinned action tags, against directive 16.2 item 4, and shipped the WP-37 log-analyzer workspace without a CI job. **Fixed here** by SHA pins (peeled commits for annotated tags) and a `device-log-analyzer` job. |
+| BLG-319 | additionally corrected: WP-36/37/46 are `partial` (PR #92), not `undone`. |

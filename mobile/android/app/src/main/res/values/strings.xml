@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Budlum Validator</string>
+    <string name="channel_service_name">Validator service</string>
+    <string name="channel_alerts_name">Validator alerts</string>
+    <string name="notification_service_title">Budlum validator running</string>
+    <string name="notification_service_text">Stored: %1$d bytes · Last audit: %2$s · %3$s</string>
+    <string name="notification_boot_title">Budlum validator paused</string>
+    <string name="notification_boot_text">Reopen the app to resume the validator service. Background audits continue automatically.</string>
+    <string name="state_connected">connected</string>
+    <string name="state_disconnected">disconnected</string>
+    <string name="audit_result_none_yet">none yet</string>
+    <!-- Directive 7.9.9.5: registration-screen disclosure. -->
+    <string name="disclosure_registration">Your phone stores content pieces. These pieces alone do not reveal the content. Public content is everyone\'s content; sealed content is encrypted.</string>
+    <!-- Directive 7.9.6.3: in-app Security page trade-off. -->
+    <string name="security_tradeoff">The operator key is stored on this device wrapped by the Android Keystore (StrongBox when available). It is usable in the background without user authentication, so someone who seizes the unlocked device can sign duty transactions, but cannot spend your stake. If you lose the device, send RotateOperatorKey from your wallet on another device.</string>
+</resources>
