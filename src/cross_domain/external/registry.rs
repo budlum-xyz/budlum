@@ -350,12 +350,33 @@ impl ExternalDomainRegistry {
         let Some(reg) = self.domains.get_mut(domain) else {
             return Err(RegistryError::UnknownDomain(hex(domain.as_bytes())));
         };
-        if !admission.admitted || !admission.golden_verified {
+        if !admission.admitted
+            || !admission.golden_verified
+            || admission.total() == 0
+            || admission.passed() != admission.total()
+        {
             return Err(RegistryError::AdmissionFailed {
                 golden_verified: admission.golden_verified,
                 admitted: admission.admitted,
                 passed: admission.passed(),
                 total: admission.total(),
+            });
+        }
+        if admission.adapter_version != reg.record.descriptor.adapter_version {
+            return Err(RegistryError::AdmissionAdapterVersionMismatch {
+                expected: reg.record.descriptor.adapter_version,
+                found: admission.adapter_version,
+            });
+        }
+        if !reg
+            .record
+            .descriptor
+            .accepted_evidence_versions
+            .contains(&admission.evidence_version)
+            || reg.versions.window(admission.evidence_version).is_none()
+        {
+            return Err(RegistryError::AdmissionEvidenceVersionMismatch {
+                version: admission.evidence_version,
             });
         }
         let digest = admission.digest();
@@ -476,7 +497,11 @@ impl ExternalDomainRegistry {
                         .insert(attestation.evidence_digest, evidence.submitter);
                     reg.record.attestations_accepted =
                         reg.record.attestations_accepted.saturating_add(1);
-                    reg.record.last_accepted_height = Some(attestation.height);
+                    reg.record.last_accepted_height = Some(
+                        reg.record
+                            .last_accepted_height
+                            .map_or(attestation.height, |prev| prev.max(attestation.height)),
+                    );
                     reg.record.last_verified_at = Some(height);
                     reg.record.last_backing = Some(attestation.security);
                     reg.record.crypto_facts.merge(&observed);
@@ -596,7 +621,11 @@ impl ExternalDomainRegistry {
         reg.attestation_provers
             .insert(attestation.evidence_digest, submitter);
         reg.record.attestations_accepted = reg.record.attestations_accepted.saturating_add(1);
-        reg.record.last_accepted_height = Some(attestation.height);
+        reg.record.last_accepted_height = Some(
+            reg.record
+                .last_accepted_height
+                .map_or(attestation.height, |prev| prev.max(attestation.height)),
+        );
         reg.record.last_verified_at = Some(height);
         reg.record.last_backing = Some(attestation.security);
         // The quorum path verified this attestation when its evidence arrived

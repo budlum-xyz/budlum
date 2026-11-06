@@ -695,6 +695,9 @@ pub fn execute_graft_tx(
     ctx: &SettlementTxContext,
     tx: &GraftTx,
 ) -> Result<(), SettlementTxError> {
+    if !crate::core::chain_config::app_binding_enabled_for_chain_id(ctx.chain_id) {
+        return Err(refused("remote app binding is not enabled on this network"));
+    }
     let block = state.current_block_height;
     match tx {
         GraftTx::Register {

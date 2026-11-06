@@ -257,3 +257,7 @@ pub mod persistence_move;
 // WP-17 state transition, vesting, staking, governance, sharding, and V2 snapshot hardening.
 #[cfg(test)]
 pub mod wp17_state_hardening;
+
+// WP-44 domains, cross-domain bridge, settlement, and testnet feature-matrix locks.
+#[cfg(test)]
+pub mod wp44_domains_bridge_settlement;
