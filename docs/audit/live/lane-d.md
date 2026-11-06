@@ -169,6 +169,24 @@ the base fee, the proportional transfer cut and the escalating governance fee ar
 The record's premise (a flat 21000 that ignores both cuts) is gone. **Previously fixed**, and the
 rationale is written in the handler itself, which is where the next reader will look.
 
+### 4.5 The lane's permanent tests
+
+Section 15.8 cards `src/tests/audit_lane_d.rs` as a lock path, and section 14.1 rule 7 is what it
+is for: a record that was already fixed is pinned by a test that outlives the lane. Four records
+whose reading produced no test of their own now have one, named after the record so `grep BLG-099`
+and `grep blg_099_` find each other:
+
+| Record | Test in `src/tests/audit_lane_d.rs` | What it holds |
+|---|---|---|
+| BLG-099 | `blg_099_credential_comparison_does_not_stop_at_a_common_prefix` | A prefix, a superset, a one-byte change and the empty string are all refused against the credential, and both-empty matches through the length fold |
+| BLG-022 | `blg_022_next_checkpoint_is_answered_for_the_largest_target` | Interval 1 with target `u64::MAX` answers 5 from a height-4 anchor: the closed form, not a walk; interval 0 and a target behind the anchor are `None` |
+| BLG-192 | `blg_192_estimate_fee_comes_from_the_admission_rule_not_a_constant` | The estimate handler asks `get_required_fee`, and no line of code in it returns 21000. The literal stays in the comment that explains the fix, which is why the assertion reads code lines, not the body text |
+| BULGU-012 | `bulgu_012_serialisation_failure_is_an_error_not_a_null` | A value serde refuses produces `-32603` naming the method, and an encodable one still produces a value |
+
+The other five `Previously fixed` rows already had a test in the module they belong to (BLG-012,
+BLG-014, BULGU-011, DOC-GAP-07 has a declaration instead), and duplicating a test name is not
+possible in one crate's test binary, so they keep the module's name and this file cites it.
+
 Seven records still have no reading: BLG-011, BLG-016, BLG-081 to BLG-087, BLG-097, BLG-169,
 BLG-170 to BLG-181, BLG-187 to BLG-193, BLG-200, BLG-231, BLG-255, TEST-GAP-02 and TEST-GAP-07 need
 either the record text or a toolchain this sandbox does not have.
