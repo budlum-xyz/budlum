@@ -18,7 +18,7 @@ because a pull request is not evidence until it has merged.
 
 | Package | Lane | Status | Pull requests | Last commit | CI runs | Findings closed |
 |---|---|---|---|---|---|---|
-| WP-24 - A0 codec registry and the access layer | B | `in-progress` (slice 1/3) | this PR (WP-24, 1/3) | `38dd4b37` | `queued on this PR` | none in this slice |
+| WP-24 - A0 codec registry and the access layer | B | `in-progress` (slice 1/3) | this PR (WP-24, 1/3) | `1ff76edd` | `queued on this PR` | none in this slice |
 
 ## What WP-24 slice 1 delivered: object replacement
 
