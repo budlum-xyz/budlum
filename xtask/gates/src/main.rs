@@ -53,7 +53,10 @@ mod gates {
     pub mod bns_gate;
     pub mod bns_names_are_safe_in_an_address_bar;
     pub mod bridge_dual_tree;
+    pub mod bud3_custody_proofs;
     pub mod bud3_forbidden_phrases;
+    pub mod bud3_placement;
+    pub mod bud3_repair_fires;
     pub mod bud_e2e;
     pub mod budscan_parity;
     pub mod budscan_patchset;
@@ -552,6 +555,36 @@ const GATES: &[Gate] = &[
         run: gates::bud3_forbidden_phrases::run,
         run_args: None,
         self_test: gates::bud3_forbidden_phrases::self_test,
+        run_log: None,
+    },
+    // The rewritten form of `shard-placement-is-sticky-and-staked`: same
+    // properties, read from the B.U.D. 3.0 placement instead of the legacy
+    // assignment module. The old gate stays until that module is removed.
+    Gate {
+        name: "bud3-placement",
+        replaces: None,
+        run: gates::bud3_placement::run,
+        run_args: None,
+        self_test: gates::bud3_placement::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "bud3-custody-proofs",
+        replaces: None,
+        run: gates::bud3_custody_proofs::run,
+        run_args: None,
+        self_test: gates::bud3_custody_proofs::self_test,
+        run_log: None,
+    },
+    // The rewritten form of `repair-fires-on-loss`: the trigger and the repair
+    // are read from the B.U.D. 3.0 registry instead of the legacy maintenance
+    // sweep. The old gate stays until that sweep is removed.
+    Gate {
+        name: "bud3-repair-fires",
+        replaces: None,
+        run: gates::bud3_repair_fires::run,
+        run_args: None,
+        self_test: gates::bud3_repair_fires::self_test,
         run_log: None,
     },
     Gate {
