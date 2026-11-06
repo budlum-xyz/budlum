@@ -19,6 +19,7 @@
 //! | [`custody`] | Sub-block tree, symbol root, the audit draw and custody proofs |
 //! | [`pipeline`] | Upload (content to record and symbols) and view (symbols to checked content) |
 //! | [`fountain`] | RFC 6330 per-segment encoder and decoder, and the streaming encoder |
+//! | [`live`] | Live stream T-Expansion: time segments, the `prev_object` chain, the ratioless send order |
 //!
 //! The commitment is fixed-size (32 bytes). The object is not fixed-size: it
 //! is the header plus the payload, and it is at most the header larger than
@@ -35,6 +36,7 @@ pub mod custody;
 pub mod dedup_index;
 pub mod fountain;
 pub mod limits;
+pub mod live;
 pub mod meter;
 pub mod pipeline;
 pub mod placement;
@@ -49,5 +51,9 @@ pub use fountain::{
     encode_stream, FountainError, SegmentDecoder, SegmentEncoder, Symbol, SymbolKind,
 };
 pub use limits::{Bud3Limits, Profile, ProfileId};
+pub use live::{
+    LiveContext, LiveError, LiveFrame, LiveSegment, LiveStream, RatiolessPlan, StreamEnd,
+    ViewerTicket, LIVE_SEGMENT_MS, MAX_JOIN_LATENCY_MS,
+};
 pub use meter::{Meter, MeterError};
 pub use segment::{object_commitment, segment_digest, ObjectCommitment, Segmentation};
