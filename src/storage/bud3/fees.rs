@@ -355,19 +355,27 @@ impl StorageLedger {
 
     /// Release one epoch from the endowment and divide it across the shares.
     ///
-    /// Returns what the holders received this epoch. The slice is capped at
-    /// the endowment this ledger holds, so the last epoch of an object's life
-    /// pays the remainder rather than a slice the balance cannot cover.
+    /// `endowment_share` is the object's endowment, not the balance left in it:
+    /// the slice is a fixed `share x epoch / lifetime`, so the releases add up
+    /// to the whole share over the paid lifetime. Releasing a fraction of the
+    /// *remaining* balance instead would leave most of the share in the ledger
+    /// for ever (a 8760-epoch lifetime would pay out about 63 percent).
+    ///
+    /// Returns what the holders received this epoch. The slice is still capped
+    /// at the balance this ledger holds, so the last epoch of a funded object's
+    /// life pays the remainder rather than a slice the balance cannot cover.
+    ///
     /// WIRING: unwired - the executor's epoch boundary settles the endowment
     /// through this call when it lands (WP-21).
     pub fn settle_epoch(
         &mut self,
+        endowment_share: u64,
         shares: &[CustodyShare],
         epoch_secs: u64,
         lifetime_days: u64,
     ) -> u64 {
         let slice =
-            endowment_epoch_slice(self.endowment, epoch_secs, lifetime_days).min(self.endowment);
+            endowment_epoch_slice(endowment_share, epoch_secs, lifetime_days).min(self.endowment);
         if slice == 0 {
             return 0;
         }
@@ -599,7 +607,7 @@ mod tests {
         let epoch_secs = 3_600;
         let mut epochs = 0;
         for _ in 0..100 {
-            ledger.settle_epoch(&shares, epoch_secs, BILLING_DAYS);
+            ledger.settle_epoch(fee, &shares, epoch_secs, BILLING_DAYS);
             assert_eq!(ledger.accounted(), ledger.charged, "epoch {}", epochs + 1);
             epochs += 1;
         }
@@ -607,11 +615,31 @@ mod tests {
         assert!(ledger.paid > 0, "the holders were paid something");
         assert_eq!(ledger.accounted(), ledger.charged);
         assert_eq!(
-            ledger.gateway
-                + ledger.endowment
-                + ledger.paid
-                + ledger.pool,
+            ledger.gateway + ledger.endowment + ledger.paid + ledger.pool,
             ledger.charged
+        );
+
+        // The releases add up to the share the object paid, not to a fraction
+        // of it: over the whole lifetime the holders receive the endowment and
+        // the ledger keeps only the rounding dust. A slice taken from the
+        // remaining balance instead would stop near 63 percent.
+        let mut life = StorageLedger::default();
+        let share = life
+            .charge(storage_fee(10 * GIB_BYTES, BILLING_DAYS))
+            .endowment;
+        for _ in 0..8_760 {
+            life.settle_epoch(share, &shares, epoch_secs, BILLING_DAYS);
+            assert_eq!(life.accounted(), life.charged);
+        }
+        assert!(
+            life.paid >= share / 100 * 99,
+            "the holders received {} of a {share} endowment",
+            life.paid
+        );
+        assert!(
+            life.endowment <= share / 100,
+            "{} left in the endowment after the lifetime",
+            life.endowment
         );
     }
 }
