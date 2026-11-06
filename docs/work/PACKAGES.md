@@ -161,7 +161,7 @@ quota can only tighten.
 
 ## WP-04 and WP-42 continuation: the integration audit
 
-`ops/scripts/integration_audit.py` replays twelve cross-file invariants that a
+`ops/scripts/integration_audit.py` replays fourteen cross-file invariants that a
 merge can break without breaking any single file: RPC table order, gateway
 table agreement, gate and test registration, module resolution, vacuous tests,
 package registry completeness, the directive-file rule, English root scripts,

@@ -14,6 +14,9 @@ Checks (each name is also a stable finding prefix):
   `METHOD_CLASSES` rows are the same names in the same order.
 * `compat_gateway_tables_agree`: the Ethereum gateway table, the class table
   and `api.rs` agree on every served, pending and refused method.
+* `rpc_extension_signatures_agree`: `with_extensions` and handler signatures
+  agree, so two merged gateway stacks cannot leave a half-wired method.
+* `gateway_answers_are_exhaustively_matched`: the test matches every `Answer`.
 * `gate_modules_are_registered`: every gate file is registered and wired.
 * `test_modules_are_registered`: every test file is registered.
 * `module_declarations_resolve`: no `mod name;` points at a missing file.
@@ -384,6 +387,72 @@ def check_legacy_ratchet(root: Path) -> list[str]:
     return [f"legacy_storage_ratchet_is_consistent: {p}" for p in problems]
 
 
+def snake_case(name: str) -> str:
+    """The `#[method]` wire name to the Rust handler name the macro makes."""
+    out: list[str] = []
+    for index, char in enumerate(name):
+        if char.isupper():
+            previous = name[index - 1] if index else ""
+            following = name[index + 1] if index + 1 < len(name) else ""
+            if index and (not previous.isupper() or following.islower()):
+                out.append("_")
+            out.append(char.lower())
+        else:
+            out.append(char)
+    return "".join(out)
+
+
+def check_extension_signatures(root: Path) -> list[str]:
+    """Every `with_extensions` method must have a handler taking `ext`.
+
+    A merge of two gateway implementations can leave the attribute on one side
+    and the handler signature on the other. Rust would refuse to compile, but
+    this workspace has no compiler, so the mismatch is caught here.
+    """
+    api = read(root, "src/rpc/api.rs")
+    server = read(root, "src/rpc/server.rs")
+    expected = {
+        snake_case(name)
+        for name in re.findall(
+            r'#\[method\(name = "([^"]+)", with_extensions\)\]', api
+        )
+    }
+    handlers = set(
+        re.findall(
+            r"async fn ([a-z0-9_]+)\(\s*&self,\s*ext: &jsonrpsee::Extensions",
+            server,
+        )
+    )
+    problems: list[str] = []
+    if not expected and not handlers:
+        return ["rpc_extension_signatures_agree: neither side uses extensions"]
+    for name in sorted(expected - handlers):
+        problems.append(f"{name} has with_extensions but no ext parameter in server.rs")
+    for name in sorted(handlers - expected):
+        problems.append(f"{name} takes ext but its method has no with_extensions")
+    return [f"rpc_extension_signatures_agree: {p}" for p in problems]
+
+
+def check_gateway_answer_match(root: Path) -> list[str]:
+    """The gateway tests must match every `Answer` variant exhaustively."""
+    gateway = read(root, "src/rpc/compat/ethereum/mod.rs")
+    tests = read(root, "src/rpc/compat/ethereum/tests.rs")
+    definition = re.search(r"enum Answer \{(.*?)\n\}", gateway, re.S)
+    arms = re.search(r"match entry\.answer \{(.*?)\n\s*\};", tests, re.S)
+    problems: list[str] = []
+    if not definition or not arms:
+        return ["gateway_answers_are_exhaustively_matched: the enum or the match is absent"]
+    variants = set(
+        re.findall(r"^\s{4}([A-Z][A-Za-z0-9]*)\s*(?:,|\{|\()", definition.group(1), re.M)
+    )
+    matched = set(re.findall(r"Answer::([A-Z][A-Za-z0-9]*)", arms.group(1)))
+    for name in sorted(variants - matched):
+        problems.append(f"Answer::{name} has no arm in the gateway class-table test")
+    for name in sorted(matched - variants):
+        problems.append(f"the test matches Answer::{name}, which is not a variant")
+    return [f"gateway_answers_are_exhaustively_matched: {p}" for p in problems]
+
+
 TURKISH_CHARACTERS = "\u015f\u011f\u0131\u00e7\u00f6\u00fc\u015e\u011e\u0130\u00c7\u00d6\u00dc"
 
 
@@ -399,7 +468,9 @@ def check_root_python_is_english(root: Path) -> list[str]:
 
 CHECKS = (
     check_rpc_method_table,
+    check_extension_signatures,
     check_gateway_tables,
+    check_gateway_answer_match,
     check_gate_modules,
     check_test_modules,
     check_module_declarations,
@@ -453,6 +524,13 @@ def fixture(root: Path) -> None:
         root,
         "src/rpc/compat/ethereum/mod.rs",
         'pub mod filters;\n'
+        'enum Answer {\n'
+        '    ChainRead,\n'
+        '    MethodNotFound,\n'
+        '    EeUnavailable { door: &static str },\n'
+        '    BoundedFilter,\n'
+        '    Pending { package: &static str },\n'
+        '}\n'
         'const METHODS: &[MethodRow] = &[\n'
         '    MethodRow { name: "eth_chainId", answer: Answer::ChainRead },\n'
         + "".join(
@@ -465,7 +543,18 @@ def fixture(root: Path) -> None:
         '/// The row for a wire name, or `None`.\n',
     )
     write(root, "src/rpc/compat/ethereum/filters.rs", 'fn eth_filters_are_bounded() {}\n')
-    write(root, "src/rpc/compat/ethereum/tests.rs", '// gateway tests\n')
+    write(
+        root,
+        "src/rpc/compat/ethereum/tests.rs",
+        'fn check() {\n'
+        '    let expected = match entry.answer {\n'
+        '        Answer::Pending { .. } => None,\n'
+        '        Answer::ChainRead => Some("Read"),\n'
+        '        Answer::MethodNotFound | Answer::EeUnavailable { .. } => Some("Refused"),\n'
+        '        Answer::BoundedFilter => Some("LocalAdmin"),\n'
+        '    };\n'
+        '}\n',
+    )
     write(
         root,
         "src/rpc/server.rs",
@@ -473,7 +562,11 @@ def fixture(root: Path) -> None:
         'fn handle(&self) {\n'
         '    let peer = ethereum::filters::peer_of(ext);\n'
         '    let error = ethereum::filter_error("eth_newFilter", reason);\n'
-        '}\n',
+        '}\n'
+        + "".join(
+            f'async fn {snake_case(name)}(&self, ext: &jsonrpsee::Extensions) {{}}\n'
+            for name in FILTER_METHODS
+        ),
     )
     write(root, "src/lib.rs", "pub mod rpc;\npub mod clean;\n")
     write(root, "src/rpc/mod.rs", "pub mod api;\n")
@@ -514,6 +607,16 @@ def self_test() -> list[str]:
         check_rpc_method_table: (
             "src/rpc/method_class.rs",
             '    row("bud_chainId", Public, Read),\n',
+            "",
+        ),
+        check_extension_signatures: (
+            "src/rpc/server.rs",
+            "async fn eth_new_filter(&self, ext: &jsonrpsee::Extensions) {}",
+            "async fn eth_new_filter(&self) {}",
+        ),
+        check_gateway_answer_match: (
+            "src/rpc/compat/ethereum/tests.rs",
+            '        Answer::BoundedFilter => Some("LocalAdmin"),\n',
             "",
         ),
         check_gateway_tables: (
