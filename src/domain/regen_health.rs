@@ -224,6 +224,26 @@ pub fn assess(
                 stress: Some(Stress::RepairFailed),
             };
         }
+        let Some(steps) = ledger
+            .stage
+            .reversions_to(Stage::Polyp)
+            .filter(|&s| s > 0)
+        else {
+            return HealthVerdict::Alarm {
+                reason: AlarmReason::AuditTrailCorrupt {
+                    rule: rule.to_string(),
+                },
+                stress: Some(Stress::RepairFailed),
+            };
+        };
+        if steps > policy.reversion.max_stages_per_event {
+            return HealthVerdict::Alarm {
+                reason: AlarmReason::AuditTrailCorrupt {
+                    rule: rule.to_string(),
+                },
+                stress: Some(Stress::RepairFailed),
+            };
+        }
         // Full reversion is the only honest move against an unknown damage
         // window. The target snapshot still has to exist and be canonical at
         // execution time; the ledger enforces that in `revert`.
@@ -313,6 +333,17 @@ pub fn assess(
                 events: ledger.event_count(),
                 limit: policy.reversion.max_events_per_lifetime,
             },
+            stress: Some(stress),
+        };
+    }
+    let max_depth = policy.reversion.max_stages_per_event;
+    let within_depth = ledger
+        .stage
+        .reversions_to(target_stage)
+        .is_some_and(|steps| steps > 0 && steps <= max_depth);
+    if !within_depth {
+        return HealthVerdict::Alarm {
+            reason: AlarmReason::FullReversionForbidden { damaged_below },
             stress: Some(stress),
         };
     }
@@ -591,5 +622,40 @@ mod tests {
             .kind(),
             "regen-alarm-audit-trail-corrupt"
         );
+    }
+
+    #[test]
+    fn blg_131_assess_enforces_max_stages_per_event_and_polyp_self_stage_guard() {
+        let mut policy = HealthPolicy::default();
+        policy.reversion.max_stages_per_event = 1;
+        let mut ledger = RegenerationLedger::at(2, [0xFF; 32]);
+        let canon = |stage: Stage, height: u64| -> Option<[u8; 32]> {
+            if (stage, height) == (Stage::Medusa, 2) {
+                return Some(C_MEDUSA);
+            }
+            canonical(stage, height)
+        };
+        let v = assess(&ledger, &policy, &canon, &stage_height, 1000, 10);
+        assert!(matches!(v, HealthVerdict::Alarm { .. }));
+
+        ledger.stage = Stage::Polyp;
+        ledger.height = 0;
+        ledger.total_reused = 99;
+        assert!(ledger.validate().is_err());
+        let v_polyp = assess(
+            &ledger,
+            &HealthPolicy::default(),
+            &canonical,
+            &stage_height,
+            1000,
+            10,
+        );
+        assert!(matches!(
+            v_polyp,
+            HealthVerdict::Alarm {
+                reason: AlarmReason::AuditTrailCorrupt { .. },
+                ..
+            }
+        ));
     }
 }

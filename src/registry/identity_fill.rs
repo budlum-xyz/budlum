@@ -403,13 +403,23 @@ impl PresentationReceipt {
     #[must_use]
     pub fn digest(&self) -> [u8; 32] {
         let mut acc = hash_fields_bytes(&[
-            b"bud-vc-presentation-v1",
+            b"bud-vc-presentation-v2",
             self.requester.as_bytes(),
             self.subject.as_bytes(),
             &self.document_digest,
             &self.epoch.to_le_bytes(),
+            &(self.entries.len() as u64).to_le_bytes(),
         ]);
         for entry in &self.entries {
+            let mut proof_acc = hash_fields_bytes(&[
+                b"bud-vc-presentation-proof",
+                &(entry.proof.leaf_index as u64).to_le_bytes(),
+                &(entry.proof.leaf_count as u64).to_le_bytes(),
+                &(entry.proof.siblings.len() as u64).to_le_bytes(),
+            ]);
+            for sib in &entry.proof.siblings {
+                proof_acc = hash_fields_bytes(&[&proof_acc, sib]);
+            }
             acc = hash_fields_bytes(&[
                 &acc,
                 entry.slot.as_bytes(),
@@ -417,8 +427,7 @@ impl PresentationReceipt {
                 entry.field.as_bytes(),
                 &entry.salt,
                 &entry.value_digest,
-                &(entry.proof.leaf_index as u64).to_le_bytes(),
-                &(entry.proof.leaf_count as u64).to_le_bytes(),
+                &proof_acc,
             ]);
         }
         acc
@@ -621,7 +630,19 @@ pub fn check_receipt(
     if document_digest_of(document) != receipt.document_digest {
         return Err(FillError::WrongDocument);
     }
+    if receipt.entries.is_empty() {
+        return Err(FillError::CredentialNotValid {
+            slot: String::new(),
+            reason: "receipt discloses no credential fields".to_string(),
+        });
+    }
+    let mut seen_slots = std::collections::BTreeSet::new();
     for entry in &receipt.entries {
+        if !seen_slots.insert(entry.slot.as_str()) {
+            return Err(FillError::DuplicateSlot {
+                slot: entry.slot.clone(),
+            });
+        }
         let credential = registry.credential(&entry.credential_id).ok_or_else(|| {
             FillError::CredentialNotValid {
                 slot: entry.slot.clone(),
@@ -1015,6 +1036,29 @@ mod tests {
         assert!(matches!(
             fill_template("{{name}}", &[d]),
             Err(FillError::ValueCarriesBraces { .. })
+        ));
+    }
+
+    #[test]
+    fn blg_051_check_receipt_refuses_empty_entries() {
+        let registry = IdentityRegistry::new();
+        let key = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let subject = Address::from(key.public_key_bytes());
+        let requester = Address([7u8; 32]);
+        let doc = "Empty presentation";
+        let mut receipt = PresentationReceipt {
+            requester,
+            subject,
+            document_digest: document_digest_of(doc),
+            epoch: 10,
+            entries: Vec::new(),
+            subject_public_key: Vec::new(),
+            signature: Vec::new(),
+        };
+        receipt.sign(&key);
+        assert!(matches!(
+            check_receipt(&registry, &receipt, &requester, doc),
+            Err(FillError::CredentialNotValid { .. })
         ));
     }
 }
