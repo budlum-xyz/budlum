@@ -6,6 +6,11 @@ Scope: every open pull request on `lubothebook/budlum` at the time of the audit,
 and a tokenizer-checked read of the tree. No other branch was pushed, and no
 other pull request was closed, merged or retargeted by this session.
 
+Reference time: the audit-start snapshot (09:00–10:00 local) counted **63**
+open PRs; by the end of the session the stack had grown to **68** others +
+this PR (**69**); the integration probe in §9 ran against the 69-PR set.
+Counts marked "63" below refer to the audit-start snapshot.
+
 Live inputs (reproduce with the same commands):
 
 ```
@@ -303,3 +308,81 @@ remains open; this is `WP-55, 1/N`, not a package completion claim.
   branch must not be read as fixing `main`.
 - The counts above (63 PRs, 209 files, fan-in numbers, red job names) were
   produced live on 2026-11-06 and re-derivable from the commands in §0.
+
+## 9. Addendum — the integration probe (same day, later)
+
+After the snapshot above, this session ran a **local-only integration probe**:
+every open PR head was merged, in ascending PR order, into a scratch
+accumulation off `cccf1da` (a throwaway worktree, never pushed, deleted
+afterwards). Every `.rs` file in the accumulation was parsed with
+tree-sitter-rust at every probe step; every conflicted merge was aborted and
+its paths recorded. The probe ran against the **69-PR** set (the original
+63 + #84..#89). The result corrects nothing above; it sharpens it.
+
+### 9.1 Outcome by PR
+
+- **Clean merges:** #8, #9, #12, #13, #24, #34, #37, #38, #49, #54, #58,
+  #64, #76, **#86 (this PR)**.
+- **Clean but empty (already applied by the accumulation):** #87.
+- **Conflicted (aborted, not integrated):** #11, #14, #16, #18, #20, #29,
+  #30, #31, #35, #36, #39, #40, #41, #42, #43, #44, #45, #46, #47, #48,
+  #50, #51, #52, #53, #55, #56, #57, #59, #60, #61, #62, #63, #65, #66,
+  #67, #68, #69, #70, #71, #72, #73, #74, #75, #77, #78, #79, #80, #81,
+  #82, #83, #84, #85, #88, #89. 54 of 69 do not apply cleanly on top of a
+  stack in which every other PR that *can* apply cleanly is already applied.
+- **Highest-fan-in conflict magnets confirmed in practice:** `docs/work/PACKAGES.md`,
+  `docs/audit/FINDINGS.md`, `xtask/gates/src/main.rs`, `src/tests/mod.rs`,
+  `src/chain/blockchain.rs`, `.github/workflows/ci.yml`,
+  `no_out_of_block_consensus_writes.rs`, `tree_is_english.rs`.
+
+### 9.2 New findings (appended BLG ids)
+
+| ID | Severity | Finding | State |
+|---|---|---|---|
+| BLG-298 | **Critical** | **PR #8 (`a5f30fb8`) and PR #9 (`3c5bb36d`) each ship syntactically invalid Rust.** PR #8 ("The codec register and the dedup index", WP-07-era legacy-removal tip) has 8 `.rs` files that do not parse: `src/chain/blockchain.rs` (lone `f` at L7914, L7907, L7743, L4407, L4216 after removed tests), `src/persistence/db.rs` (L135, L180, L431, and a deleted method name at L131 leaving `self.                    .load(...)`), `src/persistence/traits.rs` (`f    /// # Errors` doc lines at L223 and L227), `src/rpc/tests.rs` (`a` at L445 after a removed test), `src/storage/bud3/content_ref.rs` (`Bud3NotReady,` orphaned outside its enum at L239), `src/tests/priority_findings.rs`, `src/tests/regression_ai_storage.rs`, `src/tests/regression_chain.rs` (lone `f` prefixes / orphaned `#[test]` attributes). PR #9 ("WP-12") has 2: `crates/bud-codec/src/container.rs` (L508) and `src/tests/integration.rs` (a `seat_table_version: 0,` field inserted mid-expression at L758 and L507, and in two more struct-literal sites; the set_hash chain is torn across `.clone(),`). | Open. PRs #8/#9 must be repaired on their own branches or re-rooted like #81. Neither can compile as pushed. |
+| BLG-299 | High | **Nothing in the open stack catches BLG-298.** Git merges the machine-broken blobs cleanly (a merge that conflicts on text never runs a parse check), CI has no runner for any open PR, and `main` is red anyway — the only nets that could catch a syntactically invalid tree are all absent. The repair for such merges is always discovered late, mid-stack, by the first human who builds the combined tree. | Open. A syntactic gate (tree-sitter or `cargo check` on merged trees pre-merge) is the cheapest control; it belongs to WP-42. |
+
+### 9.3 What the probe says about compatibility
+
+- **Textual cleanliness is not semantic coherence.** 14 PRs merged cleanly
+  (one more applied as a no-op), yet 9 files still did not parse at the end
+  of the accumulation, all attributable to #8/#9's broken blobs riding clean
+  merges downstream.
+- Five of PR #8's eight broken files (`blockchain.rs`, `rpc/tests.rs`,
+  `priority_findings.rs`, `regression_ai_storage.rs`, `regression_chain.rs`)
+  were transiently "repaired" by an unrelated PR's blobs mid-stack and their
+  breakage re-surfaced depending on probe order — integration outcome depends
+  on the order PRs land, so the order must be chosen, not discovered.
+- `src/persistence/db.rs:131` is the one spot that needs the **author's
+  decision**, not a mechanical repair: a field/method name was deleted between
+  `self.` and `.load(...)` in `Storage::clone`. Repairing it means choosing
+  the field that holds the quarantine ledger's atomic counter; the name is
+  not recoverable from the diff without the author's intent.
+- Mechanical repair for the rest of BLG-298: drop lone `f`/`a` fragments,
+  strip `f    ` prefixes from doc lines, delete orphaned `#[test]`
+  attributes whose functions were removed, and move the two
+  `seat_table_version: 0,` fields to the correct nesting level in the two
+  `SigningCheckpoint` literals (the `set_hash:` expression must be a single
+  chain again).
+- My PR #86 merged **clean** against the accumulated set in its final state,
+  and adds no file present in any other PR (`src/storage/bud3/live.rs`,
+  `docs/audit/LIVE_PR_STACK_AUDIT_2026-11-06.md`).
+
+### 9.4 Incidents in this session (disclosed)
+
+1. The first integration probe used `--depth 1` fetches; this left the local
+   clone shallow (`.git/shallow`), silently severing `merge-base` between
+   `main` and every open branch — the first probe produced four bogus
+   "conflict" verdicts from a broken object graph. It was detected, recorded
+   here, and repaired with `git fetch --unshallow origin`; the first probe
+   was discarded and the branch scratch state deleted. No remote ref was
+   created or modified by either probe.
+2. `git gc --prune=now` was run once while the clone was shallow; it
+   removed nothing reachable and the unshallow restored completeness.
+3. Counts drift live: the 63-PR figure is the audit-start snapshot; the
+   probe used 69 (this PR included). The stack opened #84, #85, #87, #88 and
+   #89 while this session was in flight.
+
+BLG-298 and BLG-299 are appended here for the same reason as BLG-288..297:
+`docs/audit/FINDINGS.md` does not exist on `main` and is owned by 11 open
+PRs; the integrator should migrate all twelve rows on merge.
