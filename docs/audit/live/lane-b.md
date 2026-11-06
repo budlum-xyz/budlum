@@ -176,3 +176,18 @@ finding.
 from `cccf1da`. Identifier scans are fixed-string greps on the same tree.
 Where the directive's "Kod izi" column (2026-11-02 analysis base) and this
 snapshot disagree, the live result is authoritative.
+
+## Rows carried from pr-87 (WP-27 M0 status)
+
+| BLG-064 | High | Data sovereignty / Cryptography / Economy | Open | blg_064_pollen_protected_content_bridge | src/pollen/, src/socialfi/ (20/21 traces) | IP-23|
+| BLG-109 | Critical | Data sovereignty / B.U.D. storage / SocialFi | Open - partial removal | blg_109_nft_mint_burn_manifest_delete | src/socialfi/, src/bns/ (15/16 traces) | IP-23|
+| BLG-110 | Critical | Consensus state root / BNS / Privacy | Open | blg_110_bns_registry_default_base_cost | src/bns/ (23/23 traces; L1NoteRegistry MAX_LIVE_COMMITMENTS; XSS) | IP-23|
+| BLG-129 | High | Gateway proofs | Open | blg_129_dweb_passport_proof_bundle | src/gateway/, src/budlumxyz/ (36/37 traces) | IP-23|
+| BLG-226 | High | Gonca E4 | Open | blg_226_verify_merkle_single_round | budzero/bud-isa/src/lib.rs | IP-56 (testnet closure IP-33)|
+| BLG-230 | Medium | Gonca E8 | Open | blg_230_sender_64bit_vs_address_256bit | budzero/bud-vm/src/lib.rs; src/execution/zkvm.rs | IP-33 (execution leg), IP-56|
+| BLG-232 | Medium | Gonca E10 | Open | blg_232_single_air_1073_columns | budzero/bud-proof/src/plonky3_air.rs | IP-56|
+| BLG-236 | Medium | Gonca E14 | Open | blg_236_no_plaintext_bound_commitment | docs/BUD_CONTENT_ENCRYPTION.md; src/storage/payload_crypt.rs | IP-56|
+| BLG-242 | Medium | Gonca E20 | Open | blg_242_commitment_no_team_hash | All commitment types | IP-56|
+| BLG-243 | Medium | Gonca E22 | Open | blg_243_event_accumulation_32bit_sum | budzero/README.md; docs/AI_VERIFICATION_STATUS.md | IP-56|
+| BLG-261 | Low | src/deed/mod.rs | Open | blg_261_deed_register_manifest_breaks | src/deed/mod.rs (RegisterManifest breaks when 2.0 removed) | IP-23|
+| BLG-262 | Medium | src/gateway/service.rs | Open | blg_262_content_gateway_bitswap_sled | src/gateway/service.rs (gateway serves via Bitswap + local sled; not bound to B.U.D. 3.0 symbol path) | IP-23|

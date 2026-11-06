@@ -207,3 +207,39 @@ not a replacement for it.
 ## Rows carried from pr-68 (M0 live verification)
 
 - BLG-007, BLG-009, BLG-010, BLG-011, BLG-017, BLG-019, BLG-020, BLG-021, BLG-023, BLG-028, BLG-031, BLG-041, BLG-042, BLG-044, BLG-065, BLG-066, BLG-088, BLG-089, BLG-090, BLG-100, BLG-101, BLG-102, BLG-103, BLG-104, BLG-107, BLG-113, BLG-118, BLG-119, BLG-125, BLG-128, BLG-147, BLG-151, BLG-167, BLG-183, BLG-184, BLG-196, BLG-197, BLG-202, BULGU-005, BULGU-006, BULGU-007, BULGU-008, BULGU-009, BULGU-010, BULGU-013, BULGU-015, BULGU-016, BULGU-021 (Kapatan İP: İP-08, İP-12, İP-13, İP-14, İP-15, İP-16, İP-17)
+
+## Rows carried from pr-87 (WP-27 M0 status)
+
+| BLG-024 | Low | Consensus | Open | blg_024_finality_adapter_domain_check | src/consensus/ (PoW/PoS/PoA/BFT adaptors; 8/8 traces; PoAFinalityAdapter zero divisor) | IP-44|
+| BLG-043 | Critical | Bridge / Storage accounting | Open | blg_043_unlock_bridge_transfer | src/settlement/, src/cross_domain/ (14/19 traces) | IP-44|
+| BLG-050 | Critical | Security / Identity / State root | Open | blg_050_identity_recover_poa_gate | src/registry/ (16/16 traces) | IP-44|
+| BLG-051 | High | Security / Selective disclosure | Open | blg_051_check_receipt_foreign_credential | src/registry/identity* (9/9 traces) | IP-44|
+| BLG-052 | Medium | Consensus / PoA compliance | Open | blg_052_poa_onboarding_hashmap | src/consensus/poa.rs (15/16 traces) | IP-44|
+| BLG-053 | High | Economy / Settlement security | Open | blg_053_proof_market_replay | src/settlement/ (16/16 traces) | IP-44|
+| BLG-054 | Critical | Cryptography / Bridge / Consensus | Open | blg_054_ethereum_receiptsroot_mpt | src/cross_domain/evm/ (15/19 traces) | IP-44|
+| BLG-055 | Critical | Cryptography / External finality | Open | blg_055_pairing_bls_signing_root | src/cross_domain/ (17/18 traces) | IP-44|
+| BLG-056 | High | Consensus / Economy / DoS | Open | blg_056_external_domain_freeze | src/registry/ (29/30 traces) | IP-44|
+| BLG-057 | High | Consensus / Bridge accounting | Open | blg_057_bridge_state_lifecycle | src/settlement/ (17/17 traces) | IP-44|
+| BLG-058 | High | Consensus / State root / Determinism | Open | blg_058_domain_registry_leaf_digest | src/consensus/ (19/19 traces) | IP-44|
+| BLG-091 | Critical | External-domain contract / Cryptography | Open | blg_091_budlum_finality_verifier_zero_bls | contracts/ (18/22 traces) | IP-44|
+| BLG-105 | Critical | Consensus / Bridge / Tokenomics / Crypto | Open | blg_105_burn_bridge_transfer_double_mint | src/settlement/ (15/17 traces) | IP-44|
+| BLG-116 | Critical | Cross-domain bridge / ZK verification / RPC | Open | blg_116_adapter_spec_zkvm_empty_stark | src/cross_domain/, src/rpc/ (27/31 traces) | IP-44|
+| BLG-120 | High | Settlement security / Cold wallet / Quantum anchor | Open | blg_120_cold_wallet_epoch_budget | src/settlement/, crates/bpqs/ (29/33 traces) | IP-44|
+| BLG-127 | Critical | Consensus / Cryptography / Settlement capacity / Bridge | Open | blg_127_cold_wallet_3_of_6_anchor | src/settlement/, crates/bpqs/ (35/37 traces) | IP-44|
+| BLG-130 | Critical | Consensus / Cross-domain bridge finality / Crypto | Open | blg_130_lead_is_unassailable_early_decision | src/settlement/ (31/35 traces) | IP-44|
+| BLG-131 | High | Node health / Event rollback | Open | blg_131_regeneration_ledger_medusa_cycle | src/chain/state_recovery/ (moved from regeneration_stage.rs per 5.2; 17/19 traces) | IP-44|
+| BLG-134 | Critical | Cross-domain bridge / EVM canonical encoding | Open | blg_134_evm_rlp_0x81_b | src/cross_domain/evm/rlp.rs (18/22 traces) | IP-44|
+| BLG-138 | Critical | Cross-domain bridge pipe / External chain observer | Open | blg_138_bridge_relayer_pipeline_mint_unlock | src/settlement/ (21/23 traces) | IP-44|
+| BLG-146 | Critical | Cross-chain bridge claim verification / Quantum | Open | blg_146_build_bud_to_eth_claim_receiver | src/cross_domain/ (21/23 traces; bpqs poseidon2; note-packing Goldilocks wrapping) | IP-44|
+| BLG-155 | High | GlobalBlockHeader persistence / Validators | Open | blg_155_global_block_bincode_compatibility | src/chain/ (15/17 traces) | IP-44|
+| BLG-190 | Critical | Consensus field isolation / Quantum identity | Open | blg_190_did_bud_identity_recover_poa_gate | src/registry/ (30/31 traces) | IP-44|
+| BLG-194 | Critical | Cross-domain bridge / Universal relay atomicity | Open | blg_194_submit_relay_proof_atomic | src/settlement/ (18/21 traces) | IP-44|
+| BLG-195 | Critical | Multi-consensus finality verification / Cross-domain | Open | blg_195_finality_adapter_commitment_body | src/consensus/ (26/26 traces) | IP-44|
+| BLG-199 | High | Cryptographic Merkle tree second-preimage | Open | blg_199_merkle_root_leaf_internal_confusion | src/settlement/commitment_tree.rs, src/consensus/merkle_tree.rs (8/8 traces) | IP-44|
+| BLG-204 | High | Proof market accounting atomics / Ethereum bridge | Open | blg_204_proof_market_unpaid_receipt_delete | src/settlement/ (20/23 traces) | IP-44|
+| BLG-227 | Medium | Gonca E5 | Open | blg_227_verify_inference_summary_only | src/ai/mod.rs; docs/AI_VERIFICATION_STATUS.md | IP-57 (testnet closure IP-33)|
+| BLG-228 | High | Gonca E6 | Open | blg_228_ai_stark_verification_closed | src/ai/mod.rs | IP-57 (testnet closure IP-45)|
+| BLG-229 | High | Gonca E7 | Open | blg_229_ai_registry_no_lottery | src/ai/registry.rs | IP-45 (VL-1 leg), IP-57|
+| BLG-235 | High | Gonca E13, SERA-0 | Open | blg_235_zkvm_proof_only_zk_domain | src/cross_domain/external/zkvm_proof.rs; evm sync committee | IP-44, IP-60|
+| BLG-240 | Low | Gonca E18 | Open | blg_240_validator_ordering_f64 | src/ai/registry.rs | IP-45, IP-57|
+| BLG-244 | Low | Gonca E23 | Open | blg_244_off_device_assistant_bytes | Off-device assistant repository (separate repo work item) | IP-57|

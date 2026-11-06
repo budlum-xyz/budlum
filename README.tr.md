@@ -375,7 +375,9 @@ Aynı ağaçta asgari bir CLI istemcisi de bulunur:
 ```bash
 cargo run --bin bud -- query balance <adres>
 cargo run --bin bud -- query block latest
-cargo run --bin bud -- --signing-chain-id 45261 tx send --to <adres> --amount <n> --priv-key <hex-tohum>
+# Imza islemi cüzdan/anahtar deposundan alinan anahtar ile yapilir;
+# özel anahtar asla komut satirina (--priv-key) yazilmaz.
+cargo run --bin bud -- --signing-chain-id 45261 tx send --to <adres> --amount <n>
 ```
 
 Imza atan her komut `--signing-chain-id` alir (`45260` mainnet, `45261` testnet, `45262`
