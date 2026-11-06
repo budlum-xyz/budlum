@@ -106,10 +106,13 @@ highest one keeps a parallel claim from colliding with these rows.
 
 | BLG-356 | Medium | `MobileCore::set_policy` (#82, `mobile/core/src/duty.rs`) checked only the 1 GiB to 64 GiB user range, so an opportunistic (iOS) core accepted a quota up to 64 GiB. Section 7.2 caps that class at 8 GiB and the node refuses a larger registration (`MOBILE_OPPORTUNISTIC_MAX_QUOTA_BYTES`): the phone would hold and advertise custody it cannot register. | WP-11 | **Closed here, not executed.** `set_policy` refuses a quota above `ValidatorClass::max_custody_quota_bytes()` with `mobile_quota_above_class_cap`, before any share is released. Test first: `mobile_opportunistic_quota_is_capped_at_8_gib` (`1819dc7b`), fix in the next commit. |
 
-Not fixed in this PR and still open: BLG-257 (no mobile application) and
-BLG-259 (certificate size and the undocumented light-client trust model). Both
-belong to later slices of this package (`docs/LIGHT_CLIENT.md`, the light
-client, the bindings) and to WP-36 and WP-38.
+Not fixed in this PR and still open: BLG-257 (no mobile application), which
+belongs to the bindings and to WP-36 and WP-38, and BLG-259. BLG-259 has two
+legs. The trust-model leg is answered by `docs/LIGHT_CLIENT.md` (BLS at every
+checkpoint, ML-DSA-65 at every set change, the post-quantum half required on
+mainnet, sizes computed from the signature sizes). The size leg (about 420 KB
+per post-quantum certificate at 128 seats) stays open with WP-12, which owns
+the certificate format, so the row is not closed.
 
 ## WP-11 (#82, #85, #88): mobile core duty engine, carried intact
 
