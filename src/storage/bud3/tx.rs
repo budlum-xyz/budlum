@@ -98,6 +98,20 @@ pub enum StorageTxV3 {
         /// Bytes by which to lower the holder's declared custody quota.
         lower_quota_bytes: u64,
     },
+    /// Atomically replace an object with a new codec representation verified to
+    /// decode to the identical `ContentId` (`ReplaceObject`, Section 6.14).
+    ReplaceObject {
+        /// Existing object commitment being replaced.
+        old_object: ObjectKey,
+        /// New object record carrying the identical `ContentId`.
+        new_record: ObjectRecord,
+        /// Placement shares for `new_record`.
+        new_shares: Vec<(u64, Share)>,
+        /// Independent Full-validator attestations (`>= 3`).
+        attestations: Vec<super::replace::ReplaceAttestation>,
+        /// Proposer stake subject to 1% slash on `ContentId` mismatch.
+        proposer_stake: u64,
+    },
 }
 
 /// What an applied transaction did.
@@ -127,6 +141,8 @@ pub enum Applied {
     SociallyDeleted(ShredOutcome),
     /// Shares voluntarily released for reassignment without penalty.
     Released(usize),
+    /// Object atomically replaced with a new commitment for the same `ContentId`.
+    Replaced(ObjectKey),
 }
 
 /// Apply one transaction signed by `signer` at `epoch`.
@@ -202,6 +218,23 @@ pub fn apply(
         } => registry
             .release_shares(&signer, &object, segment, lower_quota_bytes)
             .map(Applied::Released),
+        StorageTxV3::ReplaceObject {
+            old_object,
+            new_record,
+            new_shares,
+            attestations,
+            proposer_stake,
+        } => registry
+            .replace_object(
+                signer,
+                proposer_stake,
+                &old_object,
+                new_record,
+                new_shares,
+                &attestations,
+                epoch,
+            )
+            .map(Applied::Replaced),
     }
 }
 

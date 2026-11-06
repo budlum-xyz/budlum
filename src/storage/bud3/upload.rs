@@ -1,6 +1,7 @@
 //! B.U.D. 3.0 upload sessions (`bud_storageUploadOpen`, `bud_storageUploadAppend`,
 //! `bud_storageUploadFinish`), `/budlum/bud3/upload/1` limits, pixel-verification
 //! sampling rule, and two-segment memory ceiling (Sections 6.4 & 6.21.1, WP-21).
+//! exposed for `/budlum/bud3/upload/1` stream handlers and `Bud3RpcService`.
 
 use super::bof1::{Bof1Error, Flags, Object};
 use super::content_id::{ContentId, PublicHasher};
@@ -8,7 +9,7 @@ use super::custody::{symbol_leaf, symbol_root};
 use super::fountain::{FountainError, SegmentEncoder, Symbol};
 use super::frame::frames_for_object_bytes;
 use super::limits::{Bud3Limits, LimitError, Profile};
-use super::pipeline::{ObjectRecord, PipelineError};
+use super::pipeline::ObjectRecord;
 use super::placement::{place, segment_key, Candidate, PlacementError, PlacementRow, Share};
 use super::qr::{frame_to_png, png_to_frame, Bud3QrError};
 use super::registry::{Address, Bud3Registry, ObjectKey};
@@ -266,7 +267,7 @@ impl UploadSessionManager {
         let _ = admit_testnet_flags(raw_flags)?;
         if declared_len > MAX_UPLOAD_SESSION_BYTES {
             return Err(UploadError::Limit(LimitError::ContentTooLarge {
-                got: declared_len,
+                len: declared_len,
                 max: MAX_UPLOAD_SESSION_BYTES,
             }));
         }
@@ -319,6 +320,32 @@ impl UploadSessionManager {
             },
         );
         Ok(id)
+    }
+
+    /// Open an upload session parameterized in storage `lifetime_days` (`[30, 3650]` on testnet),
+    /// enforcing [`Bud3Limits::admit_lifetime`] and converting days to 150-second epochs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_session_for_days(
+        &mut self,
+        account: Address,
+        ip_key: [u8; 16],
+        declared_len: u64,
+        raw_flags: u8,
+        lifetime_days: u32,
+        pre_sealed_object: bool,
+        now_sec: u64,
+    ) -> Result<u64, UploadError> {
+        self.limits.admit_lifetime(lifetime_days)?;
+        let lifetime_epochs = u64::from(lifetime_days).saturating_mul(576);
+        self.open_session(
+            account,
+            ip_key,
+            declared_len,
+            raw_flags,
+            lifetime_epochs,
+            pre_sealed_object,
+            now_sec,
+        )
     }
 
     /// `bud_storageUploadAppend`: stream a chunk into `session_id` (Y1/Y2).

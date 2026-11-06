@@ -1,5 +1,6 @@
 //! B.U.D. 3.0 request-response symbol protocols (`/budlum/bud3/symbols/1` and
 //! `/budlum/bud3/custody/1`) and Mobile Wi-Fi-by-default serving policy.
+//! exposed for libp2p symbol protocol handlers, `Bud3ContentGateway`, and `Bud3RpcService`.
 //!
 //! Per Section 6.11.3:
 //! * `/budlum/bud3/symbols/1`: client requests an ESI range from a segment

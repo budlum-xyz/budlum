@@ -25,6 +25,7 @@
 //! is the header plus the payload, and it is at most the header larger than
 //! the content (or Padme bucket ceiling plus salt and AEAD tag when sealed).
 
+pub mod access_tiering;
 pub mod bof1;
 pub mod content_gateway;
 pub mod content_id;
@@ -45,6 +46,7 @@ pub mod placement;
 pub mod qr;
 pub mod registry;
 pub mod repair;
+pub mod replace;
 pub mod rpc;
 pub mod seal;
 pub mod segment;
@@ -57,6 +59,10 @@ pub mod video;
 pub mod view;
 pub mod volume;
 
+pub use access_tiering::{
+    AccessTier, AccessTierTracker, TierTransition, COLD_DWELL_FOR_ARCHIVE_SECS,
+    COLD_MAX_ACCESSES, COLD_WINDOW_SECS, HOT_MIN_ACCESSES, HOT_WINDOW_SECS,
+};
 pub use bof1::{Bof1Error, Flags, Header, Object};
 pub use content_gateway::{Bud3ContentGateway, GatewaySymbolBundle};
 pub use content_id::{ContentId, ContentKey};
@@ -126,6 +132,11 @@ pub use two_path::{
 pub use video::{
     chain_segment_video_digests, fold_frame_digests, video_commitment,
     video_commitment_from_frames,
+};
+pub use replace::{
+    admit_object_replacement, select_codec_with_fast_probe, PendingReplacementBarrier,
+    ReplaceAttestation, ReplaceError, VerifiedCodecCandidate, FAST_PROBE_MIN_SAVINGS_BPS,
+    GENERIC_ENTROPY_CEILING_MILLIBITS, MIN_REPLACE_ATTESTATIONS,
 };
 pub use rpc::{Bud3RpcService, BUD3_RPC_METHODS};
 pub use upload::{

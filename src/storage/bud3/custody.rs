@@ -17,6 +17,7 @@
 //! The Merkle trees here hash an odd node up unchanged and bind the leaf count
 //! into the root, the same rule as the object commitment.
 
+use super::placement::Share;
 use crate::core::hash::hash_fields_bytes;
 
 /// Sub-block size in bytes.

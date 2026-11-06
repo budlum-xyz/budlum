@@ -1,4 +1,5 @@
 //! Storage fees, the Custody Endowment, and per-epoch custody rewards.
+//! exposed for `Bud3Registry`, `Bud3RpcService`, and fee estimation tools.
 //!
 //! Every stored object is priced strictly from its placed physical bytes
 //! (`object_bytes * redundancy`), never from a recipe or zero-held-bytes

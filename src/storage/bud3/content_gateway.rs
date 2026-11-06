@@ -1,4 +1,5 @@
 //! B.U.D. 3.0 content gateway (`bud3::content_gateway`, WP-21 item 8).
+//! exposed for HTTP/RPC content gateway endpoints and symbol exchange handlers.
 //!
 //! Replaces legacy gateway serving with B.U.D. 3.0's two-mode delivery:
 //! 1. **Default client-decoded delivery (G3/G4)**: collects `>= k + 2` verified
@@ -14,6 +15,10 @@ use super::content_ref::ContentRef;
 use super::fountain::Symbol;
 use super::pipeline::ObjectRecord;
 use super::registry::Bud3Registry;
+use super::symbol_protocol::{
+    verify_symbol_range_response, LinkMetering, MobileServePolicy, SymbolPeerLimiter,
+    SymbolProtocolError, SymbolRangeRequest, SymbolRangeResponse,
+};
 use super::view::{
     collect_symbols_full_then_mobile, fallback_decode_public, NetworkSymbolSource, PaidViewReceipt,
     ViewBud3Error,
@@ -74,6 +79,31 @@ impl Bud3ContentGateway {
             return Err(ViewBud3Error::AccessDenied);
         }
         fallback_decode_public(registry, &content_ref.object_commitment, receipt, network)
+    }
+
+    /// Enforce peer symbol-request rate limits, Mobile Wi-Fi/cellular link policy,
+    /// and Merkle range verification on `/budlum/bud3/symbols/1`.
+    /// Convenience: exposed for symbol request-response handler and RPC symbol serving.
+    #[allow(clippy::too_many_arguments)]
+    pub fn serve_verified_symbol_exchange(
+        limiter: &mut SymbolPeerLimiter,
+        mobile_policy: &mut MobileServePolicy,
+        link: LinkMetering,
+        peer: &[u8; 32],
+        req: &SymbolRangeRequest,
+        resp: &SymbolRangeResponse,
+        symbol_root: [u8; 32],
+        symbol_count: u64,
+        symbol_size: u16,
+        now_sec: u64,
+    ) -> Result<bool, SymbolProtocolError> {
+        limiter.check_symbol_request(peer, req, now_sec)?;
+        let bytes = u64::from(req.count).saturating_mul(u64::from(symbol_size));
+        if !mobile_policy.admit_serve(link, bytes) {
+            return Ok(false);
+        }
+        verify_symbol_range_response(req.segment, symbol_root, symbol_count, symbol_size, resp)?;
+        Ok(true)
     }
 }
 

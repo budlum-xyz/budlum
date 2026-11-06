@@ -1,4 +1,5 @@
 //! Upload two-path verification (Y10, Y11, Y12) and view equivalence (G4, G5).
+//! exposed for upload optical round-trip gate and viewer equivalence checks.
 //!
 //! * **Y10 (`extract_object_from_optical_seconds`)**: reads QR-PNG frames
 //!   second-by-second from pixels, runs RFC 6330 segment decoding, and parses

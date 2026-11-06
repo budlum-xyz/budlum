@@ -1,5 +1,6 @@
 //! Reference dependencies, cryptographic shredding (`SocialDelete`), and DAO
 //! public content deletion (Section 6.8.2 & Section 6.8.3).
+//! exposed for `Bud3Registry`, `StorageTxV3::SocialDelete`, and governance takedown.
 //!
 //! * Same-owner base dependencies (delta codec 11 / crop derivation codec 10):
 //!   a dependent object may only reference a base object owned by the same
@@ -13,7 +14,7 @@
 //! * DAO public takedown: removes a public content digest, all referencing NFTs,
 //!   and all placed shares, recording a permanent tombstone.
 
-use super::registry::{Address, NftId, ObjectKey};
+use super::registry::{Address, ObjectKey};
 
 /// Authorization pair `(grant_tag, one_time_signature)` submitted when burning
 /// or socially deleting a sealed NFT so its active grant capsules are shredded.

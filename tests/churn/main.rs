@@ -5,8 +5,7 @@ use budlum_core::core::address::Address;
 use budlum_core::core::metrics::Metrics;
 use budlum_core::registry::handover::{ChurnSimulator, HandoverCoordinator};
 use budlum_core::registry::presence::{PresenceAggregate, PresenceClass};
-use budlum_core::storage::bud3::custody::Share;
-use budlum_core::storage::bud3::fountain::Class;
+use budlum_core::storage::bud3::placement::{Class, Share};
 use budlum_core::storage::bud3::repair::ScheduledRepairDuty;
 
 #[test]

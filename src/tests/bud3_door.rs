@@ -1259,6 +1259,111 @@ fn bud3_e2e_upload_register_view() {
     );
 }
 
+#[test]
+fn bud3_e2e_replace_object_preserves_nft_binding_and_slashes_mismatch() {
+    use crate::storage::bud3::pipeline::prepare_public_upload;
+    use crate::storage::bud3::replace::ReplaceAttestation;
+
+    let alice = Address::from([131u8; 32]);
+    let proposer = Address::from([132u8; 32]);
+    let mut state = AccountState::new();
+    state.add_balance(&alice, 100_000);
+    state.add_balance(&proposer, 100_000);
+
+    let body = b"replaceable canonical payload".repeat(40);
+    // Initial upload with raw codec (0) vs zstd/default upload — different profile/symbol layout or second commitment.
+    let old_up = prepare_public_upload(&body, &P, &Bud3Limits::default()).unwrap();
+    let old_key = old_up.record.commitment;
+    let old_shares = vec![
+        (0, share(201, Class::Full, 0, 2)),
+        (0, share(202, Class::Full, 2, 2)),
+        (0, share(203, Class::Full, 4, 2)),
+    ];
+    let nft = [0x99u8; 32];
+    apply(
+        &mut state,
+        &storage_tx(
+            alice,
+            0,
+            1,
+            0,
+            StorageTxV3::RegisterObject {
+                record: old_up.record.clone(),
+                shares: old_shares.clone(),
+                lifetime_epochs: 20,
+            },
+        ),
+    )
+    .unwrap();
+    apply(
+        &mut state,
+        &storage_tx(
+            alice,
+            1,
+            1,
+            0,
+            StorageTxV3::BindNft {
+                nft,
+                object: old_key,
+            },
+        ),
+    )
+    .unwrap();
+
+    // Build a valid replacement record for the identical ContentId under a distinct coding layout.
+    let p_alt = Profile {
+        id: 0,
+        qr_version: 40,
+        symbol_size: 256,
+        fps: 10,
+        k_max: 64,
+    };
+    let new_up = prepare_public_upload(&body, &p_alt, &Bud3Limits::default()).unwrap();
+    let new_key = new_up.record.commitment;
+    assert_ne!(old_key, new_key);
+    assert_eq!(old_up.record.content_id, new_up.record.content_id);
+
+    let attestations = vec![
+        ReplaceAttestation {
+            validator: [201u8; 32],
+            verified_content_id: old_up.record.content_id,
+        },
+        ReplaceAttestation {
+            validator: [202u8; 32],
+            verified_content_id: old_up.record.content_id,
+        },
+        ReplaceAttestation {
+            validator: [203u8; 32],
+            verified_content_id: old_up.record.content_id,
+        },
+    ];
+    let new_shares = vec![
+        (0, share(201, Class::Full, 0, new_up.record.symbols_per_segment)),
+    ];
+    apply(
+        &mut state,
+        &storage_tx(
+            proposer,
+            0,
+            1,
+            0,
+            StorageTxV3::ReplaceObject {
+                old_object: old_key,
+                new_record: new_up.record,
+                new_shares,
+                attestations,
+                proposer_stake: 50_000,
+            },
+        ),
+    )
+    .unwrap();
+
+    assert!(state.bud3_registry.object(&old_key).is_none());
+    assert!(state.bud3_registry.object(&new_key).is_some());
+    assert_eq!(state.bud3_registry.refcount(&new_key), 1);
+}
+
+
 
 
 

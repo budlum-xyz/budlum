@@ -1,4 +1,5 @@
 //! Aggregation Volume for sub-symbol B.U.D. 3.0 objects (Section 6.12, WP-21 item 4).
+//! exposed for upload small-object packing, gateway reads, and compaction sweeps.
 //!
 //! Per Section 6.12:
 //! 1. Objects smaller than a single symbol (`< symbol_size`, 2,911 bytes in P0)
@@ -334,6 +335,21 @@ impl AggregationVolume {
                 path,
             },
         ))
+    }
+
+    /// Retrieve `object` along with its [`VolumeInclusionProof`] and self-verify
+    /// the Merkle proof against [`Self::root`] before returning.
+    /// Convenience: exposed for gateway and client small-object reads.
+    pub fn get_verified(
+        &self,
+        object: &ObjectKey,
+    ) -> Result<(Vec<u8>, VolumeInclusionProof), VolumeError> {
+        let (bytes, proof) = self.get_with_proof(object)?;
+        let root = self.root();
+        if !verify_volume_inclusion(&root, object, &bytes, &proof) {
+            return Err(VolumeError::UnknownEntry);
+        }
+        Ok((bytes, proof))
     }
 }
 

@@ -1,4 +1,5 @@
 //! Ephemeral ISO QR optical presentation for B.U.D. 3.0 frames.
+//! exposed for upload pixel round-trip verification and P1 optical transfer.
 //!
 //! Renders [`Bud3Frame`] wire payloads into deterministic ISO/IEC 18004 QR
 //! matrices (byte mode, error-correction level L, deterministic mask order

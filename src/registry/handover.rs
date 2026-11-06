@@ -20,14 +20,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::core::address::Address;
 use crate::core::metrics::Metrics;
 use crate::registry::presence::{PresenceAggregate, PresenceClass, PresenceTracker};
-use crate::storage::bud3::custody::{
-    reassign_unacked_share, Share, SHARE_ASSIGNMENT_ACK_DEADLINE_EPOCHS,
-};
-use crate::storage::bud3::fountain::{Profile, SegmentDecoder, SegmentEncoder, Symbol};
+use crate::storage::bud3::custody::reassign_unacked_share;
+use crate::storage::bud3::fountain::{SegmentDecoder, SegmentEncoder, Symbol};
+use crate::storage::bud3::limits::Profile;
 use crate::storage::bud3::meter::Meter;
-use crate::storage::bud3::repair::{
-    handover_expired_repair_duty, ScheduledRepairDuty, REPAIR_TASK_HANDOVER_BLOCKS,
-};
+use crate::storage::bud3::placement::Share;
+use crate::storage::bud3::repair::{handover_expired_repair_duty, ScheduledRepairDuty};
 
 /// Consecutive finalized `SeatParticipation` absences triggering seat handover (Section 7.6 row 2).
 pub const SEAT_ABSENCE_HANDOVER_CHECKPOINTS: u64 = 2;
@@ -422,8 +420,11 @@ impl ChurnSimulator {
     /// Convenience: exposed for churn durability scenarios.
     pub fn store_coded_object(&mut self, payload: &[u8]) -> Result<(), String> {
         let profile = Profile {
+            id: 0,
+            qr_version: 40,
             symbol_size: 256,
-            max_source_symbols: 64,
+            fps: 10,
+            k_max: 64,
         };
         let enc = SegmentEncoder::new(0, payload, &profile).map_err(|e| format!("{e:?}"))?;
         let mut all_syms = enc.source_symbols();
@@ -555,7 +556,7 @@ impl ChurnSimulator {
     fn count_reconstructible_objects(&self) -> usize {
         let mut intact = 0usize;
         for obj in &self.objects {
-            let Ok(mut dec) = SegmentDecoder::new(0, obj.original.len(), &obj.profile) else {
+            let Ok(mut dec) = SegmentDecoder::new(0, obj.original.len() as u64, &obj.profile) else {
                 continue;
             };
             let mut meter = Meter::new(1 << 20, 1 << 20);
@@ -602,7 +603,7 @@ fn dropped_packet(height: u64, idx: u64, drop_ppm: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::bud3::fountain::Class;
+    use crate::storage::bud3::placement::Class;
 
     #[test]
     fn proposer_round_handover() {

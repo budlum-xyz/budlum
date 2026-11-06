@@ -1,5 +1,6 @@
 //! Per-object key derivation, client-side same-owner sealed deduplication, and
 //! HPKE X-Wing (`0x647a`) key packages for B.U.D. 3.0 view grants.
+//! exposed for wallet SDK key derivation and X-Wing grant capsule sealing.
 //!
 //! Per Section 6.8.1.3 & Section 6.21.5:
 //! * Content keys are derived deterministically per object from the wallet seed

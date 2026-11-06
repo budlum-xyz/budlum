@@ -1,6 +1,7 @@
 //! B.U.D. 3.0 view flow (G1-G8), network-backed reveal sessions (`bud_storageOpenReveal`,
 //! `bud_storageRevealFrames`, `bud_storageCloseReveal`), and paid public G8 fallback
 //! decoding (Section 6.5, WP-21, BLG-212).
+//! exposed for `Bud3RpcService`, `Bud3ContentGateway`, and BNS/SocialFi viewers.
 //!
 //! Security invariants enforced here:
 //! 1. **BLG-212 closure**: reveal sessions NEVER accept caller-supplied content bytes.

@@ -1,4 +1,5 @@
 //! B.U.D. 3.0 video commitment over logical frames.
+//! exposed for upload commitment binding and client-side frame verification.
 //!
 //! Per Section 6.15:
 //! 1. Each segment folds its ordered logical frame digests via [`fold_frame_digests`].

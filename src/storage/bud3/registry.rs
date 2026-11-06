@@ -18,9 +18,7 @@
 //!   without one marks a miss. A miss withholds the window's reward; it never
 //!   slashes.
 //!
-//! WIRING: unwired - the `StorageTx` v3 transaction door and the block
-//! executor call these methods when the legacy storage registry is removed;
-//! until then the state machine is exercised by its tests.
+//! exposed for `Executor::apply_transaction`, `Bud3RpcService`, and maintenance sweeps.
 
 use super::content_id::{ContentId, ContentIdKind};
 use super::custody::{
@@ -193,6 +191,10 @@ pub enum RegistryError {
     CrossOwnerDependency,
     /// A base object still has live dependent objects and must be detached first.
     HasDependents,
+    /// Object replacement failed `ContentId` or placement-group attestation checks.
+    BadReplacement(super::replace::ReplaceError),
+    /// Mobile custody quota outside `[mobile_quota_min_bytes, mobile_quota_max_bytes]`.
+    BadQuota(super::limits::LimitError),
 }
 
 impl From<GrantBud3Error> for RegistryError {
@@ -754,6 +756,134 @@ impl Bud3Registry {
         }
         obj.expires_at = new_expires;
         Ok(obj.expires_at)
+    }
+
+    /// Admit and record a Mobile validator's declared custody quota under `limits`.
+    /// Convenience: exposed for Mobile validator quota updates and RPC admission.
+    pub fn set_mobile_custody_quota(
+        &mut self,
+        validator: Address,
+        quota_bytes: u64,
+        limits: &super::limits::Bud3Limits,
+    ) -> Result<(), RegistryError> {
+        limits
+            .admit_mobile_quota(quota_bytes)
+            .map_err(RegistryError::BadQuota)?;
+        self.validator_quotas.insert(validator, quota_bytes);
+        Ok(())
+    }
+
+    /// `ReplaceObject` (Section 6.14): atomically replace `old_key` with `new_record`
+    /// carrying the identical `ContentId`, verified by `>= 3` Full validators from
+    /// `old_key`'s placement group. Bound NFTs re-point to `new_record.commitment`;
+    /// prior fees are never refunded (`no_refund_on_replace`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn replace_object(
+        &mut self,
+        sender: Address,
+        proposer_stake: u64,
+        old_key: &ObjectKey,
+        new_record: ObjectRecord,
+        new_shares: Vec<(u64, Share)>,
+        attestations: &[super::replace::ReplaceAttestation],
+        epoch: u64,
+    ) -> Result<ObjectKey, RegistryError> {
+        let old_entry = self.objects.get(old_key).ok_or(RegistryError::UnknownObject)?;
+        let pg_full: BTreeSet<Address> = old_entry
+            .shares
+            .iter()
+            .filter(|s| s.share.class == Class::Full)
+            .map(|s| s.share.validator)
+            .collect();
+        super::replace::admit_object_replacement(
+            &sender,
+            &old_entry.owner,
+            proposer_stake,
+            &old_entry.record,
+            &new_record,
+            &pg_full,
+            attestations,
+        )
+        .map_err(RegistryError::BadReplacement)?;
+
+        let new_key = new_record.commitment;
+        if self.tombstones.contains_key(&new_key) {
+            return Err(RegistryError::Tombstoned);
+        }
+        check_placement(&new_record, &new_shares)?;
+
+        let owner = old_entry.owner;
+        let expires_at = old_entry.expires_at.max(epoch.saturating_add(1));
+        let remaining_epochs = expires_at.saturating_sub(epoch).max(1);
+        let refs = old_entry.references.clone();
+        let digest = new_record.content_id.digest;
+        let is_public = new_record.content_id.kind == ContentIdKind::Public;
+
+        let fee_record = FeeRecord::from_placed_shares(&new_record, &new_shares);
+        let new_fee = storage_fee_for_epochs(
+            fee_record.user_physical_bytes,
+            remaining_epochs,
+            &FeeParams::TESTNET_DEFAULT,
+        )
+        .map_err(|_| RegistryError::BadLifetime)?;
+        let endowment = ObjectEndowment::new(fee_record, split_storage_fee(new_fee));
+
+        let shares = new_shares
+            .into_iter()
+            .map(|(segment, share)| ShareState {
+                segment,
+                share,
+                status: ShareStatus::Pending,
+                open_audit: None,
+                passes: 0,
+                misses: 0,
+                consecutive_misses: 0,
+                lost: false,
+                root: usize::try_from(segment).unwrap_or(usize::MAX),
+            })
+            .collect();
+        let roots = new_record
+            .symbol_roots
+            .iter()
+            .enumerate()
+            .map(|(i, r)| SymbolRoot {
+                segment: i as u64,
+                root: *r,
+                first_esi: 0,
+                count: new_record.symbols_per_segment,
+            })
+            .collect();
+        let next_esi = vec![new_record.symbols_per_segment; new_record.symbol_roots.len()];
+
+        // Forfeit any remaining endowment on the replaced object to the security pool
+        // (never refunded) and rebind every NFT reference atomically to `new_key`.
+        if let Some(removed) = self.objects.remove(old_key) {
+            let forfeited = removed.endowment.remaining_balance;
+            self.forfeited_pool_total = self.forfeited_pool_total.saturating_add(forfeited);
+        }
+        for nft in &refs {
+            if let Some((bound_obj, _)) = self.nfts.get_mut(nft) {
+                *bound_obj = new_key;
+            }
+        }
+        if is_public {
+            self.public_index.insert(digest, new_key);
+        }
+        self.tombstones.insert(*old_key, epoch);
+        self.objects.insert(
+            new_key,
+            ObjectEntry {
+                record: new_record,
+                owner,
+                references: refs,
+                expires_at,
+                shares,
+                roots,
+                next_esi,
+                endowment,
+            },
+        );
+        Ok(new_key)
     }
 
     /// Expire every object and unlinkable view grant past its paid lifetime.

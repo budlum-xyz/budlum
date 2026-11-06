@@ -53,6 +53,7 @@ mod gates {
     pub mod bns_gate;
     pub mod bns_names_are_safe_in_an_address_bar;
     pub mod bridge_dual_tree;
+    pub mod bud3_codec_and_replace;
     pub mod bud3_custody_proofs;
     pub mod bud3_custody_rewards;
     pub mod bud3_fee_uses_physical_bytes;
@@ -1494,6 +1495,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::handover_and_recovery::self_test,
+    },
+    Gate {
+        name: "bud3-codec-and-replace",
+        replaces: None,
+        run: gates::bud3_codec_and_replace::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_codec_and_replace::self_test,
     },
 ];
 

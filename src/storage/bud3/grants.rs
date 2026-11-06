@@ -1,4 +1,5 @@
 //! Unlinkable B.U.D. 3.0 view grants (`IssueViewGrant`, `RevokeViewGrant`).
+//! exposed for `Bud3Registry`, `Bud3RpcService`, and DataMarket grant issuance.
 //!
 //! Per Section 6.22.1 & WP-22 item 6:
 //! * An on-chain [`GrantRow`] NEVER carries `content_id`, `issuer`, or `grantee`.

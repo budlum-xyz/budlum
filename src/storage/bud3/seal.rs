@@ -1,6 +1,7 @@
 //! Sealed B.U.D. 3.0 objects: A0-before-sealing, Padme length bucketing,
 //! hidden `content_len = 0` header, and XChaCha20-Poly1305 AEAD bound to the
 //! keyed [`ContentId`].
+//! exposed for client-side sealed upload/view and SDK grant decryption.
 //!
 //! Per Section 6.21.4:
 //! 1. Plaintext is compressed first (`bud_codec::select`), then framed as

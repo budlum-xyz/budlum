@@ -1,5 +1,6 @@
 //! Network-shrink repair prioritization, decline/release share reassignment, and
 //! B.U.D. 3.0 storage health metrics.
+//! exposed for validator maintenance engine and `Bud3RpcService` telemetry.
 //!
 //! Per Sections 6.10, 6.13, and WP-20 items 9-13:
 //! * As the validator set shrinks, repair prioritizes segments with the smallest
