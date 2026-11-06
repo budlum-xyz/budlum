@@ -463,6 +463,7 @@ jobs:
       # the surface below puts rustc's lines in annotations because the log host is
       # not reachable from everywhere, and a red job whose reason lives only in a log
       # nobody can open is a red job with no finding.
+      - name: Build the gate binary
         id: build
         run: cargo build --release --manifest-path xtask/gates/Cargo.toml 2>&1 | tee /tmp/gates-build.log; exit "${PIPESTATUS[0]}"
       - name: Build surface (annotations)
@@ -496,6 +497,7 @@ jobs:
       # uses in `budlum` - because making a lint surface visible and enforcing it in the
       # same commit is how a repo ends up reverting the visibility. The count is an
       # annotation, so the number survives a log host nobody can reach.
+      - name: Clippy (gates workspace)
         # Graduated from izleme modu (monitoring) on 2026-09-11: the step's own
         # surface annotation measured `0 warning/error headline line(s)` in the run
         # for aaf491e, three denied lints in dead_pub_api.rs fixed and nothing else
@@ -534,6 +536,7 @@ jobs:
           printf '::notice::gates-workspace clippy: %s warning/error headline line(s), first 8 shown with their locations\n' "$(grep -cE '^(warning|error)(\[|:)' "$tmp")"
           rm -f "$tmp"
 
+      - name: Test log for the badge gate (the verdict lives in budlum)
         # A log producer, so it must run whatever else is red: the badge gate reads
         # this file, and if a neighbouring failure skipped it the badge gate would
         # report "no log" - a tooling artefact dressed up as a content finding.
@@ -1670,6 +1673,7 @@ jobs:
           key: fuzz-quick-corpus-${{ github.run_id }}
           restore-keys: |
             fuzz-quick-corpus-
+      - name: Her target 60 saniye fuzz
         # cargo-fuzz resolves fuzz/Cargo.toml relative to the CURRENT crate root;
         # it must be run from the repo root (calling from fuzz/ gives a fuzz/fuzz error).
         run: |
@@ -1712,6 +1716,7 @@ jobs:
             cargo +nightly-2026-10-09 fuzz run "$t" -- -max_total_time=60 -timeout=25 -print_final_stats=1
           done
           echo "All fuzz targets clean."
+      - name: B.U.D. format fuzz (60s)
         # bud/ is its own crate with its own fuzz/ directory, so cargo-fuzz
         # has to run from bud/.
         working-directory: bud
@@ -1971,6 +1976,7 @@ jobs:
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- module-coverage --self-test
       - name: Module coverage report - budlum (baselines in step 2, NO vacuous gate)
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- module-coverage coverage/cov.json
+      - name: BudZero coverage measurement (llvm-cov nextest, budzero workspace)
         # `cd` was used without checking its exit code. If the directory is not found
         # the shell stays at the root, the next command measures the ROOT workspace and
         # it writes the output as `budzero-cov.json`: the next step
@@ -2052,6 +2058,31 @@ jobs:
       # measured: stale lock exits 101, fresh exits 0; --no-deps does NOT
       # validate, measured the same day). The discovery is dynamic, like
       # the machete gate: hand-kept lists go stale silently.
+      # WP-43, items 3 and 4. These two read the README only, so they run in the
+      # `gates` job with the rest of the Rust gates rather than in `repo-lint`:
+      # this job owns /tmp/gate-out.log, and the Tally below lists every red gate
+      # by name. The canary of each runs first, so a red pair says whether the
+      # finding is the README or the check.
+      - name: README definition block is verbatim canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-definition-block-is-verbatim --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: README definition block is verbatim
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-definition-block-is-verbatim 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: README carries no placeholder canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-has-no-placeholders --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: README carries no placeholder
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-has-no-placeholders 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: lockfiles match their manifests (--locked metadata)
         run: |
           set -euo pipefail
@@ -2063,26 +2094,6 @@ jobs:
             n=$((n + 1))
           done < <(find . -name Cargo.lock -not -path '*/target/*' | sort)
           echo "lock freshness: $n workspace lockfile(s) verified."
-      # WP-43, items 3 and 4. This job builds the gate binary from source below, so
-      # the two README gates run here with the rest of the repository lint rather
-      # than in the `gates` job, and each one's canary runs first: a red step then
-      # names whether the finding is the README or the check.
-      - name: README definition block is verbatim canary
-        run: |
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-definition-block-is-verbatim --self-test 2>&1 | tee -a /tmp/gate-out.log
-          exit "${PIPESTATUS[0]}"
-      - name: README definition block is verbatim
-        run: |
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-definition-block-is-verbatim 2>&1 | tee -a /tmp/gate-out.log
-          exit "${PIPESTATUS[0]}"
-      - name: README carries no placeholder canary
-        run: |
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-has-no-placeholders --self-test 2>&1 | tee -a /tmp/gate-out.log
-          exit "${PIPESTATUS[0]}"
-      - name: README carries no placeholder
-        run: |
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-has-no-placeholders 2>&1 | tee -a /tmp/gate-out.log
-          exit "${PIPESTATUS[0]}"
       - name: Rust gates canary
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- --all --self-test
       - name: Rust gates
