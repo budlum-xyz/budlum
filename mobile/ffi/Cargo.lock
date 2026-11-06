@@ -110,6 +110,7 @@ name = "budlum-mobile-ffi"
 version = "0.1.0"
 dependencies = [
  "budlum-mobile-core",
+ "budlum-types",
  "uniffi",
 ]
 
