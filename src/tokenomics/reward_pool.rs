@@ -3,8 +3,8 @@
 //! Rewards are paid from a pre-allocated pool, not by minting new BUD. The
 //! genesis moves the pool out of the ecosystem share into a keyless account
 //! ([`reward_pool_account`]); the block transition of every epoch boundary
-//! pays the closing epoch's budget from that account to the active
-//! validators by stake ([`pay_epoch`]). Block emission stays disabled, so
+//! pays the closing epoch's 40% consensus share from that account to the
+//! active validators by stake ([`pay_epoch`]). Block emission stays disabled, so
 //! supply is conserved: see the economy invariant
 //! `epoch_transition_does_not_mint_validator_yield`. A chain pays only when
 //! its profile enables a pool (`Network::reward_pool`).
@@ -68,15 +68,55 @@ impl RewardPoolSchedule {
     }
 }
 
-/// Deterministically split `remaining_pool` for one epoch across active validator
-/// Stakes. The first address in sorted order receives the rounding remainder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EpochPoolSplit {
+    consensus: u64,
+    storage: u64,
+    repair_relay: u64,
+}
+
+fn percentage_of_budget(budget: u64, percentage: u64) -> u64 {
+    (u128::from(budget) * u128::from(percentage) / 100) as u64
+}
+
+/// The storage share reserved from the same epoch budget as consensus rewards.
+/// WP-25 reads this interface when distributing storage rewards.
+#[must_use]
+pub fn storage_share(schedule: &RewardPoolSchedule, epoch: u64, remaining_pool: u64) -> u64 {
+    percentage_of_budget(schedule.per_epoch_budget(epoch, remaining_pool), 50)
+}
+
+fn epoch_pool_split(
+    schedule: &RewardPoolSchedule,
+    epoch: u64,
+    remaining_pool: u64,
+) -> EpochPoolSplit {
+    let budget = schedule.per_epoch_budget(epoch, remaining_pool);
+    let consensus = percentage_of_budget(budget, 40);
+    let storage = storage_share(schedule, epoch, remaining_pool);
+    EpochPoolSplit {
+        consensus,
+        storage,
+        repair_relay: budget - consensus - storage,
+    }
+}
+
+/// Deterministically split the 40% consensus share for one epoch across active
+/// validator stakes. The first address in sorted order receives the rounding
+/// remainder. Storage and repair/relay shares are reserved by the epoch pool
+/// split and are not paid through this stake-weighted path.
 pub fn reward_for_epoch(
     schedule: RewardPoolSchedule,
     epoch: u64,
     remaining_pool: u64,
     active_validator_stakes: &[(Address, u64)],
 ) -> Vec<(Address, u64)> {
-    let budget = schedule.per_epoch_budget(epoch, remaining_pool);
+    let split = epoch_pool_split(&schedule, epoch, remaining_pool);
+    debug_assert_eq!(
+        u128::from(split.consensus) + u128::from(split.storage) + u128::from(split.repair_relay),
+        u128::from(schedule.per_epoch_budget(epoch, remaining_pool))
+    );
+    let budget = split.consensus;
     if budget == 0 || active_validator_stakes.is_empty() {
         return Vec::new();
     }
@@ -136,8 +176,10 @@ pub fn reward_pool_account() -> Address {
     ]))
 }
 
-/// Pay `closed_epoch` from the pool account to the validators that are
-/// active, not jailed and not slashed, by stake. Returns what was paid.
+/// Pay `closed_epoch`'s 40% consensus share from the pool account to the
+/// validators that are active, not jailed and not slashed, by stake. Returns
+/// what was paid. The storage and repair/relay shares remain reserved for
+/// their respective distribution paths.
 ///
 /// The budget is the schedule's per-epoch share, capped by the pool's
 /// balance, so the pool never pays what it does not hold and nothing is
@@ -294,6 +336,11 @@ mod tests {
         let mut state = funded_state(&[(1, 3_000, false), (2, 1_000, false)]);
         let pool = reward_pool_account();
         let pool_before = state.get_balance(&pool);
+        let split = epoch_pool_split(&schedule, 0, pool_before);
+        assert_eq!(split.consensus, bud(4));
+        assert_eq!(split.storage, bud(5));
+        assert_eq!(split.repair_relay, bud(1));
+        assert_eq!(storage_share(&schedule, 0, pool_before), bud(5));
 
         // Only the consensus share is paid by the existing stake-weighted
         // path. Storage and repair/relay consumers receive their own shares
@@ -318,24 +365,24 @@ mod tests {
             reward_pool_start_epoch: 0,
         };
         let payouts = reward_for_epoch(schedule, 0, 100, &[(addr(2), 30), (addr(1), 70)]);
-        assert_eq!(total_epoch_payout(&payouts), 10);
-        assert_eq!(payouts, vec![(addr(1), 7), (addr(2), 3)]);
+        assert_eq!(total_epoch_payout(&payouts), 4);
+        assert_eq!(payouts, vec![(addr(1), 3), (addr(2), 1)]);
     }
 
     #[test]
     fn reward_pool_rounding_remainder_deterministic() {
         let schedule = RewardPoolSchedule {
-            validation_reward_pool: 10,
+            validation_reward_pool: 100,
             validation_pool_epochs: 10,
             treasury_pool: 0,
             reward_pool_start_epoch: 0,
         };
         let payouts =
             reward_for_epoch(schedule, 0, 10, &[(addr(9), 1), (addr(1), 1), (addr(2), 1)]);
-        assert_eq!(total_epoch_payout(&payouts), 1);
-        assert_eq!(payouts[0], (addr(1), 1));
-        assert_eq!(payouts[1], (addr(2), 0));
-        assert_eq!(payouts[2], (addr(9), 0));
+        assert_eq!(total_epoch_payout(&payouts), 4);
+        assert_eq!(payouts[0], (addr(1), 2));
+        assert_eq!(payouts[1], (addr(2), 1));
+        assert_eq!(payouts[2], (addr(9), 1));
     }
 
     #[test]
@@ -351,13 +398,13 @@ mod tests {
     #[test]
     fn reward_pool_ignores_zero_stake() {
         let schedule = RewardPoolSchedule {
-            validation_reward_pool: 10,
+            validation_reward_pool: 100,
             validation_pool_epochs: 10,
             treasury_pool: 0,
             reward_pool_start_epoch: 0,
         };
         let payouts = reward_for_epoch(schedule, 0, 10, &[(addr(1), 0), (addr(2), 5)]);
-        assert_eq!(payouts, vec![(addr(2), 1)]);
+        assert_eq!(payouts, vec![(addr(2), 4)]);
     }
 
     fn funded_state(validators: &[(u8, u64, bool)]) -> crate::core::account::AccountState {
@@ -389,10 +436,11 @@ mod tests {
             + state.get_balance(&addr(2))
             + state.get_balance(&addr(3));
         let paid = pay_epoch(&mut state, &schedule, 0);
-        assert_eq!(paid, bud(10));
-        // 3:1 by stake; the jailed validator is paid nothing.
-        assert_eq!(state.get_balance(&addr(1)), bud(10) * 3 / 4);
-        assert_eq!(state.get_balance(&addr(2)), bud(10) / 4);
+        assert_eq!(paid, bud(4));
+        // The 40% consensus share is split 3:1 by stake; the jailed validator
+        // is paid nothing.
+        assert_eq!(state.get_balance(&addr(1)), bud(4) * 3 / 4);
+        assert_eq!(state.get_balance(&addr(2)), bud(4) / 4);
         assert_eq!(state.get_balance(&addr(3)), 0);
         let after = state.get_balance(&reward_pool_account())
             + state.get_balance(&addr(1))
@@ -427,21 +475,21 @@ mod tests {
             treasury_pool: 0,
             reward_pool_start_epoch: 0,
         };
-        assert_eq!(pay_epoch(&mut state, &schedule, 1), 1_100);
-        // The delegated share is 100; 10% is commission, so the validator
-        // receives its 1,000 self share plus 10. The delegator's 90 is a
-        // claimable debt until the delegator signs a claim.
-        assert_eq!(state.get_balance(&validator), 1_010);
+        assert_eq!(pay_epoch(&mut state, &schedule, 1), 440);
+        // The 440-unit consensus share contains a 40-unit delegated share;
+        // 10% is commission, so the validator receives its 400 self share
+        // plus 4. The delegator's 36 is a claimable debt until signed for.
+        assert_eq!(state.get_balance(&validator), 404);
         assert_eq!(state.get_balance(&delegator), 0);
-        assert_eq!(state.registry.claimable_reward(delegator, validator), 90);
+        assert_eq!(state.registry.claimable_reward(delegator, validator), 36);
         assert_eq!(
             state
                 .claim_delegator_rewards(&delegator, &validator)
                 .unwrap(),
-            90
+            36
         );
-        assert_eq!(state.get_balance(&delegator), 90);
-        assert_eq!(state.get_balance(&pool), 0);
+        assert_eq!(state.get_balance(&delegator), 36);
+        assert_eq!(state.get_balance(&pool), 660);
     }
 
     /// A reprice is prospective: a commission set in the block that closes an
@@ -475,11 +523,11 @@ mod tests {
             treasury_pool: 0,
             reward_pool_start_epoch: 0,
         };
-        assert_eq!(pay_epoch(&mut state, &schedule, 0), 1_100);
-        // No commission was in force for epoch 0, so the whole delegated
-        // share of 100 is the delegator's claim and the validator keeps 1,000.
-        assert_eq!(state.get_balance(&validator), 1_000);
-        assert_eq!(state.registry.claimable_reward(delegator, validator), 100);
+        assert_eq!(pay_epoch(&mut state, &schedule, 0), 440);
+        // No commission was in force for epoch 0, so the whole 40-unit
+        // delegated share is the delegator's claim and the validator keeps 400.
+        assert_eq!(state.get_balance(&validator), 400);
+        assert_eq!(state.registry.claimable_reward(delegator, validator), 40);
     }
 
     #[test]
