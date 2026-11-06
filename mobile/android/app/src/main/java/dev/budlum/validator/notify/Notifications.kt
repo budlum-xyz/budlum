@@ -6,8 +6,10 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import dev.budlum.validator.MainActivity
 import dev.budlum.validator.R
 
@@ -80,29 +82,34 @@ object Notifications {
             .build()
     }
 
-    /**
-     * Shown when the device rebooted and the specialUse foreground service
-     * could not be restarted from BOOT_COMPLETED (directive 7.9.3.5):
-     * the user reopens the app; WorkManager keeps answering audits meanwhile.
-     */
+    /** Request a status notice after reboot when notifications are permitted. */
     fun bootFallback(context: Context) {
         ensureChannels(context)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, android.Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) return
+        val nm = context.getSystemService(NotificationManager::class.java)
+        if (!nm.areNotificationsEnabled()) return
         val openApp = PendingIntent.getActivity(
             context,
             1,
             Intent(context, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        val nm = context.getSystemService(NotificationManager::class.java)
-        nm.notify(
-            ID_BOOT_FALLBACK,
-            NotificationCompat.Builder(context, CHANNEL_ALERTS)
-                .setSmallIcon(android.R.drawable.ic_menu_revert)
-                .setContentTitle(context.getString(R.string.notification_boot_title))
-                .setContentText(context.getString(R.string.notification_boot_text))
-                .setContentIntent(openApp)
-                .setAutoCancel(true)
-                .build()
-        )
+        try {
+            nm.notify(
+                ID_BOOT_FALLBACK,
+                NotificationCompat.Builder(context, CHANNEL_ALERTS)
+                    .setSmallIcon(android.R.drawable.ic_menu_revert)
+                    .setContentTitle(context.getString(R.string.notification_boot_title))
+                    .setContentText(context.getString(R.string.notification_boot_text))
+                    .setContentIntent(openApp)
+                    .setAutoCancel(true)
+                    .build()
+            )
+        } catch (_: SecurityException) {
+            // Permission may have been revoked after the check above.
+        }
     }
 }

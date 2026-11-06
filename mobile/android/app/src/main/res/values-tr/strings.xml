@@ -3,10 +3,11 @@
     <string name="app_name">Budlum Doğrulayıcı</string>
     <string name="channel_service_name">Doğrulayıcı hizmeti</string>
     <string name="channel_alerts_name">Doğrulayıcı uyarıları</string>
-    <string name="notification_service_title">Budlum doğrulayıcı çalışıyor</string>
+    <string name="notification_service_title">Budlum doğrulayıcı bağlı değil</string>
     <string name="notification_service_text">Saklanan: %1$d bayt · Son denetim: %2$s · %3$s</string>
     <string name="notification_boot_title">Budlum doğrulayıcı duraklatıldı</string>
-    <string name="notification_boot_text">Doğrulayıcı hizmetini sürdürmek için uygulamayı yeniden açın. Arka plan denetimleri otomatik devam eder.</string>
+    <string name="notification_boot_text">Doğrulayıcı görevleri henüz bağlı değil. Denetimler çalışmıyor. Durumu görmek için uygulamayı açın.</string>
+    <string name="validator_scaffold_notice">Doğrulayıcı kurulumu henüz kullanılamıyor. Bu sürüm denetimleri yanıtlamaz veya ağ paylarını saklamaz.</string>
     <string name="state_connected">bağlı</string>
     <string name="state_disconnected">bağlantı yok</string>
     <string name="audit_result_none_yet">henüz yok</string>

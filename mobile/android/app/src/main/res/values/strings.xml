@@ -3,10 +3,11 @@
     <string name="app_name">Budlum Validator</string>
     <string name="channel_service_name">Validator service</string>
     <string name="channel_alerts_name">Validator alerts</string>
-    <string name="notification_service_title">Budlum validator running</string>
+    <string name="notification_service_title">Budlum validator not connected</string>
     <string name="notification_service_text">Stored: %1$d bytes · Last audit: %2$s · %3$s</string>
     <string name="notification_boot_title">Budlum validator paused</string>
-    <string name="notification_boot_text">Reopen the app to resume the validator service. Background audits continue automatically.</string>
+    <string name="notification_boot_text">Validator duties are not connected yet. Audits are not running. Reopen the app to view its status.</string>
+    <string name="validator_scaffold_notice">Validator setup is not available yet. This build does not answer audits or store network shares.</string>
     <string name="state_connected">connected</string>
     <string name="state_disconnected">disconnected</string>
     <string name="audit_result_none_yet">none yet</string>

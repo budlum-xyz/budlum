@@ -12,10 +12,9 @@ import java.util.concurrent.TimeUnit
 /**
  * Application entry point.
  *
- * Directive 7.9.3.6: while the foreground service is stopped, a WorkManager
- * periodic work answers audits, broadcasts presence and accepts new shares.
- * The interval is 15 minutes with an unmetered network constraint. WorkManager
- * work survives reboots, so it is (re-)enqueued here defensively.
+ * Periodic work is scheduled every 15 minutes with an unmetered network
+ * constraint and survives reboots. Until the mobile-core binding exists, it
+ * evaluates policy only; it does not answer audits or perform network duties.
  */
 class BudlumApp : Application() {
 
