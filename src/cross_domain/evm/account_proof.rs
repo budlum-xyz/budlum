@@ -54,6 +54,8 @@ pub enum AccountProofError {
     NotAnAccount,
     /// A field is wider than the Ethereum schema allows.
     FieldTooWide,
+    /// A storage root or code hash is not exactly 32 bytes.
+    InvalidHashLength,
     /// The code carries a hash the proven account does not hold.
     CodeHashMismatch,
 }
@@ -66,6 +68,9 @@ impl std::fmt::Display for AccountProofError {
             AccountProofError::Rlp(e) => write!(f, "evm proof: rlp: {e}"),
             AccountProofError::NotAnAccount => write!(f, "evm proof: not a four-field account"),
             AccountProofError::FieldTooWide => write!(f, "evm proof: account field too wide"),
+            AccountProofError::InvalidHashLength => {
+                write!(f, "evm proof: storage root and code hash must be 32 bytes")
+            }
             AccountProofError::CodeHashMismatch => write!(f, "evm proof: wrong code for the account"),
         }
     }
@@ -107,6 +112,17 @@ fn right_aligned<const N: usize>(bytes: &[u8]) -> Result<[u8; N], AccountProofEr
     Ok(out)
 }
 
+/// Reads a fixed hash field. Unlike an integer, a short value is not padded.
+fn fixed_hash(item: &Item) -> Result<[u8; 32], AccountProofError> {
+    let bytes = rlp::as_bytes(item)?;
+    if bytes.len() != 32 {
+        return Err(AccountProofError::InvalidHashLength);
+    }
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(bytes);
+    Ok(hash)
+}
+
 /// Verifies the account proof of `address` against a finalised state root.
 ///
 /// # Errors
@@ -137,8 +153,8 @@ fn decode_account(value: &[u8]) -> Result<EvmAccount, AccountProofError> {
     }
     let nonce = rlp::decode_uint(&fields[0])?;
     let balance = u128::from_be_bytes(right_aligned::<16>(rlp::as_bytes(&fields[1])?)?);
-    let storage_root = right_aligned::<32>(rlp::as_bytes(&fields[2])?)?;
-    let code_hash = right_aligned::<32>(rlp::as_bytes(&fields[3])?)?;
+    let storage_root = fixed_hash(&fields[2])?;
+    let code_hash = fixed_hash(&fields[3])?;
     Ok(EvmAccount {
         nonce,
         balance,
@@ -311,5 +327,15 @@ mod tests {
             Item::String(vec![0u8; 32]),
         ]));
         assert_eq!(decode_account(&wide), Err(AccountProofError::FieldTooWide));
+        let short_hash = rlp::encode(&Item::List(vec![
+            Item::String(Vec::new()),
+            Item::String(Vec::new()),
+            Item::String(vec![0u8; 31]),
+            Item::String(vec![0u8; 32]),
+        ]));
+        assert_eq!(
+            decode_account(&short_hash),
+            Err(AccountProofError::InvalidHashLength)
+        );
     }
 }
