@@ -67,7 +67,7 @@ impl DatasetMetadata {
     /// [`DatasetError::EmptyTrainingCorpus`] or
     /// [`DatasetError::MissingModelTarget`].
     pub fn validate(&self) -> Result<(), DatasetError> {
-        if self.model_target.is_none() {
+        if matches!(self.model_target, None | Some([0u8; 32])) {
             return Err(DatasetError::MissingModelTarget);
         }
         if self.kind == DatasetKind::TrainingCorpus && self.sample_count == 0 {
@@ -136,6 +136,38 @@ impl SourceRef {
             grant_epochs_remaining: None,
         }
     }
+
+    /// Validate closed-circuit source identity and epoch window (`BLG-160`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SourceError`] when `content_id` is all-zero, when a Pollen
+    /// grant has zero remaining epochs or omits its epoch counter, or when a
+    /// non-grant source carries unexpected grant epochs.
+    pub fn validate(&self) -> Result<(), SourceError> {
+        if self.content_id == [0u8; 32] {
+            return Err(SourceError::ZeroContentId);
+        }
+        match (self.kind, self.grant_epochs_remaining) {
+            (SourceKind::PollenGrant, Some(epochs)) if epochs > 0 => Ok(()),
+            (SourceKind::PollenGrant, _) => Err(SourceError::ExpiredOrMissingGrant),
+            (SourceKind::StorageDeal | SourceKind::SocialRef, None) => Ok(()),
+            (SourceKind::StorageDeal | SourceKind::SocialRef, Some(_)) => {
+                Err(SourceError::UnexpectedGrantEpochs)
+            }
+        }
+    }
+}
+
+/// Closed-circuit source validation errors (`BLG-160`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceError {
+    /// All-zero `content_id` does not identify content.
+    ZeroContentId,
+    /// A Pollen grant requires at least one remaining epoch.
+    ExpiredOrMissingGrant,
+    /// Non-Pollen sources do not carry grant epoch counters.
+    UnexpectedGrantEpochs,
 }
 
 #[cfg(test)]
@@ -193,5 +225,22 @@ mod tests {
 
         let grant = SourceRef::pollen_grant([1; 32], 3);
         assert_eq!(grant.grant_epochs_remaining, Some(3));
+    }
+
+    #[test]
+    fn blg_160_zero_model_target_content_id_or_expired_grant_refused() {
+        let mut bad = DatasetMetadata::training([4; 32], 10);
+        bad.model_target = Some([0u8; 32]);
+        assert_eq!(bad.validate(), Err(DatasetError::MissingModelTarget));
+
+        assert_eq!(
+            SourceRef::storage_deal([0u8; 32]).validate(),
+            Err(SourceError::ZeroContentId)
+        );
+        assert_eq!(
+            SourceRef::pollen_grant([1u8; 32], 0).validate(),
+            Err(SourceError::ExpiredOrMissingGrant)
+        );
+        assert!(SourceRef::pollen_grant([1u8; 32], 1).validate().is_ok());
     }
 }
