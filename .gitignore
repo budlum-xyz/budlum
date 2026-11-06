@@ -20,3 +20,7 @@ __pycache__/
 /contracts/out/
 /contracts/cache/
 .claude/settings.local.json
+
+# The binding planning directive stays outside the repository tree (directive
+# section 0.1). Keep a copy outside the checkout.
+THE_BUDLUM_DIREKTIF.md
