@@ -104,11 +104,15 @@ pub fn derive_wasm_alias(addr: &Address) -> String {
 }
 
 /// Deterministic CosmWasm bech32 address (`bud1...`) of a 20-byte Cosmos account.
-///
-/// exposed for: Cosmos Compatibility Lane envelope admission (`WP-29`).
 #[must_use]
 pub fn derive_foreign_cosmos_bech32(addr20: &[u8; 20]) -> String {
     bech32_encode("bud", addr20)
+}
+
+/// Deterministic CosmWasm bech32 contract address (`bud1...`) from a 32-byte digest.
+#[must_use]
+pub fn bech32_contract_addr(digest32: &[u8; 32]) -> String {
+    bech32_encode("bud", digest32)
 }
 
 /// Deterministic off-curve 32-byte SVM alias of a native account:

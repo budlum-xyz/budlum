@@ -1,6 +1,8 @@
 [workspace]
 members = [
   "mock",
+  "evm",
+  "wasm",
 ]
 resolver = "2"
 

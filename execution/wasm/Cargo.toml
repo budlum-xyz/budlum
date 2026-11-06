@@ -1,0 +1,22 @@
+[package]
+name = "budlum-ee-wasm"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Isolated CosmWasm UEL execution-environment worker (`budlum-ee-wasm`)"
+publish = false
+
+[[bin]]
+name = "budlum-ee-wasm"
+path = "src/main.rs"
+
+[dependencies]
+budlum-uel-abi = { path = "../../crates/uel-abi" }
+hex = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+
+[lints]
+workspace = true

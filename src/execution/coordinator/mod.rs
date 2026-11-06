@@ -3,17 +3,22 @@
 //! stateful BudZero contract execution (closing BLG-248), and worker supervision.
 
 pub mod alias;
+pub mod assets;
+pub mod evm_ee;
 pub mod foreign;
 pub mod gas;
 pub mod overlay;
 pub mod scheduler;
 pub mod state;
+pub mod universal_call;
+pub mod wasm_ee;
 pub mod worker;
 
 use crate::core::account::{AccountState, BudEnvUnit};
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
-use crate::execution::coordinator::alias::derive_contract_account;
+use crate::execution::coordinator::alias::{derive_contract_account, ALIAS_NAMESPACE};
+use crate::execution::coordinator::evm_ee::EvmEe;
 use crate::execution::coordinator::foreign::{
     ForeignAdmissionError, ForeignTx, VerifiedForeignOutcome,
 };
@@ -23,6 +28,10 @@ use crate::execution::coordinator::gas::{
 };
 use crate::execution::coordinator::overlay::{BlockReadCache, TxOverlay};
 use crate::execution::coordinator::state::{NS_BUDZERO_PROGRAM, NS_BUDZERO_STORAGE};
+use crate::execution::coordinator::universal_call::{
+    unwrap_static_universal_input, BUDZERO_SYSCALL_UNIVERSAL_CALL,
+};
+use crate::execution::coordinator::wasm_ee::WasmEe;
 use crate::execution::coordinator::worker::{
     WorkerEndpoint, WorkerError, WorkerSupervisor, MAX_BLOCK_WORKER_RETRIES,
 };
@@ -234,6 +243,63 @@ impl ExecutionEnvironment for StatefulBudZeroEe {
                         gas_used: call.gas_limit,
                     });
                 }
+                if call.input.first().copied() == Some(BUDZERO_SYSCALL_UNIVERSAL_CALL) {
+                    let Some(&to_ee_b) = call.input.get(1) else {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"malformed 0x40 universal_call".to_vec(),
+                            gas_used: spent,
+                        });
+                    };
+                    let Some(tlen_s) = call.input.get(2..4) else {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"malformed 0x40 target_len".to_vec(),
+                            gas_used: spent,
+                        });
+                    };
+                    let tlen = usize::from(u16::from_le_bytes([
+                        tlen_s.first().copied().unwrap_or(0),
+                        tlen_s.get(1).copied().unwrap_or(0),
+                    ]));
+                    let Some(target_b) = call.input.get(4..4 + tlen) else {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"truncated 0x40 target".to_vec(),
+                            gas_used: spent,
+                        });
+                    };
+                    let sub_in = call.input.get(4 + tlen..).unwrap_or(&[]).to_vec();
+                    let ures = host
+                        .universal_call(UniversalCall {
+                            from: call.target.clone(),
+                            to_ee: EeId(to_ee_b),
+                            target: EeIdentity {
+                                ee: EeId(to_ee_b),
+                                id: target_b.to_vec(),
+                            },
+                            value: BudAmount(0),
+                            input: sub_in,
+                            gas_limit: call.gas_limit.saturating_sub(spent),
+                        })
+                        .map_err(|_| EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"0x40 denied".to_vec(),
+                            gas_used: spent,
+                        });
+                    return match ures {
+                        Ok(r) => Ok(EeOutcome {
+                            status: if r.success {
+                                OutcomeStatus::Success
+                            } else {
+                                OutcomeStatus::Revert
+                            },
+                            output: r.output,
+                            gas_used: spent.saturating_add(r.gas_used),
+                        }),
+                        Err(out) => Ok(out),
+                    };
+                }
                 if let (Some(slot), Some(val)) = (call.input.get(..32), call.input.get(32..)) {
                     let mut storage_key = Vec::with_capacity(call.target.id.len() + 32);
                     storage_key.extend_from_slice(&call.target.id);
@@ -303,6 +369,8 @@ impl ExecutionCoordinator {
         supervisor.register(WorkerEndpoint::in_process(|| {
             Box::new(StatefulBudZeroEe::new())
         }));
+        supervisor.register(WorkerEndpoint::in_process(|| Box::new(EvmEe::new())));
+        supervisor.register(WorkerEndpoint::in_process(|| Box::new(WasmEe::new())));
         Self { supervisor }
     }
 
@@ -706,6 +774,18 @@ fn run_ee_call(
 
 impl HostRead for HostBridge<'_> {
     fn read(&self, ns: &Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, HostError> {
+        if ns.as_str() == ALIAS_NAMESPACE {
+            if let Some(cand) = key.strip_prefix(b"evm:") {
+                if let Ok(addr20) = <[u8; 20]>::try_from(cand) {
+                    let hit = self
+                        .state
+                        .execution_state
+                        .check_evm_alias_collision(&addr20)
+                        .is_err();
+                    return Ok(hit.then(|| vec![1u8]));
+                }
+            }
+        }
         self.overlay
             .read(&self.state.execution_state, self.cache, ns.as_str(), key)
     }
@@ -722,9 +802,15 @@ impl HostApi for HostBridge<'_> {
     }
 
     fn universal_call(&mut self, call: UniversalCall) -> Result<UniversalResult, HostError> {
+        let (is_static, clean_input) = unwrap_static_universal_input(&call.input);
+        if is_static && call.value.0 > 0 {
+            return Err(HostError::Denied(String::from(
+                "non-zero value transfer forbidden in static universal call",
+            )));
+        }
         let budget = call.gas_limit.min(self.overlay.remaining_bgu());
         self.overlay
-            .push_universal_frame(self.state, call.to_ee, false)?;
+            .push_universal_frame(self.state, call.to_ee, is_static)?;
         if call.value.0 > 0 {
             let unit = BudEnvUnit::for_ee(call.to_ee)
                 .ok_or_else(|| HostError::Invalid(String::from("unsupported target EE")))?;
@@ -744,7 +830,7 @@ impl HostApi for HostBridge<'_> {
             caller: call.from,
             target: call.target,
             value: call.value,
-            input: call.input,
+            input: clean_input.to_vec(),
             gas_limit: budget,
             depth: child_depth,
             tx_hash: self.tx_hash,
@@ -837,3 +923,5 @@ impl HostApi for HostBridge<'_> {
 
 #[cfg(test)]
 mod coordinator_tests;
+#[cfg(test)]
+mod uel_wp27_wp29_wp30_tests;
