@@ -284,6 +284,47 @@ const METHOD_CLASSES: &[MethodClass] = &[
     // WebSocket subscriptions: read-only feeds (src/rpc/subscriptions.rs).
     row("bud_subscribe", Public, Read),
     row("bud_unsubscribe", Public, Read),
+    // The Ethereum JSON-RPC compatibility gateway (WP-28, 1/2). Section 8.11.2
+    // names the methods; `src/rpc/compat/ethereum/mod.rs` says what each one
+    // answers. A row here is a read of chain state or a refusal that names the
+    // Budlum door, so nothing in this namespace changes consensus state.
+    row("web3_clientVersion", Public, Read),
+    row("net_version", Public, Read),
+    row("net_listening", Public, Read),
+    row("eth_chainId", Public, Read),
+    row("eth_syncing", Public, Read),
+    row("eth_blockNumber", Public, Read),
+    row("eth_getBalance", Public, Refused),
+    row("eth_getCode", Public, Refused),
+    row("eth_getStorageAt", Public, Refused),
+    row("eth_getTransactionCount", Public, Refused),
+    row("eth_call", Public, Refused),
+    row("eth_estimateGas", Public, Refused),
+    row("eth_createAccessList", Public, Refused),
+    row("eth_gasPrice", Public, Read),
+    row("eth_maxPriorityFeePerGas", Public, Read),
+    row("eth_feeHistory", Public, Refused),
+    row("eth_sendRawTransaction", Public, Refused),
+    row("eth_getBlockByNumber", Public, Refused),
+    row("eth_getBlockByHash", Public, Refused),
+    row("eth_getBlockTransactionCountByNumber", Public, Refused),
+    row("eth_getBlockTransactionCountByHash", Public, Refused),
+    row("eth_getTransactionByHash", Public, Refused),
+    row("eth_getTransactionByBlockNumberAndIndex", Public, Refused),
+    row("eth_getTransactionReceipt", Public, Refused),
+    row("eth_getBlockReceipts", Public, Refused),
+    row("eth_getLogs", Public, Refused),
+    row("eth_newFilter", Public, Refused),
+    row("eth_newBlockFilter", Public, Refused),
+    row("eth_getFilterChanges", Public, Refused),
+    row("eth_getFilterLogs", Public, Refused),
+    row("eth_uninstallFilter", Public, Refused),
+    row("eth_accounts", Public, Read),
+    row("debug_traceTransaction", Operator, Refused),
+    row("debug_traceCall", Operator, Refused),
+    // Section 8.10.6: the Budlum state root is not an MPT root, so the MPT
+    // proof method answers `-32601` for good at the opening layer.
+    row("eth_getProof", Public, Refused),
 ];
 
 /// Check that the methods a server registers are exactly the classified
@@ -307,6 +348,13 @@ pub fn check_served_methods<'a>(
         problems.push(format!(
             "{name} has a row in METHOD_CLASSES but is not served"
         ));
+    }
+    // A compatibility gateway answers a foreign namespace. Its table is the
+    // second classification: a method there must be in the gateway table, and
+    // a method the gateway marks pending must not be served at all
+    // (`src/rpc/compat/ethereum/mod.rs`).
+    if let Err(problem) = crate::rpc::compat::ethereum::check_served(registered.iter().copied()) {
+        problems.push(problem);
     }
     if problems.is_empty() {
         Ok(())

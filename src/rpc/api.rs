@@ -1523,4 +1523,259 @@ pub trait BudlumApi {
         kind: String,
         address: Option<String>,
     ) -> jsonrpsee::core::SubscriptionResult;
+
+    // ---- Ethereum JSON-RPC compatibility gateway (WP-28, 1/2) ----
+    //
+    // Section 8.11.2 names every method of this gateway. The table in
+    // `src/rpc/compat/ethereum/mod.rs` says what each one answers, the class
+    // rows in `src/rpc/method_class.rs` say on which listener, and
+    // `docs/RPC_COMPAT.md` says why every EVM-state method refuses today: the
+    // node does not run the EVM execution environment (WP-27) yet, so a
+    // balance read here would be a number no EVM account backs.
+
+    /// `web3_clientVersion`: this node's name and version.
+    #[method(name = "web3_clientVersion")]
+    async fn web3_client_version(&self) -> Result<String, ErrorObjectOwned>;
+
+    /// `net_version`: the chain id in decimal, as Ethereum tools expect.
+    #[method(name = "net_version")]
+    async fn compat_net_version(&self) -> Result<String, ErrorObjectOwned>;
+
+    /// `net_listening`: whether this node accepts connections.
+    #[method(name = "net_listening")]
+    async fn compat_net_listening(&self) -> Result<bool, ErrorObjectOwned>;
+
+    /// `eth_chainId`: the EIP-155 chain id as a quantity.
+    #[method(name = "eth_chainId")]
+    async fn eth_chain_id(&self) -> Result<String, ErrorObjectOwned>;
+
+    /// `eth_syncing`: `false`, or the sync state while catching up.
+    #[method(name = "eth_syncing")]
+    async fn eth_syncing(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_blockNumber`: the head height as a quantity.
+    #[method(name = "eth_blockNumber")]
+    async fn eth_block_number(&self) -> Result<String, ErrorObjectOwned>;
+
+    /// `eth_getBalance`: refuses until WP-27 (door: `bud_getBalance`).
+    #[method(name = "eth_getBalance")]
+    async fn eth_get_balance(
+        &self,
+        address: String,
+        block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getCode`: refuses until WP-27 (door: `bud_getAccountProof`).
+    #[method(name = "eth_getCode")]
+    async fn eth_get_code(
+        &self,
+        address: String,
+        block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getStorageAt`: refuses until WP-27 (door: `bud_getAccountProof`).
+    #[method(name = "eth_getStorageAt")]
+    async fn eth_get_storage_at(
+        &self,
+        address: String,
+        position: String,
+        block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getTransactionCount`: refuses until WP-27 (door: `bud_getNonce`).
+    #[method(name = "eth_getTransactionCount")]
+    async fn eth_get_transaction_count(
+        &self,
+        address: String,
+        block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_call`: refuses until WP-27 (door: `bud_txPrecheck`).
+    #[method(name = "eth_call")]
+    async fn eth_call(
+        &self,
+        call: serde_json::Value,
+        block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_estimateGas`: refuses until WP-27 (door: `bud_estimateGas`).
+    #[method(name = "eth_estimateGas")]
+    async fn eth_estimate_gas(
+        &self,
+        call: serde_json::Value,
+        block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_createAccessList`: refuses until WP-27 (door: `bud_txPrecheck`).
+    #[method(name = "eth_createAccessList")]
+    async fn eth_create_access_list(
+        &self,
+        call: serde_json::Value,
+        block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_gasPrice`: the base fee in wei per gas unit (Section 8.9.7).
+    #[method(name = "eth_gasPrice")]
+    async fn eth_gas_price(&self) -> Result<String, ErrorObjectOwned>;
+
+    /// `eth_maxPriorityFeePerGas`: zero, because this chain charges none.
+    #[method(name = "eth_maxPriorityFeePerGas")]
+    async fn eth_max_priority_fee_per_gas(&self) -> Result<String, ErrorObjectOwned>;
+
+    /// `eth_feeHistory`: refuses until WP-35 calibrates the series
+    /// (door: `bud_gasPrice`).
+    #[method(name = "eth_feeHistory")]
+    async fn eth_fee_history(
+        &self,
+        block_count: String,
+        newest_block: String,
+        reward_percentiles: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_sendRawTransaction`: refuses until WP-27 accepts the envelope
+    /// (door: `bud_sendRawTransaction`).
+    #[method(name = "eth_sendRawTransaction")]
+    async fn eth_send_raw_transaction(
+        &self,
+        raw: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getBlockByNumber`: refuses until WP-27 serves `execution_root`
+    /// (door: `bud_getBlockByNumber`).
+    #[method(name = "eth_getBlockByNumber")]
+    async fn eth_get_block_by_number(
+        &self,
+        block: String,
+        full: Option<bool>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getBlockByHash`: refuses until WP-27 (door: `bud_getBlockByHash`).
+    #[method(name = "eth_getBlockByHash")]
+    async fn eth_get_block_by_hash(
+        &self,
+        hash: String,
+        full: Option<bool>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getBlockTransactionCountByNumber`: refuses until WP-27
+    /// (door: `bud_getBlockByNumber`).
+    #[method(name = "eth_getBlockTransactionCountByNumber")]
+    async fn eth_get_block_transaction_count_by_number(
+        &self,
+        block: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getBlockTransactionCountByHash`: refuses until WP-27
+    /// (door: `bud_getBlockByHash`).
+    #[method(name = "eth_getBlockTransactionCountByHash")]
+    async fn eth_get_block_transaction_count_by_hash(
+        &self,
+        hash: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getTransactionByHash`: refuses until WP-27
+    /// (door: `bud_getTransactionByHash`).
+    #[method(name = "eth_getTransactionByHash")]
+    async fn eth_get_transaction_by_hash(
+        &self,
+        hash: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getTransactionByBlockNumberAndIndex`: refuses until WP-27
+    /// (door: `bud_getBlockByNumber`).
+    #[method(name = "eth_getTransactionByBlockNumberAndIndex")]
+    async fn eth_get_transaction_by_block_number_and_index(
+        &self,
+        block: String,
+        index: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getTransactionReceipt`: refuses until WP-27
+    /// (door: `bud_getTransactionReceipt`).
+    #[method(name = "eth_getTransactionReceipt")]
+    async fn eth_get_transaction_receipt(
+        &self,
+        hash: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getBlockReceipts`: refuses until WP-27
+    /// (door: `bud_getBlockByNumber`).
+    #[method(name = "eth_getBlockReceipts")]
+    async fn eth_get_block_receipts(
+        &self,
+        block: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getLogs`: refuses until WP-27
+    /// (door: `bud_getTransactionReceipt`).
+    #[method(name = "eth_getLogs")]
+    async fn eth_get_logs(
+        &self,
+        filter: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_newFilter`: refuses until the bounded pool lands in 2/2
+    /// (door: `bud_subscribe`).
+    #[method(name = "eth_newFilter")]
+    async fn eth_new_filter(
+        &self,
+        filter: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_newBlockFilter`: refuses until the bounded pool lands in 2/2
+    /// (door: `bud_subscribe`).
+    #[method(name = "eth_newBlockFilter")]
+    async fn eth_new_block_filter(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getFilterChanges`: refuses until 2/2 (door: `bud_subscribe`).
+    #[method(name = "eth_getFilterChanges")]
+    async fn eth_get_filter_changes(
+        &self,
+        filter_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getFilterLogs`: refuses until 2/2 (door: `bud_subscribe`).
+    #[method(name = "eth_getFilterLogs")]
+    async fn eth_get_filter_logs(
+        &self,
+        filter_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_uninstallFilter`: refuses until 2/2 (door: `bud_subscribe`).
+    #[method(name = "eth_uninstallFilter")]
+    async fn eth_uninstall_filter(
+        &self,
+        filter_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_accounts`: the empty list. This node holds no unlocked key.
+    #[method(name = "eth_accounts")]
+    async fn eth_accounts(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `debug_traceTransaction`: operator only; refuses until WP-27.
+    #[method(name = "debug_traceTransaction")]
+    async fn debug_trace_transaction(
+        &self,
+        hash: String,
+        options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `debug_traceCall`: operator only; refuses until WP-27.
+    #[method(name = "debug_traceCall")]
+    async fn debug_trace_call(
+        &self,
+        call: serde_json::Value,
+        block: Option<String>,
+        options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getProof`: `-32601` on purpose (Section 8.10.6). The Budlum
+    /// native proof is `bud_getAccountProof`.
+    #[method(name = "eth_getProof")]
+    async fn eth_get_proof(
+        &self,
+        address: String,
+        keys: serde_json::Value,
+        block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 }
