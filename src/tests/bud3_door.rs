@@ -340,3 +340,542 @@ fn endowment_settles_custody_rewards_and_renewal_across_epochs() {
     assert_eq!(obj_after["endowment"]["gateway_paid"], 100);
 }
 
+#[test]
+fn bud3_sealed_grant_issue_revoke_and_not_served() {
+    use crate::crypto::hpke::HpkeKeyPair;
+    use crate::storage::bud3::grants::{compute_grant_tag, grant_revoke_digest, GrantRow};
+    use crate::storage::bud3::keys::{
+        derive_grant_one_time_keypair, derive_object_content_key, open_key_package,
+        seal_key_package, sign_with_grant_one_time_key,
+    };
+    use crate::storage::bud3::pipeline::{prepare_sealed_upload, view_sealed};
+    use crate::storage::bud3::registry::Bud3Query;
+
+    let owner = Address::from([41u8; 32]);
+    let mut state = AccountState::new();
+    state.add_balance(&owner, 50_000);
+
+    let owner_secret = [0x91u8; 32];
+    let content_key = derive_object_content_key(&owner_secret, 1);
+    let plaintext = b"confidential sealed post shared via unlinkable X-Wing grant";
+    let up = prepare_sealed_upload(
+        plaintext,
+        &content_key,
+        [0x77; 24],
+        &P,
+        &Bud3Limits::default(),
+        12,
+    )
+    .unwrap();
+    let obj_commitment = up.record.commitment;
+    let shares = vec![
+        (
+            0,
+            Share {
+                validator: [50; 32],
+                class: Class::Full,
+                first_esi: 0,
+                symbols: 6,
+            },
+        ),
+        (
+            0,
+            Share {
+                validator: [51; 32],
+                class: Class::Full,
+                first_esi: 6,
+                symbols: 6,
+            },
+        ),
+    ];
+
+    apply(
+        &mut state,
+        &storage_tx(
+            owner,
+            0,
+            1,
+            0,
+            StorageTxV3::RegisterObject {
+                record: up.record.clone(),
+                shares,
+                lifetime_epochs: 20,
+            },
+        ),
+    )
+    .unwrap();
+
+    let nft_id = [0xA1; 32];
+    apply(
+        &mut state,
+        &storage_tx(
+            owner,
+            1,
+            1,
+            0,
+            StorageTxV3::BindNft {
+                nft: nft_id,
+                object: obj_commitment,
+            },
+        ),
+    )
+    .unwrap();
+
+    // Build an unlinkable view grant sealed to the grantee's X-Wing (0x647a) key.
+    let grantee_hpke = HpkeKeyPair::from_seed(&[0xB3u8; 32]).unwrap();
+    let grant_nonce = [0x33; 32];
+    let grant_tag = compute_grant_tag(&nft_id, &grant_nonce);
+    let (one_time_seed, one_time_pk) =
+        derive_grant_one_time_keypair(&owner_secret, &nft_id, &grant_nonce).unwrap();
+    let sealed_pkg = seal_key_package(
+        grantee_hpke.public_key(),
+        &grant_tag,
+        &obj_commitment,
+        &content_key,
+    )
+    .unwrap();
+
+    let row = GrantRow {
+        grant_tag,
+        one_time_pk,
+        sealed_key_package: sealed_pkg,
+        expires_at_epoch: 15,
+    };
+    apply(
+        &mut state,
+        &storage_tx(owner, 2, 1, 0, StorageTxV3::IssueViewGrant { row }),
+    )
+    .unwrap();
+
+    // Active grant serves HPKE key package with zero content_id / issuer / grantee fields.
+    let active_json = state.bud3_registry.query_json(&Bud3Query::Grant(grant_tag));
+    assert_eq!(active_json["status"], "active");
+    assert!(active_json.get("content_id").is_none());
+    assert!(active_json.get("issuer").is_none());
+    assert!(active_json.get("grantee").is_none());
+
+    let served = state
+        .bud3_registry
+        .grant_row(&grant_tag)
+        .expect("active grant must be served");
+    let (opened_obj, opened_key) =
+        open_key_package(&grantee_hpke, &grant_tag, &served.sealed_key_package).unwrap();
+    assert_eq!(opened_obj, obj_commitment);
+    let viewed = view_sealed(&up.record, &opened_key, up.segments.concat()).unwrap();
+    assert_eq!(viewed, plaintext);
+
+    // RevokeViewGrant deletes the HPKE capsule so it is never served again.
+    let revoke_sig =
+        sign_with_grant_one_time_key(&one_time_seed, &grant_revoke_digest(&grant_tag)).unwrap();
+    apply(
+        &mut state,
+        &storage_tx(
+            owner,
+            3,
+            1,
+            0,
+            StorageTxV3::RevokeViewGrant {
+                grant_tag,
+                one_time_signature: revoke_sig,
+            },
+        ),
+    )
+    .unwrap();
+    assert!(
+        state.bud3_registry.grant_row(&grant_tag).is_none(),
+        "revoked grant key package must never be served"
+    );
+    let revoked_json = state.bud3_registry.query_json(&Bud3Query::Grant(grant_tag));
+    assert_eq!(revoked_json["status"], "revoked");
+    assert!(revoked_json.get("sealed_key_package").is_none());
+}
+
+#[test]
+fn bud3_social_delete_crypto_shredding_and_tombstone() {
+    use crate::crypto::hpke::HpkeKeyPair;
+    use crate::storage::bud3::delete::GrantShredAuth;
+    use crate::storage::bud3::grants::{compute_grant_tag, grant_revoke_digest, GrantRow};
+    use crate::storage::bud3::keys::{
+        derive_grant_one_time_keypair, derive_object_content_key, seal_key_package,
+        sign_with_grant_one_time_key,
+    };
+    use crate::storage::bud3::pipeline::prepare_sealed_upload;
+
+    let owner = Address::from([42u8; 32]);
+    let mut state = AccountState::new();
+    state.add_balance(&owner, 50_000);
+
+    let owner_secret = [0x82u8; 32];
+    let content_key = derive_object_content_key(&owner_secret, 1);
+    let up = prepare_sealed_upload(
+        b"social post with cryptographic erasure on delete",
+        &content_key,
+        [0x55; 24],
+        &P,
+        &Bud3Limits::default(),
+        12,
+    )
+    .unwrap();
+    let obj_commitment = up.record.commitment;
+    let shares = vec![
+        (
+            0,
+            Share {
+                validator: [60; 32],
+                class: Class::Full,
+                first_esi: 0,
+                symbols: 6,
+            },
+        ),
+        (
+            0,
+            Share {
+                validator: [61; 32],
+                class: Class::Full,
+                first_esi: 6,
+                symbols: 6,
+            },
+        ),
+    ];
+
+    apply(
+        &mut state,
+        &storage_tx(
+            owner,
+            0,
+            1,
+            0,
+            StorageTxV3::RegisterObject {
+                record: up.record,
+                shares,
+                lifetime_epochs: 20,
+            },
+        ),
+    )
+    .unwrap();
+    let nft_id = [0xB2; 32];
+    apply(
+        &mut state,
+        &storage_tx(
+            owner,
+            1,
+            1,
+            0,
+            StorageTxV3::BindNft {
+                nft: nft_id,
+                object: obj_commitment,
+            },
+        ),
+    )
+    .unwrap();
+
+    let grantee = HpkeKeyPair::from_seed(&[0xB4u8; 32]).unwrap();
+    let grant_nonce = [0x99; 32];
+    let grant_tag = compute_grant_tag(&nft_id, &grant_nonce);
+    let (one_time_seed, one_time_pk) =
+        derive_grant_one_time_keypair(&owner_secret, &nft_id, &grant_nonce).unwrap();
+    let sealed_pkg = seal_key_package(
+        grantee.public_key(),
+        &grant_tag,
+        &obj_commitment,
+        &content_key,
+    )
+    .unwrap();
+    apply(
+        &mut state,
+        &storage_tx(
+            owner,
+            2,
+            1,
+            0,
+            StorageTxV3::IssueViewGrant {
+                row: GrantRow {
+                    grant_tag,
+                    one_time_pk,
+                    sealed_key_package: sealed_pkg,
+                    expires_at_epoch: 20,
+                },
+            },
+        ),
+    )
+    .unwrap();
+
+    let shred_sig =
+        sign_with_grant_one_time_key(&one_time_seed, &grant_revoke_digest(&grant_tag)).unwrap();
+    apply(
+        &mut state,
+        &storage_tx(
+            owner,
+            3,
+            1,
+            0,
+            StorageTxV3::SocialDelete {
+                nft: nft_id,
+                grant_shreds: vec![GrantShredAuth {
+                    grant_tag,
+                    one_time_signature: shred_sig,
+                }],
+            },
+        ),
+    )
+    .unwrap();
+
+    assert!(state.bud3_registry.grant_row(&grant_tag).is_none());
+    assert!(state.bud3_registry.object(&obj_commitment).is_none());
+    assert!(state.bud3_registry.is_tombstoned(&obj_commitment));
+}
+
+#[test]
+fn bud3_public_dedup_sealed_isolation_and_dependency_rules() {
+    use crate::storage::bud3::keys::derive_object_content_key;
+    use crate::storage::bud3::pipeline::prepare_sealed_upload;
+    use crate::storage::bud3::registry::RegistryError;
+
+    let alice = Address::from([71u8; 32]);
+    let bob = Address::from([72u8; 32]);
+    let mut state = AccountState::new();
+    state.add_balance(&alice, 50_000);
+    state.add_balance(&bob, 50_000);
+
+    let shares = vec![
+        (
+            0,
+            Share {
+                validator: [80; 32],
+                class: Class::Full,
+                first_esi: 0,
+                symbols: 6,
+            },
+        ),
+        (
+            0,
+            Share {
+                validator: [81; 32],
+                class: Class::Full,
+                first_esi: 6,
+                symbols: 6,
+            },
+        ),
+    ];
+
+    // Public dedup across two uploaders shares one physical object commitment.
+    let pub_up =
+        prepare_public_upload(b"shared public content", &P, &Bud3Limits::default(), 12).unwrap();
+    let pub_key = pub_up.record.commitment;
+    apply(
+        &mut state,
+        &storage_tx(
+            alice,
+            0,
+            1,
+            0,
+            StorageTxV3::RegisterObject {
+                record: pub_up.record.clone(),
+                shares: shares.clone(),
+                lifetime_epochs: 10,
+            },
+        ),
+    )
+    .unwrap();
+    apply(
+        &mut state,
+        &storage_tx(
+            bob,
+            0,
+            1,
+            0,
+            StorageTxV3::RegisterObject {
+                record: pub_up.record,
+                shares: shares.clone(),
+                lifetime_epochs: 15,
+            },
+        ),
+    )
+    .unwrap();
+    apply(
+        &mut state,
+        &storage_tx(
+            alice,
+            1,
+            1,
+            0,
+            StorageTxV3::BindNft {
+                nft: [1; 32],
+                object: pub_key,
+            },
+        ),
+    )
+    .unwrap();
+    apply(
+        &mut state,
+        &storage_tx(
+            bob,
+            1,
+            1,
+            0,
+            StorageTxV3::BindNft {
+                nft: [2; 32],
+                object: pub_key,
+            },
+        ),
+    )
+    .unwrap();
+    assert_eq!(state.bud3_registry.refcount(&pub_key), 2);
+
+    // Burning Alice's NFT leaves Bob's reference alive; burning Bob's tombstones.
+    apply(
+        &mut state,
+        &storage_tx(alice, 2, 1, 0, StorageTxV3::BurnReference { nft: [1; 32] }),
+    )
+    .unwrap();
+    assert_eq!(state.bud3_registry.refcount(&pub_key), 1);
+    assert!(state.bud3_registry.object(&pub_key).is_some());
+
+    apply(
+        &mut state,
+        &storage_tx(bob, 2, 1, 0, StorageTxV3::BurnReference { nft: [2; 32] }),
+    )
+    .unwrap();
+    assert!(state.bud3_registry.is_tombstoned(&pub_key));
+
+    // Sealed isolation: identical plaintext from Alice and Bob produces isolated objects.
+    let alice_sealed = prepare_sealed_upload(
+        b"identical secret bytes",
+        &derive_object_content_key(&[0xAA; 32], 1),
+        [0x11; 24],
+        &P,
+        &Bud3Limits::default(),
+        12,
+    )
+    .unwrap();
+    let bob_sealed = prepare_sealed_upload(
+        b"identical secret bytes",
+        &derive_object_content_key(&[0xBB; 32], 1),
+        [0x22; 24],
+        &P,
+        &Bud3Limits::default(),
+        12,
+    )
+    .unwrap();
+    assert_ne!(
+        alice_sealed.record.commitment,
+        bob_sealed.record.commitment
+    );
+    let alice_base = alice_sealed.record.commitment;
+    let bob_obj = bob_sealed.record.commitment;
+    apply(
+        &mut state,
+        &storage_tx(
+            alice,
+            3,
+            1,
+            0,
+            StorageTxV3::RegisterObject {
+                record: alice_sealed.record,
+                shares: shares.clone(),
+                lifetime_epochs: 10,
+            },
+        ),
+    )
+    .unwrap();
+    apply(
+        &mut state,
+        &storage_tx(
+            bob,
+            3,
+            1,
+            0,
+            StorageTxV3::RegisterObject {
+                record: bob_sealed.record,
+                shares: shares.clone(),
+                lifetime_epochs: 10,
+            },
+        ),
+    )
+    .unwrap();
+
+    // Cross-owner base dependency is refused.
+    assert_eq!(
+        state
+            .bud3_registry
+            .register_dependency(bob_obj, alice_base),
+        Err(RegistryError::CrossOwnerDependency)
+    );
+
+    // Same-owner base dependency protects the base object until detached.
+    let alice_delta = prepare_sealed_upload(
+        b"alice delta edit",
+        &derive_object_content_key(&[0xAA; 32], 2),
+        [0x33; 24],
+        &P,
+        &Bud3Limits::default(),
+        12,
+    )
+    .unwrap();
+    let delta_key = alice_delta.record.commitment;
+    apply(
+        &mut state,
+        &storage_tx(
+            alice,
+            4,
+            1,
+            0,
+            StorageTxV3::RegisterObject {
+                record: alice_delta.record,
+                shares,
+                lifetime_epochs: 10,
+            },
+        ),
+    )
+    .unwrap();
+    apply(
+        &mut state,
+        &storage_tx(
+            alice,
+            5,
+            1,
+            0,
+            StorageTxV3::BindNft {
+                nft: [0xD1; 32],
+                object: alice_base,
+            },
+        ),
+    )
+    .unwrap();
+    state
+        .bud3_registry
+        .register_dependency(delta_key, alice_base)
+        .unwrap();
+    assert_eq!(state.bud3_registry.refcount(&alice_base), 2);
+    assert!(
+        apply(
+            &mut state,
+            &storage_tx(
+                alice,
+                6,
+                1,
+                0,
+                StorageTxV3::BurnReference { nft: [0xD1; 32] }
+            ),
+        )
+        .is_err(),
+        "base object with live dependent must refuse deletion"
+    );
+    state
+        .bud3_registry
+        .detach_dependency(&delta_key, &alice_base, 0);
+    apply(
+        &mut state,
+        &storage_tx(
+            alice,
+            6,
+            1,
+            0,
+            StorageTxV3::BurnReference { nft: [0xD1; 32] },
+        ),
+    )
+    .unwrap();
+    assert!(state.bud3_registry.is_tombstoned(&alice_base));
+}
+
+

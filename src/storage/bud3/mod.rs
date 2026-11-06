@@ -23,26 +23,25 @@
 //!
 //! The commitment is fixed-size (32 bytes). The object is not fixed-size: it
 //! is the header plus the payload, and it is at most the header larger than
-//! the content.
-//!
-//! WIRING: unwired - the content pipeline replaces the legacy storage modules
-//! one door at a time. Upload, view and `StorageTx` v3 call into this tree
-//! when the legacy storage code is removed; until then it is exercised by its
-//! own tests and the golden vectors under `tests/vectors/bud3/`.
+//! the content (or Padme bucket ceiling plus salt and AEAD tag when sealed).
 
 pub mod bof1;
 pub mod content_id;
 pub mod custody;
 pub mod dedup_index;
+pub mod delete;
 pub mod fees;
 pub mod fountain;
 pub mod frame;
+pub mod grants;
+pub mod keys;
 pub mod limits;
 pub mod meter;
 pub mod pipeline;
 pub mod placement;
 pub mod qr;
 pub mod registry;
+pub mod seal;
 pub mod segment;
 pub mod two_path;
 pub mod tx;
@@ -51,6 +50,10 @@ pub mod video;
 
 pub use bof1::{Bof1Error, Flags, Header, Object};
 pub use content_id::{ContentId, ContentKey};
+pub use delete::{
+    check_same_owner_dependency, requires_rehydration_before_transfer, GrantShredAuth,
+    ShredOutcome,
+};
 pub use fees::{
     custody_endowment_account, distribute_object_endowment_epoch, renewal_fee_epochs,
     replace_object_refund, same_owner_sealed_dedup_fee, shared_public_reference_fee_epochs,
@@ -63,11 +66,25 @@ pub use fountain::{
 pub use frame::{
     frames_for_object_bytes, Bud3Frame, FrameWireError, BUD3_FRAME_HEADER_LEN, BUD3_FRAME_MAGIC,
 };
+pub use grants::{compute_grant_tag, grant_revoke_digest, GrantBud3Error, GrantRow};
+pub use keys::{
+    content_key_from_random, derive_grant_one_time_keypair, derive_object_content_key,
+    open_key_package, seal_key_package, sign_with_grant_one_time_key, ClientSealedDedupIndex,
+    KeyPkgBud3Error, KEYPKG_PLAINTEXT_LEN,
+};
 pub use limits::{Bud3Limits, OpticalProfile, Profile, ProfileId};
 pub use meter::{Meter, MeterError};
+pub use pipeline::{
+    prepare_public_upload, prepare_public_upload_two_path, prepare_sealed_upload, view_public,
+    view_public_optical, view_sealed, ObjectRecord, PipelineError, PreparedUpload,
+};
 pub use qr::{
     frame_to_matrix, frame_to_png, png_to_frame, render_optical_seconds,
     render_p1_optical_seconds, Bud3QrError, OpticalSecond,
+};
+pub use seal::{
+    open_sealed_object, padme_padded_len, seal_object, SealBud3Error, MIN_SEALED_BUCKET_BYTES,
+    SEAL_AUTH_TAG_LEN, SEAL_SALT_LEN,
 };
 pub use segment::{object_commitment, segment_digest, ObjectCommitment, Segmentation};
 pub use two_path::{

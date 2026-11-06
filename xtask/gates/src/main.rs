@@ -58,6 +58,7 @@ mod gates {
     pub mod bud3_forbidden_phrases;
     pub mod bud3_object_is_universal;
     pub mod bud3_qr_is_presentation;
+    pub mod bud3_sealed_and_deletion;
     pub mod bud_e2e;
     pub mod budscan_parity;
     pub mod budscan_patchset;
@@ -1431,6 +1432,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::bud3_qr_is_presentation::self_test,
+    },
+    Gate {
+        name: "bud3-sealed-and-deletion",
+        replaces: None,
+        run: gates::bud3_sealed_and_deletion::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_sealed_and_deletion::self_test,
     },
 ];
 

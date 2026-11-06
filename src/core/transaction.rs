@@ -3842,10 +3842,8 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
         // The whole payload is signed: its canonical bincode bytes,
         // length-prefixed.
         TransactionType::StorageV3(storage_tx) => {
-            put_bytes(
-                out,
-                &bincode::serialize(storage_tx.as_ref()).unwrap_or_default(),
-            );
+            put_u8(out, 70);
+            encode_storage_v3_tx(storage_tx, out);
         }
         TransactionType::ExternalDomain(external_tx) => {
             put_u8(out, 53);
@@ -4265,6 +4263,188 @@ fn encode_proof_market_tx(tx: &crate::settlement::proof_market::ProofMarketTx, o
         ProofMarketTx::RefundExpired { task_id } => {
             put_u8(out, 5);
             put_fixed(out, task_id);
+        }
+    }
+}
+
+/// Canonical preimage of a B.U.D. 3.0 storage transaction. Every pub field of
+/// every carried variant and struct is written explicitly; nothing is bincode-ed
+/// (enforced by `wire-fields-are-signed`).
+fn encode_storage_v3_content_id(
+    content_id: &crate::storage::bud3::content_id::ContentId,
+    out: &mut Vec<u8>,
+) {
+    use crate::storage::bud3::content_id::ContentIdKind;
+    match content_id.kind {
+        ContentIdKind::Public => put_u8(out, 0),
+        ContentIdKind::Sealed => put_u8(out, 1),
+    }
+    put_fixed(out, &content_id.digest);
+    put_u64(out, content_id.len);
+}
+
+fn encode_storage_v3_profile(
+    profile: &crate::storage::bud3::limits::Profile,
+    out: &mut Vec<u8>,
+) {
+    put_u8(out, profile.id);
+    put_u8(out, profile.qr_version);
+    out.extend_from_slice(&profile.symbol_size.to_le_bytes());
+    put_u8(out, profile.fps);
+    put_u32(out, profile.k_max);
+}
+
+fn encode_storage_v3_record(
+    record: &crate::storage::bud3::pipeline::ObjectRecord,
+    out: &mut Vec<u8>,
+) {
+    encode_storage_v3_content_id(&record.content_id, out);
+    put_u64(out, record.object_len);
+    put_fixed(out, &record.commitment);
+    encode_storage_v3_profile(&record.profile, out);
+    out.extend_from_slice(&record.codec.to_le_bytes());
+    put_u32(out, record.symbols_per_segment);
+    put_u64(out, record.symbol_roots.len() as u64);
+    for root in &record.symbol_roots {
+        put_fixed(out, root);
+    }
+}
+
+fn encode_storage_v3_share(
+    share: &crate::storage::bud3::placement::Share,
+    out: &mut Vec<u8>,
+) {
+    use crate::storage::bud3::placement::Class;
+    put_fixed(out, &share.validator);
+    match share.class {
+        Class::Full => put_u8(out, 0),
+        Class::Mobile => put_u8(out, 1),
+    }
+    put_u32(out, share.first_esi);
+    put_u32(out, share.symbols);
+}
+
+fn encode_storage_v3_proof(
+    proof: &crate::storage::bud3::custody::CustodyProof,
+    out: &mut Vec<u8>,
+) {
+    put_u64(out, proof.segment);
+    put_u32(out, proof.esi);
+    put_u64(out, proof.position);
+    put_u64(out, proof.sub_block);
+    put_fixed(out, &proof.bytes);
+    put_u64(out, proof.symbol_path.len() as u64);
+    for step in &proof.symbol_path {
+        put_option_fixed32(out, *step);
+    }
+    put_u64(out, proof.root_path.len() as u64);
+    for step in &proof.root_path {
+        put_option_fixed32(out, *step);
+    }
+}
+
+fn encode_storage_v3_grant_row(
+    row: &crate::storage::bud3::grants::GrantRow,
+    out: &mut Vec<u8>,
+) {
+    put_fixed(out, &row.grant_tag);
+    put_bytes(out, &row.one_time_pk);
+    put_bytes(out, &row.sealed_key_package);
+    put_u64(out, row.expires_at_epoch);
+}
+
+fn encode_storage_v3_shred_auth(
+    auth: &crate::storage::bud3::delete::GrantShredAuth,
+    out: &mut Vec<u8>,
+) {
+    put_fixed(out, &auth.grant_tag);
+    put_bytes(out, &auth.one_time_signature);
+}
+
+fn encode_storage_v3_tx(tx: &crate::storage::bud3::tx::StorageTxV3, out: &mut Vec<u8>) {
+    use crate::storage::bud3::tx::StorageTxV3;
+    match tx {
+        StorageTxV3::RegisterObject {
+            record,
+            shares,
+            lifetime_epochs,
+        } => {
+            put_u8(out, 0);
+            encode_storage_v3_record(record, out);
+            put_u64(out, shares.len() as u64);
+            for (seg, share) in shares {
+                put_u64(out, *seg);
+                encode_storage_v3_share(share, out);
+            }
+            put_u64(out, *lifetime_epochs);
+        }
+        StorageTxV3::CustodyAck { object } => {
+            put_u8(out, 1);
+            put_fixed(out, object);
+        }
+        StorageTxV3::CustodyProofBatch { proofs } => {
+            put_u8(out, 2);
+            put_u64(out, proofs.len() as u64);
+            for (object, proof) in proofs {
+                put_fixed(out, object);
+                encode_storage_v3_proof(proof, out);
+            }
+        }
+        StorageTxV3::RecordRepair {
+            object,
+            segment,
+            new_shares,
+            new_root,
+        } => {
+            put_u8(out, 3);
+            put_fixed(out, object);
+            put_u64(out, *segment);
+            put_u64(out, new_shares.len() as u64);
+            for share in new_shares {
+                encode_storage_v3_share(share, out);
+            }
+            put_fixed(out, new_root);
+        }
+        StorageTxV3::BindNft { nft, object } => {
+            put_u8(out, 4);
+            put_fixed(out, nft);
+            put_fixed(out, object);
+        }
+        StorageTxV3::BurnReference { nft } => {
+            put_u8(out, 5);
+            put_fixed(out, nft);
+        }
+        StorageTxV3::RenewObject {
+            object,
+            extra_epochs,
+        } => {
+            put_u8(out, 6);
+            put_fixed(out, object);
+            put_u64(out, *extra_epochs);
+        }
+        StorageTxV3::DeclineContent { content } => {
+            put_u8(out, 7);
+            encode_storage_v3_content_id(content, out);
+        }
+        StorageTxV3::IssueViewGrant { row } => {
+            put_u8(out, 8);
+            encode_storage_v3_grant_row(row, out);
+        }
+        StorageTxV3::RevokeViewGrant {
+            grant_tag,
+            one_time_signature,
+        } => {
+            put_u8(out, 9);
+            put_fixed(out, grant_tag);
+            put_bytes(out, one_time_signature);
+        }
+        StorageTxV3::SocialDelete { nft, grant_shreds } => {
+            put_u8(out, 10);
+            put_fixed(out, nft);
+            put_u64(out, grant_shreds.len() as u64);
+            for auth in grant_shreds {
+                encode_storage_v3_shred_auth(auth, out);
+            }
         }
     }
 }

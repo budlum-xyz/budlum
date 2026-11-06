@@ -28,11 +28,13 @@ use super::custody::{
     MOBILE_AUDIT_PPM,
 };
 use super::dedup_index::DedupIndex;
+use super::delete::{check_same_owner_dependency, GrantShredAuth, ShredOutcome};
 use super::fees::{
     distribute_object_endowment_epoch, renewal_fee_epochs, split_storage_fee,
     storage_fee_for_epochs, FeeParams, FeeRecord, ObjectEndowment, ShareRewardInput,
     PRESENCE_PPM_SCALE,
 };
+use super::grants::{GrantBud3Error, GrantRow};
 use super::pipeline::ObjectRecord;
 use super::placement::{Class, Share};
 use super::segment::Segmentation;
@@ -185,6 +187,18 @@ pub enum RegistryError {
     /// The codec is not open: an object carrying it could never produce its
     /// content again on the viewer's device.
     CodecNotOpen(u16),
+    /// View-grant issuance or revocation failed validation.
+    Grant(GrantBud3Error),
+    /// A dependent delta or derived object attempted cross-owner base binding.
+    CrossOwnerDependency,
+    /// A base object still has live dependent objects and must be detached first.
+    HasDependents,
+}
+
+impl From<GrantBud3Error> for RegistryError {
+    fn from(e: GrantBud3Error) -> Self {
+        Self::Grant(e)
+    }
 }
 
 /// An RPC read of the registry.
@@ -194,6 +208,8 @@ pub enum Bud3Query {
     Object(ObjectKey),
     /// The shares one validator holds.
     Custody(Address),
+    /// One unlinkable view grant by `grant_tag`.
+    Grant([u8; 32]),
 }
 
 /// What a registration did.
@@ -220,6 +236,9 @@ pub struct Bud3Registry {
     custody_credits: BTreeMap<Address, u64>,
     presence_ppm: BTreeMap<Address, u32>,
     forfeited_pool_total: u64,
+    grants: BTreeMap<[u8; 32], GrantRow>,
+    revoked_grants: BTreeSet<[u8; 32]>,
+    base_deps: BTreeMap<ObjectKey, BTreeSet<ObjectKey>>,
 }
 
 /// The serialized form of [`Bud3Registry`].
@@ -236,6 +255,12 @@ struct FlatRegistry {
     presence_ppm: Vec<(Address, u32)>,
     #[serde(default)]
     forfeited_pool_total: u64,
+    #[serde(default)]
+    grants: Vec<([u8; 32], GrantRow)>,
+    #[serde(default)]
+    revoked_grants: Vec<[u8; 32]>,
+    #[serde(default)]
+    base_deps: Vec<(ObjectKey, Vec<ObjectKey>)>,
 }
 
 impl From<Bud3Registry> for FlatRegistry {
@@ -249,6 +274,13 @@ impl From<Bud3Registry> for FlatRegistry {
             custody_credits: r.custody_credits.into_iter().collect(),
             presence_ppm: r.presence_ppm.into_iter().collect(),
             forfeited_pool_total: r.forfeited_pool_total,
+            grants: r.grants.into_iter().collect(),
+            revoked_grants: r.revoked_grants.into_iter().collect(),
+            base_deps: r
+                .base_deps
+                .into_iter()
+                .map(|(k, set)| (k, set.into_iter().collect()))
+                .collect(),
         }
     }
 }
@@ -264,6 +296,13 @@ impl From<FlatRegistry> for Bud3Registry {
             custody_credits: f.custody_credits.into_iter().collect(),
             presence_ppm: f.presence_ppm.into_iter().collect(),
             forfeited_pool_total: f.forfeited_pool_total,
+            grants: f.grants.into_iter().collect(),
+            revoked_grants: f.revoked_grants.into_iter().collect(),
+            base_deps: f
+                .base_deps
+                .into_iter()
+                .map(|(k, v)| (k, v.into_iter().collect()))
+                .collect(),
         }
     }
 }
@@ -456,12 +495,18 @@ impl Bud3Registry {
         Ok(())
     }
 
-    /// The reference count of an object.
+    /// The reference count of an object (bound NFTs plus same-owner dependent objects).
     #[must_use]
     pub fn refcount(&self, key: &ObjectKey) -> u64 {
-        self.objects
+        let nft_refs = self
+            .objects
             .get(key)
-            .map_or(0, |o| o.references.len() as u64)
+            .map_or(0, |o| o.references.len() as u64);
+        let dep_refs = self
+            .base_deps
+            .get(key)
+            .map_or(0, |d| d.len() as u64);
+        nft_refs.saturating_add(dep_refs)
     }
 
     fn delete(&mut self, key: &ObjectKey, epoch: u64) {
@@ -479,6 +524,7 @@ impl Bud3Registry {
             for nft in obj.references {
                 self.nfts.remove(&nft);
             }
+            self.base_deps.remove(key);
             self.tombstones.insert(*key, epoch);
         }
     }
@@ -488,7 +534,9 @@ impl Bud3Registry {
     ///
     /// # Errors
     ///
-    /// [`RegistryError::UnknownNft`] or [`RegistryError::NotAuthorized`].
+    /// [`RegistryError::UnknownNft`], [`RegistryError::NotAuthorized`], or
+    /// [`RegistryError::HasDependents`] when burning the last NFT of a base
+    /// object that still has dependent delta/derived objects.
     pub fn burn_reference(
         &mut self,
         nft: &NftId,
@@ -499,15 +547,178 @@ impl Bud3Registry {
         if holder != *signer {
             return Err(RegistryError::NotAuthorized);
         }
+        let has_deps = self.base_deps.get(&key).is_some_and(|d| !d.is_empty());
+        let nft_count = self.objects.get(&key).map_or(0, |o| o.references.len());
+        if nft_count <= 1 && has_deps {
+            return Err(RegistryError::HasDependents);
+        }
         self.nfts.remove(nft);
-        let empty = self.objects.get_mut(&key).is_some_and(|o| {
+        let no_nfts = self.objects.get_mut(&key).is_some_and(|o| {
             o.references.remove(nft);
             o.references.is_empty()
         });
-        if empty {
+        let deleted = no_nfts && !has_deps;
+        if deleted {
             self.delete(&key, epoch);
         }
-        Ok(empty)
+        Ok(deleted)
+    }
+
+    /// Register a same-owner dependency (`dependent` relies on `base` via delta or crop).
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::UnknownObject`] or [`RegistryError::CrossOwnerDependency`].
+    pub fn register_dependency(
+        &mut self,
+        dependent: ObjectKey,
+        base: ObjectKey,
+    ) -> Result<(), RegistryError> {
+        if dependent == base {
+            return Err(RegistryError::BadRecord("self dependency"));
+        }
+        let dep_owner = self
+            .objects
+            .get(&dependent)
+            .ok_or(RegistryError::UnknownObject)?
+            .owner;
+        let base_owner = self
+            .objects
+            .get(&base)
+            .ok_or(RegistryError::UnknownObject)?
+            .owner;
+        if !check_same_owner_dependency(&dep_owner, &base_owner) {
+            return Err(RegistryError::CrossOwnerDependency);
+        }
+        self.base_deps.entry(base).or_default().insert(dependent);
+        Ok(())
+    }
+
+    /// Convenience: detach `dependent` from `base` after standalone rehydration.
+    pub fn detach_dependency(&mut self, dependent: &ObjectKey, base: &ObjectKey, epoch: u64) {
+        let mut remove_entry = false;
+        if let Some(set) = self.base_deps.get_mut(base) {
+            set.remove(dependent);
+            remove_entry = set.is_empty();
+        }
+        if remove_entry {
+            self.base_deps.remove(base);
+            if self
+                .objects
+                .get(base)
+                .is_some_and(|o| o.references.is_empty())
+            {
+                self.delete(base, epoch);
+            }
+        }
+    }
+
+    /// `IssueViewGrant`: record an unlinkable [`GrantRow`] carrying no `content_id`,
+    /// `issuer`, or `grantee`.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::Grant`] if the tag is duplicate/revoked, expired, or has
+    /// an invalid ML-DSA-65 one-time key or HPKE X-Wing (`0x647a`) package.
+    pub fn issue_view_grant(&mut self, row: GrantRow, epoch: u64) -> Result<(), RegistryError> {
+        if self.grants.contains_key(&row.grant_tag)
+            || self.revoked_grants.contains(&row.grant_tag)
+        {
+            return Err(RegistryError::Grant(GrantBud3Error::DuplicateOrRevokedTag));
+        }
+        row.validate_for_issue(epoch)?;
+        self.grants.insert(row.grant_tag, row);
+        Ok(())
+    }
+
+    /// `RevokeViewGrant`: verify the owner's one-time ML-DSA-65 signature and
+    /// permanently delete the grant row and its HPKE key package.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::Grant`] if the grant is unknown or the signature fails.
+    pub fn revoke_view_grant(
+        &mut self,
+        grant_tag: &[u8; 32],
+        one_time_signature: &[u8],
+    ) -> Result<(), RegistryError> {
+        let row = self
+            .grants
+            .get(grant_tag)
+            .ok_or(RegistryError::Grant(GrantBud3Error::UnknownGrant))?;
+        row.verify_revocation(one_time_signature)?;
+        self.grants.remove(grant_tag);
+        self.revoked_grants.insert(*grant_tag);
+        Ok(())
+    }
+
+    /// Convenience: read a live grant row by `grant_tag`; returns `None` once
+    /// revoked, expired, or shredded so revoked key packages are never served.
+    #[must_use]
+    pub fn grant_row(&self, grant_tag: &[u8; 32]) -> Option<&GrantRow> {
+        self.grants.get(grant_tag)
+    }
+
+    /// `SocialDelete`: atomically verify and shred every listed view-grant
+    /// capsule (`grant_shreds`), then burn `nft`'s reference and tombstone the
+    /// object if zero references remain. All checks run before any state write.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError`] if `signer` does not own `nft`, a base dependency blocks
+    /// deletion, or any grant shred authorization fails verification.
+    pub fn social_delete(
+        &mut self,
+        nft: &NftId,
+        signer: &Address,
+        grant_shreds: &[GrantShredAuth],
+        epoch: u64,
+    ) -> Result<ShredOutcome, RegistryError> {
+        let (key, holder) = *self.nfts.get(nft).ok_or(RegistryError::UnknownNft)?;
+        if holder != *signer {
+            return Err(RegistryError::NotAuthorized);
+        }
+        let has_deps = self.base_deps.get(&key).is_some_and(|d| !d.is_empty());
+        let nft_count = self.objects.get(&key).map_or(0, |o| o.references.len());
+        if nft_count <= 1 && has_deps {
+            return Err(RegistryError::HasDependents);
+        }
+
+        let mut seen = BTreeSet::new();
+        for auth in grant_shreds {
+            if !seen.insert(auth.grant_tag) {
+                return Err(RegistryError::Grant(GrantBud3Error::DuplicateOrRevokedTag));
+            }
+            let row = self
+                .grants
+                .get(&auth.grant_tag)
+                .ok_or(RegistryError::Grant(GrantBud3Error::UnknownGrant))?;
+            row.verify_revocation(&auth.one_time_signature)?;
+        }
+
+        for auth in grant_shreds {
+            self.grants.remove(&auth.grant_tag);
+            self.revoked_grants.insert(auth.grant_tag);
+        }
+        let object_deleted = self.burn_reference(nft, signer, epoch)?;
+        Ok(ShredOutcome {
+            object: key,
+            grants_shredded: grant_shreds.len(),
+            object_deleted,
+        })
+    }
+
+    /// Convenience: DAO governance takedown targeting a public content digest
+    /// (Section 6.8.3.5 & 6.21.6.2). Sealed content never enters `public_index`
+    /// and cannot be targeted here.
+    pub fn dao_delete_public_content(
+        &mut self,
+        public_digest: &[u8; 32],
+        epoch: u64,
+    ) -> Option<ObjectKey> {
+        let key = *self.public_index.get(public_digest)?;
+        self.delete(&key, epoch);
+        Some(key)
     }
 
     /// `RenewObject`: anyone may extend the paid lifetime.
@@ -540,9 +751,19 @@ impl Bud3Registry {
         Ok(obj.expires_at)
     }
 
-    /// Expire every object past its paid lifetime; expiry is handled as a
-    /// burn of every reference. Returns the deleted keys.
+    /// Expire every object and unlinkable view grant past its paid lifetime.
+    /// Returns the deleted object keys.
     pub fn expire(&mut self, epoch: u64) -> Vec<ObjectKey> {
+        let expired_grants: Vec<[u8; 32]> = self
+            .grants
+            .iter()
+            .filter(|(_, g)| g.expires_at_epoch < epoch)
+            .map(|(tag, _)| *tag)
+            .collect();
+        for tag in expired_grants {
+            self.grants.remove(&tag);
+            self.revoked_grants.insert(tag);
+        }
         let due: Vec<ObjectKey> = self
             .objects
             .iter()
@@ -1016,6 +1237,24 @@ impl Bud3Registry {
                     "shares": shares,
                 })
             }
+            Bud3Query::Grant(tag) => {
+                if let Some(row) = self.grants.get(tag) {
+                    serde_json::json!({
+                        "grant_tag": hex::encode(row.grant_tag),
+                        "status": "active",
+                        "one_time_pk": hex::encode(&row.one_time_pk),
+                        "sealed_key_package": hex::encode(&row.sealed_key_package),
+                        "expires_at_epoch": row.expires_at_epoch,
+                    })
+                } else if self.revoked_grants.contains(tag) {
+                    serde_json::json!({
+                        "grant_tag": hex::encode(tag),
+                        "status": "revoked",
+                    })
+                } else {
+                    serde_json::Value::Null
+                }
+            }
         }
     }
 
@@ -1028,6 +1267,9 @@ impl Bud3Registry {
             && self.custody_credits.is_empty()
             && self.presence_ppm.is_empty()
             && self.forfeited_pool_total == 0
+            && self.grants.is_empty()
+            && self.revoked_grants.is_empty()
+            && self.base_deps.is_empty()
     }
 
     /// The registry state root over every map, in order.
@@ -1118,6 +1360,23 @@ impl Bud3Registry {
         }
         if self.forfeited_pool_total > 0 {
             fold(&[b"forfeited", &self.forfeited_pool_total.to_le_bytes()]);
+        }
+        for (tag, row) in &self.grants {
+            fold(&[
+                b"grant",
+                tag,
+                &row.one_time_pk,
+                &row.sealed_key_package,
+                &row.expires_at_epoch.to_le_bytes(),
+            ]);
+        }
+        for tag in &self.revoked_grants {
+            fold(&[b"revoked_grant", tag]);
+        }
+        for (base, deps) in &self.base_deps {
+            for dep in deps {
+                fold(&[b"base_dep", base, dep]);
+            }
         }
         acc
     }
