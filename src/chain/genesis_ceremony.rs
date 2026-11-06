@@ -196,6 +196,53 @@ mod tests {
         assert!(assemble(Network::Testnet, inputs(records)).is_err());
     }
 
+    /// WP-16 item 1, required named test. The ceremony tool must refuse a
+    /// genesis built from fewer than eight full validators; the chain-level
+    /// 3f+1 floor of four is not the ceremony floor. RED before the fix:
+    /// `assemble` accepts seven records today.
+    #[test]
+    fn ceremony_refuses_fewer_than_eight_full_validators() {
+        let err = assemble(Network::Testnet, inputs(operators(7))).unwrap_err();
+        assert!(err.contains("at least eight"), "{err}");
+        let genesis = assemble(Network::Testnet, inputs(operators(8))).expect("assembles");
+        assert_eq!(genesis.validators.len(), 8);
+    }
+
+    /// WP-16 item 2 / BLG-003, required named test. One `u128` audit names
+    /// every source. RED before the fix: `supply_audit` does not exist yet,
+    /// so this test cannot even compile until the audit report lands.
+    #[test]
+    fn genesis_supply_audit_counts_every_source() {
+        let genesis = assemble(Network::Testnet, inputs(operators(8))).expect("assembles");
+        let audit = supply_audit(&genesis).expect("audits");
+        let fixed = u128::from(crate::tokenomics::BUD_TOTAL_SUPPLY);
+        assert_eq!(audit.fixed_supply, fixed);
+        assert_eq!(audit.categories, fixed);
+        assert_eq!(audit.total, fixed);
+        assert_eq!(audit.extra_allocations, 0);
+        assert_eq!(
+            audit.validator_stake,
+            u128::from(Network::Testnet.min_stake()) * 8
+        );
+        assert!(audit.validation_pool > 0);
+        // Stakes and the pool are drawn from the ecosystem category; they
+        // are not minted on top of the distribution.
+        let ecosystem = u128::from(
+            genesis
+                .bud_tokenomics
+                .as_ref()
+                .expect("testnet tokenomics")
+                .ecosystem,
+        );
+        assert!(audit.validator_stake + audit.validation_pool < ecosystem);
+        // An extra allocation is counted in the same `u128` total and
+        // refused instead of silently minting past the fixed supply.
+        let mut inflated = genesis.clone();
+        inflated.allocations.push((Address::from([0x77; 32]), 1));
+        let err = supply_audit(&inflated).unwrap_err();
+        assert!(err.contains("fixed supply"), "{err}");
+    }
+
     #[test]
     fn a_duplicate_validator_is_refused() {
         let mut records = operators(4);
