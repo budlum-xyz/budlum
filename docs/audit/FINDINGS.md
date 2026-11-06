@@ -19,7 +19,9 @@ packages reconcile it. Rows from other deliveries must be preserved on rebase.
 IDs BLG-281 through BLG-285 were checked against all 62 live PR bodies and
 reserved in PR #77 before their records were written. BLG-286 and BLG-287 were
 checked against the subsequent 63-PR body snapshot and reserved in PR #77 before
-this addendum. Existing reservations through BLG-280 are not changed.
+this addendum. BLG-288 through BLG-290 were reserved in PR #77 for the independent
+mobile/node compatibility review before their rows were added. Existing
+reservations through BLG-280 are not changed.
 
 | Identity | Severity | Location | Finding | Regression / evidence | Closing package | Status |
 |---|---|---|---|---|---|---|
@@ -30,6 +32,9 @@ this addendum. Existing reservations through BLG-280 are not changed.
 | BLG-285 | Medium | `.github/workflows/ci.yml`, standalone crate checks | The ABI crate's socket tests are not invoked by the standalone-crate job. The explorer format step is attached to that job across a job-boundary comment rather than to an explorer job. | YAML parse inspection confirms the misplaced step; proposed repair and ABI fmt/clippy/test commands in `980a887`. CI execution pending. | WP-42 / WP-09 | open |
 | BLG-286 | High | `serve_connection`, worker frame reads | An accepted connection can send the first byte of a frame and then withhold the rest indefinitely; the worker has no deadline for a started frame. | `uel_abi_worker_partial_frame_has_a_deadline_after_first_byte`; test added in `c6f5260`, seed corrected in `31a530e`, proposed fix `8a8688f`. Execution pending. | WP-09 | open |
 | BLG-287 | High | `serve_connection`, `ValidateDeployRequest` | Deploy validation runs outside `catch_unwind`, unlike execute and query. An engine panic can unwind the worker service instead of closing the connection as a controlled transport failure. | `uel_abi_worker_catches_deploy_validation_panics`; test added in `c6f5260`, proposed fix `8a8688f`. Execution pending. | WP-09 | open |
+| BLG-288 | High | PR #70 `presence_message`, PR #82 `presence_preimage` | Node and mobile length-prefix different fields before SHA3-256, so the same presence signal signs different bytes and cannot verify across implementations. | Executed byte-level Python reproduction and differing digests in `docs/audit/REVIEW_2.md`; shared Rust golden vector and cross-implementation BLS test pending. | WP-13 / WP-11 | open |
+| BLG-289 | High | PR #82 `CustodyProofBatch`, `ShareStore::answer`; node `StorageTxV3` | Mobile proof batches omit the object key required by the node and select audits by segment/position alone, allowing a wrong-object selection. | Type and lookup evidence in `docs/audit/REVIEW_2.md`; object-collision regression pending. | WP-11 / WP-20 | open |
+| BLG-290 | High | PR #82 `DutyTx::ReleaseShares`, PR #45 `StorageTxV3::ReleaseShares` | Mobile release carries only process-local share ids; it cannot encode the chain object/share/quota payload, so local deletion need not trigger chain repair. | Contract comparison in `docs/audit/REVIEW_2.md`; shared payload and round-trip regression pending. | WP-11 / WP-20 / WP-22 | open |
 
 ## Closure record
 
