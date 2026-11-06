@@ -34,12 +34,14 @@ finding whose fix is carried or merged.
 | BLG-275 | Low | `deny.toml`, `.github/workflows/ci.yml` | Cargo deny jobs (root and fuzz) fail on `main`. | CI 42050659038, jobs 127488354574 and 127488354282 | WP-42 |
 | BLG-276 | High | `crates/uel-abi/src/lib.rs`, `crates/uel-abi/src/transport.rs`, `crates/uel-abi/src/mock.rs`, `crates/uel-abi/tests/transport.rs` | `crates/uel-abi` unconditionally compiled `std::os::unix::net::UnixStream` in `transport.rs`, breaking `Cross-Platform Digest (windows-latest)` whenever `budlum-uel-abi` is built on Windows, and `panic_digest` / `panic_message` lived inside the Unix-only module rather than `host.rs`. | `crates/uel-abi/src/transport.rs:24` (`use std::os::unix::net::UnixStream;`); closed in PR `#36` (`aa7b8c5`, `47d4e05`) | WP-26 |
 
-## Closure record (WP-26, PR #36)
+## Closure record (WP-09, WP-26..WP-33, PR #36)
 
 | Identity | Status | Location | Verification test / gate | Pull request |
 |---|---|---|---|---|
+| BLG-088 | closed (in review, PR #36) | `crates/uel-abi/src/transport.rs`, `crates/uel-abi/tests/transport.rs` | `handshake_echoes_request_id_and_rejects_mismatch` | PR `#36` |
 | BLG-248 | closed (in review, PR #36) | `src/execution/coordinator/mod.rs` (`StatefulBudZeroEe`), `src/execution/coordinator/state.rs` | `budzero_stateful_storage_persists_across_blocks` | PR `#36` |
 | BLG-250 | closed (in review, PR #36) | `execution/Cargo.toml`, `src/execution/coordinator/worker.rs`, `xtask/gates/src/gates/ee_workers_build_with_unwind.rs` | `uel_worker_panic_yields_fault_receipt`, `uel_worker_death_does_not_commit`, gate `ee-workers-build-with-unwind` | PR `#36` |
 | BLG-256 | closed (in review, PR #36) | `src/core/account.rs`, `xtask/gates/src/gates/economy_invariants.rs` | `frac_attos_stays_below_1e12`, `uel_bud_conservation`, gate `economy-invariants` | PR `#36` |
 | BLG-260 | closed (in review, PR #36) | `src/execution/coordinator/overlay.rs` (`BlockReadCache`, `TxOverlay`), `docs/EXECUTION.md` | `coordinator_overlay_rolls_back_frame`, `execution_root_binds_every_namespace`, `uel_cross_arch_roots_equal` | PR `#36` |
+| BLG-267 | closed (in review, PR #36) | `src/execution/coordinator/foreign/`, `docs/pq/classical_allowlist.toml`, `xtask/gates/src/gates/classical_crypto_is_paired.rs` | `foreign_account_cannot_touch_pq_holding`, `emergency_alert_suspends_foreign_keeps_adopt`, gate `classical-crypto-is-paired` | PR `#36` |
 | BLG-276 | closed (in review, PR #36) | `crates/uel-abi/src/{lib,host,mock,transport}.rs`, `crates/uel-abi/tests/transport.rs` | `Cross-Platform Digest (windows-latest)` + `crates/uel-abi` test suite | PR `#36` |

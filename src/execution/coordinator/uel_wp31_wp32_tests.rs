@@ -62,8 +62,8 @@ fn svm_spl_token_and_vote_stake_refusal_and_universal_cpi() {
     let mut state = funded(&[alice, bob, proposer]);
     let mut coord = ExecutionCoordinator::new();
 
-    let alice_svm = derive_svm_alias(&alice).expect("alice off-curve svm alias");
-    let bob_svm = derive_svm_alias(&bob).expect("bob off-curve svm alias");
+    let (alice_svm, _) = derive_svm_alias(&alice).expect("alice off-curve svm alias");
+    let (bob_svm, _) = derive_svm_alias(&bob).expect("bob off-curve svm alias");
     let mint = [0x99u8; 32];
     let ata = derive_associated_token_address(&alice_svm, &mint).expect("ata");
     assert!(!is_ed25519_on_curve(&ata));

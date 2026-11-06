@@ -101,17 +101,49 @@ Each environment carries an independent deployment flag (`deploy_frozen_ees`,
 `R-21`) that freezes new contract deployments with `UelReceiptStatus::DeployFrozen`
 while keeping existing contracts live.
 
-## 6. Slice Boundary (`WP-26`)
+## 6. Execution Environments, Universal Call, and Compatibility Gateways
 
-- **Slice 1/2 (this branch)**: `frac_attos` ledger and `economy-invariants`,
-  Windows ABI guard (`BLG-276`), aliases, `execution_root` and `AccountState`
-  commitment, BGU gas/fees, mempool lanes, `BlockReadCache` + `TxOverlay`,
-  `WorkerSupervisor` + `ExecutionCoordinator`, `StatefulBudZeroEe` (`BLG-248`),
-  per-EE deploy freeze (`R-21`), `execution/` workspace + `budlum-ee-mock`, and
-  `ee-workers-build-with-unwind`.
-- **Slice 2/2 (deferred due to active lock-path PRs `#9` and `#14`)**: wiring
-  `TransactionType::Execute` / `TransactionType::Foreign` in
-  `src/core/transaction.rs` and `src/execution/executor.rs`, and adding
-  `execution_root` to `GlobalBlockHeader` V8 across `src/settlement/global_block.rs`,
-  `src/chain/{blockchain,snapshot}.rs`, `src/light_client/mod.rs`, and
-  `proto/budlum/network/protocol.proto`.
+- **Execution workers (`execution/`)**:
+  - `budlum-ee-evm` (`EeId::EVM` = `0x01`, `src/execution/coordinator/evm_ee.rs`):
+    Prague EVM runtime, `CREATE2` alias collision check, `SSTORE` state-growth
+    metering (`84 * STATE_GROWTH_GAS_PER_BYTE`), and Universal Call precompile
+    at `0x000000000000000000000000000000000000B001` (`contracts/uel/BudlumUniversal.sol`).
+  - `budlum-ee-wasm` (`EeId::WASM` = `0x02`, `src/execution/coordinator/wasm_ee.rs`):
+    deterministic CosmWasm subset refusing floating-point types/instructions,
+    non-trapping `trunc_sat`, memory above `64 MiB`, IBC exports, and Cosmos
+    staking/distribution/gov/IBC messages; exposes `BudlumMsg::UniversalCall`
+    and `BudlumQuery::UniversalView`.
+  - `budlum-ee-svm` (`EeId::SVM` = `0x03`, `src/execution/coordinator/svm_ee.rs`):
+    interpreted SBPF runtime (`jit_enabled = false`), System / SPL Token /
+    Token-2022 / ATA / Memo / BPF Loader programs, Vote/Stake refusal, and
+    built-in Universal Call program `SHA256("BDLM_SVM_UNIVERSAL_PROGRAM_V1")`.
+  - `budlum-ee-move` (`EeId::MOVE` = `0x04`, `src/execution/coordinator/move_ee.rs`):
+    sequential Move VM (`block_stm_parallel = false`), `0x1::randomness` bound
+    to `BlockContext.randao`, staking/governance refusal, `execution/move/deny.toml`,
+    and native `0x1::budlum_universal::call`.
+  - `budlum-ee-budzero` (`EeId::BUDZERO` = `0x00`): native BudZero environment
+    with `UNIVERSAL_CALL` syscall `0x40`.
+- **Universal Asset Registry (`uel/assets`, `WP-30`)**:
+  - `asset_id = SHA3-256("BDLM_UEL_ASSET_V1" || home_ee || len_le64 || home_ref)`.
+  - Zero-balance deterministic pointers between CW20/CW721 and ERC-20/ERC-721;
+    all balances and allowances live exclusively in the home environment.
+- **Foreign Compatibility Lane & Quantum Alert (`WP-33`, `BLG-267`)**:
+  - Verifies EIP-1559 (`chain_id = 45261`), Cosmos `TxRaw` (`budlum-testnet-1`),
+    Solana v0 (`150`-block window), and Aptos signed transactions (`chain_id = 205`,
+    `0xBD` alias scheme disjointness).
+  - Enforces K-3 holding isolation, `QuantumAlertLevel` (`Normal`,
+    `Elevated` -> `10x` BGU surcharge + `3600s` quarantine, `Emergency` ->
+    foreign admission suspended, `Adopt` remains open), and category `"f"`
+    enforcement in `classical_crypto_is_paired`.
+- **Compatibility RPC/REST Gateways (`src/rpc/compat/`)**:
+  - Ethereum JSON-RPC (`127.0.0.1:18547`, `WP-28`): all 34 T-Launch public
+    methods + operator `debug_traceTransaction` / `debug_traceCall`; `eth_getProof`
+    returns `-32601` (`Method not found; use bud_getExecutionProof`); block
+    `stateRoot` equals `execution_root` (sparse binary Merkle commitment, not an
+    Ethereum MPT).
+  - Solana JSON-RPC (`127.0.0.1:18548`, `WP-31`), Aptos REST (`127.0.0.1:18549`,
+    `WP-32`), and CometBFT RPC + Cosmos LCD (`127.0.0.1:18550` / `18551`, `WP-29`).
+- **Remaining wire integration (`WP-26` slice 2/2, deferred due to active
+  lock-path PRs `#9` and `#14`)**: wiring `TransactionType::{Execute,Foreign}`
+  in `src/core/transaction.rs` and `src/execution/executor.rs`, and adding
+  `execution_root` to `GlobalBlockHeader` V8.

@@ -12,8 +12,9 @@ mod foreign_tests;
 use crate::core::account::{AccountState, BudEnvUnit, ATTOS_PER_ATOM};
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
-use crate::crypto::pq::{self, SchemeId};
+use crate::crypto::pq;
 use crate::crypto::primitives::wallet_address_from_ml_dsa_87_public_key;
+use crate::crypto::scheme::SchemeId;
 use crate::crypto::secp256k1_recover::recover_address;
 use crate::execution::coordinator::alias::{
     derive_foreign_account, AccountQuantumClass, ForeignScheme,

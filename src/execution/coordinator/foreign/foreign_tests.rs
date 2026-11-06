@@ -16,8 +16,9 @@ use super::{
 };
 use crate::core::account::{AccountState, ATTOS_PER_ATOM};
 use crate::core::address::Address;
-use crate::crypto::pq::{self, SchemeId};
+use crate::crypto::pq;
 use crate::crypto::primitives::wallet_address_from_ml_dsa_87_public_key;
+use crate::crypto::scheme::SchemeId;
 use crate::execution::coordinator::alias::{
     derive_foreign_account, AccountQuantumClass, ForeignScheme, MOVE_ALIAS_SCHEME_BYTE,
 };
