@@ -87,7 +87,11 @@ groups:
     rules:
       - alert: BudlumDiskFillingUp
         # Needs node_exporter on the host; the node itself reports only its
-        # database size (budlum_storage_db_size_bytes).
+        # database size (budlum_storage_db_size_bytes). The `node` job in
+        # ops/prometheus.yml and ops/monitoring/testnet-local-prometheus.yml
+        # scrapes it, and `every_series_the_rules_read_has_a_scrape_job`
+        # (src/tests/scrape_topology_covers_the_rules.rs) fails without it -
+        # before that job existed this rule could not fire on any node.
         expr: node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"} < 0.10
         for: 10m
         labels:

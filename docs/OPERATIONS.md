@@ -71,6 +71,13 @@ Prometheus scrapes each node's metrics listener (loopback; scrape through a
 local agent). Rules: `ops/monitoring/alerts.yml`. Dashboard:
 `ops/monitoring/grafana/budlum-testnet.json`.
 
+The scrape topology is two configs: `ops/prometheus.yml` (the compose mesh,
+node1-node5) and `ops/monitoring/testnet-local-prometheus.yml` (the rehearsal).
+Both mount `ops/monitoring/alerts.yml` where the config reads it and both carry
+a `node` job for the host's node_exporter, which is the only source of
+`node_filesystem_avail_bytes`: `BudlumDiskFillingUp` cannot fire without it.
+`src/tests/scrape_topology_covers_the_rules.rs` holds that.
+
 The public edge is `ops/Caddyfile.testnet`: TLS, a 2 MB body cap and HSTS on
 `rpc.`, `faucet.` and `explorer-api.` under `TESTNET_DOMAIN`, forwarding to the
 loopback listeners the node, the faucet and the indexer bind. The operator

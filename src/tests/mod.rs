@@ -274,3 +274,8 @@ pub mod alerts_have_runbook_entries;
 // never an unauthenticated listener.
 #[cfg(test)]
 pub mod caddy_edges_match_the_services;
+
+// WP-41 item 6: the scrape topology reaches every exporter the alert rules
+// read, and the rule file is mounted where the config expects it.
+#[cfg(test)]
+pub mod scrape_topology_covers_the_rules;

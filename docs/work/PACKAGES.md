@@ -157,3 +157,19 @@ forwards to the port its service actually binds (read from the service source
 and `config/testnet.toml`, not restated), no site forwards to the operator or
 metrics listener, every site imports the shared hardening, and the services are
 told the proxy is trusted.
+
+### Delivery 6: WP-41 item 6, the scrape topology behind the rules
+
+Found while auditing the rules against the tree: `BudlumDiskFillingUp` reads
+`node_filesystem_avail_bytes`, and **no scrape config enumerated a
+node_exporter job**. The rule could not fire on any node in either stack - it
+renders green through a full disk, which is the failure mode the rule exists to
+prevent.
+
+`ops/prometheus.yml` and `ops/monitoring/testnet-local-prometheus.yml` now carry
+a `node` job for the host exporter. The exporter stays out of the node image on
+purpose: it needs host namespaces and a read-only mount of `/`.
+`src/tests/scrape_topology_covers_the_rules.rs` checks the chain end to end:
+every non-`budlum_` series a rule reads has a job that produces it, both compose
+files mount the rule file where the config reads it, and the evaluation interval
+is a whole multiple of the scrape interval.
