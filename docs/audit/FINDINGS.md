@@ -84,3 +84,26 @@ requires a CI run number, and `main` is red at the live base. No Rust toolchain
 exists in this workspace; `cargo`, `rustc`, `rustfmt` and `clippy` were not run
 locally. The evidence quoted above comes from live GitHub Actions annotations
 and job logs, which were readable through the API and the log host.
+
+## 6. Session integrator (PR #96): mechanically reproduced findings
+
+Source: `ops/scripts/stack_compatibility_audit.py`, run over the live snapshot
+`docs/audit/OPEN_PR_SNAPSHOT_2026-11-06.json` (75 open PRs). Full data:
+`docs/audit/STACK_COMPATIBILITY_DATA_2026-11-06.json`; readable report:
+`docs/audit/STACK_COMPATIBILITY_AUDIT_2026-11-06.md`. Every changed `.rs` blob
+on every open PR head was parsed with the tree-sitter Rust grammar; 1,522 blobs
+scanned, 11 with syntax findings, on three branches. Counts are Git observations,
+not measurements (directive 0.5).
+
+| ID | Severity | Finding | Evidence | State |
+|---|---|---|---|---|
+| BLG-314 | High | A third open PR ships syntactically invalid Rust: PR #55 `src/storage/bud3/private_dedup.rs` has a `MISSING` node at line 545 | mechanical audit, section 1 of the compatibility report | open; extends BLG-298, the branch is not modified here |
+| BLG-315 | Critical | The WP-46 rehearsal ceremony in PR #92 accepts empty `Full` claims, accepts eight duplicate records, publishes any `private_key` field and interpolates record filenames into Python source | PR #94 `tests/review/rehearsal_ceremony_regressions.py`, four failing checks against #92 head `9d532a8a`; source inspection of `ops/rehearsal/genesis_rehearsal.sh` | open; repaired on this branch, see slice 3/N |
+| BLG-316 | High | 497 paths are edited by more than one open PR and 103 new files are implemented more than once with different bytes | mechanical audit, sections 2 and 3 | open; this branch's carry-over policy is recorded in the compatibility report |
+| BLG-317 | High | The presence message has four different declared constant/digest shapes across `crates/budlum-types`, `mobile/core`, `src/registry` and `src/validators` (6/4/4/4 distinct lines) | mechanical audit, section 4; PR #91's BLG-301 | open; one canonical shape owed in slice 6/N |
+| BLG-318 | High | No gate in the tree can reject a syntactically broken `.rs` blob before it merges (BLG-299 unowned) | `xtask/gates/src/gates/` inventory; three broken branches in the live stack | owed: `rust_syntax_is_parseable`, slice 2/N |
+| BLG-319 | Medium | The single package register misstates WP-36/37/46 as unowned and WP-61 as T-Expansion | live `gh pr list` (PR #92) and directive 15.7 | closed in the register by slice 1/N |
+| BLG-320 | High | WP-28 2/2, WP-31 2/N and WP-32 2/N (subscriptions, SVM-state reads, Move worker, BCS, `Foreign::Aptos`, 0xBD alias) have no owner | PR #83, #89 and #93 section 3 bodies | owed: slice 5/N |
+
+Finding ids BLG-314 and up are allocated by this single ledger (BLG-313). No
+other PR was closed, merged, retargeted or edited.

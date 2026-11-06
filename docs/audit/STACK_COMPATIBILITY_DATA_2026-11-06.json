@@ -1,0 +1,2075 @@
+{
+  "base": "cccf1da1f4bcfe97503a3a00cfba24b172b49b31",
+  "branches_with_syntax_errors": [
+    {
+      "files": [
+        {
+          "file": "src/chain/blockchain.rs",
+          "findings": [
+            "error@7914",
+            "error@7907",
+            "error@7743",
+            "error@4407",
+            "error@4216"
+          ]
+        },
+        {
+          "file": "src/persistence/db.rs",
+          "findings": [
+            "error@2092",
+            "missing@431",
+            "missing@179",
+            "missing@145",
+            "error@135",
+            "error@131",
+            "error@128",
+            "error@123"
+          ]
+        },
+        {
+          "file": "src/persistence/traits.rs",
+          "findings": [
+            "error@227",
+            "error@223"
+          ]
+        },
+        {
+          "file": "src/rpc/tests.rs",
+          "findings": [
+            "error@445"
+          ]
+        },
+        {
+          "file": "src/storage/bud3/content_ref.rs",
+          "findings": [
+            "error@239"
+          ]
+        },
+        {
+          "file": "src/tests/priority_findings.rs",
+          "findings": [
+            "missing@164",
+            "missing@136",
+            "missing@133",
+            "missing@130"
+          ]
+        },
+        {
+          "file": "src/tests/regression_ai_storage.rs",
+          "findings": [
+            "missing@373",
+            "missing@372",
+            "missing@365",
+            "missing@361"
+          ]
+        },
+        {
+          "file": "src/tests/regression_chain.rs",
+          "findings": [
+            "missing@334",
+            "missing@325",
+            "missing@281"
+          ]
+        }
+      ],
+      "head": "arena/b7784c85-budlum",
+      "pr": 8,
+      "sha": "a5f30fb8"
+    },
+    {
+      "files": [
+        {
+          "file": "crates/bud-codec/src/container.rs",
+          "findings": [
+            "missing@508"
+          ]
+        },
+        {
+          "file": "src/tests/integration.rs",
+          "findings": [
+            "error@763",
+            "missing@758",
+            "error@758",
+            "error@512",
+            "missing@507",
+            "error@507"
+          ]
+        }
+      ],
+      "head": "arena/5b54fce9-budlum",
+      "pr": 9,
+      "sha": "3c5bb36d"
+    },
+    {
+      "files": [
+        {
+          "file": "src/storage/bud3/private_dedup.rs",
+          "findings": [
+            "missing@545"
+          ]
+        }
+      ],
+      "head": "arena/442cedfb-budlum",
+      "pr": 55,
+      "sha": "4d7983b4"
+    }
+  ],
+  "changed_rust_files_scanned": 1522,
+  "duplicate_new_files": 103,
+  "generated_utc": "2026-11-06T10:55:06.515439+00:00",
+  "heads_missing": [],
+  "heads_seen": 75,
+  "integrated_tree_rust_files": 908,
+  "integrated_tree_syntax_errors": [],
+  "open_prs": 75,
+  "presence_wire_drift": [
+    {
+      "distinct_lines": 6,
+      "file": "crates/budlum-types/src/presence.rs",
+      "lines": 6
+    },
+    {
+      "distinct_lines": 4,
+      "file": "mobile/core/src/presence.rs",
+      "lines": 4
+    },
+    {
+      "distinct_lines": 4,
+      "file": "src/registry/presence.rs",
+      "lines": 4
+    },
+    {
+      "distinct_lines": 4,
+      "file": "src/validators/presence.rs",
+      "lines": 4
+    }
+  ],
+  "rows": [
+    {
+      "changed_paths": 340,
+      "head": "arena/b7784c85-budlum",
+      "number": 8,
+      "rust_files": 152,
+      "sha": "a5f30fb8",
+      "syntax_errors": [
+        {
+          "file": "src/chain/blockchain.rs",
+          "findings": [
+            "error@7914",
+            "error@7907",
+            "error@7743",
+            "error@4407",
+            "error@4216"
+          ]
+        },
+        {
+          "file": "src/persistence/db.rs",
+          "findings": [
+            "error@2092",
+            "missing@431",
+            "missing@179",
+            "missing@145",
+            "error@135",
+            "error@131",
+            "error@128",
+            "error@123"
+          ]
+        },
+        {
+          "file": "src/persistence/traits.rs",
+          "findings": [
+            "error@227",
+            "error@223"
+          ]
+        },
+        {
+          "file": "src/rpc/tests.rs",
+          "findings": [
+            "error@445"
+          ]
+        },
+        {
+          "file": "src/storage/bud3/content_ref.rs",
+          "findings": [
+            "error@239"
+          ]
+        },
+        {
+          "file": "src/tests/priority_findings.rs",
+          "findings": [
+            "missing@164",
+            "missing@136",
+            "missing@133",
+            "missing@130"
+          ]
+        },
+        {
+          "file": "src/tests/regression_ai_storage.rs",
+          "findings": [
+            "missing@373",
+            "missing@372",
+            "missing@365",
+            "missing@361"
+          ]
+        },
+        {
+          "file": "src/tests/regression_chain.rs",
+          "findings": [
+            "missing@334",
+            "missing@325",
+            "missing@281"
+          ]
+        }
+      ],
+      "title": "The codec register and the dedup index"
+    },
+    {
+      "changed_paths": 226,
+      "head": "arena/5b54fce9-budlum",
+      "number": 9,
+      "rust_files": 114,
+      "sha": "3c5bb36d",
+      "syntax_errors": [
+        {
+          "file": "crates/bud-codec/src/container.rs",
+          "findings": [
+            "missing@508"
+          ]
+        },
+        {
+          "file": "src/tests/integration.rs",
+          "findings": [
+            "error@763",
+            "missing@758",
+            "error@758",
+            "error@512",
+            "missing@507",
+            "error@507"
+          ]
+        }
+      ],
+      "title": "WP-12: the committee seat table, the seat quorum and instant seat handover"
+    },
+    {
+      "changed_paths": 60,
+      "head": "arena/792d7fb2-budlum",
+      "number": 11,
+      "rust_files": 54,
+      "sha": "521d20ee",
+      "syntax_errors": [],
+      "title": "WP-06: move node-local persistence out of content storage"
+    },
+    {
+      "changed_paths": 10,
+      "head": "arena/b0362659-budlum",
+      "number": 12,
+      "rust_files": 5,
+      "sha": "ab89e67f",
+      "syntax_errors": [],
+      "title": "WP-01, WP-02, WP-03: the lane A, B and C live verification ledgers"
+    },
+    {
+      "changed_paths": 6,
+      "head": "arena/df5c50ec-budlum",
+      "number": 13,
+      "rust_files": 4,
+      "sha": "599d29dd",
+      "syntax_errors": [],
+      "title": "WP-20: the placement, custody proof and repair gates"
+    },
+    {
+      "changed_paths": 2,
+      "head": "arena/f409b61f-budlum",
+      "number": 14,
+      "rust_files": 0,
+      "sha": "4da68e01",
+      "syntax_errors": [],
+      "title": "WP-44: testnet feature closures and the launch decision record"
+    },
+    {
+      "changed_paths": 7,
+      "head": "arena/b4538b08-budlum",
+      "number": 16,
+      "rust_files": 4,
+      "sha": "0757719e",
+      "syntax_errors": [],
+      "title": "WP-03: the lane C live verification ledger, the engine inventory and its locks"
+    },
+    {
+      "changed_paths": 3,
+      "head": "arena/d8c6419d-budlum",
+      "number": 18,
+      "rust_files": 2,
+      "sha": "3e37bc13",
+      "syntax_errors": [],
+      "title": "WP-04: start lane D live verification and behavioral regression tests"
+    },
+    {
+      "changed_paths": 4,
+      "head": "arena/64ab4b8f-budlum",
+      "number": 20,
+      "rust_files": 1,
+      "sha": "edb7ba8a",
+      "syntax_errors": [],
+      "title": "WP-05: concept name owners and the owner gate"
+    },
+    {
+      "changed_paths": 80,
+      "head": "arena/e8f2bf7d-budlum",
+      "number": 24,
+      "rust_files": 64,
+      "sha": "6c164075",
+      "syntax_errors": [],
+      "title": "WP-05, WP-42, WP-26, WP-33, WP-27, WP-28 (+ WP-29, WP-30): UEL Coordinator, BudZero, EVM, Ethereum RPC, WASM & Universal Call"
+    },
+    {
+      "changed_paths": 15,
+      "head": "arena/aee1885c-budlum",
+      "number": 29,
+      "rust_files": 6,
+      "sha": "befd1f59",
+      "syntax_errors": [],
+      "title": "WP-42: continue PR #30 with the required-nightly gate and BLG-240 pin"
+    },
+    {
+      "changed_paths": 13,
+      "head": "arena/8ff8d926-budlum",
+      "number": 30,
+      "rust_files": 4,
+      "sha": "02ca1798",
+      "syntax_errors": [],
+      "title": "WP-42: the float gate, the workspace coverage gate and the conformance nightly"
+    },
+    {
+      "changed_paths": 15,
+      "head": "arena/ae0fac50-budlum",
+      "number": 31,
+      "rust_files": 9,
+      "sha": "3889b6aa",
+      "syntax_errors": [],
+      "title": "WP-05 + WP-42 + WP-08: the concept map, two missing CI gates, and the mobile duty lane"
+    },
+    {
+      "changed_paths": 9,
+      "head": "arena/14810b46-budlum",
+      "number": 34,
+      "rust_files": 6,
+      "sha": "438eacd3",
+      "syntax_errors": [],
+      "title": "WP-61, WP-16, WP-41: RPC & crypto hardening, genesis ceremony/tokenomics, and faucet/ops"
+    },
+    {
+      "changed_paths": 9,
+      "head": "arena/3ef3b577-budlum",
+      "number": 35,
+      "rust_files": 2,
+      "sha": "6854f514",
+      "syntax_errors": [],
+      "title": "WP-04: the lane D live verification ledger and the audit status index"
+    },
+    {
+      "changed_paths": 96,
+      "head": "arena/48ccda24-budlum",
+      "number": 36,
+      "rust_files": 73,
+      "sha": "c2db4785",
+      "syntax_errors": [],
+      "title": "WP-26, 1/2: Execution Coordinator, EE worker isolation, attoBUD ledger, and UEL state commitments"
+    },
+    {
+      "changed_paths": 1,
+      "head": "arena/8bbc3522-budlum",
+      "number": 37,
+      "rust_files": 1,
+      "sha": "34ae1f85",
+      "syntax_errors": [],
+      "title": "WP-16: reserve the 40/50/10 epoch pool shares"
+    },
+    {
+      "changed_paths": 2,
+      "head": "arena/3bf4ef42-budlum",
+      "number": 38,
+      "rust_files": 2,
+      "sha": "54c7aa3d",
+      "syntax_errors": [],
+      "title": "WP-09: bind the worker handshake to its request id"
+    },
+    {
+      "changed_paths": 5,
+      "head": "arena/055826ad-budlum",
+      "number": 39,
+      "rust_files": 5,
+      "sha": "9dc08823",
+      "syntax_errors": [],
+      "title": "WP-16: the pool pays by three shares, 40 consensus, 50 storage, 10 repair and relay (BLG-263)"
+    },
+    {
+      "changed_paths": 13,
+      "head": "arena/104478c0-budlum",
+      "number": 40,
+      "rust_files": 12,
+      "sha": "3291d77e",
+      "syntax_errors": [],
+      "title": "WP-08 + WP-25: the Mobile duty lane and the storage fee"
+    },
+    {
+      "changed_paths": 10,
+      "head": "arena/e55d486b-budlum",
+      "number": 41,
+      "rust_files": 7,
+      "sha": "556c4d6f",
+      "syntax_errors": [],
+      "title": "WP-61: RPC and crypto finding locks and the method coverage ratchet"
+    },
+    {
+      "changed_paths": 3,
+      "head": "arena/3f9b37a2-budlum",
+      "number": 42,
+      "rust_files": 2,
+      "sha": "4a241cb3",
+      "syntax_errors": [],
+      "title": "WP-42: keep the directive outside the tree and unblock the consensus-write canary"
+    },
+    {
+      "changed_paths": 130,
+      "head": "arena/728c9947-budlum",
+      "number": 43,
+      "rust_files": 116,
+      "sha": "318cb964",
+      "syntax_errors": [],
+      "title": "WP-45, WP-33, WP-44, WP-39, WP-18, WP-23, WP-40: testnet closures, BudZero/AI/PQ/Identity hardening, B.U.D. 3.0 & cross-domain locks"
+    },
+    {
+      "changed_paths": 11,
+      "head": "arena/cf21139f-budlum",
+      "number": 44,
+      "rust_files": 5,
+      "sha": "08d297f9",
+      "syntax_errors": [],
+      "title": "WP-45 + WP-11: close privacy and the AI layer on testnet, rank AI reputation on integers, and give the address one shared definition"
+    },
+    {
+      "changed_paths": 115,
+      "head": "arena/e99125f2-budlum",
+      "number": 45,
+      "rust_files": 73,
+      "sha": "f067824c",
+      "syntax_errors": [],
+      "title": "bud3 & validators: WP-25 fees/endowment, WP-19 optical/text, WP-22 sealed/grants, WP-13 presence"
+    },
+    {
+      "changed_paths": 9,
+      "head": "arena/b0ebe4a4-budlum",
+      "number": 46,
+      "rust_files": 6,
+      "sha": "2c75d686",
+      "syntax_errors": [],
+      "title": "WP-34: the EVM migration kit verification core and the bud-migrate tool"
+    },
+    {
+      "changed_paths": 3,
+      "head": "arena/da87421b-budlum",
+      "number": 47,
+      "rust_files": 1,
+      "sha": "646f09f3",
+      "syntax_errors": [],
+      "title": "WP-18: RFC 6330 acceptance, the retired carousel ceilings and the object ceiling"
+    },
+    {
+      "changed_paths": 9,
+      "head": "arena/b9672715-budlum",
+      "number": 48,
+      "rust_files": 6,
+      "sha": "c0e1fdaf",
+      "syntax_errors": [],
+      "title": "WP-15: bounded P2P payload decoding, the IPv6 eclipse bucket and the routing-table policy"
+    },
+    {
+      "changed_paths": 2,
+      "head": "arena/ae1671f6-budlum",
+      "number": 49,
+      "rust_files": 2,
+      "sha": "ab6c6e9a",
+      "syntax_errors": [],
+      "title": "WP-45: close the privacy and on-chain AI verification surfaces on testnet"
+    },
+    {
+      "changed_paths": 7,
+      "head": "arena/984dc17c-budlum",
+      "number": 50,
+      "rust_files": 2,
+      "sha": "03a4d680",
+      "syntax_errors": [],
+      "title": "WP-05: the concept-name map, the ownership table and the counter"
+    },
+    {
+      "changed_paths": 84,
+      "head": "arena/ae973cec-budlum",
+      "number": 51,
+      "rust_files": 65,
+      "sha": "7c1f2393",
+      "syntax_errors": [],
+      "title": "WP-43 + WP-31: the README definition and placeholder gates, the contract-crate build, and the Foreign::Solana envelope"
+    },
+    {
+      "changed_paths": 9,
+      "head": "arena/70810a66-budlum",
+      "number": 52,
+      "rust_files": 7,
+      "sha": "059d4666",
+      "syntax_errors": [],
+      "title": "WP-16 + WP-41 continuation: complete the deliveries missing from #34 and #39"
+    },
+    {
+      "changed_paths": 14,
+      "head": "arena/3aaeaafb-budlum",
+      "number": 53,
+      "rust_files": 13,
+      "sha": "3369a86a",
+      "syntax_errors": [],
+      "title": "WP-61: RPC and crypto hardening (BLG-004 read side, BLG-010 label, TEST-GAP-07 coverage gate)"
+    },
+    {
+      "changed_paths": 4,
+      "head": "arena/ca83ba96-budlum",
+      "number": 54,
+      "rust_files": 4,
+      "sha": "c330d562",
+      "syntax_errors": [],
+      "title": "WP-09: reject overridden worker ABI versions"
+    },
+    {
+      "changed_paths": 30,
+      "head": "arena/442cedfb-budlum",
+      "number": 55,
+      "rust_files": 21,
+      "sha": "4d7983b4",
+      "syntax_errors": [
+        {
+          "file": "src/storage/bud3/private_dedup.rs",
+          "findings": [
+            "missing@545"
+          ]
+        }
+      ],
+      "title": "WP-19: BOF-1 object path, the two paths and the video commitment"
+    },
+    {
+      "changed_paths": 18,
+      "head": "arena/02772065-budlum",
+      "number": 56,
+      "rust_files": 14,
+      "sha": "96baad17",
+      "syntax_errors": [],
+      "title": "WP-10 + WP-28 + WP-47: wire contract, Ethereum gateway table, and the core/storage review"
+    },
+    {
+      "changed_paths": 5,
+      "head": "arena/9caf2264-budlum",
+      "number": 57,
+      "rust_files": 4,
+      "sha": "a79abf00",
+      "syntax_errors": [],
+      "title": "WP-21: the aggregation volume for sub-symbol objects (T25 acceptance)"
+    },
+    {
+      "changed_paths": 24,
+      "head": "arena/eb137f45-budlum",
+      "number": 58,
+      "rust_files": 6,
+      "sha": "c93ef989",
+      "syntax_errors": [],
+      "title": "WP-41: proof-of-work faucet and the testnet operations surface (continues PR #34)"
+    },
+    {
+      "changed_paths": 38,
+      "head": "arena/fdbfee32-budlum",
+      "number": 59,
+      "rust_files": 28,
+      "sha": "69955d9a",
+      "syntax_errors": [],
+      "title": "WP-41 + WP-20: write the readiness and storage-health series and alert on them (continues #34, #39, #52)"
+    },
+    {
+      "changed_paths": 121,
+      "head": "arena/73c802bb-budlum",
+      "number": 60,
+      "rust_files": 101,
+      "sha": "b3a180c2",
+      "syntax_errors": [],
+      "title": "WP-06 continuation + WP-17/WP-14/WP-44: complete persistence move and implement undone core packages"
+    },
+    {
+      "changed_paths": 17,
+      "head": "arena/9a49b1e7-budlum",
+      "number": 61,
+      "rust_files": 10,
+      "sha": "3bef5f1c",
+      "syntax_errors": [],
+      "title": "WP-34, 3/3: prove direct deployment authority and price migration work"
+    },
+    {
+      "changed_paths": 79,
+      "head": "arena/28ede405-budlum",
+      "number": 62,
+      "rust_files": 67,
+      "sha": "e95c7662",
+      "syntax_errors": [],
+      "title": "WP-17: make checked block application failure-atomic (1/N)"
+    },
+    {
+      "changed_paths": 5,
+      "head": "arena/f398bd1e-budlum",
+      "number": 63,
+      "rust_files": 2,
+      "sha": "9807d422",
+      "syntax_errors": [],
+      "title": "WP-42: remove the binding directive from the tree and classify required_fee as a read"
+    },
+    {
+      "changed_paths": 4,
+      "head": "arena/bdee5a1f-budlum",
+      "number": 64,
+      "rust_files": 4,
+      "sha": "29d663ab",
+      "syntax_errors": [],
+      "title": "WP-09: do not retry uncertain worker request writes"
+    },
+    {
+      "changed_paths": 6,
+      "head": "arena/22ad7ede-budlum",
+      "number": 65,
+      "rust_files": 5,
+      "sha": "8fbf6d97",
+      "syntax_errors": [],
+      "title": "WP-24, 1/3: object replacement, the second representation of one content id"
+    },
+    {
+      "changed_paths": 81,
+      "head": "arena/5033bd18-budlum",
+      "number": 66,
+      "rust_files": 69,
+      "sha": "1f45474a",
+      "syntax_errors": [],
+      "title": "WP-17: reject overflowing transaction costs"
+    },
+    {
+      "changed_paths": 4,
+      "head": "arena/c00f4596-budlum",
+      "number": 67,
+      "rust_files": 4,
+      "sha": "80bd3be1",
+      "syntax_errors": [],
+      "title": "WP-17, 2/N: spendable-balance fee gates and checked supply-path arithmetic"
+    },
+    {
+      "changed_paths": 15,
+      "head": "arena/e40cf955-budlum",
+      "number": 68,
+      "rust_files": 5,
+      "sha": "cecf85a1",
+      "syntax_errors": [],
+      "title": "WP-01/02/03/04/05: Initial live verification (M0) and Concept name map (Delivery 1/2)"
+    },
+    {
+      "changed_paths": 17,
+      "head": "arena/8f1fe85d-budlum",
+      "number": 69,
+      "rust_files": 10,
+      "sha": "2a5ab783",
+      "syntax_errors": [],
+      "title": "WP-07 (1/N): no_legacy_storage gate, ContentRef temporary interface, Bud3NotReady refusal"
+    },
+    {
+      "changed_paths": 12,
+      "head": "arena/b3ed1490-budlum",
+      "number": 70,
+      "rust_files": 12,
+      "sha": "d611e8aa",
+      "syntax_errors": [],
+      "title": "WP-13: presence protocol and suspension (absence never slashes, V-4)"
+    },
+    {
+      "changed_paths": 24,
+      "head": "arena/ea7ae280-budlum",
+      "number": 71,
+      "rust_files": 16,
+      "sha": "1a77d034",
+      "syntax_errors": [],
+      "title": "WP-07 (2/N): remove legacy storage RPC surface"
+    },
+    {
+      "changed_paths": 11,
+      "head": "arena/ef37bef9-budlum",
+      "number": 72,
+      "rust_files": 7,
+      "sha": "85873f27",
+      "syntax_errors": [],
+      "title": "WP-28 (1/2): the Ethereum JSON-RPC namespace, plus the audit of where the 52 open pull requests collide"
+    },
+    {
+      "changed_paths": 55,
+      "head": "arena/8067bfbc-budlum",
+      "number": 73,
+      "rust_files": 29,
+      "sha": "7a7001e6",
+      "syntax_errors": [],
+      "title": "WP-40, 1/N: the budlum-explorer rename, the misplaced CI step fix, and the 52-PR stack audit"
+    },
+    {
+      "changed_paths": 5,
+      "head": "arena/89af584f-budlum",
+      "number": 74,
+      "rust_files": 2,
+      "sha": "fc0926a3",
+      "syntax_errors": [],
+      "title": "WP-42: guard the required_fee read classification"
+    },
+    {
+      "changed_paths": 76,
+      "head": "arena/da411335-budlum",
+      "number": 75,
+      "rust_files": 54,
+      "sha": "f8eedead",
+      "syntax_errors": [],
+      "title": "WP-28 (2/N), WP-04, WP-42: integrated open-PR stacks, bounded filters and compatibility audit"
+    },
+    {
+      "changed_paths": 72,
+      "head": "arena/b7f7fe4e-budlum",
+      "number": 76,
+      "rust_files": 57,
+      "sha": "f6b371b4",
+      "syntax_errors": [],
+      "title": "WP-28: bind Ethereum filters to their owning RPC connection"
+    },
+    {
+      "changed_paths": 12,
+      "head": "arena/9328f840-budlum",
+      "number": 77,
+      "rust_files": 7,
+      "sha": "bec1cf80",
+      "syntax_errors": [],
+      "title": "WP-04 + WP-09: reconcile the live PR stack and continue worker transport hardening"
+    },
+    {
+      "changed_paths": 10,
+      "head": "arena/ca0685e4-budlum",
+      "number": 78,
+      "rust_files": 6,
+      "sha": "8cb10107",
+      "syntax_errors": [],
+      "title": "Directive 0.1.5: THE_BUDLUM_DIREKTIF.md out of the tree (duplicate WP-27 envelope moved onto #24)"
+    },
+    {
+      "changed_paths": 11,
+      "head": "arena/969100f3-budlum",
+      "number": 79,
+      "rust_files": 8,
+      "sha": "130aacd8",
+      "syntax_errors": [],
+      "title": "WP-35 (1/3) + BLG-280: the execution limits table, the conformance catalog, the block gas budget and two red gates"
+    },
+    {
+      "changed_paths": 9,
+      "head": "arena/5773ecb5-budlum",
+      "number": 80,
+      "rust_files": 6,
+      "sha": "9f7d89b2",
+      "syntax_errors": [],
+      "title": "WP-09: continue and verify the open worker ABI correction stack"
+    },
+    {
+      "changed_paths": 26,
+      "head": "arena/79d50d4f-budlum",
+      "number": 81,
+      "rust_files": 25,
+      "sha": "e8f7365b",
+      "syntax_errors": [],
+      "title": "WP-12, 1/N: the committee seat table, the seat quorum and Instant Seat Handover, re-rooted on main"
+    },
+    {
+      "changed_paths": 15,
+      "head": "arena/75b787b9-budlum",
+      "number": 82,
+      "rust_files": 11,
+      "sha": "5685e03d",
+      "syntax_errors": [],
+      "title": "WP-11, 2/N: the mobile core duty engine"
+    },
+    {
+      "changed_paths": 9,
+      "head": "arena/7ff68aed-budlum",
+      "number": 83,
+      "rust_files": 7,
+      "sha": "88d04549",
+      "syntax_errors": [],
+      "title": "WP-31, 1/N: the Solana JSON-RPC namespace, its class table, the chain reads and the named refusals"
+    },
+    {
+      "changed_paths": 12,
+      "head": "arena/e0fa76e2-budlum",
+      "number": 84,
+      "rust_files": 9,
+      "sha": "9b651316",
+      "syntax_errors": [],
+      "title": "WP-06/07/42 foundations: no_legacy_storage + no_float gates, ContentRef temp interface, persistence & state-recovery dirs, package state record"
+    },
+    {
+      "changed_paths": 15,
+      "head": "arena/b7d39a4f-budlum",
+      "number": 85,
+      "rust_files": 11,
+      "sha": "0a3cf5fc",
+      "syntax_errors": [],
+      "title": "WP-11: reject mobile custody assignments that cannot answer audits"
+    },
+    {
+      "changed_paths": 4,
+      "head": "arena/e607c9b9-budlum",
+      "number": 86,
+      "rust_files": 2,
+      "sha": "b2ba0fdb",
+      "syntax_errors": [],
+      "title": "WP-55, 1/N: the live stream core (and the live audit of the open PR stack)"
+    },
+    {
+      "changed_paths": 7,
+      "head": "arena/5fd73017-budlum",
+      "number": 87,
+      "rust_files": 0,
+      "sha": "ca679375",
+      "syntax_errors": [],
+      "title": "WP-27 + WP-01/02/03/04: directive out of tree (0.1.5) and M0 live verification status"
+    },
+    {
+      "changed_paths": 21,
+      "head": "arena/dc0a724c-budlum",
+      "number": 88,
+      "rust_files": 12,
+      "sha": "dec2f9d0",
+      "syntax_errors": [],
+      "title": "WP-11: continue the mobile duty engine with admission and audit boundary fixes"
+    },
+    {
+      "changed_paths": 8,
+      "head": "arena/459dc711-budlum",
+      "number": 89,
+      "rust_files": 7,
+      "sha": "95f18e81",
+      "syntax_errors": [],
+      "title": "WP-32, 1-2/N: the Aptos REST surface and its dedicated listener"
+    },
+    {
+      "changed_paths": 36,
+      "head": "arena/ba78e1be-budlum",
+      "number": 91,
+      "rust_files": 22,
+      "sha": "e95df74c",
+      "syntax_errors": [],
+      "title": "WP-11: mobile core lane, budlum-types class and presence message (2/N)"
+    },
+    {
+      "changed_paths": 42,
+      "head": "arena/db4e6429-budlum",
+      "number": 92,
+      "rust_files": 1,
+      "sha": "9d532a8a",
+      "syntax_errors": [],
+      "title": "WP-36 1/N + WP-37 1/N + WP-46 1/N: Android validator core, device matrix, rehearsal scaffolding"
+    },
+    {
+      "changed_paths": 12,
+      "head": "arena/0238388a-budlum",
+      "number": 93,
+      "rust_files": 7,
+      "sha": "0c13496b",
+      "syntax_errors": [],
+      "title": "WP-42: integrate the live PR stack, fix red main and continue the undone packages"
+    },
+    {
+      "changed_paths": 1,
+      "head": "arena/1bc4b5d3-budlum",
+      "number": 94,
+      "rust_files": 0,
+      "sha": "c1c4d6ad",
+      "syntax_errors": [],
+      "title": "WP-04: reproduce rehearsal ceremony and Android integration defects"
+    },
+    {
+      "changed_paths": 25,
+      "head": "arena/8face9d6-budlum",
+      "number": 95,
+      "rust_files": 18,
+      "sha": "6510e4ec",
+      "syntax_errors": [],
+      "title": "WP-42: integrate and continue the unfinished live PR stack"
+    },
+    {
+      "changed_paths": 12,
+      "head": "arena/0c480ae6-budlum",
+      "number": 96,
+      "rust_files": 7,
+      "sha": "9f0375c9",
+      "syntax_errors": [],
+      "title": "WP-42/WP-04: reconcile the live PR stack, audit compatibility and continue the owed WP slices"
+    }
+  ],
+  "rust_files_with_syntax_errors": 11,
+  "shared_paths": 497,
+  "top_duplicate_new_files": [
+    {
+      "authors": [
+        13,
+        14,
+        16,
+        20,
+        29,
+        30,
+        31,
+        35,
+        36,
+        41,
+        47,
+        48,
+        50,
+        51,
+        56,
+        57,
+        59,
+        63,
+        65,
+        68,
+        72,
+        73,
+        74,
+        75,
+        82,
+        83,
+        84,
+        85,
+        88,
+        91,
+        93,
+        95,
+        96
+      ],
+      "path": "docs/work/PACKAGES.md",
+      "versions": 29
+    },
+    {
+      "authors": [
+        13,
+        31,
+        35,
+        36,
+        41,
+        44,
+        48,
+        50,
+        68,
+        77,
+        80,
+        88,
+        91,
+        93,
+        95,
+        96
+      ],
+      "path": "docs/audit/FINDINGS.md",
+      "versions": 14
+    },
+    {
+      "authors": [
+        24,
+        36,
+        51,
+        56,
+        72,
+        75,
+        76,
+        83,
+        89,
+        95
+      ],
+      "path": "src/rpc/compat/mod.rs",
+      "versions": 9
+    },
+    {
+      "authors": [
+        24,
+        51,
+        56,
+        72,
+        75,
+        76
+      ],
+      "path": "src/rpc/compat/ethereum/mod.rs",
+      "versions": 5
+    },
+    {
+      "authors": [
+        24,
+        29,
+        30,
+        31,
+        51,
+        76,
+        84
+      ],
+      "path": "xtask/gates/src/gates/no_float_in_consensus_paths.rs",
+      "versions": 5
+    },
+    {
+      "authors": [
+        12,
+        16,
+        68,
+        87
+      ],
+      "path": "docs/audit/live/lane-c.md",
+      "versions": 4
+    },
+    {
+      "authors": [
+        18,
+        35,
+        68,
+        87
+      ],
+      "path": "docs/audit/live/lane-d.md",
+      "versions": 4
+    },
+    {
+      "authors": [
+        82,
+        85,
+        88,
+        91
+      ],
+      "path": "mobile/core/src/duty.rs",
+      "versions": 4
+    },
+    {
+      "authors": [
+        82,
+        85,
+        88,
+        91
+      ],
+      "path": "mobile/core/src/lib.rs",
+      "versions": 4
+    },
+    {
+      "authors": [
+        24,
+        36,
+        51,
+        76
+      ],
+      "path": "src/execution/coordinator/foreign/mod.rs",
+      "versions": 4
+    },
+    {
+      "authors": [
+        8,
+        45,
+        69,
+        71,
+        75,
+        84
+      ],
+      "path": "src/storage/bud3/content_ref.rs",
+      "versions": 4
+    },
+    {
+      "authors": [
+        24,
+        29,
+        30,
+        31,
+        51,
+        76
+      ],
+      "path": "xtask/gates/src/gates/workflows_cover_every_workspace.rs",
+      "versions": 4
+    },
+    {
+      "authors": [
+        69,
+        71,
+        75,
+        84
+      ],
+      "path": ".github/no-legacy-storage-baseline.txt",
+      "versions": 3
+    },
+    {
+      "authors": [
+        24,
+        36,
+        51,
+        76
+      ],
+      "path": "docs/EXECUTION.md",
+      "versions": 3
+    },
+    {
+      "authors": [
+        36,
+        45,
+        79
+      ],
+      "path": "docs/EXECUTION_LIMITS.md",
+      "versions": 3
+    },
+    {
+      "authors": [
+        35,
+        68,
+        87
+      ],
+      "path": "docs/audit/LIVE_STATUS.md",
+      "versions": 3
+    },
+    {
+      "authors": [
+        36,
+        60,
+        77
+      ],
+      "path": "docs/audit/REVIEW_2.md",
+      "versions": 3
+    },
+    {
+      "authors": [
+        12,
+        68,
+        87
+      ],
+      "path": "docs/audit/live/lane-a.md",
+      "versions": 3
+    },
+    {
+      "authors": [
+        12,
+        68,
+        87
+      ],
+      "path": "docs/audit/live/lane-b.md",
+      "versions": 3
+    },
+    {
+      "authors": [
+        82,
+        85,
+        88,
+        91
+      ],
+      "path": "mobile/core/src/store.rs",
+      "versions": 3
+    },
+    {
+      "authors": [
+        36,
+        46,
+        61,
+        75,
+        78
+      ],
+      "path": "src/bin/bud-migrate.rs",
+      "versions": 3
+    },
+    {
+      "authors": [
+        8,
+        9,
+        11,
+        60,
+        62,
+        66,
+        84
+      ],
+      "path": "src/chain/state_recovery/mod.rs",
+      "versions": 3
+    },
+    {
+      "authors": [
+        36,
+        46,
+        61,
+        75,
+        78
+      ],
+      "path": "src/cross_domain/evm/account_proof.rs",
+      "versions": 3
+    },
+    {
+      "authors": [
+        24,
+        36,
+        51,
+        76
+      ],
+      "path": "src/execution/coordinator/foreign/ethereum.rs",
+      "versions": 3
+    },
+    {
+      "authors": [
+        36,
+        46,
+        61,
+        75,
+        78
+      ],
+      "path": "src/execution/coordinator/migration/mod.rs",
+      "versions": 3
+    },
+    {
+      "authors": [
+        24,
+        36,
+        51,
+        76
+      ],
+      "path": "src/mempool/lanes.rs",
+      "versions": 3
+    },
+    {
+      "authors": [
+        8,
+        9,
+        11,
+        60,
+        62,
+        66,
+        84
+      ],
+      "path": "src/persistence/mod.rs",
+      "versions": 3
+    },
+    {
+      "authors": [
+        24,
+        51,
+        75,
+        76
+      ],
+      "path": "src/rpc/compat/ethereum/filters.rs",
+      "versions": 3
+    },
+    {
+      "authors": [
+        45,
+        59,
+        60
+      ],
+      "path": "src/storage/bud3/repair.rs",
+      "versions": 3
+    },
+    {
+      "authors": [
+        45,
+        55,
+        57
+      ],
+      "path": "src/storage/bud3/volume.rs",
+      "versions": 3
+    },
+    {
+      "authors": [
+        12,
+        16,
+        68
+      ],
+      "path": "src/tests/audit_lane_c.rs",
+      "versions": 3
+    },
+    {
+      "authors": [
+        18,
+        35,
+        68
+      ],
+      "path": "src/tests/audit_lane_d.rs",
+      "versions": 3
+    },
+    {
+      "authors": [
+        13,
+        45,
+        59
+      ],
+      "path": "xtask/gates/src/gates/bud3_custody_proofs.rs",
+      "versions": 3
+    },
+    {
+      "authors": [
+        13,
+        45,
+        59
+      ],
+      "path": "xtask/gates/src/gates/bud3_placement.rs",
+      "versions": 3
+    },
+    {
+      "authors": [
+        13,
+        45,
+        59
+      ],
+      "path": "xtask/gates/src/gates/bud3_repair_fires.rs",
+      "versions": 3
+    },
+    {
+      "authors": [
+        41,
+        53
+      ],
+      "path": ".github/rpc-method-coverage-baseline.txt",
+      "versions": 2
+    },
+    {
+      "authors": [
+        45,
+        92
+      ],
+      "path": ".github/workflows/mobile.yml",
+      "versions": 2
+    },
+    {
+      "authors": [
+        12,
+        16
+      ],
+      "path": "budzero/bud-proof/tests/audit_lane_c.rs",
+      "versions": 2
+    },
+    {
+      "authors": [
+        45,
+        92
+      ],
+      "path": "config/rehearsal-genesis.json",
+      "versions": 2
+    },
+    {
+      "authors": [
+        24,
+        36,
+        51,
+        76
+      ],
+      "path": "contracts/uel/BudlumUniversal.sol",
+      "versions": 2
+    }
+  ],
+  "top_shared_paths": [
+    {
+      "count": 33,
+      "path": "docs/work/PACKAGES.md",
+      "prs": [
+        13,
+        14,
+        16,
+        20,
+        29,
+        30,
+        31,
+        35,
+        36,
+        41,
+        47,
+        48,
+        50,
+        51,
+        56,
+        57,
+        59,
+        63,
+        65,
+        68,
+        72,
+        73,
+        74,
+        75
+      ]
+    },
+    {
+      "count": 26,
+      "path": "THE_BUDLUM_DIREKTIF.md",
+      "prs": [
+        8,
+        9,
+        11,
+        14,
+        24,
+        34,
+        36,
+        42,
+        43,
+        45,
+        51,
+        58,
+        60,
+        62,
+        63,
+        66,
+        74,
+        75,
+        76,
+        77,
+        78,
+        86,
+        87,
+        93
+      ]
+    },
+    {
+      "count": 23,
+      "path": ".github/workflows/ci.yml",
+      "prs": [
+        8,
+        9,
+        24,
+        29,
+        30,
+        31,
+        40,
+        44,
+        51,
+        56,
+        59,
+        60,
+        62,
+        66,
+        73,
+        75,
+        76,
+        77,
+        80,
+        82,
+        85,
+        88,
+        91
+      ]
+    },
+    {
+      "count": 22,
+      "path": "xtask/gates/src/main.rs",
+      "prs": [
+        8,
+        9,
+        13,
+        24,
+        29,
+        30,
+        31,
+        36,
+        40,
+        45,
+        51,
+        56,
+        59,
+        60,
+        62,
+        66,
+        69,
+        71,
+        73,
+        75,
+        76,
+        84
+      ]
+    },
+    {
+      "count": 17,
+      "path": "src/rpc/server.rs",
+      "prs": [
+        8,
+        9,
+        11,
+        34,
+        41,
+        53,
+        58,
+        60,
+        62,
+        66,
+        71,
+        72,
+        73,
+        75,
+        83,
+        89,
+        95
+      ]
+    },
+    {
+      "count": 16,
+      "path": "docs/audit/FINDINGS.md",
+      "prs": [
+        13,
+        31,
+        35,
+        36,
+        41,
+        44,
+        48,
+        50,
+        68,
+        77,
+        80,
+        88,
+        91,
+        93,
+        95,
+        96
+      ]
+    },
+    {
+      "count": 16,
+      "path": "src/tests/mod.rs",
+      "prs": [
+        8,
+        11,
+        12,
+        16,
+        18,
+        35,
+        52,
+        55,
+        56,
+        59,
+        60,
+        62,
+        65,
+        66,
+        75,
+        79
+      ]
+    },
+    {
+      "count": 15,
+      "path": "src/core/account.rs",
+      "prs": [
+        8,
+        9,
+        11,
+        24,
+        36,
+        39,
+        51,
+        59,
+        60,
+        62,
+        66,
+        67,
+        70,
+        75,
+        76
+      ]
+    },
+    {
+      "count": 15,
+      "path": "src/execution/executor.rs",
+      "prs": [
+        8,
+        24,
+        39,
+        43,
+        44,
+        49,
+        51,
+        60,
+        62,
+        66,
+        67,
+        70,
+        75,
+        76,
+        91
+      ]
+    },
+    {
+      "count": 15,
+      "path": "src/storage/bud3/mod.rs",
+      "prs": [
+        8,
+        9,
+        40,
+        45,
+        55,
+        56,
+        57,
+        59,
+        60,
+        65,
+        69,
+        71,
+        75,
+        84,
+        86
+      ]
+    },
+    {
+      "count": 13,
+      "path": "config/naming/concept_map.toml",
+      "prs": [
+        8,
+        9,
+        20,
+        24,
+        31,
+        43,
+        50,
+        51,
+        60,
+        62,
+        66,
+        68,
+        76
+      ]
+    },
+    {
+      "count": 13,
+      "path": "src/chain/blockchain.rs",
+      "prs": [
+        8,
+        9,
+        11,
+        31,
+        40,
+        59,
+        60,
+        62,
+        66,
+        67,
+        70,
+        75,
+        81
+      ]
+    },
+    {
+      "count": 13,
+      "path": "src/crypto/domain_tags.rs",
+      "prs": [
+        8,
+        9,
+        24,
+        36,
+        45,
+        51,
+        52,
+        55,
+        70,
+        75,
+        76,
+        81,
+        91
+      ]
+    },
+    {
+      "count": 13,
+      "path": "xtask/gates/src/gates/no_out_of_block_consensus_writes.rs",
+      "prs": [
+        24,
+        42,
+        51,
+        60,
+        62,
+        63,
+        66,
+        74,
+        75,
+        76,
+        93,
+        95,
+        96
+      ]
+    },
+    {
+      "count": 12,
+      "path": ".github/concept-names-baseline.txt",
+      "prs": [
+        8,
+        9,
+        11,
+        31,
+        43,
+        45,
+        50,
+        60,
+        62,
+        66,
+        68,
+        73
+      ]
+    },
+    {
+      "count": 12,
+      "path": "xtask/gates/tests/repository_locks.rs",
+      "prs": [
+        8,
+        42,
+        60,
+        62,
+        63,
+        66,
+        73,
+        74,
+        75,
+        93,
+        95,
+        96
+      ]
+    },
+    {
+      "count": 11,
+      "path": "arena_claude.py",
+      "prs": [
+        24,
+        34,
+        43,
+        45,
+        51,
+        58,
+        60,
+        62,
+        66,
+        75,
+        76
+      ]
+    },
+    {
+      "count": 11,
+      "path": "src/rpc/mod.rs",
+      "prs": [
+        24,
+        36,
+        51,
+        53,
+        56,
+        72,
+        75,
+        76,
+        83,
+        89,
+        95
+      ]
+    },
+    {
+      "count": 10,
+      "path": "README.md",
+      "prs": [
+        35,
+        46,
+        51,
+        55,
+        61,
+        69,
+        71,
+        73,
+        75,
+        78
+      ]
+    },
+    {
+      "count": 10,
+      "path": "src/main.rs",
+      "prs": [
+        8,
+        9,
+        11,
+        53,
+        59,
+        60,
+        62,
+        66,
+        89,
+        95
+      ]
+    },
+    {
+      "count": 10,
+      "path": "src/rpc/compat/mod.rs",
+      "prs": [
+        24,
+        36,
+        51,
+        56,
+        72,
+        75,
+        76,
+        83,
+        89,
+        95
+      ]
+    },
+    {
+      "count": 9,
+      "path": ".github/idle-code-baseline.txt",
+      "prs": [
+        8,
+        9,
+        11,
+        45,
+        48,
+        60,
+        62,
+        66,
+        73
+      ]
+    },
+    {
+      "count": 9,
+      "path": "README.tr.md",
+      "prs": [
+        35,
+        46,
+        61,
+        69,
+        71,
+        73,
+        75,
+        78,
+        87
+      ]
+    },
+    {
+      "count": 9,
+      "path": "src/cli/commands.rs",
+      "prs": [
+        11,
+        24,
+        43,
+        51,
+        53,
+        60,
+        62,
+        66,
+        76
+      ]
+    },
+    {
+      "count": 9,
+      "path": "src/network/node.rs",
+      "prs": [
+        8,
+        9,
+        11,
+        48,
+        53,
+        60,
+        62,
+        66,
+        81
+      ]
+    },
+    {
+      "count": 9,
+      "path": "src/rpc/method_class.rs",
+      "prs": [
+        8,
+        41,
+        53,
+        60,
+        71,
+        72,
+        75,
+        83,
+        95
+      ]
+    },
+    {
+      "count": 9,
+      "path": "src/storage/bud3/bof1.rs",
+      "prs": [
+        45,
+        55,
+        60,
+        62,
+        66,
+        79,
+        93,
+        95,
+        96
+      ]
+    },
+    {
+      "count": 9,
+      "path": "xtask/gates/src/gates/tree_is_english.rs",
+      "prs": [
+        24,
+        43,
+        50,
+        51,
+        60,
+        62,
+        66,
+        73,
+        76
+      ]
+    },
+    {
+      "count": 8,
+      "path": "Cargo.toml",
+      "prs": [
+        8,
+        36,
+        44,
+        46,
+        61,
+        75,
+        78,
+        91
+      ]
+    },
+    {
+      "count": 8,
+      "path": "src/execution/coordinator/mod.rs",
+      "prs": [
+        24,
+        36,
+        46,
+        51,
+        61,
+        75,
+        76,
+        78
+      ]
+    },
+    {
+      "count": 8,
+      "path": "src/storage/bud3/registry.rs",
+      "prs": [
+        8,
+        9,
+        45,
+        55,
+        59,
+        60,
+        65,
+        75
+      ]
+    },
+    {
+      "count": 8,
+      "path": "src/tests/relayer_liveness.rs",
+      "prs": [
+        8,
+        9,
+        11,
+        60,
+        62,
+        66,
+        70,
+        75
+      ]
+    },
+    {
+      "count": 7,
+      "path": "crates/uel-abi/src/transport.rs",
+      "prs": [
+        36,
+        38,
+        54,
+        64,
+        75,
+        77,
+        80
+      ]
+    },
+    {
+      "count": 7,
+      "path": "crates/uel-abi/tests/transport.rs",
+      "prs": [
+        36,
+        38,
+        54,
+        64,
+        75,
+        77,
+        80
+      ]
+    },
+    {
+      "count": 7,
+      "path": "docs/ARCHITECTURE.md",
+      "prs": [
+        8,
+        9,
+        11,
+        60,
+        62,
+        66,
+        73
+      ]
+    },
+    {
+      "count": 7,
+      "path": "docs/NAMING.md",
+      "prs": [
+        20,
+        24,
+        31,
+        50,
+        51,
+        68,
+        76
+      ]
+    },
+    {
+      "count": 7,
+      "path": "src/chain/mod.rs",
+      "prs": [
+        8,
+        9,
+        11,
+        60,
+        62,
+        66,
+        84
+      ]
+    },
+    {
+      "count": 7,
+      "path": "src/chain/state_recovery/mod.rs",
+      "prs": [
+        8,
+        9,
+        11,
+        60,
+        62,
+        66,
+        84
+      ]
+    },
+    {
+      "count": 7,
+      "path": "src/lib.rs",
+      "prs": [
+        8,
+        9,
+        11,
+        60,
+        62,
+        66,
+        84
+      ]
+    },
+    {
+      "count": 7,
+      "path": "src/persistence/mod.rs",
+      "prs": [
+        8,
+        9,
+        11,
+        60,
+        62,
+        66,
+        84
+      ]
+    }
+  ]
+}

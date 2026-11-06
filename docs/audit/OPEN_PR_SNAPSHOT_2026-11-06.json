@@ -1,0 +1,602 @@
+[
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/0c480ae6-budlum",
+        "number": 96,
+        "state": "OPEN",
+        "title": "WP-42/WP-04: reconcile the live PR stack, audit compatibility and continue the owed WP slices",
+        "url": "https://github.com/lubothebook/budlum/pull/96"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/8face9d6-budlum",
+        "number": 95,
+        "state": "OPEN",
+        "title": "WP-42: integrate and continue the unfinished live PR stack",
+        "url": "https://github.com/lubothebook/budlum/pull/95"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/1bc4b5d3-budlum",
+        "number": 94,
+        "state": "OPEN",
+        "title": "WP-04: reproduce rehearsal ceremony and Android integration defects",
+        "url": "https://github.com/lubothebook/budlum/pull/94"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/0238388a-budlum",
+        "number": 93,
+        "state": "OPEN",
+        "title": "WP-42: integrate the live PR stack, fix red main and continue the undone packages",
+        "url": "https://github.com/lubothebook/budlum/pull/93"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/db4e6429-budlum",
+        "number": 92,
+        "state": "OPEN",
+        "title": "WP-36 1/N + WP-37 1/N + WP-46 1/N: Android validator core, device matrix, rehearsal scaffolding",
+        "url": "https://github.com/lubothebook/budlum/pull/92"
+    },
+    {
+        "baseRefName": "arena/dc0a724c-budlum",
+        "headRefName": "arena/ba78e1be-budlum",
+        "number": 91,
+        "state": "OPEN",
+        "title": "WP-11: mobile core lane, budlum-types class and presence message (2/N)",
+        "url": "https://github.com/lubothebook/budlum/pull/91"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/459dc711-budlum",
+        "number": 89,
+        "state": "OPEN",
+        "title": "WP-32, 1-2/N: the Aptos REST surface and its dedicated listener",
+        "url": "https://github.com/lubothebook/budlum/pull/89"
+    },
+    {
+        "baseRefName": "arena/b7d39a4f-budlum",
+        "headRefName": "arena/dc0a724c-budlum",
+        "number": 88,
+        "state": "OPEN",
+        "title": "WP-11: continue the mobile duty engine with admission and audit boundary fixes",
+        "url": "https://github.com/lubothebook/budlum/pull/88"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/5fd73017-budlum",
+        "number": 87,
+        "state": "OPEN",
+        "title": "WP-27 + WP-01/02/03/04: directive out of tree (0.1.5) and M0 live verification status",
+        "url": "https://github.com/lubothebook/budlum/pull/87"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/e607c9b9-budlum",
+        "number": 86,
+        "state": "OPEN",
+        "title": "WP-55, 1/N: the live stream core (and the live audit of the open PR stack)",
+        "url": "https://github.com/lubothebook/budlum/pull/86"
+    },
+    {
+        "baseRefName": "arena/75b787b9-budlum",
+        "headRefName": "arena/b7d39a4f-budlum",
+        "number": 85,
+        "state": "OPEN",
+        "title": "WP-11: reject mobile custody assignments that cannot answer audits",
+        "url": "https://github.com/lubothebook/budlum/pull/85"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/e0fa76e2-budlum",
+        "number": 84,
+        "state": "OPEN",
+        "title": "WP-06/07/42 foundations: no_legacy_storage + no_float gates, ContentRef temp interface, persistence & state-recovery dirs, package state record",
+        "url": "https://github.com/lubothebook/budlum/pull/84"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/7ff68aed-budlum",
+        "number": 83,
+        "state": "OPEN",
+        "title": "WP-31, 1/N: the Solana JSON-RPC namespace, its class table, the chain reads and the named refusals",
+        "url": "https://github.com/lubothebook/budlum/pull/83"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/75b787b9-budlum",
+        "number": 82,
+        "state": "OPEN",
+        "title": "WP-11, 2/N: the mobile core duty engine",
+        "url": "https://github.com/lubothebook/budlum/pull/82"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/79d50d4f-budlum",
+        "number": 81,
+        "state": "OPEN",
+        "title": "WP-12, 1/N: the committee seat table, the seat quorum and Instant Seat Handover, re-rooted on main",
+        "url": "https://github.com/lubothebook/budlum/pull/81"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/5773ecb5-budlum",
+        "number": 80,
+        "state": "OPEN",
+        "title": "WP-09: continue and verify the open worker ABI correction stack",
+        "url": "https://github.com/lubothebook/budlum/pull/80"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/969100f3-budlum",
+        "number": 79,
+        "state": "OPEN",
+        "title": "WP-35 (1/3) + BLG-280: the execution limits table, the conformance catalog, the block gas budget and two red gates",
+        "url": "https://github.com/lubothebook/budlum/pull/79"
+    },
+    {
+        "baseRefName": "arena/b0ebe4a4-budlum",
+        "headRefName": "arena/ca0685e4-budlum",
+        "number": 78,
+        "state": "OPEN",
+        "title": "Directive 0.1.5: THE_BUDLUM_DIREKTIF.md out of the tree (duplicate WP-27 envelope moved onto #24)",
+        "url": "https://github.com/lubothebook/budlum/pull/78"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/9328f840-budlum",
+        "number": 77,
+        "state": "OPEN",
+        "title": "WP-04 + WP-09: reconcile the live PR stack and continue worker transport hardening",
+        "url": "https://github.com/lubothebook/budlum/pull/77"
+    },
+    {
+        "baseRefName": "arena/e8f2bf7d-budlum",
+        "headRefName": "arena/b7f7fe4e-budlum",
+        "number": 76,
+        "state": "OPEN",
+        "title": "WP-28: bind Ethereum filters to their owning RPC connection",
+        "url": "https://github.com/lubothebook/budlum/pull/76"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/da411335-budlum",
+        "number": 75,
+        "state": "OPEN",
+        "title": "WP-28 (2/N), WP-04, WP-42: integrated open-PR stacks, bounded filters and compatibility audit",
+        "url": "https://github.com/lubothebook/budlum/pull/75"
+    },
+    {
+        "baseRefName": "arena/f398bd1e-budlum",
+        "headRefName": "arena/89af584f-budlum",
+        "number": 74,
+        "state": "OPEN",
+        "title": "WP-42: guard the required_fee read classification",
+        "url": "https://github.com/lubothebook/budlum/pull/74"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/8067bfbc-budlum",
+        "number": 73,
+        "state": "OPEN",
+        "title": "WP-40, 1/N: the budlum-explorer rename, the misplaced CI step fix, and the 52-PR stack audit",
+        "url": "https://github.com/lubothebook/budlum/pull/73"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/ef37bef9-budlum",
+        "number": 72,
+        "state": "OPEN",
+        "title": "WP-28 (1/2): the Ethereum JSON-RPC namespace, plus the audit of where the 52 open pull requests collide",
+        "url": "https://github.com/lubothebook/budlum/pull/72"
+    },
+    {
+        "baseRefName": "arena/8f1fe85d-budlum",
+        "headRefName": "arena/ea7ae280-budlum",
+        "number": 71,
+        "state": "OPEN",
+        "title": "WP-07 (2/N): remove legacy storage RPC surface",
+        "url": "https://github.com/lubothebook/budlum/pull/71"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/b3ed1490-budlum",
+        "number": 70,
+        "state": "OPEN",
+        "title": "WP-13: presence protocol and suspension (absence never slashes, V-4)",
+        "url": "https://github.com/lubothebook/budlum/pull/70"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/8f1fe85d-budlum",
+        "number": 69,
+        "state": "OPEN",
+        "title": "WP-07 (1/N): no_legacy_storage gate, ContentRef temporary interface, Bud3NotReady refusal",
+        "url": "https://github.com/lubothebook/budlum/pull/69"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/e40cf955-budlum",
+        "number": 68,
+        "state": "OPEN",
+        "title": "WP-01/02/03/04/05: Initial live verification (M0) and Concept name map (Delivery 1/2)",
+        "url": "https://github.com/lubothebook/budlum/pull/68"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/c00f4596-budlum",
+        "number": 67,
+        "state": "OPEN",
+        "title": "WP-17, 2/N: spendable-balance fee gates and checked supply-path arithmetic",
+        "url": "https://github.com/lubothebook/budlum/pull/67"
+    },
+    {
+        "baseRefName": "arena/28ede405-budlum",
+        "headRefName": "arena/5033bd18-budlum",
+        "number": 66,
+        "state": "OPEN",
+        "title": "WP-17: reject overflowing transaction costs",
+        "url": "https://github.com/lubothebook/budlum/pull/66"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/22ad7ede-budlum",
+        "number": 65,
+        "state": "OPEN",
+        "title": "WP-24, 1/3: object replacement, the second representation of one content id",
+        "url": "https://github.com/lubothebook/budlum/pull/65"
+    },
+    {
+        "baseRefName": "arena/ca83ba96-budlum",
+        "headRefName": "arena/bdee5a1f-budlum",
+        "number": 64,
+        "state": "OPEN",
+        "title": "WP-09: do not retry uncertain worker request writes",
+        "url": "https://github.com/lubothebook/budlum/pull/64"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/f398bd1e-budlum",
+        "number": 63,
+        "state": "OPEN",
+        "title": "WP-42: remove the binding directive from the tree and classify required_fee as a read",
+        "url": "https://github.com/lubothebook/budlum/pull/63"
+    },
+    {
+        "baseRefName": "arena/73c802bb-budlum",
+        "headRefName": "arena/28ede405-budlum",
+        "number": 62,
+        "state": "OPEN",
+        "title": "WP-17: make checked block application failure-atomic (1/N)",
+        "url": "https://github.com/lubothebook/budlum/pull/62"
+    },
+    {
+        "baseRefName": "arena/b0ebe4a4-budlum",
+        "headRefName": "arena/9a49b1e7-budlum",
+        "number": 61,
+        "state": "OPEN",
+        "title": "WP-34, 3/3: prove direct deployment authority and price migration work",
+        "url": "https://github.com/lubothebook/budlum/pull/61"
+    },
+    {
+        "baseRefName": "arena/792d7fb2-budlum",
+        "headRefName": "arena/73c802bb-budlum",
+        "number": 60,
+        "state": "OPEN",
+        "title": "WP-06 continuation + WP-17/WP-14/WP-44: complete persistence move and implement undone core packages",
+        "url": "https://github.com/lubothebook/budlum/pull/60"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/fdbfee32-budlum",
+        "number": 59,
+        "state": "OPEN",
+        "title": "WP-41 + WP-20: write the readiness and storage-health series and alert on them (continues #34, #39, #52)",
+        "url": "https://github.com/lubothebook/budlum/pull/59"
+    },
+    {
+        "baseRefName": "arena/14810b46-budlum",
+        "headRefName": "arena/eb137f45-budlum",
+        "number": 58,
+        "state": "OPEN",
+        "title": "WP-41: proof-of-work faucet and the testnet operations surface (continues PR #34)",
+        "url": "https://github.com/lubothebook/budlum/pull/58"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/9caf2264-budlum",
+        "number": 57,
+        "state": "OPEN",
+        "title": "WP-21: the aggregation volume for sub-symbol objects (T25 acceptance)",
+        "url": "https://github.com/lubothebook/budlum/pull/57"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/02772065-budlum",
+        "number": 56,
+        "state": "OPEN",
+        "title": "WP-10 + WP-28 + WP-47: wire contract, Ethereum gateway table, and the core/storage review",
+        "url": "https://github.com/lubothebook/budlum/pull/56"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/442cedfb-budlum",
+        "number": 55,
+        "state": "OPEN",
+        "title": "WP-19: BOF-1 object path, the two paths and the video commitment",
+        "url": "https://github.com/lubothebook/budlum/pull/55"
+    },
+    {
+        "baseRefName": "arena/3bf4ef42-budlum",
+        "headRefName": "arena/ca83ba96-budlum",
+        "number": 54,
+        "state": "OPEN",
+        "title": "WP-09: reject overridden worker ABI versions",
+        "url": "https://github.com/lubothebook/budlum/pull/54"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/3aaeaafb-budlum",
+        "number": 53,
+        "state": "OPEN",
+        "title": "WP-61: RPC and crypto hardening (BLG-004 read side, BLG-010 label, TEST-GAP-07 coverage gate)",
+        "url": "https://github.com/lubothebook/budlum/pull/53"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/70810a66-budlum",
+        "number": 52,
+        "state": "OPEN",
+        "title": "WP-16 + WP-41 continuation: complete the deliveries missing from #34 and #39",
+        "url": "https://github.com/lubothebook/budlum/pull/52"
+    },
+    {
+        "baseRefName": "arena/e8f2bf7d-budlum",
+        "headRefName": "arena/ae973cec-budlum",
+        "number": 51,
+        "state": "OPEN",
+        "title": "WP-43 + WP-31: the README definition and placeholder gates, the contract-crate build, and the Foreign::Solana envelope",
+        "url": "https://github.com/lubothebook/budlum/pull/51"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/984dc17c-budlum",
+        "number": 50,
+        "state": "OPEN",
+        "title": "WP-05: the concept-name map, the ownership table and the counter",
+        "url": "https://github.com/lubothebook/budlum/pull/50"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/ae1671f6-budlum",
+        "number": 49,
+        "state": "OPEN",
+        "title": "WP-45: close the privacy and on-chain AI verification surfaces on testnet",
+        "url": "https://github.com/lubothebook/budlum/pull/49"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/b9672715-budlum",
+        "number": 48,
+        "state": "OPEN",
+        "title": "WP-15: bounded P2P payload decoding, the IPv6 eclipse bucket and the routing-table policy",
+        "url": "https://github.com/lubothebook/budlum/pull/48"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/da87421b-budlum",
+        "number": 47,
+        "state": "OPEN",
+        "title": "WP-18: RFC 6330 acceptance, the retired carousel ceilings and the object ceiling",
+        "url": "https://github.com/lubothebook/budlum/pull/47"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/b0ebe4a4-budlum",
+        "number": 46,
+        "state": "OPEN",
+        "title": "WP-34: the EVM migration kit verification core and the bud-migrate tool",
+        "url": "https://github.com/lubothebook/budlum/pull/46"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/e99125f2-budlum",
+        "number": 45,
+        "state": "OPEN",
+        "title": "bud3 & validators: WP-25 fees/endowment, WP-19 optical/text, WP-22 sealed/grants, WP-13 presence",
+        "url": "https://github.com/lubothebook/budlum/pull/45"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/cf21139f-budlum",
+        "number": 44,
+        "state": "OPEN",
+        "title": "WP-45 + WP-11: close privacy and the AI layer on testnet, rank AI reputation on integers, and give the address one shared definition",
+        "url": "https://github.com/lubothebook/budlum/pull/44"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/728c9947-budlum",
+        "number": 43,
+        "state": "OPEN",
+        "title": "WP-45, WP-33, WP-44, WP-39, WP-18, WP-23, WP-40: testnet closures, BudZero/AI/PQ/Identity hardening, B.U.D. 3.0 & cross-domain locks",
+        "url": "https://github.com/lubothebook/budlum/pull/43"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/3f9b37a2-budlum",
+        "number": 42,
+        "state": "OPEN",
+        "title": "WP-42: keep the directive outside the tree and unblock the consensus-write canary",
+        "url": "https://github.com/lubothebook/budlum/pull/42"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/e55d486b-budlum",
+        "number": 41,
+        "state": "OPEN",
+        "title": "WP-61: RPC and crypto finding locks and the method coverage ratchet",
+        "url": "https://github.com/lubothebook/budlum/pull/41"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/104478c0-budlum",
+        "number": 40,
+        "state": "OPEN",
+        "title": "WP-08 + WP-25: the Mobile duty lane and the storage fee",
+        "url": "https://github.com/lubothebook/budlum/pull/40"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/055826ad-budlum",
+        "number": 39,
+        "state": "OPEN",
+        "title": "WP-16: the pool pays by three shares, 40 consensus, 50 storage, 10 repair and relay (BLG-263)",
+        "url": "https://github.com/lubothebook/budlum/pull/39"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/3bf4ef42-budlum",
+        "number": 38,
+        "state": "OPEN",
+        "title": "WP-09: bind the worker handshake to its request id",
+        "url": "https://github.com/lubothebook/budlum/pull/38"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/8bbc3522-budlum",
+        "number": 37,
+        "state": "OPEN",
+        "title": "WP-16: reserve the 40/50/10 epoch pool shares",
+        "url": "https://github.com/lubothebook/budlum/pull/37"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/48ccda24-budlum",
+        "number": 36,
+        "state": "OPEN",
+        "title": "WP-26, 1/2: Execution Coordinator, EE worker isolation, attoBUD ledger, and UEL state commitments",
+        "url": "https://github.com/lubothebook/budlum/pull/36"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/3ef3b577-budlum",
+        "number": 35,
+        "state": "OPEN",
+        "title": "WP-04: the lane D live verification ledger and the audit status index",
+        "url": "https://github.com/lubothebook/budlum/pull/35"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/14810b46-budlum",
+        "number": 34,
+        "state": "OPEN",
+        "title": "WP-61, WP-16, WP-41: RPC & crypto hardening, genesis ceremony/tokenomics, and faucet/ops",
+        "url": "https://github.com/lubothebook/budlum/pull/34"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/ae0fac50-budlum",
+        "number": 31,
+        "state": "OPEN",
+        "title": "WP-05 + WP-42 + WP-08: the concept map, two missing CI gates, and the mobile duty lane",
+        "url": "https://github.com/lubothebook/budlum/pull/31"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/8ff8d926-budlum",
+        "number": 30,
+        "state": "OPEN",
+        "title": "WP-42: the float gate, the workspace coverage gate and the conformance nightly",
+        "url": "https://github.com/lubothebook/budlum/pull/30"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/aee1885c-budlum",
+        "number": 29,
+        "state": "OPEN",
+        "title": "WP-42: continue PR #30 with the required-nightly gate and BLG-240 pin",
+        "url": "https://github.com/lubothebook/budlum/pull/29"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/e8f2bf7d-budlum",
+        "number": 24,
+        "state": "OPEN",
+        "title": "WP-05, WP-42, WP-26, WP-33, WP-27, WP-28 (+ WP-29, WP-30): UEL Coordinator, BudZero, EVM, Ethereum RPC, WASM & Universal Call",
+        "url": "https://github.com/lubothebook/budlum/pull/24"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/64ab4b8f-budlum",
+        "number": 20,
+        "state": "OPEN",
+        "title": "WP-05: concept name owners and the owner gate",
+        "url": "https://github.com/lubothebook/budlum/pull/20"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/d8c6419d-budlum",
+        "number": 18,
+        "state": "OPEN",
+        "title": "WP-04: start lane D live verification and behavioral regression tests",
+        "url": "https://github.com/lubothebook/budlum/pull/18"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/b4538b08-budlum",
+        "number": 16,
+        "state": "OPEN",
+        "title": "WP-03: the lane C live verification ledger, the engine inventory and its locks",
+        "url": "https://github.com/lubothebook/budlum/pull/16"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/f409b61f-budlum",
+        "number": 14,
+        "state": "OPEN",
+        "title": "WP-44: testnet feature closures and the launch decision record",
+        "url": "https://github.com/lubothebook/budlum/pull/14"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/df5c50ec-budlum",
+        "number": 13,
+        "state": "OPEN",
+        "title": "WP-20: the placement, custody proof and repair gates",
+        "url": "https://github.com/lubothebook/budlum/pull/13"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/b0362659-budlum",
+        "number": 12,
+        "state": "OPEN",
+        "title": "WP-01, WP-02, WP-03: the lane A, B and C live verification ledgers",
+        "url": "https://github.com/lubothebook/budlum/pull/12"
+    },
+    {
+        "baseRefName": "main",
+        "headRefName": "arena/792d7fb2-budlum",
+        "number": 11,
+        "state": "OPEN",
+        "title": "WP-06: move node-local persistence out of content storage",
+        "url": "https://github.com/lubothebook/budlum/pull/11"
+    },
+    {
+        "baseRefName": "arena/b7784c85-budlum",
+        "headRefName": "arena/5b54fce9-budlum",
+        "number": 9,
+        "state": "OPEN",
+        "title": "WP-12: the committee seat table, the seat quorum and instant seat handover",
+        "url": "https://github.com/lubothebook/budlum/pull/9"
+    },
+    {
+        "baseRefName": "ccr-c224ffbb-cbjvam",
+        "headRefName": "arena/b7784c85-budlum",
+        "number": 8,
+        "state": "OPEN",
+        "title": "The codec register and the dedup index",
+        "url": "https://github.com/lubothebook/budlum/pull/8"
+    }
+]

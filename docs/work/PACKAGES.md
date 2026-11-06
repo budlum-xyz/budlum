@@ -88,3 +88,29 @@ The `PRs` column is a live claim map, not a completion claim. Every PR in it is 
 ## Evidence boundary
 
 No CI run number is claimed here. `main` is red at the live base, so a green PR run would not be attributable to a branch. The register is a live-tree record, not a completion claim (directive 0.3.5).
+
+## Session integrator continuation (PR #96, branch `arena/0c480ae6-budlum`)
+
+The register above is the single owner (BLG-289/BLG-290). This section is the
+append-only continuation of that same register for the slices delivered on this
+session branch. Directive 15.5.2 asks for one PR per slice; the fixed session
+branch cannot host several open PRs, so each row is a commit boundary.
+
+| Slice | WP | Carried from | Content | State |
+|---|---|---|---|---|
+| 0/N | WP-42, WP-04 | #93 | live integrator base: four red `main` causes, directive out of tree, single ledgers | merged into this branch |
+| 1/N | WP-42, WP-04 | live stack | mechanical compatibility audit over all open PR heads; conflict matrix; duplicate implementations; wire drift | delivered |
+| 2/N | WP-42 | BLG-299 | `rust_syntax_is_parseable` gate with canaries, wired into the gate registry | owed |
+| 3/N | WP-36, WP-37, WP-46 | #92, #94 | Android/rehearsal scaffolding carried over; ceremony defects repaired with a green black-box harness | owed |
+| 4/N | WP-55 | #86 | live stream core carried over; 2/N broadcast driver, gateway door and activation height | owed |
+| 5/N | WP-28, WP-31, WP-32 | #72, #83, #89 | compatibility namespaces carried over; subscriptions and the Move refusal surface | owed |
+| 6/N | WP-11, WP-13, WP-42 | #91, #79 | mobile core/types carried over; one canonical presence wire shape; gate-debt wiring | owed |
+
+Corrections to the live claim map above, from the mechanical audit
+(`docs/audit/STACK_COMPATIBILITY_DATA_2026-11-06.json`):
+
+- WP-36, WP-37 and WP-46 are **partial**, not `undone`: PR #92 delivers their
+  scaffolding. The register row at the time of #93's snapshot predates #92.
+- WP-61 is a T-Launch package (directive 15.7), not T-Expansion; the row above
+  mislabels its layer.
+- The live open-PR count at this session's snapshot is 75, not 70 (BLG-297).
