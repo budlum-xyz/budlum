@@ -92,7 +92,9 @@ fn uel_abi_worker_partial_frame_has_a_deadline_after_first_byte() {
     let (mut peer, worker_stream) = UnixStream::pair().expect("socket pair");
     let worker = thread::spawn(move || serve_connection(worker_stream, &mut MockEe::new(EeId::EVM)));
     let started = Instant::now();
-    peer.write_all(&[0]).expect("first length byte");
+    // A nonzero leading byte promises a body; four zero bytes would instead
+    // form a complete empty frame and test the wrong boundary.
+    peer.write_all(&[1]).expect("first length byte");
     // Keep the frame incomplete past the two-second watchdog. An idle
     // connection may wait for its first byte, but a started frame may not.
     for _ in 0..60 {
