@@ -12,7 +12,7 @@ conflict or a stop condition).
 
 | Package | Lane | Layer | Status | Pull requests | Last commit | CI | Findings closed |
 |---|---|---|---|---|---|---|---|
-| WP-15 | A | T-Launch | in progress (1/3) | this PR | `b15f8fa` | see PR | BLG-033 (P2P decode foot), BLG-034, BLG-205 (P2P decode feet) |
+| WP-15 | A | T-Launch | in progress (1/3) | this PR | `056d550` | see PR | BLG-033 (P2P decode foot), BLG-034, BLG-205 (P2P decode feet) |
 
 ## WP-15: network, NAT traversal and P2P hardening
 
