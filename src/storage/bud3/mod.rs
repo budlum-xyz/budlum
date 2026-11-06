@@ -9,6 +9,7 @@
 //! |---|---|
 //! | [`content_id`] | `ContentId`: SHA-256 and length for public content, keyed HMAC-SHA-256 and length for sealed content |
 //! | [`limits`] | Profiles (P0) and the genesis limits |
+//! | [`admission`] | The production admission report: limits, placement, segmentation and the sealed id rule |
 //! | [`meter`] | The parser and decoder budget |
 //! | [`varint`] | Bounded LEB128 |
 //! | [`bof1`] | The BOF-1 object: canonical binary header and payload |
@@ -29,6 +30,7 @@
 //! when the legacy storage code is removed; until then it is exercised by its
 //! own tests and the golden vectors under `tests/vectors/bud3/`.
 
+pub mod admission;
 pub mod bof1;
 pub mod content_id;
 pub mod custody;
@@ -48,6 +50,7 @@ pub use content_id::{ContentId, ContentKey};
 pub use fountain::{
     encode_stream, FountainError, SegmentDecoder, SegmentEncoder, Symbol, SymbolKind,
 };
+pub use admission::chain_admission_report;
 pub use limits::{Bud3Limits, Profile, ProfileId};
 pub use meter::{Meter, MeterError};
 pub use segment::{object_commitment, segment_digest, ObjectCommitment, Segmentation};

@@ -250,3 +250,67 @@ fn closed_codecs_refuse_on_testnet() {
     assert_eq!(state.get_balance(&uploader), 1_000, "no fee, no write");
     assert_eq!(state.get_nonce(&uploader), 0);
 }
+
+/// A repair plan is a what-if read. It calls the unseen-holder transition on
+/// a clone, reports the repairs that would be due, and leaves the live
+/// registry byte-for-byte unchanged (no out-of-block state write).
+#[test]
+fn the_repair_plan_never_writes_the_live_registry() {
+    use crate::storage::bud3::registry::{Bud3Query, Bud3Registry};
+
+    let up = prepare_public_upload(b"one segment", &P, &Bud3Limits::default(), 12).unwrap();
+    let shares = vec![
+        (
+            0,
+            Share {
+                validator: [10; 32],
+                class: Class::Full,
+                first_esi: 0,
+                symbols: 6,
+            },
+        ),
+        (
+            0,
+            Share {
+                validator: [11; 32],
+                class: Class::Full,
+                first_esi: 6,
+                symbols: 6,
+            },
+        ),
+    ];
+    let mut registry = Bud3Registry::default();
+    registry
+        .register_object([1; 32], up.record, shares, 0, 100)
+        .unwrap();
+    let root_before = registry.state_root();
+
+    let plan = registry.query_json(&Bud3Query::RepairPlan([10; 32]));
+    let holder_hex = hex::encode([10u8; 32]);
+    assert_eq!(plan["holder"].as_str(), Some(holder_hex.as_str()));
+    assert_eq!(plan["shares_marked_lost"].as_u64(), Some(1));
+    assert!(plan["objects_needing_repair"].is_array());
+
+    assert_eq!(
+        registry.state_root(),
+        root_before,
+        "a read must not change the state root"
+    );
+    let custody = registry.query_json(&Bud3Query::Custody([10; 32]));
+    assert_eq!(custody["shares"][0]["lost"].as_bool(), Some(false));
+}
+
+/// The RPC read carries the admission report from the production door.
+#[test]
+fn the_admission_report_reaches_the_tree() {
+    let report = crate::storage::bud3::admission::chain_admission_report();
+    assert_eq!(
+        report["checks"]["lifetime_admitted"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        report["checks"]["mobile_quota_admitted"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(report["placement"]["k"].as_u64(), Some(4096));
+}
