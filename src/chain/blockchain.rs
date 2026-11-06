@@ -2954,14 +2954,21 @@ impl Blockchain {
         let mut charged_fee = false;
         if let Some(reporter) = report.reporter {
             if fee > 0 {
-                let account = self.state.get_or_create(&reporter);
-                if account.balance < fee {
+                // The fee gate looks at the spendable balance, not the raw
+                // balance: vesting-locked funds must not pay consensus fees
+                // (BULGU-020 class, WP-17 item 4).
+                let spendable = self.state.spendable_balance(&reporter);
+                if spendable < fee {
                     return Err(format!(
-                        "insufficient balance for slashing report fee: have {}, need {}",
-                        account.balance, fee
+                        "insufficient spendable balance for slashing report fee: have {}, need {}",
+                        spendable, fee
                     ));
                 }
-                account.balance -= fee;
+                let account = self.state.get_or_create(&reporter);
+                account.balance = account
+                    .balance
+                    .checked_sub(fee)
+                    .ok_or_else(|| "slashing report fee underflow: balance below fee".to_string())?;
                 self.state.mark_dirty(&reporter);
                 charged_fee = true;
             }

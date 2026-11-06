@@ -229,11 +229,14 @@ impl Executor {
         };
 
         {
-            let sender_account = state.get_or_create(&tx.from);
-            if sender_account.balance < total_cost {
+            // The admission gate looks at the spendable balance, not the raw
+            // balance: a vesting-locked or burn-reserve amount is not a spend
+            // gate bypass (BULGU-020 class, WP-17 item 4).
+            let sender_spendable = state.spendable_balance(&tx.from);
+            if sender_spendable < total_cost {
                 return Err(BudlumError::validation(
                     "insufficient_balance",
-                    "Insufficient balance",
+                    "Insufficient spendable balance",
                 ));
             }
         }
