@@ -38,7 +38,6 @@ mod tests {
     use super::*;
     use crate::custody::{prove, symbol_leaf, symbol_root, sub_block_count};
     use crate::hash::sha256;
-    use crate::quota::below_floor;
 
     const OWNER: [u8; 32] = [9u8; 32];
     const SECRET: [u8; 32] = [7u8; 32];
@@ -243,9 +242,8 @@ mod tests {
         assert!(core.status().stored_bytes > 0);
         // Free space below 2 GB: the core releases shares.
         core.set_available_bytes(FREE_SPACE_FLOOR_BYTES - 1);
-        assert!(below_floor(core.available_bytes()));
-        let released = core.release_for_floor().expect("release");
-        assert!(matches!(released, DutyTx::ReleaseShares { .. }));
+        let released = core.drain_duties();
+        assert!(matches!(released.as_slice(), [DutyTx::ReleaseShares { .. }]));
         assert_eq!(core.status().stored_bytes, 0);
         assert_eq!(core.policy().quota_bytes, QUOTA_MIN_BYTES);
         assert!(core.available_bytes() >= FREE_SPACE_FLOOR_BYTES);

@@ -333,9 +333,12 @@ impl MobileCore {
         core::mem::take(&mut self.pending)
     }
 
-    /// Inject host-measured free space. Tests and the Android host call this.
+    /// Update host-measured free space and queue any required floor releases.
     pub fn set_available_bytes(&mut self, available_bytes: u64) {
         self.available_bytes = available_bytes;
+        if let Some(tx) = self.release_for_floor() {
+            self.pending.push(tx);
+        }
     }
 
     /// Current free space as the core sees it.
