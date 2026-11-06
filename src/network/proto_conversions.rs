@@ -18,7 +18,20 @@ use crate::network::protocol::NetworkMessage;
 
 #[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 pub mod pb {
-    include!(concat!(env!("OUT_DIR"), "/budlum.network.rs"));
+    pub mod budlum {
+        pub mod network {
+            include!(concat!(env!("OUT_DIR"), "/budlum.network.rs"));
+        }
+        pub mod storage {
+            pub mod v3 {
+                include!(concat!(env!("OUT_DIR"), "/budlum.storage.v3.rs"));
+            }
+        }
+    }
+    // The call sites use the flat `pb::Type` form; the nesting above is what
+    // the generated cross-file references need to resolve.
+    pub use budlum::network::*;
+    pub use budlum::storage::v3::*;
 }
 
 /// Serialize a network payload, keeping the empty-bytes fallback for

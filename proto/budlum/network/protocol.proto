@@ -2,7 +2,13 @@ syntax = "proto3";
 
 package budlum.network;
 
+// The B.U.D. 3.0 storage messages live in their own file.
+import "budlum/storage/v3/bud3.proto";
+
 enum ProtoTransactionType {
+    // The retired B.U.D. 2.0 storage door: number and name stay reserved.
+    reserved 47;
+    reserved "STORAGE";
     TRANSFER = 0;
     STAKE = 1;
     UNSTAKE = 2;
@@ -61,9 +67,6 @@ enum ProtoTransactionType {
     // Social-fi vault folder mutation: ids only, ownership read from the
     // NFT registry at every operation rather than carried here.
     VAULT = 46;
-    // B.U.D. storage write applied in block: manifest registration first,
-    // with deals, challenges and audits joining the same family.
-    STORAGE = 47;
     // PoA admission door: a candidate applies for themselves, an admin of
     // the target domain decides. The payload is the registry door's own
     // transaction struct; no authority field crosses the wire.
@@ -185,7 +188,6 @@ message ProtoTransaction {
         ProtoStateUpdate state_update = 51;
         ProtoIdentityTx identity = 52;
         ProtoVaultTx vault = 53;
-        ProtoStorageTx storage = 54;
         ProtoPoaOnboardingTx poa_onboarding = 55;
         ProtoRoleBond role_bond = 56;
         ProtoCrossDomainMessagePayload relay_cross_domain_message = 57;
@@ -203,8 +205,10 @@ message ProtoTransaction {
         ProtoBridgeBurn bridge_burn = 69;
         ProtoCrossDomainMessageTx cross_domain_message = 70;
         ProtoValidatorTx validator = 71;
-        ProtoStorageV3Tx storage_v3 = 72;
+        budlum.storage.v3.ProtoStorageV3Tx storage_v3 = 72;
     }
+    // The retired 2.0 storage payload slot: the tag stays reserved.
+    reserved 54;
     // ML-DSA-87 (FIPS 204) public key for V5 user transactions.
     // For V4 transactions this is empty.
     bytes signer_public_key = 49;
@@ -612,22 +616,9 @@ message ProtoValidatorTx {
     bytes data = 1;
 }
 
-// A B.U.D. 3.0 storage transaction: the bincode encoding of StorageTxV3. The
-// signature preimage carries the same bytes, length-prefixed.
-message ProtoStorageV3Tx {
-    bytes data = 1;
-}
-
 // A relayed cross-domain message: bincode-encoded
 // `cross_domain::message::CrossDomainMessage`, sender signature included.
 message ProtoCrossDomainMessageTx {
-    bytes data = 1;
-}
-
-// The storage transaction payload: bincode-encoded `domain::StorageTx`, the
-// same convention as identity and vault. The signature preimage is built
-// field by field in core::transaction::encode_storage_tx.
-message ProtoStorageTx {
     bytes data = 1;
 }
 

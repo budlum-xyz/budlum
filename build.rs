@@ -5,6 +5,7 @@
 
 fn main() {
     println!("cargo:rerun-if-changed=proto/budlum/network/protocol.proto");
+    println!("cargo:rerun-if-changed=proto/budlum/storage/v3/bud3.proto");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=PROTOC");
 
@@ -33,6 +34,12 @@ fn main() {
     // effect; the input is given relative to the include root, a prost convention).
     prost_build::Config::new()
         .protoc_executable(protoc)
-        .compile_protos(&["budlum/network/protocol.proto"], &["proto/"])
+        .compile_protos(
+            &[
+                "budlum/network/protocol.proto",
+                "budlum/storage/v3/bud3.proto",
+            ],
+            &["proto/"],
+        )
         .expect("Failed to compile Protobuf schemas");
 }
