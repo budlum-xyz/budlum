@@ -128,7 +128,7 @@ closing package owns that decision.
 | BLG-014 | `xtask/tools/src/backup_drill.rs:218` checks the `--check-db` exit code, and `integrity_line` (line 139) needs the exact line, not a substring, with three tests around it | **Previously fixed** |
 | BLG-022 | `src/light_client/mod.rs:680` is one division with checked arithmetic, and `next_checkpoint_height_is_closed_form` (line 1253) covers the `u64::MAX` boundary | **Previously fixed** |
 | DOC-GAP-04 | `ops/budlum-core.service:11` sets `Documentation=https://github.com/rade/budlum-core`; every flag in `ExecStart` exists in `NodeConfig`, `LimitCORE=0`, and the key comes from a 0600 `EnvironmentFile` | **Open, one line**. The wrong repository is real; the rest of the record is already correct |
-| DOC-GAP-03 | `ops/scripts/` holds only `.gitkeep`; `README.md:282` and `README.tr.md:286` both run `ops/scripts/devnet-multinode-smoke.sh`; the script moved to `xtask/tools/src/multinode_smoke.rs` and `.github/workflows/docker-smoke.yml:132` runs it there | **Open, two lines** |
+| DOC-GAP-03 | `ops/scripts/` held only `.gitkeep`; `README.md:282` and `README.tr.md:286` ran `ops/scripts/devnet-multinode-smoke.sh`; the script is the `xtask/tools` `devnet-multinode-smoke` subcommand and `.github/workflows/docker-smoke.yml:132` runs it there. `fuzz/README.md` named two more removed scripts and said fourteen targets against eighteen bins | **Previously fixed in this PR** (three files, five lines) |
 | BLG-254 | `xtask/gates/src/main.rs:994` (and 928, 980) still wire all three wrong-model gates | **Will close by removal**, because section 16.3 lists them among the deleted gates and WP-07 deletes them |
 
 Two readings that changed the shape of the record:
