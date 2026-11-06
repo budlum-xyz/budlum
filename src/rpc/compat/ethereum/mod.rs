@@ -1584,10 +1584,10 @@ mod tests {
 
         // A different connection cannot inspect, advance, or remove peer A's
         // filter, even when it knows the sequential filter id.
-        assert_eq!(
+        assert!(matches!(
             table.poll_filter("peer-b", f1, 5, 2_000),
-            Err(FilterError::NotFound(f1))
-        );
+            Err(FilterError::NotFound(id)) if id == f1
+        ));
         assert_eq!(
             table.inspect_log_filter("peer-b", f1, 2_000),
             Err(FilterError::NotFound(f1))
