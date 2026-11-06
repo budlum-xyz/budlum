@@ -15,7 +15,6 @@
 use std::path::{Path, PathBuf};
 
 use syn::visit::Visit;
-use syn::spanned::Spanned;
 use syn::Attribute;
 
 const SCAN_DIRS: &[&str] = &[

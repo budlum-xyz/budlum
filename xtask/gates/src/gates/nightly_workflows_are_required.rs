@@ -53,10 +53,13 @@ fn is_verification_line(line: &str) -> bool {
     let Some(cargo) = tokens.iter().position(|t| *t == "cargo") else {
         return false;
     };
-    let verb = tokens[cargo + 1..]
+    let Some(verb) = tokens[cargo + 1..]
         .iter()
         .copied()
-        .find(|token| !token.starts_with('+'))?;
+        .find(|token| !token.starts_with('+'))
+    else {
+        return false;
+    };
     VERIFICATION_VERBS.contains(&verb)
 }
 
