@@ -130,3 +130,9 @@ other PR was closed, merged, retargeted or edited.
 |---|---|
 | BLG-294 | WP-55 now has a 2/N owner. The ten remaining T-Expansion packages (WP-49..54, 56..60, 62..64) stay unowned. |
 | BLG-320 | still open here: WP-28/WP-31/WP-32 subscriptions and the Move surface are owed to slice 5/N. |
+
+### Slice 5/N cleanup (PR #96)
+
+| ID | State after the slice |
+|---|---|
+| BLG-310 | **closed in code here**: `arena_claude.py` is removed from the tree. Reference scan before the deletion: no import, config, test, script, CI workflow or document depends on it (only the audit findings and the compatibility report mention its name). It is an external Arena router launcher, not a Budlum module: there is no logic to migrate and no new counterpart is needed. `.gitignore` refuses a re-upload. BLG-304 is now fully closed (directive removal came from #93). |

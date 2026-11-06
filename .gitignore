@@ -24,3 +24,8 @@ __pycache__/
 # The binding planning directive is an external input, not a repository
 # document (directive 0.1 item 5 / 0.1.5). An upload must not reintroduce it.
 /THE_BUDLUM_DIREKTIF.md
+
+# The Arena router helper was Turkish-language developer tooling, not a
+# Budlum component. The tree is English (directive 0.1 item 5, tree_is_english).
+# An upload must not reintroduce it.
+/arena_claude.py
