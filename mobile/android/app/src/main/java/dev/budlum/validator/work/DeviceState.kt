@@ -35,7 +35,8 @@ fun currentDeviceState(context: Context): DeviceState {
 
     return DeviceState(
         isMetered = isMetered,
-        mobileUsedMbToday = 0, // in-app meter lands with the mobile core binding
+        // No meter is connected yet. A configured mobile cap must fail closed.
+        mobileUsedMbToday = null,
         isCharging = isCharging,
         batteryPercent = batteryPercent,
         powerSaveOn = powerSaveOn,

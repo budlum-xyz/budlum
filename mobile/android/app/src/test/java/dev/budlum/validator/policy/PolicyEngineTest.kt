@@ -67,6 +67,27 @@ class PolicyEngineTest {
     }
 
     @Test
+    fun `metered_network_pauses_without_a_known_daily_usage`() {
+        val policy = AppPolicy(network = NetworkPolicy(wifiOnly = false, dailyMobileCapMb = 100))
+        assertEquals(RunDecision.PAUSED_NETWORK, PolicyEngine.decision(policy, state(metered = true)))
+        assertEquals(
+            RunDecision.PAUSED_NETWORK,
+            PolicyEngine.decision(policy, state(metered = true).copy(mobileUsedMbToday = -1))
+        )
+    }
+
+    @Test
+    fun `metered_network_pauses_without_a_valid_daily_cap`() {
+        val uncapped = AppPolicy(network = NetworkPolicy(wifiOnly = false))
+        val zeroCap = AppPolicy(network = NetworkPolicy(wifiOnly = false, dailyMobileCapMb = 0))
+        val metered = state(metered = true).copy(mobileUsedMbToday = 0)
+        assertEquals(RunDecision.PAUSED_NETWORK, PolicyEngine.decision(uncapped, metered))
+        assertEquals(RunDecision.PAUSED_NETWORK, PolicyEngine.decision(zeroCap, metered))
+        // The cap and meter do not restrict an unmetered network.
+        assertEquals(RunDecision.RUN, PolicyEngine.decision(uncapped, state(metered = false)))
+    }
+
+    @Test
     fun `power_default_requires_charging_or_battery_above_50_without_powersave`() {
         val policy = AppPolicy()
         assertEquals(RunDecision.RUN, PolicyEngine.decision(policy, state(charging = true)))

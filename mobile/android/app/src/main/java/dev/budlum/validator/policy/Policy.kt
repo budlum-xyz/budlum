@@ -10,7 +10,7 @@ package dev.budlum.validator.policy
 data class NetworkPolicy(
     /** Default: unmetered (Wi-Fi) only. Risk R-33. */
     val wifiOnly: Boolean = true,
-    /** Daily mobile-data ceiling in MB. Only consulted when [wifiOnly] is false. */
+    /** A positive daily mobile-data ceiling is required when [wifiOnly] is false. */
     val dailyMobileCapMb: Int? = null,
 )
 
@@ -51,7 +51,8 @@ data class AppPolicy(
 /** Snapshot of the device state the policy engine decides on. */
 data class DeviceState(
     val isMetered: Boolean,
-    val mobileUsedMbToday: Long = 0,
+    /** Null means the mobile-data meter is not available. */
+    val mobileUsedMbToday: Long? = null,
     val isCharging: Boolean,
     val batteryPercent: Int,
     val powerSaveOn: Boolean,
@@ -99,8 +100,9 @@ object PolicyEngine {
     fun networkAllowed(network: NetworkPolicy, state: DeviceState): Boolean {
         if (!state.isMetered) return true
         if (network.wifiOnly) return false
-        val cap = network.dailyMobileCapMb ?: return true
-        return state.mobileUsedMbToday < cap
+        val cap = network.dailyMobileCapMb ?: return false
+        val used = state.mobileUsedMbToday ?: return false
+        return cap > 0 && used >= 0 && used < cap
     }
 
     fun powerAllowed(power: PowerPolicy, state: DeviceState): Boolean = when (power.mode) {
