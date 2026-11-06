@@ -1,3 +1,0 @@
-# Unwritten metrics baseline.
-# Format: <kind>\t<field>  (e.g. IntCounter\tai_requests_total)
-# Only shrinks. A line for a metric that is now written fails the gate.
