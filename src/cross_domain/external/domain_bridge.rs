@@ -123,6 +123,18 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
         proof: &FinalityProof,
         observer: &mut dyn CryptoObserver,
     ) -> Result<FinalityStatus, FinalityError> {
+        if domain.id != commitment.domain_id {
+            return Ok(FinalityStatus::Rejected(format!(
+                "commitment domain {} does not match local domain {}",
+                commitment.domain_id, domain.id
+            )));
+        }
+        if !domain.is_active() {
+            return Ok(FinalityStatus::Rejected(format!(
+                "domain {} is not active",
+                domain.id
+            )));
+        }
         if domain.finality_adapter != EXTERNAL_DOMAIN_FINALITY_ADAPTER {
             return Ok(FinalityStatus::Rejected(format!(
                 "domain {} is not bound to the external-domain finality adapter",
@@ -461,5 +473,29 @@ mod tests {
             matches!(status, FinalityStatus::Rejected(_)),
             "an unslashable set passed a slashable-only policy"
         );
+    }
+
+    #[test]
+    fn blg_116_inactive_or_mismatched_domain_is_rejected_at_bridge() {
+        let (adapter, mut domain, mut commitment) = fixture();
+        let proof = encode_external_evidence(&adapter.evidence).expect("encode");
+        commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
+        let bridge = ExternalDomainFinalityBridge::new(
+            Box::new(adapter),
+            VerificationPolicy::proven(100),
+        );
+
+        domain.status = DomainStatus::Frozen;
+        let frozen_status = bridge
+            .verify_finality(&domain, &commitment, &proof)
+            .unwrap();
+        assert!(matches!(frozen_status, FinalityStatus::Rejected(_)));
+
+        domain.status = DomainStatus::Active;
+        commitment.domain_id = domain.id.saturating_add(1);
+        let wrong_id = bridge
+            .verify_finality(&domain, &commitment, &proof)
+            .unwrap();
+        assert!(matches!(wrong_id, FinalityStatus::Rejected(_)));
     }
 }

@@ -79,6 +79,10 @@ impl CrossDomainMessageRegistry {
         self.messages.get(message_id)
     }
 
+    pub(crate) fn remove(&mut self, message_id: &MessageId) -> Option<CrossDomainMessage> {
+        self.messages.remove(message_id)
+    }
+
     pub fn len(&self) -> usize {
         self.messages.len()
     }
