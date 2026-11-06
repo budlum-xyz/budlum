@@ -145,6 +145,9 @@ const READ_NAMES: &[&str] = &[
     "deals_for_manifest",
     "deals_for_shard",
     "under_replicated_shards",
+    // The fee floor is a pure `&self` calculation shared by admission and
+    // `bud_estimateGas`; reading it does not change consensus state.
+    "required_fee",
 ];
 
 /// Calls on `self.state` inside a `Blockchain` method body that write it.
@@ -510,5 +513,13 @@ mod tests {
         assert!(check_actor_state_access("self.blockchain.state.add_balance(&a, 1);").is_err());
         assert!(check_actor_state_access("self.blockchain.state.epoch_index = 3;").is_err());
         assert!(check_actor_state_access("if self.blockchain.state.epoch_index == 3 {}").is_ok());
+    }
+
+    #[test]
+    fn required_fee_is_a_state_read() {
+        assert!(check_actor_state_access(
+            "let fee = self.blockchain.state.required_fee(&tx);"
+        )
+        .is_ok());
     }
 }
