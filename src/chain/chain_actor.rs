@@ -4,7 +4,7 @@ use crate::consensus::qc::{QcBlob, QcFaultProof};
 use crate::core::address::Address;
 use crate::core::block::Block;
 use crate::core::transaction::Transaction;
-use crate::storage::merkle_trie::AccountProofBundle;
+use crate::persistence::state_trie::AccountProofBundle;
 use tokio::sync::{mpsc, oneshot};
 
 /// Direction filter for agent payment queries.
@@ -54,7 +54,7 @@ pub enum ChainCommand {
     /// balance is, this answers what the node can *prove* about it.
     GetAccountProof(
         Address,
-        oneshot::Sender<Option<crate::storage::merkle_trie::AccountProofBundle>>,
+        oneshot::Sender<Option<crate::persistence::state_trie::AccountProofBundle>>,
     ),
     AddTransaction(Transaction, oneshot::Sender<Result<(), String>>),
     AddTransactionBundle(
@@ -2438,7 +2438,7 @@ impl ChainHandle {
 /// The compare is one pass over the accounts and is far cheaper than a build.
 struct ProofTrieCache {
     leaves: Vec<([u8; 32], u64, u64)>,
-    trie: crate::storage::merkle_trie::MerkleTrie,
+    trie: crate::persistence::state_trie::MerkleTrie,
 }
 
 pub struct ChainActor {
@@ -2483,7 +2483,7 @@ impl ChainActor {
     /// stale trie would produce a proof that verifies against its own root and
     /// describes state that no longer exists - worse than no proof, because it
     /// is a correct-looking answer to the wrong question.
-    fn account_proof(&mut self, addr: &Address) -> crate::storage::merkle_trie::AccountProofBundle {
+    fn account_proof(&mut self, addr: &Address) -> crate::persistence::state_trie::AccountProofBundle {
         let accounts = &self.blockchain.state.accounts;
         let fresh = self.proof_trie.as_ref().is_some_and(|cached| {
             cached.leaves.len() == accounts.len()
@@ -2498,18 +2498,18 @@ impl ChainActor {
                 .iter()
                 .map(|(a, acct)| (a.0, acct.balance, acct.nonce))
                 .collect();
-            let mut trie = crate::storage::merkle_trie::MerkleTrie::new();
+            let mut trie = crate::persistence::state_trie::MerkleTrie::new();
             for (a, balance, nonce) in &leaves {
                 trie.insert(a, *balance, *nonce);
             }
             self.proof_trie = Some(ProofTrieCache { leaves, trie });
         }
         match self.proof_trie.as_ref() {
-            Some(cached) => crate::storage::merkle_trie::prove_from_trie(&cached.trie, &addr.0),
+            Some(cached) => crate::persistence::state_trie::prove_from_trie(&cached.trie, &addr.0),
             // Unreachable: the branch above assigns it. Written as a fallback
             // rather than an unwrap so a future edit that breaks the
             // invariant costs one rebuild instead of stopping the node.
-            None => crate::storage::merkle_trie::prove_account(
+            None => crate::persistence::state_trie::prove_account(
                 self.blockchain
                     .state
                     .accounts

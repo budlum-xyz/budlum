@@ -21,7 +21,7 @@ use crate::consensus::pow::PoWEngine;
 use crate::core::address::Address;
 use crate::core::transaction::{Transaction, TransactionType};
 use crate::crypto::primitives::KeyPair;
-use crate::storage::db::Storage;
+use crate::persistence::db::Storage;
 use crate::storage::manifest::ContentManifest;
 use std::sync::Arc;
 use tempfile::tempdir;

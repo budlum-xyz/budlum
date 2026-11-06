@@ -7,7 +7,7 @@ use crate::core::address::Address;
 
 use crate::core::transaction::Transaction;
 use crate::crypto::primitives::KeyPair;
-use crate::storage::db::Storage;
+use crate::persistence::db::Storage;
 use std::sync::Arc;
 use tempfile::tempdir;
 
