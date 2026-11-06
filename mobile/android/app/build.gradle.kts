@@ -57,6 +57,17 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+
+    // F-Droid reproducible builds require omitting Play's encrypted dependency blob (WP-58).
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
+    }
+}
+
+tasks.withType<org.gradle.api.tasks.bundling.AbstractArchiveTask>().configureEach {
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
 }
 
 // Zero third-party analytics, tracking, or remote crash SDKs (Section 7.9 / WP-36).

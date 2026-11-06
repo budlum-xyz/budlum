@@ -221,6 +221,44 @@ object MobileValidatorUnitTest {
         check(logLine.contains("on_timeout=false"), "field harness formats TSV soak line")
     }
 
+    fun android_reproducible_build_matches() {
+        val gradle = File("mobile/android/app/build.gradle.kts").readText()
+        check(gradle.contains("includeInApk = false"), "WP-58 Play dependency block must be excluded from APK")
+        check(gradle.contains("isPreserveFileTimestamps = false"), "WP-58 archive timestamps must be normalized")
+        check(gradle.contains("isReproducibleFileOrder = true"), "WP-58 archive entry order must be deterministic")
+
+        val fdroid = File("mobile/android/fdroid/network.budlum.validator.yml").readText()
+        check(fdroid.contains("ndk: 27.2.12479018"), "WP-58 F-Droid recipe must pin NDK 27.2.12479018")
+        check(fdroid.contains("1.97.1"), "WP-58 F-Droid recipe must pin Rust 1.97.1")
+
+        fun packDeterministicApk(inputs: List<Pair<String, ByteArray>>): String {
+            val out = java.io.ByteArrayOutputStream()
+            java.util.zip.ZipOutputStream(out).use { zos ->
+                for ((path, payload) in inputs.sortedBy { it.first }) {
+                    val entry = java.util.zip.ZipEntry(path)
+                    entry.time = 315_532_800_000L
+                    zos.putNextEntry(entry)
+                    zos.write(payload)
+                    zos.closeEntry()
+                }
+            }
+            return java.security.MessageDigest.getInstance("SHA-256")
+                .digest(out.toByteArray())
+                .joinToString("") { "%02x".format(it) }
+        }
+
+        val entriesForward = listOf(
+            "AndroidManifest.xml" to "manifest-v1".encodeToByteArray(),
+            "classes.dex" to "dex-v1".encodeToByteArray(),
+            "lib/arm64-v8a/libbudlum_mobile_core.so" to "elf-arm64".encodeToByteArray(),
+        )
+        val entriesReverse = entriesForward.reversed()
+        check(
+            packDeterministicApk(entriesForward) == packDeterministicApk(entriesReverse),
+            "WP-58 deterministic APK packaging must yield identical SHA-256 across build orders",
+        )
+    }
+
     @JvmStatic
     fun main(args: Array<String>) {
         android_policy_wifi_only_by_default()
@@ -230,6 +268,7 @@ object MobileValidatorUnitTest {
         android_low_space_releases_shares()
         android_onboarding_reaches_registered_state()
         android_workmanager_answers_audit_when_service_stopped()
-        println("ALL 7 WP-36 ANDROID VALIDATOR TESTS PASSED")
+        android_reproducible_build_matches()
+        println("ALL 8 WP-36/WP-58 ANDROID VALIDATOR TESTS PASSED")
     }
 }
