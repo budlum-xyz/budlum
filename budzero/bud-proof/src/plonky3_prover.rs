@@ -118,8 +118,7 @@ where
     crate::bud_stark::verify(&config, air, proof, public_values).map_err(|e| format!("{e:?}"))
 }
 
-/// Build the canonical Goldilocks/Keccak STARK configuration.
-pub fn build_config() -> ChipStarkConfig {
+fn build_config() -> MyConfig {
     let hash = MyHasher::new(Keccak256Hash {});
     let compress = MyCompress::new(Keccak256Hash {});
     let val_mmcs = MyMmcs::new(hash, compress, 0);

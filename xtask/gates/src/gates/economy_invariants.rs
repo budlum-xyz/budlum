@@ -35,8 +35,6 @@ pub(crate) const TESTS: &[&str] = &[
     "fee_distribution_zero_treasury_rate",
     "fee_distribution_full_treasury_rate",
     "fee_distribution_large_fee_exercises_treasury",
-    "frac_attos_stays_below_1e12",
-    "uel_bud_conservation",
 ];
 
 pub fn run(_root: &Path, log: &Path) -> Result<String, String> {

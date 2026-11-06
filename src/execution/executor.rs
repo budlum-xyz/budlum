@@ -794,40 +794,14 @@ impl Executor {
                     }
                 }
             }
-            TransactionType::ContractCall
-                if crate::execution::coordinator::stateful_contract::is_stateful_contract_payload(
-                    &tx.data,
-                ) =>
-            {
-                if state.spendable_balance(&tx.from) < tx.fee {
-                    return Err(BudlumError::validation(
-                        "balance_underflow",
-                        "insufficient spendable balance for stateful contract fee",
-                    ));
-                }
-                let policy =
-                    crate::execution::coordinator::deploy_policy::DeployPolicy::phase1_default();
-                crate::execution::coordinator::stateful_contract::execute_stateful_contract_tx(
-                    tx, state, &policy,
-                )
-                .map_err(|e| BudlumError::validation("stateful_contract_failed", e))?;
-                let sender = state.get_or_create(&tx.from);
-                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
-                    BudlumError::validation("balance_underflow", "balance underflow")
-                })?;
-                sender.nonce = sender.nonce.saturating_add(1);
-            }
             TransactionType::ContractCall => {
                 // The VM runs for this transaction: its sender, nonce and the
                 // block height go into the context the syscalls read and the
                 // public inputs repeat, instead of the zeros a fresh VM holds.
                 let ctx = crate::execution::zkvm::TxContext::of(tx, state.current_block_height);
-                let receipt = ZkVmExecutor::execute_bytecode_vm_only(
-                    &tx.data,
-                    DEFAULT_CONTRACT_GAS_LIMIT,
-                    ctx,
-                )
-                .map_err(|e| BudlumError::validation("contract_execution_failed", e))?;
+                let receipt =
+                    ZkVmExecutor::execute_bytecode(&tx.data, DEFAULT_CONTRACT_GAS_LIMIT, ctx)
+                        .map_err(|e| BudlumError::validation("contract_execution_failed", e))?;
 
                 if !receipt.events.is_empty()
                     && receipt.events[0] == 0x00A1_00A1

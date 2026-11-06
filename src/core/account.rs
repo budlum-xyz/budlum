@@ -58,19 +58,11 @@ pub struct PendingPoaCompliance {
     pub reason_hash: [u8; 32],
 }
 
-/// One whole BUD atom (`10^-6` BUD) expressed in attoBUD (`10^-18` BUD).
-pub const ATTO_PER_ATOM: u64 = 1_000_000_000_000;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
     pub public_key: Address,
     pub balance: u64,
     pub nonce: u64,
-    /// Sub-atom fractional balance in attoBUD (`10^-18` BUD), strictly below
-    /// [`ATTO_PER_ATOM`] (`10^12`). Enables exact 18-decimal EVM wei and
-    /// 9-decimal SVM lamport accounting on the single BUD ledger.
-    #[serde(default)]
-    pub frac_attos: u64,
 }
 /// Stand-in bytes hashed when a state-root input cannot be serialized.
 ///
@@ -79,27 +71,12 @@ pub struct Account {
 /// once, and a fixed marker keeps the root identical across nodes.
 const STATE_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/account-state";
 
-fn account_leaf_hash(pubkey: &Address, account: &Account) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update([0x00]);
-    h.update(pubkey.0);
-    h.update(account.balance.to_le_bytes());
-    h.update(account.nonce.to_le_bytes());
-    if account.frac_attos != 0 {
-        h.update(b"BDLM_FRAC_ATTOS_V1");
-        h.update(account.frac_attos.to_le_bytes());
-    }
-    h.finalize().into()
-}
-
 impl Account {
     pub fn new(public_key: Address) -> Self {
         Account {
             public_key,
             balance: 0,
             nonce: 0,
-            frac_attos: 0,
         }
     }
     pub fn with_balance(public_key: Address, balance: u64) -> Self {
@@ -107,15 +84,7 @@ impl Account {
             public_key,
             balance,
             nonce: 0,
-            frac_attos: 0,
         }
-    }
-    /// Exact total balance in attoBUD (`balance * 10^12 + frac_attos`).
-    pub(crate) fn bud_amount(
-        &self,
-    ) -> Result<budlum_uel_abi::BudAmount, crate::execution::coordinator::bud_unit::BudUnitError>
-    {
-        crate::execution::coordinator::bud_unit::account_bud_amount(self)
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -503,9 +472,6 @@ pub struct AccountState {
     /// The B.U.D. 3.0 registry: objects, references, shares and audits.
     /// Rooted and snapshotted.
     pub bud3_registry: crate::storage::bud3::registry::Bud3Registry,
-    /// Universal Execution Layer namespace key-value store (`ee/*`, `uel/*`).
-    /// Folded into the state root via `execution_root()` once non-empty.
-    pub uel_state: crate::execution::coordinator::commitment::UelNamespaceStore,
     /// Governance-queued compliance freezes/unfreezes awaiting
     /// application (see [`PendingPoaCompliance`]).
     pub pending_poa_freezes: Vec<PendingPoaCompliance>,
@@ -580,7 +546,6 @@ impl AccountState {
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
             validator_directory: crate::validators::ValidatorDirectory::new(),
             bud3_registry: crate::storage::bud3::registry::Bud3Registry::default(),
-            uel_state: crate::execution::coordinator::commitment::UelNamespaceStore::default(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -646,7 +611,6 @@ impl AccountState {
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
             validator_directory: crate::validators::ValidatorDirectory::new(),
             bud3_registry: crate::storage::bud3::registry::Bud3Registry::default(),
-            uel_state: crate::execution::coordinator::commitment::UelNamespaceStore::default(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -721,7 +685,6 @@ impl AccountState {
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
             validator_directory: crate::validators::ValidatorDirectory::new(),
             bud3_registry: crate::storage::bud3::registry::Bud3Registry::default(),
-            uel_state: crate::execution::coordinator::commitment::UelNamespaceStore::default(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -839,7 +802,6 @@ impl AccountState {
             poa_compliance: snapshot.poa_compliance.clone().unwrap_or_default(),
             validator_directory: snapshot.validator_directory.clone().unwrap_or_default(),
             bud3_registry: snapshot.bud3_registry.clone().unwrap_or_default(),
-            uel_state: crate::execution::coordinator::commitment::UelNamespaceStore::default(),
             burned_total: snapshot.burned_total,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -3572,62 +3534,9 @@ impl AccountState {
     /// Part of `accounts`, so supply-cap checks must use [`Self::total_bud_committed`]
     /// Instead of this helper alone.
     pub fn circulating_supply(&self) -> u128 {
-        let mut atoms = 0u128;
-        let mut frac_sum = 0u128;
-        for a in self.accounts.values() {
-            atoms = atoms.saturating_add(u128::from(a.balance));
-            frac_sum = frac_sum.saturating_add(u128::from(a.frac_attos));
-        }
-        atoms.saturating_add(frac_sum.div_ceil(u128::from(ATTO_PER_ATOM)))
-    }
-
-    /// Exact total committed supply in attoBUD (`10^-18` BUD):
-    /// `sum(balance * 10^12 + frac_attos)` across liquid accounts plus `10^12`
-    /// times all staked, unbonding, role-bonded, and escrowed whole-atom pools.
-    ///
-    /// Convenience: exposed alongside [`Self::total_bud_committed`] for UEL
-    /// conservation checks and compatibility gateways.
-    pub fn total_atto_bud_committed(&self) -> u128 {
-        let liquid_attos = self.accounts.values().fold(0u128, |acc, a| {
-            let acct_attos = a.bud_amount().map_or_else(
-                |_| {
-                    u128::from(a.balance)
-                        .saturating_mul(u128::from(ATTO_PER_ATOM))
-                        .saturating_add(u128::from(a.frac_attos))
-                },
-                |amt| amt.0,
-            );
-            acc.saturating_add(acct_attos)
-        });
-        let non_liquid_atoms = self
-            .total_staked_supply()
-            .saturating_add(self.total_unbonding_supply())
-            .saturating_add(self.total_registry_role_bonded_supply())
-            .saturating_add(self.registry.total_delegation_unbonding_supply())
-            .saturating_add(self.total_external_bonded_supply())
-            .saturating_add(self.proof_market.total_locked_supply())
-            .saturating_add(self.settlement.relayer_policy.total_escrowed_supply())
-            .saturating_add(self.settlement.graft.total_escrowed_supply())
-            .saturating_add(self.total_storage_escrowed_supply());
-        liquid_attos
-            .saturating_add(non_liquid_atoms.saturating_mul(u128::from(ATTO_PER_ATOM)))
-    }
-
-    /// Conservation-preserving transfer of `attos` attoBUD (`10^-18` BUD)
-    /// between two accounts under `ee`'s unit quantum rule.
-    ///
-    /// Convenience: exposed on [`AccountState`] for the execution coordinator
-    /// host bridge and conservation tests.
-    pub fn transfer_atto_bud(
-        &mut self,
-        from: &Address,
-        to: &Address,
-        ee: budlum_uel_abi::EeId,
-        attos: u128,
-    ) -> Result<u64, crate::execution::coordinator::bud_unit::BudUnitError> {
-        crate::execution::coordinator::bud_unit::transfer_atto_bud_in_state(
-            self, from, to, ee, attos,
-        )
+        self.accounts
+            .values()
+            .fold(0u128, |acc, a| acc + u128::from(a.balance))
     }
 
     /// Total $BUD locked in validator stake, including inactive/jailed validators.
@@ -4159,7 +4068,14 @@ impl AccountState {
                 self.cached_leaves = self
                     .accounts
                     .par_iter()
-                    .map(|(pubkey, account)| account_leaf_hash(pubkey, account))
+                    .map(|(pubkey, account)| {
+                        let mut h = Sha256::new();
+                        h.update([0x00]);
+                        h.update(pubkey.0);
+                        h.update(account.balance.to_le_bytes());
+                        h.update(account.nonce.to_le_bytes());
+                        h.finalize().into()
+                    })
                     .collect();
             }
             #[cfg(miri)]
@@ -4167,7 +4083,14 @@ impl AccountState {
                 self.cached_leaves = self
                     .accounts
                     .iter()
-                    .map(|(pubkey, account)| account_leaf_hash(pubkey, account))
+                    .map(|(pubkey, account)| {
+                        let mut h = Sha256::new();
+                        h.update([0x00]);
+                        h.update(pubkey.0);
+                        h.update(account.balance.to_le_bytes());
+                        h.update(account.nonce.to_le_bytes());
+                        h.finalize().into()
+                    })
                     .collect();
             }
 
@@ -4212,7 +4135,12 @@ impl AccountState {
             for dirty_key in &self.dirty_accounts {
                 if let Ok(pos) = self.cached_keys.binary_search(dirty_key) {
                     if let Some(account) = self.accounts.get(dirty_key) {
-                        self.cached_leaves[pos] = account_leaf_hash(dirty_key, account);
+                        let mut h = Sha256::new();
+                        h.update([0x00]);
+                        h.update(dirty_key.0);
+                        h.update(account.balance.to_le_bytes());
+                        h.update(account.nonce.to_le_bytes());
+                        self.cached_leaves[pos] = h.finalize().into();
                         affected_indices.insert(pos);
                     }
                 }
@@ -4457,10 +4385,6 @@ impl AccountState {
         if !self.bud3_registry.is_empty() {
             final_hasher.update(b"bud3_registry_v1");
             final_hasher.update(self.bud3_registry.state_root());
-        }
-        if !self.uel_state.is_empty() {
-            final_hasher.update(b"uel_execution_v1");
-            final_hasher.update(self.uel_state.execution_root());
         }
         if !self.external_roots.is_empty() {
             final_hasher.update(b"external_roots_v1");

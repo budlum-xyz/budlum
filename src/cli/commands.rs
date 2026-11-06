@@ -466,42 +466,6 @@ pub struct FileConfig {
     pub features: Option<FeaturesSection>,
     pub consensus: Option<ConsensusSection>, // for integration of other sections
     pub anchor: Option<AnchorSection>,
-    pub compat: Option<CompatSection>,
-}
-
-/// Ecosystem compatibility RPC gateway sections (`[compat.*]`, `Section 8.11.1`, `BLG-249`).
-#[derive(Debug, serde::Deserialize, Default, Clone)]
-#[serde(deny_unknown_fields)]
-/// Convenience: CLI config deserialization surface for compatibility RPC gateways.
-pub struct CompatSection {
-    pub ethereum: Option<CompatEthereumSection>,
-    pub solana: Option<CompatGatewayListenerSection>,
-    pub aptos: Option<CompatGatewayListenerSection>,
-    pub cosmos: Option<CompatGatewayListenerSection>,
-}
-
-/// `[compat.ethereum]` TOML configuration (`127.0.0.1:18547`, `WP-28`).
-#[derive(Debug, serde::Deserialize, Default, Clone)]
-#[serde(deny_unknown_fields)]
-/// Convenience: parsed by `FileConfig` and consumed by `EthRpcConfig::from_section`.
-pub struct CompatEthereumSection {
-    pub enabled: Option<bool>,
-    pub listener: Option<String>,
-    pub operator_listener: Option<String>,
-    pub max_filters: Option<usize>,
-    pub max_filters_per_peer: Option<usize>,
-    pub filter_ttl_secs: Option<u64>,
-    pub max_subscriptions: Option<usize>,
-}
-
-/// Listener configuration for `[compat.solana]`, `[compat.aptos]`, and `[compat.cosmos]`.
-#[derive(Debug, serde::Deserialize, Default, Clone)]
-#[serde(deny_unknown_fields)]
-/// Convenience: CLI config deserialization surface for Solana, Aptos, and Cosmos gateways.
-pub struct CompatGatewayListenerSection {
-    pub enabled: Option<bool>,
-    pub listener: Option<String>,
-    pub rest_listener: Option<String>,
 }
 
 /// The `[anchor]` section: how this node emits PQ anchors.

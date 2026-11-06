@@ -42,26 +42,12 @@ pub struct State {
     backup_stack: Vec<HashMap<u64, Account>>,
 }
 
-const SMT_LEAF_DOMAIN: &[u8; 1] = b"\x00";
-const SMT_NODE_DOMAIN: &[u8; 1] = b"\x01";
-
 pub fn hash_account(acc: &Account) -> Hash {
     let mut hasher = Keccak::v256();
-    hasher.update(SMT_LEAF_DOMAIN);
     hasher.update(&acc.balance.to_le_bytes());
     hasher.update(&acc.nonce.to_le_bytes());
     hasher.update(&acc.code_hash);
     hasher.update(&acc.storage_root);
-    let mut res = [0u8; 32];
-    hasher.finalize(&mut res);
-    res
-}
-
-fn hash_smt_node(left: &Hash, right: &Hash) -> Hash {
-    let mut hasher = Keccak::v256();
-    hasher.update(SMT_NODE_DOMAIN);
-    hasher.update(left);
-    hasher.update(right);
     let mut res = [0u8; 32];
     hasher.finalize(&mut res);
     res
@@ -72,8 +58,10 @@ use std::sync::LazyLock;
 static EMPTY_HASHES: LazyLock<[[u8; 32]; 65]> = LazyLock::new(|| {
     let mut hashes = [[0u8; 32]; 65];
     for i in 1..=64 {
-        let prev = hashes[i - 1];
-        hashes[i] = hash_smt_node(&prev, &prev);
+        let mut hasher = Keccak::v256();
+        hasher.update(&hashes[i - 1]);
+        hasher.update(&hashes[i - 1]);
+        hasher.finalize(&mut hashes[i]);
     }
     hashes
 });
@@ -101,7 +89,12 @@ fn compute_subtree_root(leaves: &[(u64, Hash)], depth: usize, prefix: u64) -> Ha
     let left_root = compute_subtree_root(left_leaves, depth - 1, prefix);
     let right_root = compute_subtree_root(right_leaves, depth - 1, prefix | bit_mask);
 
-    hash_smt_node(&left_root, &right_root)
+    let mut hasher = Keccak::v256();
+    hasher.update(&left_root);
+    hasher.update(&right_root);
+    let mut res = [0u8; 32];
+    hasher.finalize(&mut res);
+    res
 }
 
 fn compute_subtree_proof(
@@ -153,11 +146,15 @@ pub fn verify_account_proof(root: Hash, id: u64, account_hash: Hash, proof: &[Ha
         let target_bit = (id & bit_mask) != 0;
         let sibling = proof[63 - depth];
 
-        current = if target_bit {
-            hash_smt_node(&sibling, &current)
+        let mut hasher = Keccak::v256();
+        if target_bit {
+            hasher.update(&sibling);
+            hasher.update(&current);
         } else {
-            hash_smt_node(&current, &sibling)
-        };
+            hasher.update(&current);
+            hasher.update(&sibling);
+        }
+        hasher.finalize(&mut current);
     }
 
     current == root
@@ -613,20 +610,5 @@ mod tests {
             !err.is_empty(),
             "error message should be non-empty, got: {err:?}"
         );
-    }
-
-    #[test]
-    fn blg_115_smt_domain_separates_leaves_and_internal_nodes() {
-        let acc = Account {
-            nonce: 0,
-            balance: 0,
-            code_hash: [0u8; 32],
-            storage_root: [0u8; 32],
-        };
-        let leaf = hash_account(&acc);
-        let node = hash_smt_node(&[0u8; 32], &[0u8; 32]);
-        assert_ne!(leaf, node);
-        assert_ne!(leaf, get_empty_hash(1));
-        assert_eq!(node, get_empty_hash(1));
     }
 }

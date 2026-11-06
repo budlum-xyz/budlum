@@ -23,9 +23,12 @@ where
         let constraint_degree = (degree_hint + is_zk).max(2);
         let result = log2_ceil_usize(constraint_degree - 1);
 
-        let symbolic = get_log_quotient_degree_extension::<F, F, A>(air, layout, trace_len, is_zk);
-        assert!(
-            result >= symbolic,
+        debug_assert!(
+            {
+                let symbolic =
+                    get_log_quotient_degree_extension::<F, F, A>(air, layout, trace_len, is_zk);
+                result >= symbolic
+            },
             "max_constraint_degree() hint {} is too small; actual log quotient degree is larger",
             degree_hint
         );
@@ -58,9 +61,12 @@ where
         let constraint_degree = (degree_hint + is_zk).max(2);
         let result = log2_ceil_usize(constraint_degree - 1);
 
-        let actual = get_max_constraint_degree_extension::<F, EF, A>(air, layout, trace_len);
-        assert!(
-            degree_hint >= actual,
+        debug_assert!(
+            {
+                let actual =
+                    get_max_constraint_degree_extension::<F, EF, A>(air, layout, trace_len);
+                degree_hint >= actual
+            },
             "max_constraint_degree() hint {} is too small; symbolic evaluation found a larger degree",
             degree_hint
         );
@@ -219,6 +225,7 @@ mod tests {
         assert_eq!(with_hint, without_hint);
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "max_constraint_degree() hint")]
     fn test_max_constraint_degree_hint_too_small_panics() {

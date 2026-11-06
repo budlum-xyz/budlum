@@ -67,21 +67,9 @@ category = "d"
 
 [[entry]]
 path = "src/security/quantum_canary.rs"
-function = "*"
+function = "(imports)"
 pq_companion = "ML-DSA-87 signatures over the same canary statements (the canary's own signing path)"
 category = "a"
-
-[[entry]]
-path = "src/crypto/secp256k1_recover.rs"
-function = "*"
-pq_companion = "External Ethereum EOA recovery combinator; paired with ML-DSA-87 in Graft/Adopt or confined to QuantumClass::Classical foreign lane"
-category = "d"
-
-[[entry]]
-path = "src/execution/coordinator/foreign/ethereum.rs"
-function = "*"
-pq_companion = "QuantumClass::Classical foreign-only custody (K-3, BLG-267); cannot touch QuantumClass::PostQuantum holdings; Adopt requires ML-DSA-87 PQ companion"
-category = "f"
 
 [[entry]]
 path = "src/domain/producer.rs"

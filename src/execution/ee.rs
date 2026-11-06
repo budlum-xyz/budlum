@@ -1,10 +1,8 @@
-//! Execution-environment ABI and worker client surface (`BLG-250`).
+//! The execution-environment interface as the node sees it.
 //!
-//! WIRING: consumed by [`crate::execution::coordinator::worker_manager`], which
-//! supervises out-of-process `budlum-ee-*` workers over [`abi::transport::EeClient`].
+//! WIRING: unwired - the Execution Coordinator is the first
+//! consumer of [`abi::transport::EeClient`]; this module is where it attaches. The
+//! ABI itself is covered by the crate's own tests (`crates/uel-abi/tests`), which run
+//! the mock environment over a real socket.
 
 pub use budlum_uel_abi as abi;
-pub use crate::execution::coordinator::worker_manager::{
-    CoordinatorBlockError, ExecutionCoordinator, UelCallReceipt, WorkerPool,
-    MAX_BLOCK_WORKER_ATTEMPTS, WORKER_RLIMIT_AS_BYTES, WORKER_WATCHDOG,
-};

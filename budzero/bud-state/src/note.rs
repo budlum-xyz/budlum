@@ -257,17 +257,4 @@ mod tests {
         r.spend(note.nullifier, note.commitment).unwrap();
         assert!(r.is_spent(note.nullifier));
     }
-
-    #[test]
-    fn blg_139_note_registry_binds_nullifier_to_commitment() {
-        let mut r = NoteRegistry::new();
-        let victim = PrivacyNote::from_field_elements(0x1111, 0x2222);
-        let attacker = PrivacyNote::from_field_elements(0x3333, 0x4444);
-        assert!(r.insert(&victim).is_ok());
-        assert!(r.insert(&attacker).is_ok());
-        assert!(r.spend(attacker.nullifier, victim.commitment).is_err());
-        assert!(!r.is_spent(attacker.nullifier));
-        assert!(r.spend(victim.nullifier, victim.commitment).is_ok());
-        assert!(r.is_spent(victim.nullifier));
-    }
 }

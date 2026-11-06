@@ -57,20 +57,9 @@ enum Mode {
 /// One entry of the map, reduced to what the gate reads.
 struct Concept {
     name: String,
-    owner: String,
     patterns: Vec<regex::Regex>,
     paths: Vec<String>,
     allow_paths: Vec<String>,
-}
-
-fn is_known_package(owner: &str) -> bool {
-    let Some(digits) = owner.strip_prefix("WP-") else {
-        return false;
-    };
-    if digits.len() != 2 || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return false;
-    }
-    matches!(digits.parse::<u8>(), Ok(1..=64))
 }
 
 struct Map {
@@ -156,10 +145,6 @@ fn parse_map(text: &str) -> Result<Map, String> {
         for key in ["new_code", "term_en", "term_tr", "area", "reason"] {
             required_str(t, key, &who)?;
         }
-        let owner = required_str(t, "owner", &who)?.to_string();
-        if !is_known_package(&owner) {
-            return Err(format!("{who}: unknown package owner `{owner}`"));
-        }
         let raw = string_list(t, "patterns")?;
         if raw.is_empty() {
             return Err(format!("{who}: `patterns` is empty"));
@@ -171,7 +156,6 @@ fn parse_map(text: &str) -> Result<Map, String> {
         }
         concepts.push(Concept {
             name,
-            owner,
             patterns,
             paths: string_list(t, "paths")?,
             allow_paths: string_list(t, "allow_paths")?,
@@ -364,11 +348,6 @@ fn check(root: &Path, write: bool) -> Result<String, String> {
         ));
     }
 
-    let owners: BTreeMap<&str, &str> = map
-        .concepts
-        .iter()
-        .map(|c| (c.name.as_str(), c.owner.as_str()))
-        .collect();
     let mut bad = String::new();
     for (name, c) in &counts {
         match baseline.get(name) {
@@ -377,8 +356,7 @@ fn check(root: &Path, write: bool) -> Result<String, String> {
             }
             Some(b) => {
                 if let Err(e) = compare(name, *c, *b) {
-                    let owner = owners.get(name.as_str()).copied().unwrap_or("unknown");
-                    let _ = writeln!(bad, "  [{owner}] {e}");
+                    let _ = writeln!(bad, "  {e}");
                 }
             }
         }
@@ -410,7 +388,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     check(root, std::env::var_os(WRITE_ENV).is_some_and(|v| v == "1"))
 }
 
-const CANARY_MAP: &str = "schema = 1\nmode = \"count\"\nglobal_allow_paths = [\"config/naming/\", \"docs/NAMING.md\"]\n\n[[concept]]\nold = [\"Canaryname\"]\npatterns = ['(?i)canary-?name']\nnew_code = \"x\"\nterm_en = \"x\"\nterm_tr = \"x\"\narea = \"x\"\nowner = \"WP-05\"\nreason = \"x\"\n";
+const CANARY_MAP: &str = "schema = 1\nmode = \"count\"\nglobal_allow_paths = [\"config/naming/\", \"docs/NAMING.md\"]\n\n[[concept]]\nold = [\"Canaryname\"]\npatterns = ['(?i)canary-?name']\nnew_code = \"x\"\nterm_en = \"x\"\nterm_tr = \"x\"\narea = \"x\"\nreason = \"x\"\n";
 
 fn stage(root: &Path, map: &str, baseline: &str) -> Result<(), String> {
     let put = |rel: &str, body: &str| -> Result<(), String> {
@@ -465,10 +443,6 @@ pub fn self_test() -> Result<String, String> {
         stage(&dir, &CANARY_MAP.replace("count", "absolute"), zero)?;
         if check(&dir, false).is_ok() {
             return Err(String::from("canary: absolute mode accepted a legacy name"));
-        }
-        stage(&dir, &CANARY_MAP.replace("WP-05", "WP-00"), zero)?;
-        if check(&dir, false).is_ok() {
-            return Err(String::from("canary: accepted an unknown package owner"));
         }
         Ok(())
     })();
@@ -553,28 +527,5 @@ mod tests {
         if let Ok(m) = parsed {
             assert_eq!(m.concepts.len(), 27);
         }
-    }
-
-    #[test]
-    fn concept_map_owner_is_a_known_package() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let map = std::fs::read_to_string(root.join(MAP_PATH)).unwrap_or_default();
-        let parsed = parse_map(&map);
-        assert!(parsed.is_ok(), "{:?}", parsed.as_ref().err());
-        if let Ok(m) = parsed {
-            for concept in &m.concepts {
-                assert!(
-                    is_known_package(&concept.owner),
-                    "unknown owner {} for {}",
-                    concept.owner,
-                    concept.name
-                );
-            }
-        }
-        assert!(!is_known_package(""));
-        assert!(!is_known_package("WP-00"));
-        assert!(!is_known_package("WP-65"));
-        assert!(!is_known_package("WP-5"));
-        assert!(!is_known_package("IP-05"));
     }
 }

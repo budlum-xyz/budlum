@@ -104,7 +104,6 @@ const ALLOWED_FILES: &[&str] = &[
     // file can say what it bans in English.
     "config/naming/concept_map.toml",
     ".github/concept-names-baseline.txt",
-    "docs/NAMING.md",
 ];
 
 /// Path fragments whose contents are a Turkish localisation.

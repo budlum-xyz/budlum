@@ -1,4 +1,3 @@
-pub mod budzero_ee;
 pub mod coordinator;
 pub mod ee;
 pub mod executor;
