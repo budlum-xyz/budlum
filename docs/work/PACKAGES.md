@@ -99,3 +99,33 @@ durable half of that rule: it fails when a `mod.rs` declares one module twice, d
 one name at two visibilities, or leaves a module file that no declaration reaches. Those
 are the shapes the collisions produce once they land, and they are visible from the tree
 without asking GitHub what is open.
+
+## Finding: one concept, two definitions, and the chain uses the short one
+
+Measured in the tree today, not in a pull request:
+
+`src/storage/bud3/types.rs` states section 6.8.2's reference counter correctly -
+`RefCount { references, bound }`, `total()` saturating over both terms, `is_zero()`
+asking both.
+
+`src/storage/bud3/registry.rs` - the chain state - declares `ObjectEntry` with
+`references: BTreeSet<NftId>` and no bound term at all. Its `refcount()` is
+`references.len()`, its `burn_reference()` deletes when `references.is_empty()`, its
+state root folds `references.len()`, and its query answer reports `references.len()`.
+
+Section 6.8.2 rule 2 says both an NFT **and** every delta or derived object bound to
+the object raise the counter; section 6.8.3 rule 2 deletes at zero. So an object that
+only a delta names is deleted while the delta still needs its bytes.
+
+Why this is a finding and not a patch here: `src/storage/bud3/registry.rs` is a lock
+path of five open pull requests (#45, #55, #59, #65), and section 15.3 item 3 gives a
+lock path to one package. Editing it on this branch is exactly the collision
+`bud3-module-claims-do-not-collide` refuses one level down. The fix belongs on the
+pull request that next touches the counter.
+
+A gate for this (`bud3_refcount_terms`, written and canaried, four canaries including
+one that proves a commented-out field does not count) is deliberately **not**
+registered: `all_selection` runs every gate that takes no arguments, so registering it
+would turn `ci.yml`'s `--all` step red on this branch for a defect this branch is not
+allowed to fix. It is parked at `/tmp/parked/bud3_refcount_terms.rs.pending` and lands
+with the fix, on the pull request that owns the counter.
