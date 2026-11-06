@@ -48,4 +48,28 @@ mod single_definition_tests {
         assert_eq!(Address::from_hex(&addr.to_hex()).ok(), Some(addr));
         assert!(Address::from_hex("ab").is_err());
     }
+
+    /// The JSON encoding is part of the wire, not an implementation detail.
+    ///
+    /// `Address` carries a hand-written `Serialize` that writes a bare hex
+    /// string. A `#[derive(Serialize)]` on the same `[u8; 32]` newtype would
+    /// instead write a 32-element array, and every stored record and RPC reply
+    /// would change shape while the type still compared equal. That is not
+    /// hypothetical: `budzero/verifier-registry/src/address.rs` defines exactly
+    /// such a derived twin today. Pinning the string here means a future dedup
+    /// that swaps in the derived form fails a test instead of the database.
+    #[test]
+    fn address_json_is_a_hex_string_not_a_byte_array() {
+        let addr = Address::from([0xabu8; 32]);
+        let json = serde_json::to_string(&addr).unwrap();
+        assert_eq!(json, format!("\"{}\"", "ab".repeat(32)));
+
+        let back: Address = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, addr);
+
+        // The derived encoding must stay refused, or both forms would be
+        // accepted and producers could drift apart silently.
+        let derived = format!("[{}]", vec!["171"; 32].join(","));
+        assert!(serde_json::from_str::<Address>(&derived).is_err());
+    }
 }
