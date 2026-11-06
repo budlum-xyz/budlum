@@ -553,8 +553,10 @@ mod tests {
     #[test]
     fn bud3_aggregation_volume() {
         let limits = Bud3Limits::default();
-        let first = b"first small object".to_vec();
-        let second = b"second, a little shorter".to_vec();
+        // Two members below one symbol each, together above one symbol, so the
+        // volume needs two source symbols and losing symbols costs nothing.
+        let first: Vec<u8> = (0..100u8).map(|i| i.wrapping_mul(7)).collect();
+        let second: Vec<u8> = (0..96u8).map(|i| i.wrapping_mul(11)).collect();
         let objects = vec![small_object(&first), small_object(&second)];
         let prepared =
             prepare_volume_upload(&objects, Visibility::Public, &SMALL, &limits, 12).unwrap();
