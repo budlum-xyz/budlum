@@ -622,6 +622,10 @@ pub struct Pkcs11Section {
     pub pq_public_key: Option<String>,
     /// Label of the ML-DSA-65 key pair signed with through PKCS#11 3.2.
     pub pq_key_label: Option<String>,
+    /// Label of the token object the vendor-native BLS mechanism signs
+    /// through (BLG-010). Absent means the compiled-in `BUD_BLS_KEY`, which is
+    /// what every existing deployment uses.
+    pub bls_key_label: Option<String>,
     /// Vendor-native PQ/Dilithium mechanism ID.
     pub pq_mechanism: Option<String>,
 }
@@ -963,6 +967,9 @@ impl NodeConfig {
                     }
                     if self.pkcs11_pq_key_label.is_none() {
                         self.pkcs11_pq_key_label = pkcs11.pq_key_label;
+                    }
+                    if self.pkcs11_bls_key_label.is_none() {
+                        self.pkcs11_bls_key_label = pkcs11.bls_key_label;
                     }
                 }
                 if let Some(socket) = signer.hsm_socket_path {
