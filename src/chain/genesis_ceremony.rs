@@ -46,17 +46,97 @@ pub struct CeremonyInputs {
     pub allocations: Vec<(Address, u64)>,
 }
 
-/// Assemble and check the genesis of `network` from the ceremony inputs.
-///
-/// The validators are sorted by address, so the result, and its hash, do
-/// not depend on the order the records were collected in.
+/// WP-16 item 1: a published testnet/mainnet ceremony needs eight full
+/// validators. The chain-level floor in `genesis.rs` stays 3f+1 = four; the
+/// devnet rehearsal keeps that smaller form.
+const MIN_CEREMONY_VALIDATORS: usize = 8;
+
+/// The single `u128` supply audit of a ceremony genesis (WP-16 item 2,
+/// BLG-003). Every source is named exactly once: the five distribution
+/// categories, extra allocations, validator stakes and the pre-funded
+/// validation pool. With a tokenomics distribution the stakes and the pool
+/// are drawn from the ecosystem category, so they are reported as deductions
+/// from that category, never added to the total a second time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupplyAudit {
+    pub categories: u128,
+    pub extra_allocations: u128,
+    pub validator_stake: u128,
+    pub validation_pool: u128,
+    pub total: u128,
+    pub fixed_supply: u128,
+}
+
+/// Audit the genesis the ceremony is about to publish.
 ///
 /// # Errors
 ///
-/// A duplicate validator, or any refusal of
-/// `validate_consensus_ceremony`: fewer than four validators, a record whose
-/// keys or proof of possession do not verify for this chain and address, or
-/// a distribution that does not hold the fixed supply.
+/// Names the total when it exceeds the fixed supply, the ecosystem category
+/// when the stakes and pool do not fit inside it, or an unknown chain id.
+pub fn supply_audit(genesis: &GenesisConfig) -> Result<SupplyAudit, String> {
+    let network = Network::from_chain_id(genesis.chain_id)
+        .ok_or_else(|| format!("unknown chain id {}", genesis.chain_id))?;
+    let params = genesis.bud_tokenomics.as_ref();
+    let categories = u128::from(params.map_or(0, |p| p.total()));
+    let extra_allocations: u128 = genesis
+        .allocations
+        .iter()
+        .map(|(_, amount)| u128::from(*amount))
+        .sum();
+    // Fold rather than cast a `usize` count into `u128`: the sum stays
+    // independent of the host word size (G-2).
+    let validator_stake = genesis
+        .validators
+        .iter()
+        .fold(0u128, |sum, _| sum.saturating_add(u128::from(network.min_stake())));
+    let validation_pool = u128::from(
+        network
+            .reward_pool()
+            .map_or(0, |schedule| schedule.validation_reward_pool),
+    );
+    let total = match params {
+        Some(p) => {
+            let ecosystem = u128::from(p.ecosystem);
+            if validator_stake.saturating_add(validation_pool) > ecosystem {
+                return Err(format!(
+                    "genesis stakes {validator_stake} and pool {validation_pool} exceed the ecosystem category {ecosystem}"
+                ));
+            }
+            categories.saturating_add(extra_allocations)
+        }
+        None => categories
+            .saturating_add(extra_allocations)
+            .saturating_add(validator_stake),
+    };
+    let fixed_supply = u128::from(crate::tokenomics::BUD_TOTAL_SUPPLY);
+    if total > fixed_supply {
+        return Err(format!(
+            "genesis supply audit totals {total} atoms, above the fixed supply {fixed_supply}"
+        ));
+    }
+    Ok(SupplyAudit {
+        categories,
+        extra_allocations,
+        validator_stake,
+        validation_pool,
+        total,
+        fixed_supply,
+    })
+}
+
+/// Assemble and check the genesis of `network` from the ceremony inputs.
+///
+/// The validators are sorted by address, so the result, and its hash, do
+/// not depend on the order the records were collected in. The tool also
+/// produces the single `u128` supply audit report (WP-16 item 1).
+///
+/// # Errors
+///
+/// A duplicate validator, fewer than eight full validators on a published
+/// network, a supply audit that does not hold the fixed supply, or any
+/// refusal of `validate_consensus_ceremony`: a record whose keys or proof of
+/// possession do not verify for this chain and address, or a distribution
+/// that does not hold the fixed supply.
 pub fn assemble(network: Network, inputs: CeremonyInputs) -> Result<GenesisConfig, String> {
     let mut operators = inputs.operators;
     operators.sort_by_key(|record| record.validator);
@@ -65,6 +145,14 @@ pub fn assemble(network: Network, inputs: CeremonyInputs) -> Result<GenesisConfi
         .any(|pair| matches!(pair, [a, b] if a.validator == b.validator))
     {
         return Err("two operator records name the same validator".into());
+    }
+    if matches!(network, Network::Mainnet | Network::Testnet)
+        && operators.len() < MIN_CEREMONY_VALIDATORS
+    {
+        return Err(format!(
+            "{network} ceremony requires at least eight full validators, got {}",
+            operators.len()
+        ));
     }
     let mut genesis = GenesisConfig::for_network(network);
     genesis.validators = operators.iter().map(|record| record.validator).collect();
@@ -80,6 +168,7 @@ pub fn assemble(network: Network, inputs: CeremonyInputs) -> Result<GenesisConfi
     if let Some(timestamp) = inputs.timestamp_ms {
         genesis.timestamp = timestamp;
     }
+    supply_audit(&genesis)?;
     genesis.validate_consensus_ceremony(network)?;
     Ok(genesis)
 }
@@ -134,8 +223,8 @@ mod tests {
     }
 
     #[test]
-    fn four_operators_assemble_a_testnet_genesis_with_active_validators() {
-        let records = operators(4);
+    fn eight_operators_assemble_a_testnet_genesis_with_active_validators() {
+        let records = operators(8);
         let genesis = assemble(Network::Testnet, inputs(records.clone())).expect("assembles");
         let state = genesis.build_state();
         let stake = Network::Testnet.min_stake();
@@ -159,7 +248,7 @@ mod tests {
             .validation_reward_pool;
         assert_eq!(
             state.get_balance(&destinations().ecosystem),
-            ecosystem - 4 * stake - pool
+            ecosystem - 8 * stake - pool
         );
         assert_eq!(
             state.get_balance(&crate::tokenomics::reward_pool::reward_pool_account()),
@@ -169,7 +258,7 @@ mod tests {
 
     #[test]
     fn the_hash_does_not_depend_on_the_order_of_the_records() {
-        let records = operators(4);
+        let records = operators(8);
         let mut reversed = records.clone();
         reversed.reverse();
         let a = assemble(Network::Testnet, inputs(records)).expect("assembles");
@@ -178,14 +267,16 @@ mod tests {
     }
 
     #[test]
-    fn fewer_than_four_operators_are_refused() {
-        let err = assemble(Network::Testnet, inputs(operators(3))).unwrap_err();
-        assert!(err.contains("at least four"), "{err}");
+    fn the_published_network_ceremony_floor_is_eight() {
+        let err = assemble(Network::Testnet, inputs(operators(7))).unwrap_err();
+        assert!(err.contains("at least eight"), "{err}");
     }
 
     #[test]
     fn a_record_for_another_chain_is_refused() {
-        let mut records = operators(3);
+        // Seven good records plus one wrong-chain record: the ceremony floor
+        // is met, so the refusal still comes from the proof of possession.
+        let mut records = operators(7);
         let keys = ValidatorKeys::generate().expect("keys generate");
         records.push(OperatorRecord {
             validator: keys.address(),
@@ -245,7 +336,7 @@ mod tests {
 
     #[test]
     fn a_duplicate_validator_is_refused() {
-        let mut records = operators(4);
+        let mut records = operators(8);
         records.push(records[0].clone());
         let err = assemble(Network::Testnet, inputs(records)).unwrap_err();
         assert!(err.contains("same validator"), "{err}");
@@ -253,7 +344,7 @@ mod tests {
 
     #[test]
     fn an_allocation_beyond_the_fixed_supply_is_refused() {
-        let mut ceremony = inputs(operators(4));
+        let mut ceremony = inputs(operators(8));
         ceremony.allocations = vec![(Address::from([0x77; 32]), 1)];
         assert!(assemble(Network::Testnet, ceremony).is_err());
     }

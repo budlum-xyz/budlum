@@ -1785,7 +1785,9 @@ fn run_genesis_assemble(
     fund: &[String],
     out: &std::path::Path,
 ) -> Result<(), String> {
-    use budlum_core::chain::genesis_ceremony::{assemble, genesis_hash, CeremonyInputs};
+    use budlum_core::chain::genesis_ceremony::{
+        assemble, genesis_hash, supply_audit, CeremonyInputs, SupplyAudit,
+    };
     use budlum_core::core::chain_config::Network;
     let network = match network {
         "testnet" => Network::Testnet,
@@ -1832,11 +1834,18 @@ fn run_genesis_assemble(
             .collect::<Result<_, _>>()?,
     };
     let genesis = assemble(network, inputs)?;
+    // WP-16 item 1: the ceremony publishes the audit report beside the file
+    // and its hash, so every operator can repeat the same `u128` sum.
+    let audit: SupplyAudit = supply_audit(&genesis)?;
     let json = serde_json::to_string_pretty(&genesis).map_err(|e| e.to_string())?;
     std::fs::write(out, json + "\n").map_err(|e| format!("cannot write {}: {e}", out.display()))?;
     println!("validators: {}", genesis.validators.len());
     println!("genesis file: {}", out.display());
     println!("genesis hash: {}", genesis_hash(&genesis));
+    println!(
+        "supply audit: {}",
+        serde_json::to_string(&audit).map_err(|e| e.to_string())?
+    );
     Ok(())
 }
 
