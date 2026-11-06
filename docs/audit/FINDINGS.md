@@ -235,3 +235,16 @@ other PR was closed, merged, retargeted or edited.
 |---|---|
 | BLG-294 | WP-55 now has a 2/N owner. The ten remaining T-Expansion packages (WP-49..54, 56..60, 62..64) stay unowned. |
 | BLG-320 | still open here: WP-28/WP-31/WP-32 subscriptions and the Move surface are owed to slice 5/N. |
+
+### Slice 5/N cleanup (PR #96)
+
+| ID | State after the slice |
+|---|---|
+| BLG-310 | **closed in code here**: `arena_claude.py` is removed from the tree. Reference scan before the deletion: no import, config, test, script, CI workflow or document depends on it (only the audit findings and the compatibility report mention its name). It is an external Arena router launcher, not a Budlum module: there is no logic to migrate and no new counterpart is needed. `.gitignore` refuses a re-upload. BLG-304 is now fully closed (directive removal came from #93). |
+
+### Slice 6/N (PR #96): carried RPC stack and its compatibility proof
+
+| ID | State after the slice |
+|---|---|
+| BLG-311 | partially addressed. The WP-31 1/N + 2/N and WP-32 1/N deliveries of PR #95 are carried here as one coherent set (its `api.rs`, `method_class.rs`, `mod.rs`, `server.rs`, `tests.rs`, `main.rs` and six compat modules). `ops/scripts/rpc_surface_audit.py` proves the three tables agree: 218 declared methods, 218 class rows, 35 Solana methods, all 18 Aptos REST routes of directive 8.11.4, zero missing modules, zero duplicate route patterns, zero problems. |
+| BLG-320 | WP-31 subscriptions are now carried from #95. WP-28 2/2 and the WP-32 Move worker remain owed. |
