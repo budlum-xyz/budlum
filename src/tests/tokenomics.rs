@@ -777,3 +777,43 @@ fn the_annual_burn_still_fires_after_a_year_of_epochs() {
         "exactly one annual increment leaves the reserve"
     );
 }
+
+/// WP-17 item 4 (BULGU-020 class): every admission/fee gate must look at the
+/// spendable balance, not the raw balance. At genesis epoch 0 the whole team
+/// allocation is vesting-locked, so a fee-only transaction (liquid_cost ==
+/// fee) from the team account must be refused even though the raw balance is
+/// 20M BUD.
+#[test]
+fn blg_020_fee_gate_respects_vesting_lock() {
+    let addrs = TokenomicsAddresses::reserved();
+    let mut state = GenesisConfig::new(45262)
+        .with_bud_tokenomics()
+        .build_state();
+
+    // The raw balance exists but nothing is spendable before the cliff.
+    assert!(state.get_balance(&addrs.team) > 0);
+    assert_eq!(state.spendable_balance(&addrs.team), 0);
+
+    let mut tx = Transaction::new_with_chain_id(
+        addrs.team,
+        Address::zero(),
+        0,
+        1,
+        1,
+        vec![],
+        DEFAULT_CHAIN_ID,
+        TransactionType::Vote,
+    );
+    tx.hash = tx.calculate_hash();
+    let err = Executor::apply_transaction_checked(&mut state, &tx).unwrap_err();
+    assert_eq!(
+        err.code(),
+        "insufficient_balance",
+        "a fee-only transaction from a fully locked account must hit the spendable gate"
+    );
+    assert_eq!(
+        state.get_balance(&addrs.team),
+        bud(20_000_000),
+        "the locked balance must be untouched"
+    );
+}
