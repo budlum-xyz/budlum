@@ -7752,6 +7752,83 @@ mod tests {
         assert!(is_ip_allowed(&config, &req));
     }
 
+    /// BLG-029 lock, quota half. A client behind a proxy may forge every entry
+    /// to the left of the one its proxy appended. The quota is keyed on the
+    /// appended address, so three forgeries spend three requests of one window
+    /// and the fourth is refused. An implementation that took the leftmost entry
+    /// would hand a fresh bucket to every forged address.
+    #[test]
+    fn blg_029_a_forged_forwarded_for_entry_buys_no_fresh_quota() {
+        let config = RpcSecurityConfig {
+            trusted_proxies: vec!["*".into()],
+            allowed_ips: vec!["10.0.0.1".into()],
+            rate_limit_per_minute: Some(2),
+            ..Default::default()
+        };
+        let per_ip_rates = Arc::new(Mutex::new(HashMap::new()));
+        let real = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+        for forged in ["10.0.0.1", "10.0.0.2"] {
+            let mut req = request_with_remote(SocketAddr::from(([203, 0, 113, 9], 40000)));
+            req.headers_mut().insert(
+                "x-forwarded-for",
+                HeaderValue::from_str(&format!("{forged}, 198.51.100.7")).unwrap(),
+            );
+            assert_eq!(
+                extract_client_ip(&config, &req),
+                Some(real),
+                "the forged {forged} entry must not become the client"
+            );
+            assert!(
+                !is_ip_allowed(&config, &req),
+                "the forged {forged} entry must not read as an allow-listed client"
+            );
+            assert!(
+                is_per_ip_rate_limited(&config, &per_ip_rates, Some(real)),
+                "the {forged} forgery must not reset the window"
+            );
+        }
+        assert!(
+            !is_per_ip_rate_limited(&config, &per_ip_rates, Some(real)),
+            "one client, one bucket: the third request of a window of two is refused"
+        );
+        assert_eq!(
+            per_ip_rates.lock().unwrap().len(),
+            1,
+            "a forged address may not create its own bucket"
+        );
+    }
+
+    /// BLG-099 lock. The comparison walks the expected key on every call and
+    /// folds the length difference into the accumulator, so a candidate of the
+    /// wrong length is refused without an early return and without the
+    /// same-buffer self-comparison that measured shorter than a real mismatch.
+    #[test]
+    fn blg_099_the_api_key_compare_never_early_returns_on_length() {
+        let expected = "secret-value";
+        for candidate in [
+            "",
+            "s",
+            "secret",
+            "secret-valu",
+            "secret-value",
+            "secret-valuf",
+            "secret-value-and-more",
+        ] {
+            assert_eq!(
+                constant_time_eq_str(candidate, expected),
+                candidate == expected,
+                "candidate {candidate:?}"
+            );
+        }
+        // An empty candidate and an empty expectation are the one case where the
+        // loop body never runs: the length fold alone decides.
+        assert!(constant_time_eq_str("", ""));
+        assert!(!constant_time_eq_str("x", ""));
+        // A one byte difference at the end is refused, as is the same length
+        // with a different byte: neither answer is allowed to be cheaper.
+        assert!(!constant_time_eq_str("secret-valud", expected));
+    }
+
     #[test]
     fn spoofed_forwarded_headers_are_ignored_without_trusted_proxy_match() {
         let config = RpcSecurityConfig {

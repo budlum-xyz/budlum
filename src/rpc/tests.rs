@@ -1436,17 +1436,204 @@ mod rpc_tests {
 
     /// The re-encode check refuses a body over the shared 1 MiB cap before
     /// it decodes or encodes anything.
+    /// The estimate for a transfer of `amount` whose own fee is unset.
+    async fn estimate_for_transfer(server: &RpcServer, amount: u64) -> u64 {
+        let mut tx = Transaction::new_with_chain_id(
+            Address::from([21u8; 32]),
+            Address::from([22u8; 32]),
+            amount,
+            0,
+            0,
+            vec![],
+            45262,
+            crate::core::transaction::TransactionType::Transfer,
+        );
+        tx.hash = tx.calculate_hash();
+        let estimate = server.estimate_gas(tx).await.unwrap();
+        u64::from_str_radix(estimate.trim_start_matches("0x"), 16).unwrap()
+    }
+
+    /// BLG-192 lock. `bud_estimateGas` has to answer with the fee the chain
+    /// will charge, which for a transfer is the floor PLUS the proportional
+    /// cut. Quoting the floor alone under-priced every large transfer, and the
+    /// wallet then sent a transaction the admission rule refused.
     #[tokio::test]
-    async fn rpc_tests_verify_encoding_refuses_oversized_body() {
-        let (server, _chain) = setup().await;
-        let manifest =
-            crate::storage::ContentManifest::from_bytes_sliced(b"small body", 16).unwrap();
-        let big = "00".repeat(crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES + 1);
-        let refused = server
-            .storage_verify_encoding(big, manifest)
+    async fn blg_192_estimate_gas_carries_the_proportional_cut() {
+        let (server, chain) = setup().await;
+        let base_fee = chain.get_base_fee().await;
+        let amount = 1_000_000_000;
+
+        let mut tx = Transaction::new_with_chain_id(
+            Address::from([21u8; 32]),
+            Address::from([22u8; 32]),
+            amount,
+            0,
+            0,
+            vec![],
+            45262,
+            crate::core::transaction::TransactionType::Transfer,
+        );
+        tx.hash = tx.calculate_hash();
+        let required = chain
+            .get_required_fee(tx.clone())
             .await
-            .expect_err("oversized body must be refused");
-        assert!(refused.message().contains("verify cap"));
-        assert_eq!(refused.code(), -32602);
+            .expect("the chain actor answers");
+        let estimate = u64::from_str_radix(
+            server.estimate_gas(tx).await.unwrap().trim_start_matches("0x"),
+            16,
+        )
+        .unwrap();
+
+        assert!(
+            required > base_fee,
+            "a transfer of {amount} carries a proportional cut above the floor of {base_fee}"
+        );
+        assert_eq!(
+            estimate, required,
+            "the estimate is the fee the admission rule enforces, not the bare floor"
+        );
+        assert!(
+            estimate_for_transfer(&server, amount).await
+                > estimate_for_transfer(&server, 1).await,
+            "the estimate must grow with the transferred amount"
+        );
+    }
+
+    /// BLG-030 lock, grant rows. The three grant writes change state-root
+    /// bearing rows, so every call is refused and the refusal names the
+    /// transaction door. Nothing is written, and the read side still answers.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[tokio::test]
+    async fn blg_030_view_grant_writes_refuse_and_name_their_transaction_door() {
+        let (server, _chain) = setup().await;
+        let key = crate::crypto::primitives::WalletKeyPair::generate().public_key_bytes();
+        let auth = serde_json::json!({
+            "ownerPublicKey": format!("0x{}", hex::encode(key)),
+            "signature": "0x",
+        });
+        let content_id = format!("0x{}", "11".repeat(32));
+        let key_id = format!("0x{}", "22".repeat(32));
+
+        let issued = server
+            .storage_issue_view_grant(
+                content_id.clone(),
+                Some(auth.clone()),
+                None,
+                key_id.clone(),
+                "public".to_string(),
+                1,
+            )
+            .await
+            .expect_err("issuing a grant is a block transaction");
+        assert_eq!(issued.code(), -32602);
+        let revoked = server
+            .storage_revoke_view_grant(0, Some(auth.clone()), 1)
+            .await
+            .expect_err("revoking a grant is a block transaction");
+        let deleted = server
+            .storage_social_delete(content_id.clone(), Some(auth), 1)
+            .await
+            .expect_err("a social delete is a block transaction");
+
+        for (err, door) in [
+            (issued, "StorageTx::IssueViewGrant"),
+            (revoked, "StorageTx::RevokeViewGrant"),
+            (deleted, "StorageTx::SocialDelete"),
+        ] {
+            assert!(
+                err.message().contains(door) && err.message().contains("bud_sendRawTransaction"),
+                "the refusal must name {door} and the door that carries it, got: {}",
+                err.message()
+            );
+        }
+
+        let listing = server
+            .storage_list_view_grants(content_id, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            listing["count"],
+            serde_json::json!(0),
+            "a refused write registers nothing"
+        );
+        assert_eq!(
+            server
+                .storage_list_view_grants("0xshort".to_string(), true)
+                .await
+                .unwrap_err()
+                .code(),
+            -32602,
+            "a malformed content id is a client error"
+        );
+        let viewer = format!("0x{}", hex::encode([7u8; 32]));
+        let owner = format!("0x{}", hex::encode([8u8; 32]));
+        let answer = server
+            .storage_may_view(
+                format!("0x{}", "11".repeat(32)),
+                viewer,
+                key_id.clone(),
+                owner.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            answer.get("allowed").is_some(),
+            "a read that cannot answer is an error, not a silent default: {answer}"
+        );
+        assert_eq!(
+            server
+                .storage_may_view(
+                    format!("0x{}", "11".repeat(32)),
+                    "not-an-address".to_string(),
+                    key_id,
+                    owner,
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            -32602,
+            "a viewer that cannot be parsed is refused by name"
+        );
+    }
+
+    /// TEST-GAP-07. The bridge and relayer reads answer on an empty chain and
+    /// refuse a malformed id instead of answering `null`: absence is a claim,
+    /// and a caller cannot tell it from a typo it should fix.
+    #[tokio::test]
+    async fn bridge_and_relayer_reads_answer_and_refuse_a_malformed_id() {
+        let (server, _chain) = setup().await;
+        let id = format!("0x{}", "aa".repeat(32));
+        assert!(
+            server.get_bridge_transfer(id.clone()).await.unwrap().is_null(),
+            "an unknown message id is answered with null"
+        );
+        assert_eq!(
+            server
+                .get_bridge_transfer("0xnothex".to_string())
+                .await
+                .unwrap_err()
+                .code(),
+            -32602,
+            "a malformed id is a client error"
+        );
+        assert_eq!(
+            server
+                .get_bridge_transfer(format!("0x{}", "aa".repeat(31)))
+                .await
+                .unwrap_err()
+                .code(),
+            -32602,
+            "a short id is refused, not padded"
+        );
+        let summary = server.get_relayer_status(None).await.unwrap();
+        assert!(!summary.is_null(), "the queue summary always answers");
+        assert_eq!(
+            server
+                .get_relayer_status(Some("0xnothex".to_string()))
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
     }
 }

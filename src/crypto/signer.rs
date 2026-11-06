@@ -196,6 +196,43 @@ mod tests {
         assert_eq!(signer.pq_public_key(), Some(expected_pq_pk));
     }
 
+    /// BLG-150 lock, signer half. One Ed25519 key signs blocks, prevotes and
+    /// precommits, and the three must never be interchangeable: a prevote
+    /// replayed as a block signature, or a precommit replayed as a prevote, is
+    /// a consensus forgery made from a legitimate signature. Each half also has
+    /// to verify, so the separation is not produced by a refusal.
+    #[test]
+    fn blg_150_block_prevote_and_precommit_signatures_are_not_interchangeable() {
+        let keypair = KeyPair::generate().expect("ed25519 key");
+        let signer = KeyPairSigner::new(keypair.clone());
+        let msg = [9u8; 32];
+        let block = signer.sign_block(&msg).expect("block signature");
+        let prevote = signer.sign_prevote(&msg).expect("prevote");
+        let precommit = signer.sign_precommit(&msg).expect("precommit");
+        assert_ne!(block, prevote, "a prevote must not be a block signature");
+        assert_ne!(prevote, precommit, "a precommit must not be a prevote");
+        assert_ne!(block, precommit, "a precommit must not be a block signature");
+
+        // Each is a signature over its own tagged hash, under the same key.
+        let public = signer.public_key_bytes();
+        crate::crypto::primitives::verify_signature(&msg, &block, &public)
+            .expect("the block signature verifies over the bare hash");
+        for (tag, sig) in [
+            (b"BDLM_PREVOTE_ED25519_V1".to_vec(), &prevote),
+            (b"BDLM_PRECOMMIT_ED25519_V1".to_vec(), &precommit),
+        ] {
+            let mut hashed = tag;
+            hashed.extend_from_slice(&msg);
+            let digest = crate::core::hash::calculate_hash_bytes(&hashed);
+            crate::crypto::primitives::verify_signature(&digest, sig, &public)
+                .expect("the vote signature verifies over its own domain");
+            assert!(
+                crate::crypto::primitives::verify_signature(&digest, &block, &public).is_err(),
+                "the block signature must not verify as a vote over the same message"
+            );
+        }
+    }
+
     #[test]
     fn default_consensus_signer_rejects_missing_bls_pq_material() {
         let signer = KeyPairSigner::new(KeyPair::generate().expect("ed25519 key"));
