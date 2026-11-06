@@ -7000,10 +7000,17 @@ impl BudlumApiServer for RpcServer {
         commitment: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let key = parse_hex32(&commitment)?;
-        Ok(self
+        let mut out = self
             .chain
             .bud3(crate::storage::bud3::registry::Bud3Query::Object(key))
-            .await)
+            .await;
+        if let Some(map) = out.as_object_mut() {
+            map.insert(
+                "bud3Admission".to_string(),
+                crate::storage::bud3::admission::chain_admission_report(),
+            );
+        }
+        Ok(out)
     }
 
     async fn storage_get_custody(
@@ -7011,10 +7018,18 @@ impl BudlumApiServer for RpcServer {
         validator: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let key = parse_hex32(&validator)?;
-        Ok(self
+        let mut out = self
             .chain
             .bud3(crate::storage::bud3::registry::Bud3Query::Custody(key))
-            .await)
+            .await;
+        let plan = self
+            .chain
+            .bud3(crate::storage::bud3::registry::Bud3Query::RepairPlan(key))
+            .await;
+        if let Some(map) = out.as_object_mut() {
+            map.insert("repairIfUnseen".to_string(), plan);
+        }
+        Ok(out)
     }
 
     async fn list_relays(&self) -> Result<serde_json::Value, ErrorObjectOwned> {

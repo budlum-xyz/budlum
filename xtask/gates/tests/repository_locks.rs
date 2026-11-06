@@ -238,3 +238,42 @@ fn the_three_format_hunks_are_applied() {
         "the state-root assertion is not rustfmt-shaped"
     );
 }
+
+/// The two ratchets are paid down by wiring, never by raising a baseline.
+/// All ten dead B.U.D. 3.0 helpers must be called from production code, and
+/// the `mark_unseen` transition must be reached from a read-only what-if
+/// path (BLG-309).
+#[test]
+fn the_two_ratchets_are_closed_by_wiring() {
+    let admission = read("src/storage/bud3/admission.rs");
+    for call in [
+        "admit_lifetime(",
+        "admit_mobile_quota(",
+        "testnet_default()",
+        "redundancy_milli(",
+        "mobile_share_milli()",
+        "survives_mobile_exit(",
+        "hours_to_epochs(",
+        "total_source_symbols()",
+        "matches_sealed(",
+    ] {
+        assert!(
+            admission.contains(call),
+            "the admission door no longer calls {call}"
+        );
+    }
+    let registry = read("src/storage/bud3/registry.rs");
+    assert!(
+        registry.contains("probe.mark_unseen(holder)"),
+        "mark_unseen must be reached from the read-only repair plan"
+    );
+    let server = read("src/rpc/server.rs");
+    assert!(
+        server.contains("chain_admission_report()"),
+        "the admission door must be reached from the RPC read"
+    );
+    assert!(
+        server.contains("Bud3Query::RepairPlan(key)"),
+        "the repair plan must be reached from the RPC read"
+    );
+}
