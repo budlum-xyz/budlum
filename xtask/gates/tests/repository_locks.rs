@@ -276,4 +276,9 @@ fn the_two_ratchets_are_closed_by_wiring() {
         server.contains("Bud3Query::RepairPlan(key)"),
         "the repair plan must be reached from the RPC read"
     );
+    let dead = read(".github/dead-pub-api-baseline.txt");
+    assert!(
+        !dead.contains("src/cross_domain/evm/sync_committee.rs:rotate_period"),
+        "a stale baseline line must be deleted, not kept"
+    );
 }
