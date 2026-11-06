@@ -171,6 +171,17 @@ impl IntoIterator for DedupIndex {
 }
 
 impl DedupIndex {
+    /// Iterate over the exact mappings in canonical digest order. The local
+    /// filter is deliberately excluded from consensus state.
+    pub(super) fn iter(&self) -> impl Iterator<Item = (&[u8; 32], &ObjectKey)> {
+        self.map.iter()
+    }
+
+    /// Whether the exact index has no mappings.
+    pub(super) fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
     /// The object holding `digest`, if the index holds one. A filter "no"
     /// answers without the lookup; a "maybe" always consults the exact index.
     #[must_use]

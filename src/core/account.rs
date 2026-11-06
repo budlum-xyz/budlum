@@ -4383,7 +4383,7 @@ impl AccountState {
         // The B.U.D. 3.0 registry folds in once it holds anything, so a chain
         // that never stored an object keeps its pinned roots.
         if !self.bud3_registry.is_empty() {
-            final_hasher.update(b"bud3_registry_v1");
+            final_hasher.update(b"bud3_registry_v2");
             final_hasher.update(self.bud3_registry.state_root());
         }
         if !self.external_roots.is_empty() {
