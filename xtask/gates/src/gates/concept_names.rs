@@ -57,6 +57,8 @@ enum Mode {
 /// One entry of the map, reduced to what the gate reads.
 struct Concept {
     name: String,
+    /// The work package that performs the rename, as `WP-NN`.
+    owner: u16,
     patterns: Vec<regex::Regex>,
     paths: Vec<String>,
     allow_paths: Vec<String>,
@@ -112,6 +114,28 @@ fn required_str<'a>(table: &'a toml::Table, key: &str, who: &str) -> Result<&'a 
         .ok_or_else(|| format!("{who}: missing or empty `{key}`"))
 }
 
+/// Parse a `owner = "WP-NN"` value.
+///
+/// The owner is the package that performs the rename. The identifier is the
+/// same `WP-NN` form the directive uses for a work package, so a typo cannot
+/// point the map at a package that does not exist.
+fn parse_owner(owner: &str) -> Result<u16, String> {
+    let digits = owner
+        .strip_prefix("WP-")
+        .ok_or_else(|| format!("owner `{owner}` is not a WP-NN package id"))?;
+    if digits.len() != 2 || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return Err(format!("owner `{owner}` is not a WP-NN package id"));
+    }
+    let n: u16 = digits
+        .parse()
+        .map_err(|e| format!("owner `{owner}`: {e}"))?;
+    if (1..=64).contains(&n) {
+        Ok(n)
+    } else {
+        Err(format!("owner `{owner}` is outside WP-01..WP-64"))
+    }
+}
+
 fn parse_map(text: &str) -> Result<Map, String> {
     let table: toml::Table = text.parse().map_err(|e| format!("{MAP_PATH}: {e}"))?;
     if table.get("schema").and_then(toml::Value::as_integer) != Some(1) {
@@ -142,9 +166,10 @@ fn parse_map(text: &str) -> Result<Map, String> {
             .cloned()
             .ok_or_else(|| format!("concept #{i}: `old` is empty"))?;
         let who = format!("concept `{name}`");
-        for key in ["new_code", "term_en", "term_tr", "area", "reason"] {
+        for key in ["new_code", "term_en", "term_tr", "area", "reason", "owner"] {
             required_str(t, key, &who)?;
         }
+        let owner = parse_owner(required_str(t, "owner", &who)?)?;
         let raw = string_list(t, "patterns")?;
         if raw.is_empty() {
             return Err(format!("{who}: `patterns` is empty"));
@@ -156,6 +181,7 @@ fn parse_map(text: &str) -> Result<Map, String> {
         }
         concepts.push(Concept {
             name,
+            owner,
             patterns,
             paths: string_list(t, "paths")?,
             allow_paths: string_list(t, "allow_paths")?,
@@ -301,6 +327,9 @@ fn check(root: &Path, write: bool) -> Result<String, String> {
     let map = parse_map(&text)?;
     let counts = measure(&map, root);
     let total: usize = counts.values().map(|c| c.matches).sum();
+    let mut owners: Vec<u16> = map.concepts.iter().map(|c| c.owner).collect();
+    owners.sort_unstable();
+    owners.dedup();
 
     if map.mode == Mode::Absolute {
         let mut bad = String::new();
@@ -314,8 +343,9 @@ fn check(root: &Path, write: bool) -> Result<String, String> {
             }
         }
         return if bad.is_empty() {
-            Ok(String::from(
-                "OK: absolute mode, no legacy concept name remains.",
+            Ok(format!(
+                "OK: absolute mode, no legacy concept name remains ({} owner package(s)).",
+                owners.len()
             ))
         } else {
             Err(format!(
@@ -371,8 +401,9 @@ fn check(root: &Path, write: bool) -> Result<String, String> {
     }
     if bad.is_empty() {
         Ok(format!(
-            "OK: count mode, {} concept(s), {total} legacy match(es), all equal to the baseline.",
-            counts.len()
+            "OK: count mode, {} concept(s), {} owner package(s), {total} legacy match(es), all equal to the baseline.",
+            counts.len(),
+            owners.len()
         ))
     } else {
         Err(format!("FAIL: concept-name counts:\n{bad}"))
@@ -388,7 +419,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     check(root, std::env::var_os(WRITE_ENV).is_some_and(|v| v == "1"))
 }
 
-const CANARY_MAP: &str = "schema = 1\nmode = \"count\"\nglobal_allow_paths = [\"config/naming/\", \"docs/NAMING.md\"]\n\n[[concept]]\nold = [\"Canaryname\"]\npatterns = ['(?i)canary-?name']\nnew_code = \"x\"\nterm_en = \"x\"\nterm_tr = \"x\"\narea = \"x\"\nreason = \"x\"\n";
+const CANARY_MAP: &str = "schema = 1\nmode = \"count\"\nglobal_allow_paths = [\"config/naming/\", \"docs/NAMING.md\"]\n\n[[concept]]\nold = [\"Canaryname\"]\npatterns = ['(?i)canary-?name']\nnew_code = \"x\"\nterm_en = \"x\"\nterm_tr = \"x\"\narea = \"x\"\nreason = \"x\"\nowner = \"WP-05\"\n";
 
 fn stage(root: &Path, map: &str, baseline: &str) -> Result<(), String> {
     let put = |rel: &str, body: &str| -> Result<(), String> {
@@ -443,6 +474,14 @@ pub fn self_test() -> Result<String, String> {
         stage(&dir, &CANARY_MAP.replace("count", "absolute"), zero)?;
         if check(&dir, false).is_ok() {
             return Err(String::from("canary: absolute mode accepted a legacy name"));
+        }
+        let bad_owner = CANARY_MAP.replace("owner = \"WP-05\"", "owner = \"WP-99\"");
+        if parse_map(&bad_owner).is_ok() {
+            return Err(String::from("canary: an unknown owner was accepted"));
+        }
+        let short_owner = CANARY_MAP.replace("owner = \"WP-05\"", "owner = \"WP-5\"");
+        if parse_map(&short_owner).is_ok() {
+            return Err(String::from("canary: a malformed owner was accepted"));
         }
         Ok(())
     })();
@@ -527,5 +566,26 @@ mod tests {
         if let Ok(m) = parsed {
             assert_eq!(m.concepts.len(), 27);
         }
+    }
+
+    #[test]
+    fn concept_map_owner_is_a_known_package() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let text = std::fs::read_to_string(root.join(MAP_PATH))
+            .unwrap_or_else(|e| panic!("cannot read {MAP_PATH}: {e}"));
+        let map = parse_map(&text).unwrap_or_else(|e| panic!("{MAP_PATH}: {e}"));
+        for concept in &map.concepts {
+            assert!(
+                (1..=64).contains(&concept.owner),
+                "concept `{}` names owner {}, which is outside WP-01..WP-64",
+                concept.name,
+                concept.owner
+            );
+        }
+        // The parser is the door: a malformed owner must not reach the map.
+        assert!(parse_owner("WP-00").is_err());
+        assert!(parse_owner("WP-65").is_err());
+        assert!(parse_owner("WP-5").is_err());
+        assert!(parse_owner("WP-05").is_ok());
     }
 }
