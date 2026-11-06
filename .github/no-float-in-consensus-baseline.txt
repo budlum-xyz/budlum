@@ -1,0 +1,8 @@
+# No-float-in-consensus-paths baseline. One file per line.
+# A ratchet: this list may only shrink. Remove a line once every `f32`/`f64`
+# token in that file is gone from consensus-critical code. WP-42 owns the
+# final removal.
+src/chain/chain_actor.rs
+src/consensus/filiz.rs
+src/consensus/pos.rs
+src/storage/bud3/placement.rs

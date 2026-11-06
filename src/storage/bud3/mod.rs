@@ -11,6 +11,7 @@
 //! | [`limits`] | Profiles (P0) and the genesis limits |
 //! | [`meter`] | The parser and decoder budget |
 //! | [`varint`] | Bounded LEB128 |
+//! | [`content_ref`] | `ContentRef` temporary interface; dependent modules use this until WP-21 lands (Section 5.7) |
 //! | [`bof1`] | The BOF-1 object: canonical binary header and payload |
 //! | [`segment`] | Segmentation, segment digests and the object commitment |
 //! | [`placement`] | Stake-weighted rendezvous placement, diversity caps, the placement table |
@@ -31,6 +32,7 @@
 
 pub mod bof1;
 pub mod content_id;
+pub mod content_ref;
 pub mod custody;
 pub mod dedup_index;
 pub mod fountain;
@@ -45,6 +47,7 @@ pub mod varint;
 
 pub use bof1::{Bof1Error, Flags, Header, Object};
 pub use content_id::{ContentId, ContentKey};
+pub use content_ref::{ContentRef, ContentRefError};
 pub use fountain::{
     encode_stream, FountainError, SegmentDecoder, SegmentEncoder, Symbol, SymbolKind,
 };

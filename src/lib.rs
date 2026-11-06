@@ -31,6 +31,10 @@ pub mod light_client;
 pub mod mempool;
 pub mod network;
 pub mod object_layer;
+/// Node-local key-value persistence (state trie, pruning, witness retention).
+/// Content storage lives at `storage::bud3`; this module is not a content
+/// store (KR-01, D-1).
+pub mod persistence;
 pub mod pollen;
 pub mod privacy;
 pub mod prover;
