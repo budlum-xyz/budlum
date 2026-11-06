@@ -119,5 +119,17 @@ STARK proving on every call (`BLG-248`).
 - Gateways (`src/rpc/compat/cosmos/`): CometBFT JSON-RPC on `127.0.0.1:18550` and
   Cosmos LCD REST on `127.0.0.1:18551` (`[compat.cosmos]`).
 
+## 9. Universal Call and Universal Asset Registry (`WP-30`, `BLG-250`, `BLG-252`)
+
+- Synchronous cross-VM calls (`src/execution/coordinator/universal_call.rs`):
+  max cross-EE depth `8`, Phase-1 `ReentrancyForbidden`, `is_static` write prohibition,
+  EVM precompile `0x000000000000000000000000000000000000B001` (`contracts/uel/BudlumUniversal.sol`)
+  emitting `UniversalCallExecuted(uint8,bytes,bool)`, WASM `BudlumMsg::UniversalCall`,
+  and BudZero syscall `0x40` (`UNIVERSAL_CALL`).
+- Universal Asset Registry (`src/execution/coordinator/assets/`): `uel/assets`
+  namespace, `RegisterAsset`, `CreatePointer`, and stateless CW20/ERC-20 & CW721/ERC-721
+  pointers whose balances and allowances live exclusively in the home environment.
+
+
 
 

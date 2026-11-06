@@ -875,6 +875,7 @@ fn service_chain_query(
                         value: BudAmount(0),
                         input: input_bytes,
                         gas_limit: gas_limit_bgu,
+                        is_static: true,
                     };
                     match host.universal_call(ucall) {
                         Ok(res) if res.success => {
@@ -1440,6 +1441,7 @@ fn dispatch_submsg(
                 value: BudAmount(val_u128),
                 input: input_bytes,
                 gas_limit: (*gas_limit_bgu).min(fuel_budget),
+                is_static: *is_static,
             };
             match host.universal_call(ucall) {
                 Ok(res) if res.success => Ok((res.output, res.gas_used)),

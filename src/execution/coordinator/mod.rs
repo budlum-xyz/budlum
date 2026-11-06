@@ -10,6 +10,7 @@
 //! Section 8.6.2 classical compatibility lane (`WP-27`).
 
 pub mod accounts;
+pub mod assets;
 pub mod bud_unit;
 pub mod commitment;
 pub mod deploy_policy;
@@ -18,4 +19,5 @@ pub mod gas;
 pub mod overlay;
 pub mod scheduler;
 pub mod stateful_contract;
+pub mod universal_call;
 pub mod worker_manager;

@@ -2,12 +2,12 @@
 
 #![forbid(unsafe_code)]
 
-use bud_isa::{Instruction, MainnetActivation};
+use bud_isa::{Instruction, MainnetActivation, Opcode};
 use bud_vm::Vm;
 use budlum_uel_abi::{
-    BlockContext, CodeInfo, EeCall, EeCallKind, EeFault, EeId, EeLog, EeOutcome, EeQuery,
-    EeRefusal, ExecutionEnvironment, HostApi, HostError, HostRead, Namespace, OutcomeStatus,
-    RefusalCode,
+    BlockContext, BudAmount, CodeInfo, EeCall, EeCallKind, EeFault, EeId, EeIdentity, EeLog,
+    EeOutcome, EeQuery, EeRefusal, ExecutionEnvironment, HostApi, HostError, HostRead, Namespace,
+    OutcomeStatus, RefusalCode, UniversalCall,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -15,6 +15,8 @@ use sha2::{Digest as _, Sha256};
 pub const NS_BUDZERO_PROGRAM: &str = "ee/budzero/program";
 /// Canonical BudZero contract storage namespace.
 pub const NS_BUDZERO_STORAGE: &str = "ee/budzero/storage";
+/// BudZero UEL Universal Call syscall number (`Section 8.7.2` BudZero row: `0x40`).
+pub const SYSCALL_UNIVERSAL_CALL: i32 = 0x40;
 
 const MAX_CODE_BYTES: usize = 1024 * 1024;
 const WORKER_VM_MEMORY_BYTES: usize = 8192;
@@ -125,6 +127,28 @@ fn set_caller_256(vm: &mut Vm, caller_id: &[u8]) {
     vm.context.set_sender_bytes(&buf);
 }
 
+fn read_packed_bytes(
+    storage: &std::collections::BTreeMap<u64, u64>,
+    base: u64,
+    len: usize,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(len);
+    let words = len.div_ceil(8);
+    for idx in 0..words {
+        let w = storage.get(&(base.saturating_add(idx as u64))).copied().unwrap_or(0);
+        out.extend_from_slice(&w.to_le_bytes());
+    }
+    out.truncate(len);
+    out
+}
+
+fn program_has_universal_syscall(program: &[u64]) -> bool {
+    program.iter().any(|&raw| {
+        Instruction::decode_for_mainnet(raw, MainnetActivation::default())
+            .is_ok_and(|inst| inst.opcode == Opcode::Syscall && inst.imm == SYSCALL_UNIVERSAL_CALL)
+    })
+}
+
 /// Execution-only BudZero worker engine (`panic = "unwind"`).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BudZeroWorker;
@@ -229,8 +253,56 @@ impl ExecutionEnvironment for BudZeroWorker {
                     vm.storage.insert(slot, val);
                 }
 
+                let mut ucall_gas = 0u64;
+                if program_has_universal_syscall(&program) {
+                    let meta = vm.storage.get(&0x4000).copied().unwrap_or(0);
+                    let to_ee = EeId((meta & 0xff) as u8);
+                    let is_static = ((meta >> 8) & 1) != 0;
+                    let req_gas = vm.storage.get(&0x4001).copied().unwrap_or(call.gas_limit);
+                    let val_lo = u128::from(vm.storage.get(&0x4002).copied().unwrap_or(0));
+                    let val_hi = u128::from(vm.storage.get(&0x4003).copied().unwrap_or(0));
+                    let t_len = (vm.storage.get(&0x4004).copied().unwrap_or(0) as usize).min(64);
+                    let i_len =
+                        (vm.storage.get(&0x4005).copied().unwrap_or(0) as usize).min(16_384);
+                    let target_bytes = read_packed_bytes(&vm.storage, 0x4010, t_len);
+                    let input_bytes = read_packed_bytes(&vm.storage, 0x4100, i_len);
+                    let ucall = UniversalCall {
+                        from: call.target.clone(),
+                        to_ee,
+                        target: EeIdentity {
+                            ee: to_ee,
+                            id: target_bytes,
+                        },
+                        value: BudAmount((val_hi << 64) | val_lo),
+                        input: input_bytes,
+                        gas_limit: req_gas.min(call.gas_limit),
+                        is_static,
+                    };
+                    match host.universal_call(ucall) {
+                        Ok(ures) => {
+                            ucall_gas = ures.gas_used;
+                            vm.storage.insert(0x4006, u64::from(ures.success));
+                        }
+                        Err(HostError::OutOfGas) => {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::OutOfGas,
+                                output: Vec::new(),
+                                gas_used: call.gas_limit,
+                            });
+                        }
+                        Err(_) => {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: Vec::new(),
+                                gas_used: 0,
+                            });
+                        }
+                    }
+                }
+
                 let receipt = vm.run_receipt(&program);
-                if host.charge(receipt.gas_used).is_err() {
+                let total_gas = receipt.gas_used.saturating_add(ucall_gas);
+                if host.charge(total_gas).is_err() {
                     return Ok(EeOutcome {
                         status: OutcomeStatus::OutOfGas,
                         output: Vec::new(),
@@ -241,7 +313,7 @@ impl ExecutionEnvironment for BudZeroWorker {
                     return Ok(EeOutcome {
                         status: OutcomeStatus::Revert,
                         output: Vec::new(),
-                        gas_used: receipt.gas_used,
+                        gas_used: total_gas,
                     });
                 }
                 for (slot, val) in &vm.state_writes {
@@ -273,7 +345,7 @@ impl ExecutionEnvironment for BudZeroWorker {
                 Ok(EeOutcome {
                     status: OutcomeStatus::Success,
                     output: out,
-                    gas_used: receipt.gas_used,
+                    gas_used: total_gas,
                 })
             }
         }

@@ -139,6 +139,7 @@ struct OverlayFrame {
     depth: u32,
     gas_limit: u64,
     gas_used: u64,
+    read_only: bool,
     writes: BTreeMap<(String, Vec<u8>), Option<Vec<u8>>>,
     shadow_balances: BTreeMap<Address, u128>,
     transfers: Vec<(Address, Address, u128)>,
@@ -147,12 +148,13 @@ struct OverlayFrame {
 }
 
 impl OverlayFrame {
-    fn new(active_ee: EeId, depth: u32, gas_limit: u64) -> Self {
+    fn new(active_ee: EeId, depth: u32, gas_limit: u64, read_only: bool) -> Self {
         Self {
             active_ee,
             depth,
             gas_limit,
             gas_used: 0,
+            read_only,
             writes: BTreeMap::new(),
             shadow_balances: BTreeMap::new(),
             transfers: Vec::new(),
@@ -264,7 +266,7 @@ impl<'a> OverlayCore<'a> {
         Self {
             state,
             read_cache: RefCell::new(read_cache),
-            frames: vec![OverlayFrame::new(root_ee, 0, gas_limit)],
+            frames: vec![OverlayFrame::new(root_ee, 0, gas_limit, false)],
         }
     }
 
@@ -286,11 +288,30 @@ impl<'a> OverlayCore<'a> {
 
     /// Push a nested child frame for `universal_call`.
     pub fn push_frame(&mut self, ee: EeId, depth: u32, gas_limit: u64) -> Result<(), HostError> {
+        self.push_frame_with_mode(ee, depth, gas_limit, false)
+    }
+
+    /// Push a nested child frame with explicit `read_only` (`static`) enforcement.
+    pub fn push_frame_with_mode(
+        &mut self,
+        ee: EeId,
+        depth: u32,
+        gas_limit: u64,
+        is_static: bool,
+    ) -> Result<(), HostError> {
         if depth > MAX_UNIVERSAL_CALL_DEPTH {
             return Err(HostError::DepthExceeded);
         }
-        self.frames.push(OverlayFrame::new(ee, depth, gas_limit));
+        let parent_ro = self.frames.last().is_some_and(|f| f.read_only);
+        self.frames
+            .push(OverlayFrame::new(ee, depth, gas_limit, parent_ro || is_static));
         Ok(())
+    }
+
+    /// Return `true` when the active frame forbids state mutations (`static = true`).
+    #[must_use]
+    pub fn is_read_only(&self) -> bool {
+        self.frames.last().is_some_and(|f| f.read_only)
     }
 
     /// Pop the top child frame on revert/fault, returning its `gas_used` and discarding mutations.
@@ -481,6 +502,9 @@ impl<D: UniversalDispatcher> HostRead for ExecutionOverlay<'_, '_, D> {
 
 impl<D: UniversalDispatcher> HostApi for ExecutionOverlay<'_, '_, D> {
     fn write(&mut self, ns: &Namespace, key: &[u8], value: Option<&[u8]>) -> Result<(), HostError> {
+        if self.core.is_read_only() {
+            return Err(HostError::Denied("StaticCallWriteForbidden".into()));
+        }
         let ns_str = ns.as_str();
         if UelSubTree::from_namespace(ns_str).is_none() {
             return Err(HostError::Denied(format!("unknown namespace `{ns_str}`")));
@@ -520,6 +544,9 @@ impl<D: UniversalDispatcher> HostApi for ExecutionOverlay<'_, '_, D> {
         if self.core.frames.iter().any(|f| f.active_ee == call.to_ee) {
             return Err(HostError::Denied("ReentrancyForbidden".into()));
         }
+        if (self.core.is_read_only() || call.is_static) && call.value.0 > 0 {
+            return Err(HostError::Denied("StaticCallWriteForbidden".into()));
+        }
 
         let warm = self.core.is_target_warm(call.to_ee, &call.target.id);
         let overhead = BGU_UNIVERSAL_CALL_BASE.saturating_add(if warm {
@@ -535,7 +562,8 @@ impl<D: UniversalDispatcher> HostApi for ExecutionOverlay<'_, '_, D> {
         }
 
         let stipend = callee_gas_stipend(self.core.remaining_gas(), call.gas_limit);
-        self.core.push_frame(call.to_ee, next_depth, stipend)?;
+        self.core
+            .push_frame_with_mode(call.to_ee, next_depth, stipend, call.is_static)?;
 
         if call.value.0 > 0
             && self
@@ -576,6 +604,9 @@ impl<D: UniversalDispatcher> HostApi for ExecutionOverlay<'_, '_, D> {
     }
 
     fn emit_log(&mut self, log: EeLog) -> Result<(), HostError> {
+        if self.core.is_read_only() {
+            return Err(HostError::Denied("StaticCallWriteForbidden".into()));
+        }
         let cost = log_cost_bgu(log.topics.len(), log.data.len());
         self.core.charge_frame(cost)?;
         if let Some(top) = self.core.frames.last_mut() {
@@ -594,6 +625,9 @@ impl<D: UniversalDispatcher> HostApi for ExecutionOverlay<'_, '_, D> {
         to: &EeIdentity,
         attos: u128,
     ) -> Result<(), HostError> {
+        if self.core.is_read_only() && attos > 0 {
+            return Err(HostError::Denied("StaticCallWriteForbidden".into()));
+        }
         self.core.charge_frame(BGU_BUD_TRANSFER)?;
         self.core.record_transfer(from, to, attos, true)
     }
@@ -738,6 +772,7 @@ mod tests {
                     value: BudAmount(10 * ATTO_PER_ATOM),
                     input: vec![2],
                     gas_limit: 200_000,
+                    is_static: false,
                 })
                 .unwrap();
             assert!(!rev.success);
@@ -758,6 +793,7 @@ mod tests {
                     value: BudAmount(5 * ATTO_PER_ATOM),
                     input: vec![1],
                     gas_limit: 200_000,
+                    is_static: false,
                 })
                 .unwrap();
             assert!(ok.success);
@@ -774,6 +810,7 @@ mod tests {
                 value: BudAmount(0),
                 input: vec![3],
                 gas_limit: 2_000_000,
+                is_static: false,
             });
             assert_eq!(deep, Err(HostError::DepthExceeded));
         }

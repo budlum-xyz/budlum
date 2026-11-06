@@ -8,6 +8,7 @@
 
 pub mod abi;
 pub mod db;
+pub mod precompile_universal;
 
 use std::any::Any;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -16,7 +17,6 @@ use budlum_uel_abi::transport::panic_digest;
 use budlum_uel_abi::{
     BlockContext, BudAmount, CodeInfo, EeCall, EeCallKind, EeFault, EeId, EeIdentity, EeOutcome,
     EeQuery, EeRefusal, ExecutionEnvironment, HostApi, HostRead, OutcomeStatus, RefusalCode,
-    UniversalCall,
 };
 use revm::context::{BlockEnv, CfgEnv, Context, Journal, TxEnv};
 use revm::context_interface::result::{ExecutionResult, HaltReason};
@@ -32,11 +32,8 @@ use revm::primitives::{Address, Bytes, TxKind, U256};
 use revm::{ExecuteEvm, InspectEvm, Inspector, MainBuilder};
 use sha2::{Digest, Sha256};
 
-use crate::abi::{
-    decode_precompile_call, encode_precompile_return, PRECOMPILE_BASE_GAS,
-    UNIVERSAL_CALL_PRECOMPILE,
-};
-use crate::db::{commit_evm_state, evm_identity, HostDb, ReadOnlyHostDb};
+use crate::db::{commit_evm_state, HostDb, ReadOnlyHostDb};
+use crate::precompile_universal::handle_universal_precompile_call;
 
 /// Default Budlum EVM chain ID (`EIP-155`).
 pub const BUDLUM_EVM_CHAIN_ID: u64 = 45_261;
@@ -88,90 +85,7 @@ impl<'a> Inspector<EvmHostCtx<'a>, EthInterpreter> for BudlumEvmInspector {
         context: &mut EvmHostCtx<'a>,
         inputs: &mut CallInputs,
     ) -> Option<CallOutcome> {
-        if inputs.bytecode_address != UNIVERSAL_CALL_PRECOMPILE
-            && inputs.target_address != UNIVERSAL_CALL_PRECOMPILE
-        {
-            return None;
-        }
-
-        let calldata: Vec<u8> = inputs.input.as_bytes(context).to_vec();
-        let mem_offset = inputs.return_memory_offset.clone();
-
-        if inputs.gas_limit < PRECOMPILE_BASE_GAS {
-            return Some(CallOutcome::new(
-                InterpreterResult::new_oog(inputs.gas_limit, inputs.reservoir),
-                mem_offset,
-            ));
-        }
-
-        let Some(parsed) = decode_precompile_call(&calldata) else {
-            let mut gas =
-                Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit, inputs.reservoir);
-            let _ = gas.record_regular_cost(PRECOMPILE_BASE_GAS);
-            return Some(CallOutcome::new(
-                InterpreterResult::new(InstructionResult::Revert, Bytes::new(), gas),
-                mem_offset,
-            ));
-        };
-
-        if inputs.is_static && (!parsed.is_static_selector && parsed.value_attos > 0) {
-            return Some(CallOutcome::new(
-                InterpreterResult::new(
-                    InstructionResult::CallNotAllowedInsideStatic,
-                    Bytes::new(),
-                    Gas::new_spent_with_reservoir(inputs.gas_limit, inputs.reservoir),
-                ),
-                mem_offset,
-            ));
-        }
-
-        let remaining_for_callee = inputs.gas_limit.saturating_sub(PRECOMPILE_BASE_GAS);
-        let forwarded_gas = parsed.gas_bgu.min(remaining_for_callee);
-        let ucall = UniversalCall {
-            from: evm_identity(inputs.caller),
-            to_ee: EeId(parsed.target_ee),
-            target: EeIdentity {
-                ee: EeId(parsed.target_ee),
-                id: parsed.target,
-            },
-            value: BudAmount(parsed.value_attos),
-            input: parsed.input,
-            gas_limit: forwarded_gas,
-        };
-
-        match context.journaled_state.db_mut().universal_call(ucall) {
-            Ok(ures) => {
-                let total_cost = PRECOMPILE_BASE_GAS.saturating_add(ures.gas_used);
-                if total_cost > inputs.gas_limit {
-                    return Some(CallOutcome::new(
-                        InterpreterResult::new_oog(inputs.gas_limit, inputs.reservoir),
-                        mem_offset,
-                    ));
-                }
-                let mut gas =
-                    Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit, inputs.reservoir);
-                if !gas.record_regular_cost(total_cost) {
-                    return Some(CallOutcome::new(
-                        InterpreterResult::new_oog(inputs.gas_limit, inputs.reservoir),
-                        mem_offset,
-                    ));
-                }
-                let encoded = encode_precompile_return(ures.success, &ures.output);
-                Some(CallOutcome::new(
-                    InterpreterResult::new(InstructionResult::Return, Bytes::from(encoded), gas),
-                    mem_offset,
-                ))
-            }
-            Err(_) => {
-                let mut gas =
-                    Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit, inputs.reservoir);
-                let _ = gas.record_regular_cost(PRECOMPILE_BASE_GAS);
-                Some(CallOutcome::new(
-                    InterpreterResult::new(InstructionResult::Revert, Bytes::new(), gas),
-                    mem_offset,
-                ))
-            }
-        }
+        handle_universal_precompile_call(context, inputs)
     }
 }
 
@@ -1027,6 +941,16 @@ mod tests {
         // ABI return: word0 = 1 (ok), word1 = 64, word2 = 9 ("echo:ping")
         assert_eq!(res.output[31], 1);
         assert_eq!(&res.output[96..105], b"echo:ping");
+        // Verify UniversalCallExecuted(uint8,bytes,bool) log was emitted by 0x...B001
+        assert_eq!(host.logs.len(), 1);
+        assert_eq!(
+            host.logs[0].emitter.id.as_slice(),
+            UNIVERSAL_CALL_PRECOMPILE.as_slice()
+        );
+        assert_eq!(
+            host.logs[0].topics[0].as_slice(),
+            crate::precompile_universal::UNIVERSAL_CALL_EXECUTED_TOPIC0.as_slice()
+        );
     }
 
     #[test]
