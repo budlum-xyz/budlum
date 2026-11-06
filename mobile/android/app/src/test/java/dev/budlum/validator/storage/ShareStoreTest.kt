@@ -1,5 +1,11 @@
 package dev.budlum.validator.storage
 
+import java.io.File
+import java.nio.file.Files
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -63,12 +69,105 @@ class ShareStoreTest {
     }
 
     @Test
-    fun `android_low_space_releases_shares`() {
+    fun `duplicate segment never overwrites an existing share`() {
+        val original = byteArrayOf(1, 2, 3, 4)
+        assertTrue(store.writeShare(segmentA, original, quotaBytes = 100))
+        assertFalse(store.writeShare(segmentA, byteArrayOf(9, 9, 9), quotaBytes = 100))
+        assertArrayEquals(original, store.shareFile(segmentA).readBytes())
+        assertEquals(4L, store.storedBytes())
+        assertEquals(listOf("010aff"), store.bud3Dir.listFiles()!!.map { it.name })
+    }
+
+    @Test
+    fun `an existing dangling link cannot redirect a share write`() {
+        assertTrue(store.bud3Dir.mkdirs())
+        val outside = File(tmp.root, "outside")
+        Files.createSymbolicLink(store.shareFile(segmentA).toPath(), outside.toPath())
+        assertFalse(store.writeShare(segmentA, ByteArray(4), quotaBytes = 100))
+        assertFalse(outside.exists())
+    }
+
+    @Test
+    fun `admission refuses to cross the low space floor`() {
+        val almostFull = ShareStore(
+            noBackupFilesDir = tmp.root,
+            freeSpaceProvider = { ShareStore.LOW_SPACE_BYTES + 3 }
+        )
+        assertFalse(almostFull.writeShare(segmentA, ByteArray(4), quotaBytes = 100))
+        assertFalse(almostFull.shareFile(segmentA).exists())
+
+        val exactlyEnough = ShareStore(
+            noBackupFilesDir = tmp.root,
+            freeSpaceProvider = { ShareStore.LOW_SPACE_BYTES + 4 }
+        )
+        assertTrue(exactlyEnough.writeShare(segmentA, ByteArray(4), quotaBytes = 100))
+    }
+
+    @Test
+    fun `negative quota cannot delete stored shares`() {
+        assertTrue(store.writeShare(segmentA, ByteArray(4), quotaBytes = 100))
+        assertTrue(runCatching { store.enforceQuota(-1) }.isFailure)
+        assertTrue(store.shareFile(segmentA).exists())
+        assertEquals(4L, store.storedBytes())
+    }
+
+    @Test
+    fun `empty segment id cannot delete the store directory`() {
+        assertTrue(store.bud3Dir.mkdirs())
+        assertTrue(store.releaseShares(listOf(byteArrayOf())).isEmpty())
+        assertTrue(store.bud3Dir.isDirectory)
+        assertFalse(store.writeShare(byteArrayOf(), ByteArray(1), quotaBytes = 100))
+    }
+
+    @Test
+    fun `quota enforcement preserves files with unrecognized names`() {
+        assertTrue(store.writeShare(segmentA, byteArrayOf(1, 2), quotaBytes = 100))
+        val unknown = File(store.bud3Dir, "not-a-segment")
+        unknown.writeBytes(byteArrayOf(7, 8, 9))
+        val released = store.enforceQuota(0)
+        assertTrue(released.isEmpty())
+        assertArrayEquals(byteArrayOf(7, 8, 9), unknown.readBytes())
+        assertArrayEquals(byteArrayOf(1, 2), store.shareFile(segmentA).readBytes())
+    }
+
+    @Test
+    fun `concurrent stores cannot admit more than the quota`() {
+        val workers = 16
+        val bytesPerShare = 16_384
+        val ready = CountDownLatch(workers)
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(workers)
+        try {
+            val writes = (0 until workers).map { index ->
+                executor.submit<Boolean> {
+                    val concurrentStore = ShareStore(tmp.root) { Long.MAX_VALUE }
+                    ready.countDown()
+                    start.await()
+                    concurrentStore.writeShare(
+                        byteArrayOf(index.toByte()),
+                        ByteArray(bytesPerShare),
+                        quotaBytes = bytesPerShare.toLong(),
+                    )
+                }
+            }
+            assertTrue(ready.await(10, TimeUnit.SECONDS))
+            start.countDown()
+            assertEquals(1, writes.count { it.get(10, TimeUnit.SECONDS) })
+            assertEquals(bytesPerShare.toLong(), store.storedBytes())
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `low space is detected and explicit local release reports ids`() {
+        assertTrue(store.writeShare(segmentA, ByteArray(4), quotaBytes = 100))
         val lowSpace = ShareStore(
             noBackupFilesDir = tmp.root,
             freeSpaceProvider = { ShareStore.LOW_SPACE_BYTES - 1 }
         )
         assertTrue(lowSpace.needsReleaseDueToLowSpace())
+        assertFalse(lowSpace.writeShare(segmentB, ByteArray(4), quotaBytes = 100))
 
         val plenty = ShareStore(
             noBackupFilesDir = tmp.root,
@@ -76,8 +175,8 @@ class ShareStoreTest {
         )
         assertFalse(plenty.needsReleaseDueToLowSpace())
 
-        // The release path itself deletes the files and reports the ids.
-        assertTrue(lowSpace.writeShare(segmentA, ByteArray(4), quotaBytes = 100))
+        // This tests only local deletion. The durable chain release and repair
+        // protocol is not wired into this Android scaffold yet.
         val released = lowSpace.releaseShares(listOf(segmentA))
         assertEquals(listOf(segmentA), released)
         assertEquals(0L, lowSpace.storedBytes())
