@@ -20,6 +20,8 @@
 //! | [`custody`] | Sub-block tree, symbol root, the audit draw and custody proofs |
 //! | [`pipeline`] | Upload (content to record and symbols) and view (symbols to checked content) |
 //! | [`fountain`] | RFC 6330 per-segment encoder and decoder, and the streaming encoder |
+//! | [`live`] | Live stream T-Expansion: time segments, the `prev_object` chain, the ratioless send order |
+//! | [`live_broadcast`] | WP-55 2/N: the broadcast driver, the gateway door and the activation height |
 //!
 //! The commitment is fixed-size (32 bytes). The object is not fixed-size: it
 //! is the header plus the payload, and it is at most the header larger than
@@ -37,6 +39,8 @@ pub mod custody;
 pub mod dedup_index;
 pub mod fountain;
 pub mod limits;
+pub mod live;
+pub mod live_broadcast;
 pub mod meter;
 pub mod pipeline;
 pub mod placement;
@@ -52,5 +56,13 @@ pub use fountain::{
 };
 pub use admission::chain_admission_report;
 pub use limits::{Bud3Limits, Profile, ProfileId};
+pub use live::{
+    verify_chain, LiveActivation, LiveContext, LiveError, LiveFrame, LiveSegment, LiveStream,
+    RatiolessPlan, StreamEnd, ViewerTicket, ACTIVATION, LIVE_SEGMENT_MS, MAX_JOIN_LATENCY_MS,
+};
+pub use live_broadcast::{
+    BroadcastDriver, BroadcastError, LiveGateway, LiveGatewayRefusal, MAX_LIVE_PENDING_SYMBOLS,
+    MAX_LIVE_SUBSCRIBERS,
+};
 pub use meter::{Meter, MeterError};
 pub use segment::{object_commitment, segment_digest, ObjectCommitment, Segmentation};

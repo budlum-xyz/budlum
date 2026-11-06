@@ -161,3 +161,77 @@ unrelated findings; references to those records include their originating PR.
 Detailed red/green output, source/toolchain caveats, scope constraints and the
 remaining integration blockers are in `MOBILE_CORE_REVIEW.md`. No performance
 measurement, package completion or testnet readiness is claimed.
+## 3. Syntax audit of the two broken branches (method)
+
+PR #86 records BLG-298 from a hand inspection. This integrator repeated the
+check mechanically with the tree-sitter Rust grammar (version 0.26, grammar
+`tree_sitter_rust`) over every changed `.rs` file on PR #8 and PR #9. Files with
+`ERROR` or `MISSING` nodes are listed in
+`docs/audit/STACK_INTEGRATION_AUDIT_2026-11-06.md`, section 5. The result is a
+syntax finding, not a type-check: no crate registry is reachable in this
+workspace, so `cargo check` was not run. No other PR's branch was modified.
+
+## 4. What closing BLG-309 requires
+
+The two gates are ratchets. Raising either baseline is forbidden by the
+directive's "no softening" rule (0.3.1). The ten dead public functions and the
+two `admit_*` guards are the B.U.D. 3.0 object-lifecycle helpers written by the
+placement, limits, registry and segmentation packages. They must be called from
+a production admission path (WP-21) rather than exempted with prose. The
+proposed path is named in the integration audit; closing the finding needs that
+path plus a CI run showing both counts at or below their baselines.
+
+## 5. Evidence boundary
+
+No finding in this file is claimed fully closed. "Closed in code" means the
+tree change is present in a named commit of this branch; directive 0.3.5 still
+requires a CI run number, and `main` is red at the live base. No Rust toolchain
+exists in this workspace; `cargo`, `rustc`, `rustfmt` and `clippy` were not run
+locally. The evidence quoted above comes from live GitHub Actions annotations
+and job logs, which were readable through the API and the log host.
+
+## 6. Session integrator (PR #96): mechanically reproduced findings
+
+Source: `ops/scripts/stack_compatibility_audit.py`, run over the live snapshot
+`docs/audit/OPEN_PR_SNAPSHOT_2026-11-06.json` (75 open PRs). Full data:
+`docs/audit/STACK_COMPATIBILITY_DATA_2026-11-06.json`; readable report:
+`docs/audit/STACK_COMPATIBILITY_AUDIT_2026-11-06.md`. Every changed `.rs` blob
+on every open PR head was parsed with the tree-sitter Rust grammar; 1,522 blobs
+scanned, 11 with syntax findings, on three branches. Counts are Git observations,
+not measurements (directive 0.5).
+
+| ID | Severity | Finding | Evidence | State |
+|---|---|---|---|---|
+| BLG-314 | High | A third open PR ships syntactically invalid Rust: PR #55 `src/storage/bud3/private_dedup.rs` has a `MISSING` node at line 545 | mechanical audit, section 1 of the compatibility report | open; extends BLG-298, the branch is not modified here |
+| BLG-315 | Critical | The WP-46 rehearsal ceremony in PR #92 accepts empty `Full` claims, accepts eight duplicate records, publishes any `private_key` field and interpolates record filenames into Python source | PR #94 `tests/review/rehearsal_ceremony_regressions.py`, four failing checks against #92 head `9d532a8a`; source inspection of `ops/rehearsal/genesis_rehearsal.sh` | open; repaired on this branch, see slice 3/N |
+| BLG-316 | High | 497 paths are edited by more than one open PR and 103 new files are implemented more than once with different bytes | mechanical audit, sections 2 and 3 | open; this branch's carry-over policy is recorded in the compatibility report |
+| BLG-317 | High | The presence message has four different declared constant/digest shapes across `crates/budlum-types`, `mobile/core`, `src/registry` and `src/validators` (6/4/4/4 distinct lines) | mechanical audit, section 4; PR #91's BLG-301 | open; one canonical shape owed in slice 6/N |
+| BLG-318 | High | No gate in the tree can reject a syntactically broken `.rs` blob before it merges (BLG-299 unowned) | `xtask/gates/src/gates/` inventory; three broken branches in the live stack | owed: `rust_syntax_is_parseable`, slice 2/N |
+| BLG-319 | Medium | The single package register misstates WP-36/37/46 as unowned and WP-61 as T-Expansion | live `gh pr list` (PR #92) and directive 15.7 | closed in the register by slice 1/N |
+| BLG-320 | High | WP-28 2/2, WP-31 2/N and WP-32 2/N (subscriptions, SVM-state reads, Move worker, BCS, `Foreign::Aptos`, 0xBD alias) have no owner | PR #83, #89 and #93 section 3 bodies | owed: slice 5/N |
+
+Finding ids BLG-314 and up are allocated by this single ledger (BLG-313). No
+other PR was closed, merged, retargeted or edited.
+
+### Slice 2/N updates (PR #96)
+
+| ID | State after the slice |
+|---|---|
+| BLG-299 / BLG-318 | closed in code here: `rust-syntax-is-parseable` is registered in `xtask/gates/src/main.rs`, carries six canaries and is locked by `xtask/gates/tests/stack_compatibility.rs`. CI run number owed. Local replica evidence: `docs/audit/RUST_SYNTAX_GATE_VERIFICATION_2026-11-06.md`. |
+| BLG-314 | still open: PR #55's broken blob is reproduced and named, the branch itself is not modified. |
+| BLG-298 | reproduced mechanically with exact line numbers; the third broken branch (#55) is BLG-314. |
+
+### Slice 3/N updates (PR #96)
+
+| ID | State after the slice |
+|---|---|
+| BLG-315 | **closed in code here**: the WP-46 ceremony is fail-closed. Red: PR #94's harness fails 4/4 against #92 head `9d532a8a`; Green: the extended 10-test harness passes 10/10 on this branch. Exact outputs in `docs/audit/CEREMONY_DEFECT_REPAIR_2026-11-06.md`. CI run number owed; the harness is wired by `.github/workflows/ceremony.yml`. |
+| BLG-321 | High. PR #92's `mobile.yml` used four unpinned action tags, against directive 16.2 item 4, and shipped the WP-37 log-analyzer workspace without a CI job. **Fixed here** by SHA pins (peeled commits for annotated tags) and a `device-log-analyzer` job. |
+| BLG-319 | additionally corrected: WP-36/37/46 are `partial` (PR #92), not `undone`. |
+
+### Slice 4/N updates (PR #96)
+
+| ID | State after the slice |
+|---|---|
+| BLG-294 | WP-55 now has a 2/N owner. The ten remaining T-Expansion packages (WP-49..54, 56..60, 62..64) stay unowned. |
+| BLG-320 | still open here: WP-28/WP-31/WP-32 subscriptions and the Move surface are owed to slice 5/N. |
