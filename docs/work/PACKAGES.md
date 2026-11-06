@@ -6,4 +6,4 @@ SHA and a CI run number.
 
 | Package | Lane | Status | Pull requests | Notes |
 |---|---|---|---|---|
-| WP-11 | D | in progress, 2/N | this branch | Mobile core duty engine. Types crate, light client, UniFFI and libp2p are later slices. BLG-022, BLG-257 and BLG-259 stay open. |
+| WP-11 | D | in progress, 2/N | #82 | Mobile core duty engine. Types crate, light client, UniFFI and libp2p are later slices. BLG-022, BLG-257 and BLG-259 stay open. |
