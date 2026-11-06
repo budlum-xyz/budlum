@@ -91,6 +91,47 @@ def missing_module_files() -> list[str]:
     return problems
 
 
+def config_drift() -> list[str]:
+    """Chain ids, framework pins and scheme tables must not drift between
+    the REST gateway, the coordinator envelope, the supply-chain policy and
+    the golden vector.
+    """
+    problems = []
+    expected_chain = "205"
+    expected_commit = "81d89f428fe8e4b69d53b4916993e9a930afc37c"
+    chain_files = [
+        ROOT / "src/rpc/compat/aptos/mod.rs",
+        ROOT / "src/execution/coordinator/foreign/aptos.rs",
+    ]
+    for path in chain_files:
+        if not path.is_file():
+            problems.append(f"{path.relative_to(ROOT)} is missing")
+            continue
+        text = path.read_text()
+        if "APTOS_CHAIN_ID" not in text or expected_chain not in text:
+            problems.append(f"{path.relative_to(ROOT)}: APTOS_CHAIN_ID is not {expected_chain}")
+        if "0xBD" not in text and "MOVE_ALIAS_SCHEME_BYTE" not in text:
+            problems.append(f"{path.relative_to(ROOT)}: the 0xBD alias byte is not named")
+    for rel in [
+        "src/execution/coordinator/foreign/aptos.rs",
+        "execution/move/deny.toml",
+        "tests/vectors/aptos/pinned_scheme_ids.json",
+    ]:
+        path = ROOT / rel
+        if not path.is_file():
+            problems.append(f"{rel} is missing")
+        elif expected_commit not in path.read_text():
+            problems.append(f"{rel} does not pin {expected_commit}")
+    vector = ROOT / "tests/vectors/aptos/pinned_scheme_ids.json"
+    if vector.is_file():
+        data = json.loads(vector.read_text())
+        if 0xBD in data.get("scheme_ids", []):
+            problems.append("the pinned Scheme table uses the reserved 0xBD byte")
+        if data.get("reserved_byte_is_used") is not False:
+            problems.append("the golden vector does not record 0xBD as unused")
+    return problems
+
+
 def duplicate_endpoint_patterns() -> list[str]:
     problems = []
     aptos = ROOT / "src/rpc/compat/aptos/mod.rs"
@@ -115,6 +156,7 @@ def main() -> int:
     compat, rest = compat_tables()
     modules = missing_module_files()
     endpoints = duplicate_endpoint_patterns()
+    drift = config_drift()
 
     declared_not_classified = sorted(api - classes)
     classified_not_declared = sorted(classes - api)
@@ -159,6 +201,7 @@ def main() -> int:
         + [f"{ns}: compat method out of sync: {n}" for ns, ns2 in compat_missing.items() for n in ns2]
         + modules
         + endpoints
+        + drift
     )
 
     data = {
@@ -172,6 +215,7 @@ def main() -> int:
         "missing_named_methods": missing_named,
         "missing_module_files": modules,
         "duplicate_endpoint_patterns": endpoints,
+        "config_drift": drift,
         "problems": problems,
     }
     out = ROOT / args.out_json

@@ -26,11 +26,11 @@ least one 4 GB RAM device.
 
 Device tests (run on each matrix device, logs attached to the PR):
 
-- `android_specialuse_service_runs_24h` — the `specialUse` foreground service
+- `android_specialuse_service_runs_24h` - the `specialUse` foreground service
   stays in the foreground for 24 h; `onTimeout` is never called.
-- `android_battery_budget` — battery drain on an unplugged day under the
+- `android_battery_budget` - battery drain on an unplugged day under the
   default policy; target at most 5% per day, or a documented deviation.
-- `mobile_nat_matrix` — home NAT, carrier NAT (CGNAT) and IPv6: connection is
+- `mobile_nat_matrix` - home NAT, carrier NAT (CGNAT) and IPv6: connection is
   established in every network type; direct / hole-punched / relay ratios are
   written to the report.
 

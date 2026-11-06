@@ -1,0 +1,26 @@
+{
+  "checks": {
+    "action_pins": {
+      "count": 0,
+      "first": []
+    },
+    "config_parsing": {
+      "count": 0,
+      "first": []
+    },
+    "module_declarations": {
+      "count": 0,
+      "first": []
+    },
+    "turkish_characters": {
+      "count": 0,
+      "first": []
+    },
+    "typographic_dashes": {
+      "count": 0,
+      "first": []
+    }
+  },
+  "problems": 0,
+  "text_files_scanned": 1217
+}

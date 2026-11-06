@@ -87,7 +87,7 @@ that asks for `accountSubscribe` without the SVM worker does not hold a feed
 slot. The refusal names the Budlum door (`bud_getAccountProof` or
 `bud_getTransactionReceipt`) in the message and in the error data.
 
-* `slotSubscribe` → `slotNotification` (`slotUnsubscribe` to close) — reports
+* `slotSubscribe` -> `slotNotification` (`slotUnsubscribe` to close) - reports
   Budlum chain progress in the Solana slot shape (`{"parent","root","slot"}`).
   `slot` is the Budlum head height, `parent` is `slot-1` (genesis clamped to
   `0`), `root` is the last finalized Budlum height, never above `slot`. The
@@ -98,7 +98,7 @@ slot. The refusal names the Budlum door (`bud_getAccountProof` or
   64 slots are burst per tick, older heights are skipped, and a 5 s send
   timeout drops the subscription.
 * `accountSubscribe`, `signatureSubscribe`, `logsSubscribe`,
-  `programSubscribe` — refused by name (`-32004`) with the closest Budlum
+  `programSubscribe` - refused by name (`-32004`) with the closest Budlum
   door. They wait for the SVM worker.
 
 `slotSubscribe` shares the node-wide feed-slot budget (`MAX_SUBSCRIPTION_FEEDS`)
@@ -124,11 +124,11 @@ reason they are unavailable.
 
 The Solana gateway is served on two listeners:
 
-* the shared Budlum JSON-RPC listener — all `bud_*` methods plus the Solana
+* the shared Budlum JSON-RPC listener - all `bud_*` methods plus the Solana
   namespace (so a node without `--solana-listener` still answers the same
   vocabulary);
 * the dedicated loopback listener on `127.0.0.1:18548` (HTTP and WebSocket)
-  — only the Solana method table, so a Solana client cannot reach Budlum or
+  - only the Solana method table, so a Solana client cannot reach Budlum or
   operator methods through the compatibility port. It reuses the same
   `RpcSecurityLayer` (IP, origin, rate, authentication), body/connection
   limits and optional TLS as the primary public listener. The public node in
