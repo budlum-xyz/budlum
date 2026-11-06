@@ -4522,4 +4522,59 @@ mod tests {
             "G-4: a refused door must not create an account row"
         );
     }
+
+    /// Closing the entry to a layer must not close its exit.
+    ///
+    /// The AI layer had no chain-id gate before WP-45, so an operator bond
+    /// taken on testnet is legitimate existing state. `bond_ai_operator`
+    /// debits the balance and `AiOperatorUnbond` -> `AiOperatorWithdraw` is
+    /// the only path that returns it. A boundary guard that refuses those two
+    /// doors does not close a feature, it confiscates a bond - the same bug
+    /// `begin_unbonding` and the `Unstake` handler already document.
+    #[test]
+    fn a_bond_taken_before_the_closure_can_still_leave_testnet() {
+        let (_, testnet, _) = boundary_chain_ids();
+        let who = Address::from([27u8; 32]);
+        let mut state = AccountState::new();
+        let bond = state.required_ai_bond(testnet);
+        state.add_balance(&who, bond + 10_000);
+        state
+            .bond_ai_operator(&who, bond, testnet)
+            .expect("the bond was taken while the layer had no chain-id gate");
+        let after_bond = state.get_balance(&who);
+        assert_eq!(after_bond, 10_000, "the bond left the balance");
+
+        let unbond = Transaction::new_with_chain_id(
+            who,
+            Address::zero(),
+            0,
+            1,
+            0,
+            vec![],
+            testnet,
+            TransactionType::AiOperatorUnbond,
+        );
+        Executor::apply_transaction_checked(&mut state, &unbond)
+            .expect("closing the layer must not trap a bond taken while it was open");
+
+        let delay = state.registry.params().unbonding_epochs;
+        state.epoch_index = state.epoch_index.saturating_add(delay);
+        let withdraw = Transaction::new_with_chain_id(
+            who,
+            Address::zero(),
+            0,
+            1,
+            1,
+            vec![],
+            testnet,
+            TransactionType::AiOperatorWithdraw,
+        );
+        Executor::apply_transaction_checked(&mut state, &withdraw)
+            .expect("the exit door stays open on a closed chain");
+        assert_eq!(
+            state.get_balance(&who),
+            after_bond + bond - 2,
+            "the whole bond came back, less the two fees"
+        );
+    }
 }
