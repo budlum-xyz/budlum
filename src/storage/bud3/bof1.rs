@@ -601,7 +601,7 @@ mod tests {
     #[test]
     fn tampered_payload_does_not_match_the_content() {
         let mut obj = Object::raw_public(b"abc");
-        obj.payload = b"abd".to_vec();
+        obj.payload = b"axc".to_vec();
         assert_eq!(obj.raw_public_content(), Err(Bof1Error::ContentMismatch));
     }
 
