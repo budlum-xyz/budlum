@@ -119,6 +119,7 @@ mod gates {
     pub mod mermaid;
     pub mod metrics_are_written;
     pub mod minting_paths_are_counted;
+    pub mod mobile_validator_apps;
     pub mod module_coverage;
     pub mod multi_ratio_consensus;
     pub mod named_tests;
@@ -1521,6 +1522,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::bud3_codec_and_replace::self_test,
+    },
+    Gate {
+        name: "mobile-validator-apps",
+        replaces: None,
+        run: gates::mobile_validator_apps::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::mobile_validator_apps::self_test,
     },
 ];
 

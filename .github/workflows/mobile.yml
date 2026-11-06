@@ -1,0 +1,43 @@
+name: Mobile Android Validator
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "mobile/android/**"
+      - "src/registry/mobile_runtime.rs"
+      - "xtask/gates/src/gates/mobile_validator_apps.rs"
+      - ".github/workflows/mobile.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: mobile-android-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  android-validator-verify:
+    name: Android Mobile Validator & F-Droid Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Mobile runtime unit tests (WP-36, WP-38, WP-58)
+        run: cargo test --lib registry::mobile_runtime::tests --locked -- --nocapture
+      - name: Static gate (Android specialUse, F-Droid recipe, zero battery-ignore)
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- --self-test mobile-validator-apps
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- mobile-validator-apps

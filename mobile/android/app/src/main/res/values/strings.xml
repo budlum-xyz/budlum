@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Budlum Validator</string>
+    <string name="notification_channel_name">Budlum Mobile Validator Status</string>
+    <string name="disclosure_custody_notice">Your phone stores erasure-coded B.U.D. 3.0 shares. Single shares do not reveal content; public content is open to all and sealed content is encrypted. No mining runs on this device.</string>
+    <string name="security_keystore_tradeoff">Owner ML-DSA-87 spending requires biometric or PIN authentication. Operator ML-DSA-65 and BLS presence keys are Android Keystore AES-256-GCM wrapped for background duties and cannot spend your stake; use RotateOperatorKey if this phone is lost.</string>
+    <string name="action_register_validator">Create 24-Word Wallet &amp; Register Mobile Validator</string>
+    <string name="status_registered_active">Validator Active (Wi-Fi Only Default, Thermal Guard Locked)</string>
+    <string name="action_leave_validator">Leave &amp; Release Custody Shares (Unbond Stake)</string>
+</resources>

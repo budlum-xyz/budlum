@@ -1,0 +1,29 @@
+name: Mobile iOS Validator
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "mobile/ios/**"
+      - ".github/workflows/mobile-ios.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: mobile-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ios-opportunistic-verify:
+    name: iOS MobileOpportunistic Swift Package Tests
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Swift Package Build & Unit Tests (WP-38)
+        working-directory: mobile/ios
+        run: swift test --verbose

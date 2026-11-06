@@ -1,0 +1,36 @@
+Categories:
+  - Internet
+  - Security
+License: Apache-2.0
+SourceCode: https://github.com/lubothebook/budlum
+IssueTracker: https://github.com/lubothebook/budlum/issues
+
+AutoName: Budlum Validator
+Summary: Post-quantum B.U.D. 3.0 Mobile storage validator and light client
+Description: |-
+  Budlum Validator lets an Android phone (Android 10+) participate in the
+  Budlum network as a Mobile validator without proof-of-work mining,
+  proprietary Google Play Services dependencies, or third-party tracking SDKs.
+
+  * Stores erasure-coded B.U.D. 3.0 custody shares inside cloud-excluded storage.
+  * Defaults to unmetered Wi-Fi only and pauses automatically on thermal rise.
+  * Wraps operator ML-DSA-65 and BLS presence keys with Android Keystore / StrongBox.
+
+RepoType: git
+Repo: https://github.com/lubothebook/budlum.git
+
+Builds:
+  - versionName: 0.1.0-testnet
+    versionCode: 1
+    commit: HEAD
+    subdir: mobile/android/app
+    gradle:
+      - yes
+    ndk: 27.2.12479018
+    srclibs:
+      - rustup@1.27.1
+
+AutoUpdateMode: None
+UpdateCheckMode: None
+CurrentVersion: 0.1.0-testnet
+CurrentVersionCode: 1

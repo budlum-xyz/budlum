@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- XML character entities decode into native UTF-8 locale strings in aapt2. -->
+    <string name="app_name">Budlum Validator (TR)</string>
+    <string name="notification_channel_name">Budlum Mobil Validator</string>
+    <string name="disclosure_custody_notice">Telefonunuz B.U.D. 3.0 paylar&#x0131;n&#x0131; saklar; tek ba&#x015F;&#x0131;na paylar veriyi a&#x00E7;maz, m&#x00FC;h&#x00FC;rl&#x00FC; veriler &#x015F;ifrelidir ve cihazda madencilik yap&#x0131;lmaz.</string>
+    <string name="security_keystore_tradeoff">Sahip ML-DSA-87 harcamalar&#x0131; biyometri veya PIN ister. Operat&#x00F6;r ML-DSA-65 ve BLS varl&#x0131;k anahtarlar&#x0131; Android Keystore AES-256-GCM ile korunur ve stake harcayamaz; telefon kaybolursa RotateOperatorKey g&#x00F6;nderin.</string>
+    <string name="action_register_validator">24 Kelime C&#x00FC;zdan &amp; Mobil Validator Ba&#x015F;lat</string>
+    <string name="status_registered_active">Validator Aktif (Wi-Fi Varsay&#x0131;lan, Termal Koruma Kilitli)</string>
+    <string name="action_leave_validator">Ayr&#x0131;l &amp; Paylar&#x0131; B&#x0131;rak (Stake &#x00C7;&#x00F6;z)</string>
+</resources>

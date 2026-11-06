@@ -25,6 +25,7 @@ pub mod identity;
 pub mod identity_fill;
 pub mod invalid_vote;
 pub mod liveness;
+pub mod mobile_runtime;
 pub mod params;
 pub mod permissionless;
 pub mod poa_compliance;
