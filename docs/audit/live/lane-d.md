@@ -127,9 +127,10 @@ in this checkout: `docs/audit/` holds only `AUDIT_FINDINGS.md`, which carries ze
 `| BLG-NNN |` shape, and `TESTNET_TRACEABILITY.md`. The directive's own tables in section 14 give the
 id, importance, area, Turkish title and closing package, and those are what section 3 records.
 
-`docs/audit/FINDINGS.md` is written from the directive's own tables: identity, importance, area,
-English title, live state, test and closing package. Five records carry a state read from the live
-tree, and the rest stay `Open`, because without the descriptions the lane cannot honestly write
+`docs/audit/FINDINGS.md` is written from the directive's own tables in the section 14.1 vocabulary:
+identity, importance, area, English title, state, evidence, test, closing package and note. Four
+records reach `Closed` by rule 7 (already fixed, with the note and a pinning test or a build
+declaration). The rest stay `Open`, because without the record text the lane cannot honestly write
 "already fixed" or "invalid" for a record it did not read. Two ways forward, both allowed by the directive:
 
 1. the ledger is supplied to the session, and WP-04 item 3 is completed against it; or
