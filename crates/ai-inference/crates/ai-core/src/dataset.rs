@@ -159,7 +159,7 @@ impl SourceRef {
     }
 }
 
-/// Closed-circuit source validation errors (`BLG-160`).
+/// Convenience: closed-circuit source validation errors (`BLG-160`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceError {
     /// All-zero `content_id` does not identify content.

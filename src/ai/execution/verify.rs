@@ -40,9 +40,9 @@ impl ExecutionVerifyReport {
             && self.weights_bound
     }
 
-    /// Structural + STARK (when attempted).
+    /// Structural + STARK: requires `stark_ok == Some(true)` (`BLG-059`).
     pub fn is_fully_valid(&self) -> bool {
-        self.is_structurally_valid() && self.stark_ok != Some(false)
+        self.is_structurally_valid() && self.stark_ok == Some(true)
     }
 }
 
@@ -836,5 +836,28 @@ mod stark_path_e2e {
             build_matmul_guest_program(&a).unwrap(),
             "rebuilding from dims must reproduce the proved program"
         );
+    }
+
+    #[test]
+    fn blg_059_is_fully_valid_requires_stark_ok_true_and_clean_exit() {
+        let mut rep = ExecutionVerifyReport {
+            commitments_ok: true,
+            model_bound: true,
+            has_proof_bytes: true,
+            program_hash_nonzero: true,
+            program_hash_matches_model: true,
+            weights_bound: true,
+            stark_ok: None,
+            stark_error: None,
+        };
+        assert!(rep.is_structurally_valid());
+        assert!(
+            !rep.is_fully_valid(),
+            "unverified STARK must not count as full"
+        );
+        rep.stark_ok = Some(false);
+        assert!(!rep.is_fully_valid());
+        rep.stark_ok = Some(true);
+        assert!(rep.is_fully_valid());
     }
 }

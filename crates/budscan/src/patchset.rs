@@ -156,7 +156,7 @@ pub fn render_list(entries: &[PatchEntry]) -> String {
     render_in_order(&sorted)
 }
 
-/// Render the list back to text in its exact application order.
+/// Convenience: render the list back to text in its exact application order.
 ///
 /// Dependent patches must be applied in list order rather than alphabetical
 /// order; callers writing an ordered series use this function.

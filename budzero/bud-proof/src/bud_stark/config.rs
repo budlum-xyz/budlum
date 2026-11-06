@@ -95,10 +95,11 @@ pub struct StarkConfig<Pcs, Challenge, Challenger> {
     _phantom: PhantomData<Challenge>,
 }
 
+/// Convenience: canonical Goldilocks prime (`2^64 - 2^32 + 1`).
 pub const GOLDILOCKS_MODULUS: u64 = 18_446_744_069_414_584_321;
 
 impl<Pcs, Challenge, Challenger> StarkConfig<Pcs, Challenge, Challenger> {
-    /// Fallible constructor enforcing non-empty canonical Goldilocks security parameters.
+    /// Convenience: fallible constructor enforcing non-empty canonical Goldilocks security parameters.
     pub fn try_new_with_security(
         pcs: Pcs,
         challenger: Challenger,

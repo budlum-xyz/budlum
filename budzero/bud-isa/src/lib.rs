@@ -218,7 +218,9 @@ impl std::fmt::Display for DecodeError {
 
 impl std::error::Error for DecodeError {}
 
+/// Convenience: register index ceiling for canonical BudISA encoding.
 pub const MAX_REGISTER_INDEX: u8 = 31;
+/// Convenience: 55-bit canonical instruction mask (`[54:0]`).
 pub const CANONICAL_INSTRUCTION_MASK: u64 = (1u64 << 55) - 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,6 +233,7 @@ pub struct Instruction {
 }
 
 impl Instruction {
+    /// Convenience: fallible encoder rejecting out-of-range 5-bit registers.
     pub fn try_encode(&self) -> Result<u64, DecodeError> {
         if self.rd > MAX_REGISTER_INDEX {
             return Err(DecodeError::RegisterOutOfRange("rd", self.rd));
