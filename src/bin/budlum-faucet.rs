@@ -66,7 +66,7 @@ use clap::{Parser, Subcommand};
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::{Bytes, Incoming};
 use hyper::{Method, Request, Response, StatusCode};
-use prometheus::{IntCounter, Registry, TextEncoder};
+use prometheus::{Encoder as _, IntCounter, Registry, TextEncoder};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::process::ExitCode;
@@ -719,7 +719,8 @@ const ROUTE_HELP: &str =
 fn metrics_response(registry: &Registry) -> Response<Full<Bytes>> {
     let mut buffer = Vec::new();
     let encoder = TextEncoder::new();
-    if prometheus::Encoder::encode(&encoder, &registry.gather(), &mut buffer).is_err() {
+    let metric_families = registry.gather();
+    if encoder.encode(&metric_families, &mut buffer).is_err() {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "the faucet metrics could not be encoded",
