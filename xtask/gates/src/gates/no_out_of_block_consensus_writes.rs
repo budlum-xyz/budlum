@@ -522,9 +522,9 @@ mod tests {
         assert!(
             check_actor_state_access("let fee = self.blockchain.state.required_fee(&tx);").is_ok()
         );
-        assert!(
-            check_actor_state_access("let fee = self.blockchain.state.required_fee_override(&tx);")
-                .is_err()
-        );
+        assert!(check_actor_state_access(
+            "let fee = self.blockchain.state.required_fee_override(&tx);"
+        )
+        .is_err());
     }
 }
