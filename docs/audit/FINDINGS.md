@@ -59,9 +59,27 @@ number when one completes. Self-report is not evidence (§0.3 item 5).
 |---|---|---|---|---|
 | BLG-279 | Medium | A second `Address` definition survives in the VM workspace: `budzero/verifier-registry/src/address.rs:9` derives `Serialize`/`Deserialize` over `pub struct Address(pub [u8; 32])`, so it encodes as a 32-element byte array, while `core::address::Address` hand-writes a bare hex string. K-4 says wallet, chain and VM call one definition. `SlashingReport` (`evidence.rs:65`) and `Registration` (`registry.rs:106`) derive serde over that field, so the two workspaces already disagree on the JSON shape of the same concept. | İP-33 (owns the crate), coordinate with İP-11 job 1 | **Open — recorded, not closed here.** |
 
-Numbering: `BLG-268` is taken by #24, #13 claims `BLG-268`–`BLG-275`, and
-`BLG-276`–`BLG-278` are claimed by #36/#50/#68, so this row takes the next free
-id, `BLG-279`.
+| BLG-288 | High | The concept-name gate is red on `main` itself, independently of any PR. Four concepts measure above the committed baseline: `Budscan` 34/272 vs 33/268, `Tarif` 52/1444 vs 51/1442, `PUL` 14/100 vs 13/99, `Gövde` 2/2 vs 1/1. Each is exactly **+1 file**, and the deltas are the gate's own detection literals: `xtask/gates/src/gates/geiger.rs` (Budscan 4), `bud3_forbidden_phrases.rs` (Tarif 2, Gövde 1) and `module_coverage.rs` (PUL 1). `xtask` is in `SCAN_ROOTS` and none of the four carries an `allow_paths` entry, so a detector is counted as a use of the name it detects. `compare()` fails on any inequality and `check(root, write=true)` refuses to write a raised count, so the documented `BUDLUM_CONCEPT_NAMES_WRITE=1` escape cannot clear it. | naming-policy owner; `config/naming/concept_map.toml` is edited by #8/#20/#24/#31/#43/#50/#60/#68 | **Open — recorded, not closed here.** |
+
+Numbering: `BLG-268` is taken by #24, #13 claims `BLG-268`–`BLG-275`,
+`BLG-276`–`BLG-281` are claimed by #36/#50/#68 and #79 carries `BLG-280`/`BLG-287`,
+so these rows take `BLG-279` and `BLG-288`, both verified free in every open PR
+body and in every open `FINDINGS.md` patch.
+
+BLG-288 is not fixed here for three reasons. The fix is an `allow_paths` entry
+for `xtask/gates/` (or equivalent) in `config/naming/concept_map.toml`, which is a
+naming-policy decision, not a WP-45/WP-11 change; that file and the baseline are
+shared append-only and already held by eight open PRs; and this PR's own measured
+delta is **0 matches / 0 files**, so it neither causes nor worsens the drift.
+
+Two limits on that row. It was measured with a faithful replication of
+`measure()` and `compare()` — same `SCAN_ROOTS`, `SKIP_DIRS`, `MAX_FILE_BYTES`,
+`global_allow_paths`, per-concept scoping and per-line counting — not with the
+Rust gate, which cannot run here (S-1). And while reading the map, the `PUL` and
+`Tarif` entries were seen to carry `\\b` inside TOML **literal** strings, so the
+compiled regex is a literal backslash followed by `b`, not a word boundary;
+those patterns are inert today. Correcting the escaping would raise the counts
+sharply, so it has to land together with a baseline decision, not before it.
 
 Why this PR does not fix it: nothing depends on `verifier-registry` today (it is
 a leaf member of the `budzero` workspace), so no wire crosses yet and there is
