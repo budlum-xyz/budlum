@@ -252,7 +252,8 @@ impl PoaMembershipRegistry {
     pub fn root_with_expiry(&self, kyc_expiry: &BTreeMap<(DomainId, Address), u64>) -> [u8; 32] {
         use sha3::{Digest, Sha3_256};
         let mut hasher = Sha3_256::new();
-        hasher.update(b"BDLM_POA_ADMISSION_ROOT_V2");
+        hasher.update(b"BDLM_POA_ADMISSION_ROOT_V1");
+        hasher.update([2u8]);
         hasher.update((self.admins.len() as u64).to_le_bytes());
         for ((domain, admin), ()) in &self.admins {
             hasher.update(domain.to_le_bytes());

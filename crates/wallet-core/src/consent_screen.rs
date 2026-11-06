@@ -6,8 +6,8 @@
 
 use sha3::{Digest, Sha3_256};
 
-const TAG_CONSENT_GRANT_V1: &[u8] = b"BDLM_CONSENT_BLIND_GRANT_V1";
-const TAG_CONSENT_HANDLE_V1: &[u8] = b"BDLM_CONSENT_REVOCATION_V1";
+const TAG_CONSENT_GRANT_V1: &[u8] = b"budlum/consent/blind-grant/v1";
+const TAG_CONSENT_HANDLE_V1: &[u8] = b"budlum/consent/revocation/v1";
 const HASH_SUITE_SHA3_256_V1: u8 = 0x02;
 
 fn hash_prefixed(tag: &[u8], parts: &[&[u8]]) -> [u8; 32] {

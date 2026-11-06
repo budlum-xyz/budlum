@@ -141,7 +141,7 @@ impl DeterministicInferenceProfile {
         };
         let seed_le = self.sampling_seed.to_le_bytes();
         Ok(sha256_prefixed(
-            b"BDLM_AI_DIP_V2",
+            b"budlum/ai/dip/v2",
             &[
                 &self.model_id,
                 &self.weights_root,
@@ -177,7 +177,7 @@ pub fn derive_committee_seed(
     let req_ep = request_epoch.to_le_bytes();
     let sd_ep = seed_epoch.to_le_bytes();
     Ok(sha256_prefixed(
-        b"BDLM_AI_COMMITTEE_SEED_V1",
+        b"budlum/ai/committee-seed/v1",
         &[request_id, &req_ep, &sd_ep, epoch_randomness],
     ))
 }
@@ -191,7 +191,7 @@ pub fn is_sampled_for_audit(seed: &[u8; 32], request_id: &[u8; 32], sampling_bps
     if sampling_bps >= 10_000 {
         return true;
     }
-    let digest = sha256_prefixed(b"BDLM_AI_SAMPLE_V1", &[seed, request_id]);
+    let digest = sha256_prefixed(b"budlum/ai/sample/v1", &[seed, request_id]);
     let mut low = [0u8; 8];
     low.copy_from_slice(&digest[..8]);
     let bucket = u64::from_le_bytes(low) % 10_000;
@@ -262,7 +262,7 @@ impl TileStepProof {
         let rhs_b = encode_i32_slice(&rhs);
         let out_b = encode_i32_slice(&out);
         let step_commitment = sha256_prefixed(
-            b"BDLM_AI_TILE64_V1",
+            b"budlum/ai/tile64/v1",
             &[&request_id, &step_le, &weights_root, &lhs_b, &rhs_b, &out_b],
         );
         Ok(Self {

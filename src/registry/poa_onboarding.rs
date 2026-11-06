@@ -430,7 +430,7 @@ impl PoAOnboarding {
         use sha3::{Digest, Sha3_256};
         let base = self.registry.root_with_expiry(&self.kyc_expiry);
         let mut hasher = Sha3_256::new();
-        hasher.update(b"BDLM_POA_ONBOARDING_ROOT_V2");
+        hasher.update(b"budlum/poa/onboarding-root/v2");
         hasher.update(base);
         hasher.update((self.audit.len() as u64).to_le_bytes());
         for ev in &self.audit {
