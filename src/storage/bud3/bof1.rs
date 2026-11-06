@@ -278,8 +278,8 @@ impl Object {
             }
             return Ok(Self::raw_public(content));
         }
-        let decoded = bud_codec::decode(codec, &payload, id.len)
-            .map_err(|_| Bof1Error::ContentMismatch)?;
+        let decoded =
+            bud_codec::decode(codec, &payload, id.len).map_err(|_| Bof1Error::ContentMismatch)?;
         if decoded != content {
             return Err(Bof1Error::ContentMismatch);
         }
@@ -601,7 +601,7 @@ mod tests {
     #[test]
     fn tampered_payload_does_not_match_the_content() {
         let mut obj = Object::raw_public(b"abc");
-        obj.payload = b"abd".to_vec();
+        obj.payload = b"axc".to_vec();
         assert_eq!(obj.raw_public_content(), Err(Bof1Error::ContentMismatch));
     }
 
