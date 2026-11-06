@@ -14,6 +14,7 @@
 //! | [`rule`] | Class rules, templates, interfaces, conditions |
 //! | [`registry`] | The state: classes, placements, departures, home calls |
 //! | [`tx`] | `ObjectLayerTx` and the activation gate |
+//! | [`metrics`] | The metric table's duration rings and counters, derived and never hashed |
 //! | [`family`] | Everything family-specific, behind `FamilyProfile` |
 //!
 //! # Testnet
@@ -44,6 +45,7 @@
 pub mod charter;
 pub mod family;
 pub mod ids;
+pub mod metrics;
 pub mod pairs;
 pub mod registry;
 pub mod rule;
@@ -52,6 +54,7 @@ pub mod tx;
 pub use charter::{CanonicalCodeHashes, CharterStatus, CodeProof, DataPolicy, DomainCharter};
 pub use family::{profile_for, AssetKind, FamilyProfile, HomeVmFamily};
 pub use ids::{AssetClassId, AssetId, DepartureId, DependencyId, HomeIdentity};
+pub use metrics::{DomainMetrics, ObjectLayerMetrics, Ring, Series};
 pub use registry::{
     ChallengeStatus, FidelityChallenge, ObjectLayerParams, ObjectLayerRegistry, Refusal,
 };

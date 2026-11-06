@@ -257,6 +257,10 @@ pub mod bud3_door;
 pub mod bud3_live;
 #[cfg(test)]
 pub mod bud3_private_dedup;
+// The object layer's metric surface (card step 10): the duration rings and the
+// counters the Section 9 table names.
+#[cfg(test)]
+pub mod object_layer_metrics;
 // WP-19: the object path, the two paths, the video commitment, the text form
 // and the parsers (Section 6.4, 6.5, 6.15, 6.23 T9 and T10).
 #[cfg(test)]
