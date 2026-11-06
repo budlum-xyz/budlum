@@ -107,3 +107,11 @@ not measurements (directive 0.5).
 
 Finding ids BLG-314 and up are allocated by this single ledger (BLG-313). No
 other PR was closed, merged, retargeted or edited.
+
+### Slice 2/N updates (PR #96)
+
+| ID | State after the slice |
+|---|---|
+| BLG-299 / BLG-318 | closed in code here: `rust-syntax-is-parseable` is registered in `xtask/gates/src/main.rs`, carries six canaries and is locked by `xtask/gates/tests/stack_compatibility.rs`. CI run number owed. Local replica evidence: `docs/audit/RUST_SYNTAX_GATE_VERIFICATION_2026-11-06.md`. |
+| BLG-314 | still open: PR #55's broken blob is reproduced and named, the branch itself is not modified. |
+| BLG-298 | reproduced mechanically with exact line numbers; the third broken branch (#55) is BLG-314. |
