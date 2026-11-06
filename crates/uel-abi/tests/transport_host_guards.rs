@@ -20,14 +20,10 @@ fn envelope(id: u64, body: pb::envelope::Body) -> pb::Envelope {
     }
 }
 
-fn start_read_request() -> (
-    UnixStream,
-    JoinHandle<Result<ServeEnd, TransportError>>,
-) {
+fn start_read_request() -> (UnixStream, JoinHandle<Result<ServeEnd, TransportError>>) {
     let (mut peer, worker_stream) = UnixStream::pair().expect("socket pair");
-    let worker = thread::spawn(move || {
-        serve_connection(worker_stream, &mut MockEe::new(EeId::EVM))
-    });
+    let worker =
+        thread::spawn(move || serve_connection(worker_stream, &mut MockEe::new(EeId::EVM)));
     write_frame(
         &mut peer,
         &envelope(1, pb::envelope::Body::Hello(pb::Hello { ee: 1 })),
@@ -101,7 +97,10 @@ fn uel_abi_worker_rejects_malformed_host_replies() {
         let (mut peer, worker) = start_read_request();
         let result = match case {
             0 => None,
-            1 => Some(pb::host_response::Result::Balance(pb::Amount { hi: 0, lo: 1 })),
+            1 => Some(pb::host_response::Result::Balance(pb::Amount {
+                hi: 0,
+                lo: 1,
+            })),
             _ => Some(pb::host_response::Result::Error(pb::HostError {
                 code: 99,
                 message: "undefined error code".into(),
@@ -144,5 +143,8 @@ fn uel_abi_valid_host_refusal_remains_deterministic() {
     };
     assert_eq!(outcome.status, pb::OutcomeStatus::Revert as i32);
     drop(peer);
-    assert_eq!(worker.join().expect("worker").expect("clean end"), ServeEnd::Closed);
+    assert_eq!(
+        worker.join().expect("worker").expect("clean end"),
+        ServeEnd::Closed
+    );
 }

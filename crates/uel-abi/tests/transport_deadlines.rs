@@ -17,9 +17,7 @@ use std::time::{Duration, Instant};
 
 static SOCKET_SEQ: AtomicU32 = AtomicU32::new(0);
 
-fn spawn_peer(
-    peer: impl FnOnce(UnixStream) + Send + 'static,
-) -> (PathBuf, JoinHandle<()>) {
+fn spawn_peer(peer: impl FnOnce(UnixStream) + Send + 'static) -> (PathBuf, JoinHandle<()>) {
     let path = std::env::temp_dir().join(format!(
         "uel-deadline-{}-{}.sock",
         std::process::id(),
@@ -121,10 +119,15 @@ fn uel_abi_unrepresentable_deadline_does_not_panic() {
         let _ = serve_connection(stream, &mut MockEe::new(EeId::EVM));
     });
     let mut client = EeClient::new(&path, EeId::EVM);
-    client.validate_deploy(b"first").expect("transport").expect("code");
+    client
+        .validate_deploy(b"first")
+        .expect("transport")
+        .expect("code");
     client = client.with_timeout(Duration::MAX);
     assert_eq!(
-        client.validate_deploy(b"second").expect_err("invalid budget"),
+        client
+            .validate_deploy(b"second")
+            .expect_err("invalid budget"),
         TransportError::Timeout
     );
     assert!(!client.is_connected());
@@ -173,7 +176,10 @@ fn uel_abi_unusable_final_response_poisons_the_connection() {
         });
         let mut client = EeClient::new(&path, EeId::EVM);
         assert!(client.validate_deploy(b"code").is_err(), "case {case}");
-        assert!(!client.is_connected(), "case {case} retained a poisoned stream");
+        assert!(
+            !client.is_connected(),
+            "case {case} retained a poisoned stream"
+        );
         drop(client);
         worker.join().expect("peer");
         std::fs::remove_file(path).expect("remove socket");

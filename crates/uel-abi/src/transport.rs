@@ -426,10 +426,7 @@ impl EeClient {
         }
         let id = self.take_request_id();
         let result = match self.stream.as_mut() {
-            Some(stream) => write_frame(
-                &mut DeadlineIo { stream, deadline },
-                &envelope(id, body),
-            ),
+            Some(stream) => write_frame(&mut DeadlineIo { stream, deadline }, &envelope(id, body)),
             None => return Err(TransportError::Protocol("no connection".into())),
         };
         if let Err(error) = result {
@@ -441,10 +438,7 @@ impl EeClient {
 
     /// A malformed final response is as untrustworthy as a failed read.
     /// Drop the connection even when framing and request correlation passed.
-    fn finish<T>(
-        &mut self,
-        result: Result<T, TransportError>,
-    ) -> Result<T, TransportError> {
+    fn finish<T>(&mut self, result: Result<T, TransportError>) -> Result<T, TransportError> {
         if result.is_err() {
             self.stream = None;
         }
