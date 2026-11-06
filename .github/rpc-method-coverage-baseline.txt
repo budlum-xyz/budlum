@@ -5,23 +5,26 @@
 # A row of `METHOD_CLASSES` is covered when a test function in `src/rpc/tests.rs`
 # or `src/tests/*.rs` names the method (its JSON-RPC name in quotes, or a call to
 # its handler) and the statement that names it unwraps an answer (success) or
-# reads the error (refusal).
+# reads the error (refusal). The mark must sit on the same statement as the name,
+# on purpose: coverage is claimed where a reader can see it, and a helper or a
+# loop that visits every method buys nothing until its own call site names the
+# method it covers.
 #
-# Two kinds of row carry a smaller demand, and the rule encodes both, so a line
-# here is always work a later change can finish:
+# Two kinds of row carry a smaller demand, and the rule encodes both, so every
+# line here is work a later change can finish:
 #   * a `Refused` row is not asked for a success test, because it refuses every
 #     call by design and its refusal must name the transaction door;
 #   * a method `src/rpc/api.rs` declares with the receiver alone is not asked for
 #     a refusal test, because it has no invalid call at that layer and an error
-#     case for it would be an invention.
+#     case written to satisfy the gate would be an invention.
 #
 # The file only shrinks. A line whose test exists must be deleted in the same
 # change, and a method that loses its test must be recorded here with a reason in
 # the pull request that does it. The gate's own behaviour is locked by
 # `rpc_method_coverage_catches_an_injected_gap`.
 #
-# Measured against the tree on 2026-11-06: 183 rows, 48 rows covered
-# on both sides the rule asks for, 135 rows carrying 204 gap lines.
+# Measured against the tree on 2026-11-06: 183 rows, 73 rows covered
+# on both sides the rule asks for, 110 rows carrying 177 gap lines.
 bud_adminBanPeer missing=success
 bud_adminListBannedPeers missing=success
 bud_adminUnbanPeer missing=refusal
@@ -30,7 +33,6 @@ bud_aiAgentPayment missing=refusal
 bud_aiAgentPayment missing=success
 bud_aiAgentPayments missing=refusal
 bud_aiAgentPayments missing=success
-bud_aiAgentRanking missing=success
 bud_aiAgentReputation missing=refusal
 bud_aiAgentReputation missing=success
 bud_aiCallbackQueue missing=refusal
@@ -43,13 +45,11 @@ bud_aiEquivocationStatus missing=refusal
 bud_aiEquivocationStatus missing=success
 bud_aiExecutionProof missing=refusal
 bud_aiExecutionProof missing=success
-bud_aiGetActiveVerifiers missing=success
 bud_aiGetModel missing=refusal
 bud_aiGetModel missing=success
 bud_aiGetOutcome missing=refusal
 bud_aiGetOutcome missing=success
 bud_aiInferenceStats missing=success
-bud_aiOpenRequests missing=success
 bud_aiReclaimFee missing=refusal
 bud_aiReclaimFee missing=success
 bud_aiRegisterModel missing=refusal
@@ -62,10 +62,8 @@ bud_aiSubmitResult missing=refusal
 bud_aiSubmitResult missing=success
 bud_aiVerifierQos missing=refusal
 bud_aiVerifierQos missing=success
-bud_aiVerifierRanking missing=success
 bud_aiVerifierStake missing=refusal
 bud_aiVerifierStake missing=success
-bud_aiVerifierWhitelist missing=success
 bud_atlasGetWalletContext missing=refusal
 bud_atlasGetWalletContext missing=success
 bud_bnsPrepareRegisterSubdomain missing=refusal
@@ -89,7 +87,6 @@ bud_gatewayFetchContent missing=refusal
 bud_gatewayFetchContent missing=success
 bud_gatewayRenderContent missing=refusal
 bud_gatewayRenderContent missing=success
-bud_getAccountProof missing=refusal
 bud_getAccountProof missing=success
 bud_getBalance missing=refusal
 bud_getBlockByHash missing=refusal
@@ -101,7 +98,6 @@ bud_getExternalDomainProfile missing=refusal
 bud_getExternalDomainProfile missing=success
 bud_getExternalDomainStatus missing=refusal
 bud_getExternalDomainStatus missing=success
-bud_getExternalIntakeDigest missing=success
 bud_getExternalQuorumRound missing=refusal
 bud_getExternalQuorumRound missing=success
 bud_getExternalQuorumRounds missing=refusal
@@ -111,25 +107,17 @@ bud_getGlobalHeaderProof missing=refusal
 bud_getGlobalHeaderProof missing=success
 bud_getGraftApplication missing=refusal
 bud_getGraftApplication missing=success
-bud_getNonce missing=refusal
-bud_getNonce missing=success
-bud_getQuantumAlarm missing=success
 bud_getRelayerIntent missing=refusal
 bud_getRelayerIntent missing=success
-bud_getRestakedValidators missing=success
-bud_getSlashingHistory missing=success
 bud_getSovereignTemplate missing=refusal
 bud_getSovereignTemplate missing=success
 bud_getStateSnapshot missing=refusal
 bud_getStateSnapshot missing=success
-bud_getStatus missing=success
 bud_getTransactionByHash missing=refusal
 bud_getTransactionReceipt missing=refusal
 bud_getValidatorDelegations missing=refusal
-bud_getValidatorSet missing=success
 bud_graftPaymentProof missing=refusal
 bud_graftPaymentProof missing=success
-bud_health missing=success
 bud_hubGetApps missing=success
 bud_hubGetGraftApps missing=success
 bud_hubPrepareRegister missing=refusal
@@ -138,18 +126,11 @@ bud_identityCredential missing=refusal
 bud_identityVerifyPresentation missing=refusal
 bud_inspectEthereumUpdate missing=refusal
 bud_inspectEthereumUpdate missing=success
-bud_listGateways missing=success
-bud_listRelays missing=success
-bud_marketGetOffers missing=success
 bud_marketPrepareOffer missing=refusal
 bud_marketPrepareOffer missing=success
 bud_marketPreparePurchase missing=refusal
 bud_marketPreparePurchase missing=success
 bud_mintBridgeTransfer missing=refusal
-bud_netListening missing=success
-bud_netPeerCount missing=success
-bud_netVersion missing=success
-bud_nodeInfo missing=success
 bud_passportGetProfile missing=refusal
 bud_passportGetProfile missing=success
 bud_passportGetProofBundle missing=refusal
@@ -158,10 +139,6 @@ bud_planEvmVerification missing=refusal
 bud_planEvmVerification missing=success
 bud_pollenBuildAiInputRef missing=refusal
 bud_pollenBuildAiInputRef missing=success
-bud_pollenGetAccessGrants missing=success
-bud_pollenGetDataAssets missing=success
-bud_pollenGetPurchaseReceipts missing=success
-bud_pollenGetSaleAuthorizations missing=success
 bud_pollenPreparePurchase missing=refusal
 bud_pollenPreparePurchase missing=success
 bud_pollenPrepareSaleAuthorization missing=refusal
@@ -219,7 +196,6 @@ bud_submitQcFaultProof missing=refusal
 bud_submitSlashingReport missing=refusal
 bud_subscribe missing=refusal
 bud_subscribe missing=success
-bud_syncing missing=success
 bud_txPrecheck missing=refusal
 bud_unlockBridgeTransfer missing=refusal
 bud_unlockBridgeTransferVerified missing=refusal

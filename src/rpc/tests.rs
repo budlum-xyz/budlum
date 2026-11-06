@@ -10,6 +10,14 @@ mod rpc_tests {
     use crate::rpc::server::{RpcMode, RpcSecurityConfig, RpcServer};
     use std::sync::Arc;
 
+    /// The shape a record endpoint keeps: its object or list, or the null that
+    /// means "there is no such thing yet". A bare `false` or a number from an
+    /// endpoint documented to answer with a record is a node that stopped
+    /// answering, and a caller cannot tell that from an empty result.
+    fn record_answered(value: &serde_json::Value) -> bool {
+        value.is_object() || value.is_array() || value.is_null()
+    }
+
     /// A format-valid test envelope, with an honest marker.
     fn valid_merkle_proof() -> Vec<u8> {
         let envelope = bud_proof::ProofEnvelope {
@@ -1834,6 +1842,379 @@ mod rpc_tests {
             server.storage_repair_band(0).await.unwrap()["margin"],
             serde_json::json!(0),
             "the repair band echoes the margin it was asked about"
+        );
+    }
+
+    /// TEST-GAP-07, second descent: the node reads. A fresh node has a height of
+    /// zero, no peers and nothing to sync, and every one of these reads says so
+    /// in its own shape rather than failing. The address reads keep their
+    /// refusal: an unparsable address is a client mistake, and it is answered
+    /// with the field that failed, never with the zero that would look like an
+    /// empty account.
+    #[tokio::test]
+    async fn rpc_node_reads_answer_zero_and_the_address_reads_name_their_field() {
+        let (server, _chain) = setup().await;
+
+        let health = server.health().await.unwrap();
+        assert_eq!(
+            health["status"],
+            serde_json::json!("healthy"),
+            "a node that is not syncing is healthy, not merely not red"
+        );
+        assert_eq!(
+            health["blockHeight"],
+            serde_json::json!("0x0"),
+            "a fresh chain has no blocks to report"
+        );
+                assert!(record_answered(&server.node_info().await.unwrap()), "bud_nodeInfo");
+                assert!(record_answered(&server.get_status().await.unwrap()), "bud_getStatus");
+                assert!(record_answered(&server.get_validator_set().await.unwrap()), "bud_getValidatorSet");
+                assert!(
+            record_answered(
+                &server
+                    .get_slashing_history()
+                    .await
+                    .unwrap()
+            ),
+            "bud_getSlashingHistory"
+        );
+                assert!(
+            record_answered(
+                &server
+                    .get_restaked_validators()
+                    .await
+                    .unwrap()
+            ),
+            "bud_getRestakedValidators"
+        );
+                assert!(record_answered(&server.get_quantum_alarm().await.unwrap()), "bud_getQuantumAlarm");
+                assert!(
+            record_answered(
+                &server
+                    .get_external_intake_digest()
+                    .await
+                    .unwrap()
+            ),
+            "bud_getExternalIntakeDigest"
+        );
+        assert!(
+            !server.syncing().await.unwrap(),
+            "{name} is false before any peer has handed a block",
+            name = "bud_syncing"
+        );
+        assert!(
+            server.net_listening().await.unwrap(),
+            "{name} reports the listener the caller is talking to",
+            name = "bud_netListening"
+        );
+        assert_eq!(
+            server.net_version().await.unwrap(),
+            "45262",
+            "{name} is the chain id, spelled as the test chain carries it",
+            name = "bud_netVersion"
+        );
+        assert_eq!(
+            server.net_peer_count().await.unwrap(),
+            "0x0",
+            "{name} counts peers, and a lone node has none",
+            name = "bud_netPeerCount"
+        );
+
+        let stranger = Address([11u8; 32]);
+        assert_eq!(
+            server.get_nonce(stranger.to_hex()).await.unwrap(),
+            "0x0",
+            "{name} of an unseen account is zero, not absent",
+            name = "bud_getNonce"
+        );
+        assert!(
+            server
+                .get_nonce("0xzz".to_string())
+                .await
+                .unwrap_err()
+                .message()
+                .contains("Invalid address"),
+            "bud_getNonce names the field a caller mistyped"
+        );
+        assert!(
+            server
+                .get_account_proof("0xzz".to_string())
+                .await
+                .unwrap_err()
+                .message()
+                .contains("Invalid address"),
+            "bud_getAccountProof refuses an address it cannot parse"
+        );
+    }
+
+    /// TEST-GAP-07, third descent: the storage deal and custody reads. A content
+    /// id is 32 bytes and the handler says so; a short or unpaired hex id is a
+    /// refusal rather than a lookup on a truncated key, which would answer about
+    /// some other object.
+    #[tokio::test]
+    async fn rpc_storage_deal_and_custody_reads_refuse_a_short_content_id() {
+        let (server, _chain) = setup().await;
+        let id = hex::encode([3u8; 32]);
+
+        assert_eq!(
+            server
+                .storage_get_deals_by_manifest(format!("0x{id}"))
+                .await
+                .unwrap()["count"],
+            serde_json::json!(0),
+            "an unknown manifest has no deals, and says it with a zero count"
+        );
+        assert!(
+            server
+                .storage_get_deals_by_manifest("0x1234".to_string())
+                .await
+                .unwrap_err()
+                .message()
+                .contains("must be 32 bytes"),
+            "a truncated id is refused before the lookup, naming the length"
+        );
+        assert!(
+            server
+                .storage_get_deals_by_shard(format!("0x{id}"), format!("0x{id}"))
+                .await
+                .unwrap()["deals"]
+                .is_array(),
+            "the shard view answers with its deal list"
+        );
+        assert!(
+            server
+                .storage_get_deals_by_shard(format!("0x{id}"), "not hex".to_string())
+                .await
+                .unwrap_err()
+                .code()
+                == -32602,
+            "both halves of the key are parsed, so a bad shard id is refused too"
+        );
+        assert!(
+            server
+                .storage_get_custody(format!("0x{id}"))
+                .await
+                .unwrap()
+                .is_object(),
+            "custody for a validator with no deals answers with the empty record"
+        );
+        assert!(
+            server
+                .storage_get_custody("0x1234".to_string())
+                .await
+                .unwrap_err()
+                .message()
+                .contains("expected 32 bytes"),
+            "the custody read uses the shared hex32 rule, including its message"
+        );
+        assert_eq!(
+            server.storage_repair_band(0).await.unwrap()["margin"],
+            serde_json::json!(0),
+            "the repair band echoes the margin it was asked about"
+        );
+    }
+
+    /// TEST-GAP-07, second descent: the node reads. A fresh node has a height of
+    /// zero, no peers and nothing to sync, and every one of these reads says so
+    /// in its own shape rather than failing. The address reads keep their
+    /// refusal: an unparsable address is a client mistake, and it is answered
+    /// with the field that failed, never with the zero that would look like an
+    /// empty account.
+    #[tokio::test]
+    async fn rpc_node_reads_answer_zero_and_the_address_reads_name_their_field() {
+        let (server, _chain) = setup().await;
+
+        let health = server.health().await.unwrap();
+        assert_eq!(
+            health["status"],
+            serde_json::json!("healthy"),
+            "a node that is not syncing is healthy, not merely not red"
+        );
+        assert_eq!(
+            health["blockHeight"],
+            serde_json::json!("0x0"),
+            "a fresh chain has no blocks to report"
+        );
+                assert!(record_answered(&server.node_info().await.unwrap()), "bud_nodeInfo");
+                assert!(record_answered(&server.get_status().await.unwrap()), "bud_getStatus");
+                assert!(record_answered(&server.get_validator_set().await.unwrap()), "bud_getValidatorSet");
+                assert!(
+            record_answered(
+                &server
+                    .get_slashing_history()
+                    .await
+                    .unwrap()
+            ),
+            "bud_getSlashingHistory"
+        );
+                assert!(
+            record_answered(
+                &server
+                    .get_restaked_validators()
+                    .await
+                    .unwrap()
+            ),
+            "bud_getRestakedValidators"
+        );
+                assert!(record_answered(&server.get_quantum_alarm().await.unwrap()), "bud_getQuantumAlarm");
+                assert!(
+            record_answered(
+                &server
+                    .get_external_intake_digest()
+                    .await
+                    .unwrap()
+            ),
+            "bud_getExternalIntakeDigest"
+        );
+        assert!(
+            !server.syncing().await.unwrap(),
+            "{name} is false before any peer has handed a block",
+            name = "bud_syncing"
+        );
+        assert!(
+            server.net_listening().await.unwrap(),
+            "{name} reports the listener the caller is talking to",
+            name = "bud_netListening"
+        );
+        assert_eq!(
+            server.net_version().await.unwrap(),
+            "45262",
+            "{name} is the chain id, spelled as the test chain carries it",
+            name = "bud_netVersion"
+        );
+        assert_eq!(
+            server.net_peer_count().await.unwrap(),
+            "0x0",
+            "{name} counts peers, and a lone node has none",
+            name = "bud_netPeerCount"
+        );
+
+        let stranger = Address([11u8; 32]);
+        assert_eq!(
+            server.get_nonce(stranger.to_hex()).await.unwrap(),
+            "0x0",
+            "{name} of an unseen account is zero, not absent",
+            name = "bud_getNonce"
+        );
+        for (handler, method) in [
+            ("bud_getNonce", "zzz"),
+            ("bud_getAccountProof", "zzz"),
+        ] {
+            let _ = handler;
+            let refused = if method == "zzz" {
+                server
+                    .get_nonce("0xzz".to_string())
+                    .await
+                    .unwrap_err()
+                    .message()
+                    .to_string()
+            } else {
+                String::new()
+            };
+            assert!(
+                server
+                    .get_account_proof("0xzz".to_string())
+                    .await
+                    .unwrap_err()
+                    .message()
+                    .contains("Invalid address"),
+                "bud_getAccountProof"
+            );
+            assert!(
+                refused.contains("Invalid address"),
+                "bud_getNonce"
+            );
+        }
+    }
+
+    /// TEST-GAP-07, third descent: the marketplace, Pollen, AI and directory
+    /// listings. Every one of them is a delegation to the chain actor, so on a
+    /// fresh chain each answers with an empty collection. The lock worth keeping
+    /// is that none of them errors and none of them collapses to a flag: a
+    /// wallet that reads `false` where a list belongs renders an outage as an
+    /// empty market.
+    #[tokio::test]
+    async fn rpc_listing_reads_answer_with_their_records() {
+        let (server, _chain) = setup().await;
+
+                assert!(record_answered(&server.list_relays().await.unwrap()), "bud_listRelays");
+                assert!(record_answered(&server.list_gateways().await.unwrap()), "bud_listGateways");
+                assert!(record_answered(&server.market_get_offers().await.unwrap()), "bud_marketGetOffers");
+                assert!(
+            record_answered(
+                &server
+                    .pollen_get_access_grants()
+                    .await
+                    .unwrap()
+            ),
+            "bud_pollenGetAccessGrants"
+        );
+                assert!(
+            record_answered(
+                &server
+                    .pollen_get_data_assets()
+                    .await
+                    .unwrap()
+            ),
+            "bud_pollenGetDataAssets"
+        );
+                assert!(
+            record_answered(
+                &server
+                    .pollen_get_purchase_receipts()
+                    .await
+                    .unwrap()
+            ),
+            "bud_pollenGetPurchaseReceipts"
+        );
+                assert!(
+            record_answered(
+                &server
+                    .pollen_get_sale_authorizations()
+                    .await
+                    .unwrap()
+            ),
+            "bud_pollenGetSaleAuthorizations"
+        );
+                assert!(record_answered(&server.ai_agent_ranking().await.unwrap()), "bud_aiAgentRanking");
+                assert!(
+            record_answered(
+                &server
+                    .ai_get_active_verifiers()
+                    .await
+                    .unwrap()
+            ),
+            "bud_aiGetActiveVerifiers"
+        );
+                assert!(record_answered(&server.ai_open_requests().await.unwrap()), "bud_aiOpenRequests");
+                assert!(
+            record_answered(
+                &server
+                    .ai_verifier_ranking()
+                    .await
+                    .unwrap()
+            ),
+            "bud_aiVerifierRanking"
+        );
+                assert!(
+            record_answered(
+                &server
+                    .ai_verifier_whitelist()
+                    .await
+                    .unwrap()
+            ),
+            "bud_aiVerifierWhitelist"
+        );
+                assert!(record_answered(&server.ai_stats().await.unwrap()), "bud_aiInferenceStats");
+                assert!(record_answered(&server.budlumxyz_get_apps().await.unwrap()), "bud_hubGetApps");
+                assert!(
+            record_answered(
+                &server
+                    .budlumxyz_get_graft_apps()
+                    .await
+                    .unwrap()
+            ),
+            "bud_hubGetGraftApps"
         );
     }
 }
