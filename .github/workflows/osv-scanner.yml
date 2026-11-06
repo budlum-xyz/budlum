@@ -111,9 +111,12 @@ jobs:
             --lockfile=Cargo.lock \
             --lockfile=budzero/Cargo.lock \
             --lockfile=fuzz/Cargo.lock \
+            --lockfile=kani/Cargo.lock \
             --lockfile=crates/wallet-core/Cargo.lock \
             --lockfile=crates/note-packing/Cargo.lock \
             --lockfile=crates/bpqs/Cargo.lock \
+            --lockfile=crates/bud-codec/Cargo.lock \
+            --lockfile=crates/uel-abi/Cargo.lock \
             --lockfile=xtask/gates/Cargo.lock \
             --lockfile=xtask/tools/Cargo.lock \
             --lockfile=crates/ai-inference/Cargo.lock \
