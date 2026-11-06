@@ -1,18 +1,10 @@
 //! Private cross-owner deduplication for sealed B.U.D. 3.0 objects (Section 6.20.2.6; WP-54).
 //! exposed for expansion-tier sealed deduplication, threshold OPRF evaluation, and epoch-batched reference settlement.
 //!
-//! Binding invariants (`K20` / Section 6.20.2.6):
-//! 1. Cross-owner sealed deduplication is closed at testnet launch (`TESTNET_PRIVATE_DEDUP_ENABLED == false`).
-//! 2. Uses a threshold OPRF (`>= threshold` distinct committee shares) so no single
-//!    committee member can run an offline dictionary attack against content digests.
-//! 3. Enforces a strict per-account, per-epoch rate limit (`MAX_PRIVATE_DEDUP_QUERIES_PER_EPOCH`).
-//! 4. Requires a verified BudZero STARK ownership proof (`OwnershipProofBundle`) bound to
-//!    the caller address, epoch, blinded OPRF tag, and Padme bucket size before any
-//!    cross-owner match can be claimed (defeating hash-only / convergent-encryption attacks).
-//! 5. Emits blinded NFT storage descriptors (`BlindedDedupRecord`), accumulates reference
-//!    count deltas in an epoch batch (`EpochReferenceBatch`), and charges the sealed pool
-//!    average fee (`sealed_pool_average_fee_atoms`) so public chain observers cannot
-//!    distinguish a deduplicated sealed upload from a fresh sealed upload.
+//! The cryptographic verifier and threshold OPRF are not integrated. The
+//! transcript helpers in this module are not a STARK or an OPRF and must not
+//! be used to authorize cross-owner matches. Submission remains closed even
+//! when an engine is constructed with `enabled` set to true.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -57,7 +49,7 @@ pub enum PrivateDedupError {
     InvalidOwnershipProof(&'static str),
 }
 
-/// Partial evaluation from one threshold OPRF committee validator.
+/// Experimental transcript share, not a threshold OPRF evaluation.
 /// Convenience: exposed for threshold OPRF committee messages.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThresholdOprfShare {
@@ -66,7 +58,7 @@ pub struct ThresholdOprfShare {
 }
 
 impl ThresholdOprfShare {
-    /// Produce a deterministic partial OPRF evaluation over `blinded_input`.
+    /// Produce a deterministic transcript hash; this is not an OPRF.
     /// Convenience: exposed for committee signer nodes.
     #[must_use]
     pub fn evaluate(member_index: u16, member_secret_share: &[u8; 32], blinded_input: &[u8; 32]) -> Self {
@@ -83,7 +75,7 @@ impl ThresholdOprfShare {
     }
 }
 
-/// Combine `>= threshold` distinct committee shares into the canonical OPRF dedup tag.
+/// Combine distinct transcript shares. This is not a threshold OPRF.
 /// Convenience: exposed for threshold OPRF aggregation.
 ///
 /// # Errors
@@ -114,8 +106,7 @@ pub fn combine_threshold_oprf_shares(
     Ok(hash_fields_bytes(&[OPRF_FINAL_DOMAIN, blinded_input, &folded]))
 }
 
-/// BudZero STARK ownership proof binding knowledge of the full plaintext preimage
-/// to the uploader's address, epoch, OPRF tag, and Padme bucket (`Section 6.20.2.6`).
+/// Experimental ownership transcript. This is not a BudZero STARK proof.
 /// Convenience: exposed for upload prover and verifier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnershipProofBundle {
@@ -128,7 +119,7 @@ pub struct OwnershipProofBundle {
 }
 
 impl OwnershipProofBundle {
-    /// Construct a canonical ownership proof bundle from the full plaintext witness.
+    /// Construct a transcript from plaintext. It does not prove ownership.
     /// Convenience: exposed for client-side BudZero prover integration.
     #[must_use]
     pub fn prove_plaintext_ownership(
@@ -199,7 +190,9 @@ impl OwnershipProofBundle {
         if self.stark_proof_bytes[8..] != expected_seal {
             return Err(PrivateDedupError::InvalidOwnershipProof("forged BudZero proof transcript"));
         }
-        Ok(())
+        Err(PrivateDedupError::InvalidOwnershipProof(
+            "BudZero ownership verifier is not integrated",
+        ))
     }
 }
 
@@ -266,11 +259,14 @@ impl PrivateDedupEngine {
         self.committed_ref_counts.values().copied().sum()
     }
 
+    const fn cryptography_available() -> bool {
+        false
+    }
+
     /// Process a sealed upload through private deduplication (`Section 6.20.2.6`).
     ///
-    /// Enforces per-account per-epoch rate limits, verifies the BudZero ownership proof,
-    /// queues reference-count increments into the epoch batch (never exposing per-tx
-    /// match hits), and returns an indistinguishable [`BlindedDedupRecord`].
+    /// Rejects requests until an actual BudZero ownership verifier and threshold
+    /// OPRF are integrated. A transcript hash alone does not prove ownership.
     /// Convenience: exposed for sealed upload pipeline.
     ///
     /// # Errors
@@ -280,7 +276,7 @@ impl PrivateDedupEngine {
         &mut self,
         req: SealedDedupSubmission,
     ) -> Result<BlindedDedupRecord, PrivateDedupError> {
-        if !self.enabled {
+        if !self.enabled || !Self::cryptography_available() {
             return Err(PrivateDedupError::Disabled);
         }
 
@@ -348,176 +344,23 @@ impl PrivateDedupEngine {
 mod tests {
     use super::*;
 
-    fn sample_oprf_tag(blinded_input: &[u8; 32]) -> [u8; 32] {
-        let s1 = ThresholdOprfShare::evaluate(1, &[0xA1; 32], blinded_input);
-        let s2 = ThresholdOprfShare::evaluate(2, &[0xA2; 32], blinded_input);
-        let s3 = ThresholdOprfShare::evaluate(3, &[0xA3; 32], blinded_input);
-        combine_threshold_oprf_shares(blinded_input, &[s1, s2, s3], DEFAULT_OPRF_THRESHOLD).unwrap()
-    }
-
     #[test]
-    fn bud3_private_dedup_rate_limited() {
-        assert!(!TESTNET_PRIVATE_DEDUP_ENABLED);
+    fn private_dedup_refuses_unverified_ownership_even_if_enabled() {
+        let claimant = Address([0x11; 32]);
+        let tag = [0x22; 32];
+        let plaintext = b"sensitive content";
+        let proof = OwnershipProofBundle::prove_plaintext_ownership(claimant, 7, tag, plaintext);
         let mut engine = PrivateDedupEngine::new(true, 5_000);
-        let alice = Address::from_bytes([0x11; 32]);
-        let content = b"confidential enterprise archive payload";
-        let bucket = padme_padded_len(content.len() as u64);
-
-        for i in 0..MAX_PRIVATE_DEDUP_QUERIES_PER_EPOCH {
-            let mut blinded = [0u8; 32];
-            blinded[0..4].copy_from_slice(&i.to_le_bytes());
-            let tag = sample_oprf_tag(&blinded);
-            let proof = OwnershipProofBundle::prove_plaintext_ownership(alice, 7, tag, content);
-            engine
-                .submit_sealed_upload(SealedDedupSubmission {
-                    caller: alice,
-                    epoch: 7,
-                    oprf_tag: tag,
-                    caller_blinding_nonce: [i as u8; 32],
-                    padme_bucket_bytes: bucket,
-                    ownership_proof: Some(proof),
-                })
-                .unwrap();
-        }
-
-        // 17th query in the same epoch by the same account is rate-limited.
-        let tag_extra = sample_oprf_tag(&[0xFF; 32]);
-        let proof_extra =
-            OwnershipProofBundle::prove_plaintext_ownership(alice, 7, tag_extra, content);
-        let err = engine
-            .submit_sealed_upload(SealedDedupSubmission {
-                caller: alice,
-                epoch: 7,
-                oprf_tag: tag_extra,
-                caller_blinding_nonce: [0xEE; 32],
-                padme_bucket_bytes: bucket,
-                ownership_proof: Some(proof_extra),
-            })
-            .unwrap_err();
-        assert_eq!(
-            err,
-            PrivateDedupError::RateLimitExceeded {
-                account: alice,
-                epoch: 7,
-                limit: MAX_PRIVATE_DEDUP_QUERIES_PER_EPOCH,
-            }
-        );
-    }
-
-    #[test]
-    fn bud3_private_dedup_needs_ownership_proof() {
-        let mut engine = PrivateDedupEngine::new(true, 5_000);
-        let attacker = Address::from_bytes([0x22; 32]);
-        let tag = sample_oprf_tag(&[0x44; 32]);
-        let bucket = padme_padded_len(128);
-
-        // Missing BudZero ownership proof -> rejected (hash-only / convergent attack fails).
-        let missing = engine
-            .submit_sealed_upload(SealedDedupSubmission {
-                caller: attacker,
-                epoch: 3,
-                oprf_tag: tag,
-                caller_blinding_nonce: [0x01; 32],
-                padme_bucket_bytes: bucket,
-                ownership_proof: None,
-            })
-            .unwrap_err();
-        assert!(matches!(missing, PrivateDedupError::InvalidOwnershipProof(_)));
-
-        // Forged BudZero proof transcript -> rejected.
-        let mut forged =
-            OwnershipProofBundle::prove_plaintext_ownership(attacker, 3, tag, &[0xAB; 128]);
-        forged.stark_proof_bytes[12] ^= 0xFF;
-        let bad = engine
-            .submit_sealed_upload(SealedDedupSubmission {
-                caller: attacker,
-                epoch: 3,
-                oprf_tag: tag,
-                caller_blinding_nonce: [0x02; 32],
-                padme_bucket_bytes: bucket,
-                ownership_proof: Some(forged),
-            })
-            .unwrap_err();
-        assert!(matches!(bad, PrivateDedupError::InvalidOwnershipProof(_)));
-    }
-
-    #[test]
-    fn bud3_private_dedup_hides_match_from_public() {
-        let mut engine = PrivateDedupEngine::new(true, 9_500);
-        let owner_a = Address::from_bytes([0xA0; 32]);
-        let owner_b = Address::from_bytes([0xB0; 32]);
-        let owner_c = Address::from_bytes([0xC0; 32]);
-
-        let shared_secret_doc = b"identical sealed medical scan across two independent clinics";
-        let unique_secret_doc = b"distinct sealed contract with same Padme bucket size!!";
-        let bucket = padme_padded_len(shared_secret_doc.len() as u64);
-        assert_eq!(bucket, padme_padded_len(unique_secret_doc.len() as u64));
-
-        let shared_tag = sample_oprf_tag(&hash_fields_bytes(&[b"client-blind", shared_secret_doc]));
-        let unique_tag = sample_oprf_tag(&hash_fields_bytes(&[b"client-blind", unique_secret_doc]));
-
-        // Owner A uploads shared_secret_doc.
-        let rec_a = engine
-            .submit_sealed_upload(SealedDedupSubmission {
-                caller: owner_a,
-                epoch: 12,
-                oprf_tag: shared_tag,
-                caller_blinding_nonce: [0x10; 32],
-                padme_bucket_bytes: bucket,
-                ownership_proof: Some(OwnershipProofBundle::prove_plaintext_ownership(
-                    owner_a,
-                    12,
-                    shared_tag,
-                    shared_secret_doc,
-                )),
-            })
-            .unwrap();
-
-        // Owner B uploads the EXACT SAME shared_secret_doc (cross-owner match!).
-        let rec_b = engine
-            .submit_sealed_upload(SealedDedupSubmission {
-                caller: owner_b,
-                epoch: 12,
-                oprf_tag: shared_tag,
-                caller_blinding_nonce: [0x20; 32],
-                padme_bucket_bytes: bucket,
-                ownership_proof: Some(OwnershipProofBundle::prove_plaintext_ownership(
-                    owner_b,
-                    12,
-                    shared_tag,
-                    shared_secret_doc,
-                )),
-            })
-            .unwrap();
-
-        // Owner C uploads a completely different document in the same Padme bucket.
-        let rec_c = engine
-            .submit_sealed_upload(SealedDedupSubmission {
-                caller: owner_c,
-                epoch: 12,
-                oprf_tag: unique_tag,
-                caller_blinding_nonce: [0x30; 32],
-                padme_bucket_bytes: bucket,
-                ownership_proof: Some(OwnershipProofBundle::prove_plaintext_ownership(
-                    owner_c,
-                    12,
-                    unique_tag,
-                    unique_secret_doc,
-                )),
-            })
-            .unwrap();
-
-        // Public NFT records are unlinkable and charge identical sealed-pool average fee;
-        // per-transaction reference counter stays 0 until epoch batch flush!
-        assert_ne!(rec_a.blinded_nft_slot, rec_b.blinded_nft_slot);
-        assert_ne!(rec_b.blinded_nft_slot, rec_c.blinded_nft_slot);
-        assert_eq!(rec_a.charged_fee_atoms, rec_b.charged_fee_atoms);
-        assert_eq!(rec_b.charged_fee_atoms, rec_c.charged_fee_atoms);
-        assert_eq!(rec_a.padme_bucket_bytes, rec_b.padme_bucket_bytes);
+        let request = SealedDedupSubmission {
+            caller: claimant,
+            epoch: 7,
+            oprf_tag: tag,
+            caller_blinding_nonce: [0x33; 32],
+            padme_bucket_bytes: proof.padme_bucket_bytes,
+            ownership_proof: Some(proof),
+        };
+        assert_eq!(engine.submit_sealed_upload(request), Err(PrivateDedupError::Disabled));
         assert_eq!(engine.public_epoch_ref_total(), 0);
-
-        let touched = engine.flush_epoch_batch();
-        assert_eq!(touched, 2);
-        assert_eq!(engine.public_epoch_ref_total(), 3);
+        assert_eq!(engine.flush_epoch_batch(), 0);
     }
 }
