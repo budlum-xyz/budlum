@@ -599,6 +599,32 @@ pub fn hash_from_elements(elements: [u64; OUTPUT]) -> NoteHash {
     out
 }
 
+/// Hash up to eight canonical Goldilocks elements, refusing any element at or
+/// above `GOLDILOCKS_P` instead of silently reducing it modulo `p`.
+///
+/// Convenience: checked counterpart to [`hash`] preventing two distinct
+/// unreduced inputs from colliding into one Poseidon digest.
+#[must_use]
+pub fn try_hash(inputs: [u64; RATE]) -> Option<[u64; OUTPUT]> {
+    if inputs.iter().any(|&v| v >= GOLDILOCKS_P) {
+        return None;
+    }
+    Some(hash(inputs))
+}
+
+/// Pack four canonical field elements into a 32-byte note hash, refusing any
+/// element at or above `GOLDILOCKS_P`.
+///
+/// Convenience: checked counterpart to [`hash_from_elements`] symmetric with
+/// [`elements_from_hash`].
+#[must_use]
+pub fn try_hash_from_elements(elements: [u64; OUTPUT]) -> Option<NoteHash> {
+    if elements.iter().any(|&v| v >= GOLDILOCKS_P) {
+        return None;
+    }
+    Some(hash_from_elements(elements))
+}
+
 /// Read four field elements out of a 32-byte note hash. `None` when an element is
 /// not a canonical field value, because such a hash was not produced by [`hash`].
 #[must_use]
@@ -695,5 +721,9 @@ mod tests {
         let mut packed = hash_from_elements([1, 2, 3, 4]);
         packed[16..24].copy_from_slice(&GOLDILOCKS_P.to_le_bytes());
         assert_eq!(elements_from_hash(&packed), None);
+        assert_eq!(try_hash_from_elements([1, 2, GOLDILOCKS_P, 4]), None);
+        let max_valid = [1, 2, GOLDILOCKS_P - 1, 4];
+        assert!(try_hash_from_elements(max_valid).is_some());
+        assert_eq!(try_hash([GOLDILOCKS_P, 0, 0, 0, 0, 0, 0, 0]), None);
     }
 }

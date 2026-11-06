@@ -149,7 +149,7 @@ fn write(item: &Item, list_payloads: &[usize], next: &mut usize, out: &mut Vec<u
 
 fn encode_string(bytes: &[u8], out: &mut Vec<u8>) {
     if bytes.len() == 1 && bytes[0] < 0x80 {
-        // Kural 1: tek byte < 0x80 → byte kendisi.
+        // Rule 1: a single byte < 0x80 encodes as itself.
         out.push(bytes[0]);
     } else {
         encode_length(bytes.len(), 0x80, out);
@@ -640,5 +640,18 @@ mod tests {
             enc = next;
         }
         assert_eq!(decode(&enc), Err(RlpError::NestingTooDeep));
+    }
+
+    #[test]
+    fn blg_134_non_canonical_single_byte_and_overlong_lengths_refused() {
+        assert_eq!(decode(&[0x81, 0x00]), Err(RlpError::NonCanonical));
+        assert_eq!(decode(&[0x81, 0x7f]), Err(RlpError::NonCanonical));
+        assert_eq!(decode(&[0xb8, 0x00]), Err(RlpError::NonCanonical));
+        let mut short_as_long = vec![0xb8, 55];
+        short_as_long.extend_from_slice(&[0xaa; 55]);
+        assert_eq!(decode(&short_as_long), Err(RlpError::NonCanonical));
+        let mut leading_zero = vec![0xb9, 0x00, 56];
+        leading_zero.extend_from_slice(&[0xaa; 56]);
+        assert_eq!(decode(&leading_zero), Err(RlpError::NonCanonical));
     }
 }

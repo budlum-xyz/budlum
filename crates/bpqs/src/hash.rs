@@ -51,12 +51,18 @@ pub trait BpqsHash {
 /// the packaging contract; backends differ only in what they do to these
 /// bytes afterwards.
 pub(crate) fn frame_bytes(domain: &[u8], parts: &[&[u8]]) -> Vec<u8> {
+    let Ok(dom_len) = u16::try_from(domain.len()) else {
+        panic!("BPQS domain tag exceeds u16::MAX");
+    };
     let mut frame =
         Vec::with_capacity(2 + domain.len() + parts.iter().map(|p| 4 + p.len()).sum::<usize>());
-    frame.extend_from_slice(&(domain.len() as u16).to_le_bytes());
+    frame.extend_from_slice(&dom_len.to_le_bytes());
     frame.extend_from_slice(domain);
     for part in parts {
-        frame.extend_from_slice(&(part.len() as u32).to_le_bytes());
+        let Ok(part_len) = u32::try_from(part.len()) else {
+            panic!("BPQS hash part exceeds u32::MAX");
+        };
+        frame.extend_from_slice(&part_len.to_le_bytes());
         frame.extend_from_slice(part);
     }
     frame
@@ -125,5 +131,12 @@ mod hash_tests {
         h.update([0u8; 6]);
         let expected: [u8; 32] = h.finalize().into();
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    #[should_panic(expected = "BPQS domain tag exceeds u16::MAX")]
+    fn blg_146_frame_bytes_rejects_domain_length_u16_truncation() {
+        let overlong = alloc::vec![b'A'; usize::from(u16::MAX) + 1];
+        let _ = Sha3_256Hash::digest32(&overlong, &[b"x"]);
     }
 }

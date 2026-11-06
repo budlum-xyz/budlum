@@ -511,4 +511,13 @@ mod tests {
         d.register("bob.bud".into(), owner, 1, 10).unwrap();
         assert_ne!(c.root(), d.root(), "the name count is committed");
     }
+
+    #[test]
+    fn blg_110_bns_default_matches_new_base_cost_and_root() {
+        let from_default = BnsRegistry::default();
+        let from_new = BnsRegistry::new();
+        assert_eq!(from_default.base_cost, 100);
+        assert_eq!(from_default.base_cost, from_new.base_cost);
+        assert_eq!(from_default.root(), from_new.root());
+    }
 }

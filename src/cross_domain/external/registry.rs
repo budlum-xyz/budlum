@@ -200,7 +200,11 @@ impl ExternalDomainRegistry {
         if network.is_empty() {
             return Err(RegistryError::EmptyNetwork);
         }
-        if !admission.admitted || !admission.golden_verified {
+        if !admission.admitted
+            || !admission.golden_verified
+            || admission.total() == 0
+            || admission.passed() != admission.total()
+        {
             return Err(RegistryError::AdmissionFailed {
                 golden_verified: admission.golden_verified,
                 admitted: admission.admitted,
@@ -350,12 +354,35 @@ impl ExternalDomainRegistry {
         let Some(reg) = self.domains.get_mut(domain) else {
             return Err(RegistryError::UnknownDomain(hex(domain.as_bytes())));
         };
-        if !admission.admitted || !admission.golden_verified {
+        if !admission.admitted
+            || !admission.golden_verified
+            || admission.total() == 0
+            || admission.passed() != admission.total()
+        {
             return Err(RegistryError::AdmissionFailed {
                 golden_verified: admission.golden_verified,
                 admitted: admission.admitted,
                 passed: admission.passed(),
                 total: admission.total(),
+            });
+        }
+        if admission.adapter_version != reg.record.descriptor.adapter_version {
+            return Err(RegistryError::AdmissionAdapterVersionMismatch {
+                expected: reg.record.descriptor.adapter_version,
+                found: admission.adapter_version,
+            });
+        }
+        let version_live = reg
+            .record
+            .accepted_evidence_versions
+            .contains(&admission.evidence_version)
+            && reg
+                .versions
+                .window(admission.evidence_version)
+                .is_some_and(|w| w.sunset_height.is_none());
+        if !version_live {
+            return Err(RegistryError::AdmissionEvidenceVersionMismatch {
+                version: admission.evidence_version,
             });
         }
         let digest = admission.digest();
@@ -476,7 +503,8 @@ impl ExternalDomainRegistry {
                         .insert(attestation.evidence_digest, evidence.submitter);
                     reg.record.attestations_accepted =
                         reg.record.attestations_accepted.saturating_add(1);
-                    reg.record.last_accepted_height = Some(attestation.height);
+                    let prev_h = reg.record.last_accepted_height.unwrap_or(0);
+                    reg.record.last_accepted_height = Some(prev_h.max(attestation.height));
                     reg.record.last_verified_at = Some(height);
                     reg.record.last_backing = Some(attestation.security);
                     reg.record.crypto_facts.merge(&observed);
@@ -596,7 +624,8 @@ impl ExternalDomainRegistry {
         reg.attestation_provers
             .insert(attestation.evidence_digest, submitter);
         reg.record.attestations_accepted = reg.record.attestations_accepted.saturating_add(1);
-        reg.record.last_accepted_height = Some(attestation.height);
+        let prev_h = reg.record.last_accepted_height.unwrap_or(0);
+        reg.record.last_accepted_height = Some(prev_h.max(attestation.height));
         reg.record.last_verified_at = Some(height);
         reg.record.last_backing = Some(attestation.security);
         // The quorum path verified this attestation when its evidence arrived
@@ -991,6 +1020,12 @@ mod tests {
             evidence: &RawConsensusEvidence,
             _policy: &VerificationPolicy,
         ) -> Result<FinalityAttestation, AdapterError> {
+            if evidence.evidence_version != 1 {
+                return Err(AdapterError::UnsupportedEvidenceVersion {
+                    version: evidence.evidence_version,
+                    accepted: "1".to_string(),
+                });
+            }
             if evidence.payload == b"golden" {
                 Ok(FinalityAttestation {
                     adapter: AdapterId::from_name("fix"),
@@ -1349,5 +1384,55 @@ mod tests {
                 .is_none(),
             "latest_attestation must stay empty after rejected replay"
         );
+    }
+
+    #[test]
+    fn blg_205_readmit_and_last_accepted_height_monotonicity() {
+        let (mut registry, key, att) = registered();
+        // Advance height to 50, then commit an older historical height 10:
+        // `last_accepted_height` must stay at 50 rather than rewinding to 10.
+        let mut h50 = att.clone();
+        h50.height = 50;
+        h50.evidence_digest = [0x50; 32];
+        registry
+            .commit_attestation(&h50, Address::from([7u8; 32]))
+            .unwrap();
+        assert_eq!(
+            registry.domain(&key).unwrap().record.last_accepted_height,
+            Some(50)
+        );
+
+        let mut h10 = att.clone();
+        h10.height = 10;
+        h10.evidence_digest = [0x10; 32];
+        registry
+            .commit_attestation(&h10, Address::from([7u8; 32]))
+            .unwrap();
+        assert_eq!(
+            registry.domain(&key).unwrap().record.last_accepted_height,
+            Some(50),
+            "historical attestation must not rewind last_accepted_height"
+        );
+
+        // Fault the domain and verify forged 0-probe or mismatched-version
+        // AdmissionReports cannot reopen it.
+        registry.mark_faulted(&key, "fault").unwrap();
+        let zero_probes = AdmissionReport {
+            adapter_version: 1,
+            evidence_version: 1,
+            golden_verified: true,
+            probes: Vec::new(),
+            probe_commitment: [0; 32],
+            admitted: true,
+        };
+        assert!(registry.readmit(&key, &zero_probes, "forged").is_err());
+
+        let mut wrong_ver = admit(&Fix, &VerificationPolicy::strict(10));
+        wrong_ver.evidence_version = 99;
+        assert!(registry.readmit(&key, &wrong_ver, "wrong-ev").is_err());
+
+        let mut wrong_av = admit(&Fix, &VerificationPolicy::strict(10));
+        wrong_av.adapter_version = 2;
+        assert!(registry.readmit(&key, &wrong_av, "wrong-av").is_err());
     }
 }
