@@ -284,6 +284,32 @@ mod tests {
     }
 
     #[test]
+    fn pool_split_is_40_50_10() {
+        let schedule = RewardPoolSchedule {
+            validation_reward_pool: bud(100),
+            validation_pool_epochs: 10,
+            treasury_pool: 0,
+            reward_pool_start_epoch: 0,
+        };
+        let mut state = funded_state(&[(1, 3_000, false), (2, 1_000, false)]);
+        let pool = reward_pool_account();
+        let pool_before = state.get_balance(&pool);
+
+        // Only the consensus share is paid by the existing stake-weighted
+        // path. Storage and repair/relay consumers receive their own shares
+        // from the same epoch budget instead of this path consuming all of it.
+        let paid = pay_epoch(&mut state, &schedule, 0);
+        assert_eq!(paid, bud(4), "the consensus share is 40 percent");
+        assert_eq!(state.get_balance(&addr(1)), bud(3));
+        assert_eq!(state.get_balance(&addr(2)), bud(1));
+        assert_eq!(
+            state.get_balance(&pool),
+            pool_before - bud(4),
+            "the other 60 percent stays in the Network Security Pool"
+        );
+    }
+
+    #[test]
     fn reward_pool_conserves_budget() {
         let schedule = RewardPoolSchedule {
             validation_reward_pool: 100,
