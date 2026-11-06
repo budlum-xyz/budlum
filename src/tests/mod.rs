@@ -249,3 +249,7 @@ pub mod validator_classes;
 // The B.U.D. 3.0 storage door end to end.
 #[cfg(test)]
 pub mod bud3_door;
+
+// Lane D live-audit regression evidence (WP-04).
+#[cfg(test)]
+pub mod audit_lane_d;
