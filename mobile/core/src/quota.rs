@@ -22,3 +22,17 @@ pub fn fits(stored: u64, incoming: u64, quota: u64) -> bool {
 pub fn below_floor(available_bytes: u64) -> bool {
     available_bytes < FREE_SPACE_FLOOR_BYTES
 }
+
+#[cfg(test)]
+mod tests {
+    use super::fits;
+
+    #[test]
+    fn mobile_quota_overflow_is_a_refusal() {
+        assert!(!fits(u64::MAX, 1, u64::MAX));
+        assert!(!fits(u64::MAX - 1, 2, u64::MAX));
+        assert!(fits(u64::MAX - 1, 1, u64::MAX));
+        assert!(fits(32, 32, 64));
+        assert!(!fits(32, 33, 64));
+    }
+}
