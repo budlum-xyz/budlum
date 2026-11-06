@@ -143,3 +143,12 @@ other PR was closed, merged, retargeted or edited.
 |---|---|
 | BLG-311 | partially addressed. The WP-31 1/N + 2/N and WP-32 1/N deliveries of PR #95 are carried here as one coherent set (its `api.rs`, `method_class.rs`, `mod.rs`, `server.rs`, `tests.rs`, `main.rs` and six compat modules). `ops/scripts/rpc_surface_audit.py` proves the three tables agree: 218 declared methods, 218 class rows, 35 Solana methods, all 18 Aptos REST routes of directive 8.11.4, zero missing modules, zero duplicate route patterns, zero problems. |
 | BLG-320 | WP-31 subscriptions are now carried from #95. WP-28 2/2 and the WP-32 Move worker remain owed. |
+
+### Slice 7/N updates (PR #96)
+
+| ID | State after the slice |
+|---|---|
+| BLG-320 | WP-32 2/N now has an owner: the BCS envelope, `Foreign::Aptos`, the pinned framework, the 0xBD alias verification, the replay cache and the Move worker refusal surface are delivered. WP-28 2/2 (Ethereum subscriptions) and WP-24 2/3..3/3 remain owed. |
+| BLG-322 | High. Four carried files from #92/#95/#86 contained 26 Unicode dashes; `no_unicode_dashes` has no exemptions and would fail on them. **Fixed here** by ASCII replacement; `ops/scripts/tree_compatibility_audit.py` reports zero typographic dashes over 1,217 text files. |
+| BLG-323 | Medium. The Aptos chain id, framework commit and reserved scheme byte were duplicated across the REST gateway, the coordinator, the supply-chain policy and the golden vector with no check that they agree. **Fixed here**: `ops/scripts/rpc_surface_audit.py` refuses a drift; all four agree at 205 / `81d89f42...` / `0xBD`. |
+| BLG-311 | the WP-31 and WP-32 1/N deliveries are carried and their three method tables are proved consistent (218/218/35/18, zero problems). |

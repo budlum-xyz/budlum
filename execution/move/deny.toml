@@ -1,0 +1,30 @@
+# WP-32 (directive 8.14 item 4 and the WP-32 card item 7).
+# The only `unknown-git` exception for the Move worker lives in THIS file and
+# is pinned to one full commit of aptos-core. The framework commit is the same
+# one whose `Scheme` enum was verified for the 0xBD alias byte (see
+# docs/audit/WP32_MOVE_2N_2026-11-06.md and
+# src/execution/coordinator/foreign/aptos.rs).
+
+[graph]
+targets = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = ["https://github.com/aptos-labs/aptos-core?rev=81d89f428fe8e4b69d53b4916993e9a930afc37c"]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "CC0-1.0",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+]
+
+[advisories]
+yanked = "deny"

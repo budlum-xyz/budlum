@@ -1,4 +1,4 @@
-# Live PR-stack audit — 2026-11-06
+# Live PR-stack audit - 2026-11-06
 
 Scope: every open pull request on `lubothebook/budlum` at the time of the audit,
 `main` (`cccf1da`), and this branch (`arena/e607c9b9-budlum`). Method: `gh pr list`,
@@ -6,7 +6,7 @@ Scope: every open pull request on `lubothebook/budlum` at the time of the audit,
 and a tokenizer-checked read of the tree. No other branch was pushed, and no
 other pull request was closed, merged or retargeted by this session.
 
-Reference time: the audit-start snapshot (09:00–10:00 local) counted **63**
+Reference time: the audit-start snapshot (09:00-10:00 local) counted **63**
 open PRs; by the end of the session the stack had grown to **68** others +
 this PR (**69**); the integration probe in §9 ran against the 69-PR set.
 Counts marked "63" below refer to the audit-start snapshot.
@@ -45,7 +45,7 @@ Numbers in this file are a snapshot. The stack moves daily; counts drift.
   (`results-receiver.actions.githubusercontent.com` returns EOF), so the red
   is recorded as job names only. Two consequences follow:
   1. A green run on any PR head is not, by itself, evidence the *feature*
-     works — the base is red, so no signal is attributable to the branch.
+     works - the base is red, so no signal is attributable to the branch.
   2. No merge in the open stack is verifiably green today. Treat every
      "ready to merge" claim as unverified until `main` itself is green.
 - **CI queues without a runner for open PRs.** PR #65 and PR #59 record their
@@ -65,7 +65,7 @@ Numbers in this file are a snapshot. The stack moves daily; counts drift.
 
 ## 2. Work package coverage (live, this audit)
 
-Claim map (`WP` → claiming PRs). "Range artifacts" such as `WP-01..WP-64`
+Claim map (`WP` -> claiming PRs). "Range artifacts" such as `WP-01..WP-64`
 are excluded:
 
 | WP | PRs |
@@ -137,7 +137,7 @@ their bodies). The integrator should migrate these rows into
 
 | ID | Severity | Finding | State |
 |---|---|---|---|
-| BLG-288 | High | `THE_BUDLUM_DIREKTIF.md` is tracked in the tree (`git cat-file -e cccf1da:THE_BUDLUM_DIREKTIF.md` succeeds). Directive 0.1.5: the binding directive does not enter the repository; the tree is English. | **Closed by this PR** (tracked copy removed; 0.1.5 also done in #42, #63, #77, #78 — four conflicting removals to de-duplicate at integration). |
+| BLG-288 | High | `THE_BUDLUM_DIREKTIF.md` is tracked in the tree (`git cat-file -e cccf1da:THE_BUDLUM_DIREKTIF.md` succeeds). Directive 0.1.5: the binding directive does not enter the repository; the tree is English. | **Closed by this PR** (tracked copy removed; 0.1.5 also done in #42, #63, #77, #78 - four conflicting removals to de-duplicate at integration). |
 | BLG-289 | High | `docs/work/PACKAGES.md` does not exist on `main` and is touched by 25 open PRs. Every package status row written by WP-04 will conflict with 24 other editors. | Open. Needs one named integrator and an order. |
 | BLG-290 | High | `docs/audit/FINDINGS.md` does not exist on `main` and is touched by 11 open PRs. Ledger rows collide on every integration. | Open. Same fix as BLG-289. |
 | BLG-291 | Medium | The directive's shared-append list (15.3.4) does not cover high fan-in files the stack edits concurrently: `xtask/gates/src/main.rs` (14), `src/tests/mod.rs` (13), `src/chain/blockchain.rs` (12), `src/execution/executor.rs` (11), `src/rpc/server.rs` (9), `src/crypto/domain_tags.rs` is listed but contested by 9 PRs in practice. | Open. The list needs a revision or the stack needs a merge train. |
@@ -165,7 +165,7 @@ its own words, what is left.
 | 16 | WP-03 lane C ledger + engine inventory | reported in a follow-up comment |
 | 18 | WP-04 lane D live audit 1/N | Rust never executed; CI not awaited |
 | 20 | WP-05 concept owners + owner gate | counter unchanged by this PR |
-| 24 | WP-05/26/27/28/29/30/33/42 — UEL coordinator, BudZero, EVM, RPC, WASM | large multi-package PR; per-package status untracked |
+| 24 | WP-05/26/27/28/29/30/33/42 - UEL coordinator, BudZero, EVM, RPC, WASM | large multi-package PR; per-package status untracked |
 | 29 | WP-42 required-nightly gate | carries #30 forward; open for reconciliation |
 | 30 | WP-42 float gate + coverage gate | slice 1/3 |
 | 31 | WP-05/42/08 concept map + gates + mobile duty lane | "Not done, and named so the next packet does not guess" |
@@ -199,7 +199,7 @@ its own words, what is left.
 | 61 | WP-34, 3/3 migration proofs | remaining: Sepolia e2e record; fuzz target lands in nightly |
 | 62 | WP-17 failure-atomic block application 1/N | stacked on #60; closes nothing alone |
 | 63 | WP-42 directive out + required_fee read | continuation #74 stacked |
-| 64 | WP-09 no uncertain write retries | checkpoint of the #38→#54→#64 chain |
+| 64 | WP-09 no uncertain write retries | checkpoint of the #38->#54->#64 chain |
 | 65 | WP-24 object replacement 1/3 | replacement/access_tiering T22 delivered |
 | 66 | WP-17 overflowing transaction costs 2/N | amount+fee overflow only |
 | 67 | WP-17 spendable-balance fee gates 2/N | continues #62; supply-path slice |
@@ -215,7 +215,7 @@ its own words, what is left.
 | 77 | WP-04 + WP-09 reconcile + transport hardening | BLG-281..287 recorded open |
 | 78 | directive out of tree | duplicate overlap with #42/#63/#77 |
 | 79 | WP-35, 1/3 execution limits + BLG-280 | waits on unmerged engines (WP-27) |
-| 80 | WP-09 worker ABI correction stack | superset of #38→#54→#64; BLG-281.. pending |
+| 80 | WP-09 worker ABI correction stack | superset of #38->#54->#64; BLG-281.. pending |
 | 81 | WP-12, 1/N committee seats re-rooted on main | remaining WP-12 work unspecified in 1/N |
 | 82 | WP-11, 2/N mobile duty engine | jobs 2-9 of WP-11 open |
 | 83 | WP-31, 1/N Solana JSON-RPC namespace | subscriptions pending; 2/N owed |
@@ -242,11 +242,11 @@ claims none of the following. Effort levels and dependency notes:
 | WP-63 | UOL SVM family | WP-49, WP-31 | needs WP-49 |
 | WP-64 | UOL Move family | WP-49, WP-32 | needs WP-49 |
 
-What this PR delivers for WP-55: the live stream core — time segments
+What this PR delivers for WP-55: the live stream core - time segments
 (2 s default), the BOF-1 `bit1` segment object with the `prev_object` chain,
 the ratioless send order (source frames first, then continuous repair frames),
 viewer join with the two-segment latency budget, chain verification for light
-clients, and the final-commitment-to-NFT binding record — plus the
+clients, and the final-commitment-to-NFT binding record - plus the
 `bud3_live_is_closed_on_testnet` gate (G-7) and the T13-shaped test
 (`bud3_live_stream`). The optical send path (P1 profile) is a per-request
 transport property, never written in the object; the StorageTx wiring is an
@@ -269,7 +269,7 @@ remains open; this is `WP-55, 1/N`, not a package completion claim.
    code on the `bud3` tree; no lock path of any open PR is modified.
 4. **It records the stack audit** (this file) instead of FINDINGS.md
    (BLG-289/290/292).
-5. **`arena_claude.py` is deliberately unchanged** — five open PRs edit it
+5. **`arena_claude.py` is deliberately unchanged** - five open PRs edit it
    (#24, #34, #43, #45, #60); it is not this branch's concern.
 
 ## 7. Recommendations (owner actions, not executed here)
@@ -309,7 +309,7 @@ remains open; this is `WP-55, 1/N`, not a package completion claim.
 - The counts above (63 PRs, 209 files, fan-in numbers, red job names) were
   produced live on 2026-11-06 and re-derivable from the commands in §0.
 
-## 9. Addendum — the integration probe (same day, later)
+## 9. Addendum - the integration probe (same day, later)
 
 After the snapshot above, this session ran a **local-only integration probe**:
 every open PR head was merged, in ascending PR order, into a scratch
@@ -340,7 +340,7 @@ its paths recorded. The probe ran against the **69-PR** set (the original
 | ID | Severity | Finding | State |
 |---|---|---|---|
 | BLG-298 | **Critical** | **PR #8 (`a5f30fb8`) and PR #9 (`3c5bb36d`) each ship syntactically invalid Rust.** PR #8 ("The codec register and the dedup index", WP-07-era legacy-removal tip) has 8 `.rs` files that do not parse: `src/chain/blockchain.rs` (lone `f` at L7914, L7907, L7743, L4407, L4216 after removed tests), `src/persistence/db.rs` (L135, L180, L431, and a deleted method name at L131 leaving `self.                    .load(...)`), `src/persistence/traits.rs` (`f    /// # Errors` doc lines at L223 and L227), `src/rpc/tests.rs` (`a` at L445 after a removed test), `src/storage/bud3/content_ref.rs` (`Bud3NotReady,` orphaned outside its enum at L239), `src/tests/priority_findings.rs`, `src/tests/regression_ai_storage.rs`, `src/tests/regression_chain.rs` (lone `f` prefixes / orphaned `#[test]` attributes). PR #9 ("WP-12") has 2: `crates/bud-codec/src/container.rs` (L508) and `src/tests/integration.rs` (a `seat_table_version: 0,` field inserted mid-expression at L758 and L507, and in two more struct-literal sites; the set_hash chain is torn across `.clone(),`). | Open. PRs #8/#9 must be repaired on their own branches or re-rooted like #81. Neither can compile as pushed. |
-| BLG-299 | High | **Nothing in the open stack catches BLG-298.** Git merges the machine-broken blobs cleanly (a merge that conflicts on text never runs a parse check), CI has no runner for any open PR, and `main` is red anyway — the only nets that could catch a syntactically invalid tree are all absent. The repair for such merges is always discovered late, mid-stack, by the first human who builds the combined tree. | Open. A syntactic gate (tree-sitter or `cargo check` on merged trees pre-merge) is the cheapest control; it belongs to WP-42. |
+| BLG-299 | High | **Nothing in the open stack catches BLG-298.** Git merges the machine-broken blobs cleanly (a merge that conflicts on text never runs a parse check), CI has no runner for any open PR, and `main` is red anyway - the only nets that could catch a syntactically invalid tree are all absent. The repair for such merges is always discovered late, mid-stack, by the first human who builds the combined tree. | Open. A syntactic gate (tree-sitter or `cargo check` on merged trees pre-merge) is the cheapest control; it belongs to WP-42. |
 
 ### 9.3 What the probe says about compatibility
 
@@ -351,7 +351,7 @@ its paths recorded. The probe ran against the **69-PR** set (the original
 - Five of PR #8's eight broken files (`blockchain.rs`, `rpc/tests.rs`,
   `priority_findings.rs`, `regression_ai_storage.rs`, `regression_chain.rs`)
   were transiently "repaired" by an unrelated PR's blobs mid-stack and their
-  breakage re-surfaced depending on probe order — integration outcome depends
+  breakage re-surfaced depending on probe order - integration outcome depends
   on the order PRs land, so the order must be chosen, not discovered.
 - `src/persistence/db.rs:131` is the one spot that needs the **author's
   decision**, not a mechanical repair: a field/method name was deleted between
@@ -372,7 +372,7 @@ its paths recorded. The probe ran against the **69-PR** set (the original
 
 1. The first integration probe used `--depth 1` fetches; this left the local
    clone shallow (`.git/shallow`), silently severing `merge-base` between
-   `main` and every open branch — the first probe produced four bogus
+   `main` and every open branch - the first probe produced four bogus
    "conflict" verdicts from a broken object graph. It was detected, recorded
    here, and repaired with `git fetch --unshallow origin`; the first probe
    was discarded and the branch scratch state deleted. No remote ref was

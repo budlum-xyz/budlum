@@ -9,7 +9,10 @@
 //! account model, Move resources, BCS transactions, events, or table state
 //! answer HTTP 503 and name the native Budlum door. They do not invent an
 //! Aptos-shaped answer from a different ledger. Delivery 2/N opens the
-//! dedicated loopback listener. The Move worker belongs to a later delivery.
+//! dedicated loopback listener. `move_worker` then checks the BCS envelope,
+//! the pinned framework and the reserved `0xBD` Move-alias scheme byte
+//! (directive 8.4.2 rule 2) before it refuses execution by name. The
+//! aptos-vm worker itself belongs to a later delivery.
 
 use crate::chain::chain_actor::ChainHandle;
 use crate::core::block::Block;
@@ -20,6 +23,9 @@ use std::collections::BTreeSet;
 
 #[cfg(test)]
 mod tests;
+
+/// WP-32, 2/N: the Move worker admission boundary and the BCS envelope.
+pub mod move_worker;
 
 /// The Aptos chain id assigned to Budlum's Aptos foreign envelope.
 const APTOS_CHAIN_ID: u8 = 205;
