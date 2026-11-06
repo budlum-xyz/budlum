@@ -167,6 +167,20 @@ groups:
         annotations:
           summary: "{{ $value }} B.U.D. 3.0 repairs are waiting on {{ $labels.node }}"
 
+      - alert: BudlumBud3AuditLatencyHigh
+        # IP-20 item 13's fourth series. An audit that stays open is a holder
+        # that is not answering; the Full window is 2 epochs (about 100 s at
+        # testnet's slot) and the Mobile window 24 epochs, so a p90 above ten
+        # minutes means holders are drifting out of their window long before
+        # the window closes and the miss is recorded.
+        expr: histogram_quantile(0.9, sum by (le, node) (rate(budlum_bud3_audit_latency_seconds_bucket[15m]))) > 600
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "B.U.D. 3.0 custody audits wait {{ $value }}s at p90 on {{ $labels.node }}"
+          description: "Holders are answering audits late; a window that closes unanswered is a lost share and, at f / 2, a repair."
+
       - alert: BudlumBud3MobileCustodyMissing
         # The mobile floor is a promise about where the network's custody sits.
         # A node that placed objects but holds no mobile custody is not meeting

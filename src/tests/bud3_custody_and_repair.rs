@@ -167,7 +167,13 @@ fn bud3_custody_proof_verifies() {
         Err(RegistryError::BadProof)
     );
     // Inside it, the same proof is accepted.
-    assert_eq!(r.submit_proofs(&addr(10), &[(key, proof)], last_epoch), Ok(1));
+    let (answered, waited) = r
+        .submit_proofs(&addr(10), &[(key, proof)], last_epoch)
+        .expect("inside its window the proof is accepted");
+    assert_eq!(answered, 1);
+    // The audit opened in epoch 1 and is answered at its window's last epoch,
+    // so the wait is the window length in epochs.
+    assert_eq!(waited, vec![last_epoch.saturating_sub(1)]);
     let after = r
         .object(&key)
         .expect("registered")
@@ -1039,4 +1045,79 @@ fn the_bad_repair_proof_round_trips() {
     let decoded: SlashingProof = bincode::deserialize(&encoded).expect("deserializable");
     assert_eq!(decoded, proof);
     assert_eq!(decoded.condition(), SlashingCondition::BadRepair);
+}
+
+/// IP-20 item 13: `budlum_bud3_audit_latency_seconds` is a series the scrape
+/// really carries, and an audit that ages is visible in it.
+///
+/// The series was named by the card, declared nowhere, and therefore written
+/// nowhere: a scrape showed nothing at all where an operator expected a
+/// distribution. This holds both halves - it is registered and exported before
+/// anything observes it, and an open audit's age grows with the epochs it has
+/// waited.
+#[test]
+fn the_audit_latency_series_exists_and_moves() {
+    let metrics = crate::core::metrics::Metrics::new().expect("metric names are literals");
+    let scrape = metrics.encode();
+    assert!(
+        scrape.contains("budlum_bud3_audit_latency_seconds"),
+        "the audit-latency series is not exported, so an alert on it can never fire"
+    );
+
+    // An open audit ages with the epochs it has waited.
+    let mut r = Bud3Registry::default();
+    let (up, key) = register(&mut r, &content(1_500));
+    ack_all(&mut r, &key);
+    assert!(r.open_audits(&[21; 32], 4, &EVERY_SHARE) > 0);
+    assert!(
+        r.open_audit_ages(4).iter().all(|age| *age == 0),
+        "an audit opened this epoch has waited no epochs"
+    );
+    let ages = r.open_audit_ages(6);
+    assert!(!ages.is_empty());
+    assert!(
+        ages.iter().all(|age| *age == 2),
+        "every open audit has waited the two epochs since it opened: {ages:?}"
+    );
+
+    // Answering reports the exact wait, and the wait is in epochs, which the
+    // chain converts with its own epoch length.
+    let obj = r.object(&key).expect("registered").clone();
+    let symbols = &up.segments[0];
+    let leaves: Vec<(u32, [u8; 32])> = symbols
+        .iter()
+        .map(|s| (s.esi, symbol_leaf(&s.data)))
+        .collect();
+    let share = obj
+        .shares
+        .iter()
+        .find(|s| s.share.validator == addr(10))
+        .expect("holder 10");
+    let (audit, _, opened) = share.open_audit.expect("drawn");
+    assert_eq!(opened, 4);
+    let pos = audit.position as usize;
+    let proof = prove(
+        audit.segment,
+        &leaves,
+        pos,
+        &symbols[pos].data,
+        audit.sub_block as usize,
+    )
+    .expect("proves");
+    let (answered, waited) = r
+        .submit_proofs(&addr(10), &[(key, proof)], 7)
+        .expect("a valid proof answers its audit");
+    assert_eq!(answered, 1);
+    assert_eq!(waited, vec![3], "opened in 4, answered in 7: three epochs");
+
+    // The chain's conversion is the one the histogram needs.
+    let seconds = crate::core::chain_config::epoch_seconds_for_chain_id(45261);
+    assert!(seconds > 0, "an epoch on testnet is a positive number of seconds");
+    assert_eq!(
+        seconds,
+        crate::core::chain_config::epoch_len_for_chain_id(45261)
+            * crate::core::chain_config::Network::from_chain_id(45261)
+                .map_or(1, |n| n.slot_ms())
+            / 1_000
+    );
 }

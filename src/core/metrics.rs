@@ -292,6 +292,17 @@ pub struct Metrics {
     /// Segments that have reached the repair threshold and have an open
     /// repair task.
     pub bud3_repair_backlog: IntGauge,
+    /// How long an answered custody audit waited for its proof, in seconds.
+    ///
+    /// IP-20 item 13 names this series. It was declared, registered and
+    /// written nowhere, so a scrape showed a permanent zero next to a real
+    /// backlog.
+    ///
+    /// A histogram rather than a gauge because the operator question is a
+    /// distribution: "are holders answering inside their window" is answered
+    /// by a high quantile against the window length, not by the age of the
+    /// oldest audit.
+    pub bud3_audit_latency_seconds: Histogram,
     /// Live custody bytes per validator class (`class="full"` and
     /// `class="mobile"`).
     ///
@@ -817,6 +828,10 @@ impl Metrics {
             "budlum_bud3_repair_backlog",
             "B.U.D. 3.0 segments past the repair threshold with an open repair task",
         )?;
+        let bud3_audit_latency_seconds = Histogram::with_opts(HistogramOpts::new(
+            "budlum_bud3_audit_latency_seconds",
+            "Seconds an answered B.U.D. 3.0 custody audit waited for its proof",
+        ))?;
         let ee_fault_total = IntCounterVec::new(
             prometheus::Opts::new(
                 "budlum_ee_fault_total",
@@ -962,6 +977,7 @@ impl Metrics {
         registry.register(Box::new(bud3_objects.clone()))?;
         registry.register(Box::new(bud3_segments_at_risk.clone()))?;
         registry.register(Box::new(bud3_repair_backlog.clone()))?;
+        registry.register(Box::new(bud3_audit_latency_seconds.clone()))?;
         registry.register(Box::new(bud3_custody_bytes.clone()))?;
         registry.register(Box::new(ee_fault_total.clone()))?;
 
@@ -1097,6 +1113,7 @@ impl Metrics {
             bud3_objects,
             bud3_segments_at_risk,
             bud3_repair_backlog,
+            bud3_audit_latency_seconds,
             bud3_custody_bytes,
             ee_fault_total,
         })
@@ -1294,6 +1311,7 @@ mod tests {
             "budlum_bud3_objects",
             "budlum_bud3_segments_at_risk",
             "budlum_bud3_repair_backlog",
+            "budlum_bud3_audit_latency_seconds",
             "budlum_bud3_custody_bytes",
             "budlum_ee_fault_total",
         ] {

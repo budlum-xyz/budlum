@@ -260,6 +260,16 @@ impl Blockchain {
         m.bud3_custody_bytes
             .with_label_values(&["mobile"])
             .set(i64::try_from(mobile_bytes).unwrap_or(i64::MAX));
+        // IP-20 item 13: how long an open audit has waited. The unit is
+        // seconds, so the epoch length of this chain is the conversion; a
+        // series in epochs would be unreadable next to the windows in
+        // `AuditParams`, which are stated in epochs but compared against a
+        // histogram whose buckets are minutes.
+        let epoch_seconds = crate::core::chain_config::epoch_seconds_for_chain_id(self.chain_id);
+        for age in registry.open_audit_ages(self.state.epoch_index) {
+            let seconds = age.saturating_mul(epoch_seconds) as f64;
+            m.bud3_audit_latency_seconds.observe(seconds);
+        }
     }
 
     pub(crate) fn emit_chain_metrics(&self) {

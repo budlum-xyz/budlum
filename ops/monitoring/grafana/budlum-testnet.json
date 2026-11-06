@@ -764,6 +764,43 @@
           "legendFormat": "{{node}}"
         }
       ]
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "B.U.D. 3.0 custody audit latency (p90)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 88
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.9, sum by (le, node) (rate(budlum_bud3_audit_latency_seconds_bucket[15m])))",
+          "legendFormat": "{{node}}"
+        }
+      ]
     }
   ]
 }
