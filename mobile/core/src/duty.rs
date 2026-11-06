@@ -190,16 +190,18 @@ impl MobileCore {
         })
     }
 
-    /// Answer an audit. The proof is checked against the stored symbol root
-    /// before it leaves the core.
+    /// Answer an audit for `object`. Segment and position are scoped to an
+    /// object, so the host must supply the object associated with the audit.
+    /// The proof is checked against the stored symbol root before it leaves
+    /// the core; that self-check does not authenticate the root.
     ///
     /// # Errors
     ///
     /// [`CoreError`] when the share is missing or the proof does not verify.
-    pub fn answer_audit(&mut self, audit: Audit) -> Result<DutyTx, CoreError> {
-        match self.store.answer(&audit) {
+    pub fn answer_audit(&mut self, object: [u8; 32], audit: Audit) -> Result<DutyTx, CoreError> {
+        match self.store.answer(&object, &audit) {
             Ok(proof) => {
-                if let Some(share) = self.store.matching_audit(&audit) {
+                if let Some(share) = self.store.matching_audit(&object, &audit) {
                     proof
                         .verify(&audit, &share.proof_context())
                         .map_err(|_| {
