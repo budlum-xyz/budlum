@@ -34,6 +34,8 @@ pub enum ForeignScheme {
     AptosAuth = 0x03,
     /// Cosmos 20-byte `secp256k1` account address bytes.
     CosmosSecp256k1 = 0x04,
+    /// Sui 32-byte `BLAKE2b-256(0x00 || ed25519_pk)` address (`WP-50`).
+    SuiEd25519 = 0x05,
 }
 
 impl ForeignScheme {
@@ -42,7 +44,7 @@ impl ForeignScheme {
     pub const fn expected_len(self) -> usize {
         match self {
             Self::EvmSecp256k1 | Self::CosmosSecp256k1 => 20,
-            Self::SvmEd25519 | Self::AptosAuth => 32,
+            Self::SvmEd25519 | Self::AptosAuth | Self::SuiEd25519 => 32,
         }
     }
 }
@@ -239,7 +241,7 @@ pub fn derive_local_alias(local: &Address, ee: EeId) -> Result<Vec<u8>, AccountM
             }
             Err(AccountModelError::SvmOffCurveExhausted)
         }
-        EeId::MOVE => {
+        EeId::MOVE | EeId::MOVE_SUI => {
             let mut h = Sha3_256::new();
             h.update(local.0);
             h.update([0xBD]);
@@ -247,6 +249,19 @@ pub fn derive_local_alias(local: &Address, ee: EeId) -> Result<Vec<u8>, AccountM
             Ok(digest.to_vec())
         }
         EeId::BUDZERO => Ok(local.0.to_vec()),
+        EeId::CAIRO
+        | EeId::NEAR_WASM
+        | EeId::POLKAVM
+        | EeId::TVM
+        | EeId::UTXO
+        | EeId::PLUTUS => {
+            let mut h = Sha3_256::new();
+            h.update(b"BDLM_EXT_ALIAS_V1");
+            h.update([ee.0]);
+            h.update(local.0);
+            let digest: [u8; 32] = h.finalize().into();
+            Ok(digest.to_vec())
+        }
         other => Err(AccountModelError::UnknownEnvironment(other)),
     }
 }

@@ -5,6 +5,7 @@
 pub mod aptos;
 pub mod cosmos;
 pub mod ethereum;
+pub mod sui;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

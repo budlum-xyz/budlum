@@ -15,6 +15,7 @@ bud-isa = { path = "../../budzero/bud-isa" }
 budlum-ee-budzero = { path = "../budzero" }
 budlum-ee-evm = { path = "../evm" }
 budlum-ee-move = { path = "../move" }
+budlum-ee-move-sui = { path = "../move-sui" }
 budlum-ee-svm = { path = "../svm" }
 budlum-ee-wasm = { path = "../wasm" }
 budlum-uel-abi = { path = "../../crates/uel-abi" }

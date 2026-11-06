@@ -14,6 +14,10 @@ use budlum_ee_move::framework::{
     MoveOp, BUDLUM_MOVE_ALIAS_SCHEME_BYTE, FRAMEWORK_ADDRESS,
 };
 use budlum_ee_move::{MovePayload, MoveQuery, MoveWorker, APTOS_GAS_TO_BGU, NS_MOVE_STATE};
+use budlum_ee_move_sui::{
+    MoveSuiWorker, SuiCompiledModule, SuiPtb, SuiPtbCommand, ATTO_PER_MIST,
+    PROPOSED_SUI_ACTIVATION_HEIGHT,
+};
 use budlum_ee_svm::programs::{
     SvmAccountMeta, SvmInstructionEnvelope, ATTOS_PER_LAMPORT, NS_SVM_ACCOUNT, STAKE_PROGRAM_ID,
     SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID,
@@ -841,5 +845,53 @@ mod tests {
         assert_ne!(root_a, [0u8; 32]);
         let hex_root = hex::encode(root_a);
         println!("UEL_EXECUTION_ROOT={hex_root}");
+    }
+
+    /// Directive IP-50 conformance gate: `uel_conformance_move_sui`.
+    #[test]
+    fn uel_conformance_move_sui() {
+        let mut worker = MoveSuiWorker::new();
+        let mut host = MemoryHost::new(5_000_000);
+        let Ok(caller) = EeIdentity::new(EeId::MOVE_SUI, vec![0x31; 32]) else {
+            panic!("caller");
+        };
+        host.balances.insert(caller.clone(), 500 * ATTO_PER_MIST);
+        let ctx = BlockContext {
+            chain_id: 45_261,
+            height: PROPOSED_SUI_ACTIVATION_HEIGHT,
+            timestamp_ms: 1_793_923_200_000,
+        };
+        let Ok(ptb_in) = serde_json::to_vec(&SuiPtb {
+            commands: vec![
+                SuiPtbCommand::PublishPackage {
+                    modules: vec![SuiCompiledModule {
+                        name: "pool".to_string(),
+                        exported_functions: vec!["swap".to_string()],
+                        bytecode: vec![0x53, 0x55, 0x49, 0x01],
+                    }],
+                    initial_coin_mist: 100,
+                },
+                SuiPtbCommand::MintGasCoin { amount_mist: 50 },
+            ],
+        }) else {
+            panic!("ptb_in");
+        };
+        let Ok(out) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: caller.clone(),
+                target: caller,
+                value: BudAmount(0),
+                input: ptb_in,
+                gas_limit: 2_000_000,
+                depth: 0,
+                tx_hash: [0x50; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("sui exec");
+        };
+        assert_eq!(out.status, OutcomeStatus::Success);
     }
 }

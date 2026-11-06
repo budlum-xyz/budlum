@@ -183,6 +183,18 @@ STARK proving on every call (`BLG-248`).
   `conformance-nightly.yml` alongside `parallel_schedule_equals_sequential_root` and
   `parallel_scheduler_is_deterministic_across_arch`.
 
+## 15. Move (Sui Dialect) Execution Environment (`WP-50`, `EeId::MOVE_SUI = 0x05`)
+
+- Standalone out-of-process worker `budlum-ee-move-sui` (`execution/move-sui/`,
+  `panic = "unwind"`, pinned upstream `MystenLabs/sui` reference
+  `e5b8d9a4c2718f140933b42c66d8c04a7d1e9b02`, `Apache-2.0`).
+- Sui object model in `ee/sui/object` (`AddressOwner`, `ObjectOwner`, `Shared`,
+  `Immutable`, Lamport versioning, `BLAKE2b-256` object digests), `Foreign::Sui`
+  (`ForeignScheme::SuiEd25519 = 0x05`), and Sui JSON-RPC subset (`src/rpc/compat/sui/`).
+- Closed at launch on testnet `45261` (`move_sui_is_closed_on_testnet`,
+  `foreign_sui_is_closed_on_testnet`) with proposed activation height `50_000`.
+
+
 
 
 
