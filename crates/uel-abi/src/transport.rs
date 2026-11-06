@@ -141,6 +141,43 @@ fn deadline_after(timeout: Duration) -> Result<Instant, TransportError> {
         .ok_or(TransportError::Timeout)
 }
 
+/// An idle worker connection may wait for its next request. Once any byte of
+/// a frame arrives, the rest of that frame and its response share one budget.
+struct WorkerFrameIo<'a> {
+    stream: &'a mut UnixStream,
+    deadline: Option<Instant>,
+}
+
+impl Read for WorkerFrameIo<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some(deadline) = self.deadline {
+            return DeadlineIo {
+                stream: &mut *self.stream,
+                deadline,
+            }
+            .read(buf);
+        }
+        self.stream.set_read_timeout(None)?;
+        let read = self.stream.read(buf)?;
+        if read > 0 {
+            self.deadline = Some(Instant::now().checked_add(WATCHDOG).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::TimedOut, "UEL watchdog is unrepresentable")
+            })?);
+        }
+        Ok(read)
+    }
+}
+
+fn read_worker_frame(stream: &mut UnixStream) -> Result<(pb::Envelope, Instant), TransportError> {
+    let mut reader = WorkerFrameIo {
+        stream,
+        deadline: None,
+    };
+    let frame = read_frame(&mut reader)?;
+    let deadline = reader.deadline.ok_or(TransportError::Timeout)?;
+    Ok((frame, deadline))
+}
+
 /// The digest an environment reports for a caught panic. Domain-separated and
 /// bound to the environment, so two environments panicking with one message
 /// still differ.
@@ -771,7 +808,7 @@ pub fn serve_connection(
     mut stream: UnixStream,
     ee: &mut dyn ExecutionEnvironment,
 ) -> Result<ServeEnd, TransportError> {
-    let hello = read_frame(&mut stream)?;
+    let (hello, deadline) = read_worker_frame(&mut stream)?;
     match hello.body {
         Some(pb::envelope::Body::Hello(_)) => {}
         _ => {
@@ -781,7 +818,10 @@ pub fn serve_connection(
         }
     }
     write_frame(
-        &mut stream,
+        &mut DeadlineIo {
+            stream: &mut stream,
+            deadline,
+        },
         &envelope(
             hello.request_id,
             pb::envelope::Body::Hello(pb::Hello {
@@ -791,22 +831,35 @@ pub fn serve_connection(
     )?;
 
     loop {
-        let frame = match read_frame(&mut stream) {
+        let (frame, deadline) = match read_worker_frame(&mut stream) {
             Ok(frame) => frame,
-            Err(FrameError::Closed) => return Ok(ServeEnd::Closed),
-            Err(error) => return Err(error.into()),
+            Err(TransportError::Frame(FrameError::Closed)) => return Ok(ServeEnd::Closed),
+            Err(error) => return Err(error),
         };
         let id = frame.request_id;
         match frame.body {
             Some(pb::envelope::Body::ValidateDeployRequest(request)) => {
-                let result = match ee.validate_deploy(&request.code) {
-                    Ok(info) => pb::validate_deploy_response::Result::Info((&info).into()),
-                    Err(refusal) => {
+                let verdict = catch_unwind(AssertUnwindSafe(|| ee.validate_deploy(&request.code)));
+                let result = match verdict {
+                    Ok(Ok(info)) => pb::validate_deploy_response::Result::Info((&info).into()),
+                    Ok(Err(refusal)) => {
                         pb::validate_deploy_response::Result::Refusal((&refusal).into())
+                    }
+                    Err(payload) => {
+                        // ValidateDeployResponse has no fault arm. Do not
+                        // invent a successful code hash or unwind the worker;
+                        // close this connection as a transport failure.
+                        let digest = panic_digest(ee.id(), &panic_message(&*payload));
+                        return Err(TransportError::Protocol(format!(
+                            "deploy validation panicked ({digest:02x?})"
+                        )));
                     }
                 };
                 write_frame(
-                    &mut stream,
+                    &mut DeadlineIo {
+                        stream: &mut stream,
+                        deadline,
+                    },
                     &envelope(
                         id,
                         pb::envelope::Body::ValidateDeployResponse(pb::ValidateDeployResponse {
@@ -826,7 +879,6 @@ pub fn serve_connection(
                     field: "execute.call",
                 })?)?;
                 let ee_id = ee.id();
-                let deadline = deadline_after(WATCHDOG)?;
                 let (verdict, lost) = {
                     let mut host = RemoteHost {
                         stream: RefCell::new(&mut stream),
@@ -887,7 +939,6 @@ pub fn serve_connection(
                         .try_into()?,
                     input: request.input,
                 };
-                let deadline = deadline_after(WATCHDOG)?;
                 let (verdict, lost) = {
                     let host = RemoteHost {
                         stream: RefCell::new(&mut stream),
