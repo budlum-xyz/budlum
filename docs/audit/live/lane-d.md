@@ -187,6 +187,32 @@ The other five `Previously fixed` rows already had a test in the module they bel
 BLG-014, BULGU-011, DOC-GAP-07 has a declaration instead), and duplicating a test name is not
 possible in one crate's test binary, so they keep the module's name and this file cites it.
 
+### 4.6 Two live red jobs on `main`, read while working
+
+The lane's earlier passes recorded that no run had concluded. That changed during this session, and
+section 14.1 rule 9 says a new problem found while reading gets the next free id. Two scheduled jobs
+on `main` are red right now:
+
+| Run | Workflow / job | Failed step | What the step runs |
+|---|---|---|---|
+| `42163252239` | Watchdog / Main health pulse | `Lockfiles still match their manifests on main` | `cargo metadata --format-version 1 --locked` from the directory of every `Cargo.lock`: a nonzero exit means a manifest moved without its lockfile |
+| `42163252239` | Watchdog / RustSec drift | `Audit every workspace lockfile` | `cargo audit --file` over 15 lockfiles against a freshly fetched advisory DB; the workflow treats a failed DB fetch as a failure too |
+| `42002851792` | Testnet Rehearsal | (whole run) | the rehearsal, on `main` |
+
+The same Watchdog job's two later steps passed (`actionlint` parsed every workflow, and
+`budlum-gates regen-health-door` ran with its `--self-test`). That bounds the failure: the YAML is
+valid and the gate is wired; the drift is in a manifest and lockfile pair, or in the advisory DB
+fetch.
+
+The error text itself is not reachable from this environment. `gh run view --log-failed` returns
+empty and both `actions/jobs/<id>/logs` endpoints return `EOF` from the blob-storage redirect on
+every attempt. So this ledger records the failed step and the command it runs, which is enough to
+reproduce locally with one command, and does not invent an error message.
+
+Two records in the directive's own review family read on this: BLG-264 and BLG-265 (the `WIRING:`
+count and the combined-state record). They stay `Open` here; the red pulse is cited as the live
+evidence that the drift is real, not as a closed record.
+
 Seven records still have no reading: BLG-011, BLG-016, BLG-081 to BLG-087, BLG-097, BLG-169,
 BLG-170 to BLG-181, BLG-187 to BLG-193, BLG-200, BLG-231, BLG-255, TEST-GAP-02 and TEST-GAP-07 need
 either the record text or a toolchain this sandbox does not have.

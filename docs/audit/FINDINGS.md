@@ -101,6 +101,18 @@ needs a CI run, and this environment has neither.
 | DOC-GAP-08 | S3 | cli | The CLI fee default disagrees with the network base fee | Open | not read | not run | WP-39 | the record text is not in this tree |
 | DOC-GAP-09 | S3 | docs | The ledger table needs detail that WP-04 verifies | Open | not read | not run | WP-43 | the record text is not in this tree |
 
+
+## New findings raised by this lane (section 14.1 rule 9)
+
+Section 14.1 rule 9 says a problem found while reading gets the next free id, `BLG-268` onward. The
+first two are CI drift that was red on `main` while this lane was reading it. Neither is a record
+from the old ledger, so neither is in the table above.
+
+| Id | Importance | Area | English title | State | Evidence | Test | Closing package | Note |
+|---|---|---|---|---|---|---|---|---|
+| BLG-268 | High | ci | A lockfile no longer matches its manifest on `main`, and the Watchdog pulse is red | Open | `.github/workflows/watchdog.yml:107` (step `Lockfiles still match their manifests on main`); run `42163252239` | not run | WP-42 | the step runs `cargo metadata --locked` per lockfile directory; the failing directory is not recoverable here because the job log endpoint returns EOF, so the record names the step and the command, not the file |
+| BLG-269 | High | ci | The RustSec drift pulse is red on `main`, so either an advisory now hits a tracked lockfile or the advisory DB fetch failed | Open | `.github/workflows/watchdog.yml:57` (step `Audit every workspace lockfile`); run `42163252239` | not run | WP-42 | the workflow makes a failed DB fetch a failure by design, so the record must be re-read with log access before it is called an advisory |
+
 ## Named-test rule
 
 Section 16.4 rule 1 requires a regression test named `blg_NNN_<short>` for every record. No such
