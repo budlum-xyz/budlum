@@ -247,6 +247,7 @@ fn ci_runs_every_standalone_package_test_suite() {
         "crates/note-packing",
         "crates/uel-abi",
         "crates/wallet-core",
+        "execution/budzero",
         "xtask/tools",
     ] {
         assert!(

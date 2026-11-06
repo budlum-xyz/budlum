@@ -202,7 +202,8 @@ fn decode_checked_budzero(code: &[u8]) -> Result<Vec<u64>, String> {
             .try_into()
             .map_err(|_| "bad instruction word".to_string())?;
         let raw = u64::from_le_bytes(arr);
-        Instruction::decode(raw)?;
+        Instruction::decode_for_mainnet(raw, bud_isa::MainnetActivation::default())
+            .map_err(|e| e.to_string())?;
         words.push(raw);
     }
     Ok(words)
@@ -305,11 +306,7 @@ pub fn execute_stateful_contract_tx(
             let program = decode_checked_budzero(&code_bytes)?;
 
             let mut vm = Vm::with_mainnet_mode(STATEFUL_VM_MEMORY_BYTES, capped_limit, true);
-            if let Some(first8) = tx.from.as_bytes().get(..8) {
-                if let Ok(word) = first8.try_into() {
-                    vm.context.sender = u64::from_le_bytes(word);
-                }
-            }
+            vm.context.set_sender_bytes(&tx.from.0);
             vm.context.nonce = tx.nonce;
             vm.context.block_height = state.current_block_height;
 

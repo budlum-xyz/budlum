@@ -1330,6 +1330,7 @@ jobs:
             crates/bud-codec
             crates/note-packing
             crates/uel-abi
+            execution/budzero
       - id: protoc
         name: Install protoc
         if: always() && steps.rust.outcome == 'success'
@@ -1346,6 +1347,9 @@ jobs:
       - name: Format (uel-abi)
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --manifest-path crates/uel-abi/Cargo.toml --all -- --check
+      - name: Format (ee-budzero)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path execution/budzero/Cargo.toml --all -- --check
       - name: Clippy (bpqs)
         if: always() && steps.rust.outcome == 'success'
         run: cargo clippy --manifest-path crates/bpqs/Cargo.toml --all-targets -- -D warnings
@@ -1358,6 +1362,9 @@ jobs:
       - name: Clippy (uel-abi)
         if: always() && steps.protoc.outcome == 'success'
         run: cargo clippy --manifest-path crates/uel-abi/Cargo.toml --all-targets -- -D warnings
+      - name: Clippy (ee-budzero)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo clippy --manifest-path execution/budzero/Cargo.toml --all-targets -- -D warnings
       - name: Tests (bpqs)
         if: always() && steps.rust.outcome == 'success'
         run: cargo test --manifest-path crates/bpqs/Cargo.toml
@@ -1370,6 +1377,9 @@ jobs:
       - name: Tests (uel-abi)
         if: always() && steps.protoc.outcome == 'success'
         run: cargo test --manifest-path crates/uel-abi/Cargo.toml
+      - name: Tests (ee-budzero)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo test --manifest-path execution/budzero/Cargo.toml
 
   # ============================  / Bolum 4 (BNS gate) ============================
       - name: Format

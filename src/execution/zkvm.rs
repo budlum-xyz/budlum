@@ -44,6 +44,7 @@ pub struct ZkVmReceipt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TxContext {
     pub sender: u64,
+    pub sender_words: [u64; 4],
     pub nonce: u64,
     pub block_height: u64,
 }
@@ -52,10 +53,15 @@ impl TxContext {
     /// The context of `tx` executing in the block at `block_height`.
     #[must_use]
     pub fn of(tx: &crate::core::transaction::Transaction, block_height: u64) -> Self {
-        let mut word = [0u8; 8];
-        word.copy_from_slice(&tx.from.as_bytes()[..8]);
+        let mut words = [0u64; 4];
+        for (slot, chunk) in words.iter_mut().zip(tx.from.as_bytes().chunks_exact(8)) {
+            if let Ok(arr) = chunk.try_into() {
+                *slot = u64::from_le_bytes(arr);
+            }
+        }
         Self {
-            sender: u64::from_le_bytes(word),
+            sender: words.first().copied().unwrap_or(0),
+            sender_words: words,
             nonce: tx.nonce,
             block_height,
         }
@@ -128,7 +134,11 @@ impl ZkVmExecutor {
 
         let program = decode_program(bytecode)?;
         let mut vm = Vm::with_mainnet_mode(CONTRACT_VM_MEMORY_BYTES, gas_limit, mainnet);
-        vm.context.sender = ctx.sender;
+        if ctx.sender_words != [0u64; 4] {
+            vm.context.set_sender_words(ctx.sender_words);
+        } else {
+            vm.context.sender = ctx.sender;
+        }
         vm.context.nonce = ctx.nonce;
         vm.context.block_height = ctx.block_height;
 
