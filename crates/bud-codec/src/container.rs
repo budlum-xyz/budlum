@@ -506,4 +506,5 @@ mod tests {
         }
         assert_eq!(structural_join(StructuralKind::Json, &chunks), json);
     }
+}
 
