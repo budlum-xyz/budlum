@@ -97,7 +97,7 @@ mod tests {
         core.start();
         let ack = core.accept_share(assigned.clone()).expect("accept");
         assert!(matches!(ack, DutyTx::CustodyAck { .. }));
-        let duty = core.answer_audit(audit).expect("audit");
+        let duty = core.answer_audit(assigned.object, audit).expect("audit");
         let DutyTx::CustodyProofBatch(batch) = duty else {
             panic!("expected a proof batch");
         };
@@ -157,8 +157,35 @@ mod tests {
             "mobile_share_placement_order"
         );
         assert_eq!(core.status().stored_bytes, 0);
-        core.accept_share(assigned).expect("valid placement");
-        core.answer_audit(audit).expect("valid proof");
+        core.accept_share(assigned.clone()).expect("valid placement");
+        core.answer_audit(assigned.object, audit).expect("valid proof");
+    }
+
+    #[test]
+    fn mobile_core_audits_the_requested_object() {
+        let (first, audit) = placed_symbol(&[1; 64], 7);
+        let (mut second, _) = placed_symbol(&[2; 64], 7);
+        second.object = [4; 32];
+        let mut core = fixture(8 * QUOTA_MIN_BYTES);
+        core.accept_share(first.clone()).expect("first object");
+        core.accept_share(second.clone()).expect("second object");
+
+        let DutyTx::CustodyProofBatch(batch) = core
+            .answer_audit(second.object, audit)
+            .expect("second object's audit")
+        else {
+            panic!("expected a proof batch");
+        };
+        let context = ProofContext {
+            symbol_root: symbol_root(&second.placed),
+            symbol_count: 1,
+            sub_blocks: sub_block_count(second.symbol.len()),
+        };
+        batch.proofs[0].verify(&audit, &context).expect("proof");
+        assert_eq!(
+            core.answer_audit([5; 32], audit).expect_err("unknown object").code,
+            "mobile_audit_unknown_share"
+        );
     }
 
     #[test]
