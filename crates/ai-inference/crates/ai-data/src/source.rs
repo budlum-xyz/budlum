@@ -28,7 +28,7 @@ pub enum DataError {
 ///
 /// # Errors
 ///
-/// `InvalidSource` when `content_id` is zero or a Pollen grant has zero
+/// `InvalidSource` when `content_id` is zero or a data-market grant has zero
 /// remaining epochs.
 pub fn assert_closed_loop(source: &SourceRef) -> Result<(), DataError> {
     source.validate().map_err(DataError::InvalidSource)?;
@@ -95,7 +95,7 @@ mod tests {
 
     #[test]
     fn require_source_enforces_exact_kind() {
-        let grant = SourceRef::pollen_grant([1; 32], 1);
+        let mut grant = SourceRef::pollen_grant([1; 32], 1);
         assert!(require_source(&grant, SourceKind::PollenGrant).is_ok());
         assert_eq!(
             require_source(&grant, SourceKind::StorageDeal),
@@ -104,17 +104,18 @@ mod tests {
                 got: SourceKind::PollenGrant
             })
         );
+        grant.grant_epochs_remaining = Some(0);
+        assert_eq!(
+            assert_closed_loop(&grant),
+            Err(DataError::InvalidSource(SourceError::ExpiredOrMissingGrant))
+        );
     }
 
     #[test]
-    fn blg_160_assert_closed_loop_refuses_zero_id_and_expired_pollen_grant() {
+    fn blg_160_assert_closed_loop_refuses_zero_id_and_expired_grant() {
         assert_eq!(
             assert_closed_loop(&SourceRef::storage_deal([0u8; 32])),
             Err(DataError::InvalidSource(SourceError::ZeroContentId))
-        );
-        assert_eq!(
-            assert_closed_loop(&SourceRef::pollen_grant([9u8; 32], 0)),
-            Err(DataError::InvalidSource(SourceError::ExpiredOrMissingGrant))
         );
     }
 }

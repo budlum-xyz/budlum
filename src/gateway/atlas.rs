@@ -24,7 +24,7 @@
 
 use crate::core::address::Address;
 use crate::domain::{ConsensusKind, DomainId, Hash32};
-use crate::pollen::{AccessGrant, DataAsset, SaleAuthorization};
+use crate::pollen::{AccessGrant, AccessGrantStatus, DataAsset, SaleAuthorization};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -77,7 +77,7 @@ pub fn build_wallet_context(
         .iter()
         .filter(|grant| {
             grant.owner == address
-                && grant.status == crate::pollen::AccessGrantStatus::Active
+                && grant.status == AccessGrantStatus::Active
                 && grant.reads_used < grant.max_reads
         })
         .count();
@@ -85,7 +85,7 @@ pub fn build_wallet_context(
         .iter()
         .filter(|grant| {
             grant.grantee == address
-                && grant.status == crate::pollen::AccessGrantStatus::Active
+                && grant.status == AccessGrantStatus::Active
                 && grant.reads_used < grant.max_reads
         })
         .count();
@@ -427,7 +427,7 @@ impl AtlasQueryEngine {
                 .iter()
                 .min_by_key(|(&id, s)| (s.last_commit_epoch, s.current_height, id))
                 .map(|(&id, _)| id)
-                .ok_or_else(|| "Atlas domain summary index empty".to_string())?;
+                .ok_or_else(|| "domain summary index empty".to_string())?;
             self.domain_summaries.remove(&stalest);
         }
         self.domain_summaries.insert(summary.domain_id, summary);

@@ -141,7 +141,7 @@ impl SourceRef {
     ///
     /// # Errors
     ///
-    /// Returns [`SourceError`] when `content_id` is all-zero, when a Pollen
+    /// Returns [`SourceError`] when `content_id` is all-zero, when a data-market
     /// grant has zero remaining epochs or omits its epoch counter, or when a
     /// non-grant source carries unexpected grant epochs.
     pub fn validate(&self) -> Result<(), SourceError> {
@@ -149,12 +149,12 @@ impl SourceRef {
             return Err(SourceError::ZeroContentId);
         }
         match (self.kind, self.grant_epochs_remaining) {
-            (SourceKind::PollenGrant, Some(epochs)) if epochs > 0 => Ok(()),
-            (SourceKind::PollenGrant, _) => Err(SourceError::ExpiredOrMissingGrant),
             (SourceKind::StorageDeal | SourceKind::SocialRef, None) => Ok(()),
             (SourceKind::StorageDeal | SourceKind::SocialRef, Some(_)) => {
                 Err(SourceError::UnexpectedGrantEpochs)
             }
+            (_, Some(epochs)) if epochs > 0 => Ok(()),
+            (_, _) => Err(SourceError::ExpiredOrMissingGrant),
         }
     }
 }
@@ -164,9 +164,9 @@ impl SourceRef {
 pub enum SourceError {
     /// All-zero `content_id` does not identify content.
     ZeroContentId,
-    /// A Pollen grant requires at least one remaining epoch.
+    /// A data-market grant requires at least one remaining epoch.
     ExpiredOrMissingGrant,
-    /// Non-Pollen sources do not carry grant epoch counters.
+    /// Non-grant sources do not carry grant epoch counters.
     UnexpectedGrantEpochs,
 }
 
@@ -223,8 +223,11 @@ mod tests {
         let deal = SourceRef::storage_deal([1; 32]);
         assert!(deal.grant_epochs_remaining.is_none());
 
-        let grant = SourceRef::pollen_grant([1; 32], 3);
+        let mut grant = SourceRef::pollen_grant([1; 32], 3);
         assert_eq!(grant.grant_epochs_remaining, Some(3));
+        assert!(grant.validate().is_ok());
+        grant.grant_epochs_remaining = Some(0);
+        assert_eq!(grant.validate(), Err(SourceError::ExpiredOrMissingGrant));
     }
 
     #[test]
@@ -237,10 +240,5 @@ mod tests {
             SourceRef::storage_deal([0u8; 32]).validate(),
             Err(SourceError::ZeroContentId)
         );
-        assert_eq!(
-            SourceRef::pollen_grant([1u8; 32], 0).validate(),
-            Err(SourceError::ExpiredOrMissingGrant)
-        );
-        assert!(SourceRef::pollen_grant([1u8; 32], 1).validate().is_ok());
     }
 }

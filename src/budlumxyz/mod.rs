@@ -20,9 +20,9 @@ pub struct BudlumxyzRegistry {
     ///
     /// Empty set = nobody is a governor. No governance action populates this
     /// yet, so on a real network the set is empty and
-    /// [`BudlumxyzRegistry::mark_verified_by_governance`] refuses every
+    /// [`Self::mark_verified_by_governance`] refuses every
     /// caller. The badge itself still moves, through
-    /// [`BudlumxyzRegistry::mark_verified_by_proposal`], on the authority of
+    /// [`Self::mark_verified_by_proposal`], on the authority of
     /// a counted vote rather than an address.
     #[serde(default)]
     pub authorized_governors: std::collections::HashSet<Address>,

@@ -628,7 +628,15 @@ mod tests {
     fn blg_131_assess_enforces_max_stages_per_event_and_polyp_self_stage_guard() {
         let mut policy = HealthPolicy::default();
         policy.reversion.max_stages_per_event = 1;
-        let mut ledger = RegenerationLedger::at(2, [0xFF; 32]);
+        let mut ledger = healthy_ledger();
+        ledger.stage = Stage::Medusa;
+        ledger.height = 2;
+        ledger.commitment = [0xFF; 32];
+        ledger.reversion_events.clear();
+        ledger.total_reused = 0;
+        ledger.total_discarded = 0;
+        ledger.total_refiled = 0;
+        ledger.total_rederive = 0;
         let canon = |stage: Stage, height: u64| -> Option<[u8; 32]> {
             if (stage, height) == (Stage::Medusa, 2) {
                 return Some(C_MEDUSA);

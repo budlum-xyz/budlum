@@ -1720,7 +1720,7 @@ mod tests {
         let seller = addr(1);
         let buyer = addr(2);
         let stranger = addr(3);
-        let bud3_cid = crate::storage::bud3::content_id::ContentId::public(b"pollen-dataset-v3");
+        let bud3_cid = crate::storage::bud3::content_id::ContentId::public(b"market-dataset-v3");
         let manifest_id = ContentId(bud3_cid.digest);
         let asset = DataAsset::new(seller, manifest_id, [0x55; 32], true);
         let asset_id = reg.register_data_asset(asset.clone()).unwrap();

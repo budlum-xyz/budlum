@@ -40,7 +40,7 @@ F-Droid, and direct signed APK releases.
 
 ## 3. F-Droid & Reproducible Direct APK Distribution
 
-1. **Build Recipe (`mobile/android/fdroid/network.budlum.validator.yml`):**
+1. **Build Metadata (`mobile/android/fdroid/network.budlum.validator.yml`):**
    - Pins Rust `1.97.1`, Android NDK `27.2.12479018`, `SOURCE_DATE_EPOCH=1700000000`,
      `CARGO_INCREMENTAL=0`, and `--remap-path-prefix` so build-host paths never
      leak into `.so` sections.

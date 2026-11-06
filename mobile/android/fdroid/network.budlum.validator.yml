@@ -4,10 +4,10 @@ Categories:
   - Security
 License: Apache-2.0
 AuthorName: Budlum Contributors
-WebSite: https://github.com/lubothebook/budlum
-SourceCode: https://github.com/lubothebook/budlum
-IssueTracker: https://github.com/lubothebook/budlum/issues
-Changelog: https://github.com/lubothebook/budlum/releases
+WebSite: https://budlum.network
+SourceCode: https://budlum.network/source
+IssueTracker: https://budlum.network/issues
+Changelog: https://budlum.network/releases
 
 AutoName: Budlum Validator
 Summary: Post-quantum light validator and encrypted storage share custodian
@@ -21,7 +21,7 @@ Description: |-
   * Zero third-party analytics, crash-reporting, or advertising SDKs.
 
 RepoType: git
-Repo: https://github.com/lubothebook/budlum.git
+Repo: https://budlum.network/budlum.git
 
 Builds:
   - versionName: 0.1.0-testnet

@@ -228,8 +228,8 @@ object MobileValidatorUnitTest {
         check(gradle.contains("isReproducibleFileOrder = true"), "WP-58 archive entry order must be deterministic")
 
         val fdroid = File("mobile/android/fdroid/network.budlum.validator.yml").readText()
-        check(fdroid.contains("ndk: 27.2.12479018"), "WP-58 F-Droid recipe must pin NDK 27.2.12479018")
-        check(fdroid.contains("1.97.1"), "WP-58 F-Droid recipe must pin Rust 1.97.1")
+        check(fdroid.contains("ndk: 27.2.12479018"), "WP-58 F-Droid metadata must pin NDK 27.2.12479018")
+        check(fdroid.contains("1.97.1"), "WP-58 F-Droid metadata must pin Rust 1.97.1")
 
         fun packDeterministicApk(inputs: List<Pair<String, ByteArray>>): String {
             val out = java.io.ByteArrayOutputStream()

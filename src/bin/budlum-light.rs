@@ -553,27 +553,16 @@ mod tests {
             epoch: 1,
             state_root: "33".repeat(32),
         };
-        let header = GlobalBlockHeader {
-            version: 7,
-            global_height: 1,
-            previous_global_hash: [0u8; 32],
-            chain_id: 45_261,
-            timestamp_ms: 1_000,
-            domain_registry_root: [0u8; 32],
-            domain_commitment_root: [0u8; 32],
-            message_root: [0u8; 32],
-            bridge_state_root: [0u8; 32],
-            replay_nonce_root: [0u8; 32],
-            proposer: None,
-            settlement_finality_root: [0u8; 32],
-            storage_root: None,
-            ai_root: None,
-            identity_root: None,
-            checkpoint_height: 10,
-            external_intake_root: None,
-            graft_root: None,
-            delegation_root: None,
-        };
+        let z = "[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]";
+        let json = format!(
+            "{{\"version\":7,\"global_height\":1,\"previous_global_hash\":{z},\
+             \"chain_id\":45261,\"timestamp_ms\":1000,\"domain_registry_root\":{z},\
+             \"domain_commitment_root\":{z},\"message_root\":{z},\"bridge_state_root\":{z},\
+             \"replay_nonce_root\":{z},\"proposer\":null,\"settlement_finality_root\":{z},\
+             \"checkpoint_height\":10}}"
+        );
+        let header: GlobalBlockHeader =
+            serde_json::from_str(&json).expect("valid GlobalBlockHeader JSON");
         let o1 = GlobalHeaderOpening {
             header: header.clone(),
             state_root_body: "44".repeat(32),

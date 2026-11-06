@@ -3,10 +3,10 @@
 //! bids, fulfilment and refunds run in block through `SettlementTx::Graft`;
 //! the Ethereum-side `GraftExecutor` contract is ().
 //!
-//! Graft: an application that lives on another network is used from
+//! Remote app binding: an application that lives on another network is used from
 //! Budlum and paid for in BUD, without moving there.
 //!
-//! A Graft row binds an application on an origin domain to one deterministic,
+//! An app-binding row binds an application on an origin domain to one deterministic,
 //! keyless Budlum mirror account. Nothing leaves the mirror except by a rule
 //! of this module; there is no administrator key.
 //!
@@ -703,7 +703,7 @@ pub fn execute_graft_tx(
         .value();
     if ctx.chain_id == testnet || ctx.chain_id == mainnet {
         return Err(refused(
-            "app binding (Graft) is closed on testnet and mainnet",
+            "remote app binding is closed on testnet and mainnet",
         ));
     }
     let block = state.current_block_height;
@@ -1774,7 +1774,7 @@ mod tests {
             manifest_hash: [0xBB; 32],
         };
         let err = execute_graft_tx(&mut state, &testnet_ctx, &tx)
-            .expect_err("app binding (Graft) must be closed on testnet");
+            .expect_err("remote app binding must be closed on testnet");
         assert!(err.to_string().contains("closed on testnet"));
     }
 }

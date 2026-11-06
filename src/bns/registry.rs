@@ -525,7 +525,7 @@ mod tests {
     fn bns_resolves_bud3_content() {
         let owner = Address::from([0x31; 32]);
         let stranger = Address::from([0x32; 32]);
-        let bud3_cid = crate::storage::bud3::content_id::ContentId::public(b"dweb-index-html");
+        let bud3_cid = crate::storage::bud3::content_id::ContentId::public(b"site-index-html");
         let cid = ContentId(bud3_cid.digest);
 
         let mut reg = BnsRegistry::new();

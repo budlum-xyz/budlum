@@ -14,7 +14,10 @@
 
 #![forbid(unsafe_code)]
 
-use budscan::evidence::Strength;
+use budscan::{
+    evidence::{Claim, Strength},
+    Evidence,
+};
 use budscan::patchset;
 use budscan::{name_rule, query};
 
@@ -136,11 +139,7 @@ fn self_test() -> i32 {
     }
 
     // 8. A blank claim reason never yields Verified.
-    let blank_claim = budscan::Evidence::new().with(budscan::evidence::Claim::new(
-        "canary",
-        Strength::Verified,
-        "   ",
-    ));
+    let blank_claim = Evidence::new().with(Claim::new("canary", Strength::Verified, "   "));
     if blank_claim.weakest() != Strength::Refused {
         problems.push(String::from("a blank-reason claim was not refused"));
     }

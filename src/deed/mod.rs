@@ -110,7 +110,7 @@ impl Manifest {
     /// Build the B.U.D. 3.0 `StorageTxV3::RegisterObject` transaction for this
     /// educational artifact after checking that `record` commits to `content_id`.
     ///
-    /// Convenience: exposed so DeEd domain callers register artifacts as B.U.D.
+    /// Convenience: exposed so education domain callers register artifacts as B.U.D.
     /// 3.0 objects (`BLG-261`) instead of legacy manifests.
     pub fn to_register_object_tx(
         &self,
@@ -120,10 +120,10 @@ impl Manifest {
     ) -> Result<crate::storage::bud3::tx::StorageTxV3, &'static str> {
         self.validate()?;
         if lifetime_epochs == 0 {
-            return Err("DeEd object lifetime_epochs must be positive");
+            return Err("education object lifetime_epochs must be positive");
         }
         if record.content_id.digest != self.content_id.0 {
-            return Err("DeEd record content_id digest mismatch");
+            return Err("education record content_id digest mismatch");
         }
         Ok(crate::storage::bud3::tx::StorageTxV3::RegisterObject {
             record,

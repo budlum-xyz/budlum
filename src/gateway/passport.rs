@@ -17,7 +17,9 @@
 
 use crate::bns::types::BnsResolved;
 use crate::core::address::Address;
-use crate::pollen::{AccessGrant, DataAsset, SaleAuthorization};
+use crate::pollen::{
+    AccessGrant, AccessGrantStatus, DataAsset, DataAssetStatus, SaleAuthorization,
+};
 use crate::storage::{ContentId, ContentManifest};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -280,10 +282,10 @@ pub fn build_passport_proof_bundle(
         }
         None => hasher.update([0]),
     }
-    hasher.update((profile.pollen.assets_owned as u64).to_le_bytes());
-    hasher.update((profile.pollen.grants_as_owner as u64).to_le_bytes());
-    hasher.update((profile.pollen.grants_as_grantee as u64).to_le_bytes());
-    hasher.update((profile.pollen.sale_authorizations as u64).to_le_bytes());
+    if let Ok(encoded_profile) = serde_json::to_vec(profile) {
+        hasher.update((encoded_profile.len() as u64).to_le_bytes());
+        hasher.update(&encoded_profile);
+    }
     hasher.update(generated_at_block.to_le_bytes());
     hasher.update((items.len() as u32).to_le_bytes());
     for item in &items {
@@ -388,7 +390,7 @@ pub fn build_passport_profile(
         .iter()
         .filter(|grant| {
             grant.owner == owner
-                && grant.status == crate::pollen::AccessGrantStatus::Active
+                && grant.status == AccessGrantStatus::Active
                 && grant.reads_used < grant.max_reads
         })
         .count();
@@ -396,7 +398,7 @@ pub fn build_passport_profile(
         .iter()
         .filter(|grant| {
             grant.grantee == owner
-                && grant.status == crate::pollen::AccessGrantStatus::Active
+                && grant.status == AccessGrantStatus::Active
                 && grant.reads_used < grant.max_reads
         })
         .count();
@@ -610,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_129_proof_bundle_binds_all_profile_fields_and_ignores_revoked_pollen() {
+    fn blg_129_proof_bundle_binds_all_profile_fields_and_ignores_revoked_assets() {
         let owner = addr(3);
         let cid = ContentId::of(b"doc");
         let resolved = BnsResolved {
@@ -623,16 +625,18 @@ mod tests {
             is_expired: false,
         };
         let mut revoked_asset = DataAsset::new(owner, cid, [9u8; 32], true);
-        revoked_asset.status = crate::pollen::DataAssetStatus::Revoked;
+        revoked_asset.status = DataAssetStatus::Revoked;
         let profile = build_passport_profile(
             "doc.bud".into(),
-            Some(resolved),
+            Some(resolved.clone()),
             None,
             &[revoked_asset],
             &[],
             &[],
         );
-        assert_eq!(profile.pollen.assets_owned, 0);
+        let baseline_profile =
+            build_passport_profile("doc.bud".into(), Some(resolved), None, &[], &[], &[]);
+        assert_eq!(profile, baseline_profile);
 
         let bundle = try_build_passport_proof_bundle(&profile, 50).unwrap();
         let mut forged = profile.clone();
