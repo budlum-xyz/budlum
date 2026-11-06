@@ -170,12 +170,15 @@ fn is_ai_layer_transaction(tx_type: &TransactionType) -> bool {
 ///
 /// Closing a layer's entry must not close its exit. Until WP-45 the AI layer
 /// had no chain-id gate at all, so bonds and escrows taken on testnet are
-/// legitimate existing state, and these six doors are the only way that value
+/// legitimate existing state, and these seven doors are the only way that value
 /// returns to its owner. Refusing them does not close a feature, it
 /// confiscates a balance - the bug `begin_unbonding` ("left the remaining bond
 /// locked for good") and the `Unstake` handler ("a 100% confiscation") already
 /// name. `AiAgentPaymentRelease` is here for the same reason: it pays the
 /// recipient for work already delivered, so blocking it strands the escrow.
+/// `AiDisputeSlash` settles an existing bond too, and it is only valid inside
+/// `DISPUTE_WINDOW_BLOCKS`: refusing it for that window lets the window expire,
+/// after which the equivocator withdraws unslashed through the open exit.
 ///
 /// Each door keeps its own authorisation, shape and deadline checks; this
 /// exemption only removes the chain-id refusal. New value cannot enter,
@@ -190,6 +193,7 @@ fn is_ai_layer_exit(tx_type: &TransactionType) -> bool {
             | TransactionType::AiRequestCancel(_)
             | TransactionType::AiAgentPaymentReclaim(_)
             | TransactionType::AiAgentPaymentRelease(_)
+            | TransactionType::AiDisputeSlash { .. }
     )
 }
 
