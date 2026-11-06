@@ -1,9 +1,10 @@
-//! Validator classes and the single registration door.
+//! Validator classes and the single registration door, and the mobile duty lane.
 //!
-//! The duty lane tests
-//! (`mobile_duty_tx_lane_is_rate_limited`, `duty_lane_budget_is_twenty_percent`)
-//! come with the duty transactions themselves (`CustodyAck`,
-//! `CustodyProofBatch`, `PresenceSignal`), which land later.
+//! The duty lane (`src/mempool/duty_lane.rs`) carries `CustodyAck` and
+//! `CustodyProofBatch`: free (Section 7.3 item 6), one batch per validator per
+//! window, and never more than 20 percent of a block. `PresenceSignal` is the
+//! third family the directive names and has no transaction variant yet, so it is
+//! named in `DutyKind` and not carried; the module doc there says why.
 
 use crate::core::account::AccountState;
 use crate::core::address::Address;
@@ -725,4 +726,161 @@ fn the_directory_answers_get_validator_list_relays_and_list_gateways() {
     assert!(directory
         .query_json(DirectoryQuery::One(Address::from([0x55; 32])))
         .is_null());
+}
+
+// ---------------------------------------------------------------------------
+// The mobile duty lane, Section 7.3 item 6.
+// ---------------------------------------------------------------------------
+
+/// A signed `CustodyAck` for `seed`, paying `fee`.
+///
+/// Duty work is free on the paying path, so the refusal this test looks for has
+/// to come from the lane and not from the fee floor: the transaction below is
+/// built with fee zero on purpose, which the floor would refuse if the lane did
+/// not offer it.
+fn custody_ack(seed: u8, nonce: u64, fee: u64) -> Transaction {
+    use crate::storage::bud3::tx::StorageTxV3;
+    let keypair = crate::crypto::primitives::KeyPair::from_seed(&[seed; 32]).unwrap();
+    let from = Address::from(keypair.public_key_bytes());
+    let mut tx = Transaction::new_with_chain_id(
+        from,
+        Address::zero(),
+        0,
+        fee,
+        nonce,
+        Vec::new(),
+        DEFAULT_CHAIN_ID,
+        TransactionType::StorageV3(Box::new(StorageTxV3::CustodyAck { object: [seed; 32] })),
+    );
+    tx.hash = tx.calculate_hash();
+    tx.sign(&keypair);
+    tx
+}
+
+fn lobby() -> crate::mempool::pool::Mempool {
+    crate::mempool::pool::Mempool::new(crate::mempool::pool::MempoolConfig::default())
+}
+
+#[test]
+fn mobile_duty_tx_lane_is_rate_limited() {
+    use crate::mempool::pool::MempoolError;
+
+    let mut pool = lobby();
+    let window = 7;
+    let first = custody_ack(11, 0, 0);
+    let sender = first.from;
+
+    // Free: the pool's fee floor is 1 by default and this transaction pays 0.
+    pool.add_transaction_in_window(first, window)
+        .expect("a duty ack is free and the lane has not been used this epoch");
+
+    // A second batch from the same validator in the same epoch is the thing the
+    // rate limit exists to refuse.
+    let second = custody_ack(11, 1, 0);
+    assert_eq!(
+        pool.add_transaction_in_window(second.clone(), window),
+        Err(MempoolError::DutyWindowExhausted),
+        "one batch per validator per window"
+    );
+
+    // The next epoch starts empty, so the validator is not locked out.
+    let mut third = custody_ack(11, 1, 0);
+    third.hash = third.calculate_hash();
+    pool.add_transaction_in_window(third, window + 1)
+        .expect("a new window grants a new batch");
+
+    // A second validator is unaffected by the first one's use of its own slot.
+    pool.add_transaction_in_window(custody_ack(12, 0, 0), window)
+        .expect("the limit is per validator, not per lane");
+
+    // A paying transaction is never refused by the duty window: the epoch is
+    // spent for `sender`, and an ordinary transfer still gets in.
+    let keypair = crate::crypto::primitives::KeyPair::from_seed(&[13; 32]).unwrap();
+    let from = Address::from(keypair.public_key_bytes());
+    let mut transfer = Transaction::new_with_chain_id(
+        from,
+        Address::zero(),
+        100,
+        5,
+        0,
+        Vec::new(),
+        DEFAULT_CHAIN_ID,
+        TransactionType::Transfer,
+    );
+    transfer.hash = transfer.calculate_hash();
+    transfer.sign(&keypair);
+    pool.add_transaction_in_window(transfer, window)
+        .expect("the duty lane does not gate paying traffic");
+}
+
+#[test]
+fn duty_lane_budget_is_twenty_percent() {
+    use crate::mempool::duty_lane::{
+        DutyLane, DUTY_LANE_SHARE_PERCENT, DUTY_SUBMISSIONS_PER_WINDOW,
+    };
+    use crate::mempool::pool::MempoolError;
+
+    // The constant the directive fixes (Section 7.3 item 6, TESTNET-DEFAULT).
+    assert_eq!(DUTY_LANE_SHARE_PERCENT, 20);
+    assert_eq!(DUTY_SUBMISSIONS_PER_WINDOW, 1);
+
+    // A block of 1 000 000 bytes gives the corridor 200 000, rounded down.
+    assert_eq!(DutyLane::new(1_000_000).corridor_bytes(), 200_000);
+    assert_eq!(DutyLane::new(7).corridor_bytes(), 1, "rounded down, never up");
+
+    // The pool builds its corridor from the consensus block limit.
+    let pool = lobby();
+    let expected =
+        crate::consensus::MAX_BLOCK_SIZE * usize::from(DUTY_LANE_SHARE_PERCENT) / 100;
+    assert_eq!(
+        pool.duty_corridor_bytes(),
+        expected,
+        "the pool's corridor is a fifth of MAX_BLOCK_SIZE"
+    );
+
+    // The corridor's ceiling is measured against a batch of known size, so the
+    // arithmetic is exact rather than dependent on how large an ML-DSA-87
+    // signature happens to be today: a 1 000 byte block gives 200, and 150 + 60
+    // is refused while 150 + 50 is admitted.
+    let mut lane = DutyLane::new(1_000);
+    lane.record(&Address::from([1u8; 32]), 1, 150);
+    assert_eq!(
+        lane.admit(&Address::from([2u8; 32]), 1, 60),
+        Err(crate::mempool::duty_lane::DutyRefusal::CorridorFull),
+        "150 + 60 is past a 200 byte corridor"
+    );
+    assert_eq!(
+        lane.admit(&Address::from([2u8; 32]), 1, 50),
+        Ok(()),
+        "150 + 50 is exactly the corridor"
+    );
+
+    // End to end through the pool: every duty transaction it admits is charged
+    // to the corridor, and the corridor is never exceeded.
+    let mut pool = lobby();
+    let corridor = pool.duty_corridor_bytes();
+    let mut admitted = 0usize;
+    for seed in 20u8..24 {
+        if pool.add_transaction_in_window(custody_ack(seed, 0, 0), 1).is_ok() {
+            admitted += 1;
+        }
+    }
+    assert!(admitted >= 1, "at least one duty transaction fits the corridor");
+    assert!(
+        pool.duty_bytes_this_block() <= corridor,
+        "the corridor admitted {} bytes against a {corridor} byte ceiling",
+        pool.duty_bytes_this_block()
+    );
+
+    // A new block resets the corridor; the window stays spent, which is the
+    // difference between "a new block" and "a new epoch".
+    let before = pool.duty_bytes_this_block();
+    assert!(before > 0, "the previous block had used some of the corridor");
+    pool.begin_block(1);
+    assert_eq!(pool.duty_bytes_this_block(), 0, "a new block, a new corridor");
+    assert_eq!(
+        pool.add_transaction_in_window(custody_ack(20, 1, 0), 1),
+        Err(MempoolError::DutyWindowExhausted),
+        "a new block is not a new window"
+    );
 }

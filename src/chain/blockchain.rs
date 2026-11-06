@@ -911,7 +911,12 @@ impl Blockchain {
             if let Ok(txs) = store.load_mempool_txs() {
                 let count = txs.len();
                 for tx in txs {
-                    let _ = mempool.add_transaction(tx);
+                    // Restored in the epoch the node starts in. A duty
+                    // transaction that arrives back from disk is re-admitted
+                    // through the lane like any other, so a restart cannot be
+                    // used to hand a validator a second free batch: the count
+                    // it spends is the current window's.
+                    let _ = mempool.add_transaction_in_window(tx, state.epoch_index);
                 }
                 if count > 0 {
                     info!("Restored {count} transactions from mempool persistence");
@@ -3884,9 +3889,14 @@ impl Blockchain {
         block_timestamp_ms: u128,
         previous_hash: &str,
     ) -> Vec<Transaction> {
-        let pending_txs = self
-            .mempool
-            .get_sorted_transactions(crate::consensus::MAX_TRANSACTIONS_PER_BLOCK);
+        // A new block is a new corridor (Section 7.3 item 6: the duty lane may
+        // take 20 percent of a block), but not a new window: the window is the
+        // epoch, so clearing the per-validator counts here would be the rate
+        // limit removed rather than enforced.
+        let (pending_txs, _) = self.mempool.begin_block_and_select(
+            self.state.epoch_index,
+            crate::consensus::MAX_TRANSACTIONS_PER_BLOCK,
+        );
         let mut valid_txs = Vec::new();
         let mut temp_state = self.state.clone();
         let set_block_context = |s: &mut crate::core::account::AccountState| {
@@ -4928,8 +4938,12 @@ impl Blockchain {
 
         self.mempool
             .sync_scheme_registry(&self.state.scheme_registry);
+        // The duty lane's window is the epoch: Section 7.3 item 6 limits a
+        // mobile validator to one free batch per window, and the epoch is the
+        // unit both the registry and the pool already use for time. Passed
+        // explicitly because the pool has no clock consensus agrees on.
         self.mempool
-            .add_transaction(transaction.clone())
+            .add_transaction_in_window(transaction.clone(), self.state.epoch_index)
             .map_err(|e| format!("Mempool error: {e:?}"))?;
         if let Some(ref store) = self.storage {
             if let Err(e) = store.save_mempool_tx(&transaction) {
