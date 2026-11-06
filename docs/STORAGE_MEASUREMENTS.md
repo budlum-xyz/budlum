@@ -64,3 +64,33 @@ using integer ceiling division (`div_ceil`) over `1 GiB * 365 days`:
 - Mobile `30%` placement floor (`decentralization_physical_bytes`) is accounted
   separately and paid from the Network Security Pool (`reward_pool::storage_share`),
   never surcharged to the uploader.
+
+## 4. Expansion-Tier Codecs and Supply-Chain Decisions (`WP-54`, Section 6.6.5)
+
+Expansion codecs (`6, 7, 8, 12, 13, 23..=26`) remain closed at testnet launch and open
+individually only after clearing the Section 6.6.3 item 10 bit-exact round-trip and
+bounded-decoder gate:
+
+| Codec | Domain | License & Dependency Decision | Measured Corpus Ratio (Section 6.6.5) |
+|---:|---|---|---|
+| 6 | Preflate + LZMA2 | Pure-Rust Apache-2.0 / MIT (`lzma-rust2` / in-tree preflate) required prior to opening; copyleft C libraries refused | Recompressed deflate / ZIP streams `1.15x` to `1.35x` |
+| 7 | Lossless WAV / PCM audio | Pure-Rust FLAC LPC frame encoder preserving RIFF header bytes bit-for-bit | `6.04x` to `6.26x` on synthetic / studio PCM corpus |
+| 8 | Context mixing (`SlowY`) | Bounded-memory deterministic integer mixer (`bud3::meter` capped) | Cold archival text/structured corpus `3.8x` to `5.4x` |
+| 12 | Fast shared context (`BCX1`) | In-tree `src/storage/bud3/compression_context.rs` (zero external deps, public-only) | Small JSON/schema records `1.35x` to `2.75x` |
+| 13 | Archival shared context (`BCX1`) | In-tree `src/storage/bud3/compression_context.rs` (`Cold` tier or `>= 25%` floor) | Cold structured records `1.80x` to `3.40x` |
+| 23 | Genomic FASTQ 2-bit delta | In-tree lossless base + quality stream split (`bud_format_genomic`) | `3.0x` to `6.0x` on FASTQ reads |
+| 24 | Office OPC (`DOCX`/`XLSX`) | Store-ZIP canonical repack staged behind Codec 6 gate | `1.0x` to `1.1x` (`DOCX`), `1.0x` to `1.6x` (`XLSX`) |
+| 25 | Lossless point cloud | Integer grid + exact residual only (lossy quantization permanently banned by `D-3`) | Lossless residual baseline (`>= 1.0x` bit-exact) |
+| 26 | Raw pixel lossless (`BMP`/`TIFF`) | In-tree header-preserving lossless row predictor (zero external C codecs) | `15.84x` on uncompressed BMP/TIFF pixel bodies |
+
+## 5. Shared Compression Context and Private Cross-Owner Deduplication (`WP-54`, Section 6.20)
+
+1. **Shared Compression Context (`K15`..`K19`, `src/storage/bud3/compression_context.rs`):**
+   - Chain state stores only the fixed [`ContextManifest`] (`context_id` derived via length-prefixed SHA-256 over `class_tag`, `generation`, sorted `corpus_objects`, `dictionary_digest`, and `created_epoch`); materialized dictionary bytes live strictly in each node's local [`LocalContextCache`].
+   - Public objects are corpus candidates by default; sealed content is unconditionally rejected (`ContextError::SealedContentForbidden`).
+   - Burned corpus members are evicted on the next [`SharedContextEngine::rotate_context`]; dependent objects re-encode under their existing NFTs (`ReplaceObject`) with zero change to `ContentId`.
+   - Context-compressed uploads pay `20%` (`CONTEXT_SAVINGS_FEE_SHARE_BPS = 2_000`) of saved physical-byte fees into the `ContextMaintenancePool`; exact full-content deduplication matches pay `0` extra fee.
+2. **Private Cross-Owner Sealed Deduplication (`K20`, `src/storage/bud3/private_dedup.rs`):**
+   - Combines `>= 3` threshold OPRF shares (`combine_threshold_oprf_shares`), enforces `MAX_PRIVATE_DEDUP_QUERIES_PER_EPOCH = 16` per `(epoch, account)`, and requires a valid BudZero plaintext-ownership proof (`OwnershipProofBundle`) bound to `(claimant, epoch, oprf_tag, padme_bucket_bytes)`.
+   - Emits unlinkable [`BlindedDedupRecord`] descriptors, prices every sealed upload at `sealed_pool_average_fee_atoms`, and defers reference-count updates to `flush_epoch_batch` at epoch boundaries.
+   - **Accepted residual risk (`Section 6.20.2.6`):** The designated upload validator executing the admission session observes whether the blinded OPRF tag matched an existing entry, while all public chain observers see indistinguishable NFT slots, Padme bucket sizes, and uniform pool-average fees.

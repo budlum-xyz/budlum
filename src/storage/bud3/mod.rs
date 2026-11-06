@@ -27,6 +27,7 @@
 
 pub mod access_tiering;
 pub mod bof1;
+pub mod compression_context;
 pub mod content_gateway;
 pub mod content_id;
 pub mod content_ref;
@@ -43,6 +44,7 @@ pub mod maintenance;
 pub mod meter;
 pub mod pipeline;
 pub mod placement;
+pub mod private_dedup;
 pub mod qr;
 pub mod registry;
 pub mod repair;

@@ -150,6 +150,35 @@ impl AccessTierTracker {
     pub fn transitions(&self) -> &[TierTransition] {
         &self.transitions
     }
+
+    /// Return public objects eligible for archival `SlowY` / Codec `13` conversion
+    /// when expansion-tier conversion is enabled (`Section 6.14 item 8`, `WP-54 item 5`).
+    ///
+    /// Returns an empty list on testnet launch (`expansion_enabled == false`) and never
+    /// selects sealed objects (`is_sealed == true`).
+    /// Convenience: exposed for expansion-tier archival re-encoding sweeps.
+    #[must_use]
+    pub fn expansion_archival_candidates(
+        &self,
+        now_secs: u64,
+        expansion_enabled: bool,
+    ) -> Vec<ObjectKey> {
+        if !expansion_enabled {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for (obj, log) in &self.objects {
+            if !log.is_sealed
+                && log.current_tier == Some(AccessTier::Cold)
+                && log
+                    .cold_since_secs
+                    .is_some_and(|since| now_secs.saturating_sub(since) >= COLD_DWELL_FOR_ARCHIVE_SECS)
+            {
+                out.push(*obj);
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]
