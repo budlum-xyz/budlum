@@ -319,3 +319,11 @@ recomputed for this larger snapshot.
 Protective decision: keep the fixed session branch and PR #77; carry only owned
 or shared-append corrections here, notify affected PRs, and do not close, merge,
 force-push or push another session's branch.
+
+## Live refresh: 85 open PRs
+
+A subsequent REST snapshot found 85 open PRs. The additions after the 81-PR
+checkpoint are #103 (directive ignore-rule guard), #104 (WP-42/open-PR
+reconciliation and red repairs), #105 (WP-21 upload session/storage fee), and
+#106 (WP-42 red-main/open-PR reconciliation). No PR was closed. Historical
+collision metrics are not recomputed for this snapshot.
