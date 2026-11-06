@@ -6,7 +6,8 @@
 //! the payload bytes are equal. That only works if no call site passes an empty
 //! context, and none invents a string outside the registry.
 //!
-//! This gate reads production Rust under `src/` and `crates/wallet-core` and
+//! This gate reads production Rust under `src/`, `crates/wallet-core` and the
+//! mobile crates (`mobile/core`, `mobile/ffi`), which sign on the phone, and
 //! fails on two things:
 //!
 //! * a call to a context-taking function whose context argument is an empty
@@ -26,7 +27,12 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 /// Roots holding shipped code.
-const SCAN_ROOTS: &[&str] = &["src", "crates/wallet-core/src"];
+const SCAN_ROOTS: &[&str] = &[
+    "src",
+    "crates/wallet-core/src",
+    "mobile/core/src",
+    "mobile/ffi/src",
+];
 
 /// The one file allowed to call the library primitives.
 const FACADE: &str = "src/crypto/pq.rs";
