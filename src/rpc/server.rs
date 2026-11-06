@@ -911,27 +911,32 @@ fn request_came_from_trusted_proxy<B>(config: &RpcSecurityConfig, req: &HttpRequ
 }
 
 fn extract_client_ip<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> Option<IpAddr> {
-    // Security model:
-    // 1. Prefer the real socket peer address when available.
-    // 2. Only honor forwarding headers if the socket peer is itself trusted.
-    // This closes both previous failure modes:
-    // - direct requests no longer self-DoS when allow-lists are enabled,
-    // - proxy headers are no longer trusted purely because `trusted_proxies`
-    //   Is non-empty.
     let direct_ip = extract_direct_client_ip(req);
 
     if !config.trusted_proxies.is_empty() && request_came_from_trusted_proxy(config, req) {
-        if let Some(forwarded_ip) = req
-            .headers()
-            .get("x-forwarded-for")
-            .and_then(|value| value.to_str().ok())
-            // Rightmost entry: the one the trusted proxy itself appended.
-            // Entries to its left are client-supplied and can be forged.
-            .and_then(|value| value.split(',').next_back())
-            .map(str::trim)
-            .and_then(|ip| ip.parse::<IpAddr>().ok())
-        {
-            return Some(forwarded_ip);
+        // All header lines form one chain in wire order. Only explicitly
+        // configured proxy addresses may be skipped; a wildcard trusts the
+        // socket peer but must not make every forwarded hop trusted.
+        if req.headers().contains_key("x-forwarded-for") {
+            let values = req.headers().get_all("x-forwarded-for");
+            let mut lines: Vec<_> = values.iter().collect();
+            while let Some(line) = lines.pop() {
+                let value = line.to_str().ok()?;
+                let last = value.split(',').next_back()?;
+                let prefix = value.rsplit_once(',').map(|(prefix, _)| prefix);
+                for entry in std::iter::once(last)
+                    .chain(prefix.into_iter().flat_map(|prefix| prefix.rsplit(',')))
+                {
+                    let ip = entry.trim().parse::<IpAddr>().ok()?;
+                    if !config.trusted_proxies.iter().any(|proxy| {
+                        proxy.parse::<IpAddr>().is_ok_and(|trusted| trusted == ip)
+                    }) {
+                        return Some(ip);
+                    }
+                }
+            }
+            // A malformed or entirely trusted chain cannot identify a client.
+            return None;
         }
 
         if let Some(real_ip) = req
@@ -7786,6 +7791,49 @@ mod tests {
             Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)))
         );
         assert!(!is_ip_allowed(&config, &req));
+    }
+
+    #[test]
+    fn blg_029_forwarded_ip_and_quota_are_bound() {
+        let config = RpcSecurityConfig {
+            allowed_ips: vec!["203.0.113.7".into()],
+            trusted_proxies: vec!["127.0.0.1".into(), "192.0.2.10".into()],
+            rate_limit_per_minute: Some(1),
+            ..Default::default()
+        };
+        let mut req = request_with_remote(SocketAddr::from(([127, 0, 0, 1], 9000)));
+        req.headers_mut().append(
+            "x-forwarded-for",
+            HeaderValue::from_static("198.51.100.99, 203.0.113.7"),
+        );
+        req.headers_mut().append(
+            "x-forwarded-for",
+            HeaderValue::from_static("192.0.2.10"),
+        );
+        let client = Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
+        assert_eq!(extract_client_ip(&config, &req), client);
+        assert!(is_ip_allowed(&config, &req));
+        let rates = Arc::new(Mutex::new(HashMap::new()));
+        assert!(is_per_ip_rate_limited(&config, &rates, client));
+        assert!(!is_per_ip_rate_limited(&config, &rates, extract_client_ip(&config, &req)));
+
+        req.headers_mut().insert("x-forwarded-for", HeaderValue::from_static("bad"));
+        req.headers_mut().insert("x-real-ip", HeaderValue::from_static("203.0.113.7"));
+        assert_eq!(extract_client_ip(&config, &req), None);
+        assert!(!is_ip_allowed(&config, &req));
+        assert!(!is_per_ip_rate_limited(&config, &rates, extract_client_ip(&config, &req)));
+    }
+
+    #[test]
+    fn blg_099_constant_time_eq_checks_length_and_distinct_buffers() {
+        let expected = String::from("secret-token");
+        let matching = String::from("secret-token");
+        assert!(constant_time_eq_str(&matching, &expected));
+        assert!(!constant_time_eq_str("secret-tokeN", &expected));
+        assert!(!constant_time_eq_str("secret", &expected));
+        assert!(!constant_time_eq_str("secret-token-more", &expected));
+        assert!(!constant_time_eq_str("", &expected));
+        assert!(constant_time_eq_str("", ""));
     }
 
     #[test]
