@@ -66,6 +66,7 @@ use clap::{Parser, Subcommand};
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::{Bytes, Incoming};
 use hyper::{Method, Request, Response, StatusCode};
+use prometheus::{IntCounter, Registry, TextEncoder};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::process::ExitCode;
@@ -554,6 +555,9 @@ struct Faucet {
     /// Per-process secret for proof-of-work challenges. A restart issues new
     /// challenges; in-flight proofs must be fetched again, which is safe.
     pow_secret: [u8; 32],
+    /// R-15 grant counter and the registry it is exposed through.
+    grant_metric: IntCounter,
+    metric_registry: Registry,
     identity: http_support::ClientIdentity,
     /// Do not queue an unbounded number of grants behind the nonce lock.
     grant_slots: Arc<Semaphore>,
@@ -634,6 +638,7 @@ impl Faucet {
             })?;
 
         *next_nonce = nonce.saturating_add(1);
+        self.grant_metric.inc();
         Ok(serde_json::json!({
             "to": format!("0x{}", request.to.to_hex()),
             "amount_atoms": self.policy.amount,
@@ -703,10 +708,32 @@ fn upstream_failure(method: &str, error: &str) -> (StatusCode, String) {
     )
 }
 
-/// The four write routes and the one read route, in one place so the refusal
+/// The four write routes and the two read routes, in one place so the refusal
 /// text cannot drift away from the dispatcher.
 const ROUTE_HELP: &str =
-    "POST /challenge, /request, /mobile/request, /requestAirdrop or GET /health";
+    "POST /challenge, /request, /mobile/request, /requestAirdrop or GET /health, /metrics";
+
+/// R-15: the faucet exports its own grant counter. It is a separate process
+/// from the node, so it owns a separate registry instead of reporting a zero
+/// next to the node's metrics.
+fn metrics_response(registry: &Registry) -> Response<Full<Bytes>> {
+    let mut buffer = Vec::new();
+    let encoder = TextEncoder::new();
+    if prometheus::Encoder::encode(&encoder, &registry.gather(), &mut buffer).is_err() {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the faucet metrics could not be encoded",
+        );
+    }
+    let mut response = Response::new(Full::new(Bytes::from(buffer)));
+    *response.status_mut() = StatusCode::OK;
+    if let Ok(value) = hyper::header::HeaderValue::from_str("text/plain; version=0.0.4") {
+        response
+            .headers_mut()
+            .insert(hyper::header::CONTENT_TYPE, value);
+    }
+    response
+}
 
 fn error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
     json_response(status, &serde_json::json!({ "error": message }))
@@ -729,6 +756,9 @@ async fn handle(
     let method = request.method().clone();
     if method == Method::GET && path == "/health" {
         return Ok(json_response(StatusCode::OK, &faucet.health().await));
+    }
+    if method == Method::GET && path == "/metrics" {
+        return Ok(metrics_response(&faucet.metric_registry));
     }
     if method != Method::POST {
         return Ok(error_response(StatusCode::NOT_FOUND, ROUTE_HELP));
@@ -848,6 +878,15 @@ async fn serve(
     }
     let mut pow_secret = [0u8; 32];
     rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut pow_secret);
+    let metric_registry = Registry::new();
+    let grant_metric = IntCounter::new(
+        "budlum_faucet_grants_total",
+        "Ordinary signed transfers the testnet faucet submitted",
+    )
+    .map_err(|e| format!("faucet grant metric: {e}"))?;
+    metric_registry
+        .register(Box::new(grant_metric.clone()))
+        .map_err(|e| format!("faucet metric registry: {e}"))?;
     let faucet = Arc::new(Faucet {
         node,
         key,
@@ -855,6 +894,8 @@ async fn serve(
         chain_id,
         policy,
         pow_secret,
+        grant_metric,
+        metric_registry,
         identity,
         grant_slots: Arc::new(Semaphore::new(1)),
         state: Mutex::new((Ledger::default(), 0)),
@@ -1455,6 +1496,11 @@ mod tests {
         {
             registered.insert(metric.to_string());
         }
+        // The faucet is a separate process and exports its own counter.
+        let faucet = std::fs::read_to_string(root.join("src/bin/budlum-faucet.rs")).unwrap();
+        assert!(faucet.contains("\"budlum_faucet_grants_total\""));
+        assert!(faucet.contains("path == \"/metrics\""));
+        registered.insert("budlum_faucet_grants_total".to_string());
         assert!(
             registered.len() > 100,
             "the metric scan found too few registered metrics"
@@ -1516,5 +1562,46 @@ mod tests {
         assert!(unit.contains("/etc/budlum/hsm.env"));
         assert!(unit.contains("github.com/lubothebook/budlum"));
         assert!(!unit.contains("github.com/rade/"));
+    }
+
+    /// WP-41 job 4: the three compose profiles are present and the rehearsal
+    /// profile loads the alert rules. A CI host cannot boot Docker, so the
+    /// test locks the wiring instead of claiming a live boot.
+    #[test]
+    fn ops_compose_testnet_profile_boots() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let compose = std::fs::read_to_string(root.join("ops/docker-compose.testnet.yml")).unwrap();
+        for profile in ["single", "four-node", "rehearsal"] {
+            assert!(
+                compose.contains(&format!("profiles: [\"{profile}\"]"))
+                    || compose.contains(&format!("\"{profile}\"")),
+                "the {profile} profile is missing"
+            );
+        }
+        for service in [
+            "seed",
+            "relay",
+            "gateway",
+            "rpc",
+            "faucet",
+            "prometheus",
+            "grafana",
+        ] {
+            assert!(
+                compose.contains(&format!("  {service}:\n")),
+                "the {service} service is missing"
+            );
+        }
+        assert!(compose.contains("monitoring/alerts.yml"));
+        let alerts = std::fs::read_to_string(root.join("ops/monitoring/alerts.yml")).unwrap();
+        assert!(alerts.contains("budlum-launch-boundary"));
+        assert!(root
+            .join("ops/monitoring/grafana/budlum-launch-boundary.json")
+            .is_file());
+        assert!(root.join("ops/runbooks/seed-node.md").is_file());
+        assert!(root.join("ops/runbooks/relay-node.md").is_file());
+        assert!(root.join("ops/runbooks/upload-gateway.md").is_file());
+        assert!(root.join("ops/runbooks/rpc-node.md").is_file());
+        assert!(root.join("ops/BACKUP_DRILL.md").is_file());
     }
 }

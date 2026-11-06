@@ -59,3 +59,53 @@ explorer-api.{$TESTNET_DOMAIN} {
 		header_up X-Forwarded-For {remote_host}
 	}
 }
+
+# Section 8.11.1 compatibility gateways. Every listener stays on loopback and
+# is reached only through this Caddy instance. The node's per-IP quota
+# (rate_limit_per_minute in config/testnet.toml) is the rate limit; the
+# `common` snippet above caps the request body at 2MB and sets HSTS.
+evm.{$TESTNET_DOMAIN} {
+	import common
+	reverse_proxy 127.0.0.1:18547 {
+		header_up X-Forwarded-For {remote_host}
+	}
+}
+
+solana.{$TESTNET_DOMAIN} {
+	import common
+	# requestAirdrop is testnet-only. The compatibility gateway translates the
+	# base58 key, solves the faucet's proof of work and calls the faucet's
+	# /requestAirdrop with a `budlum` object. See ops/runbooks/rpc-node.md.
+	reverse_proxy 127.0.0.1:18548 {
+		header_up X-Forwarded-For {remote_host}
+	}
+}
+
+aptos.{$TESTNET_DOMAIN} {
+	import common
+	reverse_proxy 127.0.0.1:18549 {
+		header_up X-Forwarded-For {remote_host}
+	}
+}
+
+cosmos-rpc.{$TESTNET_DOMAIN} {
+	import common
+	reverse_proxy 127.0.0.1:18550 {
+		header_up X-Forwarded-For {remote_host}
+	}
+}
+
+cosmos-rest.{$TESTNET_DOMAIN} {
+	import common
+	reverse_proxy 127.0.0.1:18551 {
+		header_up X-Forwarded-For {remote_host}
+	}
+}
+
+# The read-only explorer UI. The API stays on explorer-api.{$TESTNET_DOMAIN}.
+explorer.{$TESTNET_DOMAIN} {
+	import common
+	reverse_proxy 127.0.0.1:18710 {
+		header_up X-Forwarded-For {remote_host}
+	}
+}

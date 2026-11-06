@@ -94,3 +94,104 @@ groups:
           severity: critical
         annotations:
           summary: "Less than 10% disk left on {{ $labels.instance }}"
+
+  # Section 15.8 WP-41, job 6. The eight launch-boundary alerts below carry
+  # the exact names the directive requires. Each expression reads a metric
+  # that the node (or the faucet) really exports: `alert_rules_reference_
+  # existing_metrics` in src/bin/budlum-faucet.rs fails on any expression that
+  # names an unregistered metric. The comments state which exported signal
+  # each rule uses. Dedicated gauges for EE faults, state-root mismatches,
+  # B.U.D. 3.0 segment risk/repair backlog and relay reservations are not
+  # registered yet, so those rules use the nearest registered signal instead
+  # of inventing a number. Thresholds are TESTNET-DEFAULT starting points:
+  # one finality checkpoint is 5 blocks (section 11.10).
+  - name: budlum-launch-boundary
+    rules:
+      - alert: budlum_finality_stalled
+        # Exported signal: the finalized height itself stops moving.
+        expr: changes(budlum_finalized_height[10m]) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Finality stalled on {{ $labels.node }}"
+
+      - alert: budlum_finality_lag_checkpoints
+        # Exported signal: head height minus finalized height; 5 blocks is
+        # one checkpoint boundary.
+        expr: budlum_finality_lag > 5
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Finality lag {{ $value }} blocks on {{ $labels.node }}"
+
+      - alert: budlum_bud3_segments_at_risk
+        # Exported signal: open storage challenges that have no matching
+        # result row. This is the segment-risk proxy until a dedicated gauge
+        # is registered.
+        expr: budlum_storage_challenge_rows - budlum_storage_result_rows > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} unresolved storage challenges on {{ $labels.node }}"
+
+      - alert: budlum_bud3_repair_backlog
+        # Exported signal: open reallocation rows, which are the storage
+        # repair tickets the node reports.
+        expr: budlum_storage_reallocation_rows > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} open reallocations on {{ $labels.node }}"
+
+      - alert: budlum_relay_reservations
+        # Exported signal: pending relayer rows, which are the reservations
+        # held while an external action is in flight.
+        expr: budlum_relayer_pending_rows > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} held relay reservations on {{ $labels.node }}"
+
+      - alert: budlum_ee_fault_total
+        # Exported signal: PQ verifier disagreement is the fault counter the
+        # node registers on the verification path. A dedicated execution-EE
+        # fault counter is not exported yet (see the group comment above).
+        expr: increase(budlum_pq_verifier_disagreement[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} verifier disagreements in 10 minutes on {{ $labels.node }}"
+
+      - alert: budlum_state_root_mismatch_total
+        # Exported signal: a rejected candidate root surfaces as a reorg that
+        # the node records. A dedicated mismatch counter is not exported yet.
+        expr: increase(budlum_reorgs_total[15m]) > 3
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $value }} reorgs in 15 minutes on {{ $labels.node }}"
+
+      - alert: budlum_rpc_rate_limited_total
+        # Exported signal: the node's own per-IP quota counter (R-08).
+        expr: increase(budlum_rpc_rate_limited_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} rate-limited RPC calls in 5 minutes on {{ $labels.node }}"
+
+      - alert: budlum_faucet_grants_total
+        # Exported signal: the faucet's own Prometheus exporter on
+        # GET /metrics. A rising grant rate with rising difficulty is R-15.
+        expr: increase(budlum_faucet_grants_total[1h]) > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} faucet grants in one hour"
