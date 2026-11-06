@@ -502,6 +502,39 @@ mod tests {
         assert!(!state.settlement.is_empty());
     }
 
+    /// TEST-GAP-01 (BULGU-019): the bond is collateral moved out of the
+    /// sender's balance, so it is a spend. The vesting lock of the team
+    /// account holds against it: locked funds cannot be escrowed as a bond.
+    #[test]
+    fn vesting_gate_covers_external_collateral() {
+        let mut state = AccountState::new();
+        let poster = addr(9);
+        state.add_balance(&poster, bond() * 4);
+        state.team_vesting = Some((
+            poster,
+            crate::tokenomics::VestingSchedule {
+                total: bond() * 4,
+                start_epoch: 0,
+                cliff_epochs: 10,
+                duration_epochs: 100,
+            },
+        ));
+        assert_eq!(
+            state.spendable_balance(&poster),
+            0,
+            "pre-cliff: nothing is spendable"
+        );
+        let tx = ExternalDomainTx::Register(Box::new(request(poster)));
+        let err = execute_external_domain_tx(&mut state, &ctx(poster), &tx).unwrap_err();
+        assert!(
+            matches!(err, ExternalDomainTxError::BondUnfunded { .. }),
+            "unexpected refusal: {err:?}"
+        );
+        assert_eq!(state.get_balance(&poster), bond() * 4);
+        assert!(state.external_bond_escrow.get(&poster).is_none());
+        assert!(state.settlement.is_empty());
+    }
+
     #[test]
     fn a_registration_in_someone_elses_name_is_refused_and_writes_nothing() {
         let mut state = AccountState::new();

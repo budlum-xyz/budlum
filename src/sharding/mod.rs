@@ -365,6 +365,30 @@ mod tests {
         assert_eq!(state.get_or_create(&addr(0)).nonce, 1);
     }
 
+    /// BULGU-020: the cross-shard transfer reads the spendable balance, so
+    /// the vesting lock of the team account holds on this path too.
+    #[test]
+    fn cross_shard_transfer_refuses_vesting_locked_funds() {
+        let mut state = AccountState::new();
+        state.get_or_create(&addr(0)).balance = 100;
+        state.team_vesting = Some((
+            addr(0),
+            crate::tokenomics::VestingSchedule {
+                total: 100,
+                start_epoch: 0,
+                cliff_epochs: 10,
+                duration_epochs: 100,
+            },
+        ));
+        assert_eq!(state.spendable_balance(&addr(0)), 0);
+        let num_shards = 2;
+        let tx = transfer(addr(0), addr(1), 40, 5);
+        assert!(apply_cross_shard_transfer(&mut state, &tx, num_shards).is_err());
+        assert_eq!(state.get_or_create(&addr(0)).balance, 100);
+        assert_eq!(state.get_or_create(&addr(0)).nonce, 0);
+        assert_eq!(state.get_or_create(&addr(1)).balance, 0);
+    }
+
     /// A rejected transfer must not create accounts.
     #[test]
     fn p20_f04_rejected_transfer_creates_no_accounts() {

@@ -4019,6 +4019,69 @@ mod tests {
         assert!(state.get_validator(&team).is_none());
     }
 
+    /// BULGU-020: an arm that charges only a fee still reads the spendable
+    /// balance. The vesting-locked funds of the team account do not pay a
+    /// fee, so the arm refuses at the fee gate and not later, for another
+    /// reason.
+    #[test]
+    fn a_fee_only_arm_refuses_vesting_locked_funds_at_the_fee_gate() {
+        use crate::core::account::AccountState;
+        use crate::core::address::Address;
+        use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
+        use crate::execution::executor::Executor;
+
+        let team = Address::from([7u8; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&team, 5_000);
+        state.team_vesting = Some((
+            team,
+            crate::tokenomics::VestingSchedule {
+                total: 5_000,
+                start_epoch: 0,
+                cliff_epochs: 10,
+                duration_epochs: 100,
+            },
+        ));
+        assert_eq!(state.spendable_balance(&team), 0);
+
+        let mut tx = Transaction::new_with_chain_id(
+            team,
+            Address::zero(),
+            0,
+            1,
+            0,
+            vec![],
+            DEFAULT_CHAIN_ID,
+            TransactionType::ClaimRewards {
+                validator: Address::from([8u8; 32]),
+            },
+        );
+        tx.hash = tx.calculate_hash();
+        let err = Executor::apply_transaction_checked(&mut state, &tx)
+            .expect_err("a locked fee must be refused");
+        assert_eq!(
+            err.code(),
+            "insufficient_balance_for_fee",
+            "unexpected error: {err}"
+        );
+        assert_eq!(state.get_balance(&team), 5_000);
+    }
+
+    /// BULGU-020, the class: no money gate in the executor reads the raw
+    /// balance of the sender. A raw read skips the vesting lock.
+    #[test]
+    fn no_executor_gate_reads_the_raw_sender_balance() {
+        let src = include_str!("executor.rs");
+        let production = src
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .unwrap_or(src);
+        assert!(
+            !production.contains("get_balance(&tx.from) <"),
+            "a fee or cost gate compares the raw balance; read `spendable_balance`"
+        );
+    }
+
     #[test]
     fn verifier_fee_split_pays_remainder_to_first_verifiers() {
         let mut state = crate::core::account::AccountState::new();
