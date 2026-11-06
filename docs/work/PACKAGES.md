@@ -91,3 +91,38 @@ Measuring the two gates: run
 `cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-float-in-consensus-paths`
 and `... -- workflows-cover-every-workspace`. Both are wired into `ci.yml`'s
 Gates job by name, so `--all` is not the only way they run.
+
+### WP-42 overlaps an open pull request, and that is recorded rather than hidden
+
+PR #30 (`WP-42: the float gate, the workspace coverage gate and the conformance
+nightly`) and PR #29, which continues it, were open when the two gates in this
+branch were written. The work here was done without reading them and is
+independent, but it is a second implementation of the same two gates, and
+Section 15.1 item 7 forbids two agents on one package. What follows is the
+honest part.
+
+The two versions agree on scope, on the 20 percent workspace rule and on
+`EXEMPT_FUNCS` versus `EXEMPT_FILES`. They disagree in two places, and reading
+#30's version is what found both bugs in this one:
+
+| Shape | This branch, before | This branch, now | #30 |
+|---|---|---|---|
+| `#[cfg(test)]` on a `use` or a `const` | blanked the whole item *and the function under it*, hiding a production float | blanks the gated item only | correct |
+| `#[cfg(any(test, feature = "..."))]` | treated as test-only and blanked, hiding production code | left visible, because `any` widens | correct |
+| `src/storage/bud3/placement.rs` | scanned | exempt by function span, with the reason | exempt by file name, as the card writes it |
+
+Both shapes now carry canaries (1b and 1c). Which branch merges first decides
+which implementation survives; the other should be closed with a pointer to this
+table rather than merged, and the survivor should take `EXEMPT_FILES` by name for
+`placement.rs`, because that is the wording the card uses.
+
+### WP-08, the same situation
+
+`src/mempool/duty_lane.rs` here and in PR #40 are also two implementations. The
+one here takes the window from the caller (`state.epoch_index`), which is wrong:
+Section 7.2 gives a Mobile validator a 10-minute presence cadence and an epoch
+spans many blocks, so one batch per epoch is one batch per hour on the devnet
+parameters. PR #40's `window_at(now_ms)` numbers windows from the Unix epoch and
+matches the cadence the directive writes. If #40 merges first, this module should
+be dropped rather than reconciled; the tests it added to
+`src/tests/validator_classes.rs` are the reusable part.
