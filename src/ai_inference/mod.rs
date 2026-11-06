@@ -34,7 +34,6 @@ pub mod metrics;
 pub mod perception;
 pub mod query;
 pub mod social;
-pub mod storage;
 pub mod verify;
 
 // Operator (validator hardening: a separate compute-bond role)
@@ -240,7 +239,7 @@ impl TrainingDataGrant {
     }
 }
 
-// B.U.D. hardening: AI-dataset metadata (an addition for StorageDeal)
+// B.U.D. hardening: AI-dataset metadata (an addition for stored content)
 
 /// AI dataset type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -252,7 +251,7 @@ pub enum AiDatasetKind {
     TrainingCorpus,
 }
 
-/// AI-dataset metadata to attach to a `StorageDeal` (B.U.D. hardening).
+/// AI-dataset metadata to attach to stored content (B.U.D. hardening).
 #[derive(Clone, Debug, Default)]
 pub struct AiDatasetMetadata {
     pub kind: AiDatasetKind,
@@ -541,7 +540,7 @@ mod tests {
     fn text_perception() -> crate::ai_inference::perception::PerceptionRequest {
         crate::ai_inference::perception::PerceptionRequest {
             asset_id: crate::pollen::AssetId([1; 32]),
-            content_id: crate::storage::content_id::ContentId([2; 32]),
+            content_id: crate::storage::bud3::content_id::ContentId::referenced([2; 32]),
             kind: crate::ai_inference::perception::PerceptionKind::Text,
             declared_units: 100,
         }

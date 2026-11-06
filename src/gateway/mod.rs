@@ -1,6 +1,5 @@
 pub mod atlas;
 pub mod passport;
-pub mod service;
 pub use atlas::{
     build_wallet_context, AtlasEvidenceCard, AtlasEvidenceStatus, AtlasQueryEngine,
     AtlasWalletContext, CrossDomainTrace, DomainSummary, EvidenceRecord, MessageTraceStatus,
@@ -12,4 +11,3 @@ pub use passport::{
     validate_passport_name, DwebPassportProfile, EvidenceCard, EvidenceStatus, PassportProofBundle,
     PassportProofItem,
 };
-pub use service::{pollen_guard_ids, BudGateway};

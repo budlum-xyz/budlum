@@ -2767,15 +2767,13 @@ mod tests {
         // Bridge off, for the same reason as the PoS twin above.
         let mut domain = default_domain(
             5,
-            ConsensusKind::StorageAttestation(crate::domain::StorageDomainParams::default()),
+            ConsensusKind::StorageAttestation,
             45262,
             crate::domain::types::STORAGE_ATTESTATION_ADAPTER,
             0,
         );
         domain.bridge_enabled = false;
-        let mut commitment = commitment(ConsensusKind::StorageAttestation(
-            crate::domain::StorageDomainParams::default(),
-        ));
+        let mut commitment = commitment(ConsensusKind::StorageAttestation);
         commitment.domain_id = 5;
 
         let kp = KeyPair::generate().unwrap();
@@ -2843,19 +2841,12 @@ mod tests {
         let adapter = StorageAttestationFinalityAdapter;
         let mut domain = default_domain(
             5,
-            crate::domain::ConsensusKind::StorageAttestation(crate::domain::StorageDomainParams {
-                min_operator_bond: 100,
-                chunk_size: 1024,
-                challenge_interval: 10,
-                ..Default::default()
-            }),
+            crate::domain::ConsensusKind::StorageAttestation,
             45262,
             crate::domain::types::STORAGE_ATTESTATION_ADAPTER,
             0,
         );
-        let mut commitment = commitment(crate::domain::ConsensusKind::StorageAttestation(
-            crate::domain::StorageDomainParams::default(),
-        ));
+        let mut commitment = commitment(crate::domain::ConsensusKind::StorageAttestation);
         commitment.domain_id = 5;
 
         assert!(matches!(

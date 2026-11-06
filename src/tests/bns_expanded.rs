@@ -184,7 +184,7 @@ fn test_bns_transfer_clears_previous_owner_pointers() {
     reg.set_content(
         "pointers.bud",
         &alice,
-        crate::storage::content_id::ContentId([9u8; 32]),
+        crate::storage::bud3::content_id::ContentId::referenced([9u8; 32]),
         0,
     )
     .unwrap();
@@ -210,7 +210,7 @@ fn test_bns_expired_name_refuses_writes() {
         reg.set_content(
             "stale.bud",
             &alice,
-            crate::storage::content_id::ContentId([1u8; 32]),
+            crate::storage::bud3::content_id::ContentId::referenced([1u8; 32]),
             100
         ),
         Err(BnsError::Expired)

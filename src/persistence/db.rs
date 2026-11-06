@@ -121,7 +121,6 @@ pub struct Storage {
     /// be EXERCISED instead of grepped. Never set outside `cfg(test)`; no
     /// production behaviour reads it.
     #[cfg(test)]
-    fail_economics_writes: std::sync::atomic::AtomicBool,
 }
 
 impl Clone for Storage {
@@ -129,9 +128,7 @@ impl Clone for Storage {
         Self {
             db: self.db.clone(),
             #[cfg(test)]
-            fail_economics_writes: std::sync::atomic::AtomicBool::new(
-                self.fail_economics_writes
-                    .load(std::sync::atomic::Ordering::SeqCst),
+                self.                    .load(std::sync::atomic::Ordering::SeqCst),
             ),
         }
     }
@@ -180,7 +177,6 @@ impl Storage {
         let storage = Self {
             db,
             #[cfg(test)]
-            fail_economics_writes: std::sync::atomic::AtomicBool::new(false),
         };
         storage.apply_migrations()?;
         storage.recover_interrupted_commit()?;
@@ -433,7 +429,6 @@ impl Storage {
             let restored = Self {
                 db,
                 #[cfg(test)]
-                fail_economics_writes: std::sync::atomic::AtomicBool::new(false),
             };
             restored.apply_migrations()?;
             restored.recover_interrupted_commit()?;
@@ -1287,72 +1282,6 @@ impl Storage {
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
-    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
-    pub fn save_storage_registry(
-        &self,
-        registry: &crate::domain::storage_deal::StorageRegistry,
-    ) -> std::io::Result<()> {
-        let val = encode(registry)?;
-        self.db.insert(
-            b"STORAGE_REGISTRY_VERSION",
-            STORAGE_REGISTRY_ROW_VERSION.to_le_bytes().to_vec(),
-        )?;
-        self.db.insert(b"STORAGE_REGISTRY", val)?;
-        self.db.flush()?;
-        Ok(())
-    }
-
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
-    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
-    pub fn load_storage_registry(
-        &self,
-    ) -> std::io::Result<Option<crate::domain::storage_deal::StorageRegistry>> {
-        if let Some(val) = self.db.get(b"STORAGE_REGISTRY")? {
-            let version = self.db.get(b"STORAGE_REGISTRY_VERSION")?;
-            let expected_version = STORAGE_REGISTRY_ROW_VERSION.to_le_bytes();
-            // No tag means the row was written before the tag existed, which is
-            // still the row this build writes: it must load, or every node that
-            // ever persisted a registry refuses to boot after an upgrade. A row
-            // that does carry a tag from another build is still refused.
-            if version
-                .as_deref()
-                .is_some_and(|tag| tag != expected_version.as_slice())
-            {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "STORAGE_REGISTRY row has no matching version tag; a row from another build \
-                     is refused",
-                ));
-            }
-            // One shape only. A row written before the settled-ticket queue
-            // used to be padded with an empty queue and accepted; the queue
-            // is part of the registry root and decides when a ticket row is
-            // dropped, so the padded node split from its peers at the first
-            // retention cutoff. Such a row is reported, not repaired.
-            let decoded =
-                decode::<crate::domain::storage_deal::StorageRegistry>(&val).map_err(|error| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!(
-                            "STORAGE_REGISTRY row does not decode as the current StorageRegistry \
-                             shape; a row from an older build cannot be loaded without changing \
-                             the committed registry root, so it is refused: {error}"
-                        ),
-                    )
-                })?;
-            Ok(Some(decoded))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
     pub fn save_bridge_state(&self, bridge_state: &BridgeState) -> std::io::Result<()> {
         let val = encode(bridge_state)?;
         self.db.insert(b"BRIDGE_STATE", val)?;
@@ -1469,52 +1398,6 @@ impl Storage {
         &self,
     ) -> std::io::Result<Option<crate::prover::ProofClaimRegistry>> {
         if let Some(val) = self.db.get(b"PROOF_CLAIM_REGISTRY")? {
-            let decoded = decode(&val)?;
-            Ok(Some(decoded))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
-    /// Arm/disarm the test-only persist failure.
-    #[cfg(test)]
-    #[allow(dead_code)] // armed by the economics persistence tests only.
-    pub(crate) fn set_fail_economics_writes(&self, on: bool) {
-        self.fail_economics_writes
-            .store(on, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    pub fn save_storage_economics_state(
-        &self,
-        snapshot: &crate::chain::blockchain::StorageEconomicsStateSnapshot,
-    ) -> std::io::Result<()> {
-        #[cfg(test)]
-        if self
-            .fail_economics_writes
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            return Err(std::io::Error::other(
-                "injected storage-economics persist failure",
-            ));
-        }
-        let val = encode(snapshot)?;
-        self.db.insert(b"STORAGE_ECONOMICS_STATE", val)?;
-        self.db.flush()?;
-        Ok(())
-    }
-
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
-    pub fn load_storage_economics_state(
-        &self,
-    ) -> std::io::Result<Option<crate::chain::blockchain::StorageEconomicsStateSnapshot>> {
-        if let Some(val) = self.db.get(b"STORAGE_ECONOMICS_STATE")? {
             let decoded = decode(&val)?;
             Ok(Some(decoded))
         } else {
@@ -2026,61 +1909,6 @@ impl Storage {
         Ok(())
     }
 
-    fn content_key(cid: &crate::storage::content_id::ContentId) -> String {
-        format!("CONTENT:{}", hex::encode(cid.0))
-    }
-
-    /// Store raw content bytes by their canonical `ContentId`.
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
-    pub fn put_content(
-        &self,
-        cid: &crate::storage::content_id::ContentId,
-        bytes: &[u8],
-    ) -> std::io::Result<()> {
-        let expected = crate::storage::content_id::ContentId::of(bytes);
-        if &expected != cid {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "content bytes do not match ContentId",
-            ));
-        }
-        self.db.insert(Self::content_key(cid).as_bytes(), bytes)?;
-        self.db.flush()?;
-        Ok(())
-    }
-
-    /// Retrieve raw content bytes by `ContentId`.
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
-    pub fn get_content(
-        &self,
-        cid: &crate::storage::content_id::ContentId,
-    ) -> std::io::Result<Vec<u8>> {
-        let bytes = self
-            .db
-            .get(Self::content_key(cid).as_bytes())?
-            .map(|value| value.to_vec())
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("content {cid} not found"),
-                )
-            })?;
-        // The row is addressed by its hash; a row that no longer hashes to its
-        // key is damage and must not be served as that content.
-        if &crate::storage::content_id::ContentId::of(&bytes) != cid {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("content {cid} does not match its stored bytes"),
-            ));
-        }
-        Ok(bytes)
-    }
 }
 
 impl BlockchainStorage for Storage {
@@ -2261,18 +2089,9 @@ impl BlockchainStorage for Storage {
         Self::load_quarantine_ledger(self)
     }
 
-    fn save_storage_economics_state(
-        &self,
-        snapshot: &crate::chain::blockchain::StorageEconomicsStateSnapshot,
-    ) -> std::io::Result<()> {
-        Self::save_storage_economics_state(self, snapshot)
-    }
+    f
 
-    fn load_storage_economics_state(
-        &self,
-    ) -> std::io::Result<Option<crate::chain::blockchain::StorageEconomicsStateSnapshot>> {
-        Self::load_storage_economics_state(self)
-    }
+    f
 
     fn save_cross_domain_message(&self, message: &CrossDomainMessage) -> std::io::Result<()> {
         Self::save_cross_domain_message(self, message)
@@ -2440,52 +2259,6 @@ mod tests {
             storage.get_qc_blob(100).unwrap_err().kind(),
             std::io::ErrorKind::InvalidData
         );
-    }
-
-    /// A storage registry row written before the tag existed still loads; a
-    /// tag from another build is still refused.
-    #[test]
-    fn a_storage_registry_row_from_before_the_tag_still_loads() {
-        let dir = tempdir().unwrap();
-        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
-        let registry = crate::domain::storage_deal::StorageRegistry::default();
-        storage.save_storage_registry(&registry).unwrap();
-        assert!(storage.load_storage_registry().unwrap().is_some());
-
-        // No tag at all: written before the tag existed. It must load - every
-        // database persisted by the previous release looks like this, and
-        // refusing it left those nodes unable to start.
-        storage.db().remove(b"STORAGE_REGISTRY_VERSION").unwrap();
-        assert!(
-            storage.load_storage_registry().unwrap().is_some(),
-            "a row from before the tag existed still loads"
-        );
-
-        // A tag from another build is still refused.
-        storage
-            .db()
-            .insert(
-                b"STORAGE_REGISTRY_VERSION",
-                &(STORAGE_REGISTRY_ROW_VERSION.wrapping_add(1)).to_le_bytes(),
-            )
-            .unwrap();
-        let err = storage.load_storage_registry().unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-    }
-
-    #[test]
-    fn get_content_refuses_a_row_that_no_longer_hashes_to_its_key() {
-        let dir = tempdir().unwrap();
-        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
-        let cid = crate::storage::content_id::ContentId::of(b"hello");
-        storage.put_content(&cid, b"hello").unwrap();
-        assert_eq!(storage.get_content(&cid).unwrap(), b"hello");
-        storage
-            .db()
-            .insert(Storage::content_key(&cid).as_bytes(), b"tampered")
-            .unwrap();
-        let err = storage.get_content(&cid).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]
@@ -2770,21 +2543,6 @@ mod tests {
         assert!(seen.contains_key(&(producer, 5)));
         assert!(storage.db.get(bad_value_key.as_bytes()).unwrap().is_none());
         assert!(storage.db.get(b"SEEN:not-hex:7").unwrap().is_none());
-    }
-
-    #[test]
-    fn content_store_roundtrip_and_rejects_wrong_cid() {
-        let dir = tempdir().unwrap();
-        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
-        let bytes = b"B.U.D. local blob";
-        let cid = crate::storage::content_id::ContentId::of(bytes);
-
-        storage.put_content(&cid, bytes).unwrap();
-        assert_eq!(storage.get_content(&cid).unwrap(), bytes);
-
-        let wrong = crate::storage::content_id::ContentId([0xFF; 32]);
-        let error = storage.put_content(&wrong, bytes).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]

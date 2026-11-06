@@ -191,7 +191,6 @@ rayon = "1.10"
 bud-isa = { path = "budzero/bud-isa" }
 bud-vm = { path = "budzero/bud-vm" }
 bud-proof = { path = "budzero/bud-proof" }
-bud-node = { path = "budzero/bud-node" }
 # The node indexes commitments and nullifiers by the bytes the wallet packed.
 # That packing had three independent copies, one here, one in the wallet and
 # one in the zkVM state layer, and nothing forced them to stay equal. They now
@@ -284,14 +283,6 @@ harness = false
 [[bench]]
 name = "ratio_rayon"
 path = "benches/micro/ratio_rayon.rs"
-harness = false
-
-# Parity-row throughput and the generate-to-reference roundtrip, printed by
-# the CI step `Erasure parity rows rayon vs serial throughput`; its numbers
-# belong to the host that ran the step, so nothing in the tree pins them.
-[[bench]]
-name = "erasure_rows"
-path = "benches/micro/erasure_rows.rs"
 harness = false
 
 # Domain throughput/latency benchmarks (criterion.rs)

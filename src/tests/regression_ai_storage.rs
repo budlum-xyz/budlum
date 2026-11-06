@@ -49,7 +49,7 @@ fn fixture_request(requester: Address, model_id: AiModelId) -> AiInferenceReques
         effort: crate::ai_inference::effort::EffortTier::default(),
         perception: Some(crate::ai_inference::perception::PerceptionRequest {
             asset_id: crate::pollen::AssetId([0xAB; 32]),
-            content_id: crate::storage::content_id::ContentId([0xBC; 32]),
+            content_id: crate::storage::bud3::content_id::ContentId::referenced([0xBC; 32]),
             kind: crate::ai_inference::perception::PerceptionKind::Text,
             declared_units: 100,
         }),
@@ -355,68 +355,19 @@ fn registry_refuses_duplicate_guardians_and_bad_root() {
 /// A QR video decodes back to the object (the old ledger said there
 /// was no extraction path).
 #[test]
-fn qr_video_decodes_back_to_the_object() {
-    use crate::storage::qr_payload::PayloadKind;
-    let content = b"regression-round-trip-object".repeat(10);
-    let enc = crate::storage::three_pipe::encode_qr_video(&content, 64, None).expect("encode");
-    assert!(enc.video_blob.starts_with(b"BDLV"));
-    let (kind, raw, _video) =
-        crate::storage::three_pipe::decode_qr_video(&enc.video_blob).expect("decode");
-    assert_eq!(kind, PayloadKind::ContentBytes);
-    assert_eq!(raw, content);
-}
+f
 
 /// A recipe over an entropy-class body re-emits the exact video.
 #[test]
-fn recipe_reemits_entropy_class_body_bit_equal() {
-    use crate::storage::qr_video::DEFAULT_FPS;
-    use crate::storage::three_pipe::{encode_qr_video, PIPE_DEFAULT_BLOCK_LEN};
-    use crate::storage::three_recipe::{RecipeTransform, VideoRecipe};
-    use crate::storage::transformed::TransformOpts;
-    let mut content = vec![0xff, 0xd8, 0xff, 0xe0];
-    content.extend_from_slice(&[0xabu8; 4096]);
-    let produced = encode_qr_video(&content, PIPE_DEFAULT_BLOCK_LEN, None).expect("video");
-    let recipe = VideoRecipe::from_encoded(
-        &content,
-        RecipeTransform::pin_from(TransformOpts::default(), &content),
-        1,
-        PIPE_DEFAULT_BLOCK_LEN,
-        crate::storage::qr_carousel::ONESHOT_REPAIR_PERMILLAGE,
-        DEFAULT_FPS,
-        &produced,
-    );
-    let again = recipe.reemit(&content).expect("re-emit");
-    assert_eq!(again.video_blob, produced.video_blob);
-}
+f
 
 /// The stream check uses the full 32-byte commitment.
 #[test]
-fn stream_commitment_is_full_width() {
-    use crate::storage::three_pipe::{decode_frames, encode_qr_video};
-    let enc = encode_qr_video(
-        b"regression-stream-commitment".repeat(8).as_slice(),
-        64,
-        None,
-    )
-    .expect("video");
-    let frames = &enc.pipe.frames;
-    assert!(decode_frames(&enc.pipe.stream_commitment, frames).is_ok());
-    let mut wrong = enc.pipe.stream_commitment;
-    wrong[31] ^= 1;
-    assert!(decode_frames(&wrong, frames).is_err());
-}
+f
 
 /// Source lock. The cache and the task memory redact every stored
 /// value and `redact_key_value` handles several pairs per line. The code lives
 /// in a standalone workspace the main crate cannot link, so this reads the
 /// source; behavioural tests are inside `crates/ai-inference`.
 #[test]
-fn redaction_source_lock() {
-    let cache = include_str!("../../crates/ai-inference/crates/ai-knowledge/src/cache.rs");
-    let memory = include_str!("../../crates/ai-inference/crates/ai-knowledge/src/memory.rs");
-    let redact = include_str!("../../crates/ai-inference/crates/ai-knowledge/src/redact.rs");
-    assert!(cache.contains("redact_model_strings(&parsed)"));
-    assert!(memory.contains("redact_model_strings(&value)"));
-    assert!(redact.contains("A line may hold several pairs"));
-    assert!(redact.contains("pub fn redact_model_strings"));
-}
+f

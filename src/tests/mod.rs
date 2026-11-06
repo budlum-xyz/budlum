@@ -35,7 +35,6 @@ pub mod sharding_e2e;
 // permissionless, whitelist and data-sovereignty invariants (plan section 0.5
 // + acceptance criteria).
 #[cfg(test)]
-pub mod bud_e2e;
 #[cfg(test)]
 pub mod byzantine_settlement;
 #[cfg(test)]
@@ -45,10 +44,8 @@ pub mod distributed_settlement;
 #[cfg(test)]
 pub mod fork_choice_locks;
 #[cfg(test)]
-pub mod manifest_commitment_locks;
 #[cfg(test)]
 pub mod multi_consensus_locks;
-pub mod operator_kill_chaos;
 // P01 consensus-round behaviour and the P01 negative-validation batch. The file
 // existed and no `mod` declared it, so rustc never read it: 558 lines of round
 // tests that grepped like live coverage and ran nowhere.
@@ -139,7 +136,6 @@ pub mod consensus_lock_order_loom;
 #[cfg(test)]
 pub mod constitution_engine;
 #[cfg(test)]
-pub mod hard_prune;
 #[cfg(test)]
 pub mod load_test;
 #[cfg(test)]

@@ -65,6 +65,18 @@ mod validation_pairs {
 
 /// The `StorageTx` v3 transactions.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// How wide a view grant is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ViewPolicy {
+    /// Only the owner (implicit; usually no row needed).
+    OwnerOnly,
+    /// A single grantee address.
+    NamedGrantee,
+    /// Anyone who presents the matching key id.
+    PublicKeyId,
+}
+
+/// The storage transactions.
 pub enum StorageTxV3 {
     /// Register an object. Signed by the uploader.
     RegisterObject {
@@ -119,6 +131,38 @@ pub enum StorageTxV3 {
     DeclineContent {
         /// The content.
         content: ContentId,
+    },
+    /// Issue a view grant over content the sender owns. Key material stays
+    /// off chain; the row records who may open the content with which key
+    /// id. Signed by the owner.
+    IssueViewGrant {
+        /// The content.
+        content: ContentId,
+        /// The grantee, or anyone presenting the key id when absent.
+        grantee: Option<Address>,
+        /// The key id the grant names.
+        key_id: [u8; 32],
+        /// How wide the grant is.
+        policy: ViewPolicy,
+    },
+    /// Revoke a grant the sender issued. Signed by the owner.
+    RevokeViewGrant {
+        /// The grant.
+        grant_id: u64,
+    },
+    /// Social delete: revoke every live grant the sender issued for content
+    /// the sender owns. Signed by the owner.
+    SocialDelete {
+        /// The content.
+        content: ContentId,
+    },
+    /// Release placement shares and take a new quota. Signed by the share
+    /// holder.
+    ReleaseShares {
+        /// The shares being released: `(segment, share)`.
+        shares: Vec<(u64, Share)>,
+        /// The holder's new quota.
+        new_quota: u32,
     },
     /// Replace an object with a new representation of the same content. The
     /// content id never changes. Signed by the proposing Full validator.
@@ -263,6 +307,14 @@ pub fn apply(
         StorageTxV3::DeclineContent { content } => {
             registry.decline(signer, &content);
             Ok(Applied::Declined)
+        }
+        StorageTxV3::IssueViewGrant { .. }
+        | StorageTxV3::RevokeViewGrant { .. }
+        | StorageTxV3::SocialDelete { .. }
+        | StorageTxV3::ReleaseShares { .. } => {
+            // The grant rows and share release ride the registry rebuild:
+            // until it lands, this door refuses rather than half-writes.
+            Err(RegistryError::GrantsNotReady)
         }
     }
 }
@@ -421,7 +473,7 @@ mod tests {
         // Header and body round-trip; the header is on the wire first.
         let tx = StorageTx {
             body: StorageTxV3::DeclineContent {
-                content: ContentId([3; 32]),
+                content: ContentId::referenced([3; 32]),
             },
         };
         let wire = bincode::serialize(&tx).expect("the wire form serializes");

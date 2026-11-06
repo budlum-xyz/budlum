@@ -238,8 +238,8 @@ pub enum WalletEdgeType {
     AiPayment,
     /// A BNS registration.
     BnsRegistration,
-    /// A storage agreement.
-    StorageDeal,
+    /// A content custody agreement.
+    ContentCustody,
     /// Governance oy.
     GovernanceVote,
     /// A Pollen access grant.
@@ -466,7 +466,7 @@ impl AtlasQueryEngine {
 mod tests {
     use super::*;
     use crate::pollen::{AccessGrant, DataAsset, Signature64};
-    use crate::storage::ContentId;
+    use crate::storage::bud3::content_id::ContentId;
 
     fn addr(byte: u8) -> Address {
         Address::from([byte; 32])
@@ -492,7 +492,7 @@ mod tests {
     fn wallet_context_counts_pollen_lineage_without_plaintext() {
         let owner = addr(1);
         let grantee = addr(2);
-        let asset = DataAsset::new(owner, ContentId::of(b"asset"), [3u8; 32], true);
+        let asset = DataAsset::new(owner, ContentId::public(b"asset"), [3u8; 32], true);
         let grant = grant(&asset, grantee);
         let ctx = build_wallet_context(owner, 10, 1, &[asset], &[grant], &[]);
         assert_eq!(ctx.pollen.assets_owned, 1);

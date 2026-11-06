@@ -184,10 +184,8 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_storageOpenReveal", Public, LocalAdmin),
     row("bud_storageRevealFrames", Public, LocalAdmin),
     row("bud_storageCloseReveal", Public, LocalAdmin),
-    // refused; the doors are `StorageTx::OpenDeal` and
-    // `StorageTx::AcceptReallocation`.
-    // refused; the doors are `StorageTx::OpenChallenge` and
-    // `StorageTx::AnswerChallenge`.
+    // refused; the doors are the signed storage transactions.
+    // refused; the doors are the signed storage transactions.
     row("bud_bnsResolve", Public, Read),
     row("bud_bnsResolveFull", Public, Read),
     row("bud_bnsResolveContent", Public, Read),

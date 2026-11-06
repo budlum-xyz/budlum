@@ -455,7 +455,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                         effort_tenths: u32::from(req.effort.tenths()),
                         perception: req.perception.clone().map(|p| pb::ProtoPerceptionRequest {
                             asset_id: p.asset_id.0.to_vec(),
-                            content_id: p.content_id.0.to_vec(),
+                            content_id: p.content_id.digest.to_vec(),
                             kind_tag: u32::from(p.kind.perception_tag()),
                             declared_units: p.declared_units,
                         }),
@@ -1243,7 +1243,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                 }
                 cid_bytes.copy_from_slice(&payload.cid);
                 TransactionType::AiOfferData {
-                    cid: crate::storage::content_id::ContentId(cid_bytes),
+                    cid: crate::storage::bud3::content_id::ContentId::referenced(cid_bytes),
                     price: payload.price,
                 }
             }
@@ -1269,7 +1269,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     }
                     let mut arr = [0u8; 32];
                     arr.copy_from_slice(&payload.manifest_id);
-                    Some(crate::storage::content_id::ContentId(arr))
+                    Some(crate::storage::bud3::content_id::ContentId::referenced(arr))
                 };
                 TransactionType::BudlumxyzRegisterApp {
                     name: payload.name,
@@ -1604,7 +1604,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                             })?;
                             Some(crate::ai_inference::perception::PerceptionRequest {
                                 asset_id: crate::pollen::AssetId(aid),
-                                content_id: crate::storage::content_id::ContentId(cid),
+                                content_id: crate::storage::bud3::content_id::ContentId::referenced(cid),
                                 kind,
                                 declared_units: p.declared_units,
                             })
@@ -2821,7 +2821,7 @@ mod tests {
                 external_state_root: [5u8; 32],
             }),
             TransactionType::AiOfferData {
-                cid: crate::storage::content_id::ContentId([7u8; 32]),
+                cid: crate::storage::bud3::content_id::ContentId::referenced([7u8; 32]),
                 price: 500,
             },
             TransactionType::AiPurchaseData { offer_id: 888 },
@@ -2829,7 +2829,7 @@ mod tests {
                 name: "BudApp".into(),
                 category: crate::budlumxyz::types::AppCategory::DeFi,
                 website_url: "https://budlum.ai".into(),
-                manifest_id: Some(crate::storage::content_id::ContentId([8u8; 32])),
+                manifest_id: Some(crate::storage::bud3::content_id::ContentId::referenced([8u8; 32])),
             },
             TransactionType::BudlumxyzAttestApp { app_id: 4242 },
             TransactionType::AiModelRegister(crate::ai::types::AiModelSpec {
@@ -2885,7 +2885,7 @@ mod tests {
             }),
             TransactionType::Storage(Box::new(crate::storage::bud3::tx::StorageTx {
                 body: crate::storage::bud3::tx::StorageTxV3::DeclineContent {
-                    content: crate::storage::ContentId([7u8; 32]),
+                    content: crate::storage::bud3::content_id::ContentId::referenced([7u8; 32]),
                 },
             })),
             TransactionType::Identity(crate::registry::IdentityTx::Register {

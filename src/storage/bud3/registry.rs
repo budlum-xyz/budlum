@@ -187,6 +187,9 @@ pub enum RegistryError {
     /// The replacement is refused: not enough independent Full validators,
     /// a bad validation signature, or a self-replacement.
     BadReplacement(&'static str),
+    /// The grant rows and share release ride the registry rebuild: the door
+    /// refuses until it lands.
+    GrantsNotReady,
 }
 
 /// An RPC read of the registry.
@@ -302,6 +305,16 @@ fn check_placement(record: &ObjectRecord, shares: &[(u64, Share)]) -> Result<(),
 impl Bud3Registry {
     /// A live object.
     #[must_use]
+    /// Who owns the content with this id, if it is registered here.
+    ///
+    /// The lookup walks the public index by digest. Content that was never
+    /// registered here has no owner recorded, and callers must treat that as
+    /// "not owned", never as "owned by anyone".
+    pub fn content_owner(&self, content: &ContentId) -> Option<Address> {
+        let key = *self.public_index.get(&content.digest)?;
+        self.objects.get(&key).map(|entry| entry.owner)
+    }
+
     pub fn object(&self, key: &ObjectKey) -> Option<&ObjectEntry> {
         self.objects.get(key)
     }

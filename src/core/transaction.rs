@@ -537,7 +537,7 @@ pub enum TransactionType {
     UniversalRelay(ExternalTransaction),
     RelayerResult(RelayerExternalResult),
     AiOfferData {
-        cid: crate::storage::content_id::ContentId,
+        cid: crate::storage::bud3::content_id::ContentId,
         price: u64,
     },
     AiPurchaseData {
@@ -547,7 +547,7 @@ pub enum TransactionType {
         name: String,
         category: crate::budlumxyz::types::AppCategory,
         website_url: String,
-        manifest_id: Option<crate::storage::content_id::ContentId>,
+        manifest_id: Option<crate::storage::bud3::content_id::ContentId>,
     },
     /// The developer's own claim that an app record is theirs.
     ///
@@ -3445,7 +3445,7 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
                 Some(p) => {
                     put_u8(out, 1);
                     put_fixed(out, &p.asset_id.0);
-                    put_fixed(out, &p.content_id.0);
+                    put_fixed(out, &p.content_id.digest);
                     put_u8(out, p.kind.perception_tag());
                     put_u32(out, p.declared_units);
                 }

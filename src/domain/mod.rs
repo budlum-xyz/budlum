@@ -1,5 +1,4 @@
 pub mod commitment_registry;
-pub mod deal_open;
 pub mod finality_adapter;
 pub mod fork_choice;
 pub mod plugin;
@@ -8,9 +7,6 @@ pub mod pq_canonical;
 pub mod producer;
 pub mod registry;
 pub mod sovereign;
-pub mod storage_deal;
-pub mod storage_params;
-pub mod storage_tx;
 pub mod types;
 
 pub use commitment_registry::DomainCommitmentRegistry;
@@ -38,18 +34,6 @@ pub use registry::ConsensusDomainRegistry;
 pub use sovereign::{
     AuditExportBundle, ComplianceEvidence, DomainLifecycleState, SovereignDomainClass,
     SovereignDomainRegistry, SovereignDomainTemplate,
-};
-pub use storage_deal::{
-    storage_deal_leaf_hash, ChallengeOutcome, ChallengeResult, DealStatus, OperatorClass,
-    RetrievalChallenge, RetrievalChallengeRequest, RetrievalResponse, StorageDeal,
-    StorageEconomicsParams, StorageError, StorageRegistry, MISSED_CHALLENGE_COOLDOWN_SECS,
-};
-pub use storage_params::{
-    storage_params_bytes, StorageDomainParams, DEFAULT_CHUNK_SIZE, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE,
-};
-pub use storage_tx::{
-    execute_storage_tx, open_deal_consent_digest, StorageDealOpen, StorageTx, StorageTxContext,
-    StorageTxError,
 };
 pub use types::{
     normalize_hash32, validator_set_commitment, ConsensusDomain, ConsensusKind, DomainCommitment,

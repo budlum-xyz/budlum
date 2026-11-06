@@ -23,7 +23,7 @@ This file summarises the layers.
 ## Principles
 
 1. **Closed loop:** there is no path that reads outside data; every set enters
-   through a B.U.D. `StorageDeal`, a `TrainingCorpus` tag and hash
+   through a B.U.D. stored content, a `TrainingCorpus` tag and hash
    verification.
 2. **Fail closed:** an unverified hash is a refusal, and `ai-data::verify`
    deliberately returns `Err`. Real SHA-256 arrives in production.

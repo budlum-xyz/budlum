@@ -119,7 +119,6 @@ fn workflows_and_dependabot_are_current() {
 fn micro_benches_do_not_clamp_to_u32_max() {
     for file in [
         "benches/micro/ratio_rayon.rs",
-        "benches/micro/erasure_rows.rs",
     ] {
         let text = read(file);
         for clamp in [

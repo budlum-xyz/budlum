@@ -15,7 +15,6 @@ pub type DeveloperProjectId = [u8; 32];
 pub enum DevnetTopology {
     SingleNode,
     FourNodeMesh,
-    MobileSelfReplica,
 }
 
 impl DevnetTopology {
@@ -23,7 +22,6 @@ impl DevnetTopology {
         match self {
             DevnetTopology::SingleNode => 1,
             DevnetTopology::FourNodeMesh => 2,
-            DevnetTopology::MobileSelfReplica => 3,
         }
     }
 }
@@ -34,7 +32,6 @@ pub enum SdkFeature {
     PollenGrantFlow,
     ProofFixtureRunner,
     RelayerPolicyFixture,
-    MobileSelfProfile,
 }
 
 impl SdkFeature {
@@ -44,7 +41,6 @@ impl SdkFeature {
             SdkFeature::PollenGrantFlow => 2,
             SdkFeature::ProofFixtureRunner => 3,
             SdkFeature::RelayerPolicyFixture => 4,
-            SdkFeature::MobileSelfProfile => 5,
         }
     }
 }

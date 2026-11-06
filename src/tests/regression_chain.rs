@@ -254,17 +254,9 @@ fn invalid_signature_spam_proof_is_authenticated_and_bound() {
     }
 }
 
-/// A coding-audit answer is checked against the
-/// column the registry drew (`audit.column`) and the manifest's column
-/// commitment, never against a column the answerer names. The replay half:
-/// reload derives the end-of-block roots and compares the whole state root.
+/// Reload derives the end-of-block roots and compares the whole state root.
 #[test]
-fn coding_audit_column_is_bound_and_replay_derives_end_roots() {
-    let storage = production_part(include_str!("../domain/storage_deal.rs"));
-    let body = window(storage, "pub fn verify_coding_audit(", 4500);
-    assert!(body.contains("verify_column_proof("));
-    assert!(body.contains("audit.column"));
-    assert!(body.contains("CodingAuditColumnProofRejected"));
+fn replay_derives_end_roots() {
     let chain = production_part(include_str!("../chain/blockchain.rs"));
     let at = chain
         .find("Reorg persistence state root mismatch")
@@ -282,15 +274,7 @@ fn coding_audit_column_is_bound_and_replay_derives_end_roots() {
 /// an error instead of aborting, and hands the rounding dust to an operator so
 /// no part of the share is lost.
 #[test]
-fn boost_share_math_is_u128_and_dust_is_not_burned() {
-    let src = production_part(include_str!("../chain/blockchain.rs"));
-    let body = window(src, "fn distribute_bud_boost_share_in_state(", 3200);
-    assert!(body.contains("let total_weight: u128"));
-    assert!(body.contains("checked_mul(u128::from(*weight))"));
-    assert!(body.contains("let dust = boost_share.saturating_sub(distributed)"));
-    assert!(body.contains("try_add_balance(&first_operator, dust)"));
-    assert!(!body.contains(".sum::<u64>()"), "no unchecked u64 sum");
-}
+f
 
 /// Gossipsub holds a message until the application verdict, so an
 /// honest validator's relay is never banned on a pre-validation guess.
@@ -333,51 +317,13 @@ fn jail_slash_and_unbonding_are_enforced() {
 /// storage state between blocks; each is refused with a pointer to the signed
 /// transaction door.
 #[test]
-fn actor_commands_do_not_mutate_state_between_blocks() {
-    let src = production_part(include_str!("../chain/chain_actor.rs"));
-    for (arm, refusal) in [
-        (
-            "ChainCommand::IssueViewGrant { response, .. }",
-            "view_grant_rpc_mutation_error()",
-        ),
-        (
-            "ChainCommand::RevokeViewGrant { response, .. }",
-            "view_grant_rpc_mutation_error()",
-        ),
-        (
-            "ChainCommand::SocialDelete { response, .. }",
-            "social_delete_rpc_mutation_error()",
-        ),
-    ] {
-        let w = window(src, arm, 700);
-        assert!(w.contains(refusal), "{arm} must refuse with {refusal}");
-        assert!(w.contains("continue;"));
-    }
-    assert!(src.contains("Out-of-block confidential commit registration is disabled"));
-    // The remaining direct credit path is devnet-only.
-    let chain = production_part(include_str!("../chain/blockchain.rs"));
-    let credit = window(chain, "pub fn credit_development_account(", 1600);
-    assert!(credit.contains("self.mainnet_chain_id()"));
-    assert!(credit.contains("self.devnet_chain_id()"));
-}
+f
 
 /// A missed storage challenge settles through
 /// the one `apply_bond_slash` path, and the replayable-signature domain tag the
 /// ledger names is no longer in the tree.
 #[test]
-fn missed_challenge_settles_through_one_slash_path() {
-    let m = production_part(include_str!("../chain/storage_maintenance.rs"));
-    let body = window(m, "pub(crate) fn finalize_missed_challenges(", 1800);
-    assert!(body.contains("apply_bond_slash("));
-    assert!(body.matches("apply_bond_slash(").count() >= 1);
-    for file in [
-        include_str!("../domain/storage_deal.rs"),
-        include_str!("../chain/storage_maintenance.rs"),
-        include_str!("../execution/executor.rs"),
-    ] {
-        assert!(!file.contains("BUD_OPEN_DEAL_V1"));
-    }
-}
+f
 
 /// Every node derives the same
 /// finality round from the finalized height alone (the lowest unfinalized

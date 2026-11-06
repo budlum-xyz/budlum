@@ -18,7 +18,7 @@ mod tests {
         let db_path_str = db_path.to_str().unwrap();
 
         let alice = Address::from([0xAA; 32]);
-        let cid = crate::storage::content_id::ContentId([0x42; 32]);
+        let cid = crate::storage::bud3::content_id::ContentId::referenced([0x42; 32]);
 
         // 1. Initial setup and durable block creation. Direct state writes
         //    below are intentionally not the persistence contract; transaction
@@ -97,7 +97,7 @@ mod tests {
         // Create keypair for Alice
         let alice_keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
         let alice = Address::from(alice_keypair.public_key_bytes());
-        let cid = crate::storage::content_id::ContentId([0xEE; 32]);
+        let cid = crate::storage::bud3::content_id::ContentId::referenced([0xEE; 32]);
         // Funding must be part of canonical genesis so restart replay starts
         // From the same state. Direct in-memory add_balance creates a block
         // That cannot be replayed from the persisted default genesis.

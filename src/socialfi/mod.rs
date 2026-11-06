@@ -5,7 +5,7 @@ pub mod types;
 
 use crate::core::address::Address;
 pub use crate::socialfi::types::{Nft, NftError};
-use crate::storage::content_id::ContentId;
+use crate::storage::bud3::content_id::ContentId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -204,7 +204,7 @@ impl NftRegistry {
             hasher.update(id.to_le_bytes());
             hasher.update(nft.id.to_le_bytes());
             hasher.update(nft.owner.0);
-            hasher.update(nft.content_id.0);
+            hasher.update(nft.content_id.digest);
             hasher.update(nft.luminance.to_le_bytes());
             hasher.update(nft.minted_at_epoch.to_le_bytes());
             // Security review (MEDIUM): a length-unprefixed metadata hash
@@ -250,7 +250,7 @@ mod tests {
     fn mint_refuses_an_owner_past_the_nft_cap() {
         let mut reg = NftRegistry::new();
         let owner = Address::from([1u8; 32]);
-        let cid = crate::storage::content_id::ContentId([0xCD; 32]);
+        let cid = crate::storage::bud3::content_id::ContentId::referenced([0xCD; 32]);
         reg.ownership
             .insert(owner, (0..MAX_NFTS_PER_OWNER as u64).collect());
         reg.next_id = MAX_NFTS_PER_OWNER as u64;
@@ -266,7 +266,7 @@ mod tests {
     fn mint_refuses_an_oversized_author_name() {
         let mut reg = NftRegistry::new();
         let owner = Address::from([1u8; 32]);
-        let cid = crate::storage::content_id::ContentId([0xCD; 32]);
+        let cid = crate::storage::bud3::content_id::ContentId::referenced([0xCD; 32]);
         let long = "a".repeat(MAX_AUTHOR_NAME_BYTES + 1);
         assert!(matches!(
             reg.mint(owner, cid, 0, Some(long)),
@@ -285,7 +285,7 @@ mod tests {
         let mut reg = NftRegistry::new();
         let alice = Address::from([1u8; 32]);
         let bob = Address::from([2u8; 32]);
-        let cid = crate::storage::content_id::ContentId([0xCD; 32]);
+        let cid = crate::storage::bud3::content_id::ContentId::referenced([0xCD; 32]);
         let id = reg.mint(alice, cid, 0, None).expect("mint");
         reg.transfer(id, &alice, bob).expect("transfer");
         assert!(
@@ -304,7 +304,7 @@ mod tests {
     fn the_terminal_id_mints_once_and_then_refuses() {
         let mut reg = NftRegistry::new();
         let owner = Address::from([1u8; 32]);
-        let cid = crate::storage::content_id::ContentId([0xCD; 32]);
+        let cid = crate::storage::bud3::content_id::ContentId::referenced([0xCD; 32]);
         reg.next_id = u64::MAX;
         let id = reg
             .mint(owner, cid, 0, None)
@@ -326,7 +326,7 @@ mod tests {
     fn luminance_overflow_clamped() {
         let mut reg = NftRegistry::new();
         let owner = Address::from([1u8; 32]);
-        let cid = crate::storage::content_id::ContentId([0xAB; 32]);
+        let cid = crate::storage::bud3::content_id::ContentId::referenced([0xAB; 32]);
         reg.mint(owner, cid, 0, None).expect("fresh registry");
         let nft_id = 0;
         // Mint starts at luminance=1000. Seed near the top so a modest positive
@@ -347,7 +347,7 @@ mod tests {
         let mut reg = NftRegistry::new();
         let owner = Address::from([1u8; 32]);
         let new_owner = Address::from([2u8; 32]);
-        let cid = crate::storage::content_id::ContentId([0xCD; 32]);
+        let cid = crate::storage::bud3::content_id::ContentId::referenced([0xCD; 32]);
         let id = reg
             .mint(owner, cid, 0, Some("alice".into()))
             .expect("fresh registry");
@@ -363,7 +363,7 @@ mod tests {
     fn root_distinguishes_ownership_boundaries() {
         let alice = Address::from([1u8; 32]);
         let bob = Address::from([2u8; 32]);
-        let cid = crate::storage::content_id::ContentId([0xCD; 32]);
+        let cid = crate::storage::bud3::content_id::ContentId::referenced([0xCD; 32]);
         let mut a = NftRegistry::new();
         let first = a.mint(alice, cid, 0, None).unwrap();
         let second = a.mint(alice, cid, 0, None).unwrap();
@@ -399,7 +399,7 @@ mod tests {
         let mut reg = NftRegistry::new();
         let first = Address::from([1u8; 32]);
         let second = Address::from([2u8; 32]);
-        let cid = crate::storage::content_id::ContentId([0xAB; 32]);
+        let cid = crate::storage::bud3::content_id::ContentId::referenced([0xAB; 32]);
 
         let id = reg.mint(first, cid, 0, None).expect("fresh registry");
 
@@ -433,7 +433,7 @@ mod tests {
     fn consecutive_mints_still_work() {
         let mut reg = NftRegistry::new();
         let owner = Address::from([3u8; 32]);
-        let cid = crate::storage::content_id::ContentId([0xCD; 32]);
+        let cid = crate::storage::bud3::content_id::ContentId::referenced([0xCD; 32]);
 
         let a = reg.mint(owner, cid, 0, None).expect("first mint");
         let b = reg.mint(owner, cid, 1, None).expect("second mint");

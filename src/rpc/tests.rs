@@ -442,21 +442,7 @@ mod rpc_tests {
     }
 
     #[tokio::test]
-    async fn social_delete_is_refused_outside_a_block() {
-        let (_server, bc) = setup().await;
-        let auth = crate::storage::GrantAuthorization {
-            owner_key: [0u8; crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN],
-            signature: Vec::new(),
-        };
-        let err = bc
-            .social_delete(crate::storage::ContentId::of(b"x"), auth, 1)
-            .await
-            .unwrap_err();
-        assert!(
-            err.contains("state-root") && err.contains("bud_sendRawTransaction"),
-            "the refusal must name the diverging root and the door that does work, got: {err}"
-        );
-    }
+    a
 
     #[tokio::test]
     async fn test_rpc_block_methods() {

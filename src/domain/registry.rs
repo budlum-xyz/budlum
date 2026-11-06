@@ -489,13 +489,10 @@ fn base_domain_leaf_hash(domain: &ConsensusDomain) -> Hash32 {
             &state_scheme,
             &tx_scheme,
         ])
-    } else if let crate::domain::types::ConsensusKind::StorageAttestation(storage) = &domain.kind {
-        // B.U.D. storage domains get a V3 leaf that mixes the
-        // Storage parameters into the leaf. Without this, two storage domains
-        // With different chunk_size / challenge_interval would hash to the
-        // Same leaf and the registry root would no longer be a sound
-        // Commitment to the per-domain parameters.
-        let storage_params = crate::domain::storage_params::storage_params_bytes(storage);
+    } else if let crate::domain::types::ConsensusKind::StorageAttestation = &domain.kind {
+        // B.U.D. storage domains get a V3 leaf. The parameters of the
+        // removed storage model are gone; the domain id in the leaf keeps
+        // storage domains apart.
         hash_fields_bytes(&[
             b"BDLM_DOMAIN_REGISTRY_LEAF_V3",
             &domain.id.to_le_bytes(),
@@ -508,7 +505,6 @@ fn base_domain_leaf_hash(domain: &ConsensusDomain) -> Hash32 {
             &domain.validator_set_hash,
             domain.finality_adapter.as_bytes(),
             &domain.min_confirmations.to_le_bytes(),
-            &storage_params,
             &[u8::from(domain.bridge_enabled)],
             &block_scheme,
             &state_scheme,

@@ -158,7 +158,7 @@ mod tests {
             &grant,
             Some(crate::ai_inference::perception::PerceptionRequest {
                 asset_id: crate::pollen::AssetId([9; 32]),
-                content_id: crate::storage::content_id::ContentId([7; 32]),
+                content_id: crate::storage::bud3::content_id::ContentId::referenced([7; 32]),
                 kind: crate::ai_inference::perception::PerceptionKind::Text,
                 declared_units: 18,
             }),

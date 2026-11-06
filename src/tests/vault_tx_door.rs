@@ -14,7 +14,7 @@ use crate::core::address::Address;
 use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
 use crate::execution::executor::Executor;
 use crate::socialfi::VaultTx;
-use crate::storage::content_id::ContentId;
+use crate::storage::bud3::content_id::ContentId;
 
 fn addr(byte: u8) -> Address {
     Address::from([byte; 32])
@@ -30,7 +30,7 @@ fn alice_state() -> (AccountState, Address, Vec<u64>) {
         ids.push(
             state
                 .nft_registry
-                .mint(alice, ContentId::of(tag.as_bytes()), 0, None)
+                .mint(alice, ContentId::public(tag.as_bytes()), 0, None)
                 .expect("mint on a fresh registry"),
         );
     }

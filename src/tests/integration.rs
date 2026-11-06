@@ -1732,8 +1732,7 @@ mod integration_tests {
             handle.clone(),
             libp2p::identity::Keypair::generate_ed25519(),
             true,
-            None,
-            None,
+            false,
         )
         .unwrap();
         assert_eq!(mdns_on.mdns_enabled, cfg!(feature = "p2p-mdns"));
@@ -1742,8 +1741,7 @@ mod integration_tests {
             handle,
             libp2p::identity::Keypair::generate_ed25519(),
             false,
-            None,
-            None,
+            false,
         )
         .unwrap();
         assert!(!mdns_off.mdns_enabled);

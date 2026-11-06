@@ -12,7 +12,7 @@ of Budlum L1.
   AI dataset tags and the SocialFi bridge. This workspace does not touch it; it
   is its off-chain complement.
 - **The closed-loop principle:** AI inference layer reads only data that carries a Pollen
-  grant, a B.U.D. `StorageDeal` tag or a SocialFi origin. In this skeleton
+  grant, a B.U.D. stored content tag or a SocialFi origin. In this skeleton
   there is not a single path that reads outside data; even open data sets are
   registered with B.U.D. first.
 - **The base model:** an operator configuration value; a permissively licensed

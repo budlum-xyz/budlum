@@ -11,7 +11,7 @@
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
 use crate::registry::role::RoleId;
-use crate::storage::ContentId;
+use crate::storage::bud3::content_id::ContentId;
 use serde::{Deserialize, Serialize};
 
 /// Permissionless DeEd participant roles.
@@ -83,7 +83,7 @@ impl Manifest {
         if self.contributor == Address::zero() {
             return Err("DeEd contributor cannot be the zero address");
         }
-        if self.content_id.0 == [0u8; 32] {
+        if self.content_id.digest == [0u8; 32] {
             return Err("DeEd content_id cannot be zero");
         }
         if self.metadata_hash == [0u8; 32] {
@@ -99,7 +99,7 @@ impl Manifest {
         hash_fields_bytes(&[
             b"BDLM_DEED_MANIFEST_V1",
             self.contributor.as_bytes(),
-            &self.content_id.0,
+            &self.content_id.digest,
             self.artifact_kind.as_bytes(),
             self.visibility.as_bytes(),
             &self.metadata_hash,
@@ -115,7 +115,7 @@ mod tests {
     fn manifest() -> Manifest {
         Manifest {
             contributor: Address::from([7u8; 32]),
-            content_id: ContentId([8u8; 32]),
+            content_id: ContentId::referenced([8u8; 32]),
             artifact_kind: ArtifactKind::Research,
             visibility: Visibility::EducatorOnly,
             metadata_hash: [9u8; 32],
@@ -139,7 +139,7 @@ mod tests {
         value.contributor = Address::from([1u8; 32]);
         variants.push(value);
         let mut value = base.clone();
-        value.content_id = ContentId([2u8; 32]);
+        value.content_id = ContentId::referenced([2u8; 32]);
         variants.push(value);
         let mut value = base.clone();
         value.artifact_kind = ArtifactKind::Dataset;
@@ -179,7 +179,7 @@ mod tests {
             Err("DeEd contributor cannot be the zero address")
         );
         value = manifest();
-        value.content_id = ContentId([0u8; 32]);
+        value.content_id = ContentId::referenced([0u8; 32]);
         assert_eq!(value.validate(), Err("DeEd content_id cannot be zero"));
         value = manifest();
         value.metadata_hash = [0u8; 32];

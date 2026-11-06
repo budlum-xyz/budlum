@@ -11,9 +11,6 @@ use crate::core::chain_config::first_placeholder_peer;
 use crate::crypto::mainnet_policy::{
     check_mainnet_validator_key_policy, MainnetKeyPolicyViolation, MainnetValidatorKeyConfig,
 };
-use crate::domain::storage_deal::{OperatorClass, StorageEconomicsParams, StorageRegistry};
-use crate::domain::storage_params::StorageDomainParams;
-use crate::storage::ContentManifest;
 
 fn addr(b: u8) -> Address {
     Address([b; 32])
@@ -99,10 +96,6 @@ fn f06_f13_verify_inference_and_merkle_stay_closed() {
     let d = bud_isa::MainnetActivation::default();
     assert!(!d.verify_merkle_enabled, "F-13");
     assert!(!d.verify_inference_enabled, "F-06");
-    assert!(
-        !StorageRegistry::storage_challenge_proofs_are_checkable(),
-        "F-13: turning this on slashes honest operators"
-    );
     let toml = include_str!("../../config/mainnet.toml");
     assert!(
         toml.contains("verify_merkle = false"),
@@ -134,75 +127,13 @@ fn f12_grant_builder_is_requester_bound() {
 }
 
 #[test]
-fn f18_operator_wide_challenge_ceiling() {
-    let mut reg = StorageRegistry::new();
-    let params = StorageDomainParams {
-        chunk_size: 256,
-        max_committed_chunks: 1000,
-        challenge_interval: 10,
-        min_operator_bond: 1,
-    };
-    let econ = StorageEconomicsParams {
-        operator_bond: 5_000_000,
-        fee_per_byte_epoch: 100,
-    };
-    let operator = addr(1);
-    let opener = addr(2);
-    // One challenge per manifest so the (operator, manifest) interval never
-    // fires. The operator ceiling must still trip.
-    let mut last_deal;
-    for i in 0..=StorageRegistry::MAX_OPEN_CHALLENGES_PER_OPERATOR {
-        let mut bytes = b"f18-manifest-xxxxxxxxxxxxxxxx".to_vec();
-        bytes.extend_from_slice(&i.to_le_bytes());
-        let manifest = ContentManifest::from_bytes_sliced(&bytes, 8).unwrap();
-        last_deal = reg
-            .open_deal(
-                1,
-                &manifest,
-                manifest.shards[0].shard_id,
-                operator,
-                0,
-                10,
-                200,
-                econ.clone(),
-                &params,
-                Some(proof_envelope()),
-                Some([0x42; 32]),
-            )
-            .unwrap();
-        let result = reg.open_challenge(last_deal, 0, 4, 20, 30, opener, 50);
-        if i < StorageRegistry::MAX_OPEN_CHALLENGES_PER_OPERATOR {
-            result.unwrap_or_else(|e| panic!("challenge {i} should open: {e:?}"));
-        } else {
-            assert!(
-                matches!(
-                    result,
-                    Err(
-                        crate::domain::storage_deal::StorageError::TooManyOpenChallengesPerOperator { .. }
-                    )
-                ),
-                "F-18: expected operator ceiling, got {result:?}"
-            );
-        }
-    }
-}
+f
 
 #[test]
-fn f17_mobile_class_is_enforced_once_declared() {
-    let mut reg = StorageRegistry::new();
-    assert_eq!(reg.operator_class(&addr(1)), OperatorClass::AlwaysOn);
-    reg.set_operator_class(addr(1), OperatorClass::Mobile);
-    assert!(!reg.operator_class(&addr(1)).may_hold_primary());
-}
+f
 
 #[test]
-fn f19_mainnet_bond_floor_is_above_the_unit_rate() {
-    assert!(
-        StorageRegistry::MAINNET_MIN_OPENER_BOND
-            > StorageRegistry::required_opener_bond(16 * 1024 * 1024),
-        "F-19: mainnet floor must dominate the uncalibrated 1-unit-per-KiB rate"
-    );
-}
+f
 
 #[test]
 fn f20_dockerfile_healthcheck_is_jsonrpc() {
@@ -230,15 +161,7 @@ fn f15_maintenance_audit_tag_is_inventoried() {
 }
 
 #[test]
-fn f17_class_declaration_has_only_the_in_block_path() {
-    let tx_src = include_str!("../domain/storage_tx.rs");
-    assert!(tx_src.contains("DeclareOperatorClass"));
-    let actor = include_str!("../chain/chain_actor.rs");
-    assert!(
-        !actor.contains("SetStorageOperatorClass"),
-        "F-17: the class changes only through a signed transaction in a block"
-    );
-}
+f
 
 #[test]
 fn f05_readiness_does_not_claim_stark_verification() {

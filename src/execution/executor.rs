@@ -1061,7 +1061,7 @@ impl Executor {
                 sender.nonce = sender.nonce.saturating_add(1);
             }
             TransactionType::BnsSetContent => {
-                let (name, cid): (String, crate::storage::content_id::ContentId) =
+                let (name, cid): (String, crate::storage::bud3::content_id::ContentId) =
                     bincode::deserialize(&tx.data)
                         .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
 
@@ -1112,7 +1112,7 @@ impl Executor {
                 sender.nonce = sender.nonce.saturating_add(1);
             }
             TransactionType::NftMint => {
-                let (cid, author): (crate::storage::content_id::ContentId, Option<String>) =
+                let (cid, author): (crate::storage::bud3::content_id::ContentId, Option<String>) =
                     bincode::deserialize(&tx.data)
                         .map_err(|e| BudlumError::validation("nft_invalid_data", e.to_string()))?;
 
@@ -1208,7 +1208,7 @@ impl Executor {
                 }
 
                 // Constitution section 1: when an NFT is burned the data is physically deleted from B.U.D. storage.
-                // Physical pruning is handled at Blockchain level (storage_registry.prune_content);
+                // Physical pruning is handled at the content layer;
                 // Here we record the CID for the post-block prune hook.
                 tracing::info!(%cid, "NftBurn recorded - storage content pruning delegated to blockchain");
 
@@ -1289,17 +1289,12 @@ impl Executor {
                     BudlumError::validation("balance_overflow", "NFT boost creator share overflow")
                 })?;
 
-                // F4 (Constitution): route 4% B.U.D. share to storage operator pool.
-                // Distributed by blockchain after block commit via distribute_bud_boost_share.
-                state.pending_bud_boost_share = state
-                    .pending_bud_boost_share
-                    .checked_add(bud_share)
-                    .ok_or_else(|| {
-                        BudlumError::validation(
-                            "pending_share_overflow",
-                            "pending bud boost share overflow",
-                        )
-                    })?;
+                // F4 (Constitution): the 4% B.U.D. operator share. The
+                // operator-pool distribution rode the removed custody
+                // economics; until the rebuilt custody flow pays operators,
+                // the share leaves circulation at the same sink as the
+                // protocol share (treasury or implicit burn), so the boost
+                // split's supply math is unchanged.
 
                 // F4 treasury_pool (Q-X4 config_driven): 80% protocol share goes to burn_reserve (treasury) if set,
                 // Otherwise implicit burn (honest fallback). This makes Treasury/Burn explicit per Constitution
@@ -1309,13 +1304,14 @@ impl Executor {
                 // (80%) is effectively burned because it leaves no account balance.
                 // This is equivalent to deducting from booster and not crediting
                 // Anyone - circulating_supply strictly decreases. No fix needed.
-                if protocol_share > 0 {
+                let treasury_share = protocol_share.saturating_add(bud_share);
+                if treasury_share > 0 {
                     if let Some(treasury_addr) = state.burn_reserve_address {
                         let treasury = state.get_or_create(&treasury_addr);
                         // Checked add for treasury credit
                         treasury.balance = treasury
                             .balance
-                            .checked_add(protocol_share)
+                            .checked_add(treasury_share)
                             .ok_or_else(|| {
                                 BudlumError::validation(
                                     "balance_overflow",
@@ -1326,7 +1322,7 @@ impl Executor {
                             nft_id = %nft_id,
                             protocol_treasury = %treasury_addr,
                             protocol_fee = %protocol_share,
-                            "SocialFi: Protocol treasury credited (80%)"
+                            "SocialFi: Protocol treasury credited"
                         );
                     } else {
                         tracing::info!(
@@ -2010,7 +2006,7 @@ impl Executor {
                         // Tier 1 because letting the NFT path refuse a block would
                         // roll back a finalized inference result.
                         let output_bytes = res.output_ref.as_slice().to_vec();
-                        let content_id = crate::storage::content_id::ContentId::of(&output_bytes);
+                        let content_id = crate::storage::bud3::content_id::ContentId::of(&output_bytes);
                         if let Err(e) = crate::ai_inference::social::ai_output_to_nft(
                             &mut state.nft_registry,
                             requester,
@@ -2167,7 +2163,7 @@ impl Executor {
                 // again (`register_manifest` refuses content bound to another
                 // owner) and the gateway refused to serve it, so the seizure
                 // was permanent and permissionless.
-                match state.storage_registry.owner_of(&asset.manifest_id) {
+                match state.bud3_registry.content_owner(&asset.manifest_id) {
                     Some(recorded_owner) if recorded_owner == tx.from => {}
                     Some(_) => {
                         return Err(BudlumError::validation(
@@ -2178,7 +2174,7 @@ impl Executor {
                     None => {
                         return Err(BudlumError::validation(
                             "pollen_asset_manifest_unregistered",
-                            "DataAsset content id has no unambiguous registered owner; register the manifest first",
+                            "DataAsset content id has no unambiguous registered owner; register the content first",
                         ));
                     }
                 }
@@ -2192,9 +2188,9 @@ impl Executor {
                     .marketplace
                     .bind_content_to_asset(asset_manifest_id, asset_id, asset_owner)
                     .map_err(|e| BudlumError::validation("pollen_asset_bind_failed", e))?;
-                state
-                    .storage_registry
-                    .retract_plaintext_manifest_for_owner(&asset_manifest_id, &tx.from);
+                // The plaintext-manifest retraction of the removed content
+                // model has no counterpart left; the rebuilt content flow
+                // carries its own publication record.
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")

@@ -1,6 +1,6 @@
 use crate::bns::types::{BnsError, BnsResolved, NameRecord};
 use crate::core::address::Address;
-use crate::storage::content_id::ContentId;
+use crate::storage::bud3::content_id::ContentId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -400,7 +400,7 @@ impl BnsRegistry {
             match record.content_id {
                 Some(content_id) => {
                     hasher.update([1u8]);
-                    hasher.update(content_id.0);
+                    hasher.update(content_id.digest);
                 }
                 None => hasher.update([0u8]),
             }
@@ -474,7 +474,7 @@ mod tests {
         let owner = Address::from([1u8; 32]);
         reg.register("alice.bud".into(), owner, 1, 10).unwrap();
         let root_before = reg.root();
-        reg.set_content("alice.bud", &owner, ContentId([0x55; 32]), 1)
+        reg.set_content("alice.bud", &owner, ContentId::referenced([0x55; 32]), 1)
             .unwrap();
         assert_ne!(root_before, reg.root());
     }

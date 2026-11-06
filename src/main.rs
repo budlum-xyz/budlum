@@ -1454,70 +1454,13 @@ async fn main() {
         config.p2p_identity_file.as_deref(),
     );
 
-    // B.U.D. Storage Node Initialization (Monolithic Architecture)
-    type StorageParts = (
-        Option<Arc<bud_node::BudBitswap>>,
-        Option<bud_node::ShardingConfig>,
-        Option<Arc<dyn bud_node::ContentStore>>,
-    );
-    let (storage_node, sharding_config, content_metrics_store): StorageParts =
-        if config.storage_enabled {
-            // Content bytes are node-local service state, not consensus state, but
-            // losing them on restart strands the manifests and active deals that
-            // the chain still advertises. Keep the store beside the chain DB and
-            // fail closed if it cannot be opened; silently falling back to memory
-            // would turn a restart into data loss again.
-            let content_path = std::path::Path::new(&config.db_path).with_extension("content");
-            let store = Arc::new(
-                bud_node::FileContentStore::with_default_capacity_at(&content_path).unwrap_or_else(
-                    |error| {
-                        eprintln!(
-                            "Error: could not open persistent B.U.D. content store at {}: {error}",
-                            content_path.display()
-                        );
-                        std::process::exit(1);
-                    },
-                ),
-            );
-            let bitswap = Arc::new(bud_node::BudBitswap::new(store.clone()));
-
-            let mut s_config = if config.mobile_mode {
-                bud_node::ShardingConfig::mobile_default()
-            } else {
-                bud_node::ShardingConfig::default()
-            };
-
-            s_config.replication_factor = config.storage_replication_factor;
-            s_config.mandatory = config.storage_mandatory_sharding;
-
-            (Some(bitswap), Some(s_config), Some(store))
-        } else {
-            (None, None, None)
-        };
-
-    if let Some(store) = content_metrics_store {
-        let metrics = metrics.clone();
-        tokio::spawn(async move {
-            loop {
-                metrics
-                    .content_store_chunks
-                    .set(i64::try_from(store.len()).unwrap_or(i64::MAX));
-                metrics
-                    .content_store_bytes
-                    .set(i64::try_from(store.bytes()).unwrap_or(i64::MAX));
-                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-            }
-        });
-    }
-
     let mut node = Node::with_key(
         chain.clone(),
         identity_key,
         config
             .mdns_enabled
             .unwrap_or(network.security_config().mdns_enabled),
-        storage_node,
-        sharding_config,
+        config.mobile_mode,
     )
     .unwrap_or_else(|e| {
         eprintln!("Error: could not build the P2P node: {e}");
@@ -2049,11 +1992,8 @@ async fn main() {
                                     continue;
                                 }
                             };
-                            if let Some((block, pruned_cids)) = chain.produce_block(producer).await {
+                            if let Some((block, _pruned_cids)) = chain.produce_block(producer).await {
                                 println!("Produced block #{} with {} txs", block.index, block.transactions.len());
-                                for cid in pruned_cids {
-                                    client.storage_prune_sync(cid);
-                                }
                             }
                         }
                         "chain" => {

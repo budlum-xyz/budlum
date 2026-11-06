@@ -5,6 +5,6 @@
 {"user": "Are the model weights bound to a zkVM AIR?", "assistant": "So far only the execution_weights_digest claim; first memory is not bound to a STARK."}
 {"user": "What does the VerifyInference opcode return?", "assistant": "It always returns 0 today; there is no STARK verification circuit and it is closed by MainnetActivation."}
 {"user": "What is the ordering while an inference proof is verified?", "assistant": "Public inputs, program hash, exit_code, then the STARK."}
-{"user": "What does AI inference layer require before reading data?", "assistant": "A Pollen permit or a B.U.D. StorageDeal, plus the mandatory perception claim."}
+{"user": "What does AI inference layer require before reading data?", "assistant": "A Pollen permit or a B.U.D. stored content, plus the mandatory perception claim."}
 {"user": "What is the training quality rule?", "assistant": "100 excellent examples beat 10,000 mediocre ones."}
 {"user": "What is the LoRA example range?", "assistant": "1K-10K; full SFT requires 100K+."}

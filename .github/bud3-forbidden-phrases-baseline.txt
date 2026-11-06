@@ -8,12 +8,5 @@
 # path
 crates/ai-inference/crates/ai-serve/src/fee_scenario.rs
 docs/ARCHITECTURE.md
-src/domain/storage_deal.rs
 src/security/quantum_canary.rs
 src/socialfi/vault.rs
-src/storage/generated.rs
-src/storage/server_admission.rs
-src/storage/three_nft.rs
-src/storage/three_pipe.rs
-src/storage/three_recipe.rs
-src/storage/three_regime.rs
