@@ -152,6 +152,15 @@ Two readings that changed the shape of the record:
 The value of the pass is the narrowing: three records that read as wide classes (BLG-015, BLG-085,
 BLG-097) are down to one or two named files each, which is what a closing package needs to act on.
 
+### 4.3 Fourth pass: BLG-095, read against the workflow and owner files
+
+| Clause of BLG-095 | Evidence | Reading |
+|---|---|---|
+| Supply-chain scripts and Dependabot skip most lockfiles | `.github/dependabot.yml` names three cargo directories (`/`, `/budzero`, `/fuzz`); 15 lockfiles exist | **open** |
+| `CODEOWNERS` is empty | `.github/CODEOWNERS` is 1420 bytes and names `@lubothebook` for the workflows, `.quality`, the baselines and `Cargo.toml` | **previously fixed** |
+| `fifteen workflows name a deleted branch` | `consensus-of-consensuses` and `testnet-quantum` appear in exactly two workflows (`ci.yml:10`, `solidity.yml:7`), and neither branch exists on the remote (59 branches, none of them either name) | **narrowed from fifteen to two**, still open |
+| the audit config keeps a stale exception | `.cargo/audit.toml` has `ignore = []` with the reason recorded | **previously fixed** |
+
 Seven records still have no reading: BLG-011, BLG-016, BLG-081 to BLG-087, BLG-097, BLG-169,
 BLG-170 to BLG-181, BLG-187 to BLG-193, BLG-200, BLG-231, BLG-255, TEST-GAP-02 and TEST-GAP-07 need
 either the record text or a toolchain this sandbox does not have.
