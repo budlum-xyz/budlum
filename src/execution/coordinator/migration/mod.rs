@@ -291,8 +291,6 @@ pub struct MigrationRequest {
     /// The contract code the relayer carries.
     pub code: Vec<u8>,
     pub occupied: bool,
-    /// The active chain's proof-gas and imported-storage prices.
-    pub fee_schedule: MigrationFeeSchedule,
 }
 
 /// Where a finished import came from: the directive's `imported_from`.
@@ -336,7 +334,6 @@ pub struct MigrationPlan {
     code: Vec<u8>,
     storage: BTreeMap<[u8; 32], [u8; 32]>,
     proof_nodes: u64,
-    fee_schedule: MigrationFeeSchedule,
 }
 
 /// Starts a migration: checks the authority and proves the source account.
@@ -397,7 +394,6 @@ pub fn begin_import(request: MigrationRequest) -> Result<MigrationPlan, ImportEr
         code: request.code,
         storage: BTreeMap::new(),
         proof_nodes,
-        fee_schedule: request.fee_schedule,
     })
 }
 
@@ -465,20 +461,25 @@ impl MigrationPlan {
 
     /// Finalizes the import into the record the account door installs.
     ///
+    /// `fee_schedule` is a node input from active chain configuration. It is
+    /// deliberately not part of [`MigrationRequest`], which a migrator supplies.
+    ///
     /// # Errors
     ///
     /// [`ImportError::CodeHashMismatch`] when the code no longer hashes to the
     /// proven code hash, [`ImportError::StorageRootMismatch`] when the imported
     /// entries do not reproduce the complete proven storage trie, or a fee
     /// overflow refusal.
-    pub fn finalize(self) -> Result<MigrationRecord, ImportError> {
+    pub fn finalize(
+        self,
+        fee_schedule: &MigrationFeeSchedule,
+    ) -> Result<MigrationRecord, ImportError> {
         let MigrationPlan {
             source,
             account,
             code,
             storage,
             proof_nodes,
-            fee_schedule,
         } = self;
         let proven_code_hash = account_proof::code_hash(&code);
         if proven_code_hash != account.code_hash {
@@ -496,7 +497,7 @@ impl MigrationPlan {
             code_bytes: u64::try_from(code.len()).map_err(|_| MigrationFeeOverflow)?,
             storage_slots: u64::try_from(storage.len()).map_err(|_| MigrationFeeOverflow)?,
         };
-        let fee = quote_migration_fee(usage, &fee_schedule)?;
+        let fee = quote_migration_fee(usage, fee_schedule)?;
         let storage = storage.into_iter().collect();
         Ok(MigrationRecord {
             address: source.address,
@@ -655,7 +656,6 @@ mod tests {
             account_proof: vec![account_node],
             code: code(),
             occupied: false,
-            fee_schedule: fee_schedule(),
         };
         (request, storage_root)
     }
@@ -734,7 +734,9 @@ mod tests {
         };
         assert_eq!(plan.import_chunk(&chunk).expect("the chunk verifies"), 1);
 
-        let record = plan.finalize().expect("the code still matches");
+        let record = plan
+            .finalize(&fee_schedule())
+            .expect("the code still matches");
         assert_eq!(record.address, address_of(CONTRACT));
         assert_eq!(record.code, code());
         assert_eq!(record.code_hash, account_proof::code_hash(&code()));
@@ -757,7 +759,7 @@ mod tests {
         let expected = plan.account().storage_root;
         let computed = storage_root::compute_storage_root(&BTreeMap::new());
         assert_eq!(
-            plan.finalize(),
+            plan.finalize(&fee_schedule()),
             Err(ImportError::StorageRootMismatch { expected, computed })
         );
     }

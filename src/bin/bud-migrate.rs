@@ -1,8 +1,10 @@
 //! `bud-migrate`: the EVM migration kit's tool (directive 8.12, WP-34).
 //!
-//! `bud-migrate verify <request.json>` runs the verification core
-//! (`budlum_core::execution::coordinator::migration`) and prints the record the
-//! account door installs, or the refusal. `bud-migrate report <input.json>`
+//! `bud-migrate verify <request.json> <chain-fee-schedule.json>` runs the
+//! verification core (`budlum_core::execution::coordinator::migration`) and
+//! prints the record the account door installs, or the refusal. The two files
+//! are separate because the migrator must not choose the node's fee schedule.
+//! `bud-migrate report <input.json>`
 //! prints the dependency report: the contracts that must migrate for this one
 //! to keep working. Neither command touches the network or signs anything; the
 //! transaction that installs the account comes from the migration door the node
@@ -30,7 +32,6 @@ struct RequestJson {
     account_proof: Vec<String>,
     code: String,
     signature: String,
-    fee_schedule: MigrationFeeSchedule,
     #[serde(default)]
     occupied: bool,
     #[serde(default)]
@@ -125,7 +126,6 @@ impl RequestJson {
             account_proof,
             code: decode_hex(&self.code)?,
             occupied: self.occupied,
-            fee_schedule: self.fee_schedule,
         };
         Ok((request, chunks))
     }
@@ -134,12 +134,13 @@ impl RequestJson {
 fn main() -> ExitCode {
     let mut arguments = std::env::args().skip(1);
     let Some(command) = arguments.next() else {
-        eprintln!("usage: bud-migrate <verify|report> <input.json>");
+        eprintln!("usage: bud-migrate verify <request.json> <chain-fee-schedule.json>");
+        eprintln!("       bud-migrate report <input.json>");
         return ExitCode::from(2);
     };
     let input = arguments.next();
     match command.as_str() {
-        "verify" => verify(input),
+        "verify" => verify(input, arguments.next()),
         "report" => report(input),
         other => {
             eprintln!("bud-migrate: unknown command `{other}`");
@@ -149,9 +150,9 @@ fn main() -> ExitCode {
 }
 
 /// Runs the verification core over one request and prints the record.
-fn verify(input: Option<String>) -> ExitCode {
-    let Some(path) = input else {
-        eprintln!("usage: bud-migrate verify <request.json>");
+fn verify(input: Option<String>, fee_schedule_input: Option<String>) -> ExitCode {
+    let (Some(path), Some(fee_schedule_path)) = (input, fee_schedule_input) else {
+        eprintln!("usage: bud-migrate verify <request.json> <chain-fee-schedule.json>");
         return ExitCode::from(2);
     };
     let text = match std::fs::read_to_string(&path) {
@@ -161,6 +162,15 @@ fn verify(input: Option<String>) -> ExitCode {
     let input: RequestJson = match serde_json::from_str(&text) {
         Ok(input) => input,
         Err(error) => return fail(&format!("parse {path}: {error}")),
+    };
+    // This file is node configuration, never a field in the migrator's request.
+    let fee_schedule_text = match std::fs::read_to_string(&fee_schedule_path) {
+        Ok(text) => text,
+        Err(error) => return fail(&format!("read {fee_schedule_path}: {error}")),
+    };
+    let fee_schedule: MigrationFeeSchedule = match serde_json::from_str(&fee_schedule_text) {
+        Ok(schedule) => schedule,
+        Err(error) => return fail(&format!("parse {fee_schedule_path}: {error}")),
     };
     let (request, chunks) = match input.into_parts() {
         Ok(parts) => parts,
@@ -178,7 +188,7 @@ fn verify(input: Option<String>) -> ExitCode {
     }
     let nonce = plan.account().nonce;
     let balance = plan.account().balance;
-    let record: MigrationRecord = match plan.finalize() {
+    let record: MigrationRecord = match plan.finalize(&fee_schedule) {
         Ok(record) => record,
         Err(error) => return refuse(&error),
     };
