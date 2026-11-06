@@ -1698,7 +1698,8 @@ async fn main() {
             RpcMode::Public,
         )
         .with_metrics(metrics.clone())
-        .with_aptos_listener("127.0.0.1:18549".to_string());
+        .with_aptos_listener("127.0.0.1:18549".to_string())
+        .with_solana_listener("127.0.0.1:18548".to_string());
         // In-process TLS: TLS 1.3 with X25519MLKEM768 only. A
         // certificate without its key, or an unusable pair, stops the node
         // here instead of falling back to plain HTTP.

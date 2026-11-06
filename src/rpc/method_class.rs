@@ -313,6 +313,16 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("getTransaction", Public, Refused),
     row("getBlock", Public, Refused),
     row("requestAirdrop", Public, Refused),
+    row("accountSubscribe", Public, Refused),
+    row("accountUnsubscribe", Public, Read),
+    row("signatureSubscribe", Public, Refused),
+    row("signatureUnsubscribe", Public, Read),
+    row("slotSubscribe", Public, Read),
+    row("slotUnsubscribe", Public, Read),
+    row("logsSubscribe", Public, Refused),
+    row("logsUnsubscribe", Public, Read),
+    row("programSubscribe", Public, Refused),
+    row("programUnsubscribe", Public, Read),
 ];
 
 /// Check that the methods a server registers are exactly the classified

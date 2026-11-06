@@ -24,15 +24,12 @@
 //! the chain refuses. A refusal that names the door is true; a plausible
 //! number is not.
 //!
-//! # What waits for 2/N
+//! # What waits for the SVM worker
 //!
-//! The dedicated listener (`127.0.0.1:18548`, HTTP and WebSocket), the five
-//! subscription methods (`accountSubscribe`, `signatureSubscribe`,
-//! `slotSubscribe`, `logsSubscribe`, `programSubscribe`), the bounded
-//! account subscription pool and the SVM worker. The subscriptions are in
-//! the table and marked [`Answer::Pending`], so a client that asks for them
-//! gets `-32601` from the dispatcher instead of a subscription table that
-//! nothing bounds.
+//! The SVM account model, token programs, transaction execution and their
+//! four state-dependent subscriptions. `slotSubscribe` is served from the
+//! Budlum chain; the other four subscriptions refuse by name before a
+//! subscription id or feed task is created.
 //!
 //! # The three tables agree
 //!
@@ -47,6 +44,7 @@ use jsonrpsee::types::error::ErrorObjectOwned;
 
 #[cfg(test)]
 mod tests;
+pub mod subscriptions;
 
 /// The code for a method this node cannot answer, with the door named in
 /// the message and in the error data.
@@ -67,6 +65,10 @@ enum Answer {
         /// The `bud_*` method that answers the same question on Budlum.
         door: &'static str,
     },
+    /// A chain-backed WebSocket feed. Its unsubscribe door is node-local.
+    Subscription,
+    /// The matching unsubscribe door of a subscription.
+    Unsubscribe,
     /// Not served yet. A client gets `-32601` from the dispatcher.
     Pending {
         /// The work package and delivery that serves it.
@@ -232,36 +234,16 @@ const METHODS: &[MethodRow] = &[
             door: "bud_sendRawTransaction",
         },
     },
-    MethodRow {
-        name: "accountSubscribe",
-        answer: Answer::Pending {
-            package: "WP-31, 2/N",
-        },
-    },
-    MethodRow {
-        name: "signatureSubscribe",
-        answer: Answer::Pending {
-            package: "WP-31, 2/N",
-        },
-    },
-    MethodRow {
-        name: "slotSubscribe",
-        answer: Answer::Pending {
-            package: "WP-31, 2/N",
-        },
-    },
-    MethodRow {
-        name: "logsSubscribe",
-        answer: Answer::Pending {
-            package: "WP-31, 2/N",
-        },
-    },
-    MethodRow {
-        name: "programSubscribe",
-        answer: Answer::Pending {
-            package: "WP-31, 2/N",
-        },
-    },
+    MethodRow { name: "accountSubscribe", answer: Answer::EeUnavailable { door: "bud_getAccountProof" } },
+    MethodRow { name: "accountUnsubscribe", answer: Answer::Unsubscribe },
+    MethodRow { name: "signatureSubscribe", answer: Answer::EeUnavailable { door: "bud_getTransactionReceipt" } },
+    MethodRow { name: "signatureUnsubscribe", answer: Answer::Unsubscribe },
+    MethodRow { name: "slotSubscribe", answer: Answer::Subscription },
+    MethodRow { name: "slotUnsubscribe", answer: Answer::Unsubscribe },
+    MethodRow { name: "logsSubscribe", answer: Answer::EeUnavailable { door: "bud_getTransactionReceipt" } },
+    MethodRow { name: "logsUnsubscribe", answer: Answer::Unsubscribe },
+    MethodRow { name: "programSubscribe", answer: Answer::EeUnavailable { door: "bud_getAccountProof" } },
+    MethodRow { name: "programUnsubscribe", answer: Answer::Unsubscribe },
 ];
 
 /// The row for a wire name, or `None` when the gateway does not list it.
@@ -277,6 +259,37 @@ fn row(name: &str) -> Option<&'static MethodRow> {
 /// a future name that is not in the table yet: it is treated as in the
 /// namespace so the startup check refuses it rather than letting it through
 /// unclassified.
+pub fn owns_method(name: &str) -> bool {
+    namespace_of(name)
+}
+
+/// The method set for the dedicated Solana listener: exactly the served rows
+/// of this gateway, copied from the already-registered production callbacks.
+pub fn dedicated_methods(
+    all: &jsonrpsee::core::server::Methods,
+) -> Result<jsonrpsee::core::server::Methods, String> {
+    let mut out = jsonrpsee::core::server::Methods::new();
+    for name in all.method_names() {
+        if !owns_method(name) {
+            continue;
+        }
+        let callback = all
+            .method(name)
+            .ok_or_else(|| format!("Solana method {name} disappeared while filtering"))?
+            .clone();
+        out.verify_and_insert(name, callback)
+            .map_err(|e| format!("register dedicated Solana method {name}: {e}"))?;
+    }
+    check_served(out.method_names())?;
+    Ok(out)
+}
+
+/// Whether this name is one of the five generated unsubscribe doors.
+#[must_use]
+pub fn is_unsubscribe(name: &str) -> bool {
+    row(name).is_some_and(|entry| entry.answer == Answer::Unsubscribe)
+}
+
 fn namespace_of(name: &str) -> bool {
     METHODS.iter().any(|row| row.name == name) || name.starts_with("solana_")
 }

@@ -44,7 +44,7 @@ The `PRs` column is a live claim map, not a completion claim. Every PR in it is 
 | WP-28 | Ethereum JSON-RPC gateway | C | T-Launch | yes | WP-27 | #24, #56, #72, #75, #76 | partial | WP-28, 2/2: subscriptions and filter delivery |
 | WP-29 | WASM (CosmWasm ABI) and Cosmos RPC subset | C | T-Launch | yes | WP-26 | #24 | partial | package completion evidence: final SHA, CI run number, every card item |
 | WP-30 | Universal Call and Universal Asset Registry | C | T-Launch | yes | WP-27, WP-29 | #24 | partial | package completion evidence: final SHA, CI run number, every card item |
-| WP-31 | SVM and Solana RPC subset | C | T-Launch | yes | WP-26 | #51, #83, #95 | partial | #83 1/N carried on #95; dedicated listener, subscriptions, SVM worker and SVM-state reads remain |
+| WP-31 | SVM and Solana RPC subset | C | T-Launch | yes | WP-26 | #51, #83, #95 | partial | #83 1/N carried on #95; 2/N dedicated listener and subscriptions delivered here, SVM worker and SVM-state reads remain |
 | WP-32 | Move (Aptos) and Aptos REST subset | C | T-Launch | yes | WP-26 | #89, #95 | partial | #89 route/listener/admission commits carried on #95; Move worker, account namespace, BCS and SDK conformance remain |
 | WP-33 | BudZero execution environment and BudZero robustness | C | T-Launch | yes | WP-26 | #24, #43 | partial | package completion evidence: final SHA, CI run number, every card item |
 | WP-34 | Migration Kit | C | T-Launch | no | WP-28 | #46, #61 | partial | package completion evidence: final SHA, CI run number, every card item |
@@ -86,6 +86,7 @@ The `PRs` column is a live claim map, not a completion claim. Every PR in it is 
 | WP-42, 1/N | WP-42, WP-04 | directive out of the tree, single integrator ledgers, live stack audit | `ebae99c8` (source #93 `ce8191ec`) |
 | WP-42, 2/N | WP-42 | observed main lint, format and gate repairs | `4bae025d` (source #93 `0c13496b`) |
 | WP-31, 1/N | WP-31 | Solana namespace, classifications, reads and refusals carried from #83 | `1ef57ae8` |
+| WP-31, 2/N | WP-31 | dedicated loopback listener (127.0.0.1:18548), slotSubscribe and four named subscription refusals, correct Solana config shapes | pending |
 | WP-32, 1/N | WP-32 | Aptos REST table and reads, dedicated listener, shared admission carried from #89 | `591cbfd0`, `faa45950`, `6510e4ec` |
 
 ## Evidence boundary

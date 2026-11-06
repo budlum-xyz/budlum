@@ -1,11 +1,14 @@
-# Solana JSON-RPC compatibility gateway (WP-31, 1/N)
+# Solana JSON-RPC compatibility gateway (WP-31, 1/N and 2/N)
 
-This document is the delivery record for the first slice of WP-31 (the
-directive's IP-31, "SVM and Solana RPC subset"). It says what the gateway
-answers, what it refuses and why, and what waits for the next slice. It is
-the companion to `src/rpc/compat/solana/mod.rs`; the three tables (the
-gateway table, `src/rpc/api.rs`, `src/rpc/method_class.rs`) are held to each
-other by the tests in `src/rpc/compat/solana/tests.rs`.
+This document is the delivery record for the first two slices of WP-31 (the
+directive's IP-31, "SVM and Solana RPC subset"). 1/N delivered the namespace,
+the class table, four honest chain reads and twenty-one named refusals on the
+shared Budlum listener. 2/N delivers the dedicated loopback listener and the
+five WebSocket subscriptions (one served, four refused by name). It says what
+the gateway answers, what it refuses and why, and what waits for the SVM
+worker. It is the companion to `src/rpc/compat/solana/mod.rs`; the three
+tables (the gateway table, `src/rpc/api.rs`, `src/rpc/method_class.rs`) are
+held to each other by the tests in `src/rpc/compat/solana/tests.rs`.
 
 ## What this gateway is
 
@@ -76,25 +79,71 @@ with "not exposed on this node yet" and the closest Budlum read, not with
 unavailable. The reason is that the Solana shape of the fact (a base58
 blockhash, an epoch/slot pair) is not exposed yet.
 
-## Pending (five WebSocket subscriptions)
+## Subscriptions (one served, four refused by name)
 
-`accountSubscribe`, `signatureSubscribe`, `slotSubscribe`, `logsSubscribe`
-and `programSubscribe` are in the gateway table marked `Pending`. They are
-not declared in `src/rpc/api.rs` and not served. A client that asks for them
-gets `-32601` from the dispatcher. The startup check
-(`method_class::check_served_methods`) refuses to serve a pending row, so
-the subscription pool cannot be half-open.
+`slotSubscribe` is served. The other four subscriptions are refused by name
+with `-32004` before a subscription id or feed slot is created, so a client
+that asks for `accountSubscribe` without the SVM worker does not hold a feed
+slot. The refusal names the Budlum door (`bud_getAccountProof` or
+`bud_getTransactionReceipt`) in the message and in the error data.
 
-## What waits for 2/N
+* `slotSubscribe` → `slotNotification` (`slotUnsubscribe` to close) — reports
+  Budlum chain progress in the Solana slot shape (`{"parent","root","slot"}`).
+  `slot` is the Budlum head height, `parent` is `slot-1` (genesis clamped to
+  `0`), `root` is the last finalized Budlum height, never above `slot`. The
+  mapping is the same one `eth_blockNumber` uses: the height is the chain's
+  height, not a 400 ms Solana slot. The gateway does not invent SVM votes;
+  `"confirmed"` is not accepted, only `"processed"` (head) and `"finalized"`.
+  A slow subscriber never makes the node replay unbounded history: at most
+  64 slots are burst per tick, older heights are skipped, and a 5 s send
+  timeout drops the subscription.
+* `accountSubscribe`, `signatureSubscribe`, `logsSubscribe`,
+  `programSubscribe` — refused by name (`-32004`) with the closest Budlum
+  door. They wait for the SVM worker.
 
-* The dedicated listener on `127.0.0.1:18548` (HTTP and WebSocket), with
-  the bounded body, connection and per-peer quota.
-* The five subscription methods and their bounded pool.
+`slotSubscribe` shares the node-wide feed-slot budget (`MAX_SUBSCRIPTION_FEEDS`)
+with the native Budlum feed. When the pool is full the sink is refused with
+`-32005`. This is the same pool the 2/N delivery introduced for the Aptos
+listener; the dedicated Solana listener reuses the same admission, body and
+connection limits as the primary public listener.
+
+```json
+// request
+{"jsonrpc":"2.0","id":1,"method":"slotSubscribe","params":[{"commitment":"finalized"}]}
+// first notification shape
+{"jsonrpc":"2.0","method":"slotNotification","params":{"subscription":"<id>","result":{"parent":6,"root":5,"slot":7}}}
+```
+
+Four of the refused methods are also chain facts rather than SVM facts:
+`getGenesisHash`, `getEpochInfo`, `getLatestBlockhash` and `isBlockhashValid`.
+They are refused with "not exposed on this node yet" and the closest Budlum
+read, not with "no SVM execution environment", because the SVM is not the
+reason they are unavailable.
+
+## Listener
+
+The Solana gateway is served on two listeners:
+
+* the shared Budlum JSON-RPC listener — all `bud_*` methods plus the Solana
+  namespace (so a node without `--solana-listener` still answers the same
+  vocabulary);
+* the dedicated loopback listener on `127.0.0.1:18548` (HTTP and WebSocket)
+  — only the Solana method table, so a Solana client cannot reach Budlum or
+  operator methods through the compatibility port. It reuses the same
+  `RpcSecurityLayer` (IP, origin, rate, authentication), body/connection
+  limits and optional TLS as the primary public listener. The public node in
+  `src/main.rs` opens it; tests and embedded servers keep the opt-in default
+  of closed.
+
+## What waits for the SVM worker
+
 * The SVM worker (`budlum-ee-svm`, `solana-svm` and `solana-sbpf`, Agave
   version pinned, JIT off), the `Foreign::Solana` envelope and the
   `ue/svm/account` namespace.
 * The built-in programs (System, SPL Token, Token-2022, Associated Token
   Account, Memo, BPF loader) and the Universal Call program.
+* The account, signature, log and program subscriptions (they currently
+  refuse by name).
 * The nightly tool tests (web3.js, Anchor, Solana CLI) and the
   `spl_token_suite_passes`, `anchor_deploy_and_test_run_unchanged`,
   `solana_web3js_transfer_runs_unchanged`, `uel_foreign_tx_replay_refused`
@@ -102,9 +151,9 @@ the subscription pool cannot be half-open.
 
 The dependency is the point: WP-31 depends on WP-26 (the Execution
 Coordinator), and this node does not run the SVM execution environment
-yet. The namespace and its refusals are delivered on the Budlum listener
-now, exactly as the Ethereum gateway's 1/2 delivery did; the dedicated
-listener and the worker are 2/N.
+yet. The namespace, refusals, subscription doors and dedicated listener
+are delivered now, exactly as the Ethereum gateway's 1/2 delivery did; the
+worker is 3/N.
 
 ## The three tables agree
 

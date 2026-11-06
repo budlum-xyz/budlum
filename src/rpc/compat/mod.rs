@@ -18,11 +18,11 @@
 //! * [`aptos`]: the Aptos REST subset of Section 8.11.4, with shared
 //!   admission and a dedicated loopback listener. Move-state routes refuse
 //!   by name until the Move worker exists.
-//! * [`solana`]: the Solana JSON-RPC subset of Section 8.11.3. This is
-//!   delivery 1/N of WP-31: the namespace, the class table, the honest
-//!   chain reads and the named refusals. `docs/SOLANA_RPC.md` records what is
-//!   served and what waits for the SVM execution environment and the
-//!   dedicated listener.
+//! * [`solana`]: the Solana JSON-RPC subset of Section 8.11.3: the namespace,
+//!   the class table, honest chain reads, named refusals, the chain-backed
+//!   slot feed and a dedicated loopback HTTP/WebSocket listener. The SVM
+//!   account model and its four state-dependent subscriptions wait for the
+//!   SVM worker. `docs/SOLANA_RPC.md` records the boundary.
 
 pub mod aptos;
 pub mod solana;

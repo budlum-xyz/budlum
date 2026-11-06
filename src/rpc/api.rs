@@ -1547,26 +1547,38 @@ pub trait BudlumApi {
 
     /// `getSlot`: the head height, as a Solana slot.
     #[method(name = "getSlot")]
-    async fn solana_get_slot(&self) -> Result<u64, ErrorObjectOwned>;
+    async fn solana_get_slot(
+        &self,
+        config: Option<serde_json::Value>,
+    ) -> Result<u64, ErrorObjectOwned>;
 
     /// `getBlockHeight`: the head height.
     #[method(name = "getBlockHeight")]
-    async fn solana_get_block_height(&self) -> Result<u64, ErrorObjectOwned>;
+    async fn solana_get_block_height(
+        &self,
+        config: Option<serde_json::Value>,
+    ) -> Result<u64, ErrorObjectOwned>;
 
     /// `getEpochInfo`: refuses until WP-31 (door: `bud_getStatus`).
     #[method(name = "getEpochInfo")]
-    async fn solana_get_epoch_info(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+    async fn solana_get_epoch_info(
+        &self,
+        config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// `getLatestBlockhash`: refuses until WP-31 (door: `bud_getBlockByNumber`).
     #[method(name = "getLatestBlockhash")]
-    async fn solana_get_latest_blockhash(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+    async fn solana_get_latest_blockhash(
+        &self,
+        config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// `isBlockhashValid`: refuses until WP-31 (door: `bud_getBlockByNumber`).
     #[method(name = "isBlockhashValid")]
     async fn solana_is_blockhash_valid(
         &self,
         blockhash: String,
-        commitment: Option<String>,
+        config: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// `getBalance`: refuses until WP-31 (door: `bud_getBalance`).
@@ -1574,7 +1586,7 @@ pub trait BudlumApi {
     async fn solana_get_balance(
         &self,
         address: String,
-        commitment: Option<String>,
+        config: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// `getAccountInfo`: refuses until WP-31 (door: `bud_getAccountProof`).
@@ -1582,8 +1594,7 @@ pub trait BudlumApi {
     async fn solana_get_account_info(
         &self,
         address: String,
-        commitment: Option<String>,
-        encoding: Option<String>,
+        config: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// `getMultipleAccounts`: refuses until WP-31 (door: `bud_getAccountProof`).
@@ -1591,7 +1602,7 @@ pub trait BudlumApi {
     async fn solana_get_multiple_accounts(
         &self,
         addresses: Vec<String>,
-        commitment: Option<String>,
+        config: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// `getProgramAccounts`: refuses until WP-31 (door: `bud_getAccountProof`).
@@ -1599,8 +1610,7 @@ pub trait BudlumApi {
     async fn solana_get_program_accounts(
         &self,
         program_id: String,
-        commitment: Option<String>,
-        filters: Option<serde_json::Value>,
+        config: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// `getTokenAccountsByOwner`: refuses until WP-31 (door: `bud_getAccountProof`).
@@ -1609,7 +1619,7 @@ pub trait BudlumApi {
         &self,
         owner: String,
         token_accounts_filter: serde_json::Value,
-        commitment: Option<String>,
+        config: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// `getTokenAccountBalance`: refuses until WP-31 (door: `bud_getBalance`).
@@ -1617,14 +1627,15 @@ pub trait BudlumApi {
     async fn solana_get_token_account_balance(
         &self,
         token_account: String,
-        commitment: Option<String>,
+        config: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// `getTokenSupply`: refuses until WP-31 (door: `bud_getStatus`).
     #[method(name = "getTokenSupply")]
     async fn solana_get_token_supply(
         &self,
-        commitment: Option<String>,
+        mint: String,
+        config: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// `getMinimumBalanceForRentExemption`: refuses until WP-31 (door: `bud_getStatus`).
@@ -1632,7 +1643,7 @@ pub trait BudlumApi {
     async fn solana_get_minimum_balance_for_rent_exemption(
         &self,
         data_size: u64,
-        commitment: Option<String>,
+        config: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// `getFeeForMessage`: refuses until WP-31 (door: `bud_gasPrice`).
@@ -1640,7 +1651,7 @@ pub trait BudlumApi {
     async fn solana_get_fee_for_message(
         &self,
         message: String,
-        commitment: Option<String>,
+        config: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// `getRecentPrioritizationFees`: refuses until WP-31 (door: `bud_gasPrice`).
@@ -1704,6 +1715,45 @@ pub trait BudlumApi {
         &self,
         address: String,
         lamports: u64,
-        commitment: Option<String>,
+        config: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// SVM account notifications are refused by name until the SVM worker exists.
+    #[subscription(name = "accountSubscribe" => "accountNotification", unsubscribe = "accountUnsubscribe", item = serde_json::Value)]
+    async fn solana_account_subscribe(
+        &self,
+        address: String,
+        config: Option<serde_json::Value>,
+    ) -> jsonrpsee::core::SubscriptionResult;
+
+    /// SVM signature notifications are refused by name until the SVM worker exists.
+    #[subscription(name = "signatureSubscribe" => "signatureNotification", unsubscribe = "signatureUnsubscribe", item = serde_json::Value)]
+    async fn solana_signature_subscribe(
+        &self,
+        signature: String,
+        config: Option<serde_json::Value>,
+    ) -> jsonrpsee::core::SubscriptionResult;
+
+    /// Budlum chain-progress notifications in the Solana slot shape.
+    #[subscription(name = "slotSubscribe" => "slotNotification", unsubscribe = "slotUnsubscribe", item = serde_json::Value)]
+    async fn solana_slot_subscribe(
+        &self,
+        config: Option<crate::rpc::compat::solana::subscriptions::SlotConfig>,
+    ) -> jsonrpsee::core::SubscriptionResult;
+
+    /// SVM log notifications are refused by name until the SVM worker exists.
+    #[subscription(name = "logsSubscribe" => "logsNotification", unsubscribe = "logsUnsubscribe", item = serde_json::Value)]
+    async fn solana_logs_subscribe(
+        &self,
+        filter: serde_json::Value,
+        config: Option<serde_json::Value>,
+    ) -> jsonrpsee::core::SubscriptionResult;
+
+    /// SVM program-account notifications are refused by name until the SVM worker exists.
+    #[subscription(name = "programSubscribe" => "programNotification", unsubscribe = "programUnsubscribe", item = serde_json::Value)]
+    async fn solana_program_subscribe(
+        &self,
+        program_id: String,
+        config: Option<serde_json::Value>,
+    ) -> jsonrpsee::core::SubscriptionResult;
 }

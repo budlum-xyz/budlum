@@ -65,7 +65,7 @@ mod solana_compat_tests {
     fn declared_method_names() -> Vec<String> {
         let api = include_str!("../../api.rs");
         let mut names = Vec::new();
-        for needle in ["#[method(name = \"", "#[subscription(name = \""] {
+        for needle in ["#[method(name = \"", "#[subscription(name = \"", "unsubscribe = \""] {
             for (at, _) in api.match_indices(needle) {
                 let rest = &api[at + needle.len()..];
                 let name = &rest[..rest.find('"').expect("a declared method has a name")];
@@ -132,9 +132,19 @@ mod solana_compat_tests {
         // The table is the directive list plus the five subscriptions, and
         // nothing else: an extra row would be a method the directive never
         // gave this gateway.
-        assert_eq!(listed.len(), DIRECTIVE_METHODS.len() + SUBSCRIPTIONS.len());
-        assert_eq!(&listed[..DIRECTIVE_METHODS.len()], DIRECTIVE_METHODS);
-        assert_eq!(&listed[DIRECTIVE_METHODS.len()..], SUBSCRIPTIONS);
+        let mut expected: Vec<&str> = DIRECTIVE_METHODS.to_vec();
+        for name in SUBSCRIPTIONS {
+            expected.push(name);
+            expected.push(match *name {
+                "accountSubscribe" => "accountUnsubscribe",
+                "signatureSubscribe" => "signatureUnsubscribe",
+                "slotSubscribe" => "slotUnsubscribe",
+                "logsSubscribe" => "logsUnsubscribe",
+                "programSubscribe" => "programUnsubscribe",
+                _ => unreachable!("the subscription list is fixed"),
+            });
+        }
+        assert_eq!(listed, expected);
     }
 
     #[test]
@@ -169,7 +179,7 @@ mod solana_compat_tests {
         for entry in METHODS {
             let expected = match entry.answer {
                 Answer::Pending { .. } => None,
-                Answer::ChainRead => Some("Read"),
+                Answer::ChainRead | Answer::Subscription | Answer::Unsubscribe => Some("Read"),
                 Answer::EeUnavailable { .. } => Some("Refused"),
             };
             let found = rows.iter().find(|(name, _, _)| name.as_str() == entry.name);
@@ -189,7 +199,7 @@ mod solana_compat_tests {
                     );
                     // A chain read is never operator-only: every node agrees
                     // on it, so there is nothing to withhold.
-                    if entry.answer == Answer::ChainRead {
+                    if matches!(entry.answer, Answer::ChainRead | Answer::Subscription | Answer::Unsubscribe) {
                         assert_eq!(listener.as_str(), "Public", "{}", entry.name);
                     }
                 }
@@ -198,25 +208,20 @@ mod solana_compat_tests {
     }
 
     #[test]
-    fn solana_pending_rows_name_a_package_and_are_not_served() {
-        let served = served_names();
-        let mut pending = 0usize;
-        for entry in METHODS {
-            if let Answer::Pending { package } = entry.answer {
-                pending += 1;
-                assert!(!package.is_empty(), "{} pends without a package", entry.name);
-                assert!(
-                    !served.contains(&entry.name),
-                    "{} pends and is served at the same time",
-                    entry.name
-                );
+    fn solana_subscriptions_have_the_exact_wire_doors() {
+        for name in SUBSCRIPTIONS {
+            let entry = row(name).unwrap_or_else(|| panic!("{name} has no row"));
+            if *name == "slotSubscribe" {
+                assert_eq!(entry.answer, Answer::Subscription);
+            } else {
+                assert!(matches!(entry.answer, Answer::EeUnavailable { .. }));
             }
+            let unsubscribe = name.replace("Subscribe", "Unsubscribe");
+            assert_eq!(row(&unsubscribe).unwrap().answer, Answer::Unsubscribe);
+            assert!(crate::rpc::compat::solana::is_unsubscribe(&unsubscribe));
         }
-        assert_eq!(
-            pending,
-            SUBSCRIPTIONS.len(),
-            "the five subscriptions are the 2/N pair"
-        );
+        assert!(!crate::rpc::compat::solana::is_unsubscribe("slotSubscribe"));
+        assert!(!crate::rpc::compat::solana::is_unsubscribe("bud_unsubscribe"));
     }
 
     #[test]
@@ -228,15 +233,15 @@ mod solana_compat_tests {
             .collect();
         let expected: &[&str] = &["getHealth", "getVersion", "getSlot", "getBlockHeight"];
         assert_eq!(&reads[..], expected);
+        assert_eq!(row("slotSubscribe").unwrap().answer, Answer::Subscription);
     }
 
     #[test]
-    fn solana_check_served_refuses_a_pending_method() {
+    fn solana_check_served_accepts_classified_subscription_doors() {
         crate::rpc::compat::solana::check_served(["getHealth", "getBalance"])
             .expect("a served method and a named refusal both have rows");
-        let err = crate::rpc::compat::solana::check_served(["accountSubscribe"])
-            .expect_err("a pending row cannot be served");
-        assert!(err.contains("WP-31, 2/N"), "{err}");
+        crate::rpc::compat::solana::check_served(["accountSubscribe", "slotSubscribe"])
+            .expect("a named refusal and a served feed both have rows");
     }
 
     #[test]
