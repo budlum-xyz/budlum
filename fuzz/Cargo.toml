@@ -90,6 +90,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "evm_deployment_proof"
+path = "fuzz_targets/evm_deployment_proof.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "consensus_state_transition"
 path = "fuzz_targets/consensus_state_transition.rs"
 test = false
