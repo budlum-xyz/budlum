@@ -16,7 +16,8 @@ use crate::execution::coordinator::assets::{
 use crate::execution::coordinator::evm_ee::solidity_selector;
 use crate::execution::coordinator::state::{NS_WASM_CODE, NS_WASM_CONTRACT, NS_WASM_STORE};
 use crate::execution::coordinator::universal_call::{
-    unwrap_static_universal_input, wrap_static_universal_input, BudlumMsg,
+    has_reserved_static_prefix, unwrap_static_universal_input, wrap_static_universal_input,
+    BudlumMsg,
 };
 use budlum_uel_abi::{
     BlockContext, BudAmount, CodeInfo, EeCall, EeCallKind, EeFault, EeId, EeIdentity, EeLog,
@@ -1010,6 +1011,11 @@ fn execute_cosmwasm_json(
             } => {
                 let target_b = hex::decode(target_hex).map_err(|e| e.to_string())?;
                 let input_b = hex::decode(input_hex).map_err(|e| e.to_string())?;
+                if has_reserved_static_prefix(&input_b) {
+                    return Err(String::from(
+                        "BudlumMsg::UniversalCall input cannot carry reserved static prefix",
+                    ));
+                }
                 let res = host
                     .universal_call(UniversalCall {
                         from: EeIdentity {

@@ -17,10 +17,11 @@ use crate::crypto::primitives::wallet_address_from_ml_dsa_87_public_key;
 use crate::crypto::scheme::SchemeId;
 use crate::crypto::secp256k1_recover::recover_address;
 use crate::execution::coordinator::alias::{
-    derive_foreign_account, AccountQuantumClass, ForeignScheme,
+    derive_evm_alias, derive_foreign_account, derive_foreign_cosmos_bech32, derive_move_alias,
+    derive_svm_alias, derive_wasm_alias, AccountQuantumClass, ForeignScheme,
 };
 use crate::execution::coordinator::foreign::aptos::{
-    aptos_ed25519_address, decode_aptos_tx, AptosEnvelopeError, DecodedAptosTx,
+    aptos_ed25519_address, decode_aptos_tx, AptosEnvelopeError, AptosPayloadKind, DecodedAptosTx,
     BUDLUM_APTOS_CHAIN_ID,
 };
 use crate::execution::coordinator::foreign::cosmos::{
@@ -34,6 +35,7 @@ use crate::execution::coordinator::foreign::solana::{
     decode_solana_tx, DecodedSolanaTx, SolanaEnvelopeError, MAX_SOLANA_BLOCKHASH_WINDOW,
 };
 use crate::execution::coordinator::state::ExecutionState;
+use budlum_uel_abi::EeId;
 use ed25519_dalek::{Signature as EdSignature, Verifier as _, VerifyingKey as EdVerifyingKey};
 use k256::ecdsa::{Signature as SecpSig, VerifyingKey as SecpVerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -172,6 +174,9 @@ pub struct ForeignLaneState {
     pub accounts: BTreeMap<Address, ForeignAccountRecord>,
     pub recent_blockhashes: VecDeque<[u8; 32]>,
     pub seen_solana_signatures: BTreeSet<[u8; 64]>,
+    /// Tracks Solana signatures per finalized blockhash for bounded eviction (`BLG-279`).
+    #[serde(default)]
+    pub solana_sigs_by_blockhash: BTreeMap<[u8; 32], Vec<[u8; 64]>>,
 }
 
 /// Verified outcome of admitting a [`ForeignTx`].
@@ -219,6 +224,7 @@ pub enum ForeignAdmissionError {
     PqHoldingsProtected,
     AccountAlreadyAdopted(Address),
     InvalidAdoptProof(String),
+    InvalidDirectPqRecipient(String),
     WrongAdoptChainId { expected: u64, got: u64 },
 }
 
@@ -248,6 +254,9 @@ impl std::fmt::Display for ForeignAdmissionError {
                 write!(f, "foreign account was already adopted into {dst}")
             }
             Self::InvalidAdoptProof(m) => write!(f, "invalid Adopt proof: {m}"),
+            Self::InvalidDirectPqRecipient(m) => {
+                write!(f, "invalid direct native PQ recipient: {m}")
+            }
             Self::WrongAdoptChainId { expected, got } => {
                 write!(f, "wrong Adopt chain_id: expected {expected}, got {got}")
             }
@@ -262,10 +271,17 @@ impl ForeignLaneState {
         Self::default()
     }
 
-    /// Pushes a finalized Budlum block hash into the 150-block Solana window.
+    /// Pushes a finalized Budlum block hash into the 150-block Solana window,
+    /// evicting replay-cache signatures tied to expired blockhashes (`BLG-279`).
     pub fn record_blockhash(&mut self, blockhash: [u8; 32]) {
         if self.recent_blockhashes.len() >= MAX_SOLANA_BLOCKHASH_WINDOW {
-            self.recent_blockhashes.pop_front();
+            if let Some(evicted) = self.recent_blockhashes.pop_front() {
+                if let Some(sigs) = self.solana_sigs_by_blockhash.remove(&evicted) {
+                    for sig in sigs {
+                        self.seen_solana_signatures.remove(&sig);
+                    }
+                }
+            }
         }
         self.recent_blockhashes.push_back(blockhash);
     }
@@ -315,6 +331,35 @@ impl ForeignLaneState {
                 ForeignAdmissionError::ClosedByQuantumAlert(self.quantum_alert_level),
             ),
         }
+    }
+
+    fn ensure_direct_pq_target(&self, pq_dst: &Address) -> Result<(), ForeignAdmissionError> {
+        if self.quantum_class_of(pq_dst) != AccountQuantumClass::PostQuantum {
+            return Err(ForeignAdmissionError::InvalidDirectPqRecipient(
+                String::from("target is not a post-quantum native account"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn foreign_account_expectation(
+        &self,
+        scheme: ForeignScheme,
+        local_id: &[u8],
+    ) -> Result<(Address, u64, u64), ForeignAdmissionError> {
+        let addr = derive_foreign_account(scheme, local_id);
+        if let Some(existing) = self.accounts.get(&addr) {
+            if let Some(dst) = existing.adopted_into {
+                return Err(ForeignAdmissionError::AccountAlreadyAdopted(dst));
+            }
+            return Ok((addr, existing.account_number, existing.next_nonce));
+        }
+        let acc_num = if scheme == ForeignScheme::CosmosSecp256k1 {
+            self.next_cosmos_account_number
+        } else {
+            0
+        };
+        Ok((addr, acc_num, 0))
     }
 
     fn upsert_foreign_account(
@@ -372,27 +417,31 @@ impl ForeignLaneState {
                 exec_state
                     .check_evm_alias_collision(&decoded.sender)
                     .map_err(|_| ForeignAdmissionError::AliasCollision)?;
-                let is_direct_pq = direct_native_pq_recipient.is_some()
-                    && decoded.data.is_empty()
-                    && decoded.to.is_some();
-                let intent = if is_direct_pq {
+                let intent = if let Some(pq_dst) = direct_native_pq_recipient {
+                    self.ensure_direct_pq_target(pq_dst)?;
+                    let expected_to = derive_evm_alias(pq_dst);
+                    if !decoded.data.is_empty() || decoded.to != Some(expected_to) {
+                        return Err(ForeignAdmissionError::InvalidDirectPqRecipient(
+                            String::from("signed Ethereum recipient/data mismatch with PQ alias"),
+                        ));
+                    }
                     ForeignIntentKind::TransferToNativePq
                 } else {
                     ForeignIntentKind::GeneralExecution
                 };
                 let advisory_warning = self.ensure_alert_allows(intent)?;
-                let rec =
-                    self.upsert_foreign_account(ForeignScheme::EthereumSecp256k1, &decoded.sender)?;
-                if decoded.nonce != rec.next_nonce {
+                let (budlum_sender, _, expected_nonce) = self.foreign_account_expectation(
+                    ForeignScheme::EthereumSecp256k1,
+                    &decoded.sender,
+                )?;
+                if decoded.nonce != expected_nonce {
                     return Err(ForeignAdmissionError::NonceMismatch {
-                        expected: rec.next_nonce,
+                        expected: expected_nonce,
                         got: decoded.nonce,
                     });
                 }
-                rec.next_nonce = rec.next_nonce.saturating_add(1);
-                let budlum_sender = rec.budlum_address;
                 if let Some(pq_dst) = direct_native_pq_recipient {
-                    if is_direct_pq && decoded.value_wei > 0 {
+                    if decoded.value_wei > 0 {
                         account_state
                             .transfer_attos_in_unit(
                                 &budlum_sender,
@@ -403,6 +452,9 @@ impl ForeignLaneState {
                             .map_err(ForeignAdmissionError::InvalidAdoptProof)?;
                     }
                 }
+                let rec =
+                    self.upsert_foreign_account(ForeignScheme::EthereumSecp256k1, &decoded.sender)?;
+                rec.next_nonce = rec.next_nonce.saturating_add(1);
                 Ok(VerifiedForeignOutcome::Ethereum {
                     budlum_sender,
                     decoded,
@@ -414,6 +466,9 @@ impl ForeignLaneState {
                 direct_native_pq_recipient,
             } => {
                 let decoded = decode_solana_tx(raw_wire).map_err(ForeignAdmissionError::Solana)?;
+                if exec_state.has_registered_alias_collision(EeId::SVM, &decoded.fee_payer) {
+                    return Err(ForeignAdmissionError::AliasCollision);
+                }
                 if !self.recent_blockhashes.contains(&decoded.recent_blockhash) {
                     return Err(ForeignAdmissionError::Solana(
                         SolanaEnvelopeError::UnknownOrExpiredBlockhash,
@@ -427,18 +482,49 @@ impl ForeignLaneState {
                         SolanaEnvelopeError::ReplayedSignature,
                     ));
                 }
-                let intent = if direct_native_pq_recipient.is_some() {
+                let intent = if let Some(pq_dst) = direct_native_pq_recipient {
+                    self.ensure_direct_pq_target(pq_dst)?;
+                    let (expected_svm, _) = derive_svm_alias(pq_dst)
+                        .map_err(ForeignAdmissionError::InvalidDirectPqRecipient)?;
+                    let ix = decoded.instructions.first().ok_or_else(|| {
+                        ForeignAdmissionError::InvalidDirectPqRecipient(String::from(
+                            "empty Solana instructions for direct PQ transfer",
+                        ))
+                    })?;
+                    let prog = decoded
+                        .account_keys
+                        .get(usize::from(ix.program_id_index))
+                        .copied();
+                    let dst_idx = ix.accounts.get(1).copied().map(usize::from);
+                    let dst_key = dst_idx.and_then(|i| decoded.account_keys.get(i).copied());
+                    let is_sys_transfer = decoded.instructions.len() == 1
+                        && prog == Some([0u8; 32])
+                        && ix.data.len() == 12
+                        && ix.data.get(..4) == Some(&2u32.to_le_bytes())
+                        && dst_key == Some(expected_svm);
+                    if !is_sys_transfer {
+                        return Err(ForeignAdmissionError::InvalidDirectPqRecipient(
+                            String::from("Solana tx is not a direct System transfer to PQ alias"),
+                        ));
+                    }
                     ForeignIntentKind::TransferToNativePq
                 } else {
                     ForeignIntentKind::GeneralExecution
                 };
                 let advisory_warning = self.ensure_alert_allows(intent)?;
+                let (budlum_sender, _, _) = self.foreign_account_expectation(
+                    ForeignScheme::SolanaEd25519,
+                    &decoded.fee_payer,
+                )?;
                 let rec = self
                     .upsert_foreign_account(ForeignScheme::SolanaEd25519, &decoded.fee_payer)?;
                 rec.next_nonce = rec.next_nonce.saturating_add(1);
-                let budlum_sender = rec.budlum_address;
                 self.seen_solana_signatures
                     .insert(decoded.fee_payer_signature);
+                self.solana_sigs_by_blockhash
+                    .entry(decoded.recent_blockhash)
+                    .or_default()
+                    .push(decoded.fee_payer_signature);
                 Ok(VerifiedForeignOutcome::Solana {
                     budlum_sender,
                     decoded,
@@ -452,21 +538,34 @@ impl ForeignLaneState {
                 let decoded =
                     decode_aptos_tx(raw_bcs, BUDLUM_APTOS_CHAIN_ID, now_timestamp_secs)
                         .map_err(ForeignAdmissionError::Aptos)?;
-                let intent = if direct_native_pq_recipient.is_some() {
+                if exec_state.has_registered_alias_collision(EeId::MOVE, &decoded.sender) {
+                    return Err(ForeignAdmissionError::AliasCollision);
+                }
+                let intent = if let Some(pq_dst) = direct_native_pq_recipient {
+                    self.ensure_direct_pq_target(pq_dst)?;
+                    let expected_move = derive_move_alias(pq_dst);
+                    if decoded.payload_kind != AptosPayloadKind::EntryFunction
+                        || !raw_bcs.windows(32).any(|w| w == expected_move)
+                    {
+                        return Err(ForeignAdmissionError::InvalidDirectPqRecipient(
+                            String::from("Aptos payload does not bind PQ Move alias"),
+                        ));
+                    }
                     ForeignIntentKind::TransferToNativePq
                 } else {
                     ForeignIntentKind::GeneralExecution
                 };
                 let advisory_warning = self.ensure_alert_allows(intent)?;
-                let rec = self.upsert_foreign_account(ForeignScheme::Aptos, &decoded.sender)?;
-                if decoded.sequence_number != rec.next_nonce {
+                let (budlum_sender, _, expected_nonce) =
+                    self.foreign_account_expectation(ForeignScheme::Aptos, &decoded.sender)?;
+                if decoded.sequence_number != expected_nonce {
                     return Err(ForeignAdmissionError::NonceMismatch {
-                        expected: rec.next_nonce,
+                        expected: expected_nonce,
                         got: decoded.sequence_number,
                     });
                 }
+                let rec = self.upsert_foreign_account(ForeignScheme::Aptos, &decoded.sender)?;
                 rec.next_nonce = rec.next_nonce.saturating_add(1);
-                let budlum_sender = rec.budlum_address;
                 Ok(VerifiedForeignOutcome::Aptos {
                     budlum_sender,
                     decoded,
@@ -486,30 +585,51 @@ impl ForeignLaneState {
                     BUDLUM_COSMOS_CHAIN_ID,
                 )
                 .map_err(ForeignAdmissionError::Cosmos)?;
-                let intent = if direct_native_pq_recipient.is_some() {
+                let cosmos_bech32 = derive_foreign_cosmos_bech32(&decoded.sender_addr20);
+                if exec_state.has_registered_alias_collision(EeId::WASM, cosmos_bech32.as_bytes()) {
+                    return Err(ForeignAdmissionError::AliasCollision);
+                }
+                let intent = if let Some(pq_dst) = direct_native_pq_recipient {
+                    self.ensure_direct_pq_target(pq_dst)?;
+                    let expected_wasm = derive_wasm_alias(pq_dst);
+                    let w_bytes = expected_wasm.as_bytes();
+                    let only_msg_send = decoded.type_urls.len() == 1
+                        && decoded.type_urls.first().map(String::as_str)
+                            == Some("/cosmos.bank.v1beta1.MsgSend");
+                    let has_alias = !w_bytes.is_empty()
+                        && tx_raw_bytes.windows(w_bytes.len()).any(|w| w == w_bytes);
+                    if !only_msg_send || !has_alias {
+                        return Err(ForeignAdmissionError::InvalidDirectPqRecipient(
+                            String::from("Cosmos tx is not a direct MsgSend to PQ WASM alias"),
+                        ));
+                    }
                     ForeignIntentKind::TransferToNativePq
                 } else {
                     ForeignIntentKind::GeneralExecution
                 };
                 let advisory_warning = self.ensure_alert_allows(intent)?;
+                let (budlum_sender, expected_acc_num, expected_nonce) = self
+                    .foreign_account_expectation(
+                        ForeignScheme::CosmosSecp256k1,
+                        &decoded.sender_addr20,
+                    )?;
+                if *account_number != expected_acc_num {
+                    return Err(ForeignAdmissionError::AccountNumberMismatch {
+                        expected: expected_acc_num,
+                        got: *account_number,
+                    });
+                }
+                if decoded.sequence != expected_nonce {
+                    return Err(ForeignAdmissionError::NonceMismatch {
+                        expected: expected_nonce,
+                        got: decoded.sequence,
+                    });
+                }
                 let rec = self.upsert_foreign_account(
                     ForeignScheme::CosmosSecp256k1,
                     &decoded.sender_addr20,
                 )?;
-                if *account_number != rec.account_number {
-                    return Err(ForeignAdmissionError::AccountNumberMismatch {
-                        expected: rec.account_number,
-                        got: *account_number,
-                    });
-                }
-                if decoded.sequence != rec.next_nonce {
-                    return Err(ForeignAdmissionError::NonceMismatch {
-                        expected: rec.next_nonce,
-                        got: decoded.sequence,
-                    });
-                }
                 rec.next_nonce = rec.next_nonce.saturating_add(1);
-                let budlum_sender = rec.budlum_address;
                 Ok(VerifiedForeignOutcome::Cosmos {
                     budlum_sender,
                     decoded,
@@ -570,15 +690,8 @@ impl ForeignLaneState {
             exec_state,
         )?;
 
-        let foreign_address = derive_foreign_account(adopt.scheme, &adopt.local_id);
-        if let Some(existing) = self.accounts.get(&foreign_address) {
-            if let Some(prev) = existing.adopted_into {
-                return Err(ForeignAdmissionError::AccountAlreadyAdopted(prev));
-            }
-        }
-        let rec = self.upsert_foreign_account(adopt.scheme, &adopt.local_id)?;
-        rec.adopted_into = Some(adopt.native_pq_target);
-
+        let (foreign_address, _, _) =
+            self.foreign_account_expectation(adopt.scheme, &adopt.local_id)?;
         let total_attos = account_state.spendable_attos(&foreign_address);
         let atom_scale = u128::from(ATTOS_PER_ATOM);
         let moved_atoms = u64::try_from(total_attos / atom_scale).unwrap_or(u64::MAX);
@@ -593,6 +706,8 @@ impl ForeignLaneState {
                 )
                 .map_err(ForeignAdmissionError::InvalidAdoptProof)?;
         }
+        let rec = self.upsert_foreign_account(adopt.scheme, &adopt.local_id)?;
+        rec.adopted_into = Some(adopt.native_pq_target);
 
         Ok(VerifiedForeignOutcome::Adopted {
             foreign_address,
@@ -642,6 +757,10 @@ fn verify_classical_adopt_proof(
                     "Cosmos local_id != 20 bytes",
                 ))
             })?;
+            let cosmos_bech32 = derive_foreign_cosmos_bech32(&expected);
+            if exec_state.has_registered_alias_collision(EeId::WASM, cosmos_bech32.as_bytes()) {
+                return Err(ForeignAdmissionError::AliasCollision);
+            }
             let pk33: [u8; 33] = compressed_pubkey33.as_slice().try_into().map_err(|_| {
                 ForeignAdmissionError::InvalidAdoptProof(String::from("Cosmos pubkey != 33 bytes"))
             })?;
@@ -669,6 +788,9 @@ fn verify_classical_adopt_proof(
                     "Solana local_id != 32 bytes",
                 ))
             })?;
+            if exec_state.has_registered_alias_collision(EeId::SVM, &pk32) {
+                return Err(ForeignAdmissionError::AliasCollision);
+            }
             let sig64: [u8; 64] = signature64.as_slice().try_into().map_err(|_| {
                 ForeignAdmissionError::InvalidAdoptProof(String::from("Solana sig != 64 bytes"))
             })?;
@@ -687,6 +809,9 @@ fn verify_classical_adopt_proof(
             let expected: [u8; 32] = local_id.try_into().map_err(|_| {
                 ForeignAdmissionError::InvalidAdoptProof(String::from("Aptos local_id != 32 bytes"))
             })?;
+            if exec_state.has_registered_alias_collision(EeId::MOVE, &expected) {
+                return Err(ForeignAdmissionError::AliasCollision);
+            }
             if aptos_ed25519_address(pubkey32) != expected {
                 return Err(ForeignAdmissionError::InvalidAdoptProof(String::from(
                     "Aptos pubkey does not derive local_id",

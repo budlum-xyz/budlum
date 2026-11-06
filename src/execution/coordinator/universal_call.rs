@@ -31,6 +31,12 @@ pub fn wrap_static_universal_input(input: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Returns `true` if `input` begins with the reserved coordinator static-call prefix.
+#[must_use]
+pub fn has_reserved_static_prefix(input: &[u8]) -> bool {
+    input.starts_with(STATIC_PREFIX)
+}
+
 /// Unwraps `(is_static, payload)` from a `UniversalCall.input` buffer.
 #[must_use]
 pub fn unwrap_static_universal_input(input: &[u8]) -> (bool, &[u8]) {
@@ -208,6 +214,11 @@ pub fn decode_precompile_calldata(calldata: &[u8]) -> Result<DecodedPrecompileCa
             u8::try_from(ee_u64).map_err(|_| String::from("target_ee exceeds uint8"))?;
         let target = read_dyn_bytes(args, 32)?;
         let input = read_dyn_bytes(args, 64)?;
+        if has_reserved_static_prefix(&input) {
+            return Err(String::from(
+                "call input cannot carry reserved static-call envelope prefix (BLG-280)",
+            ));
+        }
         let value_attos = read_u128_word(args, 96)?;
         let gas_bgu = read_u64_word(args, 128)?;
         Ok(DecodedPrecompileCall {

@@ -211,22 +211,31 @@ impl ExecutionState {
     ///
     /// exposed for: EVM worker / foreign envelope admission (`WP-27`).
     pub fn check_evm_alias_collision(&self, candidate_evm_addr: &[u8; 20]) -> Result<(), String> {
+        if self.has_registered_alias_collision(EeId::EVM, candidate_evm_addr) {
+            return Err(String::from(
+                "EVM address collides with a registered native UEL alias",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Returns `true` when `candidate` matches a registered native alias in `uel/alias` for `ee`.
+    ///
+    /// Closes `BLG-279` across EVM, WASM, SVM, and Move foreign envelope admission.
+    #[must_use]
+    pub fn has_registered_alias_collision(&self, ee: EeId, candidate: &[u8]) -> bool {
         let Some(bucket) = self.namespaces.get(ALIAS_NAMESPACE) else {
-            return Ok(());
+            return false;
         };
         for (hex_key, val) in bucket {
             let Ok(raw_key) = hex::decode(hex_key) else {
                 continue;
             };
-            if raw_key.get(32).copied() == Some(EeId::EVM.0)
-                && val.as_slice() == candidate_evm_addr
-            {
-                return Err(String::from(
-                    "EVM address collides with a registered native UEL alias",
-                ));
+            if raw_key.get(32).copied() == Some(ee.0) && val.as_slice() == candidate {
+                return true;
             }
         }
-        Ok(())
+        false
     }
 
     /// Total stored payload bytes in `ns` (for `budlum_state_bytes{ns}` metering).
