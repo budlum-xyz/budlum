@@ -13,6 +13,7 @@ description = "Budlum UEL cross-environment conformance, gas calibration, and cr
 [dependencies]
 bud-isa = { path = "../../budzero/bud-isa" }
 budlum-ee-budzero = { path = "../budzero" }
+budlum-ee-cairo = { path = "../cairo" }
 budlum-ee-evm = { path = "../evm" }
 budlum-ee-move = { path = "../move" }
 budlum-ee-move-sui = { path = "../move-sui" }

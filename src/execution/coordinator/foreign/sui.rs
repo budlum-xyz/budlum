@@ -358,15 +358,12 @@ pub fn decode_and_recover_sui_tx(
     let sig_arr: [u8; 64] = sig_slice
         .try_into()
         .map_err(|_| SuiEnvelopeError::InvalidSignatureLength(sig_len))?;
-    let pk_arr: [u8; 32] = pk_slice
-        .try_into()
-        .map_err(|_| SuiEnvelopeError::InvalidPublicKey)?;
+    let pk_arr: [u8; 32] = pk_slice.try_into().map_err(|_| SuiEnvelopeError::InvalidPublicKey)?;
 
     let vk = VerifyingKey::from_bytes(&pk_arr).map_err(|_| SuiEnvelopeError::InvalidPublicKey)?;
     let sig = Signature::from_bytes(&sig_arr);
     let signing_digest = sui_transaction_signing_digest(&env.tx_data_bytes);
-    vk.verify_strict(&signing_digest, &sig)
-        .map_err(|_| SuiEnvelopeError::BadSignature)?;
+    vk.verify_strict(&signing_digest, &sig).map_err(|_| SuiEnvelopeError::BadSignature)?;
 
     let data: SuiTransactionData = serde_json::from_slice(&env.tx_data_bytes)
         .map_err(|e| SuiEnvelopeError::MalformedEnvelope(e.to_string()))?;

@@ -1331,6 +1331,7 @@ jobs:
             crates/note-packing
             crates/uel-abi
             execution/budzero
+            execution/cairo
             execution/conformance
             execution/evm
             execution/move
@@ -1356,6 +1357,9 @@ jobs:
       - name: Format (ee-budzero)
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --manifest-path execution/budzero/Cargo.toml --all -- --check
+      - name: Format (ee-cairo)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path execution/cairo/Cargo.toml --all -- --check
       - name: Format (ee-conformance)
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --manifest-path execution/conformance/Cargo.toml --all -- --check
@@ -1389,6 +1393,9 @@ jobs:
       - name: Clippy (ee-budzero)
         if: always() && steps.protoc.outcome == 'success'
         run: cargo clippy --manifest-path execution/budzero/Cargo.toml --all-targets -- -D warnings
+      - name: Clippy (ee-cairo)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo clippy --manifest-path execution/cairo/Cargo.toml --all-targets -- -D warnings
       - name: Clippy (ee-conformance)
         if: always() && steps.protoc.outcome == 'success'
         run: cargo clippy --manifest-path execution/conformance/Cargo.toml --all-targets -- -D warnings
@@ -1422,6 +1429,9 @@ jobs:
       - name: Tests (ee-budzero)
         if: always() && steps.protoc.outcome == 'success'
         run: cargo test --manifest-path execution/budzero/Cargo.toml
+      - name: Tests (ee-cairo)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo test --manifest-path execution/cairo/Cargo.toml
       - name: Tests (ee-conformance)
         if: always() && steps.protoc.outcome == 'success'
         run: cargo test --manifest-path execution/conformance/Cargo.toml

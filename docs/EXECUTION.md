@@ -194,6 +194,18 @@ STARK proving on every call (`BLG-248`).
 - Closed at launch on testnet `45261` (`move_sui_is_closed_on_testnet`,
   `foreign_sui_is_closed_on_testnet`) with proposed activation height `50_000`.
 
+## 16. Cairo (Starknet) Execution Environment (`WP-51`, `EeId::CAIRO = 0x06`)
+
+- Standalone out-of-process worker `budlum-ee-cairo` (`execution/cairo/`,
+  `panic = "unwind"`, audited engine licenses `lambdaclass/cairo-vm` `Apache-2.0`
+  and `starkware-libs/sequencer` `blockifier` `Apache-2.0`).
+- Starknet Account Abstraction (`__validate__`, `__validate_declare__`, `__execute__`)
+  bound to the caller's post-quantum Budlum local alias under `ee/cairo/state`, plus
+  read-only Starknet JSON-RPC v0.7 subset (`src/rpc/compat/starknet/`).
+- Closed at launch on testnet `45261` (`cairo_is_closed_on_testnet`) with proposed
+  activation height `55_000`.
+
+
 
 
 

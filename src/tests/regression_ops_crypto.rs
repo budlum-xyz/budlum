@@ -248,6 +248,7 @@ fn ci_runs_every_standalone_package_test_suite() {
         "crates/uel-abi",
         "crates/wallet-core",
         "execution/budzero",
+        "execution/cairo",
         "execution/conformance",
         "execution/evm",
         "execution/move",

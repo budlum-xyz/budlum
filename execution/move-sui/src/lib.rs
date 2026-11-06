@@ -294,16 +294,10 @@ impl ExecutionEnvironment for MoveSuiWorker {
     ) -> Result<EeOutcome, EeFault> {
         let _ = sui_ns()?;
         if !self.is_active(ctx) {
-            return Ok(EeOutcome::reverted(
-                b"MOVE_SUI_CLOSED_ON_TESTNET".to_vec(),
-                0,
-            ));
+            return Ok(EeOutcome::reverted(b"MOVE_SUI_CLOSED_ON_TESTNET".to_vec(), 0));
         }
         let Ok(sender32) = <[u8; 32]>::try_from(call.caller.id.as_slice()) else {
-            return Ok(EeOutcome::reverted(
-                b"Sui caller must be 32 bytes".to_vec(),
-                0,
-            ));
+            return Ok(EeOutcome::reverted(b"Sui caller must be 32 bytes".to_vec(), 0));
         };
 
         let mut gas_used: u64 = 0;
@@ -325,10 +319,7 @@ impl ExecutionEnvironment for MoveSuiWorker {
                 return Ok(EeOutcome::out_of_gas(call.gas_limit));
             }
             let Ok(mods) = decode_sui_package_bundle(&call.input) else {
-                return Ok(EeOutcome::reverted(
-                    b"invalid Sui package bundle".to_vec(),
-                    gas_used,
-                ));
+                return Ok(EeOutcome::reverted(b"invalid Sui package bundle".to_vec(), gas_used));
             };
             let pkg_id = derive_sui_object_id(&call.tx_hash, 0);
             let contents = serde_json::to_vec(&mods).unwrap_or_default();
@@ -341,19 +332,13 @@ impl ExecutionEnvironment for MoveSuiWorker {
                 contents,
             };
             if write_sui_object(host, pkg_obj).is_err() {
-                return Ok(EeOutcome::reverted(
-                    b"package write failed".to_vec(),
-                    gas_used,
-                ));
+                return Ok(EeOutcome::reverted(b"package write failed".to_vec(), gas_used));
             }
             return Ok(EeOutcome::success(pkg_id.to_vec(), gas_used));
         }
 
         let Ok(ptb) = serde_json::from_slice::<SuiPtb>(&call.input) else {
-            return Ok(EeOutcome::reverted(
-                b"invalid SuiPtb JSON".to_vec(),
-                gas_used,
-            ));
+            return Ok(EeOutcome::reverted(b"invalid SuiPtb JSON".to_vec(), gas_used));
         };
         let mut created_ids: Vec<[u8; 32]> = Vec::new();
         let mut ordinal: u64 = 0;

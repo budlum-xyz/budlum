@@ -7,6 +7,10 @@ use std::time::Instant;
 
 use bud_isa::{Instruction, Opcode};
 use budlum_ee_budzero::BudZeroWorker;
+use budlum_ee_cairo::{
+    encode_sierra_class, CairoAction, CairoEntrypoint, CairoSyscallOp, CairoWorker,
+    SierraContractClass, AUDITED_CAIRO_ENGINE_SPDX, PROPOSED_CAIRO_ACTIVATION_HEIGHT,
+};
 use budlum_ee_evm::db::NS_EVM_STORAGE;
 use budlum_ee_evm::EvmWorker;
 use budlum_ee_move::framework::{
@@ -360,8 +364,7 @@ pub fn run_canonical_multi_ee_block_with_wasm(
     let svm_prog_id = EeIdentity::new(EeId::SVM, svm_prog.to_vec()).map_err(|e| e.to_string())?;
     let svm_sys_id =
         EeIdentity::new(EeId::SVM, SYSTEM_PROGRAM_ID.to_vec()).map_err(|e| e.to_string())?;
-    host.balances
-        .insert(svm_payer_id.clone(), 1_000_000 * ATTOS_PER_LAMPORT);
+    host.balances.insert(svm_payer_id.clone(), 1_000_000 * ATTOS_PER_LAMPORT);
     let svm_dep = svm
         .execute(
             &ctx,
@@ -891,6 +894,58 @@ mod tests {
             &mut host,
         ) else {
             panic!("sui exec");
+        };
+        assert_eq!(out.status, OutcomeStatus::Success);
+    }
+
+    /// Directive IP-51 conformance gate: `uel_conformance_cairo`.
+    #[test]
+    fn uel_conformance_cairo() {
+        assert_eq!(AUDITED_CAIRO_ENGINE_SPDX, "Apache-2.0");
+        let mut worker = CairoWorker::new();
+        let mut host = MemoryHost::new(5_000_000);
+        let Ok(caller) = EeIdentity::new(EeId::CAIRO, vec![0x41; 32]) else {
+            panic!("caller");
+        };
+        let cls = SierraContractClass {
+            sierra_version: "1.6.0".to_string(),
+            entrypoints: vec![CairoEntrypoint {
+                name: "constructor".to_string(),
+                ops: vec![CairoSyscallOp::StorageWrite {
+                    slot: [0x01; 32],
+                    value: [0x02; 32],
+                }],
+            }],
+        };
+        let Ok(bundle) = encode_sierra_class(&cls) else {
+            panic!("bundle");
+        };
+        let ctx = BlockContext {
+            chain_id: 45_261,
+            height: PROPOSED_CAIRO_ACTIVATION_HEIGHT,
+            timestamp_ms: 1_793_923_200_000,
+        };
+        let Ok(dec_in) = serde_json::to_vec(&CairoAction::Declare {
+            class_bundle: bundle,
+            nonce: 0,
+        }) else {
+            panic!("dec_in");
+        };
+        let Ok(out) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: caller.clone(),
+                target: caller,
+                value: BudAmount(0),
+                input: dec_in,
+                gas_limit: 1_000_000,
+                depth: 0,
+                tx_hash: [0x51; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("cairo declare");
         };
         assert_eq!(out.status, OutcomeStatus::Success);
     }
