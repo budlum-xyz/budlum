@@ -161,6 +161,14 @@ BLG-097) are down to one or two named files each, which is what a closing packag
 | `fifteen workflows name a deleted branch` | `consensus-of-consensuses` and `testnet-quantum` appear in exactly two workflows (`ci.yml:10`, `solidity.yml:7`), and neither branch exists on the remote (59 branches, none of them either name) | **narrowed from fifteen to two**, still open |
 | the audit config keeps a stale exception | `.cargo/audit.toml` has `ignore = []` with the reason recorded | **previously fixed** |
 
+### 4.4 Fifth pass: BLG-192 is already fixed
+
+`estimate_gas` in `src/rpc/server.rs` returns `tx.fee.max(required)`, where `required` is
+`AccountState::required_fee` through `chain.get_required_fee`: the same function admission uses, so
+the base fee, the proportional transfer cut and the escalating governance fee are all in the number.
+The record's premise (a flat 21000 that ignores both cuts) is gone. **Previously fixed**, and the
+rationale is written in the handler itself, which is where the next reader will look.
+
 Seven records still have no reading: BLG-011, BLG-016, BLG-081 to BLG-087, BLG-097, BLG-169,
 BLG-170 to BLG-181, BLG-187 to BLG-193, BLG-200, BLG-231, BLG-255, TEST-GAP-02 and TEST-GAP-07 need
 either the record text or a toolchain this sandbox does not have.
