@@ -872,4 +872,9 @@ fn duty_lane_budget_is_twenty_percent() {
         5,
         "a batch past the share waits for the next block, it is not dropped"
     );
+
+    // The share is a block rule, not a pool rule: the snapshot the reorg path
+    // rebuilds the pool from carries every batch, because a transaction left
+    // out of it is a transaction the node forgets.
+    assert_eq!(pool.all_pending_transactions(pool.len()).len(), 5);
 }

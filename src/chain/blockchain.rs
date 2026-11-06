@@ -5933,7 +5933,11 @@ impl Blockchain {
                 }
             }
         }
-        for tx in &self.mempool.get_sorted_transactions(self.mempool.len()) {
+        // The whole pool, not a block's worth of it: this path empties the
+        // pool and re-admits what it read here, so a transaction left out of
+        // the snapshot is a transaction the node silently forgot. The duty
+        // lane's block share belongs to the block door and is not applied.
+        for tx in &self.mempool.all_pending_transactions(self.mempool.len()) {
             if !chain_txs.contains(&tx.hash) {
                 new_pending.push(tx.clone());
             }

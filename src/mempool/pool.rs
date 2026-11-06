@@ -640,6 +640,31 @@ impl Mempool {
         result
     }
 
+    /// Every pending transaction, by the same fee order, with no block share
+    /// applied.
+    ///
+    /// This is not the block door and must not be used as one: it exists for
+    /// the caller that rebuilds the pool rather than fills a block (the reorg
+    /// path empties the pool and re-admits what this returns). Reading that
+    /// snapshot through [`Self::get_sorted_transactions`] would apply the duty
+    /// lane's share to a copy of the pool, and every duty batch past the share
+    /// would be dropped from the rebuilt pool instead of waiting for a block.
+    pub fn all_pending_transactions(&self, limit: usize) -> Vec<Transaction> {
+        let mut result = Vec::with_capacity(limit);
+
+        for hashes in self.by_fee.values().rev() {
+            for hash in hashes {
+                if result.len() >= limit {
+                    return result;
+                }
+                if let Some(pending) = self.transactions.get(hash) {
+                    result.push(pending.tx.clone());
+                }
+            }
+        }
+        result
+    }
+
     pub fn cleanup_expired(&mut self) -> usize {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
