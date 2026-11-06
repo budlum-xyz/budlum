@@ -17,6 +17,19 @@ permissions:
   contents: read
 
 jobs:
+  router-launcher:
+    name: Router launcher compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Offline launcher tests
+        run: |
+          set -euo pipefail
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/test_router_launcher.py -v 2>&1 | tee /tmp/router-launcher-tests.log
+          grep -Eq '^Ran [1-9][0-9]* tests?' /tmp/router-launcher-tests.log
   budlum-pq-build:
     name: Budlum Core PQ build
     runs-on: ubuntu-latest
