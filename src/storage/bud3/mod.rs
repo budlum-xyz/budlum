@@ -16,6 +16,7 @@
 //! | [`placement`] | Stake-weighted rendezvous placement, diversity caps, the placement table |
 //! | [`registry`] | Chain state: objects, dedup, references, deletion, shares, audits |
 //! | [`tx`] | `StorageTx` v3 and its one apply door |
+//! | [`fees`] | The storage fee and its renewal price, the endowment and gateway split, custody rewards with the presence multiplier, the Mobile floor charge |
 //! | [`custody`] | Sub-block tree, symbol root, the audit draw and custody proofs |
 //! | [`pipeline`] | Upload (content to record and symbols) and view (symbols to checked content) |
 //! | [`fountain`] | RFC 6330 per-segment encoder and decoder, and the streaming encoder |
@@ -33,6 +34,7 @@ pub mod bof1;
 pub mod content_id;
 pub mod custody;
 pub mod dedup_index;
+pub mod fees;
 pub mod fountain;
 pub mod limits;
 pub mod meter;
