@@ -230,7 +230,25 @@ impl ProofVerifier {
             });
         }
 
-        // 5. Public inputs hash verification
+        // 5. Public inputs hash and execution-bound consistency (BLG-370)
+        if expected_inputs.trace_len == 0 {
+            return Err(ProofVerifyError::InvalidProof(
+                "public inputs trace_len must be non-zero".into(),
+            ));
+        }
+        if expected_inputs.gas_used > expected_inputs.gas_limit {
+            return Err(ProofVerifyError::InvalidProof(
+                "public inputs gas_used exceeds gas_limit".into(),
+            ));
+        }
+        if !1u64
+            .checked_shl(envelope.degree_bits)
+            .is_some_and(|rows| rows >= expected_inputs.trace_len)
+        {
+            return Err(ProofVerifyError::InvalidProof(
+                "envelope degree_bits underprices expected trace_len".into(),
+            ));
+        }
         let computed_hash = expected_inputs.hash();
         if computed_hash != envelope.public_inputs_hash {
             return Err(ProofVerifyError::PublicInputsMismatch {
@@ -633,5 +651,33 @@ mod tests {
                  omission is invisible at the copy site"
             );
         }
+    }
+
+    #[test]
+    fn blg_370_underpriced_degree_bits_below_trace_len_rejected() {
+        let mut inputs = make_inputs();
+        inputs.trace_len = 2048;
+        let mut envelope = make_envelope(&inputs);
+        // 2^10 = 1024 < 2048: caller underprices verification gas by spoofing degree_bits.
+        envelope.degree_bits = 10;
+        envelope.public_inputs_hash = inputs.hash();
+
+        let err = ProofVerifier::verify(&envelope, &inputs, &[], 1_000_000).unwrap_err();
+        assert!(matches!(err, ProofVerifyError::InvalidProof(_)));
+    }
+
+    #[test]
+    fn blg_370_zero_trace_or_gas_overrun_in_public_inputs_rejected() {
+        let mut zero_trace = make_inputs();
+        zero_trace.trace_len = 0;
+        let env_zero = make_envelope(&zero_trace);
+        let err_zero = ProofVerifier::verify(&env_zero, &zero_trace, &[], 1_000_000).unwrap_err();
+        assert!(matches!(err_zero, ProofVerifyError::InvalidProof(_)));
+
+        let mut overrun = make_inputs();
+        overrun.gas_used = overrun.gas_limit + 1;
+        let env_over = make_envelope(&overrun);
+        let err_over = ProofVerifier::verify(&env_over, &overrun, &[], 1_000_000).unwrap_err();
+        assert!(matches!(err_over, ProofVerifyError::InvalidProof(_)));
     }
 }

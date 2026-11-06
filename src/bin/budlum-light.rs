@@ -162,10 +162,10 @@ fn verify_global_opening(
     openings: &[GlobalHeaderOpening],
     required: bool,
 ) -> Result<Option<String>, String> {
-    let Some(opening) = openings
+    let mut matches = openings
         .iter()
-        .find(|o| o.header.checkpoint_height == verified.height)
-    else {
+        .filter(|o| o.header.checkpoint_height == verified.height);
+    let Some(opening) = matches.next() else {
         if required {
             return Err(format!(
                 "no global header opening for checkpoint height {}",
@@ -174,10 +174,35 @@ fn verify_global_opening(
         }
         return Ok(None);
     };
+    if matches.next().is_some() {
+        return Err(format!(
+            "duplicate global header opening for checkpoint height {}",
+            verified.height
+        ));
+    }
     let body = decode_hash32(&opening.state_root_body)?;
     LightClient::verify_global_header(verified, &body, &opening.header)
         .map_err(|e| e.to_string())?;
     Ok(Some(hex::encode(opening.header.calculate_hash_bytes())))
+}
+
+/// Refuse an export whose headers do not all name `expected_chain_id`.
+fn validate_headers_chain_id(
+    headers: &[BlockHeader],
+    expected_chain_id: u64,
+    network: Network,
+) -> Result<(), String> {
+    for header in headers {
+        if header.chain_id != expected_chain_id {
+            return Err(format!(
+                "chain export header at height {} is for chain {}, not for the \
+                 {network:?} chain {expected_chain_id} this client is verifying \
+                 against; pass --network to match the export",
+                header.index, header.chain_id
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The interval must be positive: with 0 no checkpoint is ever due, and the
@@ -292,13 +317,8 @@ fn main() -> ExitCode {
     // and the trust anchors on the command line cannot catch that, because they
     // say nothing about which chain produced them.
     let chain_id = cli.network.chain_id();
-    let declared = export.headers[0].chain_id;
-    if declared != chain_id {
-        eprintln!(
-            "chain export is for chain {declared}, not for the {network:?} chain {chain_id} \
-             this client is verifying against; pass --network to match the export",
-            network = cli.network
-        );
+    if let Err(e) = validate_headers_chain_id(&export.headers, chain_id, cli.network) {
+        eprintln!("{e}");
         return ExitCode::FAILURE;
     }
     let mut client = match LightClient::for_chain(trusted, chain_id) {
@@ -502,5 +522,68 @@ mod tests {
         assert!(read_bounded(&path, 16).is_ok());
         assert!(read_bounded(&path, 15).is_err());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn blg_372_mixed_chain_header_after_index_zero_is_refused() {
+        use super::{validate_headers_chain_id, BlockHeader, Network};
+        use budlum_core::core::block::Block;
+
+        let testnet_id = Network::Testnet.chain_id();
+        let mut h0 = BlockHeader::from_block(&Block::new(0, "00".repeat(32), vec![]));
+        h0.chain_id = testnet_id;
+        let mut h1 = BlockHeader::from_block(&Block::new(1, h0.hash.clone(), vec![]));
+        h1.chain_id = Network::Mainnet.chain_id();
+
+        let err = validate_headers_chain_id(&[h0, h1], testnet_id, Network::Testnet)
+            .expect_err("mixed chain_id in trailing header must be refused");
+        assert!(err.contains("height 1"));
+    }
+
+    #[test]
+    fn blg_372_duplicate_global_header_opening_for_same_height_is_refused() {
+        use super::{
+            verify_global_opening, GlobalBlockHeader, GlobalHeaderOpening, VerifiedCheckpoint,
+        };
+
+        let verified = VerifiedCheckpoint {
+            height: 10,
+            block_hash: "11".repeat(32),
+            set_hash: "22".repeat(32),
+            epoch: 1,
+            state_root: "33".repeat(32),
+        };
+        let header = GlobalBlockHeader {
+            version: 7,
+            global_height: 1,
+            previous_global_hash: [0u8; 32],
+            chain_id: 45_261,
+            timestamp_ms: 1_000,
+            domain_registry_root: [0u8; 32],
+            domain_commitment_root: [0u8; 32],
+            message_root: [0u8; 32],
+            bridge_state_root: [0u8; 32],
+            replay_nonce_root: [0u8; 32],
+            proposer: None,
+            settlement_finality_root: [0u8; 32],
+            storage_root: None,
+            ai_root: None,
+            identity_root: None,
+            checkpoint_height: 10,
+            external_intake_root: None,
+            graft_root: None,
+            delegation_root: None,
+        };
+        let o1 = GlobalHeaderOpening {
+            header: header.clone(),
+            state_root_body: "44".repeat(32),
+        };
+        let o2 = GlobalHeaderOpening {
+            header,
+            state_root_body: "55".repeat(32),
+        };
+        let err = verify_global_opening(&verified, &[o1, o2], false)
+            .expect_err("conflicting duplicate openings for one height must be refused");
+        assert!(err.contains("duplicate global header opening"));
     }
 }
