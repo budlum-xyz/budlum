@@ -1236,7 +1236,7 @@ mod tests {
         assert_eq!(m1.shard_count, m2.shard_count);
     }
 
-    /// The browser core (`crates/budscan`, `BudManifest::manifest_id`) keeps a
+    /// The browser core (`crates/budlum-explorer`, `BudManifest::manifest_id`) keeps a
     /// copy of this preimage; the vector is pinned there with the same bytes.
     /// If this changes, the browser verifies against a stale formula.
     #[test]
@@ -1248,7 +1248,7 @@ mod tests {
         );
     }
 
-    /// Same vector as the browser copy (`crates/budscan/src/fetch.rs`,
+    /// Same vector as the browser copy (`crates/budlum-explorer/src/fetch.rs`,
     /// `a_dictionary_bound_manifest_id_matches_the_chain_vector`).
     ///
     /// The single-shard vector above is dictionary-free, so it cannot see a

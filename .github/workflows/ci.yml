@@ -457,7 +457,7 @@ jobs:
       # Every step below invokes the same binary, and until now the first one that
       # invoked it was a canary: a build failure in `xtask/gates` (its own workspace,
       # so no other job's clippy covers it) was reported as "the gate found a defect"
-      # in six jobs at once - measured on 2026-09-10, where Budscan's canary flipped
+      # in six jobs at once - measured on 2026-09-10, where Budlum Explorer's canary flipped
       # success -> exit 101 while its own Format and Clippy steps stayed green, which
       # proves nothing about this crate. A build step of its own names the real cause;
       # the surface below puts rustc's lines in annotations because the log host is
@@ -1258,14 +1258,14 @@ jobs:
           cargo build --manifest-path crates/wallet-core/Cargo.toml --lib --release \
             --target wasm32-unknown-unknown --features wasm
 
-  # ============================ Budscan (web3 tarayici cekirdegi) ============================
-  budscan:
-    # Budscan does not link against `budlum-core` and duplicates two definitions: the name rule
+  # ============================ Budlum Explorer (web3 tarayici cekirdegi) ============================
+  budlum-explorer:
+    # Budlum Explorer does not link against `budlum-core` and duplicates two definitions: the name rule
     # and ContentId. Copies can diverge silently and their divergence is a silent
     # results (the explorer accepts a name the chain does not; or
     # the explorer says a byte verified while the chain computes a different identity).
-    # `budscan-name-rule-parity` turns those two silences into noise.
-    name: Budscan (explorer core + patch layer)
+    # `explorer-name-rule-parity` turns those two silences into noise.
+    name: Budlum Explorer (explorer core + patch layer)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1279,31 +1279,34 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: budscan
-          workspaces: budscan
+          shared-key: budlum-explorer
+          workspaces: budlum-explorer
+      - name: Format
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path crates/budlum-explorer/Cargo.toml --all -- --check
       - name: Clippy (pedantic, -D warnings)
         if: always() && steps.rust.outcome == 'success'
-        run: cargo clippy --manifest-path crates/budscan/Cargo.toml --all-targets -- -D warnings
-      - name: budscan testleri
+        run: cargo clippy --manifest-path crates/budlum-explorer/Cargo.toml --all-targets -- -D warnings
+      - name: budlum-explorer testleri
         if: always() && steps.rust.outcome == 'success'
-        run: cargo test --manifest-path crates/budscan/Cargo.toml
-      - name: budscan own canaries
+        run: cargo test --manifest-path crates/budlum-explorer/Cargo.toml
+      - name: budlum-explorer own canaries
         if: always() && steps.rust.outcome == 'success'
         # The binary runs its own internal canaries: a schema never becomes a name, an empty
         # proof does not say `verified`, a dangling patch does not pass the check.
-        run: cargo run --manifest-path crates/budscan/Cargo.toml --bin budscan -- self-test
+        run: cargo run --manifest-path crates/budlum-explorer/Cargo.toml --bin budlum-explorer -- self-test
       - name: Gate canary (proof it is not vacuous)
         if: always() && steps.rust.outcome == 'success'
         run: |
           set -euo pipefail
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-name-rule-parity --self-test
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-patchset --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- explorer-name-rule-parity --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- explorer-patchset --self-test
       - name: Name rule and ContentId parity
         if: always() && steps.rust.outcome == 'success'
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-name-rule-parity
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- explorer-name-rule-parity
       - name: Patch layer (list=disk, no foreign brand)
         if: always() && steps.rust.outcome == 'success'
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-patchset
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- explorer-patchset
 
   # ============================ Standalone crates: bpqs and note-packing ============================
   standalone-crates:
@@ -1348,9 +1351,6 @@ jobs:
         run: cargo test --manifest-path crates/note-packing/Cargo.toml
 
   # ============================  / Bolum 4 (BNS gate) ============================
-      - name: Format
-        if: always() && steps.rust.outcome == 'success'
-        run: cargo fmt --manifest-path crates/budscan/Cargo.toml --all -- --check
   bns-gate:
     #  Section 4 module separation: BNS has its own CI gate (the B.U.D. gate pattern).
     # Name canary: if a test is deleted or renamed the gate FAILs.
@@ -1468,7 +1468,7 @@ jobs:
           - { name: fuzz, manifest: "fuzz/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: ai-inference, manifest: "crates/ai-inference/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: bpqs, manifest: "crates/bpqs/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: budscan, manifest: "crates/budscan/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: budlum-explorer, manifest: "crates/budlum-explorer/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: note-packing, manifest: "crates/note-packing/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: wallet-core, manifest: "crates/wallet-core/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: xtask-gates, manifest: "xtask/gates/Cargo.toml", config: "--config .quality/deny.toml" }
@@ -1507,7 +1507,7 @@ jobs:
           - { name: fuzz, manifest: "fuzz/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: ai-inference, manifest: "crates/ai-inference/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: bpqs, manifest: "crates/bpqs/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: budscan, manifest: "crates/budscan/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: budlum-explorer, manifest: "crates/budlum-explorer/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: note-packing, manifest: "crates/note-packing/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: wallet-core, manifest: "crates/wallet-core/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: xtask-gates, manifest: "xtask/gates/Cargo.toml", config: "--config .quality/deny.toml" }

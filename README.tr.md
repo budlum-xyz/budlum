@@ -196,7 +196,7 @@ dolayısıyla sistemin tamamı tek bir ağaç olarak derlenir, test edilir ve da
 
 | Yol | İçerik |
 | --- | --- |
-| [`crates/`](crates) | Bağımsız çalışma alanları: wallet-core, budscan, ai_inference, note-packing |
+| [`crates/`](crates) | Bağımsız çalışma alanları: wallet-core, budlum-explorer, ai_inference, note-packing |
 | [`bud/`](bud) | B.U.D. 1.0/2.0/3.0 uygulaması (kendi çalışma alanı) |
 | [`docs/`](docs) | Başvuru belgeleri: ARCHITECTURE, SPECIFICATION, SECURITY, CONTRIBUTING, PROVENANCE_NOTES |
 | [`config/`](config) | Devnet / testnet / mainnet profilleri ve genesis şablonları |
