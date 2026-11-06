@@ -249,3 +249,40 @@ The following new paths have multiple distinct blob IDs. A textual merge alone c
 ## Evidence boundary
 
 The snapshot was obtained through authenticated GitHub REST calls after GraphQL returned HTTP 504. Every open PR file list was paginated. No CI polling was performed for this audit. A later check is warranted only when a failure is observed, as requested. Existing audit documents and PR prose were read as leads; the table above uses live API metadata.
+
+## Live refresh after the transport deliveries
+
+The initial 54-PR tables above are a historical snapshot, not a claim about the
+queue after other agents continued working. A subsequent authenticated REST
+read found **62 open PRs**. The additions were:
+
+| PR | Head observed | Delivery |
+|---|---|---|
+| #75 | `1a77d0341a4fefdae04d6de9c14d893912661f18` | WP-07 legacy-storage removal across integrated stacks |
+| #76 | `f6b371b4ffa56ba778e2f5686f16a365a271e89c` | WP-28 connection-owned Ethereum filters |
+| #77 | `4ff2cc2a331fcda0d8df39a0b444ed64f0d446b1` | This audit and the WP-09 transport continuation |
+| #78 | `8cb10107585e68043c92d4d0b05fe1a23302439d` | Directive source removal; its WP-27 envelope was moved to #24 |
+| #79 | `130aacd8a2ed95f4e163c23842b38c6793dc7476` | WP-35 execution limits and conformance catalog |
+| #80 | `7f2e3667f93a5b98d0525a6bfb4573fb60f849de` | A parallel checkpoint of the same #38/#54/#64 ABI stack |
+| #81 | `e8f7365bf48ba06d9e35cb47bd09fe6f2a7a7b19` | WP-12 committee work re-rooted on main |
+| #82 | `5685e03d87c257e7e1ecc6fd3355eee5cebdbf94` | WP-11 mobile-core duty engine |
+
+The path-collision counts in the initial tables were not recomputed in this
+refresh. They must not be quoted as the current 62-PR counts.
+
+### WP-09 continuation checkpoint
+
+- Source commits carried with authorship: #38, #54 and #64.
+- `980a887`: deadline/poisoning regressions and actual ABI CI commands; also
+  repairs the misplaced explorer format step without importing #73's rename.
+- `12615f6`: one absolute client transport budget, checked clock addition and
+  connection poisoning after an unusable final response.
+- `749cdbe`: worker host-callback regression locks, including a valid-refusal
+  control so ordinary deterministic refusals remain usable.
+- `4ff2cc2`: bounded worker host I/O and operation-aware host reply validation;
+  a broken proxy cannot supply a deterministic execution receipt.
+- #80 was notified of this overlap. It remains open and unchanged. Its observed
+  head contains the same three source corrections, not the additional fixes
+  above. Reconciliation must preserve the union of tests and corrections.
+- No Rust test execution or green CI is claimed. The findings ledger keeps the
+  new records open until the required red-to-green evidence exists.
