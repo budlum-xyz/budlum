@@ -32,6 +32,7 @@ pub mod poa_membership;
 pub mod poa_onboarding;
 pub mod presence;
 pub mod quarantine_ledger;
+pub mod rehearsal;
 pub mod role;
 pub mod validator_profile;
 

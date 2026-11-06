@@ -152,6 +152,7 @@ mod gates {
     pub mod refusals_no_mutate;
     pub mod regen_health_door;
     pub mod regeneration;
+    pub mod rehearsal_and_field_matrix;
     pub mod rejection_tests;
     pub mod relay;
     pub mod release_profile_pins;
@@ -286,6 +287,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::bud3_dependent_modules::self_test,
+    },
+    Gate {
+        name: "rehearsal-and-field-matrix",
+        replaces: None,
+        run: gates::rehearsal_and_field_matrix::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::rehearsal_and_field_matrix::self_test,
     },
     Gate {
         name: "minting-paths-are-counted",
