@@ -4455,7 +4455,7 @@ mod tests {
         assert_eq!(state.ai_registry.state_root(), [0u8; 32], "G-4");
     }
 
-    /// The card's named lock for the layer decision (İP-45 job 5): with
+    /// The card's named lock for the layer decision (WP-45 job 5): with
     /// BLG-059..062 open and no per-request lottery or commit-reveal, the
     /// whole on-chain AI layer stays closed on testnet. Every door refuses
     /// with one code, on testnet, mainnet and every unclaimed id alike.
