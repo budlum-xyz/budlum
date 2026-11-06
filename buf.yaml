@@ -1,0 +1,25 @@
+# The proto/buf gate configuration
+# Scope: buf lint (STANDARD) + buf build + buf breaking --against main (in CI).
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  ignore_only:
+    # DELIBERATE CALIBRATIONS (the current wire/semantic state is preserved):
+    # (1) The 0 value in the enum is TRANSFER - translating it to _UNSPECIFIED changes
+    #     the default semantics (even with the wire numbers fixed, the default tx_type drifts).
+    # (2) The package name budlum.network is preserved - a .v1 suffix changes the message
+    #     FQNs (= wire breaking). Package version evolution is later work.
+    # PACKAGE_DIRECTORY_MATCH was resolved by real compliance instead (the file moved,
+    # the protoc FQN/package name did not change -> no wire effect).
+    ENUM_ZERO_VALUE_SUFFIX:
+      - proto/budlum/network/protocol.proto
+    ENUM_VALUE_PREFIX:
+      - proto/budlum/network/protocol.proto
+    PACKAGE_VERSION_SUFFIX:
+      - proto/budlum/network/protocol.proto
+breaking:
+  use:
+    - FILE

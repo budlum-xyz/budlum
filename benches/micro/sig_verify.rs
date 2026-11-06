@@ -1,0 +1,48 @@
+// Benchmark harness, not node code: this binary measures throughput and is
+// never part of a running validator. A failed setup step should stop the
+// measurement loudly rather than be threaded through `Result`.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+use budlum_core::crypto::primitives::KeyPair;
+use std::time::Instant;
+
+fn main() {
+    println!("\nMICRO-BENCHMARK: Signature Verification (Ed25519 + Sha3)");
+    println!("----------------------------------------------------------");
+
+    let count = 100_000;
+    println!("Generating {count} keypairs and signatures...");
+
+    let kp = KeyPair::generate().unwrap();
+    let sample_count = 1000;
+    println!("Generating {sample_count} unique samples to avoid cache bias...");
+
+    let samples: Vec<(Vec<u8>, [u8; 64])> = (0..sample_count)
+        .map(|i| {
+            let msg = format!("Budlum stress message {i}").into_bytes();
+            let sig = kp.sign(&msg);
+            (msg, sig)
+        })
+        .collect();
+
+    let pk_bytes = kp.public_key_bytes();
+
+    println!("Starting verification loop ({count} total iterations)...");
+    let start = Instant::now();
+
+    for i in 0..count {
+        let (msg, sig) = &samples[i % sample_count];
+        // Every sample is checked, not only the first: a benchmark that
+        // reports verification throughput while discarding failed
+        // verifications measures the cost of trying, not of succeeding.
+        budlum_core::crypto::primitives::verify_signature(msg, sig, &pk_bytes)
+            .expect("signature verification failed during the benchmark");
+    }
+
+    let duration = start.elapsed();
+    let ops_per_sec = count as f64 / duration.as_secs_f64();
+
+    println!("Total Time:       {duration:?}");
+    println!("Avg per Verify:   {:?}", duration / count as u32);
+    println!("Throughput:       {ops_per_sec:.2} verify/s");
+    println!("----------------------------------------------------------\n");
+}

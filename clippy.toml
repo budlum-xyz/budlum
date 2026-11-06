@@ -1,0 +1,18 @@
+# Panic limits: `unwrap_used` and `expect_used` are `deny` on the production
+# path. Test code stays outside this gate, but the exception is written in one
+# single place.
+#
+# The alternative was sprinkling `#[allow(clippy::unwrap_used)]` over every test
+# module. That path was rejected for two reasons: it produced more than two
+# hundred and thirty suppressions, and each one stayed in the tree as an
+# exemption counted by the `suppressions-are-justified` gate. An exception is
+# auditable only when it is visible and in one place; two hundred copies are the
+# opposite of that.
+#
+# A scope warning: these two keys cover only `#[test]` bodies and `#[cfg(test)]`
+# modules. Free helper functions in integration tests and everything under
+# `benches/` are out of scope; those are declared one by one at the top of the
+# file and stand with their justification in the
+# `suppressions-are-justified` table.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

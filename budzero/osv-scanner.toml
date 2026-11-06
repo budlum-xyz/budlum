@@ -1,0 +1,31 @@
+# budzero/osv-scanner.toml - OSV exceptions for the BudZero workspace
+#
+# BudZero is a separate Cargo workspace (it has its own Cargo.lock), so
+# osv-scanner matches it against the config beside it, not the root config.
+# It is kept in step with the root `osv-scanner.toml` (repository root since
+# 2026-10-25; it used to sit at `.quality/osv-scanner.toml`, a path osv-scanner
+# only reads when it is handed `--config` and that the OpenSSF Scorecard scan
+# never passed). This file still carries only the records that really appear in
+# the BudZero graph - osv-scanner reports an exception that matches nothing, and
+# a dead exception erodes the gate's credibility.
+#
+# The two vulnerability records this file used to carry (GHSA-vxx9-2994-q338
+# yamux, GHSA-q2qq-hmj6-3wpp hickory) are DELETED: libp2p 0.57 moved the tree to
+# yamux 0.14 and hickory 0.26, so both findings are patched and an ignore over a
+# patched finding hides the regression if the graph ever slides back. The root
+# test `src/tests/advisory_reachability.rs::patched_advisories_are_not_ignored_anywhere`
+# now reads this file too, so the two cannot drift apart again.
+#
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2023-0089"
+reason = "atomic-polyfill unmaintained (a maintenance warning, not a vulnerability) - the OSV mirror of the deny.toml `unmaintained = \"none\"` policy."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0141"
+reason = "bincode 1.x unmaintained - tracked on the org roadmap (the bincode 2 migration touches consensus critical byte formats, a separate task)."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+reason = "paste unmaintained (a maintenance warning, not a vulnerability); a proc-macro, no runtime surface."
+

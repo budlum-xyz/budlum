@@ -1,0 +1,342 @@
+//! A `chain_id` written as a literal is a proof bound to nothing.
+//!
+//! # The failure this closes
+//!
+//! `src/ai_inference/verify.rs` built `ExecutionPublicInputs` with `chain_id: 1`.
+//! The chain's real id is 45262. `chain_id` is a public input: it is the
+//! field that ties a proof to the chain it was produced for. Pinned to a
+//! literal, two things follow. The proofs produced here belong to no real
+//! chain, and a proof carrying `chain_id = 1` matches the expected inputs
+//! here regardless of where it came from.
+//!
+//! This is the wrongly bound public input class from the threat model. The
+//! same class in Aleo/snarkVM produced full transaction forgery, and it is
+//! in scope on every zkVM bounty programme surveyed (wrong state root, wrong
+//! chain id, transcript reuse).
+//!
+//! The helper had no production caller when it was found, which is exactly
+//! why it survived: a pinned field is invisible until the day something calls
+//! it. The gate closes the return path rather than trusting review.
+//!
+//! # What is measured
+//!
+//! Any struct-literal field `chain_id: <integer literal>` under the scanned
+//! roots fails. Accepted instead:
+//!
+//! * `chain_id` taken from a named constant, a parameter, a config field or
+//!   any other expression (`chain_id: DEFAULT_CHAIN_ID`, `chain_id,`
+//!   `chain_id: self.chain_id`, `chain_id: inputs.chain_id`).
+//! * Test modules and test-support files, where a literal is how a fixture
+//!   states which chain it means. A test that cannot write `chain_id: 1`
+//!   cannot test cross-chain rejection at all.
+//! * Constant definitions themselves (`const DEFAULT_CHAIN_ID: u64 = 45262;`),
+//!   which are the one place the number is supposed to appear.
+
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+
+/// Roots holding shipped library code.
+const SCAN_ROOTS: &[&str] = &["src", "budzero", "crates"];
+
+/// Strip every `#[cfg(test)]` item.
+///
+/// A literal inside a test is a fixture stating which chain it means, not a
+/// binding decision. The shared stripper ends the item at its own terminator:
+/// a body-less item (`use`, `const`, `static`) must not swallow the next
+/// production function.
+fn strip_test_modules(text: &str) -> String {
+    super::capability_modules_are_wired::strip_test_mods(text)
+}
+
+/// Length of the integer literal at the start of `text`, suffix included.
+///
+/// Accepts decimal, `0x`, `0o`, `0b`, digit separators and a type suffix such
+/// as `u64`. Returns 0 when `text` does not start with a literal.
+fn int_literal_len(text: &str) -> usize {
+    let b = text.as_bytes();
+    if !b.first().is_some_and(u8::is_ascii_digit) {
+        return 0;
+    }
+    let mut i = 0;
+    let radix_prefix = b.len() > 1 && b[0] == b'0' && matches!(b[1], b'x' | b'o' | b'b');
+    if radix_prefix {
+        i = 2;
+    }
+    while i < b.len()
+        && (b[i].is_ascii_digit() || b[i] == b'_' || (radix_prefix && b[i].is_ascii_hexdigit()))
+    {
+        i += 1;
+    }
+    // A type suffix, for example `u64` or `usize`.
+    if i < b.len() && matches!(b[i], b'u' | b'i') {
+        let mut j = i + 1;
+        while j < b.len() && b[j].is_ascii_alphanumeric() {
+            j += 1;
+        }
+        i = j;
+    }
+    i
+}
+
+/// Does the text after a literal end the value (`,`, `}`, `;`, end, `as T`)?
+fn value_ends(tail: &str) -> bool {
+    let tail = tail.trim_start();
+    let tail = tail.strip_prefix("as ").map_or(tail, |t| {
+        t.trim_start()
+            .trim_start_matches(|c: char| c.is_alphanumeric() || c == '_')
+    });
+    let tail = tail.trim_start();
+    tail.is_empty() || tail.starts_with([',', '}', ';', ')'])
+}
+
+/// Is this line a `chain_id` struct field or assignment with an integer literal?
+///
+/// Returns the offending literal when it is. Every `chain_id` on the line is
+/// looked at, not only the first.
+fn hardcoded_chain_id(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    // A constant definition is where the number belongs.
+    if trimmed.starts_with("const ") || trimmed.starts_with("pub const ") {
+        return None;
+    }
+    // A `let mut` local is a default that later code replaces, for example a
+    // command-line flag default. An immutable binding is final.
+    if trimmed.starts_with("let mut ") {
+        return None;
+    }
+    for (idx, _) in trimmed.match_indices("chain_id") {
+        // Only a name that is exactly `chain_id`, not `expected_chain_id`.
+        let before = trimmed[..idx].chars().next_back();
+        if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+        let rest = trimmed[idx + "chain_id".len()..].trim_start();
+        let value_text = if let Some(v) = rest.strip_prefix(':') {
+            // `chain_id: u64 = 1;` is a typed `let`; `chain_id: u64,` is a declaration.
+            let v = v.trim_start();
+            if int_literal_len(v) == 0 && trimmed.starts_with("let ") {
+                v.split_once('=').map_or("", |(_, r)| r.trim_start())
+            } else {
+                v
+            }
+        } else if rest.starts_with('=') && !rest.starts_with("==") && !rest.starts_with("=>") {
+            rest[1..].trim_start()
+        } else {
+            continue;
+        };
+        let len = int_literal_len(value_text);
+        if len > 0 && value_ends(&value_text[len..]) {
+            return Some(value_text[..len].to_string());
+        }
+    }
+    None
+}
+
+fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            let name = p.file_name().unwrap_or_default().to_string_lossy();
+            if matches!(&*name, "target" | ".git" | "tests" | "benches" | "fuzz") {
+                continue;
+            }
+            walk(&p, out);
+        } else if p.extension().is_some_and(|x| x == "rs") {
+            out.push(p);
+        }
+    }
+}
+
+/// Files whose whole purpose is test support.
+fn is_test_support(rel: &str) -> bool {
+    rel.contains("/tests/")
+        || rel.contains("_tests.rs")
+        || rel.contains("/test_")
+        || rel.ends_with("/tests.rs")
+}
+
+/// # Errors
+///
+/// Fails when a `chain_id` is written as an integer literal outside tests.
+pub fn run(root: &Path) -> Result<String, String> {
+    let mut files = Vec::new();
+    for sub in SCAN_ROOTS {
+        let base = root.join(sub);
+        if base.is_dir() {
+            walk(&base, &mut files);
+        }
+    }
+    if files.is_empty() {
+        return Err(String::from(
+            "FAIL: no .rs files found - wrong root, the gate would be vacuous",
+        ));
+    }
+
+    let mut hits: Vec<String> = Vec::new();
+    let mut scanned = 0usize;
+    for f in &files {
+        let rel = f
+            .strip_prefix(root)
+            .unwrap_or(f)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if is_test_support(&rel) {
+            continue;
+        }
+        let text = std::fs::read_to_string(f)
+            .map_err(|e| format!("FAIL: {} could not be read: {e}", f.display()))?;
+        scanned += 1;
+        let code = strip_test_modules(&text);
+        let lines: Vec<&str> = code.lines().collect();
+        for (n, line) in lines.iter().enumerate() {
+            // A value written on the line after `chain_id:` is joined to it.
+            let joined;
+            let line = if line.trim_end().ends_with("chain_id:") && n + 1 < lines.len() {
+                joined = format!("{line} {}", lines[n + 1].trim());
+                joined.as_str()
+            } else {
+                line
+            };
+            if let Some(v) = hardcoded_chain_id(line) {
+                hits.push(format!("{rel}:{}  chain_id: {v}", n + 1));
+            }
+        }
+    }
+
+    if !hits.is_empty() {
+        let mut msg = String::from("FAIL: a chain_id is written as a literal:\n");
+        for h in &hits {
+            let _ = writeln!(msg, "  - {h}");
+        }
+        msg.push_str(
+            "\nchain_id is the public input that binds a proof to its chain. Pinned to a\n\
+             literal, the proof belongs to no real chain and a proof carrying that same\n\
+             literal matches wherever it came from - a wrongly bound public input.\n\
+             Take it from a constant, a parameter or config instead.",
+        );
+        return Err(msg);
+    }
+
+    Ok(format!(
+        "chain-id gate OK: {scanned} files carry no literal chain_id outside tests."
+    ))
+}
+
+/// # Errors
+///
+/// Fails when a canary is misclassified.
+pub fn self_test() -> Result<String, String> {
+    let must_flag = [
+        "        chain_id: 1,",
+        "    chain_id: 45262,",
+        "chain_id: 0 }",
+        "            chain_id: 1_000,",
+    ];
+    for c in must_flag {
+        if hardcoded_chain_id(c).is_none() {
+            return Err(format!("a literal chain_id was accepted: {c:?}"));
+        }
+    }
+
+    let must_pass = [
+        "        chain_id: DEFAULT_CHAIN_ID,",
+        "        chain_id,",
+        "        chain_id: self.chain_id,",
+        "        chain_id: inputs.chain_id,",
+        "    pub chain_id: u64,",
+        "fn f(_chain_id: u64, backend: &str) -> bool {",
+        "pub const DEFAULT_CHAIN_ID: u64 = 45262;",
+        "        expected_chain_id: 1,",
+        "        chain_id: cfg.chain_id(),",
+    ];
+    for c in must_pass {
+        if let Some(v) = hardcoded_chain_id(c) {
+            return Err(format!("a legitimate line was flagged: {c:?} -> {v}"));
+        }
+    }
+
+    // A literal inside a test module must be invisible to the scan.
+    let with_test = "fn a() { let x = 1; }\n\
+                     #[cfg(test)]\n\
+                     mod tests {\n\
+                     fn b() { if true { } }\n\
+                     let pi = P { chain_id: 1, };\n\
+                     }\n\
+                     fn c() {}\n";
+    let stripped = strip_test_modules(with_test);
+    if stripped.contains("chain_id: 1") {
+        return Err(String::from("a test-module literal was not skipped"));
+    }
+    if !stripped.contains("fn c() {}") {
+        return Err(String::from(
+            "the brace counter ate code after the test module",
+        ));
+    }
+    // A wide character between the attribute and the brace: the old
+    // character-count skip started past the brace here and underflowed.
+    let wide = "#[cfg(test)] // \u{00f6}l\u{00e7}\u{00fc}m\nmod tests { let pi = P { chain_id: 1, }; }\nfn d() {}\n";
+    let stripped = strip_test_modules(wide);
+    if stripped.contains("chain_id: 1") || !stripped.contains("fn d() {}") {
+        return Err(String::from(
+            "a wide character before the test module brace broke the strip",
+        ));
+    }
+
+    Ok(String::from(
+        "chain-id gate self-test OK: literal chain_id rejected in four forms; \
+         constant, parameter, field, type annotation, prefixed name and \
+         test-module literals all pass.",
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suffix_hex_cast_assignment_and_second_match_are_flagged() {
+        for l in [
+            "chain_id: 1u64,",
+            "chain_id: 0x1,",
+            "chain_id: 1 as u64,",
+            "expected_chain_id: x, chain_id: 1 }",
+            "chain_id = 1;",
+            "let chain_id = 1;",
+            "let chain_id: u64 = 1;",
+        ] {
+            assert!(hardcoded_chain_id(l).is_some(), "{l}");
+        }
+        for l in [
+            "pub chain_id: u64,",
+            "let chain_id: u64 = cfg.id;",
+            "chain_id == 1",
+            "chain_id: x as u64,",
+        ] {
+            assert!(hardcoded_chain_id(l).is_none(), "{l}");
+        }
+    }
+
+    #[test]
+    fn bodyless_test_item_does_not_hide_next_function() {
+        let src = "#[cfg(test)]\nuse foo::bar;\nfn prod() {\n    let p = P { chain_id: 1, };\n}\n";
+        let stripped = strip_test_modules(src);
+        assert!(stripped.lines().any(|l| hardcoded_chain_id(l).is_some()));
+        let src =
+            "#[cfg(test)]\nconst X: u8 = 1;\nfn prod() {\n    let p = P { chain_id: 1, };\n}\n";
+        let stripped = strip_test_modules(src);
+        assert!(stripped.lines().any(|l| hardcoded_chain_id(l).is_some()));
+    }
+
+    #[test]
+    fn unreadable_file_is_an_error_not_a_skip() {
+        let dir = std::env::temp_dir().join(format!("chain-id-bad-utf8-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/lib.rs"), [0xff, 0xfe, 0xfd]).unwrap();
+        let out = run(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(out.is_err());
+    }
+}

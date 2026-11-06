@@ -1,0 +1,20 @@
+[package]
+name = "bud-compiler"
+version = "0.1.0"
+edition = "2021"
+# Inherit the root [workspace.package] value for the cargo-deny license gate
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bud-isa = { path = "../bud-isa" }
+logos = "0.16"
+tracing = "0.1"
+
+[dev-dependencies]
+bud-vm = { path = "../bud-vm" }
+
+[features]
+experimental = ["bud-isa/experimental"]

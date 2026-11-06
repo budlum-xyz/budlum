@@ -1,0 +1,19 @@
+# Foundry project for the Ethereum-side contracts.
+# Run through the Rust wrapper: `cargo run --manifest-path xtask/tools/Cargo.toml -- contracts test`.
+[profile.default]
+src = "."
+test = "test"
+out = "out"
+cache_path = "cache"
+libs = []
+solc_version = "0.8.26"
+optimizer = true
+optimizer_runs = 200
+# Cancun has no EIP-2537 precompiles: the verifier tests exercise the
+# optimistic regime and the refusal boundaries; the precompile regime is
+# covered by the `prague` profile.
+evm_version = "cancun"
+offline = true
+
+[profile.prague]
+evm_version = "prague"
