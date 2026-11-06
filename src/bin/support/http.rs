@@ -34,7 +34,12 @@ fn bucket(ip: IpAddr) -> IpAddr {
         IpAddr::V4(v4) => IpAddr::V4(v4),
         IpAddr::V6(v6) => {
             let mut octets = v6.octets();
-            octets[8..].fill(0);
+            // `get_mut` rather than `octets[8..]`: the slice cannot be out of
+            // range on a 16-byte array, but the release profile aborts on a
+            // panic, so the shape that cannot panic is the one to write.
+            if let Some(low) = octets.get_mut(8..) {
+                low.fill(0);
+            }
             IpAddr::V6(std::net::Ipv6Addr::from(octets))
         }
     }
