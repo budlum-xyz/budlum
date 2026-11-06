@@ -468,4 +468,29 @@ mod tests {
         assert_eq!(state.get_balance(&addr(1)), 0);
         assert!(balance > 0);
     }
+
+    /// BLG-263: the epoch budget is split 40 percent consensus, 50 percent
+    /// storage and 10 percent repair and relay (directive section 11.4), and
+    /// the stake weighted payout of `pay_epoch` is the consensus share only.
+    /// The other two shares stay in the pool account until their payers
+    /// read them, so the pool is never paid out ahead of its work.
+    #[test]
+    fn pay_epoch_pays_only_the_consensus_share_of_the_budget() {
+        let schedule = RewardPoolSchedule {
+            validation_reward_pool: bud(100),
+            validation_pool_epochs: 10,
+            treasury_pool: 0,
+            reward_pool_start_epoch: 0,
+        };
+        let mut state = funded_state(&[(1, 3_000, false), (2, 1_000, false)]);
+        let pool_before = state.get_balance(&reward_pool_account());
+        // The epoch budget is 10 BUD; the consensus share of it is 4 BUD.
+        let paid = pay_epoch(&mut state, &schedule, 0);
+        assert_eq!(paid, bud(4), "only the consensus share is paid out");
+        assert_eq!(
+            state.get_balance(&reward_pool_account()),
+            pool_before - bud(4),
+            "the storage and the repair and relay shares stay in the pool"
+        );
+    }
 }
