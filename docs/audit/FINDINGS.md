@@ -58,19 +58,19 @@ number when one completes. Self-report is not evidence (§0.3 item 5).
 | Identity | Severity | Row | Owner | Status |
 |---|---|---|---|---|
 | BLG-279 | Medium | A second `Address` definition survives in the VM workspace: `budzero/verifier-registry/src/address.rs:9` derives `Serialize`/`Deserialize` over `pub struct Address(pub [u8; 32])`, so it encodes as a 32-element byte array, while `core::address::Address` hand-writes a bare hex string. K-4 says wallet, chain and VM call one definition. `SlashingReport` (`evidence.rs:65`) and `Registration` (`registry.rs:106`) derive serde over that field, so the two workspaces already disagree on the JSON shape of the same concept. | İP-33 (owns the crate), coordinate with İP-11 job 1 | **Open — recorded, not closed here.** |
+| BLG-291 | High | The concept-name gate is red on `main` itself, independently of any PR. Four concepts measure above the committed baseline: `Budscan` 34/272 vs 33/268, `Tarif` 52/1444 vs 51/1442, `PUL` 14/100 vs 13/99, `Gövde` 2/2 vs 1/1. Each is exactly **+1 file**, and the deltas are the gate's own detection literals: `xtask/gates/src/gates/geiger.rs` (Budscan 4), `bud3_forbidden_phrases.rs` (Tarif 2, Gövde 1) and `module_coverage.rs` (PUL 1). `xtask` is in `SCAN_ROOTS`, so a detector is counted as a use of the name it detects. `compare()` fails on any inequality and `check(root, write=true)` refuses to write a raised count, so the documented `BUDLUM_CONCEPT_NAMES_WRITE=1` escape cannot clear it. **#50 already carries the fix for three of the four**; only `PUL` is unowned. | naming-policy owner; #50 covers Budscan/Tarif/Gövde, `PUL` in `module_coverage.rs` has no open owner | **Open — recorded, not closed here.** |
+| BLG-292 | High | #68 replaces the working 456-line concept-name gate with a 99-line stub: `ConceptNamesGate::new` returns `entries: Vec::new()` and `baseline: HashMap::new()` (both parsers are `// Parse from ...` comments), `run()` only calls a `self_test()` whose body is two comments and `Ok(())`, and all three unit tests are `assert!(true)`. Independently it does not compile against its own caller: `xtask/gates/src/main.rs` :964/:967 take `gates::concept_names::run` and `::self_test` as `fn(&Path) -> Result<String, String>`, but the stub defines those names only as methods on `ConceptNamesGate`, so both paths are unresolved (E0425). The gate it replaces exports exactly those two free functions. | #68 owner (İP-05); to be reported on the PR | **Open — another PR's branch; this PR cannot push to it.** |
 
-| BLG-288 | High | The concept-name gate is red on `main` itself, independently of any PR. Four concepts measure above the committed baseline: `Budscan` 34/272 vs 33/268, `Tarif` 52/1444 vs 51/1442, `PUL` 14/100 vs 13/99, `Gövde` 2/2 vs 1/1. Each is exactly **+1 file**, and the deltas are the gate's own detection literals: `xtask/gates/src/gates/geiger.rs` (Budscan 4), `bud3_forbidden_phrases.rs` (Tarif 2, Gövde 1) and `module_coverage.rs` (PUL 1). `xtask` is in `SCAN_ROOTS` and none of the four carries an `allow_paths` entry, so a detector is counted as a use of the name it detects. `compare()` fails on any inequality and `check(root, write=true)` refuses to write a raised count, so the documented `BUDLUM_CONCEPT_NAMES_WRITE=1` escape cannot clear it. | naming-policy owner; `config/naming/concept_map.toml` is edited by #8/#20/#24/#31/#43/#50/#60/#68 | **Open — recorded, not closed here.** |
+Numbering: `BLG-288` was free when this row was written but has since been taken
+by #77/#86/#88, so the row is renumbered to `BLG-291` and the #68 row takes
+`BLG-292`. Both were re-verified free across all 69 open PR bodies and all 12 open
+`FINDINGS.md` patches; `BLG-279` is unchanged.
 
-Numbering: `BLG-268` is taken by #24, #13 claims `BLG-268`–`BLG-275`,
-`BLG-276`–`BLG-281` are claimed by #36/#50/#68 and #79 carries `BLG-280`/`BLG-287`,
-so these rows take `BLG-279` and `BLG-288`, both verified free in every open PR
-body and in every open `FINDINGS.md` patch.
-
-BLG-288 is not fixed here for three reasons. The fix is an `allow_paths` entry
-for `xtask/gates/` (or equivalent) in `config/naming/concept_map.toml`, which is a
-naming-policy decision, not a WP-45/WP-11 change; that file and the baseline are
-shared append-only and already held by eight open PRs; and this PR's own measured
-delta is **0 matches / 0 files**, so it neither causes nor worsens the drift.
+BLG-291 is not fixed here, and it is smaller than first recorded: #50 already adds
+`xtask/gates/src/gates/geiger.rs` to `Budscan`'s `allow_paths` and
+`bud3_forbidden_phrases.rs` to `global_allow_paths`, which clears the Budscan, Tarif
+and Gövde deltas. Only `PUL` in `module_coverage.rs` is still unowned by any open PR.
+This PR's own measured delta stays **0 matches / 0 files**.
 
 Two limits on that row. It was measured with a faithful replication of
 `measure()` and `compare()` — same `SCAN_ROOTS`, `SKIP_DIRS`, `MAX_FILE_BYTES`,
@@ -92,6 +92,12 @@ What is closed here is the drift hazard on the node side:
 `address_json_is_a_hex_string_not_a_byte_array` in `src/core/address.rs` pins the
 hex-string form and asserts the array form stays refused, so a future dedup that
 substitutes the derived encoding fails a test instead of the database.
+
+BLG-292 was found while looking for the owner of BLG-291, so the two are related:
+#50 carries the correct fix for three of the four drifting concepts while #68
+rewrites the same gate, and whichever lands second must not undo the other. The
+compile break is read directly from the two files at #68's head `cecf85a1`; its CI
+was still queued, so no run result is claimed either way (S-1).
 
 ## Package status
 
