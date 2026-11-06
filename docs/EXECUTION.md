@@ -151,6 +151,16 @@ STARK proving on every call (`BLG-248`).
   `SingleKey` (`Ed25519` / `Secp256k1Ecdsa`) authenticators while refusing OIDC keyless
   accounts, expired timestamps, and sequence-number replays (`uel_foreign_tx_replay_refused_aptos`).
 
+## 12. Conformance, Gas Calibration, and Cross-Architecture Determinism (`WP-35`)
+
+- Conformance runner: `budlum-ee-conformance` (`execution/conformance/`), exercising
+  `uel_conformance_{budzero,evm,wasm,svm,move}`, `uel_gas_calibration_bound`
+  (`1 BGU <= 16 ns` p95 in `--release`), and `uel_cross_arch_roots_equal`.
+- Nightly cross-arch gate: `.github/workflows/conformance-nightly.yml` compares
+  `UEL_EXECUTION_ROOT` byte-for-byte between `ubuntu-24.04` (`x86_64`) and
+  `ubuntu-24.04-arm` (`aarch64`).
+
+
 
 
 
