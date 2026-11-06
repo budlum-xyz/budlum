@@ -249,3 +249,7 @@ pub mod validator_classes;
 // The B.U.D. 3.0 storage door end to end.
 #[cfg(test)]
 pub mod bud3_door;
+
+// WP-41: Prometheus alert rules may only name metrics the node exports.
+#[cfg(test)]
+pub mod alert_rules_reference_existing_metrics;
