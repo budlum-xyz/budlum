@@ -78,3 +78,21 @@ under `BDLM_UEL_ROOT_V1`. Stateful `ContractCall` (`BDLM_UEL_STATEFUL_V1`)
 deploys persistent BudZero programs to deterministic contract addresses and
 persists contract storage across transactions without running validator-side
 STARK proving on every call (`BLG-248`).
+
+## 6. EVM Execution Environment and Foreign Envelope (`WP-27`, `BLG-267`)
+
+- Pinned EVM engine: `revm = "=43.0.3"` (`budlum-ee-evm` worker in `execution/evm/`).
+- Supported EVM hardfork: **`Osaka`** (`SpecId::OSAKA`, the latest stable hardfork
+  in `revm` `43.0.3`; experimental `Amsterdam` is disabled).
+- Chain ID: `45261` (`EIP-155`). Accepted transaction types: Type `0` (EIP-155
+  replay-protected only), Type `1` (`EIP-2930`), Type `2` (`EIP-1559`), and Type `4`
+  (`EIP-7702`). Type `3` (`EIP-4844` blob transactions) is deterministically refused.
+- Classical-signature custody boundary (`K-3`, `BLG-267`): `Foreign::Ethereum`
+  accounts carry `QuantumClass::Classical` and can move only their own foreign
+  account holdings; they cannot debit any `QuantumClass::PostQuantum` native
+  account. A dual-signed `Adopt` operation (`BDLM_FOREIGN_ADOPT_V1`) sweeps
+  foreign holdings into a post-quantum `Address` V3 once and remains open even
+  under `QuantumAlertLevel::Isolated`.
+- Universal Call precompile skeleton: `0x000000000000000000000000000000000000B001`
+  (`contracts/uel/BudlumUniversal.sol`).
+
