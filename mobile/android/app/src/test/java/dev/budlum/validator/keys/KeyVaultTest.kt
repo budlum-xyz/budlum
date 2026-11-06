@@ -11,7 +11,7 @@ import javax.crypto.SecretKey
  * Unit tests for key wrapping (directive 7.9.6). Uses a locally generated AES
  * key so the wrap/unwrap logic is tested on the JVM without the Android
  * Keystore; the Keystore lookup itself is exercised on-device/emulator.
- * Covers the WP-36 test `android_keys_are_keystore_wrapped`.
+ * Android Keystore itself is covered by the instrumentation test, not here.
  */
 class KeyVaultTest {
 
@@ -19,7 +19,7 @@ class KeyVaultTest {
         KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
 
     @Test
-    fun `android_keys_are_keystore_wrapped`() {
+    fun `aes_gcm_wrap_round_trips_and_rejects_wrong_key`() {
         val key = localAesKey()
         val raw = ByteArray(64) { (it * 7).toByte() } // stand-in for a serialized ML-DSA-65 key
 
