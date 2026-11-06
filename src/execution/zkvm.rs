@@ -33,7 +33,7 @@ const _: () = assert!(
 /// for one environment was larger than the whole block, so a block could not
 /// spend the limit it was given and the two numbers in the documentation
 /// disagreed. The budget is now the block limit exactly, and
-/// [`BLOCK_GAS_LIMIT_BGU`] below is the one place the number is written.
+/// `BLOCK_GAS_LIMIT_BGU` below is the one place the number is written.
 pub const MAX_BLOCK_CONTRACT_GAS: u64 = BLOCK_GAS_LIMIT_BGU;
 
 /// The block gas limit of Section 8.9 item 2, in BGU, `TESTNET-DEFAULT`.
@@ -45,7 +45,7 @@ pub const MAX_BLOCK_CONTRACT_GAS: u64 = BLOCK_GAS_LIMIT_BGU;
 /// [`MAX_BLOCK_CONTRACT_GAS`] out of this file and compares them with
 /// `docs/EXECUTION_LIMITS.md`, so the document cannot claim a block limit the
 /// code does not hold either.
-pub(crate) const BLOCK_GAS_LIMIT_BGU: u64 = 60_000_000;
+const BLOCK_GAS_LIMIT_BGU: u64 = 60_000_000;
 
 const _: () = assert!(
     DEFAULT_CONTRACT_GAS_LIMIT <= BLOCK_GAS_LIMIT_BGU,
