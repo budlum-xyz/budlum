@@ -1311,10 +1311,13 @@ mod repair_band {
     /// That gap matters because the two functions answer different questions.
     /// The sweep's is "is anything in trouble by its own standard?"; an
     /// operator's is "what is within N shards of trouble for me?", and a single
-    /// per-object margin cannot answer a fixed N. The second question needed a
-    /// caller, so it has one: `bud_storageRepairBand`.
+    /// The repair band answers one question - which objects are past saving
+    /// and which still have headroom - and the chain actor owns it. The RPC
+    /// layer no longer carries the band: the old storage surface is being
+    /// removed wholesale. The lock keeps the chain-actor command arm intact
+    /// and keeps the deleted method from creeping back onto the trait.
     #[test]
-    fn the_repair_band_is_reachable_over_rpc() {
+    fn the_repair_band_is_reachable_on_the_chain_actor() {
         let actor_src = include_str!("../chain/chain_actor.rs");
         // Anchor on the match arm's own first field, not the enum variant:
         // both spell `ChainCommand::GetStorageRepairBand {` and `split_once`
@@ -1336,27 +1339,11 @@ mod repair_band {
              empty repair band concludes nothing is wrong"
         );
 
-        let server_src = include_str!("../rpc/server.rs");
-        let rpc = server_src
-            .split_once("async fn storage_repair_band(")
-            .map(|(_, after)| after)
-            .expect("the storage_repair_band RPC method must exist");
-        let rpc = &rpc[..rpc.len().min(1400)];
-        assert!(
-            rpc.contains("get_storage_repair_band(margin)"),
-            "the RPC must reach the chain actor, not recompute the band"
-        );
-        assert!(
-            rpc.contains("\"unrecoverable\"") && rpc.contains("\"repairable\""),
-            "the response must keep the two lists apart: an object below k \
-             cannot be repaired, and must not read as one that can"
-        );
-
         let api_src = include_str!("../rpc/api.rs");
         assert!(
-            api_src.contains("bud_storageRepairBand"),
-            "the method must be declared on the RPC trait, or it is unreachable \
-             from outside the process no matter what the server implements"
+            !api_src.contains("bud_storageRepairBand"),
+            "the band belongs to the chain actor now; the old storage RPC \
+             surface must not come back"
         );
     }
 

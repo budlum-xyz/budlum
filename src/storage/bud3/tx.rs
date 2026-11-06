@@ -162,6 +162,43 @@ pub enum Applied {
     Declined,
 }
 
+/// The binding-record header: the transaction kind and its long version
+/// number. The transaction door writes it into every storage payload; a
+/// payload without it belongs to another generation and never decodes here.
+pub const BINDING_HEADER: &[u8] = b"BUD3.StorageTx1";
+
+/// The signed storage transaction: the binding-record header and the body.
+/// The wire form is one byte string, so the two payload generations that
+/// once shared a transaction tag can never be confused for each other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageTx {
+    /// The transaction body.
+    pub body: StorageTxV3,
+}
+
+impl serde::Serialize for StorageTx {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut wire = Vec::with_capacity(BINDING_HEADER.len() + 256);
+        wire.extend_from_slice(BINDING_HEADER);
+        wire.extend(bincode::serialize(&self.body).map_err(|e| {
+            serde::ser::Error::custom(format_args!("the storage body does not serialize: {e}"))
+        })?);
+        serializer.serialize_bytes(&wire)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for StorageTx {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = <Vec<u8>>::deserialize(deserializer)?;
+        let body = wire.strip_prefix(BINDING_HEADER).ok_or_else(|| {
+            serde::de::Error::custom("a storage payload without the binding-record header")
+        })?;
+        let body = bincode::deserialize(body)
+            .map_err(|_| serde::de::Error::custom("the storage body does not decode"))?;
+        Ok(StorageTx { body })
+    }
+}
+
 /// Apply one transaction signed by `signer` at `epoch`.
 ///
 /// # Errors
@@ -369,5 +406,34 @@ mod tests {
             apply(&mut r, [5; 32], tx, 0),
             Err(RegistryError::BadRepair(_))
         ));
+    }
+
+    /// A payload from the previous storage generation never decodes here:
+    /// its variant tags came first, with no binding-record header, and they
+    /// would land on the wrong bodies. The binding record carries the
+    /// transaction kind and its long version number instead.
+    #[test]
+    fn storage_tx_v2_tags_do_not_decode() {
+        // A bare variant tag and its fields - the old shape - is not a
+        // payload of this generation.
+        let v2_shaped = bincode::serialize(&0u64).expect("a variant tag serializes");
+        assert!(bincode::deserialize::<StorageTx>(&v2_shaped).is_err());
+        // Header and body round-trip; the header is on the wire first.
+        let tx = StorageTx {
+            body: StorageTxV3::DeclineContent {
+                content: ContentId([3; 32]),
+            },
+        };
+        let wire = bincode::serialize(&tx).expect("the wire form serializes");
+        assert!(
+            wire.starts_with(BINDING_HEADER),
+            "the binding record opens with the transaction kind and version"
+        );
+        let back = bincode::deserialize::<StorageTx>(&wire).expect("the wire form decodes");
+        assert_eq!(back, tx);
+        // A tampered header is refused.
+        let mut tampered = wire.clone();
+        tampered[0] ^= 1;
+        assert!(bincode::deserialize::<StorageTx>(&tampered).is_err());
     }
 }

@@ -643,23 +643,10 @@ pub trait BudlumApi {
     /// `StorageTx::RegisterManifest` transaction sent with
     /// `bud_sendRawTransaction`. Operator-only, kept so a client is pointed
     /// at the transaction.
-    #[method(name = "bud_storageRegisterManifest")]
-    async fn storage_register_manifest(
-        &self,
-        manifest: crate::storage::ContentManifest,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
     /// Optional node-side encode path: re-encode `data` under the scheme the
     /// client-built `manifest` claims and refuse a mismatch. Costly; the
     /// client-built register path remains the default. Three/Generated has no
     /// body to re-encode - callers should not send one.
-    #[method(name = "bud_storageVerifyEncoding")]
-    async fn storage_verify_encoding(
-        &self,
-        data_hex: String,
-        manifest: crate::storage::ContentManifest,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
     /// Measure a QR feed before publishing it: every ceiling the pipe enforces,
     /// the drop and frame schedule, what a viewer can rebuild from those frames,
     /// and the commitments a publish would pin. Bounded by
@@ -670,30 +657,11 @@ pub trait BudlumApi {
     /// pass `seal_seed` as 32 bytes hex to seal the body before it is
     /// carouselled, or a manifest whose `encryption` is `client-side`. A clear
     /// body over a gated pin is refused.
-    #[method(name = "bud_storageQrFeedPreview")]
-    async fn storage_qr_feed_preview(
-        &self,
-        data_hex: String,
-        block_len: u16,
-        manifest: Option<crate::storage::ContentManifest>,
-        seal_seed: Option<String>,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
     /// Re-emit `count` frames of that feed from `seq`, with the fold a client
     /// checks them against. The caller supplies the body, so this publishes no
     /// handle into stored content and grants nothing: whoever holds the bytes
     /// can already produce the frames. Pass `seal_seed` (32 bytes hex) to emit
     /// the feed over the sealed body instead of the clear one.
-    #[method(name = "bud_storageQrFeedFrames")]
-    async fn storage_qr_feed_frames(
-        &self,
-        data_hex: String,
-        block_len: u16,
-        first_frame: u32,
-        count: u32,
-        seal_seed: Option<String>,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
     /// Issue a view grant (key handle on-chain; key material off-chain).
     #[method(name = "bud_storageIssueViewGrant")]
     async fn storage_issue_view_grant(
@@ -786,150 +754,42 @@ pub trait BudlumApi {
     async fn storage_close_reveal(&self, session_id: u64) -> Result<bool, ErrorObjectOwned>;
 
     /// Classic/2.0 confidential body commit. Three/recipe-only is refused.
-    #[method(name = "bud_storageRegisterConfidentialCommit")]
-    async fn storage_register_confidential_commit(
-        &self,
-        content_id: String,
-        encryption: String,
-        ciphertext_root: String,
-        proof_kind: String,
-        authorization: Option<serde_json::Value>,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
-    #[method(name = "bud_storageGetConfidentialCommit")]
-    async fn storage_get_confidential_commit(
-        &self,
-        content_id: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
     /// Refused: a deal is opened by a signed `StorageTx::OpenDeal`
     /// transaction from the payer, carrying the operator's consent.
-    #[method(name = "bud_storageOpenDeal")]
-    async fn storage_open_deal(
-        &self,
-        domain_id: u32,
-        manifest: crate::storage::ContentManifest,
-        shard_id: String,
-        operator: String,
-        payer: String,
-        replica_index: u8,
-        start_epoch: u64,
-        end_epoch: u64,
-        economics: crate::domain::storage_deal::StorageEconomicsParams,
-        domain_params: crate::domain::storage_params::StorageDomainParams,
-        merkle_proof: Option<Vec<u8>>,
-        storage_root: Option<crate::domain::Hash32>,
-        request_id: u64,
-        payer_signature: String,
-        operator_signature: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
     /// Refused: a repair ticket is filled by a signed
     /// `StorageTx::AcceptReallocation` transaction from the payer, carrying
     /// the replacement operator's consent. The placement (manifest, shard,
     /// replica) is decided by the ticket, not the caller.
-    #[method(name = "bud_storageAcceptReallocation")]
-    async fn storage_accept_reallocation(
-        &self,
-        ticket_id: u64,
-        replacement_operator: String,
-        payer: String,
-        start_epoch: u64,
-        end_epoch: u64,
-        economics: crate::domain::storage_deal::StorageEconomicsParams,
-        domain_params: crate::domain::storage_params::StorageDomainParams,
-        merkle_proof: Option<Vec<u8>>,
-        storage_root: Option<crate::domain::Hash32>,
-        request_id: u64,
-        payer_signature: String,
-        operator_signature: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
     /// Look up a previously-registered `ContentManifest` by its
     /// `manifest_id`.
-    #[method(name = "bud_storageGetManifest")]
-    async fn storage_get_manifest(
-        &self,
-        manifest_id: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
     /// All `StorageDeal`s bound to a given `manifest_id` (any replica
     /// Index, any operator, any status). Permissionless read.
-    #[method(name = "bud_storageGetDealsByManifest")]
-    async fn storage_get_deals_by_manifest(
-        &self,
-        manifest_id: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
     /// All `StorageDeal`s bound to a given `(manifest_id, shard_id)` pair.
     /// Used by clients that downloaded one shard and want to know which
     /// Operators are also holding it.
-    #[method(name = "bud_storageGetDealsByShard")]
-    async fn storage_get_deals_by_shard(
-        &self,
-        manifest_id: String,
-        shard_id: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
     /// The retrieval challenges recorded against one deal, in id order. A
     /// deal's operator reads this to find the challenge it must answer with
     /// a `StorageTx::AnswerChallenge` transaction. Permissionless read; shard
     /// ids are not returned (the deal row carries them, behind Pollen).
-    #[method(name = "bud_storageGetChallenges")]
-    async fn storage_get_challenges(
-        &self,
-        deal_id: u64,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
     /// Refused: a retrieval challenge is opened by a signed
     /// `StorageTx::OpenChallenge` transaction. Anyone may send one; the
     /// opener bond is the anti-spam mechanism and is refunded when the
     /// challenge resolves. The block draws the byte range.
-    #[method(name = "bud_storageOpenChallenge")]
-    async fn storage_open_challenge(
-        &self,
-        request: crate::domain::storage_deal::RetrievalChallengeRequest,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
     /// Refused: the deal's operator answers with a signed
     /// `StorageTx::AnswerChallenge` transaction carrying the `range_hash`
     /// and its proof.
-    #[method(name = "bud_storageAnswerChallenge")]
-    async fn storage_answer_challenge(
-        &self,
-        response: crate::domain::storage_deal::RetrievalResponse,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
     /// Query aggregate storage economics accounting from the chain actor.
     /// Permissionless read: no official indexer or team-operated service.
-    #[method(name = "bud_storageGetEconomicsSummary")]
-    async fn storage_get_economics_summary(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
-
     /// Query storage economics events (operator reward accrual and slashed-bond
     /// Accounting) from the chain actor. Permissionless read.
-    #[method(name = "bud_storageGetEconomicsEvents")]
-    async fn storage_get_economics_events(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
-
     /// Query one operator's accrued storage rewards, slash history, and
     /// Active deal count. Permissionless read; no indexer is required.
-    #[method(name = "bud_storageGetOperatorEconomics")]
-    async fn storage_get_operator_economics(
-        &self,
-        operator: crate::core::address::Address,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
     /// Look up a finalized `ChallengeResult` by `challenge_id`.
     ///
     /// The response always carries `proofKind` and `proof_kind` set to
     /// `"interim_availability_only"`.
     /// A retrieval outcome demonstrates a timely response for one requested
     /// Byte range; it is not a full Proof-of-Storage attestation.
-    #[method(name = "bud_storageGetOutcome")]
-    async fn storage_get_outcome(
-        &self,
-        challenge_id: u64,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
     /// Objects within `margin` shards of unrecoverable, and those already past
     /// it. Permissionless read; no indexer is required.
     ///
@@ -938,16 +798,9 @@ pub trait BudlumApi {
     /// and useless to an operator asking a fixed question like "what is within
     /// two shards of trouble?". Both lists come back separately: an object
     /// below `k` cannot be repaired at all, and must not read as one that can.
-    #[method(name = "bud_storageRepairBand")]
-    async fn storage_repair_band(&self, margin: u32)
-        -> Result<serde_json::Value, ErrorObjectOwned>;
-
     /// Query active storage operators (STORAGE_OPERATOR RoleId=5).
     /// Previously documented as ghost RPC, now implemented.
     /// Returns active `PermissionlessRegistry` members filtered by storage operator role.
-    #[method(name = "bud_storageActiveOperators")]
-    async fn storage_active_operators(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
-
     // --- B.U.D. Name Service (BNS) ---
 
     /// Resolve a human-readable name to an address.

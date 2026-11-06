@@ -116,8 +116,6 @@ pub mod relayer_worker_locks;
 #[cfg(test)]
 pub mod settlement_prod;
 #[cfg(test)]
-pub mod storage_tx_door;
-#[cfg(test)]
 pub mod tokenomics;
 pub mod tokenomics_proptest;
 #[cfg(test)]

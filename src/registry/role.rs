@@ -82,11 +82,6 @@ pub mod roles {
     /// `STORAGE_OPERATOR` is only required to be eligible for the
     /// Per-deal reward stream.
     ///
-    /// **Note:** `bud_storageActiveOperators`
-    /// RPC is now implemented (`src/rpc/api.rs` + `server.rs`) - queries active
-    /// `PermissionlessRegistry` members for `RoleId(5)`. Previously it was ghost
-    /// Docs only.
-    ///
     /// Like every other role, it is permissionless: any account can
     /// Register by staking the `min_stake` floor from
     /// `PermissionlessRegistry::params`. No whitelist, no admin gate

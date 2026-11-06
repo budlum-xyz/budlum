@@ -28,7 +28,9 @@ fn storage_tx(from: Address, nonce: u64, fee: u64, amount: u64, inner: StorageTx
         nonce,
         Vec::new(),
         DEFAULT_CHAIN_ID,
-        TransactionType::StorageV3(Box::new(inner)),
+        TransactionType::Storage(Box::new(crate::storage::bud3::tx::StorageTx {
+            body: inner,
+        })),
     )
 }
 
@@ -229,10 +231,12 @@ fn closed_codecs_refuse_on_testnet() {
             0,
             Vec::new(),
             Network::Testnet.chain_id().value(),
-            TransactionType::StorageV3(Box::new(StorageTxV3::RegisterObject {
-                record,
-                shares: shares.clone(),
-                lifetime_epochs: 100,
+            TransactionType::Storage(Box::new(crate::storage::bud3::tx::StorageTx {
+                body: StorageTxV3::RegisterObject {
+                    record,
+                    shares: shares.clone(),
+                    lifetime_epochs: 100,
+                },
             })),
         );
         let err = Executor::apply_transaction(&mut state, &tx)

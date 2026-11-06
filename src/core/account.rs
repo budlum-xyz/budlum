@@ -1272,7 +1272,7 @@ impl AccountState {
     }
 
     /// Bond `amount` into the STORAGE_OPERATOR role (permissionless).
-    /// Used for B.U.D. operator reward eligibility and `bud_storageActiveOperators`.
+    /// Used for B.U.D. operator reward eligibility.
     pub fn bond_storage_operator(
         &mut self,
         address: &Address,

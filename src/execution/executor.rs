@@ -3070,14 +3070,14 @@ impl Executor {
                 })?;
                 sender.nonce = sender.nonce.saturating_add(1);
             }
-            TransactionType::StorageV3(storage_tx) => {
+            TransactionType::Storage(storage_tx) => {
                 // The storage door moves no value: the signed amount is zero
                 // and only the fee is charged. The registry refuses before it
                 // writes, so a refusal leaves the state as it was.
                 if tx.amount != 0 {
                     return Err(BudlumError::validation(
-                        "storage_v3_amount_nonzero",
-                        "a StorageTx v3 transaction carries no amount",
+                        "storage_amount_nonzero",
+                        "a storage transaction carries no amount",
                     ));
                 }
                 if state.spendable_balance(&tx.from) < total_cost {
@@ -3090,10 +3090,10 @@ impl Executor {
                 crate::storage::bud3::tx::apply(
                     &mut state.bud3_registry,
                     *tx.from.as_bytes(),
-                    storage_tx.as_ref().clone(),
+                    storage_tx.as_ref().body.clone(),
                     epoch,
                 )
-                .map_err(|e| BudlumError::validation("storage_v3_refused", format!("{e:?}")))?;
+                .map_err(|e| BudlumError::validation("storage_refused", format!("{e:?}")))?;
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(total_cost).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
@@ -3327,41 +3327,6 @@ impl Executor {
                     message.sender,
                 )
                 .map_err(|e| BudlumError::validation("cross_domain_message_failed", e))?;
-                let sender = state.get_or_create(&tx.from);
-                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
-                    BudlumError::validation("balance_underflow", "balance underflow")
-                })?;
-                sender.nonce = sender.nonce.saturating_add(1);
-            }
-            TransactionType::Storage(storage_tx) => {
-                // One arm delegating to the tested body
-                // (`domain::execute_storage_tx`), which runs every check
-                // before it writes. A storage write records commitments; it
-                // moves no value, so a carried amount is refused rather than
-                // silently burned.
-                if tx.amount != 0 {
-                    return Err(BudlumError::validation(
-                        "storage_amount_must_be_zero",
-                        "a storage transaction records commitments; it cannot carry value",
-                    ));
-                }
-                if state.get_balance(&tx.from) < tx.fee {
-                    return Err(BudlumError::validation(
-                        "insufficient_balance_for_fee",
-                        "insufficient balance for the storage transaction fee",
-                    ));
-                }
-                // The nonce is read before the epilogue below advances it:
-                // an operator's consent to a deal-open is bound to it, so
-                // the consent is spent by this transaction.
-                let ctx = crate::domain::StorageTxContext {
-                    sender: tx.from,
-                    nonce: state.get_nonce(&tx.from),
-                    chain_id: tx.chain_id,
-                    fee: tx.fee,
-                };
-                crate::domain::execute_storage_tx(state, &ctx, storage_tx)
-                    .map_err(|e| BudlumError::validation("storage_tx_failed", e.to_string()))?;
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")

@@ -1057,8 +1057,7 @@ impl ContentManifest {
     }
 
     /// Look up a shard by `ContentId`. Returns `None` if the shard is not
-    /// In this manifest - used by the `bud_storageGetDealsByShard` query
-    /// Path and the E2E test (`src/tests/bud_e2e.rs`).
+    /// In this manifest.
     pub fn shard(&self, shard_id: &ContentId) -> Option<&ShardRef> {
         self.shards.iter().find(|s| &s.shard_id == shard_id)
     }
