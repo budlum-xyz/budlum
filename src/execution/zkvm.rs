@@ -22,8 +22,35 @@ const _: () = assert!(
 /// `MAX_TRANSACTIONS_PER_BLOCK` times. The budget is counted at the limit,
 /// not at `gas_used`: proving cost is committed when the call starts, and a
 /// call that runs out of gas at the limit costs the same trace as one that
-/// halts just under it. Sixty-four full calls per block.
-pub const MAX_BLOCK_CONTRACT_GAS: u64 = 64 * DEFAULT_CONTRACT_GAS_LIMIT;
+/// halts just under it. Sixty full calls per block.
+///
+/// # Why sixty and not sixty-four
+///
+/// A per-environment soft limit is a share of the block, and Section 8.9
+/// item 3 of the directive says a soft limit may not exceed the total block
+/// limit, which item 2 fixes at 60 000 000 BGU (`TESTNET-DEFAULT`). At
+/// 1 BudZero gas = 1 BGU, sixty-four calls priced 64 000 000 BGU: the budget
+/// for one environment was larger than the whole block, so a block could not
+/// spend the limit it was given and the two numbers in the documentation
+/// disagreed. The budget is now the block limit exactly, and
+/// [`BLOCK_GAS_LIMIT_BGU`] below is the one place the number is written.
+pub const MAX_BLOCK_CONTRACT_GAS: u64 = BLOCK_GAS_LIMIT_BGU;
+
+/// The block gas limit of Section 8.9 item 2, in BGU, `TESTNET-DEFAULT`.
+///
+/// Kept next to the budget that spends it so the two cannot drift, and the
+/// compile-time check below fails the build if a single contract call is ever
+/// priced above a whole block. `src/tests/conformance_locks.rs` reads this
+/// name, [`DEFAULT_CONTRACT_GAS_LIMIT`] and
+/// [`MAX_BLOCK_CONTRACT_GAS`] out of this file and compares them with
+/// `docs/EXECUTION_LIMITS.md`, so the document cannot claim a block limit the
+/// code does not hold either.
+pub(crate) const BLOCK_GAS_LIMIT_BGU: u64 = 60_000_000;
+
+const _: () = assert!(
+    DEFAULT_CONTRACT_GAS_LIMIT <= BLOCK_GAS_LIMIT_BGU,
+    "a contract call limit may not exceed the block gas limit (Section 8.9 item 3)"
+);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZkVmReceipt {
