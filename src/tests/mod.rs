@@ -261,3 +261,8 @@ pub mod wp17_state_hardening;
 // WP-44 domains, cross-domain bridge, settlement, and testnet feature-matrix locks.
 #[cfg(test)]
 pub mod wp44_domains_bridge_settlement;
+
+// WP-14 Instant Duty Handover and Disaster Recovery Mode suite.
+#[cfg(test)]
+pub mod wp14_handover_recovery;
+

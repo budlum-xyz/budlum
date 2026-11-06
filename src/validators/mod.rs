@@ -17,6 +17,8 @@
 use crate::core::address::Address;
 use crate::crypto::scheme::SchemeId;
 use serde::{Deserialize, Serialize};
+pub mod handover;
+
 use std::collections::BTreeMap;
 
 /// The longest multiaddress or gateway address a registration may carry.

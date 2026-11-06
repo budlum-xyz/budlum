@@ -188,6 +188,9 @@ pub struct Blockchain {
     /// Signature checks that run on behalf of the chain read it through
     /// `crypto::pq::verify_in`.
     pub scheme_registry: crate::crypto::scheme::SchemeStatusRegistry,
+    /// Node-local disaster recovery tracker (Section 7.7: 40-block finality
+    /// stall alarm `budlum_finality_stalled` and 1-epoch recovery mode).
+    pub recovery_tracker: crate::validators::handover::RecoveryTracker,
 }
 
 /// Heights one finality event looks at for witness pruning: finality
@@ -276,8 +279,15 @@ impl Blockchain {
             m.pending_bud_boost_atoms
                 .set(i64::try_from(self.state.pending_bud_boost_share).unwrap_or(i64::MAX));
             m.blocks_produced.inc();
+            let head_height = self.chain.last().map_or(0, |b| b.index);
             m.finality_lag
                 .set((height as u64).saturating_sub(self.finalized_height) as i64);
+            let stalled = self.recovery_tracker.is_stalled()
+                || crate::validators::handover::is_finality_stalled(
+                    head_height,
+                    self.finalized_height,
+                );
+            m.finality_stalled.set(i64::from(stalled));
             m.mempool_size.set(self.mempool.len() as i64);
             // Exported alongside the count because the count does not bound
             // memory. See `mempool::pool::DEFAULT_MAX_POOL_BYTES`.
@@ -1035,6 +1045,7 @@ impl Blockchain {
             anchor_classes: BTreeMap::new(),
             cold_wallet: None,
             scheme_registry: crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            recovery_tracker: crate::validators::handover::RecoveryTracker::new(),
         };
 
         if let Some(first) = bc.chain.first() {
@@ -2096,6 +2107,19 @@ impl Blockchain {
     /// Record a finality checkpoint whose BLS certificate and ML-DSA-65 QC
     /// were both verified.
     fn feed_finality(&mut self, height: u64, checkpoint_hash: &str, with_bls: bool) {
+        let (head_height, head_epoch) = self.chain.last().map_or((0, 0), |b| (b.index, b.epoch));
+        let stalled =
+            self.recovery_tracker
+                .observe_finality(head_height, head_epoch, self.finalized_height);
+        if let Some(ref m) = self.metrics {
+            m.finalized_height
+                .set(i64::try_from(self.finalized_height).unwrap_or(i64::MAX));
+            m.finality_lag.set(
+                i64::try_from(head_height.saturating_sub(self.finalized_height))
+                    .unwrap_or(i64::MAX),
+            );
+            m.finality_stalled.set(i64::from(stalled));
+        }
         use crate::crypto::scheme::SchemeId;
         let Some(hash) = hex::decode(checkpoint_hash)
             .ok()
@@ -3335,6 +3359,9 @@ impl Blockchain {
 
         self.finalized_height = new_finalized_height;
         self.finalized_hash = new_finalized_hash;
+        let (head_height, head_epoch) = self.chain.last().map_or((0, 0), |b| (b.index, b.epoch));
+        self.recovery_tracker
+            .observe_finality(head_height, head_epoch, self.finalized_height);
 
         if let Some(store) = &self.storage {
             if let Err(e) = store.save_canonical_height(self.finalized_height) {
@@ -4435,7 +4462,7 @@ impl Blockchain {
         next_state.current_block_unix_secs = Self::block_timestamp_secs(block.timestamp);
         next_state.current_block_entropy =
             Self::block_context_entropy(&block.previous_hash, &block.vrf_output);
-        Executor::apply_block_checked(
+        Executor::apply_block_candidate_checked(
             &mut next_state,
             &block.transactions,
             block.producer.as_ref(),
@@ -4935,6 +4962,8 @@ impl Blockchain {
         }
 
         self.mempool.set_min_fee(self.state.base_fee);
+        self.recovery_tracker
+            .observe_block(block.index, block.epoch, self.finalized_height);
         self.emit_chain_metrics();
         self.emit_tx_processed(block.transactions.len() as u64);
         self.emit_applied_tx_metrics(&block.transactions, ai_outcomes_before);
@@ -5545,6 +5574,10 @@ impl Blockchain {
             }
         }
 
+        if let Some(tip) = self.chain.last() {
+            self.recovery_tracker
+                .observe_block(tip.index, tip.epoch, self.finalized_height);
+        }
         self.emit_chain_metrics();
         self.emit_tx_processed(applied_tx_count);
         Ok(nft_burn_cids.iter().map(|(cid, _)| cid.0).collect())
@@ -8061,6 +8094,7 @@ impl Clone for Blockchain {
             anchor_classes: self.anchor_classes.clone(),
             cold_wallet: self.cold_wallet.clone(),
             scheme_registry: self.scheme_registry.clone(),
+            recovery_tracker: self.recovery_tracker.clone(),
         }
     }
 }
