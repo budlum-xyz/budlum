@@ -239,6 +239,25 @@ mod tests {
         assert!(p.set_quota(QUOTA_MAX_BYTES + 1).is_err());
     }
 
+    #[test]
+    fn mobile_core_refuses_share_that_would_cross_free_space_floor() {
+        let symbol = vec![0x44; 100];
+        let (assigned, _) = placed_symbol(&symbol, 4);
+        let mut core = fixture(FREE_SPACE_FLOOR_BYTES + 99);
+        assert_eq!(
+            core.accept_share(assigned.clone()).expect_err("floor").code,
+            "mobile_free_space_floor"
+        );
+        assert_eq!(core.status().stored_bytes, 0);
+        assert_eq!(core.available_bytes(), FREE_SPACE_FLOOR_BYTES + 99);
+        assert!(core.drain_duties().is_empty());
+
+        core.set_available_bytes(FREE_SPACE_FLOOR_BYTES + 100);
+        core.accept_share(assigned).expect("exactly at floor");
+        assert_eq!(core.available_bytes(), FREE_SPACE_FLOOR_BYTES);
+        assert_eq!(core.status().stored_bytes, 100);
+    }
+
     struct Silent;
     impl ShareSource for Silent {
         fn fetch(&self, _holder: &Holder, _timeout: std::time::Duration) -> Option<Vec<u8>> {

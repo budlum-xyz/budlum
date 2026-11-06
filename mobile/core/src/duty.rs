@@ -172,6 +172,16 @@ impl MobileCore {
             ));
         }
         let incoming = assigned.symbol.len() as u64;
+        if self
+            .available_bytes
+            .checked_sub(incoming)
+            .is_none_or(below_floor)
+        {
+            return Err(CoreError::new(
+                "mobile_free_space_floor",
+                "accepting this share would reduce free space below 2 GB",
+            ));
+        }
         let record = self.store.accept(assigned, self.policy.quota_bytes)?;
         self.available_bytes = self.available_bytes.saturating_sub(incoming);
         Ok(DutyTx::CustodyAck {
