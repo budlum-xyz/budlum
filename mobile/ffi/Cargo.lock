@@ -161,6 +161,7 @@ dependencies = [
  "budlum-mobile-core",
  "budlum-types",
  "uniffi",
+ "zeroize",
 ]
 
 [[package]]

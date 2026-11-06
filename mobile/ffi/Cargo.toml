@@ -29,6 +29,8 @@ budlum-mobile-core = { path = "../core" }
 # The section 7.2 class table, exported so the apps hold no copy (K-4).
 budlum-types = { path = "../../crates/budlum-types" }
 uniffi = { version = "=0.32.2", default-features = false }
+# Wipes the operator seed the host vault hands back (section 7.9.6).
+zeroize = "=1.9.1"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
