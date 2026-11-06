@@ -388,11 +388,26 @@ fn active_code_audit(root: &Path, errors: &mut Vec<String>) -> Result<(), String
     Ok(())
 }
 
+/// GitHub pull-request merge commits carry `Merge pull request #<N> from
+/// <owner>/<branch>` as their first line, where `<branch>` is a ref path rather
+/// than an authored commit title.
+fn is_github_pr_merge(subject: &str) -> bool {
+    let Some(rest) = subject.strip_prefix("Merge pull request #") else {
+        return false;
+    };
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    digits > 0
+        && rest[digits..]
+            .strip_prefix(" from ")
+            .is_some_and(|b| b.contains('/') && !b.contains(char::is_whitespace))
+}
+
 /// The first violating subject, if any. Pure, for tests.
 fn subject_has_identity(subject: &str) -> bool {
-    subject
-        .to_lowercase()
-        .contains(&review_identity().to_lowercase())
+    !is_github_pr_merge(subject)
+        && subject
+            .to_lowercase()
+            .contains(&review_identity().to_lowercase())
 }
 
 fn commit_subject_audit(root: &Path, errors: &mut Vec<String>) -> Result<(), String> {
@@ -762,6 +777,14 @@ mod tests {
         assert!(subject_has_identity(&format!(
             "fix: {}",
             name.to_uppercase()
+        )));
+        assert!(!subject_has_identity(&format!(
+            "Merge pull request #6 from owner/{}/branch",
+            name.to_lowercase()
+        )));
+        assert!(subject_has_identity(&format!(
+            "Merge pull request #6 from owner/branch {}",
+            name
         )));
         assert!(!subject_has_identity("fix: a normal subject"));
     }

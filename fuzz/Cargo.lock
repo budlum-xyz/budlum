@@ -456,6 +456,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bud-codec"
+version = "0.1.0"
+dependencies = [
+ "ruzstd",
+ "zstd",
+]
+
+[[package]]
 name = "bud-isa"
 version = "0.1.0"
 
@@ -526,6 +534,7 @@ dependencies = [
  "async-trait",
  "bincode",
  "bls12_381",
+ "bud-codec",
  "bud-isa",
  "bud-node",
  "bud-proof",
@@ -4745,6 +4754,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
+name = "ruzstd"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3640bec8aad418d7d03c72ea2de10d5c646a598f9883c7babc160d91e3c1b26c"
+
+[[package]]
 name = "rw-stream-sink"
 version = "0.5.0"
 source = "git+https://github.com/libp2p/rust-libp2p?rev=38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd#38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd"
@@ -6408,3 +6423,31 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[package]]
+name = "zstd"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "7.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c8ea04668f5de8d8d51051714ba560c9536519cadcdb8829bba4fe2ad159b03"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.1.2+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
+dependencies = [
+ "cc",
+ "pkg-config",
+]

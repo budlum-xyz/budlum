@@ -266,6 +266,11 @@ version = "2.0.1"
 criteria = "safe-to-deploy"
 notes = "Proc macro helper of hax-lib-macros."
 
+[[exemptions.ruzstd]]
+version = "0.8.1"
+criteria = "safe-to-deploy"
+notes = "Pure-Rust zstd decoder in crates/bud-codec (zero dependencies, default-features=false, features=[\"std\"]); pinned exact for frozen B.U.D. 3.0 A0 decoding."
+
 [[exemptions.sec1]]
 version = "0.8.1"
 criteria = "safe-to-deploy"
@@ -310,3 +315,18 @@ notes = "One pin for the PQ core and the HPKE module; libcrux-ml-dsa asks for 1.
 version = "1.5.0"
 criteria = "safe-to-deploy"
 notes = "Proc macro of zeroize 1.9."
+
+[[exemptions.zstd]]
+version = "0.13.3"
+criteria = "safe-to-deploy"
+notes = "Zstandard encoder wrapper in crates/bud-codec (encoder side only; decoded output is re-verified against ContentId via pure-Rust ruzstd)."
+
+[[exemptions.zstd-safe]]
+version = "7.4.0"
+criteria = "safe-to-deploy"
+notes = "Safe wrapper over zstd-sys for crates/bud-codec encoder."
+
+[[exemptions.zstd-sys]]
+version = "2.1.2+zstd.1.5.7"
+criteria = "safe-to-deploy"
+notes = "Upstream libzstd 1.5.7 C bindings used by crates/bud-codec encoder."
