@@ -88,8 +88,7 @@ pub fn translate_caller_to_target_ee(
         return Ok(caller.clone());
     }
     let bud = resolve_ee_identity(state, caller)?;
-    let alias =
-        derive_local_alias(&bud, target_ee).map_err(|e| HostError::Invalid(e.to_string()))?;
+    let alias = derive_local_alias(&bud, target_ee).map_err(|e| HostError::Invalid(e.to_string()))?;
     Ok(EeIdentity {
         ee: target_ee,
         id: alias,
@@ -316,9 +315,7 @@ mod tests {
         create_pointer, register_asset, AssetStandard, CreatePointer, ProbedAssetMetadata,
         RegisterAsset,
     };
-    use crate::execution::coordinator::commitment::{
-        NS_EVM_STORAGE, NS_WASM_STORE,
-    };
+    use crate::execution::coordinator::commitment::{NS_EVM_STORAGE, NS_WASM_STORE};
     use budlum_uel_abi::{
         BudAmount, CodeInfo, EeFault, EeQuery, EeRefusal, HostRead, Namespace, RefusalCode,
     };

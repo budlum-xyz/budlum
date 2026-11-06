@@ -921,8 +921,7 @@ impl CometBftCompatApiServer for CosmosCompatBackend {
             .inner
             .write()
             .map_err(|_| err_params("state lock poisoned"))?;
-        let (code, log, hash, gas_used) =
-            admit_cosmos_tx_bytes(&mut g, &raw).map_err(err_params)?;
+        let (code, log, hash, gas_used) = admit_cosmos_tx_bytes(&mut g, &raw).map_err(err_params)?;
         let height = g.latest_height;
         Ok(serde_json::json!({
             "check_tx": { "code": code, "log": log, "gas_wanted": gas_used.to_string() },
@@ -1471,12 +1470,8 @@ mod tests {
         let rpc_mod = backend.into_rpc();
         assert_eq!(check_served_cosmos_methods(rpc_mod.method_names()), Ok(()));
         assert_eq!(COSMOS_RPC_METHODS.len(), 12);
-        assert!(is_supported_abci_query_path(
-            "/cosmwasm.wasm.v1.Query/SmartContractState"
-        ));
-        assert!(!is_supported_abci_query_path(
-            "/cosmos.staking.v1beta1.Query/Validators"
-        ));
+        assert!(is_supported_abci_query_path("/cosmwasm.wasm.v1.Query/SmartContractState"));
+        assert!(!is_supported_abci_query_path("/cosmos.staking.v1beta1.Query/Validators"));
     }
 
     #[tokio::test]

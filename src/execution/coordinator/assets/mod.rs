@@ -125,9 +125,7 @@ pub fn derive_pointer_address(
     target_ee: EeId,
 ) -> Result<Vec<u8>, AssetRegistryError> {
     if ee_map_key(target_ee).is_none() {
-        return Err(AssetRegistryError::UnsupportedPhaseOneEnvironment(
-            target_ee,
-        ));
+        return Err(AssetRegistryError::UnsupportedPhaseOneEnvironment(target_ee));
     }
     let seed = hash_fields_bytes(b"BDLM_UEL_POINTER_V1", &[asset_id.as_slice(), &[target_ee.0]]);
     derive_local_alias(&Address(seed), target_ee)
@@ -164,9 +162,7 @@ where
     F: FnMut(EeId, &[u8], AssetStandard) -> Result<ProbedAssetMetadata, String>,
 {
     if ee_map_key(req.home_ee).is_none() {
-        return Err(AssetRegistryError::UnsupportedPhaseOneEnvironment(
-            req.home_ee,
-        ));
+        return Err(AssetRegistryError::UnsupportedPhaseOneEnvironment(req.home_ee));
     }
     if req.home_ee == EeId::EVM && req.home_ref.len() != 20 {
         return Err(AssetRegistryError::InvalidHomeReference);
@@ -210,9 +206,7 @@ pub fn create_pointer(
     req: &CreatePointer,
 ) -> Result<(AssetRecord, Vec<u8>), AssetRegistryError> {
     let Some(target_key) = ee_map_key(req.target_ee) else {
-        return Err(AssetRegistryError::UnsupportedPhaseOneEnvironment(
-            req.target_ee,
-        ));
+        return Err(AssetRegistryError::UnsupportedPhaseOneEnvironment(req.target_ee));
     };
     let mut record = read_asset_record(state, &req.asset_id)
         .ok_or(AssetRegistryError::AssetNotFound(req.asset_id))?;
@@ -654,12 +648,7 @@ fn pack_selector_addr_u128(sel: [u8; 4], addr20: &[u8; 20], amt: u128) -> Vec<u8
     out
 }
 
-fn pack_selector_two_addrs_u128(
-    sel: [u8; 4],
-    a: &[u8; 20],
-    b: &[u8; 20],
-    amt: u128,
-) -> Vec<u8> {
+fn pack_selector_two_addrs_u128(sel: [u8; 4], a: &[u8; 20], b: &[u8; 20], amt: u128) -> Vec<u8> {
     let mut out = Vec::with_capacity(100);
     out.extend_from_slice(&sel);
     out.extend_from_slice(&encode_abi_address(a));
