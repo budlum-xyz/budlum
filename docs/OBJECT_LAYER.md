@@ -34,7 +34,7 @@ All writes enter exclusively through `SettlementTx::ObjectLayer(Box<ObjectLayerT
 - `RegisterClass` / `RefreshClass` / `AuditCode` / `AuditCustody`: registers audited template classes (`FungibleV1`, `UniqueV1`, `RecordV1`) with `>= 3` verified reference transition samples, refreshes home slice fields, and freezes classes whose upgrade authority changes or whose custody falls into deficit.
 - `Arrive` / `SetTentativeConsent` / `Resolve`: processes proven home arrivals. `Phase::Tentative` requires explicit recipient opt-in (`SetTentativeConsent { consent: true }`), obeys the **single-dependency rule** (at most one unresolved `TentativeDependency` per recipient), blocks `Depart` until `Resolve`, and clears upon finality resolution.
 - `Call` / `Offer` / `Accept` / `HomeCall`: runs failure-atomic composites (`<= 16` calls) and standing offers with `Payment`, `Holds`, `SignedBy`, and `EscapeAddress` conditions.
-- `Depart` / `ConfirmDeparture` / `SetEscapeAddress` / `Adopt`: returns assets to their home chain, binds per-account home escape addresses (`<= 128` bytes), and adopts `Holder::Home` balances into a post-quantum `Holder::Account`.
+- `Depart` / `ConfirmDeparture` / `SetEscapeAddress` / `Adopt`: returns assets to their home chain, binds per-account home escape addresses (`<= 128` bytes), and adopts `Holder::Home` balances into a native Budlum `Holder::Account`.
 - `Challenge` / `Rebut`: opens a 200-block rule-fidelity challenge (`DEFAULT_CHALLENGE_WINDOW_BLOCKS = 200`) against an active class; timely registrant rebuttal clears the challenge, whereas expiry freezes the class (`FreezeReason::UnrebuttedChallenge`).
 
 ### Testnet `45261` Posture
@@ -47,6 +47,6 @@ All writes enter exclusively through `SettlementTx::ObjectLayer(Box<ObjectLayerT
 
 All three methods are classified as `(Listener::Public, Effect::Read)` in `src/rpc/method_class.rs`:
 
-1. `bud_getCharter(domain_id: u32)` — returns the `DomainCharter` for `domain_id`, or `null`.
-2. `bud_getAssetClass(class_id: String)` — returns `{ class, recordedCustody }` for a 32-byte hex `AssetClassId`, or `null`.
-3. `bud_getAsset(asset_id: String)` — returns the `UniqueAsset` placement record for a 32-byte hex `AssetId`, or `null`.
+1. `bud_getCharter(domain_id: u32)` - returns the `DomainCharter` for `domain_id`, or `null`.
+2. `bud_getAssetClass(class_id: String)` - returns `{ class, recordedCustody }` for a 32-byte hex `AssetClassId`, or `null`.
+3. `bud_getAsset(asset_id: String)` - returns the `UniqueAsset` placement record for a 32-byte hex `AssetId`, or `null`.

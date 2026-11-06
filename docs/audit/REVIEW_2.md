@@ -57,23 +57,23 @@ Every invariant (`Y-1` through `Y-7`, `K-1` through `K-4`, `G-2`, `G-3`, `G-4`) 
 
 All 18 fuzz targets under `fuzz/fuzz_targets/` were audited against untrusted network, storage, and execution inputs:
 
-1. `block_deserialize.rs` — untrusted block wire decoding.
-2. `transaction_deserialize.rs` — untrusted transaction envelope & witness decoding.
-3. `snapshot_deserialize.rs` — V1/V2 snapshot parser resilience.
-4. `fuzz_blockchain_serialize.rs` — round-trip chain persistence encoding.
-5. `consensus_validate.rs` — header/proposer/QC validation inputs.
-6. `consensus_state_transition.rs` — arbitrary transaction sequence execution.
-7. `bud3_bof1_decode.rs` — B.U.D. 3.0 BOF-1 binary header & varint parser.
-8. `bud3_symbol_decode.rs` — RFC 6330 fountain symbol decoder.
-9. `uel_abi_frame.rs` — UEL worker IPC frame decoder.
-10. `evm_rlp_decode.rs` — EVM RLP transaction/header decoder.
-11. `evm_mpt_verify.rs` — Ethereum Merkle-Patricia proof verifier.
-12. `vm_execute.rs` — BudZero VM bytecode decoder & meter boundaries.
-13. `budl_compile.rs` & `budl_compile_then_run.rs` — BudL compiler front-end & execution.
-14. `zk_verifier.rs` — STARK/receipt proof parser & verifier.
-15. `bpqs_wots_reject.rs` — BPQS WOTS+ malformed signature rejection.
-16. `relayer_escrow.rs` — relayer bid/intent/escrow state transitions.
-17. `reputation.rs` — integer reputation scoring bounds.
+1. `block_deserialize.rs` - untrusted block wire decoding.
+2. `transaction_deserialize.rs` - untrusted transaction envelope & witness decoding.
+3. `snapshot_deserialize.rs` - V1/V2 snapshot parser resilience.
+4. `fuzz_blockchain_serialize.rs` - round-trip chain persistence encoding.
+5. `consensus_validate.rs` - header/proposer/QC validation inputs.
+6. `consensus_state_transition.rs` - arbitrary transaction sequence execution.
+7. `bud3_bof1_decode.rs` - B.U.D. 3.0 BOF-1 binary header & varint parser.
+8. `bud3_symbol_decode.rs` - RFC 6330 fountain symbol decoder.
+9. `uel_abi_frame.rs` - UEL worker IPC frame decoder.
+10. `evm_rlp_decode.rs` - EVM RLP transaction/header decoder.
+11. `evm_mpt_verify.rs` - Ethereum Merkle-Patricia proof verifier.
+12. `vm_execute.rs` - BudZero VM bytecode decoder & meter boundaries.
+13. `budl_compile.rs` & `budl_compile_then_run.rs` - BudL compiler front-end & execution.
+14. `zk_verifier.rs` - STARK/receipt proof parser & verifier.
+15. `bpqs_wots_reject.rs` - BPQS WOTS+ malformed signature rejection.
+16. `relayer_escrow.rs` - relayer bid/intent/escrow state transitions.
+17. `reputation.rs` - integer reputation scoring bounds.
 
 ---
 
