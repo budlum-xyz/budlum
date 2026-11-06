@@ -350,12 +350,12 @@ fn subnet_bucket(addr: &Multiaddr) -> Option<crate::network::peer_manager::Subne
             Protocol::Ip4(ip) => {
                 return Some(crate::network::peer_manager::SubnetKey::from_ip(
                     std::net::IpAddr::V4(ip),
-                ))
+                ));
             }
             Protocol::Ip6(ip) => {
                 return Some(crate::network::peer_manager::SubnetKey::from_ip(
                     std::net::IpAddr::V6(ip),
-                ))
+                ));
             }
             _ => {}
         }
@@ -401,9 +401,7 @@ fn advertised_address_is_allowed(addr: &Multiaddr, private_ok: bool) -> bool {
 /// Devnet is the one network where the peers really are on loopback; every
 /// other profile either faces the open internet or is a rehearsal of it, and
 /// there a private address in the routing table is an address nobody can dial.
-fn profile_rejects_private_advertisements(
-    network: crate::core::chain_config::Network,
-) -> bool {
+fn profile_rejects_private_advertisements(network: crate::core::chain_config::Network) -> bool {
     !matches!(network, crate::core::chain_config::Network::Devnet)
 }
 

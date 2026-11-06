@@ -2724,7 +2724,9 @@ mod tests {
 
         // The ceiling is checked before the decoder is entered, so the error
         // names the size rather than whatever the decoder made of the prefix.
-        let oversized = vec![0u8; MAX_TX_TYPE_PAYLOAD_BYTES as usize + 1];
+        let over =
+            usize::try_from(MAX_TX_TYPE_PAYLOAD_BYTES).expect("the budget fits in usize") + 1;
+        let oversized = vec![0u8; over];
         let err = decode_tx_payload::<Vec<u8>>(&oversized, "probe")
             .expect_err("a payload over the ceiling must be refused");
         assert!(err.contains("ceiling"), "{err}");
