@@ -3066,6 +3066,12 @@ impl Executor {
                             .request_quota_increase(owner, *new_quota_bytes, *seq, epoch)
                             .map_err(refuse)?;
                     }
+                    // ResumeValidator (section 7.8.7): the suspension lifts
+                    // one epoch later via `LivenessTracker::activate_due_resumes`;
+                    // absence itself never slashed (V-4).
+                    ValidatorTx::Resume => {
+                        state.liveness.request_resume(&tx.from, epoch);
+                    }
                 }
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(total_cost).ok_or_else(|| {
