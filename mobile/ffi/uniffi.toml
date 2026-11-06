@@ -1,0 +1,9 @@
+# Names of the generated bindings. The Android app (WP-36) imports the Kotlin
+# package; the iOS app (WP-38) imports the Swift module.
+
+[bindings.kotlin]
+package_name = "org.budlum.mobile.core"
+cdylib_name = "budlum_mobile_ffi"
+
+[bindings.swift]
+module_name = "BudlumMobileCore"
