@@ -1327,25 +1327,49 @@ jobs:
           shared-key: standalone-crates
           workspaces: |
             crates/bpqs
+            crates/bud-codec
             crates/note-packing
+            crates/uel-abi
+      - id: protoc
+        name: Install protoc
+        if: always() && steps.rust.outcome == 'success'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Format (bpqs)
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --manifest-path crates/bpqs/Cargo.toml --all -- --check
+      - name: Format (bud-codec)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path crates/bud-codec/Cargo.toml --all -- --check
       - name: Format (note-packing)
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --manifest-path crates/note-packing/Cargo.toml --all -- --check
+      - name: Format (uel-abi)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path crates/uel-abi/Cargo.toml --all -- --check
       - name: Clippy (bpqs)
         if: always() && steps.rust.outcome == 'success'
         run: cargo clippy --manifest-path crates/bpqs/Cargo.toml --all-targets -- -D warnings
+      - name: Clippy (bud-codec)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo clippy --manifest-path crates/bud-codec/Cargo.toml --all-targets -- -D warnings
       - name: Clippy (note-packing)
         if: always() && steps.rust.outcome == 'success'
         run: cargo clippy --manifest-path crates/note-packing/Cargo.toml --all-targets -- -D warnings
+      - name: Clippy (uel-abi)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo clippy --manifest-path crates/uel-abi/Cargo.toml --all-targets -- -D warnings
       - name: Tests (bpqs)
         if: always() && steps.rust.outcome == 'success'
         run: cargo test --manifest-path crates/bpqs/Cargo.toml
+      - name: Tests (bud-codec)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo test --manifest-path crates/bud-codec/Cargo.toml
       - name: Tests (note-packing)
         if: always() && steps.rust.outcome == 'success'
         run: cargo test --manifest-path crates/note-packing/Cargo.toml
+      - name: Tests (uel-abi)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo test --manifest-path crates/uel-abi/Cargo.toml
 
   # ============================  / Bolum 4 (BNS gate) ============================
       - name: Format
