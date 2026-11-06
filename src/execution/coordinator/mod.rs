@@ -1,8 +1,8 @@
-//! The execution coordinator. A later step builds the coordinator
-//! itself; this module holds the parts that already stand on their own.
-//!
-//! WIRING: the block executor reaches the scheduler once the coordinator
-//! runs blocks through it; until then it is exercised by its
-//! equality tests against sequential execution.
+//! The Universal Execution Layer coordinator: account aliases, sparse Merkle
+//! namespaces, BGU gas and EIP-1559 fee accounting, nested call-frame overlays
+//! and worker supervision.
 
+pub mod alias;
+pub mod gas;
 pub mod scheduler;
+pub mod state;

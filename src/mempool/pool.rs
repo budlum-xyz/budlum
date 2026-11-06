@@ -163,6 +163,9 @@ pub struct Mempool {
     /// bundle that fails at its last member. The journal is `None` outside
     /// bundle admission, so ordinary admission pays nothing for it.
     journal: Option<Vec<PendingTx>>,
+
+    /// Per-envelope UEL and duty lanes with isolated entry/byte budgets.
+    lanes: crate::mempool::lanes::MultiLanePool,
 }
 
 /// How many bytes one transaction occupies, by the transport's own measure.
@@ -187,7 +190,39 @@ impl Mempool {
             scheme_registry: crate::crypto::scheme::SchemeStatusRegistry::genesis(),
             authority_cache: crate::mempool::authority_cache::AuthorityCache::default(),
             journal: None,
+            lanes: crate::mempool::lanes::MultiLanePool::default(),
         }
+    }
+
+    /// Admits a typed UEL or duty envelope into its isolated lane.
+    ///
+    /// exposed for: compatibility RPC gateways and duty gossip (`WP-13`, `WP-28`..`WP-32`).
+    pub fn admit_lane_envelope(
+        &mut self,
+        entry: crate::mempool::lanes::LaneEntry,
+    ) -> Result<(), MempoolError> {
+        self.lanes
+            .admit(entry)
+            .map_err(MempoolError::InvalidTransaction)
+    }
+
+    /// Selects ready UEL and duty envelopes across all lanes up to `block_bgu_limit`.
+    ///
+    /// exposed for: proposer block assembly (`WP-26` slice 2/2).
+    #[must_use]
+    pub fn select_lane_envelopes(
+        &self,
+        block_bgu_limit: u64,
+    ) -> Vec<crate::mempool::lanes::LaneEntry> {
+        self.lanes.select_for_block(block_bgu_limit)
+    }
+
+    /// Number of queued entries in `lane`.
+    ///
+    /// exposed for: operator metrics and compatibility RPC status.
+    #[must_use]
+    pub fn lane_len(&self, lane: crate::mempool::lanes::EnvelopeLane) -> usize {
+        self.lanes.lane_len(lane)
     }
 
     /// Adopt the chain-state scheme registry for admission checks.
