@@ -1,3 +1,4 @@
+pub mod bud3;
 pub mod registry;
 pub mod types;
 
