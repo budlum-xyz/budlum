@@ -88,6 +88,10 @@ pub enum EthEnvelopeError {
     InvalidSignature,
     HighSSignature,
     EmptyAuthorizationList,
+    PriorityFeeAboveMaxFee {
+        priority_fee_per_gas_wei: u128,
+        max_fee_per_gas_wei: u128,
+    },
 }
 
 impl fmt::Display for EthEnvelopeError {
@@ -123,6 +127,14 @@ impl fmt::Display for EthEnvelopeError {
             Self::EmptyAuthorizationList => {
                 write!(f, "EIP-7702 transaction requires non-empty authorization_list")
             }
+            Self::PriorityFeeAboveMaxFee {
+                priority_fee_per_gas_wei,
+                max_fee_per_gas_wei,
+            } => write!(
+                f,
+                "maxPriorityFeePerGas {priority_fee_per_gas_wei} exceeds \
+                 maxFeePerGas {max_fee_per_gas_wei} (revm TipAboveFeeCap)"
+            ),
         }
     }
 }
@@ -508,6 +520,12 @@ fn decode_eip1559(
     let nonce = parse_u64_be(f_nonce)?;
     let max_priority_fee_per_gas_wei = parse_u128_be(f_prio)?;
     let max_fee_per_gas_wei = parse_u128_be(f_max)?;
+    if max_priority_fee_per_gas_wei > max_fee_per_gas_wei {
+        return Err(EthEnvelopeError::PriorityFeeAboveMaxFee {
+            priority_fee_per_gas_wei,
+            max_fee_per_gas_wei,
+        });
+    }
     let gas_limit = parse_u64_be(f_gas)?;
     let to = parse_to(f_to)?;
     let value_wei = parse_u128_be(f_val)?;
@@ -578,6 +596,12 @@ fn decode_eip7702(
     let nonce = parse_u64_be(f_nonce)?;
     let max_priority_fee_per_gas_wei = parse_u128_be(f_prio)?;
     let max_fee_per_gas_wei = parse_u128_be(f_max)?;
+    if max_priority_fee_per_gas_wei > max_fee_per_gas_wei {
+        return Err(EthEnvelopeError::PriorityFeeAboveMaxFee {
+            priority_fee_per_gas_wei,
+            max_fee_per_gas_wei,
+        });
+    }
     let gas_limit = parse_u64_be(f_gas)?;
     let Some(to_addr) = parse_to(f_to)? else {
         return Err(EthEnvelopeError::InvalidAddressLength(0));
@@ -698,4 +722,120 @@ pub(crate) fn eth_address_of_secret(priv_key: &[u8; 32]) -> [u8; 20] {
     let mut addr = [0u8; 20];
     addr.copy_from_slice(&digest[12..32]);
     addr
+}
+
+#[cfg(test)]
+mod tests {
+    //! Signed-vector coverage for the EIP-1559 fee-market invariant
+    //! (`maxPriorityFeePerGas <= maxFeePerGas`, revm's `TipAboveFeeCap`).
+
+    use super::*;
+    use crate::cross_domain::evm::mpt::keccak256;
+    use crate::cross_domain::evm::rlp::Item as RlpItem;
+
+    const TEST_PK: [u8; 32] = [0x5a; 32];
+    const LANE_CHAIN_ID: u64 = 45_261;
+
+    fn uint_be(v: u128) -> RlpItem {
+        if v == 0 {
+            return RlpItem::String(Vec::new());
+        }
+        let be = v.to_be_bytes();
+        let nz = be.iter().position(|&b| b != 0).unwrap_or(be.len());
+        RlpItem::String(be[nz..].to_vec())
+    }
+
+    fn sig_scalar(word: &[u8; 32]) -> RlpItem {
+        let nz = word.iter().position(|&b| b != 0).unwrap_or(word.len());
+        RlpItem::String(word[nz..].to_vec())
+    }
+
+    fn finish_typed(tx_type: u8, mut unsigned: Vec<RlpItem>) -> Vec<u8> {
+        let mut sign_buf = vec![tx_type];
+        sign_buf.extend_from_slice(&rlp::encode(&RlpItem::List(unsigned.clone())));
+        let sighash = keccak256(&sign_buf);
+        let (yp, r, s) = sign_secp256k1_test(&TEST_PK, &sighash);
+        unsigned.push(uint_be(u128::from(yp)));
+        unsigned.push(sig_scalar(&r));
+        unsigned.push(sig_scalar(&s));
+        let mut raw = vec![tx_type];
+        raw.extend_from_slice(&rlp::encode(&RlpItem::List(unsigned)));
+        raw
+    }
+
+    fn build_eip1559(priority: u128, max_fee: u128) -> Vec<u8> {
+        let unsigned = vec![
+            uint_be(u128::from(LANE_CHAIN_ID)),
+            uint_be(0),
+            uint_be(priority),
+            uint_be(max_fee),
+            uint_be(21_000),
+            RlpItem::String([0x22; 20].to_vec()),
+            uint_be(1_000_000_000_000_000),
+            RlpItem::String(Vec::new()),
+            RlpItem::List(Vec::new()),
+        ];
+        finish_typed(0x02, unsigned)
+    }
+
+    fn build_eip7702(priority: u128, max_fee: u128) -> Vec<u8> {
+        let authorization = RlpItem::List(vec![
+            uint_be(u128::from(LANE_CHAIN_ID)),
+            RlpItem::String([0x33; 20].to_vec()),
+            uint_be(0),
+            uint_be(0),
+            RlpItem::String(vec![0x11; 32]),
+            RlpItem::String(vec![0x22; 32]),
+        ]);
+        let unsigned = vec![
+            uint_be(u128::from(LANE_CHAIN_ID)),
+            uint_be(0),
+            uint_be(priority),
+            uint_be(max_fee),
+            uint_be(21_000),
+            RlpItem::String([0x22; 20].to_vec()),
+            uint_be(0),
+            RlpItem::String(Vec::new()),
+            RlpItem::List(Vec::new()),
+            RlpItem::List(vec![authorization]),
+        ];
+        finish_typed(0x04, unsigned)
+    }
+
+    fn expected_refusal(priority: u128, max_fee: u128) -> EthEnvelopeError {
+        EthEnvelopeError::PriorityFeeAboveMaxFee {
+            priority_fee_per_gas_wei: priority,
+            max_fee_per_gas_wei: max_fee,
+        }
+    }
+
+    #[test]
+    fn eip1559_tip_above_fee_cap_refused() {
+        let raw = build_eip1559(3_000_000_000, 2_000_000_000);
+        let err = decode_and_recover_eth_tx(&raw, LANE_CHAIN_ID).unwrap_err();
+        assert_eq!(err, expected_refusal(3_000_000_000, 2_000_000_000));
+    }
+
+    #[test]
+    fn eip1559_tip_at_fee_cap_accepted() {
+        let raw = build_eip1559(2_000_000_000, 2_000_000_000);
+        let tx = decode_and_recover_eth_tx(&raw, LANE_CHAIN_ID).unwrap();
+        assert_eq!(tx.max_priority_fee_per_gas_wei, 2_000_000_000);
+        assert_eq!(tx.max_fee_per_gas_wei, 2_000_000_000);
+    }
+
+    #[test]
+    fn eip7702_tip_above_fee_cap_refused() {
+        let raw = build_eip7702(3_000_000_000, 2_000_000_000);
+        let err = decode_and_recover_eth_tx(&raw, LANE_CHAIN_ID).unwrap_err();
+        assert_eq!(err, expected_refusal(3_000_000_000, 2_000_000_000));
+    }
+
+    #[test]
+    fn eip7702_tip_at_fee_cap_accepted() {
+        let raw = build_eip7702(2_000_000_000, 2_000_000_000);
+        let tx = decode_and_recover_eth_tx(&raw, LANE_CHAIN_ID).unwrap();
+        assert_eq!(tx.tx_type, EthTxType::Eip7702);
+        assert_eq!(tx.authorizations.len(), 1);
+    }
 }
