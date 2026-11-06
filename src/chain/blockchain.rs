@@ -4414,7 +4414,7 @@ impl Blockchain {
         next_state.current_block_unix_secs = Self::block_timestamp_secs(block.timestamp);
         next_state.current_block_entropy =
             Self::block_context_entropy(&block.previous_hash, &block.vrf_output);
-        Executor::apply_block_checked(
+        Executor::apply_block_candidate_checked(
             &mut next_state,
             &block.transactions,
             block.producer.as_ref(),
