@@ -8,7 +8,7 @@ use ed25519_dalek::{
 };
 use rand::Rng;
 use sha3::{Digest, Sha3_256};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
 use zeroize::Zeroizing;
 /// Write secret key bytes so that a crash never leaves a short or empty key file.
@@ -16,38 +16,13 @@ use zeroize::Zeroizing;
 /// The bytes go to a new sibling file made with `create_new` and mode `0o600`, are
 /// flushed to disk, and then replace the target with an atomic rename. The mode of a
 /// file that already existed is therefore never kept: the new file always has `0o600`.
+///
+/// The mechanics live in [`super::key_file::write_atomic_owner_only`] so every
+/// key-shaped writer in the tree shares one definition (directive K-4); this
+/// wrapper only maps the I/O error into [`CryptoError`].
 fn write_key_file(path: &Path, bytes: &[u8]) -> Result<(), CryptoError> {
-    let io_err = |e: std::io::Error| CryptoError::Io(e.to_string());
-    let mut tmp_name = path
-        .file_name()
-        .ok_or_else(|| CryptoError::Io("key path has no file name".into()))?
-        .to_os_string();
-    tmp_name.push(".tmp");
-    let tmp_path = path.with_file_name(tmp_name);
-    match std::fs::remove_file(&tmp_path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(io_err(e)),
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let result = options
-        .open(&tmp_path)
-        .map_err(io_err)
-        .and_then(|mut file| {
-            file.write_all(bytes).map_err(io_err)?;
-            file.sync_all().map_err(io_err)?;
-            std::fs::rename(&tmp_path, path).map_err(io_err)
-        });
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp_path);
-    }
-    result
+    super::key_file::write_atomic_owner_only(path, bytes)
+        .map_err(|e| CryptoError::Io(e.to_string()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -554,6 +529,12 @@ impl ValidatorKeys {
         Ok(())
     }
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, CryptoError> {
+        // BLG-004: the write side is owner-only, so the read side refuses a file
+        // that is not. Without this the narrow mode only protects keys this
+        // build wrote; a key copied in with `cp` kept the umask's `0o644` and
+        // the node loaded it without a word.
+        super::key_file::require_owner_only(path.as_ref())
+            .map_err(|e| CryptoError::Io(e.to_string()))?;
         let bytes = std::fs::read(path.as_ref()).map_err(|e| CryptoError::Io(e.to_string()))?;
         if bytes.len() < 128 {
             return Err(CryptoError::InvalidKey("Key file too short".into()));
@@ -666,6 +647,10 @@ impl KeyPair {
         Self::from_seed(&seed)
     }
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, CryptoError> {
+        // BLG-004, the same rule as `ValidatorKeys::load`: the read side and
+        // the write side agree on what a key file may look like.
+        super::key_file::require_owner_only(path.as_ref())
+            .map_err(|e| CryptoError::Io(e.to_string()))?;
         let mut file =
             std::fs::File::open(path.as_ref()).map_err(|e| CryptoError::Io(e.to_string()))?;
         let mut bytes = Vec::new();
@@ -1041,6 +1026,53 @@ mod tests {
         assert!(BlsKeypair::from_bytes(&short).is_err());
     }
 
+    /// BLG-004: the reader refuses a validator key file that group or others
+    /// can read. The writer has always produced `0o600`; the reader used to
+    /// accept anything, so a key copied in by `cp` (mode from the umask) was
+    /// loaded as if it had been saved here.
+    #[cfg(unix)]
+    #[test]
+    fn blg_004_a_world_readable_validator_key_file_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vk.bin");
+        ValidatorKeys::generate().unwrap().save(&path).unwrap();
+        crate::crypto::key_file::require_owner_only(&path).expect("a saved file is owner-only");
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let err = ValidatorKeys::load(&path).expect_err("0o644 must be refused");
+        let message = err.to_string();
+        assert!(message.contains("chmod 600"), "{message}");
+        assert!(message.contains("644"), "{message}");
+
+        // Narrowing the file is the whole remedy: the same bytes then load.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        ValidatorKeys::load(&path).expect("0o600 loads");
+    }
+
+    /// BLG-004: `KeyPair::load` is the second reader and carries the same rule,
+    /// so `main.rs` cannot keep one key file loadable and the other not.
+    #[cfg(unix)]
+    #[test]
+    fn blg_004_a_world_readable_keypair_file_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kp.bin");
+        let kp = KeyPair::generate().unwrap();
+        kp.save(&path).unwrap();
+        crate::crypto::key_file::require_owner_only(&path).expect("a saved file is owner-only");
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o604)).unwrap();
+        let err = KeyPair::load(&path).expect_err("0o604 must be refused");
+        assert!(err.to_string().contains("chmod 600"), "{err}");
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            KeyPair::load(&path).unwrap().private_key_bytes(),
+            kp.private_key_bytes()
+        );
+    }
+
     #[test]
     fn validator_key_file_partial_bls_tail_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -1049,7 +1081,20 @@ mod tests {
         keys.save(&path).unwrap();
         let mut bytes = std::fs::read(&path).unwrap();
         bytes.push(0x7f);
+        // Seeded narrow on purpose: this test is about the BLS tail, and a
+        // plain `fs::write` would hand the reader a wide mode and stop at the
+        // permission refusal first (BLG-004), proving nothing about the tail.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&path, &bytes).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        #[cfg(not(unix))]
         std::fs::write(&path, &bytes).unwrap();
+        // The tail is refused, and it must be refused for the tail: an
+        // assertion that only says `is_err` would also pass if the reader
+        // stopped at the length check and never reached the BLS parse.
         assert!(ValidatorKeys::load(&path).is_err());
     }
 

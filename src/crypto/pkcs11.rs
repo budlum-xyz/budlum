@@ -516,7 +516,7 @@ impl Pkcs11Signer {
 
         // More than one key is never guessed: announcing one identity and signing with a
         // different key is a consensus fault.
-        Self::require_single_key("public", objects.len())?;
+        Self::require_exactly_one("public", objects.len(), key_label)?;
 
         let attr = session
             .get_attributes(objects[0], &[cryptoki::object::AttributeType::Value])
@@ -541,11 +541,28 @@ impl Pkcs11Signer {
     /// `objects[0]`, so with several keys the identity a node announced and the key it
     /// signed with could differ.
     fn require_single_key(kind: &str, count: usize) -> Result<(), String> {
+        Self::require_exactly_one(kind, count, None)
+    }
+
+    /// The same rule, with the label in the refusal when one was given.
+    ///
+    /// BLG-010: the label was read by every search but never named in the
+    /// message, so an operator who set `pkcs11_key_label` to an object that
+    /// does not exist (a typo, or a label created after the node started) was
+    /// told "No Ed25519 private key found in HSM" - true of the *label* and
+    /// false of the slot, and there was no way to tell the two apart from the
+    /// log. The label is now part of the refusal, and an unlabelled refusal
+    /// says that no label was given.
+    fn require_exactly_one(kind: &str, count: usize, label: Option<&str>) -> Result<(), String> {
+        let what = match label {
+            Some(label) => format!("Ed25519 {kind} key with label `{label}`"),
+            None => format!("Ed25519 {kind} key (no key label set)"),
+        };
         match count {
-            0 => Err(format!("No Ed25519 {kind} key found in HSM")),
+            0 => Err(format!("No {what} found in HSM")),
             1 => Ok(()),
             n => Err(format!(
-                "{n} Ed25519 {kind} keys found in HSM slot; refusing to guess, set an explicit key label"
+                "{n} {what} objects found in HSM slot; refusing to guess, set an explicit key label"
             )),
         }
     }
@@ -567,7 +584,7 @@ impl Pkcs11Signer {
             .find_objects(&template)
             .map_err(|e| format!("Ed25519 key search: {e}"))?;
 
-        Self::require_single_key("private", objects.len())?;
+        Self::require_exactly_one("private", objects.len(), key_label)?;
         Ok(objects[0])
     }
 
@@ -1279,6 +1296,37 @@ mod vendor_tests {
     fn an_ambiguous_ed25519_key_selection_is_refused() {
         let err = Pkcs11Signer::require_single_key("public", 2).unwrap_err();
         assert!(err.contains("refusing to guess"), "{err}");
+    }
+
+    /// BLG-010: the operator's label must be part of every refusal, so a typo
+    /// in `pkcs11_key_label` reads as "that label is not here" instead of as
+    /// "this slot holds no key".
+    #[test]
+    fn blg_010_a_labelled_search_names_the_label_in_its_refusal() {
+        let missing = Pkcs11Signer::require_exactly_one("private", 0, Some("consensus-a"))
+            .expect_err("no object may not pass");
+        assert!(missing.contains("consensus-a"), "{missing}");
+        assert!(
+            !missing.contains("(no key label set)"),
+            "a labelled search must not report an unlabelled one: {missing}"
+        );
+
+        let ambiguous = Pkcs11Signer::require_exactly_one("public", 2, Some("consensus-a"))
+            .expect_err("two objects may not pass");
+        assert!(ambiguous.contains("consensus-a"), "{ambiguous}");
+        assert!(ambiguous.contains("2"), "{ambiguous}");
+
+        assert!(Pkcs11Signer::require_exactly_one("public", 1, Some("consensus-a")).is_ok());
+    }
+
+    /// BLG-010: an unlabelled search says so explicitly. The previous message
+    /// was identical with and without a label, which is what made the two
+    /// cases indistinguishable to an operator.
+    #[test]
+    fn blg_010_an_unlabelled_search_says_no_label_was_set() {
+        let err = Pkcs11Signer::require_exactly_one("private", 0, None).unwrap_err();
+        assert!(err.contains("(no key label set)"), "{err}");
+        assert!(err.contains("No Ed25519 private key"), "{err}");
     }
 }
 
