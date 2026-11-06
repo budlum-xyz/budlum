@@ -15,9 +15,11 @@
 //!    code whose hash equals the proven code hash, proven storage root, and
 //!    `imported_from`. The old native balance does not travel.
 //!
-//! The `bud-migrate` binary is the caller. The transaction door (WP-34 2/3)
-//! and the installing EVM environment (WP-27) are not in this tree yet, so this
-//! is the verification, not the state write.
+//! The `bud-migrate` binary is the caller. Deployment authority needs a proven
+//! source transaction and receipt; a trusted RPC `from` or `contractAddress`
+//! field is not accepted. The transaction door (WP-34 2/3) and the installing
+//! EVM environment (WP-27) are not in this tree yet, so this is verification and
+//! fee accounting, not the state write or balance debit.
 
 use std::collections::BTreeMap;
 
@@ -26,8 +28,15 @@ use crate::cross_domain::evm::mpt;
 use crate::crypto::secp256k1_recover::{recover_address, RecoverError};
 
 pub mod dependencies;
+pub mod deployment;
+pub mod fee;
 
 pub use dependencies::{dependency_report, DependencyReport};
+pub use deployment::{verify_deployment, DeploymentProof, DeploymentProofError};
+pub use fee::{
+    quote_migration_fee, MigrationFeeOverflow, MigrationFeeQuote, MigrationFeeSchedule,
+    MigrationUsage,
+};
 
 /// The EIP-712 domain name of a migration authorization.
 const DOMAIN_NAME: &str = "Budlum Migration";
@@ -125,6 +134,8 @@ pub enum ImportError {
         signed: [u8; 20],
         deployer: [u8; 20],
     },
+    /// The deployment transaction or receipt proof was refused.
+    Deployment(DeploymentProofError),
     /// The account proof or a storage proof was refused.
     Proof(AccountProofError),
     /// The offered code is not the code the proven account holds.
@@ -147,6 +158,8 @@ pub enum ImportError {
     },
     /// A slot arrives twice with two different values.
     SlotConflicts { slot: [u8; 32] },
+    /// Proof work or the migration fee exceeded its integer bound.
+    Fee(MigrationFeeOverflow),
 }
 
 impl ImportError {
@@ -171,7 +184,9 @@ impl std::fmt::Display for ImportError {
                 write!(f, "migration: signed for chain {signed}, running {expected}")
             }
             ImportError::Signature(e) => write!(f, "migration: signature: {e}"),
+            ImportError::Deployment(e) => write!(f, "migration: {e}"),
             ImportError::Proof(e) => write!(f, "migration: {e}"),
+            ImportError::Fee(e) => write!(f, "migration: {e}"),
             ImportError::NotTheDeployer { signed, deployer } => write!(
                 f,
                 "migration: 0x{} signed, 0x{} deployed",
@@ -205,9 +220,21 @@ impl std::fmt::Display for ImportError {
 
 impl std::error::Error for ImportError {}
 
+impl From<DeploymentProofError> for ImportError {
+    fn from(error: DeploymentProofError) -> Self {
+        ImportError::Deployment(error)
+    }
+}
+
 impl From<AccountProofError> for ImportError {
     fn from(e: AccountProofError) -> Self {
         ImportError::Proof(e)
+    }
+}
+
+impl From<MigrationFeeOverflow> for ImportError {
+    fn from(error: MigrationFeeOverflow) -> Self {
+        ImportError::Fee(error)
     }
 }
 
@@ -238,9 +265,11 @@ pub struct ImportEvmStorageChunk {
 pub struct MigrationRequest {
     /// The Budlum chain id the node runs.
     pub chain_id: u64,
+    /// The EVM source chain id the deployment transaction must be signed for.
+    pub source_chain_id: u64,
     pub source_domain: String,
-    /// The source deployment.
-    pub evidence: DeploymentEvidence,
+    /// The proven source deployment transaction and successful receipt.
+    pub deployment: DeploymentProof,
     /// The deploying account's EIP-712 authorization.
     pub authorization: MigrationAuthorization,
     pub state_root: [u8; 32],
@@ -248,6 +277,8 @@ pub struct MigrationRequest {
     /// The contract code the relayer carries.
     pub code: Vec<u8>,
     pub occupied: bool,
+    /// The active chain's proof-gas and imported-storage prices.
+    pub fee_schedule: MigrationFeeSchedule,
 }
 
 /// Where a finished import came from: the directive's `imported_from`.
@@ -277,6 +308,10 @@ pub struct MigrationRecord {
     /// Where the account came from. The old native balance is deliberately not
     /// part of it: it does not travel.
     pub imported_from: ImportSource,
+    /// Verified work and installed bytes behind the migration fee.
+    pub usage: MigrationUsage,
+    /// The amount the migration transaction door must charge the migrator.
+    pub fee: MigrationFeeQuote,
 }
 
 /// A migration that has been authorized and whose source account is proven.
@@ -286,6 +321,8 @@ pub struct MigrationPlan {
     account: EvmAccount,
     code: Vec<u8>,
     storage: BTreeMap<[u8; 32], [u8; 32]>,
+    proof_nodes: u64,
+    fee_schedule: MigrationFeeSchedule,
 }
 
 /// Starts a migration: checks the authority and proves the source account.
@@ -303,41 +340,50 @@ pub fn begin_import(request: MigrationRequest) -> Result<MigrationPlan, ImportEr
             expected: request.chain_id,
         });
     }
-    if request.authorization.contract != request.evidence.contract {
-        return Err(ImportError::ContractMismatch);
-    }
-    if request.authorization.source_block != request.evidence.source_block {
+    if request.authorization.source_block != request.deployment.source_block {
         return Err(ImportError::SourceBlockMismatch);
+    }
+    if request.occupied {
+        return Err(ImportError::AddressOccupied);
+    }
+    let evidence = verify_deployment(&request.deployment, request.source_chain_id)?;
+    if request.authorization.contract != evidence.contract {
+        return Err(ImportError::ContractMismatch);
     }
     let signer = recover_address(
         &request.authorization.digest(),
         &request.authorization.signature,
     )
     .map_err(ImportError::Signature)?;
-    if signer != request.evidence.deployer {
+    if signer != evidence.deployer {
         return Err(ImportError::NotTheDeployer {
             signed: signer,
-            deployer: request.evidence.deployer,
+            deployer: evidence.deployer,
         });
-    }
-    if request.occupied {
-        return Err(ImportError::AddressOccupied);
     }
     let account = account_proof::verify_account(
         &request.account_proof,
         &request.state_root,
-        &request.evidence.contract,
+        &evidence.contract,
     )?;
     account_proof::check_code(&request.code, &account.code_hash)?;
+    let proof_nodes = request
+        .deployment
+        .proof_node_count()
+        .checked_add(request.account_proof.len())
+        .and_then(|count| u64::try_from(count).ok())
+        .ok_or(MigrationFeeOverflow)?;
     Ok(MigrationPlan {
         source: ImportSource {
             domain: request.source_domain,
-            block: request.evidence.source_block,
-            address: request.evidence.contract,
+            block: evidence.source_block,
+            address: evidence.contract,
         },
         account,
         code: request.code,
         storage: BTreeMap::new(),
+        proof_nodes,
+        fee_schedule: request.fee_schedule,
     })
 }
 
@@ -392,6 +438,12 @@ impl MigrationPlan {
                 }
             }
             self.storage.insert(entry.slot, entry.value);
+            let entry_nodes =
+                u64::try_from(entry.proof_nodes.len()).map_err(|_| MigrationFeeOverflow)?;
+            self.proof_nodes = self
+                .proof_nodes
+                .checked_add(entry_nodes)
+                .ok_or(MigrationFeeOverflow)?;
             imported += 1;
         }
         Ok(imported)
@@ -409,11 +461,19 @@ impl MigrationPlan {
             account,
             code,
             storage,
+            proof_nodes,
+            fee_schedule,
         } = self;
         let proven_code_hash = account_proof::code_hash(&code);
         if proven_code_hash != account.code_hash {
             return Err(ImportError::CodeHashMismatch);
         }
+        let usage = MigrationUsage {
+            proof_nodes,
+            code_bytes: u64::try_from(code.len()).map_err(|_| MigrationFeeOverflow)?,
+            storage_slots: u64::try_from(storage.len()).map_err(|_| MigrationFeeOverflow)?,
+        };
+        let fee = quote_migration_fee(usage, &fee_schedule)?;
         let storage = storage.into_iter().collect();
         Ok(MigrationRecord {
             address: source.address,
@@ -422,6 +482,8 @@ impl MigrationPlan {
             storage_root: account.storage_root,
             storage,
             imported_from: source,
+            usage,
+            fee,
         })
     }
 }
@@ -445,19 +507,20 @@ mod tests {
     use super::*;
     use crate::cross_domain::evm::rlp::{self, Item};
 
-    /// The deploying account of the fixture: the key was chosen once and the
-    /// address below is `keccak256(pubkey)[12..]`.
-    const DEPLOYER: &str = "4a5383ee4db7729a7391c5eb0f4a7ba4b54592c3";
-    /// The contract address of the fixture.
-    const CONTRACT: &str = "1111111111111111111111111111111111111111";
+    /// Fixtures signed independently with `eth-account` for this test key.
+    const DEPLOYER: &str = "7e5f4552091a69125d5dfcb7b8c2659029395bdf";
+    /// `CREATE` at nonce seven by `DEPLOYER`.
+    const CONTRACT: &str = "a3183498b579bd228aa2b62101c40cc1da978f24";
+    const SOURCE_CHAIN_ID: u64 = 11_155_111;
+    const DEPLOYMENT_TRANSACTION: &str = "f85807843b9aca00830f4240808084600060008401546d72a02f6a69a52fb40df1378d854d62a2c0d6cc6757bad78f8f2f85b1626815ce4fa8a01752541e338fd7331899b91e94dc7f9cf88f6ba8abc872ab59aaf63369d4e6c9";
     /// The testnet chain id the fixture signs for.
     const CHAIN_ID: u64 = 45_261;
     /// The finalised source block of the fixture.
     const SOURCE_BLOCK: u64 = 19_000_000;
     /// The EIP-712 digest of the fixture, computed independently.
-    const DIGEST: &str = "e478fbf2de0afb26c016dc0c7b6c3aa5f7cdf8bd24e7fa5288c65a70ab231b61";
+    const DIGEST: &str = "1c54f42d9a721ba55e152ed0e5c46755a98f842b49ce6b7f62fdb21fd2e4873c";
     /// The signature of `DIGEST` by `DEPLOYER`.
-    const SIGNATURE: &str = "7af821799fb21b71b7122537279cfa28d5f47a3c5eb2d19d9c2a2e8506190b2a28f996eda74ef31781c1d10e941b91a41436c8bd8d1e06fbec663c77befbc4d91b";
+    const SIGNATURE: &str = "edc403919610bc9e64e52cbc8c6cd59251aaa6281ead68fc06491493037f84b13a475a7f48338c4109062580d6452955c8049f557658f7a04956a7d8365ff0741c";
 
     fn address_of(text: &str) -> [u8; 20] {
         let bytes = hex::decode(text).expect("hex");
@@ -475,11 +538,42 @@ mod tests {
         }
     }
 
-    fn evidence(deployer: [u8; 20]) -> DeploymentEvidence {
-        DeploymentEvidence {
-            contract: address_of(CONTRACT),
-            deployer,
+    fn deployment_proof() -> DeploymentProof {
+        let transaction = hex::decode(DEPLOYMENT_TRANSACTION).expect("transaction hex");
+        let receipt = rlp::encode(&Item::List(vec![
+            Item::String(vec![1]),
+            Item::String(uint_bytes(21_000)),
+            Item::String(vec![0; 256]),
+            Item::List(Vec::new()),
+        ]));
+        let key = rlp::encode(&Item::String(Vec::new()));
+        let path = mpt::hp_encode(&mpt::to_nibbles(&key), true);
+        let transaction_node = rlp::encode(&Item::List(vec![
+            Item::String(path.clone()),
+            Item::String(transaction.clone()),
+        ]));
+        let receipt_node = rlp::encode(&Item::List(vec![
+            Item::String(path),
+            Item::String(receipt),
+        ]));
+        DeploymentProof {
             source_block: SOURCE_BLOCK,
+            transaction_index: 0,
+            transaction,
+            transaction_proof: vec![transaction_node.clone()],
+            transactions_root: mpt::keccak256(&transaction_node),
+            receipt_proof: vec![receipt_node.clone()],
+            receipts_root: mpt::keccak256(&receipt_node),
+        }
+    }
+
+    fn fee_schedule() -> MigrationFeeSchedule {
+        MigrationFeeSchedule {
+            bgu_per_proof_node: 10,
+            bgu_per_code_byte: 2,
+            bgu_per_storage_slot: 100,
+            attos_per_bgu: 3,
+            attos_per_storage_byte: 5,
         }
     }
 
@@ -530,13 +624,15 @@ mod tests {
         let state_root = mpt::keccak256(&account_node);
         let request = MigrationRequest {
             chain_id: CHAIN_ID,
+            source_chain_id: SOURCE_CHAIN_ID,
             source_domain: "sepolia".to_string(),
-            evidence: evidence(address_of(DEPLOYER)),
+            deployment: deployment_proof(),
             authorization: authorization(),
             state_root,
             account_proof: vec![account_node],
             code: code(),
             occupied: false,
+            fee_schedule: fee_schedule(),
         };
         (request, storage_root)
     }
@@ -555,16 +651,16 @@ mod tests {
         // The authorized deployer passes.
         assert!(begin_import(request().0).is_ok());
 
-        // Another account in the deployment evidence is not the signer.
+        // A valid signature by another key does not gain deployment authority.
         let mut other = request().0;
-        other.evidence = evidence([0x99u8; 20]);
-        assert_eq!(
+        other.authorization.signature = hex::decode(
+            "7af821799fb21b71b7122537279cfa28d5f47a3c5eb2d19d9c2a2e8506190b2a28f996eda74ef31781c1d10e941b91a41436c8bd8d1e06fbec663c77befbc4d91b",
+        )
+        .expect("other signature");
+        assert!(matches!(
             begin_import(other),
-            Err(ImportError::NotTheDeployer {
-                signed: address_of(DEPLOYER),
-                deployer: [0x99u8; 20],
-            })
-        );
+            Err(ImportError::NotTheDeployer { .. })
+        ));
 
         // A signature made for another chain does not authorize this one.
         let mut other_chain = request().0;
@@ -624,6 +720,12 @@ mod tests {
         assert_eq!(record.imported_from.domain, "sepolia");
         assert_eq!(record.imported_from.block, SOURCE_BLOCK);
         assert_eq!(record.imported_from.address, address_of(CONTRACT));
+        assert_eq!(record.usage.proof_nodes, 4);
+        assert_eq!(record.usage.code_bytes, 17);
+        assert_eq!(record.usage.storage_slots, 1);
+        assert_eq!(record.fee.verification_bgu, 174);
+        assert_eq!(record.fee.storage_bytes, 81);
+        assert_eq!(record.fee.total_attos, 927);
     }
 
     #[test]

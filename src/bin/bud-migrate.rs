@@ -11,9 +11,9 @@
 use std::process::ExitCode;
 
 use budlum_core::execution::coordinator::migration::{
-    begin_import, dependency_report, DependencyReport, DeploymentEvidence, ImportError,
-    ImportEvmStorageChunk, ImportSource, MigrationAuthorization, MigrationPlan, MigrationRecord,
-    MigrationRequest, StorageEntry,
+    begin_import, dependency_report, DependencyReport, DeploymentProof, ImportError,
+    ImportEvmStorageChunk, ImportSource, MigrationAuthorization,
+    MigrationFeeSchedule, MigrationPlan, MigrationRecord, MigrationRequest, StorageEntry,
 };
 use serde::Deserialize;
 
@@ -21,18 +21,31 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 struct RequestJson {
     chain_id: u64,
+    source_chain_id: u64,
     domain: String,
     contract: String,
-    deployer: String,
     source_block: u64,
+    deployment: DeploymentJson,
     state_root: String,
     account_proof: Vec<String>,
     code: String,
     signature: String,
+    fee_schedule: MigrationFeeSchedule,
     #[serde(default)]
     occupied: bool,
     #[serde(default)]
     chunks: Vec<ChunkJson>,
+}
+
+/// The source transaction and receipt proofs, with every byte string in hex.
+#[derive(Debug, Deserialize)]
+struct DeploymentJson {
+    transaction_index: u64,
+    transaction: String,
+    transaction_proof: Vec<String>,
+    transactions_root: String,
+    receipt_proof: Vec<String>,
+    receipts_root: String,
 }
 
 /// One storage chunk as it is written on disk.
@@ -64,7 +77,15 @@ impl RequestJson {
     /// Splits the on-disk shape into the request and its chunks.
     fn into_parts(self) -> Result<(MigrationRequest, Vec<ImportEvmStorageChunk>), String> {
         let contract = decode_address(&self.contract)?;
-        let deployer = decode_address(&self.deployer)?;
+        let deployment = DeploymentProof {
+            source_block: self.source_block,
+            transaction_index: self.deployment.transaction_index,
+            transaction: decode_hex(&self.deployment.transaction)?,
+            transaction_proof: decode_nodes(&self.deployment.transaction_proof)?,
+            transactions_root: decode_word(&self.deployment.transactions_root)?,
+            receipt_proof: decode_nodes(&self.deployment.receipt_proof)?,
+            receipts_root: decode_word(&self.deployment.receipts_root)?,
+        };
         let mut account_proof = Vec::with_capacity(self.account_proof.len());
         for node in &self.account_proof {
             account_proof.push(decode_hex(node)?);
@@ -91,12 +112,9 @@ impl RequestJson {
         }
         let request = MigrationRequest {
             chain_id: self.chain_id,
+            source_chain_id: self.source_chain_id,
             source_domain: self.domain,
-            evidence: DeploymentEvidence {
-                contract,
-                deployer,
-                source_block: self.source_block,
-            },
+            deployment,
             authorization: MigrationAuthorization {
                 contract,
                 budlum_chain_id: self.chain_id,
@@ -107,6 +125,7 @@ impl RequestJson {
             account_proof,
             code: decode_hex(&self.code)?,
             occupied: self.occupied,
+            fee_schedule: self.fee_schedule,
         };
         Ok((request, chunks))
     }
@@ -241,6 +260,12 @@ fn record_json(
             }))
             .collect::<Vec<serde_json::Value>>(),
         "authorization_digest": digest,
+        "migration_fee": {
+            "proof_nodes": record.usage.proof_nodes,
+            "verification_bgu": record.fee.verification_bgu,
+            "storage_bytes": record.fee.storage_bytes,
+            "total_attos": record.fee.total_attos.to_string(),
+        },
         "imported_from": {
             "domain": source.domain.as_str(),
             "block": source.block,
@@ -286,6 +311,11 @@ fn decode_address(text: &str) -> Result<[u8; 20], String> {
         .try_into()
         .map_err(|_| format!("address `{text}` is not 20 bytes"))?;
     Ok(address)
+}
+
+/// Decodes a list of RLP proof nodes.
+fn decode_nodes(nodes: &[String]) -> Result<Vec<Vec<u8>>, String> {
+    nodes.iter().map(|node| decode_hex(node)).collect()
 }
 
 /// Decodes a 32-byte word.
