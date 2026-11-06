@@ -1,6 +1,7 @@
 //! Deterministic parallel scheduling of a block's transactions.
 //!
-//! WIRING: the coordinator calls [`plan`] for every block and runs
+//! WIRING: unwired - staged until coordinator parallel worker dispatch is enabled.
+//! The coordinator calls [`plan`] for every block and runs
 //! the waves on its EE workers; until it lands, the block executor stays
 //! sequential and this module is exercised by the equality tests below.
 //!

@@ -1,6 +1,8 @@
 //! Wallet-side blinded consent confirmation screen, Padme size buckets, and
 //! threshold Shamir key-escrow primitives (WP-56 Steps 9-10 / TK7, TSO8, TSO9,
 //! TSO10, TSO12).
+//!
+//! WIRING: unwired - staged for wallet UI consent confirmation integration (WP-56).
 
 use sha3::{Digest, Sha3_256};
 
