@@ -31,6 +31,7 @@
 
 pub mod bof1;
 pub mod content_id;
+pub mod content_ref;
 pub mod custody;
 pub mod dedup_index;
 pub mod fountain;
@@ -45,6 +46,7 @@ pub mod varint;
 
 pub use bof1::{Bof1Error, Flags, Header, Object};
 pub use content_id::{ContentId, ContentKey};
+pub use content_ref::ContentRef;
 pub use fountain::{
     encode_stream, FountainError, SegmentDecoder, SegmentEncoder, Symbol, SymbolKind,
 };

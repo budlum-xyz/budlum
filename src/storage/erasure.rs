@@ -12,7 +12,7 @@
 //! # Why a coder in-tree rather than a dependency
 //!
 //! `reed-solomon-erasure` is the crate everyone reaches for, and it is the
-//! one `docs/BUD_STORAGE_ROADMAP.md` named. It is unmaintained, the owner
+//! one removed roadmap named. It is unmaintained, the owner
 //! stopped in 2021 and asked for a new owner
 //! (darrenldl/reed-solomon-erasure#88); Solana, its largest user, moved off
 //! it. `reed-solomon-simd` is maintained but its speed comes from
