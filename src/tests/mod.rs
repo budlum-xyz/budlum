@@ -266,6 +266,10 @@ pub mod wp44_domains_bridge_settlement;
 #[cfg(test)]
 pub mod wp14_handover_recovery;
 
+// WP-46 Ceremony rehearsal and T-1..T-4 / T-7 protocol drill suite.
+#[cfg(test)]
+pub mod wp46_ceremony_and_drills;
+
 // WP-48 Independent Review 2 security, conservation, and privilege-boundary suite.
 #[cfg(test)]
 pub mod wp48_review2_security;
