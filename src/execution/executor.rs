@@ -3753,7 +3753,14 @@ impl Executor {
 
 #[cfg(test)]
 mod tests {
-    use super::{ai_execution_backend_allowed, check_ai_exec_dims, privacy_transfers_enabled};
+    use super::{
+        ai_execution_backend_allowed, ai_layer_enabled, check_ai_exec_dims,
+        privacy_transfers_enabled,
+    };
+    use crate::core::account::AccountState;
+    use crate::core::address::Address;
+    use crate::core::transaction::{Transaction, TransactionType};
+    use crate::execution::executor::Executor;
 
     #[test]
     fn ai_exec_dims_rejects_wide_layer() {
@@ -4121,5 +4128,302 @@ mod tests {
 
         assert!(!privacy_transfers_enabled(mainnet));
         assert!(privacy_transfers_enabled(devnet));
+    }
+
+    // ===================== WP-45: testnet boundary =====================
+
+    /// The chain ids this boundary is written against, read from the network
+    /// table rather than repeated as literals.
+    fn boundary_chain_ids() -> (u64, u64, u64) {
+        use crate::core::chain_config::Network;
+        (
+            Network::Mainnet.chain_id().value(),
+            Network::Testnet.chain_id().value(),
+            Network::Devnet.chain_id().value(),
+        )
+    }
+
+    /// Every on-chain door of the AI inference layer, built over one sender.
+    ///
+    /// The payloads are placeholders on purpose: the boundary refuses before
+    /// any arm reads them, so a door that is missing from the guard shows up
+    /// as a *different* refusal code (or as an accepted transaction), never as
+    /// a payload error that hides the gap.
+    fn ai_layer_doors(from: Address) -> Vec<TransactionType> {
+        use crate::ai::types::{
+            AiAgentPayment, AiExecutionProof, AiInferenceRequest, AiInferenceResult, AiModelId,
+            AiModelSpec, AiRequestId, BoundedBytes,
+        };
+        let model_id = AiModelId::new([7u8; 32]);
+        let request_id = AiRequestId::new([8u8; 32]);
+        let spec = AiModelSpec {
+            model_id,
+            model_hash: [7u8; 32],
+            owner: from,
+            min_verifier_count: 1,
+            agreement_threshold: 1,
+            max_input_ref_bytes: 64,
+            max_output_ref_bytes: 64,
+            request_deadline_blocks: 10,
+            result_deadline_blocks: 10,
+            version: 1,
+            active: true,
+            require_execution_proof: false,
+            execution_program_hash: None,
+            execution_class: 0,
+            execution_weights_digest: None,
+            execution_dims: None,
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+        };
+        vec![
+            TransactionType::AiOperatorBond,
+            TransactionType::AiOperatorUnbond,
+            TransactionType::AiOperatorWithdraw,
+            TransactionType::AiModelRegister(spec),
+            TransactionType::AiModelDeactivate(model_id),
+            TransactionType::AiModelReactivate(model_id),
+            TransactionType::AiInferenceRequest(AiInferenceRequest {
+                request_id,
+                requester: from,
+                model_id,
+                input_commitment: [4u8; 32],
+                input_ref: BoundedBytes::empty(),
+                max_fee: 1,
+                callback: None,
+                submitted_at_block: 0,
+                deadline_block: 10,
+                perception: None,
+                effort: crate::ai_inference::effort::EffortTier::default(),
+            }),
+            TransactionType::AiInferenceResult(AiInferenceResult {
+                request_id,
+                verifier: from,
+                output_commitment: [5u8; 32],
+                output_ref: BoundedBytes::empty(),
+                result_nonce: 0,
+                signature: Vec::new(),
+                submitted_at_block: 0,
+            }),
+            TransactionType::AiAgentPayment(AiAgentPayment {
+                payment_id: [10u8; 32],
+                from_agent: from,
+                to_agent: Address::from([26u8; 32]),
+                amount: 1,
+                request_id: None,
+                require_proof: false,
+                submitted_at_block: 0,
+                expiry_block: 10,
+            }),
+            TransactionType::AiFeeReclaim(request_id),
+            TransactionType::AiRequestCancel(request_id),
+            TransactionType::AiDisputeSlash {
+                request_id,
+                verifier: from,
+            },
+            TransactionType::AiAgentPaymentRelease([9u8; 32]),
+            TransactionType::AiAgentPaymentReclaim([9u8; 32]),
+            TransactionType::AiAttachExecutionProof {
+                request_id,
+                proof: AiExecutionProof {
+                    model_id,
+                    input_commitment: [1u8; 32],
+                    output_commitment: [2u8; 32],
+                    program_hash: [3u8; 32],
+                    proof_bytes: vec![0u8; 8],
+                    steps: 1,
+                    gas_used: 1,
+                    weights_digest: None,
+                    public_inputs: None,
+                },
+            },
+            TransactionType::AiOfferData {
+                cid: crate::storage::content_id::ContentId::of(b"wp45"),
+                price: 1,
+            },
+            TransactionType::AiPurchaseData { offer_id: 1 },
+        ]
+    }
+
+    /// BLG-063: the privacy allowlist must not contain the public testnet.
+    /// Ownership, value conservation and membership proofs are unwired, so a
+    /// note on a network that carries value is an unbacked mint.
+    #[test]
+    fn blg_063_privacy_allowlist_excludes_testnet() {
+        let (mainnet, testnet, devnet) = boundary_chain_ids();
+        assert!(!privacy_transfers_enabled(mainnet), "mainnet stays closed");
+        assert!(
+            !privacy_transfers_enabled(testnet),
+            "BLG-063: testnet must leave the privacy allowlist until PTP-1 lands"
+        );
+        assert!(privacy_transfers_enabled(devnet), "devnet stays open");
+    }
+
+    /// The card's named lock: a private transfer submitted on the testnet
+    /// chain id is refused, and the refusal moves no note and no balance.
+    #[test]
+    fn private_transfer_is_closed_on_testnet() {
+        let (_, testnet, _) = boundary_chain_ids();
+        let who = Address::from([21u8; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&who, 1_000);
+        let c_in = budlum_note_packing::hash_from_field(11);
+        let c_out = budlum_note_packing::hash_from_field(12);
+        state.note_registry.insert_note(c_in).unwrap();
+        let sub = crate::privacy::PrivateTransferSubmit {
+            spent_commitments: vec![c_in],
+            nullifiers: vec![budlum_note_packing::hash_from_field(13)],
+            output_commitments: vec![c_out],
+            nullifier_proofs: vec![budlum_note_packing::hash_from_field(14)],
+            authorization_sig: vec![0u8; 64],
+            public_digest: [0u8; 32],
+        };
+        let tx = Transaction::new_with_chain_id(
+            who,
+            Address::zero(),
+            0,
+            100,
+            0,
+            vec![],
+            testnet,
+            TransactionType::PrivateTransferSubmit(sub),
+        );
+        let err = Executor::apply_transaction_checked(&mut state, &tx)
+            .expect_err("a private transfer must be refused on testnet");
+        assert_eq!(err.code(), "privacy_testnet_closed");
+        assert!(state.note_registry.contains_commitment(&c_in), "G-4");
+        assert!(!state.note_registry.contains_commitment(&c_out), "G-4");
+        assert_eq!(state.get_balance(&who), 1_000, "G-4: no fee on a refusal");
+    }
+
+    /// The card's named lock for the other privacy door: note insertion.
+    #[test]
+    fn note_registry_is_closed_on_testnet() {
+        let (_, testnet, _) = boundary_chain_ids();
+        let who = Address::from([22u8; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&who, 1_000);
+        let c = budlum_note_packing::hash_from_field(42);
+        let tx = Transaction::new_with_chain_id(
+            who,
+            Address::zero(),
+            0,
+            100,
+            0,
+            vec![],
+            testnet,
+            TransactionType::PrivacyNoteInsert(c),
+        );
+        let err = Executor::apply_transaction_checked(&mut state, &tx)
+            .expect_err("note insertion must be refused on testnet");
+        assert_eq!(err.code(), "privacy_testnet_closed");
+        assert!(!state.note_registry.contains_commitment(&c), "G-4");
+        assert_eq!(state.get_balance(&who), 1_000, "G-4");
+    }
+
+    /// BLG-228 by closure: the execution-proof door is shut on testnet, and
+    /// the refusal happens before the arm can touch escrow or reputation.
+    #[test]
+    fn ai_execution_proof_is_closed_on_testnet() {
+        let (_, testnet, _) = boundary_chain_ids();
+        let who = Address::from([23u8; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&who, 1_000);
+        let proof = crate::ai::types::AiExecutionProof {
+            model_id: crate::ai::types::AiModelId::new([7u8; 32]),
+            input_commitment: [1u8; 32],
+            output_commitment: [2u8; 32],
+            program_hash: [3u8; 32],
+            proof_bytes: vec![0u8; 8],
+            steps: 1,
+            gas_used: 1,
+            weights_digest: None,
+            public_inputs: None,
+        };
+        let tx = Transaction::new_with_chain_id(
+            who,
+            Address::zero(),
+            0,
+            100,
+            0,
+            vec![],
+            testnet,
+            TransactionType::AiAttachExecutionProof {
+                request_id: crate::ai::types::AiRequestId::new([8u8; 32]),
+                proof,
+            },
+        );
+        let err = Executor::apply_transaction_checked(&mut state, &tx)
+            .expect_err("an AI execution proof must be refused on testnet");
+        assert_eq!(err.code(), "ai_layer_testnet_closed");
+        assert_eq!(state.get_balance(&who), 1_000, "G-4");
+        assert_eq!(state.ai_registry.state_root(), [0u8; 32], "G-4");
+    }
+
+    /// The card's named lock for the layer decision (İP-45 job 5): with
+    /// BLG-059..062 open and no per-request lottery or commit-reveal, the
+    /// whole on-chain AI layer stays closed on testnet. Every door refuses
+    /// with one code, on testnet, mainnet and every unclaimed id alike.
+    #[test]
+    fn ai_layer_is_closed_on_testnet() {
+        let (mainnet, testnet, devnet) = boundary_chain_ids();
+        assert!(ai_layer_enabled(devnet), "devnet keeps the layer open");
+        assert!(!ai_layer_enabled(testnet), "testnet stays closed");
+        assert!(!ai_layer_enabled(mainnet), "mainnet stays closed");
+        for unclaimed in [1u64, 42, 1337, 45263, u64::MAX] {
+            assert!(!ai_layer_enabled(unclaimed), "chain id {unclaimed}");
+        }
+
+        let who = Address::from([24u8; 32]);
+        for chain_id in [mainnet, testnet, 999_999] {
+            for door in ai_layer_doors(who) {
+                let mut state = AccountState::new();
+                state.add_balance(&who, 1_000_000);
+                let tx = Transaction::new_with_chain_id(
+                    who,
+                    Address::zero(),
+                    1_000,
+                    100,
+                    0,
+                    vec![],
+                    chain_id,
+                    door,
+                );
+                let err = Executor::apply_transaction_checked(&mut state, &tx)
+                    .expect_err("every AI door must refuse on a closed chain");
+                assert_eq!(
+                    err.code(),
+                    "ai_layer_testnet_closed",
+                    "chain {chain_id}: {:?}",
+                    tx.tx_type
+                );
+                assert_eq!(state.get_balance(&who), 1_000_000, "G-4");
+                assert_eq!(state.ai_registry.state_root(), [0u8; 32], "G-4");
+            }
+        }
+    }
+
+    /// G-4 at the boundary itself: the guard runs before the liquidity probe,
+    /// which creates the sender row. A refusal from an address that holds
+    /// nothing must leave that address absent, not funded-with-zero.
+    #[test]
+    fn a_closed_ai_door_does_not_create_the_sender_account() {
+        let (_, testnet, _) = boundary_chain_ids();
+        let stranger = Address::from([25u8; 32]);
+        let mut state = AccountState::new();
+        let tx = Transaction::new_with_chain_id(
+            stranger,
+            Address::zero(),
+            0,
+            1,
+            0,
+            vec![],
+            testnet,
+            TransactionType::AiOperatorBond,
+        );
+        assert!(Executor::apply_transaction_checked(&mut state, &tx).is_err());
+        assert!(
+            !state.accounts.contains_key(&stranger),
+            "G-4: a refused door must not create an account row"
+        );
     }
 }

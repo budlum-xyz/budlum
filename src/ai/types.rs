@@ -1494,3 +1494,70 @@ mod tests {
         assert_ne!(a.calculate_leaf(), b.calculate_leaf());
     }
 }
+
+#[cfg(test)]
+mod permyriad_tests {
+    //! WP-45 / BLG-240: the integer scores are exact, bounded and total.
+    use super::{AiAgentReputation, AiVerifierQos, TRUST_SCORE_BASIS_POINTS};
+    use crate::core::address::Address;
+
+    fn addr(byte: u8) -> Address {
+        Address::from([byte; 32])
+    }
+
+    #[test]
+    fn reliability_permyriad_is_exact_and_bounded() {
+        let mut qos = AiVerifierQos::new(addr(1));
+        assert_eq!(qos.reliability_score_permyriad(), 0, "no data scores zero");
+        qos.total_results_submitted = 3;
+        qos.successful_finalizations = 1;
+        // 1/3 = 3333.33.. bp, truncated toward zero, never rounded up.
+        assert_eq!(qos.reliability_score_permyriad(), 3_333);
+        qos.equivocation_count = 1;
+        // 3333 * 9000 / 10000 = 2999.7 -> 2999
+        assert_eq!(qos.reliability_score_permyriad(), 2_999);
+        qos.equivocation_count = 10;
+        assert_eq!(qos.reliability_score_permyriad(), 0, "penalty saturates");
+        qos.equivocation_count = u64::MAX;
+        assert_eq!(qos.reliability_score_permyriad(), 0, "no overflow");
+    }
+
+    #[test]
+    fn trust_permyriad_weights_are_forty_sixty() {
+        let mut rep = AiAgentReputation::new(addr(1));
+        assert_eq!(rep.trust_score_permyriad(), 0, "no data scores zero");
+        rep.payments_completed = 1;
+        // Payments only: 1.0 * 0.4 + neutral 1.0 * 0.6 = 1.0
+        assert_eq!(rep.trust_score_permyriad(), TRUST_SCORE_BASIS_POINTS);
+        rep.results_submitted = 2;
+        rep.results_finalized = 1;
+        rep.equivocations = 1;
+        // payment 10000; inference (5000 * 8500 / 10000) = 4250
+        // trust = (10000*4000 + 4250*6000)/10000 = 6550
+        assert_eq!(rep.trust_score_permyriad(), 6_550);
+        rep.payments_defaulted = 1;
+        // payment 5000 -> (5000*4000 + 4250*6000)/10000 = 4550
+        assert_eq!(rep.trust_score_permyriad(), 4_550);
+    }
+
+    /// G-2: the same counters give the same score on every node, and the
+    /// score never leaves `0..=10_000`.
+    #[test]
+    fn permyriad_scores_are_total_over_extreme_counters() {
+        for counter in [0u64, 1, 2, 7, u64::MAX / 2, u64::MAX] {
+            let mut qos = AiVerifierQos::new(addr(1));
+            qos.total_results_submitted = counter;
+            qos.successful_finalizations = counter;
+            qos.equivocation_count = counter;
+            assert!(qos.reliability_score_permyriad() <= TRUST_SCORE_BASIS_POINTS);
+
+            let mut rep = AiAgentReputation::new(addr(1));
+            rep.payments_completed = counter;
+            rep.payments_defaulted = counter;
+            rep.results_submitted = counter;
+            rep.results_finalized = counter;
+            rep.equivocations = counter;
+            assert!(rep.trust_score_permyriad() <= TRUST_SCORE_BASIS_POINTS);
+        }
+    }
+}
