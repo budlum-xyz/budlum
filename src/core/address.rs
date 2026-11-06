@@ -7,10 +7,10 @@ pub struct Address(pub [u8; 32]);
 
 impl Address {
     pub fn from_hex(s: &str) -> Result<Self, String> {
-        let s = s.strip_prefix("0x").unwrap_or(s);
-        if s == "0" {
-            return Ok(Address([0u8; 32]));
-        }
+        let s = s
+            .strip_prefix("0x")
+            .or_else(|| s.strip_prefix("0X"))
+            .unwrap_or(s);
         let bytes = hex::decode(s).map_err(|e| e.to_string())?;
         if bytes.len() != 32 {
             return Err(format!(
@@ -83,5 +83,19 @@ impl<'de> Deserialize<'de> for Address {
 impl From<[u8; 32]> for Address {
     fn from(bytes: [u8; 32]) -> Self {
         Address(bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blg_151_address_from_hex_requires_canonical_64_hex() {
+        assert!(Address::from_hex("0").is_err());
+        assert!(Address::from_hex("0x0").is_err());
+        assert!(Address::from_hex(&"01".repeat(31)).is_err());
+        let upper = format!("0X{}", "0A".repeat(32));
+        assert_eq!(Address::from_hex(&upper).unwrap(), Address([0x0a; 32]));
     }
 }

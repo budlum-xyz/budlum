@@ -92,8 +92,11 @@ impl TaskMemory {
                 if line.trim().is_empty() {
                     continue;
                 }
-                if let Ok(rec) = serde_json::from_str::<MemoryRecord>(line) {
-                    mem.push_record(rec);
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+                    let clean = crate::redact::redact_model_strings(&val);
+                    if let Ok(rec) = serde_json::from_value::<MemoryRecord>(clean) {
+                        mem.push_record(rec);
+                    }
                 }
             }
         }
@@ -128,12 +131,14 @@ impl TaskMemory {
         let value =
             serde_json::to_value(&rec).map_err(|e| format!("could not encode the record: {e}"))?;
         let redacted = crate::redact::redact_model_strings(&value);
-        let line = if redacted == value {
-            serde_json::to_string(&rec).map_err(|e| format!("could not encode the record: {e}"))?
+        let clean_rec: MemoryRecord = if redacted == value {
+            rec
         } else {
-            serde_json::to_string(&redacted)
-                .map_err(|e| format!("could not encode the record: {e}"))?
+            serde_json::from_value(redacted.clone())
+                .map_err(|e| format!("could not decode masked record: {e}"))?
         };
+        let line = serde_json::to_string(&clean_rec)
+            .map_err(|e| format!("could not encode the record: {e}"))?;
         // Append in place: a failed read must never truncate the history.
         let mut file = std::fs::OpenOptions::new()
             .read(true)
@@ -159,7 +164,7 @@ impl TaskMemory {
         chunk.push('\n');
         file.write_all(chunk.as_bytes())
             .map_err(|e| format!("could not write the memory: {e}"))?;
-        self.push_record(rec);
+        self.push_record(clean_rec);
         Ok(())
     }
 
@@ -364,6 +369,11 @@ mod tests {
             on_disk.contains("<SECRET:MASKED>"),
             "nothing was masked: {on_disk}"
         );
+        // Neither the in-memory copy nor a reopened copy retains plaintext (`BLG-070`).
+        let in_mem = mem.commands[0].output.as_deref().unwrap_or("");
+        assert!(!in_mem.contains(&secret), "{in_mem}");
+        assert!(in_mem.contains("<SECRET:MASKED>"), "{in_mem}");
+
         // The line still parses, so masking did not corrupt the format.
         let again = TaskMemory::open(&path).unwrap();
         assert_eq!(again.commands.len(), 1);
