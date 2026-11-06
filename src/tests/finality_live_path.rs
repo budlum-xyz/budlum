@@ -272,7 +272,7 @@ fn node_prevote_epoch_reaches_the_aggregator() {
         // Drive a real prevote through a real aggregator built the way
         // start_prevote_task builds it.
         let (snap, sks) = make_snapshot(1, node_epoch, 1000);
-        let mut agg = FinalityAggregator::new(DEFAULT_CHAIN_ID, 
+        let mut agg = FinalityAggregator::new(DEFAULT_CHAIN_ID,
             node_epoch,
             checkpoint_height,
             "cp_hash".into(),
