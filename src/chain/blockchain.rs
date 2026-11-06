@@ -3557,8 +3557,10 @@ impl Blockchain {
                     | crate::core::transaction::TransactionType::AiOperatorWithdraw
             ) {
                 pending.fee
+            } else if let Some(cost) = pending.checked_total_cost() {
+                cost
             } else {
-                pending.total_cost()
+                break;
             };
             if spendable_balance < pending_cost {
                 break;
@@ -3631,8 +3633,11 @@ impl Blockchain {
                 | crate::core::transaction::TransactionType::ClaimRewards { .. }
         ) {
             tx.fee
+        } else if let Some(cost) = tx.checked_total_cost() {
+            cost
         } else {
-            tx.total_cost()
+            reasons.push("transaction_cost_overflow".to_string());
+            u64::MAX
         };
         if spendable_balance < precheck_cost {
             reasons.push("insufficient_funds".to_string());
