@@ -166,7 +166,7 @@ mod ethereum_compat_tests {
 
     #[test]
     fn eth_served_set_matches_the_declared_api() {
-        let mut served = served_names();
+        let mut served: Vec<String> = served_names().iter().map(|n| (*n).to_string()).collect();
         served.sort_unstable();
         assert_eq!(
             served,
@@ -249,7 +249,7 @@ mod ethereum_compat_tests {
             .filter(|row| row.answer == Answer::ChainRead)
             .map(|row| row.name)
             .collect();
-        let expected = [
+        let expected: &[&str] = &[
             "web3_clientVersion",
             "net_version",
             "net_listening",
@@ -260,7 +260,7 @@ mod ethereum_compat_tests {
             "eth_maxPriorityFeePerGas",
             "eth_accounts",
         ];
-        assert_eq!(reads, expected);
+        assert_eq!(&reads[..], expected);
     }
 
     #[test]
