@@ -32,7 +32,6 @@ import androidx.compose.ui.unit.dp
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        ValidatorAuditWorker.schedulePeriodic(applicationContext)
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
@@ -74,11 +73,12 @@ fun ValidatorDashboardScreen(
             style = MaterialTheme.typography.headlineSmall,
         )
         Text(text = stringResource(R.string.disclosure_custody_notice))
+        Text(text = stringResource(R.string.validator_unavailable))
         Text(text = stringResource(R.string.security_keystore_tradeoff))
         Text(text = "OEM Battery Guide ($manufacturer): Settings > Apps > Budlum Validator > Battery > Unrestricted")
 
         if (!registered) {
-            Button(onClick = {
+            Button(enabled = false, onClick = {
                 registered = true
                 onStartForegroundValidator()
             }) {
@@ -86,7 +86,7 @@ fun ValidatorDashboardScreen(
             }
         } else {
             Text(text = stringResource(R.string.status_registered_active))
-            Button(onClick = {
+            Button(enabled = false, onClick = {
                 registered = false
                 onLeaveValidator()
             }) {

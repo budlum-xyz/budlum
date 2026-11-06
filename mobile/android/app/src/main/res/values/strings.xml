@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="validator_unavailable">Validator registration and share release are unavailable until the network integration is complete. No stake is registered or unbonded by this screen.</string>
     <string name="app_name">Budlum Validator</string>
     <string name="notification_channel_name">Budlum Mobile Validator Status</string>
     <string name="disclosure_custody_notice">Your phone stores erasure-coded B.U.D. 3.0 shares. Single shares do not reveal content; public content is open to all and sealed content is encrypted. No mining runs on this device.</string>
