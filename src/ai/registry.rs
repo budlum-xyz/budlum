@@ -1610,12 +1610,17 @@ impl AiRegistry {
 
     /// Get all verifiers ordered by reliability score (descending).
     /// Used for QoS-aware verifier selection in the Agentic Economy.
+    ///
+    /// The sort key is the integer permyriad score, not the `f64` display
+    /// score (WP-45 / BLG-240): a float key rounds differently between
+    /// builds and `partial_cmp` hides a `NaN` as `Equal`. Ties break on the
+    /// address, so the order is total and identical on every node.
     pub fn verifiers_by_reliability(&self) -> Vec<AiVerifierQos> {
         let mut qos_list: Vec<_> = self.verifier_qos.values().cloned().collect();
         qos_list.sort_by(|a, b| {
-            b.reliability_score()
-                .partial_cmp(&a.reliability_score())
-                .unwrap_or(std::cmp::Ordering::Equal)
+            b.reliability_score_permyriad()
+                .cmp(&a.reliability_score_permyriad())
+                .then_with(|| a.verifier.cmp(&b.verifier))
         });
         qos_list
     }
@@ -2006,16 +2011,38 @@ impl AiRegistry {
     /// Get all agents sorted by trust score (descending - highest trust first).
     /// Returns Vec of (agent_address, trust_score) tuples.
     ///
+    /// The returned score is the `f64` display column, but the *ordering*
+    /// comes from the integer permyriad score (WP-45 / BLG-240), with the
+    /// address breaking ties. Keeping the float in the signature keeps the
+    /// RPC's display column stable while removing it from the decision.
+    ///
     /// WIRING: the read model for ranking agents by trust; the operator
     /// surface that lists agents this way does not call it yet, so the
     /// ordering is pinned by this module's tests.
     pub fn agents_by_trust_score(&self) -> Vec<(Address, f64)> {
-        let mut scored: Vec<(Address, f64)> = self
+        let mut scored: Vec<(Address, u64, f64)> = self
             .agent_reputations
             .iter()
-            .map(|(addr, rep)| (*addr, rep.trust_score()))
+            .map(|(addr, rep)| (*addr, rep.trust_score_permyriad(), rep.trust_score()))
             .collect();
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        scored.into_iter().map(|(addr, _, score)| (addr, score)).collect()
+    }
+
+    /// The agent ranking as integers: `(address, permyriad score)`, ordered
+    /// exactly as [`Self::agents_by_trust_score`] orders (WP-45 / BLG-240).
+    ///
+    /// This is the form a consensus or cross-process consumer should use.
+    /// One permyriad is 1/10_000 of a unit of trust; the range is
+    /// `0..=10_000`.
+    #[must_use]
+    pub fn agents_by_trust_score_permyriad(&self) -> Vec<(Address, u64)> {
+        let mut scored: Vec<(Address, u64)> = self
+            .agent_reputations
+            .iter()
+            .map(|(addr, rep)| (*addr, rep.trust_score_permyriad()))
+            .collect();
+        scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         scored
     }
 
@@ -2030,18 +2057,19 @@ impl AiRegistry {
     /// The ranking in fixed-point permyriad scores (1/10_000 of a unit
     /// trust), ordered as `agents_by_trust_score` orders.
     /// The actor and RPC boundary carries this, not the raw
-    /// `f64` - a float crossing process boundaries is the Z8 rule, and
-    /// quantizing once, here, keeps every consumer's ordering identical
-    /// without re-deriving a sort key from a float.
+    /// `f64` - a float crossing process boundaries is the Z8 rule.
+    ///
+    /// WP-45 / BLG-240: this used to re-quantize the display float
+    /// (`(score * 10_000.0).round() as u64`), which put a float back on the
+    /// boundary it was meant to keep off, and rounded where the ranking
+    /// truncates. It now returns the integer score itself, so the value the
+    /// boundary carries and the value the sort used are the same number.
+    /// The name is kept because the actor command and the RPC reply are
+    /// wired to it; the unit is permyriad, as the `trust_score_basis: 10_000`
+    /// field already advertised.
     #[must_use]
     pub fn agents_by_trust_score_permille(&self) -> Vec<(Address, u64)> {
-        self.agents_by_trust_score()
-            .into_iter()
-            .map(|(addr, score)| {
-                let q = (score * 10_000.0).round().clamp(0.0, u64::MAX as f64) as u64;
-                (addr, q)
-            })
-            .collect()
+        self.agents_by_trust_score_permyriad()
     }
 
     /// Calculate deterministic Merkle/SHA256 root of all AI registry maps.
@@ -2206,7 +2234,7 @@ mod tests {
     //!
     //! A float sort key is not a consensus-safe ordering: two nodes built
     //! with different optimization settings may round the last bit of a
-    //! `f64` differently, and `partial_cmp` on a NaN silently degrades to
+    //! `f64` differently, and `partial_cmp` on a `NaN` silently degrades to
     //! `Equal`. The scores stay available as `f64` for display, but the
     //! *order* and the value that crosses the actor/RPC boundary come from
     //! the fixed-point permyriad functions.
@@ -2289,7 +2317,7 @@ mod tests {
     }
 
     /// Equal integer scores keep the map's address order: no float compare,
-    /// no `unwrap_or(Equal)` hiding a NaN, no platform-dependent tie order.
+    /// no `unwrap_or(Equal)` hiding a `NaN`, no platform-dependent tie order.
     #[test]
     fn ai_ranking_breaks_ties_by_address() {
         let mut registry = AiRegistry::new();

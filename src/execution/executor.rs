@@ -64,7 +64,7 @@ fn check_ai_exec_dims(dims: &[u16]) -> Result<(), String> {
 }
 
 fn privacy_transfers_enabled(chain_id: u64) -> bool {
-    // Allowlist, not a denylist.
+    // Allowlist, not a denylist, and devnet is its only member (BLG-063).
     //
     // `PrivateTransferSubmit` reaches `note_registry.apply_transfer`, which
     // takes the nullifier the submitter hands it: the binding check
@@ -72,21 +72,98 @@ fn privacy_transfers_enabled(chain_id: u64) -> bool {
     // `apply_transfer_with_proofs` is called with proofs, and nothing in the
     // tree calls it that way. So today a transfer proves who signed the
     // transaction, never that the signer owns the note; value conservation and
-    // membership are unwired too. That is survivable on the two networks where
-    // the notes are worth nothing.
+    // membership are unwired too (BLG-225). That is survivable only where the
+    // notes are worth nothing, and a public testnet is not that place: it is
+    // the network people are asked to trust before mainnet, and an unbacked
+    // mint there is a real loss.
     //
-    // The old test was `chain_id != Mainnet`, which answers "is this not the
-    // one network we care about" instead of "is this a network where losing the
-    // notes costs nothing". Every id nobody has claimed yet - a second mainnet,
-    // a public testnet that grows real value - came back enabled.
+    // The testnet id used to sit in this list. WP-45 removes it: the surface
+    // stays closed on testnet until PTP-1 wires ownership, value conservation
+    // and membership (directive 10.4 item 7). The proof code is kept, not
+    // deleted - only the door is shut (G-7).
+    //
+    // The older `chain_id != Mainnet` test answered "is this not the one
+    // network we care about" instead of "is this a network where losing the
+    // notes costs nothing", so every unclaimed id came back enabled too.
     chain_id
         == crate::core::chain_config::Network::Devnet
             .chain_id()
             .value()
-        || chain_id
-            == crate::core::chain_config::Network::Testnet
-                .chain_id()
-                .value()
+}
+
+/// The refusal a closed privacy door returns.
+///
+/// Testnet gets its own code so an operator reading a rejected block can tell
+/// "this network is not launched yet" from "this network launched with the
+/// feature off". Every other closed id keeps the historical mainnet code and
+/// message, so nothing that already matched on them has to change.
+fn privacy_closed_refusal(chain_id: u64, mainnet_message: &'static str) -> BudlumError {
+    if chain_id
+        == crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value()
+    {
+        BudlumError::validation(
+            "privacy_testnet_closed",
+            "privacy transfers and note insertion are closed on testnet until ownership, value-conservation and membership proofs are wired (BLG-063)",
+        )
+    } else {
+        BudlumError::validation("privacy_mainnet_disabled", mainnet_message)
+    }
+}
+
+/// Whether the on-chain AI inference layer may execute on this chain.
+///
+/// WP-45 job 5 is a decision, and this is it: **closed on testnet**.
+///
+/// The directive (1.5, 10.6) lets the layer open at VL-1 only once BLG-059,
+/// BLG-060, BLG-061 and BLG-062 are closed *and* both VL-1 conditions are
+/// built: a per-request lottery with commit-reveal (BLG-229) and integer
+/// ranking (BLG-240). Integer ranking lands in this package; the lottery and
+/// commit-reveal do not exist in the tree, and the four findings above are
+/// still open. One missing condition is enough to keep the layer shut, so the
+/// whole surface refuses on testnet rather than opening at a level nobody can
+/// verify. `ai_layer_is_closed_on_testnet` is the proof.
+///
+/// Devnet stays open: that is where the layer is developed, and its tokens
+/// carry no value. The allowlist shape is deliberate - a new chain id is
+/// closed by default instead of inheriting the last network's decision.
+fn ai_layer_enabled(chain_id: u64) -> bool {
+    chain_id
+        == crate::core::chain_config::Network::Devnet
+            .chain_id()
+            .value()
+}
+
+/// Every transaction door that belongs to the on-chain AI layer.
+///
+/// Kept beside [`ai_layer_enabled`] so the guard and the decision cannot drift
+/// apart. The two marketplace doors (`AiOfferData`, `AiPurchaseData`) are in
+/// the list on purpose: they are the AI-to-data-market leg of the closed loop
+/// BLG-126 describes, where an inference request reads a paid asset without a
+/// grant. Leaving them open would keep that loop reachable on testnet through
+/// the market side while the inference side was shut.
+fn is_ai_layer_transaction(tx_type: &TransactionType) -> bool {
+    matches!(
+        tx_type,
+        TransactionType::AiOfferData { .. }
+            | TransactionType::AiPurchaseData { .. }
+            | TransactionType::AiModelRegister(_)
+            | TransactionType::AiInferenceRequest(_)
+            | TransactionType::AiInferenceResult(_)
+            | TransactionType::AiFeeReclaim(_)
+            | TransactionType::AiModelDeactivate(_)
+            | TransactionType::AiModelReactivate(_)
+            | TransactionType::AiRequestCancel(_)
+            | TransactionType::AiDisputeSlash { .. }
+            | TransactionType::AiAgentPayment(_)
+            | TransactionType::AiAgentPaymentRelease(_)
+            | TransactionType::AiAgentPaymentReclaim(_)
+            | TransactionType::AiAttachExecutionProof { .. }
+            | TransactionType::AiOperatorBond
+            | TransactionType::AiOperatorUnbond
+            | TransactionType::AiOperatorWithdraw
+    )
 }
 
 impl Executor {
@@ -210,6 +287,22 @@ impl Executor {
                 ));
             }
             _ => {}
+        }
+
+        // WP-45: the AI layer boundary. It sits here - after the cheap
+        // shape guards above and before `liquid_cost` / `get_or_create` -
+        // because that probe *creates* the sender row. A refusal must leave
+        // the state byte-identical (G-4), so no closed door may run after it.
+        //
+        // One guard for the whole layer rather than a check inside each of
+        // the seventeen arms: an arm added later is closed by default, and
+        // `is_ai_layer_transaction` is the single place that has to learn
+        // about it.
+        if is_ai_layer_transaction(&tx.tx_type) && !ai_layer_enabled(tx.chain_id) {
+            return Err(BudlumError::validation(
+                "ai_layer_testnet_closed",
+                "the on-chain AI inference layer is closed on this chain id until BLG-059..062 are closed and the VL-1 lottery, commit-reveal and integer ranking are wired (WP-45)",
+            ));
         }
 
         let liquid_cost = match tx.tx_type {
@@ -2449,8 +2542,8 @@ impl Executor {
             }
             TransactionType::PrivacyNoteInsert(commitment) => {
                 if !privacy_transfers_enabled(tx.chain_id) {
-                    return Err(BudlumError::validation(
-                        "privacy_mainnet_disabled",
+                    return Err(privacy_closed_refusal(
+                        tx.chain_id,
                         "privacy note insertion is disabled on mainnet until full proof verification is wired",
                     ));
                 }
@@ -2474,8 +2567,8 @@ impl Executor {
             }
             TransactionType::PrivateTransferSubmit(sub) => {
                 if !privacy_transfers_enabled(tx.chain_id) {
-                    return Err(BudlumError::validation(
-                        "privacy_mainnet_disabled",
+                    return Err(privacy_closed_refusal(
+                        tx.chain_id,
                         "private transfers are disabled on mainnet until ownership, value-conservation, and membership proofs are wired",
                     ));
                 }
@@ -4107,7 +4200,10 @@ mod tests {
 
         assert!(!privacy_transfers_enabled(mainnet), "mainnet must stay off");
         assert!(privacy_transfers_enabled(devnet), "devnet must stay on");
-        assert!(privacy_transfers_enabled(testnet), "testnet must stay on");
+        assert!(
+            !privacy_transfers_enabled(testnet),
+            "WP-45/BLG-063: testnet left the allowlist; it stays closed until PTP-1"
+        );
 
         for unclaimed in [1u64, 42, 1337, 45263, u64::MAX] {
             assert!(
