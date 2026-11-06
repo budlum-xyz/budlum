@@ -47,7 +47,10 @@
 #![forbid(unsafe_code)]
 #![no_std]
 
+pub mod digest4;
 pub mod poseidon;
+
+pub use digest4::{Digest4, HashSuiteId, SuiteTaggedCommitment};
 
 /// A packed note hash: commitment or nullifier, as stored on chain.
 pub type NoteHash = [u8; 32];
