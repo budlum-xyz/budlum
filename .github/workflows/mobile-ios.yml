@@ -1,0 +1,39 @@
+name: Mobile iOS Opportunistic Validator
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "mobile/ios/**"
+      - ".github/workflows/mobile-ios.yml"
+  push:
+    branches: [main]
+    paths:
+      - "mobile/ios/**"
+      - ".github/workflows/mobile-ios.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ios-opportunistic-validator:
+    name: iOS Opportunistic Validator Swift Package Tests (WP-38)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build and run WP-38 iOS Swift test suite
+        working-directory: mobile/ios
+        run: |
+          set -euo pipefail
+          swift test
