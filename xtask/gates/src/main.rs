@@ -39,6 +39,8 @@
 
 use std::path::{Path, PathBuf};
 
+mod sha256;
+
 mod gates {
     pub mod accumulators_pinned;
     pub mod actionlint;
@@ -136,6 +138,8 @@ mod gates {
     pub mod proof_deps_are_exactly_pinned;
     pub mod qr_is_derivative_only;
     pub mod quantum_account;
+    pub mod readme_definition_block_is_verbatim;
+    pub mod readme_has_no_placeholders;
     pub mod readme_no_deny;
     pub mod reduction_claims;
     pub mod refusals_no_mutate;
@@ -1414,6 +1418,22 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::workflows_cover_every_workspace::self_test,
+    },
+    Gate {
+        name: "readme-definition-block-is-verbatim",
+        replaces: None,
+        run: gates::readme_definition_block_is_verbatim::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::readme_definition_block_is_verbatim::self_test,
+    },
+    Gate {
+        name: "readme-has-no-placeholders",
+        replaces: None,
+        run: gates::readme_has_no_placeholders::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::readme_has_no_placeholders::self_test,
     },
     Gate {
         name: "ee-workers-build-with-unwind",

@@ -117,3 +117,49 @@ jobs:
           from=$(cast rpc --rpc-url http://127.0.0.1:8546 eth_accounts | tr -d '[]"' | cut -d, -f1)
           forge create --root contracts --offline graft/GraftExecutor.sol:GraftExecutor \
             --rpc-url http://127.0.0.1:8546 --unlocked --from "$from" --broadcast
+
+  # The two Rust contract crates are in the tree and, until this job existed,
+  # in no workflow: `contracts/object-layer/cosmwasm` and
+  # `contracts/object-layer/svm` are standalone Cargo workspaces, so the root
+  # `cargo build`/`cargo test --workspace`/`cargo clippy --all-targets` never
+  # saw either of them, and the Solidity job above compiles the `.sol` files
+  # next to them. Code that ships as a contract and compiles nowhere is code no
+  # commit is tested against; `workflows-cover-every-workspace` now refuses that
+  # state, and this job is the build it asks for. A host target is enough for
+  # the checks here: the chain targets need the chain vendors' own toolchains,
+  # and the crate-level logic (the fail-closed verifier, the endpoint state
+  # machine) is target-independent.
+  contract-crates:
+    name: Object-layer contract crates (cosmwasm + SVM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - manifest: contracts/object-layer/cosmwasm/Cargo.toml
+            name: cosmwasm
+          - manifest: contracts/object-layer/svm/Cargo.toml
+            name: svm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: object-layer-${{ matrix.name }}
+          workspaces: contracts/object-layer/${{ matrix.name }}
+      - name: Format
+        run: cargo fmt --manifest-path ${{ matrix.manifest }} --all -- --check
+      - name: Clippy
+        run: cargo clippy --manifest-path ${{ matrix.manifest }} --all-targets -- -D warnings
+      - name: Build and test
+        run: |
+          set -euo pipefail
+          cargo build --locked --manifest-path ${{ matrix.manifest }}
+          cargo test --locked --manifest-path ${{ matrix.manifest }}
