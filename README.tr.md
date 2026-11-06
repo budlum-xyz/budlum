@@ -283,7 +283,7 @@ cargo run --release -- --network devnet
 
 ```bash
 docker compose -f ops/docker-compose.yml up   # bkz. ops/docker-compose.yml
-bash ops/scripts/devnet-multinode-smoke.sh
+cargo run --release --manifest-path xtask/tools/Cargo.toml -- devnet-multinode-smoke
 ```
 
 ### Profilden çalıştırma
