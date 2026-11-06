@@ -2,6 +2,7 @@
 //! EVM alias collision guards, `Adopt` one-shot sweep, quantum-alert gating, and
 //! per-namespace state-growth metering (`WP-27`, `BLG-267`).
 
+pub mod aptos;
 pub mod cosmos;
 pub mod ethereum;
 
@@ -18,6 +19,10 @@ use crate::execution::coordinator::accounts::{
 };
 use crate::execution::coordinator::bud_unit::{
     account_total_attos, add_attos_to_account, sub_attos_from_account, ATTOS_PER_ATOM,
+    ATTO_PER_OCTA,
+};
+use crate::execution::coordinator::foreign::aptos::{
+    decode_and_verify_aptos_tx, AptosEnvelopeError, DecodedAptosTx, BUDLUM_APTOS_CHAIN_ID,
 };
 use crate::execution::coordinator::foreign::cosmos::{
     decode_and_verify_cosmos_tx, CosmosEnvelopeError, CosmosWasmMsg, DecodedCosmosTx,
@@ -56,7 +61,9 @@ pub enum QuantumAlertLevel {
 pub enum ForeignLaneError {
     EthEnvelope(EthEnvelopeError),
     CosmosEnvelope(CosmosEnvelopeError),
+    AptosEnvelope(AptosEnvelopeError),
     AliasCollision([u8; 20]),
+    MoveAliasCollision([u8; 32]),
     CreateTargetCollidesWithAlias([u8; 20]),
     ReplayNonceMismatch { expected: u64, actual: u64 },
     QuantumAlertClosed { level: QuantumAlertLevel },
@@ -73,8 +80,12 @@ impl fmt::Display for ForeignLaneError {
         match self {
             Self::EthEnvelope(e) => write!(f, "{e}"),
             Self::CosmosEnvelope(e) => write!(f, "{e}"),
+            Self::AptosEnvelope(e) => write!(f, "{e}"),
             Self::AliasCollision(addr) => {
                 write!(f, "EVM address 0x{} collides with registered PQ alias", hex::encode(addr))
+            }
+            Self::MoveAliasCollision(addr) => {
+                write!(f, "Move address 0x{} collides with registered PQ alias", hex::encode(addr))
             }
             Self::CreateTargetCollidesWithAlias(addr) => write!(
                 f,
@@ -120,6 +131,12 @@ impl From<EthEnvelopeError> for ForeignLaneError {
 impl From<CosmosEnvelopeError> for ForeignLaneError {
     fn from(value: CosmosEnvelopeError) -> Self {
         Self::CosmosEnvelope(value)
+    }
+}
+
+impl From<AptosEnvelopeError> for ForeignLaneError {
+    fn from(value: AptosEnvelopeError) -> Self {
+        Self::AptosEnvelope(value)
     }
 }
 
@@ -231,6 +248,7 @@ impl StateGrowthMeter {
 pub struct ForeignCoordinatorBook {
     evm_alias_to_pq: BTreeMap<[u8; 20], Address>,
     wasm_alias_to_pq: BTreeMap<String, Address>,
+    move_alias_to_pq: BTreeMap<[u8; 32], Address>,
     pq_accounts: BTreeSet<Address>,
     foreign_nonces: BTreeMap<Address, u64>,
     cosmos_account_numbers: BTreeMap<Address, u64>,
@@ -264,9 +282,15 @@ impl ForeignCoordinatorBook {
         let Ok(wasm_bech32) = String::from_utf8(raw_wasm_alias) else {
             return Err(ForeignLaneError::InvalidAdoptSignature);
         };
+        let raw_move_alias = derive_local_alias(&pq_addr, EeId::MOVE)
+            .map_err(|_| ForeignLaneError::InvalidAdoptSignature)?;
+        let Ok(move_alias32) = <[u8; 32]>::try_from(raw_move_alias.as_slice()) else {
+            return Err(ForeignLaneError::InvalidAdoptSignature);
+        };
         self.pq_accounts.insert(pq_addr);
         self.evm_alias_to_pq.insert(alias20, pq_addr);
         self.wasm_alias_to_pq.insert(wasm_bech32, pq_addr);
+        self.move_alias_to_pq.insert(move_alias32, pq_addr);
         self.growth_meter
             .record_write("uel/alias", 33, None, Some(20));
         Ok(alias20)
@@ -474,9 +498,7 @@ impl ForeignCoordinatorBook {
             derive_foreign_account(ForeignScheme::CosmosSecp256k1, &tx.sender_raw)
                 .map_err(|_| ForeignLaneError::InvalidAdoptSignature)?;
         if self.quantum_class_of(&foreign_bud_addr) == QuantumClass::PostQuantum {
-            return Err(ForeignLaneError::ClassicalCannotTouchPqHoldings(
-                foreign_bud_addr,
-            ));
+            return Err(ForeignLaneError::ClassicalCannotTouchPqHoldings(foreign_bud_addr));
         }
 
         if let Some(&stored_acct_num) = self.cosmos_account_numbers.get(&foreign_bud_addr) {
@@ -486,9 +508,7 @@ impl ForeignCoordinatorBook {
                 ));
             }
         } else if expected_account_number != 0 {
-            return Err(ForeignLaneError::CosmosEnvelope(
-                CosmosEnvelopeError::InvalidSignature,
-            ));
+            return Err(ForeignLaneError::CosmosEnvelope(CosmosEnvelopeError::InvalidSignature));
         }
 
         match self.alert_level {
@@ -597,6 +617,144 @@ impl ForeignCoordinatorBook {
             self.next_cosmos_account_number = self.next_cosmos_account_number.saturating_add(1);
             self.cosmos_account_numbers
                 .insert(foreign_bud_addr, assigned);
+        }
+        self.foreign_nonces
+            .insert(foreign_bud_addr, expected_seq.saturating_add(1));
+        Ok(tx)
+    }
+
+    /// Validate and apply a `Foreign::Aptos` BCS `SignedTransaction` (`WP-32`, `BLG-249`).
+    ///
+    /// Convenience: invoked by the coordinator foreign lane and Aptos compatibility tests.
+    pub fn apply_aptos_envelope(
+        &mut self,
+        raw_signed_bcs: &[u8],
+        block_timestamp_secs: u64,
+        state: &mut AccountState,
+    ) -> Result<DecodedAptosTx, ForeignLaneError> {
+        if self.alert_level == QuantumAlertLevel::Isolated {
+            return Err(ForeignLaneError::QuantumAlertClosed {
+                level: self.alert_level,
+            });
+        }
+
+        let tx = decode_and_verify_aptos_tx(
+            raw_signed_bcs,
+            BUDLUM_APTOS_CHAIN_ID,
+            block_timestamp_secs,
+        )?;
+        if self.move_alias_to_pq.contains_key(&tx.sender) {
+            return Err(ForeignLaneError::MoveAliasCollision(tx.sender));
+        }
+
+        let foreign_bud_addr = derive_foreign_account(ForeignScheme::AptosAuth, &tx.sender)
+            .map_err(|_| ForeignLaneError::InvalidAdoptSignature)?;
+        debug_assert_eq!(
+            AccountKind::Foreign(ForeignScheme::AptosAuth).quantum_class(),
+            QuantumClass::Classical
+        );
+        if self.pq_accounts.contains(&foreign_bud_addr) {
+            return Err(ForeignLaneError::ClassicalCannotTouchPqHoldings(foreign_bud_addr));
+        }
+        if self.adopted_tombstones.contains(&foreign_bud_addr) {
+            return Err(ForeignLaneError::AlreadyAdopted(foreign_bud_addr));
+        }
+
+        if self.alert_level == QuantumAlertLevel::Restricted {
+            let Some((rcpt_move_addr, _)) = tx.direct_octa_transfer else {
+                return Err(ForeignLaneError::QuantumAlertClosed {
+                    level: self.alert_level,
+                });
+            };
+            if !self.move_alias_to_pq.contains_key(&rcpt_move_addr) {
+                return Err(ForeignLaneError::QuantumAlertClosed {
+                    level: self.alert_level,
+                });
+            }
+        }
+
+        let expected_seq = self
+            .foreign_nonces
+            .get(&foreign_bud_addr)
+            .copied()
+            .unwrap_or(0);
+        if tx.sequence_number != expected_seq {
+            return Err(ForeignLaneError::ReplayNonceMismatch {
+                expected: expected_seq,
+                actual: tx.sequence_number,
+            });
+        }
+
+        let fee_octas = u128::from(tx.max_gas_amount)
+            .checked_mul(u128::from(tx.gas_unit_price_octas))
+            .ok_or(ForeignLaneError::BalanceOverflow)?;
+        let transfer_octas = tx
+            .direct_octa_transfer
+            .map_or(0u128, |(_, amt)| u128::from(amt));
+        let total_octas = fee_octas
+            .checked_add(transfer_octas)
+            .ok_or(ForeignLaneError::BalanceOverflow)?;
+        let total_debit = total_octas
+            .checked_mul(ATTO_PER_OCTA)
+            .ok_or(ForeignLaneError::BalanceOverflow)?;
+
+        let available = state
+            .accounts
+            .get(&foreign_bud_addr)
+            .map_or(0u128, account_total_attos);
+        if available < total_debit {
+            return Err(ForeignLaneError::InsufficientForeignBalance {
+                available,
+                required: total_debit,
+            });
+        }
+
+        let mut sender_next = state
+            .accounts
+            .get(&foreign_bud_addr)
+            .cloned()
+            .unwrap_or_else(|| crate::core::account::Account::new(foreign_bud_addr));
+        sub_attos_from_account(&mut sender_next, total_debit).map_err(|_| {
+            ForeignLaneError::InsufficientForeignBalance {
+                available,
+                required: total_debit,
+            }
+        })?;
+
+        let rcpt_staged = if let Some((rcpt_move_addr, octas)) = tx.direct_octa_transfer {
+            let send_attos = u128::from(octas)
+                .checked_mul(ATTO_PER_OCTA)
+                .ok_or(ForeignLaneError::BalanceOverflow)?;
+            let rcpt_bud = self
+                .move_alias_to_pq
+                .get(&rcpt_move_addr)
+                .copied()
+                .map(Ok)
+                .unwrap_or_else(|| {
+                    derive_foreign_account(ForeignScheme::AptosAuth, &rcpt_move_addr)
+                })
+                .map_err(|_| ForeignLaneError::InvalidAdoptSignature)?;
+            if rcpt_bud == foreign_bud_addr {
+                add_attos_to_account(&mut sender_next, send_attos)
+                    .map_err(|_| ForeignLaneError::BalanceOverflow)?;
+                None
+            } else {
+                let mut acc = state
+                    .accounts
+                    .get(&rcpt_bud)
+                    .cloned()
+                    .unwrap_or_else(|| crate::core::account::Account::new(rcpt_bud));
+                add_attos_to_account(&mut acc, send_attos)
+                    .map_err(|_| ForeignLaneError::BalanceOverflow)?;
+                Some((rcpt_bud, acc))
+            }
+        } else {
+            None
+        };
+
+        state.accounts.insert(foreign_bud_addr, sender_next);
+        if let Some((rcpt, acc)) = rcpt_staged {
+            state.accounts.insert(rcpt, acc);
         }
         self.foreign_nonces
             .insert(foreign_bud_addr, expected_seq.saturating_add(1));
@@ -1078,6 +1236,62 @@ mod tests {
         // Replaying the exact same signed TxRaw (sequence 0) must be refused!
         assert_eq!(
             book.apply_cosmos_envelope(&raw, 0, &mut state),
+            Err(ForeignLaneError::ReplayNonceMismatch {
+                expected: 1,
+                actual: 0,
+            })
+        );
+    }
+
+    /// Directive IP-32 gate: `uel_foreign_tx_replay_refused` (Aptos leg).
+    #[test]
+    fn uel_foreign_tx_replay_refused_aptos() {
+        use crate::execution::coordinator::foreign::aptos::aptos_ed25519_auth_key;
+        use crate::execution::coordinator::foreign::aptos::tests::{
+            build_raw_aptos_transfer_bcs, sign_ed25519_aptos_tx,
+        };
+        use ed25519_dalek::SigningKey;
+
+        let mut book = ForeignCoordinatorBook::new();
+        let mut state = AccountState::new();
+
+        let sk = SigningKey::from_bytes(&[0x77u8; 32]);
+        let sender_move = aptos_ed25519_auth_key(sk.verifying_key().as_bytes());
+        let foreign_bud = derive_foreign_account(ForeignScheme::AptosAuth, &sender_move).unwrap();
+        let foreign_acc = crate::core::account::Account::with_balance(foreign_bud, 10_000_000);
+        state.accounts.insert(foreign_bud, foreign_acc);
+
+        let pq_target = Address([0x88u8; 32]);
+        let _ = book.register_pq_account(pq_target).unwrap();
+        let pq_move_alias: [u8; 32] = derive_local_alias(&pq_target, EeId::MOVE)
+            .unwrap()
+            .try_into()
+            .unwrap();
+
+        let raw_tx = build_raw_aptos_transfer_bcs(
+            sender_move,
+            0,
+            pq_move_alias,
+            50_000, // 50_000 octas = 0.0005 BUD
+            1_000,
+            100,
+            1_900_000_000,
+            BUDLUM_APTOS_CHAIN_ID,
+        );
+        let signed = sign_ed25519_aptos_tx(&sk, &raw_tx);
+
+        let ok = book
+            .apply_aptos_envelope(&signed, 1_800_000_000, &mut state)
+            .expect("first Aptos tx succeeds");
+        assert_eq!(ok.sequence_number, 0);
+        assert_eq!(
+            account_total_attos(state.accounts.get(&pq_target).unwrap()),
+            50_000u128 * ATTO_PER_OCTA
+        );
+
+        // Replaying sequence_number 0 must be deterministically refused.
+        assert_eq!(
+            book.apply_aptos_envelope(&signed, 1_800_000_000, &mut state),
             Err(ForeignLaneError::ReplayNonceMismatch {
                 expected: 1,
                 actual: 0,

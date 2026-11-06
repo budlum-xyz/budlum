@@ -138,6 +138,20 @@ STARK proving on every call (`BLG-248`).
   BPF Upgradeable Loader, and Universal Call (`SHA256("BDLM_SVM_UNIVERSAL_PROGRAM_V1")`).
   Solana `Vote` and `Stake` programs are deterministically refused (`Section 8.15`).
 
+## 11. Move (Aptos) Execution Environment and Foreign Envelope (`WP-32`, `BLG-249`)
+
+- Out-of-process worker: `budlum-ee-move` (`execution/move/`, `EeId::MOVE = 0x04`,
+  `BLOCK_STM_ENABLED = false`, `1 Aptos gas unit = 100 BGU`, `1 octa = 10^10 attoBUD`),
+  with `0xBD` local-alias authentication-key scheme byte verified unused against pinned
+  `aptos-core` (`81d89f428fe8e4b69d53b4916993e9a930afc37c`), `0x1` staking/governance
+  modules disabled, `0x1::randomness` bound to `BlockContext`, and
+  `0x1::budlum_universal::call`.
+- Foreign envelope (`src/execution/coordinator/foreign/aptos.rs`): BCS `SignedTransaction`
+  for chain ID `205` (`45261 mod 256`), verifying `Ed25519`, `MultiEd25519`, and
+  `SingleKey` (`Ed25519` / `Secp256k1Ecdsa`) authenticators while refusing OIDC keyless
+  accounts, expired timestamps, and sequence-number replays (`uel_foreign_tx_replay_refused_aptos`).
+
+
 
 
 

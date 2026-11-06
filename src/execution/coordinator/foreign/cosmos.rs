@@ -499,11 +499,35 @@ fn decompress_secp256k1_pubkey(pubkey_33: &[u8]) -> Result<AffinePoint, CosmosEn
     .ok_or(CosmosEnvelopeError::InvalidPublicKeyBytes)
 }
 
-/// Verify a 64-byte compact `(r || s)` low-`s` `secp256k1` ECDSA signature over
-/// `SHA-256(sign_doc_bytes)` using audited `k256` curve arithmetic.
-pub fn verify_cosmos_secp256k1_direct(
-    pubkey_33: &[u8],
-    sign_doc_bytes: &[u8],
+fn parse_secp256k1_pubkey(pubkey: &[u8]) -> Result<AffinePoint, CosmosEnvelopeError> {
+    if pubkey.len() == 33 {
+        return decompress_secp256k1_pubkey(pubkey);
+    }
+    if pubkey.len() != 65 || pubkey.first().copied() != Some(0x04) {
+        return Err(CosmosEnvelopeError::InvalidPublicKeyBytes);
+    }
+    let Some(x_slice) = pubkey.get(1..33) else {
+        return Err(CosmosEnvelopeError::InvalidPublicKeyBytes);
+    };
+    let Some(&y_last) = pubkey.get(64) else {
+        return Err(CosmosEnvelopeError::InvalidPublicKeyBytes);
+    };
+    let x_bytes =
+        FieldBytes::try_from(x_slice).map_err(|_| CosmosEnvelopeError::InvalidPublicKeyBytes)?;
+    let pt = Option::<AffinePoint>::from(AffinePoint::decompress(
+        &x_bytes,
+        k256::elliptic_curve::subtle::Choice::from(y_last & 1),
+    ))
+    .ok_or(CosmosEnvelopeError::InvalidPublicKeyBytes)?;
+    if pt.to_sec1_point(false).as_bytes() != pubkey {
+        return Err(CosmosEnvelopeError::InvalidPublicKeyBytes);
+    }
+    Ok(pt)
+}
+
+pub(crate) fn verify_secp256k1_prehashed(
+    pubkey_sec1: &[u8],
+    digest: &[u8; 32],
     sig_64: &[u8],
 ) -> Result<(), CosmosEnvelopeError> {
     if sig_64.len() != 64 {
@@ -515,7 +539,7 @@ pub fn verify_cosmos_secp256k1_direct(
     if s_slice > SECP256K1_HALF_ORDER.as_slice() {
         return Err(CosmosEnvelopeError::SignatureHighS);
     }
-    let pub_point = decompress_secp256k1_pubkey(pubkey_33)?;
+    let pub_point = parse_secp256k1_pubkey(pubkey_sec1)?;
     let r_fb = FieldBytes::try_from(r_slice).map_err(|_| CosmosEnvelopeError::InvalidSignature)?;
     let s_fb = FieldBytes::try_from(s_slice).map_err(|_| CosmosEnvelopeError::InvalidSignature)?;
     let r = Option::<Scalar>::from(Scalar::from_repr(r_fb))
@@ -526,8 +550,7 @@ pub fn verify_cosmos_secp256k1_direct(
         return Err(CosmosEnvelopeError::InvalidSignature);
     }
 
-    let digest: [u8; 32] = Sha256::digest(sign_doc_bytes).into();
-    let e = <Scalar as Reduce<FieldBytes>>::reduce(&FieldBytes::from(digest));
+    let e = <Scalar as Reduce<FieldBytes>>::reduce(&FieldBytes::from(*digest));
     let s_inv = Option::<Scalar>::from(s.invert()).ok_or(CosmosEnvelopeError::InvalidSignature)?;
     let u1 = e * s_inv;
     let u2 = r * s_inv;
@@ -544,6 +567,17 @@ pub fn verify_cosmos_secp256k1_direct(
         return Err(CosmosEnvelopeError::InvalidSignature);
     }
     Ok(())
+}
+
+/// Verify a 64-byte compact `(r || s)` low-`s` `secp256k1` ECDSA signature over
+/// `SHA-256(sign_doc_bytes)` using audited `k256` curve arithmetic.
+pub fn verify_cosmos_secp256k1_direct(
+    pubkey_33: &[u8],
+    sign_doc_bytes: &[u8],
+    sig_64: &[u8],
+) -> Result<(), CosmosEnvelopeError> {
+    let digest: [u8; 32] = Sha256::digest(sign_doc_bytes).into();
+    verify_secp256k1_prehashed(pubkey_33, &digest, sig_64)
 }
 
 fn parse_ubud_coins(coins: &[CosmosCoinProto]) -> Result<u64, CosmosEnvelopeError> {
@@ -798,9 +832,7 @@ mod tests {
             "8eb208f7e05d987a9b044a8e98c6b087f15a0bfc"
         );
         assert_eq!(
-            hex::encode(ripemd160(
-                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
-            )),
+            hex::encode(ripemd160(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")),
             "12a053384a9c0c88e405a06c27dcf49ada62eb2b"
         );
     }

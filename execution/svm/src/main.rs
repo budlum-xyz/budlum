@@ -3,7 +3,8 @@
 #![forbid(unsafe_code)]
 
 use std::env;
-use std::os::unix::net::UnixStream;
+use std::fs;
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -14,14 +15,14 @@ fn parse_socket_arg() -> Result<PathBuf, String> {
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--socket" {
-            if let Some(val) = args.next() {
-                return Ok(PathBuf::from(val));
-            }
-            return Err("missing path after --socket".into());
+            return args
+                .next()
+                .map(PathBuf::from)
+                .ok_or_else(|| "missing value after --socket".to_string());
         }
-        if let Some(rest) = arg.strip_prefix("--socket=") {
-            if !rest.is_empty() {
-                return Ok(PathBuf::from(rest));
+        if let Some(val) = arg.strip_prefix("--socket=") {
+            if !val.is_empty() {
+                return Ok(PathBuf::from(val));
             }
         }
     }
@@ -29,31 +30,37 @@ fn parse_socket_arg() -> Result<PathBuf, String> {
 }
 
 fn main() -> ExitCode {
-    let sock_path = match parse_socket_arg() {
+    let socket_path = match parse_socket_arg() {
         Ok(p) => p,
         Err(msg) => {
-            eprintln!("budlum-ee-svm: {msg}");
+            eprintln!("{msg}");
             return ExitCode::from(2);
         }
     };
-
-    let stream = match UnixStream::connect(&sock_path) {
-        Ok(s) => s,
+    if socket_path.exists() {
+        let _ = fs::remove_file(&socket_path);
+    }
+    let listener = match UnixListener::bind(&socket_path) {
+        Ok(l) => l,
         Err(err) => {
-            eprintln!(
-                "budlum-ee-svm: connect {} failed: {err}",
-                sock_path.display()
-            );
+            eprintln!("failed to bind {}: {err}", socket_path.display());
             return ExitCode::from(1);
         }
     };
 
-    let mut worker = SvmWorker;
-    match serve_connection(stream, &mut worker) {
-        Ok(ServeEnd::Disconnected | ServeEnd::Shutdown) => ExitCode::SUCCESS,
-        Err(err) => {
-            eprintln!("budlum-ee-svm: transport error: {err}");
-            ExitCode::from(1)
+    for incoming in listener.incoming() {
+        match incoming {
+            Ok(stream) => {
+                let mut worker = SvmWorker;
+                if matches!(serve_connection(stream, &mut worker), Ok(ServeEnd::Faulted)) {
+                    return ExitCode::from(75);
+                }
+            }
+            Err(err) => {
+                eprintln!("accept error: {err}");
+                return ExitCode::from(1);
+            }
         }
     }
+    ExitCode::SUCCESS
 }

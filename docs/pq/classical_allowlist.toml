@@ -90,6 +90,12 @@ pq_companion = "QuantumClass::Classical foreign-only custody (K-3, BLG-267); can
 category = "f"
 
 [[entry]]
+path = "src/execution/coordinator/foreign/aptos.rs"
+function = "*"
+pq_companion = "QuantumClass::Classical foreign-only custody (K-3, BLG-267); cannot touch QuantumClass::PostQuantum holdings; Adopt requires ML-DSA-87 PQ companion"
+category = "f"
+
+[[entry]]
 path = "src/domain/producer.rs"
 function = "(imports)"
 pq_companion = "ML-DSA-65 QC of the same producer (consensus/qc.rs); a block needs the QC too"
