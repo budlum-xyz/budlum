@@ -24,7 +24,7 @@ Reading the columns:
 
 | Package | Lane | Layer | Status | PRs | Findings | Notes |
 |---|---|---|---|---|---|---|
-| WP-42 | D | T-Launch | in progress (1/3) | this pull request | BLG-015 (open), BLG-012 to BLG-016 and BLG-081 to BLG-193 (open) | Slice 1 adds `no-float-in-consensus-paths` and `workflows-cover-every-workspace` to `xtask/gates`, wires both into the `Gates` job of `ci.yml`, and adds the `Conformance nightly` workflow that compiles the two endpoint contract workspaces. |
+| WP-42 | D | T-Launch | in progress (1/3) | this pull request | BLG-015 (open), BLG-012 to BLG-016 and BLG-081 to BLG-193 (open) | Slice 1 adds `no-float-in-consensus-paths`, `workflows-cover-every-workspace` and `nightly-workflows-are-required` to `xtask/gates`, wires all three into the `Gates` job of `ci.yml`, adds the `Conformance nightly` workflow that compiles the two endpoint contract workspaces, and adds the missing cron trigger to `determinism.yml`. |
 
 ## WP-42: CI, gates and supply chain
 
@@ -54,7 +54,20 @@ Slice 1 (this pull request):
    crate, `fuzz`, `kani`, and the two endpoint contract workspaces
    under `contracts/object-layer/`. Only executable `run:` content counts, so a
    job name, a cache key and a comment cannot satisfy it.
-3. `.github/workflows/conformance-nightly.yml`. Section 16.2 requires this
+3. `nightly-workflows-are-required`
+   (`xtask/gates/src/gates/nightly_workflows_are_required.rs`).
+   Section 16.2 rule 1 makes a nightly run a gate, and a nightly that never
+   fires protects nothing. Every workflow whose name promises a nightly or a
+   weekly run, and every scheduled workflow Section 16.2 requires, must carry a
+   `cron:` under `schedule:`, declare jobs and disable none of them with a
+   literal false. The required workflows whose subject is not in the tree yet
+   are reported with their owning package instead of failing the build, so the
+   list is visible in every run and shrinks as those packages land; a required
+   workflow that exists and is not scheduled always fails.
+   Running it found one real defect: `determinism.yml` ran on push and on a
+   pull request only, while Section 16.2 puts it on a nightly run as well. The
+   cron trigger is added here.
+4. `.github/workflows/conformance-nightly.yml`. Section 16.2 requires this
    workflow and it did not exist. It compiles the CosmWasm and SVM endpoint
    workspaces, which no job reached before, and asserts that their entry points
    still exist. The full conformance suite of Section 8.13 lands here as the
@@ -62,7 +75,7 @@ Slice 1 (this pull request):
 
 Still open in this package: the workflow set of Section 16.2 that depends on
 workspaces which do not exist yet (`execution.yml` needs the execution
-workspaces of WP-26 to WP-35, `mobile.yml` and `mobile-ios.yml` need WP-11),
+workspaces of WP-26 to WP-35, `mobile.yml` and `mobile-ios.yml` need WP-11 to WP-38),
 `cargo-deny`/`cargo-vet`/`cargo-geiger` per execution workspace, the Kani
 coverage of TEST-GAP-02, the fuzz targets of item 6, and the closure protocol
 of the findings listed above.
@@ -77,6 +90,10 @@ Evidence for slice 1:
 - `workflows-cover-every-workspace` reads 31 workflow files and reports all 8
   workspaces covered, with `fuzz` covered implicitly by `cargo fuzz` because
   cargo-fuzz resolves `fuzz/Cargo.toml` itself.
+- `nightly-workflows-are-required` reports 7 scheduled workflows green and 6
+  required workflows deferred with their owners (`storage-nightly.yml`,
+  `churn-nightly.yml`, `nat-nightly.yml`, `mobile.yml`, `mobile-ios.yml`,
+  `supply-chain.yml`).
 - No CI run number yet: this pull request has not run. The findings this package
   owns stay open until it does, and a self-declared result is not evidence
   (directive 0.3 item 5).
