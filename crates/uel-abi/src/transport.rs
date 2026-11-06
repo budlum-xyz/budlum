@@ -627,14 +627,14 @@ impl RemoteHost<'_> {
         );
         let outcome = write_frame(
             &mut DeadlineIo {
-                stream: &mut **stream,
+                stream: &mut stream,
                 deadline: self.deadline,
             },
             &request,
         )
         .and_then(|()| {
             read_frame(&mut DeadlineIo {
-                stream: &mut **stream,
+                stream: &mut stream,
                 deadline: self.deadline,
             })
         });
