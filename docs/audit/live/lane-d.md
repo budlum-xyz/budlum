@@ -138,6 +138,20 @@ Two readings that changed the shape of the record:
 - DOC-GAP-04 is narrower than its title. Only `Documentation=` is wrong; the unit is otherwise
   hardened and its flags exist.
 
+### 4.2 Third pass: the CI and gate records, read against the workflow files
+
+| Record | Evidence read | Reading |
+|---|---|---|
+| BLG-015 | `crates/bud-codec` and `crates/uel-abi` are path dependencies of the root crate and are used in `src/storage/bud3/` and `src/execution/ee.rs`, so their library code compiles in every root build. No workflow has `--manifest-path crates/bud-codec` or `crates/uel-abi`, so their own `#[cfg(test)]` blocks and `crates/uel-abi/tests/` never execute | **Open, narrowed**: it is a test-execution gap, not a compile gap |
+| BLG-016 | `.github/workflows/ci.yml:1480` runs `cargo deny check` and the `Cargo Deny` matrix covers each manifest; `find` in the lock-freshness step (line 2026) walks all 15 lockfiles. `.github/dependabot.yml` names only three cargo directories (`/`, `/budzero`, `/fuzz`) | **Partly fixed**: the scan covers every lockfile, the update bot still covers three of fifteen |
+| BLG-081 | `crates/wallet-core` exists, so the "directory that does not exist" clause is closed; the only `"wallet-core"` strings left are the `wallet-core` gate's own name and two scratch directories in test fixtures | **Partly fixed**: the missing-directory clause is gone |
+| BLG-085 | `crates/bud-codec/Cargo.toml` and `crates/uel-abi/Cargo.toml` have neither `[profile.release]` nor `overflow-checks`; every other crate in the tree has both | **Open, narrowed to exactly two crates** |
+| BLG-097 | `kani/Cargo.lock` exists, so that clause is closed. `bud/fuzz/` has no `Cargo.lock`, and `bud/kani/kani_bud_format.rs` is still in the tree with no workflow that names `bud/kani` or the file | **Partly fixed**: two clauses closed, two still open |
+| DOC-GAP-07 | `Cargo.toml:255` declares the bin | **Previously fixed** |
+
+The value of the pass is the narrowing: three records that read as wide classes (BLG-015, BLG-085,
+BLG-097) are down to one or two named files each, which is what a closing package needs to act on.
+
 Seven records still have no reading: BLG-011, BLG-016, BLG-081 to BLG-087, BLG-097, BLG-169,
 BLG-170 to BLG-181, BLG-187 to BLG-193, BLG-200, BLG-231, BLG-255, TEST-GAP-02 and TEST-GAP-07 need
 either the record text or a toolchain this sandbox does not have.
