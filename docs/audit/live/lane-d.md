@@ -209,6 +209,28 @@ empty and both `actions/jobs/<id>/logs` endpoints return `EOF` from the blob-sto
 every attempt. So this ledger records the failed step and the command it runs, which is enough to
 reproduce locally with one command, and does not invent an error message.
 
+### The first red job is not a drift in the lock, it is an omission
+
+The health pulse's failing step runs `cargo metadata --format-version 1 --locked` once per lockfile
+directory. Read against the root pair, that command has a definite reason to fail, and it is not a
+stale version:
+
+- `Cargo.toml:205` declares `bud-codec = { path = "crates/bud-codec" }`, not `optional`.
+- The root `Cargo.lock` contains no `bud-codec` package at all: `grep -c` over the lock returns 0.
+- The `budlum-core` package block lists eleven sibling crates and `bud-codec` is not among them,
+  although it is the twelfth path dependency.
+- `crates/bud-codec` needs `zstd 0.13.3` and `ruzstd 0.8.1`, and the root lock names neither, so
+  this is not just a missing package block: four packages are absent and eight transitive versions
+  differ from what `crates/bud-codec/Cargo.lock` resolves (`libc` 0.2.186 against 0.2.191, `cc`
+  1.2.63 against 1.11.0, and six more).
+
+That makes the missing `--locked` resolution a *consequence* of the missing dependency, not a
+separate fault. It is why the record below is written as an omission with its arithmetic, and why
+this lane does not fix it: `Cargo.lock` is not a lane D lock path, and hand-writing the four package
+blocks would invent a resolution that the next real `cargo` run would rewrite. The fix is one
+`cargo update` on a machine with a toolchain, in WP-42, where `.github/workflows/` and the supply
+chain live.
+
 Two records in the directive's own review family read on this: BLG-264 and BLG-265 (the `WIRING:`
 count and the combined-state record). They stay `Open` here; the red pulse is cited as the live
 evidence that the drift is real, not as a closed record.
