@@ -1,0 +1,3 @@
+{"device_id":"device-a","tier":"entry4_gb","peak_rss_mib":120,"daily_battery_bps":200,"metered_bytes_served":0,"allow_cellular_opt_in":false,"audits_answered":10,"audits_missed":1,"rewards_credited_atoms":100}
+{"device_id":"device-b","tier":"midrange8_gb","peak_rss_mib":180,"daily_battery_bps":500,"metered_bytes_served":1024,"allow_cellular_opt_in":true,"audits_answered":20,"audits_missed":0,"rewards_credited_atoms":200}
+{"device_id":"device-a","tier":"entry4_gb","peak_rss_mib":130,"daily_battery_bps":250,"metered_bytes_served":0,"allow_cellular_opt_in":false,"audits_answered":5,"audits_missed":0,"rewards_credited_atoms":50}

@@ -1,0 +1,13 @@
+[package]
+name = "budlum-mobile-log-analyzer"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+publish = false
+
+# Keep this operator tool independent of the root workspace membership.
+[workspace]
+
+[dependencies]
+budlum-core = { path = "../../.." }
+serde_json = "1"

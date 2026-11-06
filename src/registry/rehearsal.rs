@@ -304,6 +304,7 @@ pub struct MobileFieldSummary {
 /// battery drain (`> 5% / day`).
 pub fn analyze_mobile_field_logs(jsonl: &str) -> Result<MobileFieldSummary, RehearsalError> {
     let mut summary = MobileFieldSummary::default();
+    let mut devices = BTreeSet::new();
     for raw in jsonl.lines() {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -333,7 +334,8 @@ pub fn analyze_mobile_field_logs(jsonl: &str) -> Result<MobileFieldSummary, Rehe
                 "Mobile validator exceeded 5.00%/day background battery ceiling",
             ));
         }
-        summary.device_count = summary.device_count.saturating_add(1);
+        devices.insert(sample.device_id);
+        summary.device_count = devices.len();
         summary.max_rss_mib = summary.max_rss_mib.max(sample.peak_rss_mib);
         summary.max_daily_battery_bps = summary
             .max_daily_battery_bps
@@ -405,6 +407,28 @@ mod tests {
 
         topo.full_validators.pop();
         assert!(verify_rehearsal_topology(&topo).is_err());
+    }
+
+    #[test]
+    fn device_log_analyzer_golden_reports() {
+        let input = include_str!("../../mobile/tools/log-analyzer/fixtures/samples.jsonl");
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../mobile/tools/log-analyzer/fixtures/report.json"
+        ))
+        .unwrap();
+        let actual = serde_json::to_value(analyze_mobile_field_logs(input).unwrap()).unwrap();
+        assert_eq!(actual, expected);
+
+        assert!(analyze_mobile_field_logs("").is_err());
+        assert!(analyze_mobile_field_logs("not json").is_err());
+        let excessive_battery =
+            input.replace("\"daily_battery_bps\":500", "\"daily_battery_bps\":501");
+        assert!(analyze_mobile_field_logs(&excessive_battery).is_err());
+        let unapproved_cellular = input.replace(
+            "\"allow_cellular_opt_in\":true",
+            "\"allow_cellular_opt_in\":false",
+        );
+        assert!(analyze_mobile_field_logs(&unapproved_cellular).is_err());
     }
 
     #[test]
