@@ -17,9 +17,12 @@
 //! 2. **A field numbered twice** inside one message, and **a field number
 //!    reused after deletion**, which the file records as `reserved`.
 //! 3. **A BOF-1 field in the proto.** The object header is canonical in
-//!    `src/storage/bud3/bof1.rs`; a `magic`, `version`, `flags` or `payload`
-//!    field here would be a second encoding of it, and the first time the two
-//!    disagreed the network would have two objects with one name.
+//!    `src/storage/bud3/bof1.rs`; a `magic`, `flags` or `payload` field here
+//!    would be a second encoding of it, and the first time the two disagreed
+//!    the network would have two objects with one name. `version` is
+//!    deliberately *not* on that list: BOF-1's `version` is the object
+//!    format's, while the protocol's `version` belongs on every message that
+//!    opens an exchange, and this gate requires it there instead (rule 6).
 //! 4. **A presentation field.** No raster reaches a wire message: `png`,
 //!    `bdlv` and `h264` are refused by name, the same rule
 //!    `bud3_qr_is_presentation` applies to hash inputs.
@@ -357,7 +360,8 @@ pub fn self_test() -> Result<String, String> {
     result?;
     Ok(String::from(
         "bud3-proto-is-total canary OK: an orphan message, a reused number, a reserved \
-         number, a BOF-1 header field and a raster field all failed.",
+         number, a BOF-1 header field, a raster field and an unversioned Request all \
+         failed.",
     ))
 }
 
