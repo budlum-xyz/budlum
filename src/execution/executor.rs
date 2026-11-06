@@ -4615,4 +4615,25 @@ mod tests {
             "the whole bond came back, less the two fees"
         );
     }
+
+    /// Closing the layer must not close accountability either.
+    ///
+    /// `AiDisputeSlash` burns a bond for equivocation proven on a request that
+    /// already exists. Refusing it for the whole dispute window lets the window
+    /// expire, after which `operator_has_open_obligations` is false and the
+    /// operator withdraws the full bond unslashed through the open exit.
+    #[test]
+    fn a_dispute_survives_the_closure_on_testnet() {
+        let (_, testnet, _) = boundary_chain_ids();
+        assert!(!ai_layer_enabled(testnet));
+        let who = Address::from([28u8; 32]);
+        let dispute = ai_layer_doors(who)
+            .into_iter()
+            .find(|t| matches!(t, TransactionType::AiDisputeSlash { .. }))
+            .expect("the door list carries a dispute");
+        assert!(
+            is_ai_layer_exit(&dispute),
+            "an equivocator must not escape the bond by waiting out a refused window"
+        );
+    }
 }
