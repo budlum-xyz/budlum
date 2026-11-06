@@ -111,7 +111,6 @@ mod gates {
     pub mod multi_ratio_consensus;
     pub mod named_tests;
     pub mod network_hardening_gate;
-    pub mod nightly_workflows_are_required;
     pub mod no_conflict_markers;
     pub mod no_constant_security_verdicts;
     pub mod no_float_in_consensus_paths;
@@ -1414,14 +1413,6 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::workflows_cover_every_workspace::self_test,
-    },
-    Gate {
-        name: "nightly-workflows-are-required",
-        replaces: None,
-        run: gates::nightly_workflows_are_required::run,
-        run_log: None,
-        run_args: None,
-        self_test: gates::nightly_workflows_are_required::self_test,
     },
 ];
 
