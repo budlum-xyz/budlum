@@ -96,3 +96,17 @@ STARK proving on every call (`BLG-248`).
 - Universal Call precompile skeleton: `0x000000000000000000000000000000000000B001`
   (`contracts/uel/BudlumUniversal.sol`).
 
+## 7. Ethereum JSON-RPC Compatibility Gateway (`WP-28`, `BLG-249`)
+
+- Public HTTP and WebSocket listener: `127.0.0.1:18547` (`src/rpc/compat/ethereum/`,
+  configured under `[compat.ethereum]` in `config/*.toml`).
+- Method classification table: `src/rpc/compat/ethereum/method_class.rs`
+  (`ETH_METHOD_CLASSES`). `debug_traceTransaction` and `debug_traceCall` are served
+  exclusively on the loopback operator listener (`127.0.0.1:18557`).
+- Block `stateRoot` semantics (`Section 8.10` items 5 and 6): the `stateRoot` field
+  returned by `eth_getBlockByNumber`, `eth_getBlockByHash`, and `newHeads` is
+  Budlum's sparse-Merkle `execution_root` (`BDLM_UEL_ROOT_V1`), **not** an Ethereum
+  hexary Patricia MPT root. Consequently, `eth_getProof` deterministically returns
+  JSON-RPC `-32601` (`Method not found`) and directs callers to `bud_getExecutionProof`.
+
+
