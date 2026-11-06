@@ -45,9 +45,11 @@ low-degree random XOR rule and a `u8` degree cap. Past degree 255 the rule
 saturated and its "independent" repair symbols began repeating each other, so a
 large segment could not recover from loss (BLG-216). Its ceilings were `u32`
 (preview 1 MiB, package 64 MiB, `k <= 4096`, video 50 000 frames), so an object
-past 4 GiB was silently cut (BLG-213). The file is removed by the package that
-owns the codec register; until then both models exist in the tree and only
-B.U.D. 3.0 is on the target path.
+past 4 GiB was silently cut (BLG-213). The file sits on this package's own lock
+path, so it is removed by the second half of WP-18 together with its call sites
+in `qr_frame`, `qr_payload`, `qr_recipe`, `qr_receive`, `qr_reemit`, `qr_video`
+and `emit`. Until that lands, both models exist in the tree and only B.U.D. 3.0
+is on the target path.
 
 ## Tests that state the above
 
