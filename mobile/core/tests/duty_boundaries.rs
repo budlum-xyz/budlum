@@ -148,3 +148,102 @@ fn mobile_proof_duty_keeps_the_object_identity() -> Result<(), Box<dyn std::erro
     assert_ne!(first, second, "the host must know which object to submit");
     Ok(())
 }
+
+#[test]
+fn mobile_core_replay_refusal_preserves_space_and_pending_duties(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut core = core(FREE_SPACE_FLOOR_BYTES + 128);
+    let share = assigned(1, 10);
+    core.accept_share(share.clone())?;
+    let before = core.status();
+    let available = core.available_bytes();
+    assert_eq!(
+        refusal(core.accept_share(share)).code,
+        "mobile_share_already_stored"
+    );
+    assert_eq!(core.status(), before);
+    assert_eq!(core.available_bytes(), available);
+    assert!(core.drain_duties().is_empty());
+    Ok(())
+}
+
+#[test]
+fn mobile_conflicting_position_or_esi_does_not_replace_a_share(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for same_esi in [false, true] {
+        let first = assigned(1, 10);
+        let mut conflicting = assigned(1, 20);
+        if same_esi {
+            conflicting.position = 1;
+            conflicting.placed.insert(0, (6, symbol_leaf(&[30; 64])));
+        } else {
+            conflicting.esi = 8;
+            conflicting.placed = vec![(8, symbol_leaf(&conflicting.symbol))];
+        }
+        let mut store = ShareStore::new();
+        let original = store.accept(first, QUOTA_MIN_BYTES)?;
+        assert_eq!(
+            refusal(store.accept(conflicting, QUOTA_MIN_BYTES)).code,
+            "mobile_share_already_stored"
+        );
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.get(original.id), Some(&original));
+    }
+    Ok(())
+}
+
+#[test]
+fn mobile_distinct_symbols_of_one_segment_remain_usable() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut first = assigned(1, 10);
+    let mut second = assigned(1, 20);
+    second.esi = 8;
+    second.position = 1;
+    let placed = vec![
+        (7, symbol_leaf(&first.symbol)),
+        (8, symbol_leaf(&second.symbol)),
+    ];
+    first.placed = placed.clone();
+    second.placed = placed;
+    let mut core = core(FREE_SPACE_FLOOR_BYTES + 128);
+    core.accept_share(first)?;
+    core.accept_share(second)?;
+    assert_eq!(core.status().stored_bytes, 128);
+    for position in [0, 1] {
+        assert!(matches!(
+            core.answer_audit(
+                [1; 32],
+                Audit {
+                    segment: 0,
+                    position,
+                    sub_block: 0
+                }
+            )?,
+            DutyTx::CustodyProofBatch(_)
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn presence_preimage_matches_shared_golden_vector() {
+    use budlum_mobile_core::presence::presence_preimage;
+    use sha3::{Digest, Sha3_256};
+
+    const EXPECTED: &[u8; 32] = include_bytes!("../../../tests/vectors/presence/v1/digest.bin");
+    const PREIMAGE: &[u8; 65] = include_bytes!("../../../tests/vectors/presence/v1/preimage.bin");
+    assert_eq!(Sha3_256::digest(PREIMAGE).as_slice(), EXPECTED);
+    assert_eq!(
+        presence_preimage(45_261, 11, ValidatorClass::Mobile),
+        *EXPECTED
+    );
+    assert_ne!(
+        presence_preimage(45_261, 11, ValidatorClass::Full),
+        *EXPECTED
+    );
+    assert_ne!(
+        presence_preimage(45_261, 12, ValidatorClass::Mobile),
+        *EXPECTED
+    );
+    assert_ne!(presence_preimage(1, 11, ValidatorClass::Mobile), *EXPECTED);
+}
