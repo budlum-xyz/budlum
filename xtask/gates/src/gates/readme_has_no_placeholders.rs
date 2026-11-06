@@ -50,8 +50,8 @@ const BASELINE: &str = ".github/readme-placeholders-baseline.txt";
 /// The marker that opens a slot.
 const SLOT_OPEN: &str = "{{";
 
-/// To-do markers, as whole words and case-sensitively: `todo` inside a word is
-/// not a marker here, and `TBD` is written in capitals when it is one.
+/// To-do markers, matched as whole words and case-insensitively: `todolist` is
+/// one word and not a marker, and `ToDo` in the middle of a sentence is.
 const MARKERS: &[&str] = &["TODO", "TBD", "FIXME"];
 
 /// One recorded slot.
@@ -103,7 +103,7 @@ fn markers_on(line: &str) -> Vec<String> {
         }
         if word_len > 0 {
             let word = &line[start..index];
-            if MARKERS.contains(&word) {
+            if MARKERS.contains(&word.to_uppercase().as_str()) {
                 out.push(word.to_string());
             }
             word_len = 0;
