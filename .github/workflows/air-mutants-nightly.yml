@@ -1,0 +1,48 @@
+# Nightly mutation check of the AIR rules.
+#
+# Each AIR rule must be noticed by at least one test: a mutant that changes a
+# rule and leaves the tests green means a constraint nobody checks. This runs
+# on a schedule and by hand only. It never runs on a pull request, so it never
+# blocks one.
+
+name: AIR Mutants Nightly
+
+on:
+  schedule:
+    - cron: "15 2 * * *"   # nightly, 02:15 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: air-mutants-nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  air-mutants:
+    name: cargo mutants (AIR rules)
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budzero-air-mutants
+          workspaces: budzero
+      - name: cargo install cargo-mutants
+        run: cargo install cargo-mutants --locked
+      # The baseline is not skipped: the unmutated tree has to be green before
+      # a verdict is trusted. A timeout is never counted as caught.
+      - name: cargo mutants (AIR constraint file)
+        working-directory: budzero
+        run: |
+          set -euo pipefail
+          cargo mutants --in-place --timeout 900 \
+            --file bud-proof/src/plonky3_air.rs -- --lib

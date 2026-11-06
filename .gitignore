@@ -1,0 +1,22 @@
+target/
+# A CI artifact (the output of the xtask/tools generate-sbom tool); it is not committed
+sbom.cdx.json
+protoc-*.zip
+# Build status
+
+# Python bytecode caches (never source)
+__pycache__/
+*.pyc
+
+# Node state and key material. The profiles in config/ write keys to
+# ./secrets/ and chain state to ./data/ (relative to the working directory);
+# neither may ever be committed. Anchored to the
+# root so tracked directories that happen to be called `data` elsewhere in
+# the tree keep working.
+/secrets/
+/data/
+
+# Foundry build output of the Ethereum-side contracts.
+/contracts/out/
+/contracts/cache/
+.claude/settings.local.json

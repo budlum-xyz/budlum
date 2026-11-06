@@ -1,0 +1,587 @@
+//! A refusal must not leave a partial write behind.
+//!
+//! Ported from `scripts/check-refusals-do-not-mutate-first.sh`. A
+//! `Result`-returning function that removes from a `self.` collection and can
+//! still `return Err` afterwards must either put the value back (`.insert` on
+//! the failing path), decide every refusal before the remove, or declare
+//! `PARTIAL: allowed - <reason>` in its doc comment.
+
+use std::fmt::Write as _;
+use std::path::Path;
+
+const SCAN_ROOTS: &[&str] = &["src", "budzero", "crates", "bud/src"];
+
+/// Balanced brace body starting at `open` (index of `{`).
+/// Skip a regular string literal starting at `b[j] == b'"'`. Returns the
+/// index just past the closing quote. Backslash escapes hide a quote.
+fn skip_string(b: &[u8], j: usize) -> usize {
+    let mut k = j + 1;
+    while k < b.len() {
+        match b[k] {
+            b'\\' => k += 2,
+            b'"' => return k + 1,
+            _ => k += 1,
+        }
+    }
+    b.len()
+}
+
+/// Skip a raw string literal (`r"..."`, `r#"..."#`, `br##"..."##`) whose
+/// opening prefix starts at `j`. Returns the index just past the closing
+/// delimiter, or `None` when the bytes at `j` are not a raw string (an
+/// identifier like `r#gen`, or a plain `r`).
+fn skip_raw_string(b: &[u8], j: usize) -> Option<usize> {
+    let mut k = j;
+    if k < b.len() && b[k] == b'b' {
+        k += 1;
+    }
+    if k >= b.len() || b[k] != b'r' {
+        return None;
+    }
+    k += 1;
+    let mut hashes = 0usize;
+    while k < b.len() && b[k] == b'#' {
+        hashes += 1;
+        k += 1;
+    }
+    if k >= b.len() || b[k] != b'"' {
+        return None;
+    }
+    k += 1;
+    while k < b.len() {
+        if b[k] == b'"' {
+            let mut h = 0usize;
+            while h < hashes && k + 1 + h < b.len() && b[k + 1 + h] == b'#' {
+                h += 1;
+            }
+            if h == hashes {
+                return Some(k + 1 + hashes);
+            }
+        }
+        k += 1;
+    }
+    Some(b.len())
+}
+
+/// Skip a block comment starting at `b[j..j+2] == "/*"`. Rust block comments
+/// nest. Returns the index just past the closing `*/`, or the end of the
+/// input for an unterminated comment.
+fn skip_block_comment(b: &[u8], j: usize) -> usize {
+    let mut depth = 1usize;
+    let mut k = j + 2;
+    while k + 1 < b.len() {
+        if b[k] == b'/' && b[k + 1] == b'*' {
+            depth += 1;
+            k += 2;
+        } else if b[k] == b'*' && b[k + 1] == b'/' {
+            depth -= 1;
+            k += 2;
+            if depth == 0 {
+                return k;
+            }
+        } else {
+            k += 1;
+        }
+    }
+    b.len()
+}
+
+/// Skip a character literal starting at `b[j] == b'\''`, or return `None`
+/// when the quote starts a lifetime instead. A char literal closes within a
+/// few bytes (escapes included); a lifetime never does.
+fn skip_char_literal(b: &[u8], j: usize) -> Option<usize> {
+    let mut k = j + 1;
+    if k < b.len() && b[k] == b'\\' {
+        k += 1; // the escape start; the scan below finds the closing quote
+    }
+    let limit = (j + 16).min(b.len());
+    while k < limit {
+        match b[k] {
+            b'\n' => return None,
+            b'\'' => return Some(k + 1),
+            _ => k += 1,
+        }
+    }
+    None
+}
+
+fn balanced(src: &str, open: usize) -> String {
+    let mut depth = 0i32;
+    let mut j = open;
+    let b = src.as_bytes();
+    while j < b.len() {
+        match b[j] {
+            // Braces inside literals and comments are text, not structure.
+            // The old counter walked straight through them, so a `"}"` in a
+            // string or a `// {` in a comment ended the test-module strip at
+            // the wrong place and test-only code was scanned as production.
+            b'"' => {
+                j = skip_string(b, j);
+                continue;
+            }
+            b'r' | b'b' => {
+                if let Some(k) = skip_raw_string(b, j) {
+                    j = k;
+                    continue;
+                }
+            }
+            b'\'' => {
+                if let Some(k) = skip_char_literal(b, j) {
+                    j = k;
+                    continue;
+                }
+            }
+            b'/' if j + 1 < b.len() && b[j + 1] == b'/' => {
+                while j < b.len() && b[j] != b'\n' {
+                    j += 1;
+                }
+                continue;
+            }
+            b'/' if j + 1 < b.len() && b[j + 1] == b'*' => {
+                j = skip_block_comment(b, j);
+                continue;
+            }
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return src[open..=j].to_string();
+                }
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    src[open..].to_string()
+}
+
+/// Remove `#[cfg(test)] mod ... { }` blocks, mirroring the shell gate's
+/// `strip_test_mods`. When a `#[cfg(test)]` attribute is not followed by a
+/// `mod`, it is left in place and the scan continues past it (the shell
+/// regex skips it, it does not abort the whole strip).
+fn strip_test_mods(src: &str) -> String {
+    let mut out = String::new();
+    let mut rest = src;
+    loop {
+        let m = rest.find("#[cfg(test)]");
+        let Some(m) = m else {
+            out.push_str(rest);
+            return out;
+        };
+        let attr_end = m + "#[cfg(test)]".len();
+        // Only a `mod` item is a test module. Anything else is left in place.
+        let head = rest[attr_end..].trim_start();
+        let head = head.strip_prefix("pub ").unwrap_or(head).trim_start();
+        if !head.starts_with("mod ") {
+            out.push_str(&rest[..attr_end]);
+            rest = &rest[attr_end..];
+            continue;
+        }
+        // `mod name;` has no body: the item ends at the semicolon.
+        let semi = rest[attr_end..].find(';');
+        let brace = rest[attr_end..].find('{');
+        let end = match (semi, brace) {
+            (Some(sc), Some(br)) if sc < br => attr_end + sc + 1,
+            (Some(sc), None) => attr_end + sc + 1,
+            (_, Some(br)) => {
+                let open = attr_end + br;
+                open + balanced(rest, open).len()
+            }
+            (None, None) => rest.len(),
+        };
+        out.push_str(&rest[..m]);
+        // Keep the line breaks of the removed text so reported line numbers
+        // still match the file.
+        out.extend(rest[m..end].chars().filter(|c| *c == '\n'));
+        rest = &rest[end..];
+    }
+}
+
+/// Collect production `.rs` files under the scan roots.
+fn collect_files(root: &Path) -> Result<Vec<(std::path::PathBuf, String)>, String> {
+    let mut files: Vec<(std::path::PathBuf, String)> = Vec::new();
+    for scan_root in SCAN_ROOTS {
+        let base = root.join(scan_root);
+        if !base.is_dir() {
+            continue;
+        }
+        let mut stack = vec![base];
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in rd.filter_map(Result::ok) {
+                let Ok(path_kind) = e.file_type() else {
+                    continue;
+                };
+                let path = e.path();
+                if path_kind.is_dir() {
+                    let name = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    if !matches!(name.as_str(), ".git" | "target" | "node_modules") {
+                        stack.push(path);
+                    }
+                } else if path.extension().is_some_and(|x| x == "rs") {
+                    let rel = path
+                        .strip_prefix(root)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    if !is_test_path(&rel) {
+                        files.push((path, rel));
+                    }
+                }
+            }
+        }
+    }
+    if files.is_empty() {
+        return Err(format!(
+            "no production .rs files found under {}",
+            root.display()
+        ));
+    }
+    Ok(files)
+}
+
+fn is_test_path(rel: &str) -> bool {
+    rel.contains("/tests/") || rel.ends_with("_tests.rs") || rel.ends_with("/tests.rs")
+}
+
+/// Doc comment lines immediately above `at`, mirroring the shell gate which
+/// iterates `src[:at].splitlines()[:-1]` (the last line holds the tail of the
+/// `fn` line itself and must not be inspected).
+fn doc_above(src: &str, at: usize) -> String {
+    let before = &src[..at];
+    let lines: Vec<&str> = before.lines().collect();
+    let mut doc: Vec<&str> = Vec::new();
+    for line in lines[..lines.len().saturating_sub(1)].iter().rev() {
+        let t = line.trim();
+        if t.starts_with("///") || t.starts_with("//") {
+            doc.push(t);
+        } else if !t.starts_with('#') && !t.is_empty() {
+            break;
+        }
+    }
+    doc.reverse();
+    doc.join("\n")
+}
+
+/// Does the `fn name(` line return `Result<`?
+fn is_result_fn(line: &str) -> bool {
+    let t = line.trim_start();
+    if !t.starts_with("fn ") {
+        return false;
+    }
+    // `Result<`, `io::Result<`, `anyhow::Result<`: the path before `<` ends
+    // in `Result`.
+    t.find("->").is_some_and(|at| {
+        let ret = t[at + 2..].trim_start();
+        ret.find('<')
+            .is_some_and(|lt| ret[..lt].trim_end().ends_with("Result"))
+    })
+}
+
+/// The shell regex is `self\s*\.\s*\w+\s*\.\s*remove\(`: a `self` receiver
+/// followed by exactly one identifier then `.remove(`. A local variable like
+/// `map.remove(` (where `map` came from `self.inner.write()`) must NOT count,
+/// so the match is the full `self.<word>.remove(` chain, not just any
+/// `self.` in the window.
+fn self_receiver(lines: &[&str], idx: usize) -> Option<String> {
+    let lo = idx.saturating_sub(2);
+    let window: String = lines[lo..=idx]
+        .iter()
+        .map(|l| l.trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let w = window.as_bytes();
+    let mut i = 0;
+    while i + 5 <= w.len() {
+        // "self"
+        if &w[i..i + 4] == b"self"
+            && (i + 4 == w.len() || !w[i + 4].is_ascii_alphanumeric() && w[i + 4] != b'_')
+        {
+            // optional whitespace then '.'
+            let mut j = i + 4;
+            while j < w.len() && (w[j] == b' ' || w[j] == b'\t') {
+                j += 1;
+            }
+            if j >= w.len() || w[j] != b'.' {
+                i += 4;
+                continue;
+            }
+            j += 1;
+            while j < w.len() && (w[j] == b' ' || w[j] == b'\t') {
+                j += 1;
+            }
+            // one identifier
+            let id_start = j;
+            while j < w.len() && (w[j].is_ascii_alphanumeric() || w[j] == b'_') {
+                j += 1;
+            }
+            let id_end = j;
+            if j == id_start {
+                i += 4;
+                continue;
+            }
+            while j < w.len() && (w[j] == b' ' || w[j] == b'\t') {
+                j += 1;
+            }
+            if j >= w.len() || w[j] != b'.' {
+                i += 4;
+                continue;
+            }
+            j += 1;
+            while j < w.len() && (w[j] == b' ' || w[j] == b'\t') {
+                j += 1;
+            }
+            // "remove("
+            if w[j..].starts_with(b"remove(") {
+                return Some(String::from_utf8_lossy(&w[id_start..id_end]).into_owned());
+            }
+            i += 4;
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// # Errors
+///
+/// Returns a finding per offender, or a vacuity failure.
+/// The keyword every scanned definition starts with.
+///
+/// Named so the scan offset and the name offset cannot disagree: the loop
+/// slices at this string, so the name is exactly this far in.
+const FN_KEYWORD: &str = "fn ";
+
+fn verdict(checked_fns: usize, problems: &[String]) -> Result<(), String> {
+    if checked_fns == 0 {
+        return Err(String::from(
+            "gate found no Result-returning fn that removes from a collection - \
+             wrong root, or the pattern changed shape.",
+        ));
+    }
+    if !problems.is_empty() {
+        let mut msg = String::new();
+        for p in problems {
+            writeln!(msg, "FAIL: {p}").expect("writing to a String cannot fail");
+        }
+        return Err(msg);
+    }
+    Ok(())
+}
+
+pub fn run(root: &Path) -> Result<String, String> {
+    let files = collect_files(root)?;
+
+    let mut problems: Vec<String> = Vec::new();
+    let mut checked_fns = 0usize;
+
+    for (path, rel) in &files {
+        let raw = std::fs::read_to_string(path).map_err(|e| format!("cannot read {rel}: {e}"))?;
+        let src = strip_test_mods(&raw);
+        let mut rest = src.as_str();
+        let mut offset = 0usize;
+        while let Some(rel_pos) = rest.find(FN_KEYWORD) {
+            let abs = offset + rel_pos;
+            // Parse the fn signature until `{`.
+            let after = &rest[rel_pos..];
+            let Some(open_rel) = after.find('{') else {
+                break;
+            };
+            let sig = &after[..open_rel];
+            if !is_result_fn(sig) {
+                rest = &after[open_rel + 1..];
+                offset = abs + open_rel + 1;
+                continue;
+            }
+            // Name. `after` was sliced at the `fn ` this iteration found, so
+            // the keyword is at offset 0 and the name begins right after it.
+            // The previous version searched for `fn ` a second time and
+            // unwrapped the result, which asked the same question twice and
+            // panicked on the answer it had already been given.
+            let name_start = FN_KEYWORD.len();
+            let name: String = sig[name_start..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            let brace = abs + open_rel;
+            let body = balanced(&src, brace);
+            let lines: Vec<&str> = body.lines().collect();
+
+            let removes: Vec<usize> = lines
+                .iter()
+                .enumerate()
+                .filter(|(i, l)| {
+                    !l.trim_start().starts_with("//")
+                        && l.contains(".remove(")
+                        && self_receiver(&lines, *i).is_some()
+                })
+                .map(|(i, _)| i)
+                .collect();
+            if removes.is_empty() {
+                rest = &after[open_rel + 1..];
+                offset = abs + open_rel + 1;
+                continue;
+            }
+            checked_fns += 1;
+            let first_remove = removes[0];
+            let receiver = self_receiver(&lines, first_remove).unwrap_or_default();
+            let restore = format!("{receiver}.insert(");
+            let later_err: Vec<usize> = lines
+                .iter()
+                .enumerate()
+                .filter(|(i, l)| {
+                    *i > first_remove
+                        && !l.trim_start().starts_with("//")
+                        && l.contains("return Err(")
+                })
+                .map(|(i, _)| i)
+                .collect();
+            let guarded = |err_line: usize| -> bool {
+                (first_remove + 1..err_line).any(|i| {
+                    !lines[i].trim_start().starts_with("//") && lines[i].contains(&restore)
+                })
+            };
+            let unguarded: Vec<usize> =
+                later_err.iter().copied().filter(|e| !guarded(*e)).collect();
+            let restored = unguarded.is_empty();
+            let declared = doc_above(&src, abs).contains("PARTIAL: allowed");
+
+            if restored && !declared {
+                // ok
+            } else if declared && later_err.is_empty() {
+                // declared but no later err: ok
+            } else if !restored && !declared {
+                let line_no = src[..brace].matches('\n').count() + 1 + first_remove + 1;
+                problems.push(format!(
+                    "{rel}:{line_no}: `{name}` removes from a `self.` collection and \
+                     can still `return Err` afterwards, with nothing putting the value \
+                     back. The caller is told the call failed while the entry is gone, \
+                     and nothing rolls it back. Decide every refusal before the remove, \
+                     restore it on the failing path, or write `PARTIAL: allowed - \
+                     <reason>` in the function's doc."
+                ));
+            }
+            rest = &after[open_rel + 1..];
+            offset = abs + open_rel + 1;
+        }
+    }
+
+    verdict(checked_fns, &problems)?;
+    Ok(format!(
+        "partial-write gate OK: {checked_fns} Result-returning fns remove from a \
+         collection, each deciding its refusals first, restoring on failure, or \
+         declaring why a partial write is allowed"
+    ))
+}
+
+/// # Errors
+///
+/// Returns a finding when a defect fixture passes.
+pub fn self_test() -> Result<String, String> {
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-refusals")?;
+    let _ = std::fs::create_dir_all(dir.join("src"));
+    let _ = std::fs::create_dir_all(dir.join("budzero"));
+    let _ = std::fs::create_dir_all(dir.join("crates/demo/src"));
+    let _ = std::fs::create_dir_all(dir.join("bud/src"));
+
+    // Good: refusal before remove, or insert after.
+    let good = "fn f(&mut self) -> Result<(), E> {\n    if !self.valid() { return Err(E::X); }\n    self.m.remove(&k);\n    Ok(())\n}\nfn g(&mut self) -> Result<(), E> {\n    let v = self.m.remove(&k)?;\n    let r = do_work()?;\n    self.m.insert(k, v);\n    Ok(())\n}\n";
+    std::fs::write(dir.join("src/lib.rs"), good).map_err(|e| e.to_string())?;
+    if run(&dir).is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from("canary: a good module was refused"));
+    }
+
+    // Bad: remove then Err with no insert.
+    let bad = "fn f(&mut self) -> Result<(), E> {\n    self.m.remove(&k);\n    if !self.valid() { return Err(E::X); }\n    Ok(())\n}\n";
+    std::fs::write(dir.join("src/lib.rs"), bad).map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from("canary: Err after remove passed"));
+    }
+
+    // A partial write under a standalone crate or the bud tree is scanned
+    // like one under src.
+    std::fs::write(dir.join("src/lib.rs"), good).map_err(|e| e.to_string())?;
+    for rel in ["crates/demo/src/lib.rs", "bud/src/lib.rs"] {
+        std::fs::write(dir.join(rel), bad).map_err(|e| e.to_string())?;
+        let missed = run(&dir).is_ok();
+        let _ = std::fs::remove_file(dir.join(rel));
+        if missed {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(format!("canary: a partial write in {rel} was not scanned"));
+        }
+    }
+    std::fs::write(dir.join("src/lib.rs"), good).map_err(|e| e.to_string())?;
+
+    // A test module is not production code, whatever it does to its own
+    // maps. The strip used to leave the tail of every `#[cfg(test)] mod`
+    // in the scanned text, so a partial write inside a test read as a
+    // finding against the file.
+    let test_only = format!(
+        "{good}#[cfg(test)]\nmod tests {{\n    {bad}}}\n",
+        good = good,
+        bad = bad.replace('\n', "\n    ")
+    );
+    std::fs::write(dir.join("src/lib.rs"), test_only).map_err(|e| e.to_string())?;
+    if run(&dir).is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a partial write that lives only in a test module was reported",
+        ));
+    }
+
+    // The strip is token-aware: a `}` inside a string literal within the
+    // test module must not end the strip early and leave the violation
+    // that follows it in the scanned text.
+    let tricky = format!(
+        "{good}#[cfg(test)]\nmod tests {{\n    let s = \"}}\";\n    {bad}}}\n",
+        good = good,
+        bad = bad.replace('\n', "\n    ")
+    );
+    std::fs::write(dir.join("src/lib.rs"), tricky).map_err(|e| e.to_string())?;
+    if run(&dir).is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a brace inside a string literal ended the test-module strip early",
+        ));
+    }
+
+    // A bodiless test module declaration must not swallow the next block:
+    // the production function after it is still scanned.
+    let declared = format!("#[cfg(test)]\npub mod tests;\n{bad}");
+    std::fs::write(dir.join("src/lib.rs"), declared).map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a bodiless test module declaration hid the function after it",
+        ));
+    }
+
+    // An insert into another collection is not a restore, and a path
+    // qualified `Result` return is still a refusal.
+    let other = "fn f(&mut self) -> Result<(), E> {\n    self.m.remove(&k);\n    self.log.insert(k, 1);\n    if !self.valid() { return Err(E::X); }\n    Ok(())\n}\n";
+    let qualified = "fn f(&mut self) -> io::Result<()> {\n    self.m.remove(&k);\n    if !self.valid() { return Err(E::X); }\n    Ok(())\n}\n";
+    for (label, body) in [
+        ("another collection", other),
+        ("qualified Result", qualified),
+    ] {
+        std::fs::write(dir.join("src/lib.rs"), body).map_err(|e| e.to_string())?;
+        if run(&dir).is_ok() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(format!("canary: {label} hid a partial write"));
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(String::from(
+        "refusals canary OK (good PASSes, a partial write FAILs, one inside a test module \
+         PASSES, and a brace inside a string does not end the strip).",
+    ))
+}

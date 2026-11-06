@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Budlum wallet-core test page</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 48rem; margin: 2rem auto; padding: 0 1rem; }
+    label { display: block; margin-top: 1rem; }
+    input, textarea { width: 100%; font-family: monospace; }
+    pre { white-space: pre-wrap; word-break: break-all; background: #f4f4f4; padding: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>wallet-core in the browser</h1>
+  <p>
+    Signs a V5 (ML-DSA-87) transfer with the wasm build of
+    <code>crates/wallet-core</code> and sends it to a node's public RPC
+    Build the module first:
+  </p>
+  <pre>cargo build --manifest-path crates/wallet-core/Cargo.toml --lib --release \
+  --target wasm32-unknown-unknown --features wasm
+wasm-bindgen --target web --out-dir crates/wallet-core/web/pkg \
+  crates/wallet-core/target/wasm32-unknown-unknown/release/budlum_wallet_core.wasm</pre>
+  <p>Serve this directory over HTTP and open the page. Use a test wallet only.</p>
+
+  <label>24 words <textarea id="mnemonic" rows="3"></textarea></label>
+  <label>Node RPC URL <input id="rpc" value="http://127.0.0.1:28545"></label>
+  <label>Recipient (64 hex) <input id="to"></label>
+  <label>Amount (base units) <input id="amount" value="1000000"></label>
+  <label>Fee (base units) <input id="fee" value="1000"></label>
+  <p><button id="send">Sign and send</button></p>
+  <pre id="out"></pre>
+
+  <script type="module">
+    import init, { BrowserWallet, get_nonce_body, chain_id_body, send_raw_transaction_body, quantity_result }
+      from "./pkg/budlum_wallet_core.js";
+    await init();
+    const out = document.getElementById("out");
+    const rpc = async (body) => {
+      const response = await fetch(document.getElementById("rpc").value, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body,
+      });
+      return response.text();
+    };
+    document.getElementById("send").onclick = async () => {
+      try {
+        const wallet = new BrowserWallet(document.getElementById("mnemonic").value.trim());
+        const nonce = quantity_result(await rpc(get_nonce_body(wallet.address())));
+        const chainId = quantity_result(await rpc(chain_id_body()));
+        const signed = wallet.sign_transfer(
+          document.getElementById("to").value.trim(),
+          BigInt(document.getElementById("amount").value),
+          BigInt(document.getElementById("fee").value),
+          nonce, chainId, BigInt(Date.now()),
+        );
+        out.textContent = "from " + wallet.address() + "\n" + await rpc(send_raw_transaction_body(signed));
+      } catch (error) {
+        out.textContent = "error: " + error;
+      }
+    };
+  </script>
+</body>
+</html>

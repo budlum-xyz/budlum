@@ -1,0 +1,14 @@
+[package]
+name = "bud-isa"
+version = "0.1.0"
+edition = "2021"
+# Inherit the root [workspace.package] value for the cargo-deny license gate
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[features]
+experimental = []

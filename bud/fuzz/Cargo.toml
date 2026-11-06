@@ -1,0 +1,23 @@
+# The cargo-fuzz target (run with cargo +nightly fuzz check/run).
+[package]
+name = "bud-core-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bud-core = { path = ".." }
+
+[[bin]]
+name = "fuzz_bud_format"
+path = "fuzz_bud_format.rs"
+test = false
+doc = false
+
+[profile.release]
+debug = 1
