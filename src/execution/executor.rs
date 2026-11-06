@@ -166,12 +166,12 @@ fn is_ai_layer_transaction(tx_type: &TransactionType) -> bool {
     )
 }
 
-/// The doors that only unwind state the layer already holds.
+/// The doors that only settle state the layer already holds.
 ///
 /// Closing a layer's entry must not close its exit. Until WP-45 the AI layer
 /// had no chain-id gate at all, so bonds and escrows taken on testnet are
-/// legitimate existing state, and these seven doors are the only way that value
-/// returns to its owner. Refusing them does not close a feature, it
+/// legitimate existing state, and these seven doors are the only way that
+/// state is settled. Refusing them does not close a feature, it
 /// confiscates a balance - the bug `begin_unbonding` ("left the remaining bond
 /// locked for good") and the `Unstake` handler ("a 100% confiscation") already
 /// name. `AiAgentPaymentRelease` is here for the same reason: it pays the
@@ -4508,9 +4508,10 @@ mod tests {
         let who = Address::from([24u8; 32]);
         for chain_id in [mainnet, testnet, 999_999] {
             for door in ai_layer_doors(who) {
-                // The exit doors are exempt on purpose: they only return value
-                // that entered while the layer was ungated. They are pinned by
-                // `a_bond_taken_before_the_closure_can_still_leave_testnet`.
+                // The exempt doors only settle state that predates the closure:
+                // six return value to its owner, the seventh slashes a proven
+                // equivocation. They are pinned by the bond-withdrawal and
+                // dispute-survival tests below.
                 if is_ai_layer_exit(&door) {
                     continue;
                 }
