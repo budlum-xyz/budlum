@@ -3,11 +3,11 @@
 //!
 //! Every test named `bud3_*` here is a named acceptance test from the
 //! directive. The unit tests inside `src/storage/bud3/{object,frames,stages,
-//! volume,repair}.rs` cover the pieces; these tests cover what the directive
-//! claims about the whole path. The remaining tests in this file cover the
-//! supporting pieces of the same package (the A0 stage chain, the aggregation
-//! volume and the repair decision) so that the package ships its own
-//! evidence.
+//! volume}.rs` cover the pieces; these tests cover what the directive claims
+//! about the whole path. The remaining tests in this file cover the supporting
+//! pieces of the same package (the A0 stage chain and the aggregation volume)
+//! so that the package ships its own evidence. The repair rule is another
+//! branch's work and is not tested here.
 //!
 //! Two profiles are used on purpose:
 //!
@@ -31,15 +31,11 @@ use crate::storage::bud3::object::{
     object_from_symbols, object_from_text, object_to_text, text_form, video_commitment,
     ObjectError, SegmentCommit,
 };
-use crate::storage::bud3::repair::{
-    assign_repairer, plan_segment, repair_is_bad, shrink_plan, LossBudget,
-};
 use crate::storage::bud3::stages::{
     aggregate_applies, recognise, ContentClass, Stage, StageChain, StageOutcome,
 };
 use crate::storage::bud3::volume::{member_leaf, Volume, VolumeError, VOLUME_TARGET_BYTES};
 use crate::storage::bud3::{limits::Profile, meter::Meter, Object, Symbol};
-use crate::storage::bud3::{placement::Class, placement::Share};
 
 /// 64-byte symbols and eight per segment: many segments, no raster.
 const NARROW: Profile = Profile {
@@ -583,68 +579,6 @@ fn bud3_volume_hides_nothing_from_its_members() {
         commitment: shifted.commitment,
     };
     assert_eq!(back.member_bytes(&proof).unwrap(), b"two");
-}
-
-#[test]
-fn bud3_repair_fires_below_the_threshold() {
-    let held = vec![(
-        Share {
-            validator: [1u8; 32],
-            class: Class::Full,
-            first_esi: 0,
-            symbols: 3,
-        },
-        vec![0u32, 1, 2],
-    )];
-    let mut task = plan_segment(
-        [4u8; 32],
-        0,
-        512,
-        &NARROW,
-        LossBudget { f: 4, k: 8 },
-        &held,
-        [5u8; 32],
-    )
-    .unwrap()
-    .unwrap();
-    assert!(!task.missing_esis.is_empty());
-    assert_eq!(task.slash_percent, 1);
-
-    let eligible = [
-        (
-            Share {
-                validator: [6u8; 32],
-                class: Class::Full,
-                first_esi: 0,
-                symbols: 1,
-            },
-            Class::Full,
-        ),
-        (
-            Share {
-                validator: [7u8; 32],
-                class: Class::Mobile,
-                first_esi: 0,
-                symbols: 1,
-            },
-            Class::Mobile,
-        ),
-    ];
-    assign_repairer(&mut task, &eligible, &|_| 10).unwrap();
-    assert_eq!(task.repairer, [6u8; 32], "only a Full share repairs");
-    assert!(!repair_is_bad(&[], &[]));
-
-    let plan = shrink_plan(512, &NARROW, 8, 1).unwrap();
-    assert!(plan.iter().all(|p| p.symbols_per_survivor >= 8 + 2));
-    // The loss budget of a row: one eighth of its shares, at least one, and a
-    // repair threshold of half of it.
-    let budget = LossBudget::from_row(8, 0, 8);
-    assert_eq!(budget.f, 1);
-    assert_eq!(budget.threshold(), 1);
-    assert!(budget.fires(8, 8));
-    let budget = LossBudget::from_row(16, 512, 4096);
-    assert_eq!(budget.f, 66);
-    assert_eq!(budget.threshold(), 33);
 }
 
 #[test]

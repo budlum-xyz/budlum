@@ -54,8 +54,6 @@ mod gates {
     pub mod bns_names_are_safe_in_an_address_bar;
     pub mod bridge_dual_tree;
     pub mod bud3_forbidden_phrases;
-    pub mod bud3_object_is_universal;
-    pub mod bud3_qr_is_presentation;
     pub mod bud_e2e;
     pub mod budscan_parity;
     pub mod budscan_patchset;
@@ -554,22 +552,6 @@ const GATES: &[Gate] = &[
         run: gates::bud3_forbidden_phrases::run,
         run_args: None,
         self_test: gates::bud3_forbidden_phrases::self_test,
-        run_log: None,
-    },
-    Gate {
-        name: "bud3-object-is-universal",
-        replaces: None,
-        run: gates::bud3_object_is_universal::run,
-        run_args: None,
-        self_test: gates::bud3_object_is_universal::self_test,
-        run_log: None,
-    },
-    Gate {
-        name: "bud3-qr-is-presentation",
-        replaces: None,
-        run: gates::bud3_qr_is_presentation::run,
-        run_args: None,
-        self_test: gates::bud3_qr_is_presentation::self_test,
         run_log: None,
     },
     Gate {

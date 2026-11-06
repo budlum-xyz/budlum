@@ -23,7 +23,6 @@
 //! | [`frames`] | The optical path: symbols to QR rasters and back, the two-path gate (Y11) |
 //! | [`stages`] | The A0 stage chain: recognition, dedup, transform, entropy coding, sealing |
 //! | [`volume`] | The aggregation volume for objects smaller than one symbol |
-//! | [`repair`] | Lazy repair, the repair task and network shrink |
 //!
 //! The commitment is fixed-size (32 bytes). The object is not fixed-size: it
 //! is the header plus the payload, and it is at most the header larger than
@@ -39,14 +38,13 @@ pub mod content_id;
 pub mod custody;
 pub mod dedup_index;
 pub mod fountain;
-pub mod limits;
 pub mod frames;
+pub mod limits;
 pub mod meter;
 pub mod object;
 pub mod pipeline;
 pub mod placement;
 pub mod registry;
-pub mod repair;
 pub mod segment;
 pub mod stages;
 pub mod tx;
