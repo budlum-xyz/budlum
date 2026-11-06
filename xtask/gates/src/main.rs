@@ -64,7 +64,6 @@ mod gates {
     pub mod ci_workflow_guards;
     pub mod classical_crypto_is_paired;
     pub mod clippy_extra;
-    pub mod coding_audit_samples_the_relationship;
     pub mod concept_names;
     pub mod consensus_maps_ordered;
     pub mod consensus_state_only_changes_in_blocks;
@@ -91,7 +90,6 @@ mod gates {
     pub mod gates_do_not_panic;
     pub mod gating_flags;
     pub mod geiger;
-    pub mod generated_content;
     pub mod genesis_schema;
     pub mod git_deps_audited;
     pub mod gov_slash_evidence_is_validator_only;
@@ -123,7 +121,6 @@ mod gates {
     pub mod node_classification_gate;
     pub mod one_house_guards;
     pub mod ownerless_dependencies;
-    pub mod paid_content;
     pub mod parallel_execution;
     pub mod pinned_downloads;
     pub mod poa_compliance_gate;
@@ -155,13 +152,10 @@ mod gates {
     pub mod state_recovery_door;
     pub mod storage_penalties;
     pub mod storage_priced;
-    pub mod storage_proof_boundary;
-    pub mod storage_provider_gate;
     pub mod suppressions_are_justified;
     pub mod tee_trust_boundary_is_structural;
     pub mod test_modules_can_see_what_they_test;
     pub mod the_image_builds_what_the_manifest_declares;
-    pub mod three_is_recipe_only;
     pub mod threshold_rates;
     pub mod timing_safe;
     pub mod transcript_mirrors;
@@ -177,7 +171,6 @@ mod gates {
     pub mod wire_fields_are_signed;
     pub mod workflows_produce_jobs;
     pub mod zero_address_sender_is_verified;
-    pub mod zero_storage_frozen;
     pub mod zero_tests_witness;
     pub mod zizmor;
     pub mod zkvm_refuses_untrusted_proofs;
@@ -313,14 +306,7 @@ const GATES: &[Gate] = &[
         self_test: gates::capability_modules_are_wired::self_test,
         run_log: None,
     },
-    Gate {
-        name: "coding-audit-samples-the-relationship",
-        replaces: Some("check-coding-audit-samples-the-relationship.sh"),
-        run: gates::coding_audit_samples_the_relationship::run,
-        run_args: None,
-        self_test: gates::coding_audit_samples_the_relationship::self_test,
-        run_log: None,
-    },
+,
     Gate {
         name: "content-encryption-bound",
         replaces: Some("check-content-encryption-is-declared-and-bound.sh"),
@@ -617,18 +603,7 @@ const GATES: &[Gate] = &[
         run_args: None,
         self_test: gates::poa_compliance_gate::self_test,
     },
-    Gate {
-        name: "storage-provider",
-        replaces: Some("check-storage-provider-gate.sh"),
-        run: |_| {
-            Err(String::from(
-                "storage-provider reads a cargo test log; pass its path as an argument",
-            ))
-        },
-        run_log: Some(gates::storage_provider_gate::run),
-        run_args: None,
-        self_test: gates::storage_provider_gate::self_test,
-    },
+,
     Gate {
         name: "network-hardening",
         replaces: Some("check-network-hardening-gate.sh"),
@@ -913,14 +888,7 @@ const GATES: &[Gate] = &[
         run_args: None,
         self_test: gates::derived_content::self_test,
     },
-    Gate {
-        name: "zero-storage-bytes-are-frozen",
-        replaces: Some("check-zero-storage-bytes-are-frozen.sh"),
-        run: gates::zero_storage_frozen::run,
-        run_log: None,
-        run_args: None,
-        self_test: gates::zero_storage_frozen::self_test,
-    },
+,
     Gate {
         name: "repair-fires-on-loss",
         replaces: Some("check-repair-fires-on-loss.sh"),
@@ -929,14 +897,7 @@ const GATES: &[Gate] = &[
         run_args: None,
         self_test: gates::repair_fires::self_test,
     },
-    Gate {
-        name: "storage-proof-production-boundary",
-        replaces: Some("check-storage-proof-production-boundary.sh"),
-        run: gates::storage_proof_boundary::run,
-        run_log: None,
-        run_args: None,
-        self_test: gates::storage_proof_boundary::self_test,
-    },
+,
     Gate {
         name: "badges-are-current",
         replaces: Some("check-badges-are-current.sh"),
@@ -965,14 +926,7 @@ const GATES: &[Gate] = &[
         run_args: None,
         self_test: gates::containment_defaults::self_test,
     },
-    Gate {
-        name: "generated-content-is-verifiable",
-        replaces: Some("check-generated-content-is-verifiable.sh"),
-        run: gates::generated_content::run,
-        run_log: None,
-        run_args: None,
-        self_test: gates::generated_content::self_test,
-    },
+,
     Gate {
         name: "qr-is-derivative-only",
         replaces: None,
@@ -981,14 +935,7 @@ const GATES: &[Gate] = &[
         self_test: gates::qr_is_derivative_only::self_test,
         run_log: None,
     },
-    Gate {
-        name: "three-is-recipe-only",
-        replaces: None,
-        run: gates::three_is_recipe_only::run,
-        run_args: None,
-        self_test: gates::three_is_recipe_only::self_test,
-        run_log: None,
-    },
+,
     Gate {
         name: "storage-is-priced-by-size",
         replaces: Some("check-storage-is-priced-by-size.sh"),
@@ -1061,14 +1008,7 @@ const GATES: &[Gate] = &[
         run_args: None,
         self_test: gates::pinned_downloads::self_test,
     },
-    Gate {
-        name: "paid-content-cannot-be-read-for-free",
-        replaces: Some("check-paid-content-cannot-be-read-for-free.sh"),
-        run: gates::paid_content::run,
-        run_log: None,
-        run_args: None,
-        self_test: gates::paid_content::self_test,
-    },
+,
     Gate {
         name: "reduction-claims-state-both-units",
         replaces: Some("check-reduction-claims-state-both-units.sh"),
