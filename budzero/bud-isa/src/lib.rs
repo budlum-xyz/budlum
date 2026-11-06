@@ -89,7 +89,7 @@ pub enum IsaProfile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MainnetActivation {
     /// False = OFF on mainnet (staged rollout) - the same as bool::default,
-    /// clippy::derivable_impls nedeniyle derive'a indirildi.
+    /// kept explicit for clarity alongside the privacy gates.
     pub verify_merkle_enabled: bool,
     /// AI inference verification opcode gate.
     /// False means OFF on mainnet - it requires post-ceremony activation.
@@ -192,6 +192,8 @@ pub enum DecodeError {
     InvalidOpcode(u8),
     ExperimentalOpcodeDisabled(Opcode, IsaProfile),
     MainnetActivationRequired(Opcode),
+    NonCanonicalHighBits(u16),
+    RegisterOutOfRange(&'static str, u8),
 }
 
 impl std::fmt::Display for DecodeError {
@@ -204,11 +206,20 @@ impl std::fmt::Display for DecodeError {
             DecodeError::MainnetActivationRequired(op) => {
                 write!(f, "Opcode {:?} requires mainnet activation", op)
             }
+            DecodeError::NonCanonicalHighBits(bits) => {
+                write!(f, "Non-canonical high bits: 0x{bits:03X}")
+            }
+            DecodeError::RegisterOutOfRange(field, reg) => {
+                write!(f, "Register {field}={reg} exceeds 5-bit ceiling 31")
+            }
         }
     }
 }
 
 impl std::error::Error for DecodeError {}
+
+pub const MAX_REGISTER_INDEX: u8 = 31;
+pub const CANONICAL_INSTRUCTION_MASK: u64 = (1u64 << 55) - 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Instruction {
@@ -220,16 +231,33 @@ pub struct Instruction {
 }
 
 impl Instruction {
-    pub fn encode(&self) -> u64 {
+    pub fn try_encode(&self) -> Result<u64, DecodeError> {
+        if self.rd > MAX_REGISTER_INDEX {
+            return Err(DecodeError::RegisterOutOfRange("rd", self.rd));
+        }
+        if self.rs1 > MAX_REGISTER_INDEX {
+            return Err(DecodeError::RegisterOutOfRange("rs1", self.rs1));
+        }
+        if self.rs2 > MAX_REGISTER_INDEX {
+            return Err(DecodeError::RegisterOutOfRange("rs2", self.rs2));
+        }
         let mut res = self.opcode as u64;
-        res |= (self.rd as u64) << 8;
-        res |= (self.rs1 as u64) << 13;
-        res |= (self.rs2 as u64) << 18;
-        res |= ((self.imm as u32) as u64) << 23;
-        res
+        res |= u64::from(self.rd & 0x1F) << 8;
+        res |= u64::from(self.rs1 & 0x1F) << 13;
+        res |= u64::from(self.rs2 & 0x1F) << 18;
+        res |= u64::from(self.imm as u32) << 23;
+        Ok(res)
+    }
+
+    pub fn encode(&self) -> u64 {
+        self.try_encode()
+            .expect("Instruction::encode requires rd, rs1, rs2 <= 31")
     }
 
     pub fn decode_any(val: u64) -> Result<Self, DecodeError> {
+        if (val & !CANONICAL_INSTRUCTION_MASK) != 0 {
+            return Err(DecodeError::NonCanonicalHighBits((val >> 55) as u16));
+        }
         let op_u8 = (val & 0xFF) as u8;
         let opcode = match op_u8 {
             0x00 => Opcode::Halt,
@@ -632,5 +660,37 @@ mod tests {
             .trim()
             .parse()
             .expect("POSEIDON_RC round count is not a number")
+    }
+
+    #[test]
+    fn blg_129_register_overflow_and_non_canonical_high_bits_are_refused() {
+        let bad_rd = Instruction {
+            opcode: Opcode::Add,
+            rd: 32,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        };
+        assert_eq!(
+            bad_rd.try_encode(),
+            Err(DecodeError::RegisterOutOfRange("rd", 32))
+        );
+
+        let neg_imm = Instruction {
+            opcode: Opcode::Push,
+            rd: 31,
+            rs1: 31,
+            rs2: 31,
+            imm: -1,
+        }
+        .encode();
+        assert_eq!(neg_imm >> 55, 0);
+        assert!(Instruction::decode_any(neg_imm).is_ok());
+
+        let non_canonical = neg_imm | (1u64 << 55);
+        assert_eq!(
+            Instruction::decode_any(non_canonical),
+            Err(DecodeError::NonCanonicalHighBits(1))
+        );
     }
 }

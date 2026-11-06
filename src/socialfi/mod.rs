@@ -445,4 +445,27 @@ mod tests {
         let c = reg.mint(owner, cid, 2, None).expect("mint after burn");
         assert!(c > b, "ids must not be reused after a burn");
     }
+
+    #[test]
+    fn socialfi_nft_burn_needs_owner() {
+        let mut reg = NftRegistry::new();
+        let owner = Address::from([0x11; 32]);
+        let intruder = Address::from([0x22; 32]);
+        let bud3_cid = crate::storage::bud3::content_id::ContentId::public(b"socialfi-media");
+        let cid = ContentId(bud3_cid.digest);
+        let id = reg.mint(owner, cid, 5, Some("creator".into())).unwrap();
+        let before = reg.root();
+
+        let err = reg
+            .burn(id, &intruder)
+            .expect_err("non-owner burn must be refused");
+        assert!(matches!(err, NftError::NotOwner));
+        assert_eq!(reg.root(), before);
+        assert_eq!(reg.get_nft(id).unwrap().owner, owner);
+
+        let burned_cid = reg.burn(id, &owner).expect("owner burn succeeds");
+        assert_eq!(burned_cid, cid);
+        assert!(reg.get_nft(id).is_none());
+        assert!(!reg.ownership.contains_key(&owner));
+    }
 }

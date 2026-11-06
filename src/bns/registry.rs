@@ -520,4 +520,22 @@ mod tests {
         assert_eq!(from_default.base_cost, from_new.base_cost);
         assert_eq!(from_default.root(), from_new.root());
     }
+
+    #[test]
+    fn bns_resolves_bud3_content() {
+        let owner = Address::from([0x31; 32]);
+        let stranger = Address::from([0x32; 32]);
+        let bud3_cid = crate::storage::bud3::content_id::ContentId::public(b"dweb-index-html");
+        let cid = ContentId(bud3_cid.digest);
+
+        let mut reg = BnsRegistry::new();
+        reg.register("portal.bud".into(), owner, 1, 10).unwrap();
+        assert_eq!(
+            reg.set_content("portal.bud", &stranger, cid, 2),
+            Err(BnsError::NotOwner)
+        );
+        reg.set_content("portal.bud", &owner, cid, 2).unwrap();
+        assert_eq!(reg.resolve_content("portal.bud", 5), Some(cid));
+        assert_eq!(reg.resolve_content("portal.bud", 11), None);
+    }
 }
