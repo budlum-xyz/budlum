@@ -1,0 +1,24 @@
+[package]
+name = "budlum-types"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+description = "Mobile/client-facing common types for the Budlum protocol - crate cradle for Section 8 İP-11"
+
+# İP-11 cradle: intentionally no dependencies. The very point of the cradle is
+# that this crate must compile with ZERO validator-only deps (no sled, tokio,
+# libp2p, hyper, prometheus, reqwest, jsonrpsee, clap). İP-13 will add
+# dependencies only on small utility crates (sha2, thiserror, zeroize, hex,
+# postcard) needed by the moved types.
+[dependencies]
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unused_import_braces = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

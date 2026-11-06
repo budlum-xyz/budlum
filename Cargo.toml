@@ -205,6 +205,9 @@ budlum-uel-abi = { path = "crates/uel-abi" }
 bud-codec = { path = "crates/bud-codec" }
 # In-tree, feature-gated (2026-09-19 user decision: no separate repository).
 budlum-bpqs = { path = "crates/bpqs", optional = true }
+# §8 İP-11 mobile/client type cradle. Starts empty in İP-11; types are moved
+# here from src/ during İP-13. No validator-only dependencies.
+budlum-types = { path = "crates/budlum-types", default-features = false }
 
 [build-dependencies]
 prost-build = "0.14.3"

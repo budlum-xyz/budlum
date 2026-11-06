@@ -80,7 +80,7 @@ is done", "what is in flight", and "what is blocked".
 |---|---|---|---|---|
 | İP-04 Live verification: clients, ops, CI, docs and unified status | T-Launch | Started (this branch) | #72 | `docs/work/PACKAGES.md` (this file) created; full four-lane status, `FINDINGS.md`, `LIVE_STATUS.md` and per-lane lane files ship with İP-04. |
 | İP-05 Concept name map and counter gate | T-Launch | Partial | #20, #31, #50, #68 | `config/naming/concept_map.toml`, `.github/concept-names-baseline.txt`, `xtask/gates/src/gates/concept_names.rs` all wired. Counter ratchets down; switch to "absolute" at İP-43. |
-| İP-11 Mobile core and light client | T-Launch | Not started | — | `crates/budlum-types/` split and UniFFI mobile core pending. |
+| İP-11 Mobile core and light client | T-Launch | Partial (this branch: cradle created) | — | `crates/budlum-types/` created and registered in root Cargo.toml (zero validator-only deps). Cradle is empty; İP-12 flips wallet-core/uel-abi/note-packing edges to depend on it; İP-13 performs the actual type extraction move. UniFFI mobile core and light-client split land with the rest of İP-11. |
 | İP-36 Android validator application | T-Launch | Not started | — | `mobile/` tree pending; Kotlin + Jetpack Compose, `specialUse` FGS. |
 | İP-37 Mobile device matrix and field test | T-Launch | Not started | — | After İP-36. |
 | İP-38 iOS opportunistic application | T-Launch (beta) | Not started | — | Does not block launch. |
