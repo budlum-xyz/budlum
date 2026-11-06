@@ -1,0 +1,30 @@
+[package]
+name = "budlum-mobile-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+description = "Budlum mobile validator core: custody duties, presence, quota, relay switch and share handover"
+publish = false
+
+[lib]
+name = "budlum_mobile_core"
+path = "src/lib.rs"
+
+[dependencies]
+sha2 = "=0.11.1"
+sha3 = "=0.12.0"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unused_import_braces = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[profile.release]
+overflow-checks = true
+panic = "abort"

@@ -1308,6 +1308,37 @@ jobs:
           cargo build --manifest-path crates/wallet-core/Cargo.toml --lib --release \
             --target wasm32-unknown-unknown --features wasm
 
+  # ============================ Mobile core (WP-11) ============================
+  mobile-core:
+    # The mobile validator core is its own crate so a phone does not link
+    # budlum-core. Root `cargo test --lib` never runs it. Without this job a
+    # break in custody proofs, presence, quota or relay switch stays green.
+    name: Mobile core (WP-11)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: mobile-core
+          workspaces: mobile/core
+      - name: Format
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path mobile/core/Cargo.toml --all -- --check
+      - name: Clippy
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo clippy --manifest-path mobile/core/Cargo.toml --all-targets -- -D warnings
+      - name: Tests
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo test --manifest-path mobile/core/Cargo.toml
+
   # ============================ Budscan (web3 tarayici cekirdegi) ============================
   budscan:
     # Budscan does not link against `budlum-core` and duplicates two definitions: the name rule
