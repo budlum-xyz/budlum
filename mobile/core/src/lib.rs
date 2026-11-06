@@ -106,7 +106,9 @@ mod tests {
             symbol_count: 1,
             sub_blocks: sub_block_count(symbol.len()),
         };
-        batch.proofs[0].verify(&audit, &ctx).expect("verify");
+        let (object, proof) = batch.proofs.first().expect("one keyed proof");
+        assert_eq!(*object, assigned.object);
+        proof.verify(&audit, &ctx).expect("verify");
         assert_eq!(core.status().last_audit, LastAudit::Passed);
         // A proof for another sub-block still verifies against the same root.
         let extra = prove(1, &assigned.placed, 0, &symbol, 1).expect("second sub-block");
@@ -180,7 +182,9 @@ mod tests {
             symbol_count: 1,
             sub_blocks: sub_block_count(second.symbol.len()),
         };
-        batch.proofs[0].verify(&audit, &context).expect("proof");
+        let (object, proof) = batch.proofs.first().expect("one keyed proof");
+        assert_eq!(*object, second.object);
+        proof.verify(&audit, &context).expect("proof");
         assert_eq!(
             core.answer_audit([5; 32], audit).expect_err("unknown object").code,
             "mobile_audit_unknown_share"

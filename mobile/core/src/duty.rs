@@ -217,7 +217,7 @@ impl MobileCore {
                 }
                 self.last_audit = LastAudit::Passed;
                 Ok(DutyTx::CustodyProofBatch(CustodyProofBatch {
-                    proofs: vec![proof],
+                    proofs: vec![(object, proof)],
                 }))
             }
             Err(err) => {
