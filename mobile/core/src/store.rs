@@ -203,3 +203,26 @@ impl ShareStore {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mobile_share_id_exhaustion_does_not_overwrite_a_record() {
+        let symbol = vec![1; 64];
+        let mut store = ShareStore::new();
+        store.next_id = u64::MAX;
+        let assigned = AssignedShare {
+            object: [1; 32],
+            segment: 0,
+            esi: 0,
+            position: 0,
+            placed: vec![(0, symbol_leaf(&symbol))],
+            symbol,
+        };
+        assert!(store.accept(assigned, 1_000).is_err());
+        assert!(store.is_empty());
+        assert_eq!(store.next_id, u64::MAX);
+    }
+}
