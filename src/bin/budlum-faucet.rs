@@ -258,7 +258,11 @@ impl Ledger {
 
     fn roll_day(&mut self, now: u64) {
         let day = now / SECONDS_PER_DAY;
-        if day != self.day {
+        // Ported from open PR #34, which found this bug: a wall-clock
+        // correction backwards must not reset the daily cap (or the demand
+        // counter) a second time. Keep the newest day seen until the clock
+        // catches up again.
+        if day > self.day {
             self.day = day;
             self.sent_today = 0;
             self.requests_today = 0;
@@ -1102,6 +1106,35 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(refusal, Refusal::DailyCap);
+    }
+
+    /// Ported from open PR #34: a backwards clock correction must not give
+    /// the caller another daily cap, and must not lower the work difficulty
+    /// by resetting the demand count either.
+    #[test]
+    fn faucet_limits_hold_when_the_clock_moves_backwards() {
+        let p = Policy::from_bud(100, 1, 100).unwrap();
+        let mut ledger = Ledger::default();
+        let today = 10 * super::SECONDS_PER_DAY;
+        ledger.note_request(today);
+        ledger
+            .check(&p, &Address::from([1u8; 32]), ip(1), today)
+            .unwrap();
+        ledger.record(&p, Address::from([1u8; 32]), ip(1), today);
+        ledger.note_request(today - super::SECONDS_PER_DAY);
+        assert_eq!(ledger.requests_today, 2, "demand survives a clock rollback");
+        assert_eq!(
+            ledger.check(&p, &Address::from([2u8; 32]), ip(2), today),
+            Err(Refusal::DailyCap)
+        );
+        ledger
+            .check(
+                &p,
+                &Address::from([2u8; 32]),
+                ip(2),
+                today + super::SECONDS_PER_DAY,
+            )
+            .unwrap();
     }
 
     /// WP-41: difficulty rises with demand and resets on a new UTC day.
