@@ -461,7 +461,9 @@ pub fn self_test() -> Result<String, String> {
         "a trigger that reads a clock",
     )?;
 
-    Ok(String::from("repair gate self-test OK: 12 canaries"))
+    Ok(String::from(
+        "repair gate self-test OK: one clean pass and 12 refusals",
+    ))
 }
 
 #[cfg(test)]

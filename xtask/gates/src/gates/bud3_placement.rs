@@ -561,7 +561,8 @@ pub fn self_test() -> Result<String, String> {
     )?;
 
     Ok(String::from(
-        "placement gate self-test OK: 12 canaries (one per way placement can look right and be wrong)",
+        "placement gate self-test OK: one clean pass and 11 refusals, one per \
+         way placement can look right and be wrong",
     ))
 }
 

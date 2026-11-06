@@ -600,7 +600,7 @@ pub fn self_test() -> Result<String, String> {
     )?;
 
     Ok(String::from(
-        "custody proof gate self-test OK: 12 canaries",
+        "custody proof gate self-test OK: one clean pass and 11 refusals",
     ))
 }
 
