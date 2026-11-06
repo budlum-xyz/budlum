@@ -115,16 +115,22 @@ impl ShareStore {
                 "accepting this share would exceed the custody quota",
             ));
         }
-        let leaf = symbol_leaf(&assigned.symbol);
-        let expected = assigned
-            .placed
-            .iter()
-            .find(|(esi, _)| *esi == assigned.esi)
-            .map(|(_, l)| *l);
-        if expected != Some(leaf) {
+        // The position used by audit proofs must identify this exact ESI and
+        // leaf, not merely some matching entry elsewhere in the placement.
+        // Strict ordering also rules out ambiguous duplicate ESIs.
+        if assigned.placed.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+            return Err(CoreError::new(
+                "mobile_share_placement_order",
+                "the placement must contain unique ESIs in ascending order",
+            ));
+        }
+        let expected = usize::try_from(assigned.position)
+            .ok()
+            .and_then(|position| assigned.placed.get(position));
+        if expected != Some(&(assigned.esi, symbol_leaf(&assigned.symbol))) {
             return Err(CoreError::new(
                 "mobile_share_leaf_mismatch",
-                "the assigned symbol does not match the placed leaf",
+                "the assigned position, ESI and symbol must match the placed leaf",
             ));
         }
         let id = self.next_id;
