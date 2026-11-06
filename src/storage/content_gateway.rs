@@ -1,3 +1,7 @@
+//! B.U.D. content gateway service.
+//!
+//! exposed for: content gateway serving paths and RPC handlers.
+
 use crate::chain::chain_actor::ChainHandle;
 use crate::network::node::NodeClient;
 use crate::storage::content_id::ContentId;
@@ -710,5 +714,14 @@ mod tests {
             ..resolved.clone()
         };
         assert_eq!(pollen_guard_ids(&only_root), vec![ContentId([1u8; 32])]);
+    }
+
+    #[test]
+    fn gateway_tree_is_gone() {
+        let legacy = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/gateway"));
+        assert!(
+            !legacy.exists(),
+            "legacy src/gateway tree must remain deleted (BLG-262)"
+        );
     }
 }

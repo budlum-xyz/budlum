@@ -1,4 +1,6 @@
-//! D-Web Passport core profile model.
+//! Wallet identity profile model.
+//!
+//! exposed for: wallet identity profile RPC handlers.
 //!
 //! This module is intentionally read-only. It builds evidence-labelled profile
 //! Data for budlum.xyz without claiming that unproven data is verified.

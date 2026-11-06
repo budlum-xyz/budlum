@@ -29,7 +29,7 @@ pub mod domain;
 pub mod education_domain;
 pub mod error;
 pub mod execution;
-pub mod gateway;
+pub mod explorer_evidence;
 pub mod light_client;
 pub mod mempool;
 pub mod network;

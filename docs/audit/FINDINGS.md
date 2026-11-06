@@ -59,3 +59,8 @@ finding whose fix is carried or merged.
 | BLG-278 | closed (in review, PR #36) | `src/execution/coordinator/foreign/mod.rs` | `review_2_quantum_alert_level2_spoofed_recipient_refused_blg_278` | PR `#36` |
 | BLG-279 | closed (in review, PR #36) | `src/execution/coordinator/{state.rs,foreign/mod.rs}` | `review_2_cross_ee_alias_collision_and_bounded_solana_window_blg_279` | PR `#36` |
 | BLG-280 | closed (in review, PR #36) | `src/execution/coordinator/{universal_call.rs,wasm_ee.rs}` | `review_2_static_prefix_spoofing_refused_blg_280` | PR `#36` |
+| BLG-064 | closed (in review, PR #36) | `src/data_market/mod.rs`, `src/rpc/{api,method_class}.rs` | `data_market_sale_uses_grant` | PR `#36` |
+| BLG-065 | closed (in review, PR #36) | `src/socialfi/nft_folders.rs` | `socialfi_nft_burn_needs_owner` | PR `#36` |
+| BLG-109 | closed (in review, PR #36) | `src/socialfi/nft_folders.rs` | `socialfi_nft_burn_needs_owner` | PR `#36` |
+| BLG-261 | closed (in review, PR #36) | `src/education_domain/mod.rs` | `education_domain_registers_object` | PR `#36` |
+| BLG-262 | closed (in review, PR #36) | `src/wallet/identity_profile.rs`, `src/explorer_evidence/mod.rs`, `src/storage/content_gateway.rs` | `gateway_tree_is_gone` | PR `#36` |
