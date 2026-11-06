@@ -248,6 +248,8 @@ pub mod validator_classes;
 
 // The B.U.D. 3.0 storage door end to end.
 #[cfg(test)]
+pub mod bud3_context;
+#[cfg(test)]
 pub mod bud3_door;
 // WP-19: the object path, the two paths, the video commitment, the text form
 // and the parsers (Section 6.4, 6.5, 6.15, 6.23 T9 and T10).

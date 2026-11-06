@@ -12,6 +12,7 @@
 //! | [`meter`] | The parser and decoder budget |
 //! | [`varint`] | Bounded LEB128 |
 //! | [`bof1`] | The BOF-1 object: canonical binary header and payload |
+//! | [`compression_context`] | The shared compression context: manifest, corpus, renewal, savings fee |
 //! | [`segment`] | Segmentation, segment digests and the object commitment |
 //! | [`placement`] | Stake-weighted rendezvous placement, diversity caps, the placement table |
 //! | [`registry`] | Chain state: objects, dedup, references, deletion, shares, audits |
@@ -34,6 +35,7 @@
 //! own tests and the golden vectors under `tests/vectors/bud3/`.
 
 pub mod bof1;
+pub mod compression_context;
 pub mod content_id;
 pub mod custody;
 pub mod dedup_index;
