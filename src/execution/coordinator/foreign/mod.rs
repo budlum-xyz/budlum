@@ -397,7 +397,7 @@ impl ForeignCoordinatorBook {
             .accounts
             .get(&foreign_bud_addr)
             .cloned()
-            .unwrap_or_else(|| crate::core::account::Account::new(foreign_bud_addr, 0));
+            .unwrap_or_else(|| crate::core::account::Account::new(foreign_bud_addr));
         sub_attos_from_account(&mut sender_next, total_debit).map_err(|_| {
             ForeignLaneError::InsufficientForeignBalance {
                 available,
@@ -416,7 +416,7 @@ impl ForeignCoordinatorBook {
                     .accounts
                     .get(&rcpt)
                     .cloned()
-                    .unwrap_or_else(|| crate::core::account::Account::new(rcpt, 0));
+                    .unwrap_or_else(|| crate::core::account::Account::new(rcpt));
                 add_attos_to_account(&mut probe, tx.value_wei)
                     .map_err(|_| ForeignLaneError::BalanceOverflow)?;
                 Some((rcpt, probe))
@@ -551,7 +551,7 @@ impl ForeignCoordinatorBook {
             .accounts
             .get(&foreign_bud_addr)
             .cloned()
-            .unwrap_or_else(|| crate::core::account::Account::new(foreign_bud_addr, 0));
+            .unwrap_or_else(|| crate::core::account::Account::new(foreign_bud_addr));
         sub_attos_from_account(&mut sender_next, total_debit).map_err(|_| {
             ForeignLaneError::InsufficientForeignBalance {
                 available,
@@ -579,7 +579,7 @@ impl ForeignCoordinatorBook {
                         let mut acc = staged_recipients
                             .remove(&pq_rcpt)
                             .or_else(|| state.accounts.get(&pq_rcpt).cloned())
-                            .unwrap_or_else(|| crate::core::account::Account::new(pq_rcpt, 0));
+                            .unwrap_or_else(|| crate::core::account::Account::new(pq_rcpt));
                         add_attos_to_account(&mut acc, send_attos)
                             .map_err(|_| ForeignLaneError::BalanceOverflow)?;
                         staged_recipients.insert(pq_rcpt, acc);
@@ -678,14 +678,14 @@ impl ForeignCoordinatorBook {
                 .accounts
                 .get(&foreign_bud_addr)
                 .cloned()
-                .unwrap_or_else(|| crate::core::account::Account::new(foreign_bud_addr, 0));
+                .unwrap_or_else(|| crate::core::account::Account::new(foreign_bud_addr));
             sub_attos_from_account(&mut src_next, swept)
                 .map_err(|_| ForeignLaneError::BalanceOverflow)?;
             let mut dst_next = state
                 .accounts
                 .get(&req.target_pq_account)
                 .cloned()
-                .unwrap_or_else(|| crate::core::account::Account::new(req.target_pq_account, 0));
+                .unwrap_or_else(|| crate::core::account::Account::new(req.target_pq_account));
             add_attos_to_account(&mut dst_next, swept)
                 .map_err(|_| ForeignLaneError::BalanceOverflow)?;
             Some((src_next, dst_next))
