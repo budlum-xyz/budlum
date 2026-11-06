@@ -27,7 +27,7 @@ merge order resolve the shared files. This file is the queue record for that cho
 
 | Package | Title | Lane | Status | Pull request | Lock paths | Findings |
 |---|---|---|---|---|---|---|
-| WP-61 | RPC and crypto hardening | D | in review, delivery 1/2 | #24 | `src/rpc/tests.rs`, `src/rpc/server.rs` (test module), `src/rpc/method_class.rs` (append), `src/crypto/{primitives,signer,pq,pkcs11}.rs` (test modules), `.github/rpc-method-coverage-baseline.txt` (new) | BLG-004, BLG-009, BLG-010, BLG-029, BLG-030, BLG-032, BLG-099, BLG-192, BLG-200, BULGU-011, BULGU-012 locked; TEST-GAP-07 ratcheted; BLG-150 and BLG-200 keep open feet in other lanes |
+| WP-61 | RPC and crypto hardening | D | in review, delivery 1/2 | #41 | `src/rpc/tests.rs`, `src/rpc/server.rs` (test module), `src/rpc/method_class.rs` (append), `src/crypto/{primitives,signer,pq,pkcs11}.rs` (test modules), `.github/rpc-method-coverage-baseline.txt` (new) | BLG-004, BLG-009, BLG-010, BLG-029, BLG-030, BLG-032, BLG-099, BLG-192, BLG-200, BULGU-011, BULGU-012 locked; TEST-GAP-07 ratcheted; BLG-150 and BLG-200 keep open feet in other lanes |
 
 Last commit of the WP-61 row: `git log -1 --format=%H` on the branch, written by
 the push that updates this row. CI run: the run number of the `Tests` job on the

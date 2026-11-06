@@ -30,7 +30,7 @@ says `pre-fixed`. The state below is written against `origin/main`
 request merges; the merge commit and the CI run number are written into these rows
 by that merge, and no row below claims one.
 
-The branch carrying these rows is `arena/e55d486b-budlum`, pull request #24, head
+The branch carrying these rows is `arena/e55d486b-budlum`, pull request #41, head
 commit recorded in `docs/work/PACKAGES.md`.
 
 | Identity | Severity | Status | Lock | Note |
