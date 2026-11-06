@@ -64,4 +64,4 @@ jobs:
           api-level: 30
           target: default
           working-directory: mobile/android
-          run: gradle connectedDebugAndroidTest --no-daemon
+          script: gradle connectedDebugAndroidTest --no-daemon

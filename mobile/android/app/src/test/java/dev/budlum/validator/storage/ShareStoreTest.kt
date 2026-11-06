@@ -48,9 +48,9 @@ class ShareStoreTest {
     @Test
     fun `enforceQuota releases oldest first until within quota`() {
         val quota = 6L
-        assertTrue(store.writeShare(segmentA, ByteArray(4), quota = 100))
+        assertTrue(store.writeShare(segmentA, ByteArray(4), quotaBytes = 100))
         Thread.sleep(5) // lastModified ordering
-        assertTrue(store.writeShare(segmentB, ByteArray(4), quota = 100))
+        assertTrue(store.writeShare(segmentB, ByteArray(4), quotaBytes = 100))
 
         val released = store.enforceQuota(quota)
         // ByteArray equality is reference equality; compare hex forms.

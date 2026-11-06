@@ -27,10 +27,10 @@ enum class PowerMode {
 }
 
 data class QuotaPolicy(
-    val quotaBytes: Long = DEFAULT_QUOTA_BYTES,
+    val quotaBytes: Long = PolicyEngine.DEFAULT_QUOTA_BYTES,
 ) {
     init {
-        require(quotaBytes in MIN_QUOTA_BYTES..MAX_QUOTA_BYTES) {
+        require(quotaBytes in PolicyEngine.MIN_QUOTA_BYTES..PolicyEngine.MAX_QUOTA_BYTES) {
             "quota must be within 1 GiB..64 GiB (directive 7.9.4)"
         }
     }
