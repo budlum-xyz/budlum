@@ -132,3 +132,19 @@ fn mobile_unscoped_audit_refuses_multiple_objects() -> Result<(), Box<dyn std::e
     assert_eq!(core.status().last_audit, LastAudit::Missed);
     Ok(())
 }
+
+#[test]
+fn mobile_proof_duty_keeps_the_object_identity() -> Result<(), Box<dyn std::error::Error>> {
+    let mut core = core(FREE_SPACE_FLOOR_BYTES + 128);
+    core.accept_share(assigned(1, 10))?;
+    core.accept_share(assigned(2, 10))?;
+    let audit = Audit {
+        segment: 0,
+        position: 0,
+        sub_block: 0,
+    };
+    let first = core.answer_audit([1; 32], audit)?;
+    let second = core.answer_audit([2; 32], audit)?;
+    assert_ne!(first, second, "the host must know which object to submit");
+    Ok(())
+}
