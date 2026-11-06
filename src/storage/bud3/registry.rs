@@ -28,6 +28,11 @@ use super::custody::{
     MOBILE_AUDIT_PPM,
 };
 use super::dedup_index::DedupIndex;
+use super::fees::{
+    distribute_object_endowment_epoch, renewal_fee_epochs, split_storage_fee,
+    storage_fee_for_epochs, FeeParams, FeeRecord, ObjectEndowment, ShareRewardInput,
+    PRESENCE_PPM_SCALE,
+};
 use super::pipeline::ObjectRecord;
 use super::placement::{Class, Share};
 use super::segment::Segmentation;
@@ -114,6 +119,9 @@ pub struct ObjectEntry {
     /// Per segment, the next ESI never yet used. Repair takes new ESIs from
     /// here, so a lost ESI is never produced twice.
     pub next_esi: Vec<u32>,
+    /// Custody Endowment accounting for this object.
+    #[serde(default)]
+    pub endowment: ObjectEndowment,
 }
 
 /// Audit windows and probabilities, in epochs and ppm.
@@ -209,6 +217,9 @@ pub struct Bud3Registry {
     nfts: BTreeMap<NftId, (ObjectKey, Address)>,
     tombstones: BTreeMap<ObjectKey, u64>,
     declines: BTreeSet<([u8; 32], Address)>,
+    custody_credits: BTreeMap<Address, u64>,
+    presence_ppm: BTreeMap<Address, u32>,
+    forfeited_pool_total: u64,
 }
 
 /// The serialized form of [`Bud3Registry`].
@@ -219,6 +230,12 @@ struct FlatRegistry {
     nfts: Vec<(NftId, (ObjectKey, Address))>,
     tombstones: Vec<(ObjectKey, u64)>,
     declines: Vec<([u8; 32], Address)>,
+    #[serde(default)]
+    custody_credits: Vec<(Address, u64)>,
+    #[serde(default)]
+    presence_ppm: Vec<(Address, u32)>,
+    #[serde(default)]
+    forfeited_pool_total: u64,
 }
 
 impl From<Bud3Registry> for FlatRegistry {
@@ -229,6 +246,9 @@ impl From<Bud3Registry> for FlatRegistry {
             nfts: r.nfts.into_iter().collect(),
             tombstones: r.tombstones.into_iter().collect(),
             declines: r.declines.into_iter().collect(),
+            custody_credits: r.custody_credits.into_iter().collect(),
+            presence_ppm: r.presence_ppm.into_iter().collect(),
+            forfeited_pool_total: r.forfeited_pool_total,
         }
     }
 }
@@ -241,6 +261,9 @@ impl From<FlatRegistry> for Bud3Registry {
             nfts: f.nfts.into_iter().collect(),
             tombstones: f.tombstones.into_iter().collect(),
             declines: f.declines.into_iter().collect(),
+            custody_credits: f.custody_credits.into_iter().collect(),
+            presence_ppm: f.presence_ppm.into_iter().collect(),
+            forfeited_pool_total: f.forfeited_pool_total,
         }
     }
 }
@@ -353,6 +376,14 @@ impl Bud3Registry {
         {
             return Err(RegistryError::Declined);
         }
+        let fee_record = FeeRecord::from_placed_shares(&record, &shares);
+        let initial_fee = storage_fee_for_epochs(
+            fee_record.user_physical_bytes,
+            lifetime_epochs,
+            &FeeParams::TESTNET_DEFAULT,
+        )
+        .map_err(|_| RegistryError::BadLifetime)?;
+        let endowment = ObjectEndowment::new(fee_record, split_storage_fee(initial_fee));
         let shares = shares
             .into_iter()
             .map(|(segment, share)| ShareState {
@@ -392,6 +423,7 @@ impl Bud3Registry {
                 shares,
                 roots,
                 next_esi,
+                endowment,
             },
         );
         Ok(Registered::New(key))
@@ -434,6 +466,13 @@ impl Bud3Registry {
 
     fn delete(&mut self, key: &ObjectKey, epoch: u64) {
         if let Some(obj) = self.objects.remove(key) {
+            // Early burn or replacement never refunds prior storage fees; any
+            // undistributed balance enters the Network Security Pool.
+            if obj.endowment.remaining_balance > 0 {
+                self.forfeited_pool_total = self
+                    .forfeited_pool_total
+                    .saturating_add(obj.endowment.remaining_balance);
+            }
             if obj.record.content_id.kind == ContentIdKind::Public {
                 self.public_index.remove(&obj.record.content_id.digest);
             }
@@ -484,10 +523,20 @@ impl Bud3Registry {
             .objects
             .get_mut(key)
             .ok_or(RegistryError::UnknownObject)?;
-        obj.expires_at = obj
+        let new_expires = obj
             .expires_at
             .checked_add(extra_epochs)
             .ok_or(RegistryError::BadLifetime)?;
+        if obj.endowment.fee_record.user_physical_bytes > 0 {
+            let fee = renewal_fee_epochs(
+                obj.endowment.fee_record.user_physical_bytes,
+                extra_epochs,
+                &FeeParams::TESTNET_DEFAULT,
+            )
+            .map_err(|_| RegistryError::BadLifetime)?;
+            obj.endowment.deposit(split_storage_fee(fee));
+        }
+        obj.expires_at = new_expires;
         Ok(obj.expires_at)
     }
 
@@ -625,8 +674,10 @@ impl Bud3Registry {
         Ok(hits.len())
     }
 
-    /// Close every audit window that ended before `epoch`: each is a miss.
-    /// Returns the number of misses.
+    /// Close every audit window that ended before `epoch`: each is a miss,
+    /// then settle this epoch's Custody Endowment rewards across live objects.
+    /// Missed windows withhold that window's reward and route it to the Network
+    /// Security Pool without slashing stake. Returns the number of misses.
     pub fn close_windows(&mut self, epoch: u64) -> usize {
         let mut missed = 0;
         for obj in self.objects.values_mut() {
@@ -646,7 +697,72 @@ impl Bud3Registry {
                 }
             }
         }
+        self.tick_endowments_at_epoch(epoch);
         missed
+    }
+
+    fn tick_endowments_at_epoch(&mut self, epoch: u64) {
+        let declines = &self.declines;
+        let presence = &self.presence_ppm;
+        let credits = &mut self.custody_credits;
+        let forfeited_total = &mut self.forfeited_pool_total;
+        for obj in self.objects.values_mut() {
+            if obj.endowment.remaining_balance == 0 {
+                continue;
+            }
+            let remaining_epochs = obj.expires_at.saturating_sub(epoch).saturating_add(1);
+            let symbol_size = u64::from(obj.record.profile.symbol_size);
+            let digest = obj.record.content_id.digest;
+            let inputs: Vec<ShareRewardInput> = obj
+                .shares
+                .iter()
+                .map(|s| {
+                    let declined = declines.contains(&(digest, s.share.validator));
+                    let eligible = s.status == ShareStatus::Confirmed
+                        && !s.lost
+                        && !declined
+                        && s.consecutive_misses == 0;
+                    let presence_ppm = presence
+                        .get(&s.share.validator)
+                        .copied()
+                        .unwrap_or(PRESENCE_PPM_SCALE);
+                    ShareRewardInput {
+                        validator: s.share.validator,
+                        symbol_bytes: u64::from(s.share.symbols).saturating_mul(symbol_size),
+                        eligible,
+                        presence_ppm,
+                    }
+                })
+                .collect();
+            let settlement =
+                distribute_object_endowment_epoch(&mut obj.endowment, remaining_epochs, &inputs, 0);
+            for (validator, amount) in settlement.holder_payouts {
+                let entry = credits.entry(validator).or_insert(0);
+                *entry = entry.saturating_add(amount);
+            }
+            *forfeited_total =
+                forfeited_total.saturating_add(settlement.forfeited_to_security_pool);
+        }
+    }
+
+    /// Convenience: record a validator's observed presence ratio in parts per
+    /// million (`0..=1_000_000`) for subsequent Custody Endowment ticks.
+    pub fn set_validator_presence_ppm(&mut self, validator: Address, ppm: u32) {
+        self.presence_ppm
+            .insert(validator, ppm.min(PRESENCE_PPM_SCALE));
+    }
+
+    /// Convenience: read cumulative Custody Endowment rewards earned by `validator`.
+    #[must_use]
+    pub fn validator_custody_credit(&self, validator: &Address) -> u64 {
+        self.custody_credits.get(validator).copied().unwrap_or(0)
+    }
+
+    /// Convenience: read cumulative Custody Endowment amounts forfeited to the
+    /// Network Security Pool by missed audits, declined shares, or early burns.
+    #[must_use]
+    pub const fn forfeited_security_pool_total(&self) -> u64 {
+        self.forfeited_pool_total
     }
 
     /// Mark every share of `holder` lost: the holder was unseen for its
@@ -847,6 +963,14 @@ impl Bud3Registry {
                         "references": o.references.len(),
                         "expires_at_epoch": o.expires_at,
                         "repairs_due": self.repairs_due(key),
+                        "endowment": {
+                            "user_physical_bytes": o.endowment.fee_record.user_physical_bytes,
+                            "decentralization_physical_bytes": o.endowment.fee_record.decentralization_physical_bytes,
+                            "total_deposited": o.endowment.total_deposited,
+                            "remaining_balance": o.endowment.remaining_balance,
+                            "gateway_paid": o.endowment.gateway_paid,
+                            "forfeited_to_security_pool": o.endowment.forfeited_to_security_pool,
+                        },
                     })
                 } else if let Some(epoch) = self.tombstones.get(key) {
                     serde_json::json!({
@@ -888,16 +1012,22 @@ impl Bud3Registry {
                 serde_json::json!({
                     "validator": hex::encode(validator),
                     "count": shares.len(),
+                    "earned_custody_rewards": self.validator_custody_credit(validator),
                     "shares": shares,
                 })
             }
         }
     }
 
-    /// Whether the registry holds nothing.
+    /// Whether the registry is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.objects.is_empty() && self.tombstones.is_empty() && self.declines.is_empty()
+        self.objects.is_empty()
+            && self.tombstones.is_empty()
+            && self.declines.is_empty()
+            && self.custody_credits.is_empty()
+            && self.presence_ppm.is_empty()
+            && self.forfeited_pool_total == 0
     }
 
     /// The registry state root over every map, in order.
@@ -918,6 +1048,15 @@ impl Bud3Registry {
                 &o.record.object_len.to_le_bytes(),
                 &o.expires_at.to_le_bytes(),
                 &(o.references.len() as u64).to_le_bytes(),
+                &o.endowment.fee_record.user_physical_bytes.to_le_bytes(),
+                &o.endowment
+                    .fee_record
+                    .decentralization_physical_bytes
+                    .to_le_bytes(),
+                &o.endowment.total_deposited.to_le_bytes(),
+                &o.endowment.remaining_balance.to_le_bytes(),
+                &o.endowment.gateway_paid.to_le_bytes(),
+                &o.endowment.forfeited_to_security_pool.to_le_bytes(),
             ]);
             for r in &o.roots {
                 fold(&[
@@ -970,6 +1109,15 @@ impl Bud3Registry {
         }
         for (d, v) in &self.declines {
             fold(&[b"decline", d, v]);
+        }
+        for (v, amt) in &self.custody_credits {
+            fold(&[b"credit", v, &amt.to_le_bytes()]);
+        }
+        for (v, ppm) in &self.presence_ppm {
+            fold(&[b"presence", v, &ppm.to_le_bytes()]);
+        }
+        if self.forfeited_pool_total > 0 {
+            fold(&[b"forfeited", &self.forfeited_pool_total.to_le_bytes()]);
         }
         acc
     }

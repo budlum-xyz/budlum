@@ -246,3 +246,97 @@ fn closed_codecs_refuse_on_testnet() {
     assert_eq!(state.get_balance(&uploader), 1_000, "no fee, no write");
     assert_eq!(state.get_nonce(&uploader), 0);
 }
+
+#[test]
+fn endowment_settles_custody_rewards_and_renewal_across_epochs() {
+    use crate::storage::bud3::registry::Bud3Query;
+
+    let uploader = Address::from([21u8; 32]);
+    let confirmed_holder = Address::from([30u8; 32]);
+    let unconfirmed_holder = Address::from([31u8; 32]);
+    let mut state = AccountState::new();
+    state.add_balance(&uploader, 10_000);
+    state.add_balance(&confirmed_holder, 1_000);
+
+    let up = prepare_public_upload(b"endowment-priced payload", &P, &Bud3Limits::default(), 12)
+        .unwrap();
+    let key = up.record.commitment;
+    let shares = vec![
+        (
+            0,
+            Share {
+                validator: [30; 32],
+                class: Class::Full,
+                first_esi: 0,
+                symbols: 6,
+            },
+        ),
+        (
+            0,
+            Share {
+                validator: [31; 32],
+                class: Class::Full,
+                first_esi: 6,
+                symbols: 6,
+            },
+        ),
+    ];
+
+    apply(
+        &mut state,
+        &storage_tx(
+            uploader,
+            0,
+            1,
+            0,
+            StorageTxV3::RegisterObject {
+                record: up.record,
+                shares,
+                lifetime_epochs: 10,
+            },
+        ),
+    )
+    .unwrap();
+
+    // 0.001 BUD minimum fee (1,000 base units) splits 950 to Custody Endowment and 50 to gateway.
+    let obj = state.bud3_registry.query_json(&Bud3Query::Object(key));
+    assert_eq!(obj["endowment"]["total_deposited"], 950);
+    assert_eq!(obj["endowment"]["gateway_paid"], 50);
+
+    // Only holder 30 acknowledges its share; holder 31 remains pending.
+    apply(
+        &mut state,
+        &storage_tx(confirmed_holder, 0, 1, 0, StorageTxV3::CustodyAck { object: key }),
+    )
+    .unwrap();
+
+    state.advance_epoch(0, DEFAULT_CHAIN_ID);
+    let earned_confirmed = state.bud3_registry.validator_custody_credit(&[30; 32]);
+    let earned_unconfirmed = state
+        .bud3_registry
+        .validator_custody_credit(unconfirmed_holder.as_bytes());
+    let forfeited = state.bud3_registry.forfeited_security_pool_total();
+    assert!(earned_confirmed > 0);
+    assert_eq!(earned_unconfirmed, 0);
+    assert!(forfeited > 0);
+
+    // Renewing adds another 950 base units to the object's Custody Endowment.
+    apply(
+        &mut state,
+        &storage_tx(
+            uploader,
+            1,
+            1,
+            0,
+            StorageTxV3::RenewObject {
+                object: key,
+                extra_epochs: 10,
+            },
+        ),
+    )
+    .unwrap();
+    let obj_after = state.bud3_registry.query_json(&Bud3Query::Object(key));
+    assert_eq!(obj_after["endowment"]["total_deposited"], 1_900);
+    assert_eq!(obj_after["endowment"]["gateway_paid"], 100);
+}
+

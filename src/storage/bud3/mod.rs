@@ -17,6 +17,7 @@
 //! | [`registry`] | Chain state: objects, dedup, references, deletion, shares, audits |
 //! | [`tx`] | `StorageTx` v3 and its one apply door |
 //! | [`custody`] | Sub-block tree, symbol root, the audit draw and custody proofs |
+//! | [`fees`] | Physical-byte storage fees, Custody Endowment, 95/5 split and epoch custody rewards |
 //! | [`pipeline`] | Upload (content to record and symbols) and view (symbols to checked content) |
 //! | [`fountain`] | RFC 6330 per-segment encoder and decoder, and the streaming encoder |
 //!
@@ -33,6 +34,7 @@ pub mod bof1;
 pub mod content_id;
 pub mod custody;
 pub mod dedup_index;
+pub mod fees;
 pub mod fountain;
 pub mod limits;
 pub mod meter;
@@ -45,6 +47,12 @@ pub mod varint;
 
 pub use bof1::{Bof1Error, Flags, Header, Object};
 pub use content_id::{ContentId, ContentKey};
+pub use fees::{
+    custody_endowment_account, distribute_object_endowment_epoch, renewal_fee_epochs,
+    replace_object_refund, same_owner_sealed_dedup_fee, shared_public_reference_fee_epochs,
+    split_storage_fee, storage_fee_for_days, storage_fee_for_epochs, EpochCustodySettlement,
+    FeeError, FeeParams, FeeRecord, FeeSplit, ObjectEndowment, ShareRewardInput,
+};
 pub use fountain::{
     encode_stream, FountainError, SegmentDecoder, SegmentEncoder, Symbol, SymbolKind,
 };
