@@ -7,9 +7,11 @@ pub mod assets;
 pub mod evm_ee;
 pub mod foreign;
 pub mod gas;
+pub mod move_ee;
 pub mod overlay;
 pub mod scheduler;
 pub mod state;
+pub mod svm_ee;
 pub mod universal_call;
 pub mod wasm_ee;
 pub mod worker;
@@ -26,8 +28,10 @@ use crate::execution::coordinator::gas::{
     effective_priority_fee_attos, next_uel_base_fee_attos, settle_uel_fee_attos, BlockBguMeter,
     UelFeeSettlement, MIN_UEL_BASE_FEE_ATTOS,
 };
+use crate::execution::coordinator::move_ee::MoveEe;
 use crate::execution::coordinator::overlay::{BlockReadCache, TxOverlay};
 use crate::execution::coordinator::state::{NS_BUDZERO_PROGRAM, NS_BUDZERO_STORAGE};
+use crate::execution::coordinator::svm_ee::SvmEe;
 use crate::execution::coordinator::universal_call::{
     unwrap_static_universal_input, BUDZERO_SYSCALL_UNIVERSAL_CALL,
 };
@@ -371,6 +375,8 @@ impl ExecutionCoordinator {
         }));
         supervisor.register(WorkerEndpoint::in_process(|| Box::new(EvmEe::new())));
         supervisor.register(WorkerEndpoint::in_process(|| Box::new(WasmEe::new())));
+        supervisor.register(WorkerEndpoint::in_process(|| Box::new(SvmEe::new())));
+        supervisor.register(WorkerEndpoint::in_process(|| Box::new(MoveEe::new())));
         Self { supervisor }
     }
 
@@ -925,3 +931,5 @@ impl HostApi for HostBridge<'_> {
 mod coordinator_tests;
 #[cfg(test)]
 mod uel_wp27_wp29_wp30_tests;
+#[cfg(test)]
+mod uel_wp31_wp32_tests;

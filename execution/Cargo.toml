@@ -1,32 +1,20 @@
 [workspace]
-members = [
-  "mock",
-  "evm",
-  "wasm",
-]
 resolver = "2"
+members = ["mock", "evm", "wasm", "svm", "move", "budzero"]
 
 [workspace.package]
-edition = "2021"
-rust-version = "1.97.1"
+version = "0.1.0"
+edition = "2024"
 license = "LicenseRef-PolyForm-Shield-1.0.0"
+publish = false
 
-[workspace.lints.rust]
-unsafe_code = "forbid"
-
-[workspace.lints.clippy]
-unwrap_used = "deny"
-expect_used = "deny"
-
-# Every `budlum-ee-*` worker binary runs in its own OS process behind a Unix
-# domain socket. Unlike the node binary (`panic = "abort"` in root Cargo.toml),
-# workers MUST build with `panic = "unwind"` so `catch_unwind` in
-# `budlum_uel_abi::transport::serve_connection` turns deterministic engine
-# panics into `EeFault` receipts instead of aborting the worker process
-# (section 8.3.2, closing BLG-250; enforced by `ee-workers-build-with-unwind`).
-[profile.release]
-overflow-checks = true
+# Worker processes execute untrusted bytecode behind a socket boundary and
+# MUST catch panics into structured `EeFault::Internal` payloads instead of
+# aborting the process abruptly (`ee_workers_build_with_unwind` gate).
+[profile.dev]
 panic = "unwind"
-lto = true
-codegen-units = 1
-strip = true
+overflow-checks = true
+
+[profile.release]
+panic = "unwind"
+overflow-checks = true

@@ -1,0 +1,11 @@
+[package]
+name = "budlum-ee-budzero"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Sandboxed out-of-process BudZero execution worker for Budlum UEL."
+
+[dependencies]
+budlum-uel-abi = { path = "../../crates/uel-abi" }
+sha3 = "0.10"
