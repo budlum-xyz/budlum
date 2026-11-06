@@ -2309,9 +2309,10 @@ mod tests {
             integer_ranking,
             "the actor/RPC boundary must carry the integer score itself"
         );
+        let top: Vec<Address> = registry.top_agents(1).into_iter().map(|(a, _)| a).collect();
         assert_eq!(
-            registry.top_agents(1),
-            registry.agents_by_trust_score().into_iter().take(1).collect::<Vec<_>>(),
+            top,
+            vec![integer_ranking[0].0],
             "top-N is the same ordering, cut"
         );
     }
