@@ -38,6 +38,15 @@ use std::str::FromStr;
 /// The wire form is lowercase hex with no `0x` prefix. Parsing also accepts a
 /// `0x` prefix and the shorthand `"0"` for the zero address, because callers
 /// have always been allowed to write both.
+///
+/// # The input contract is owned by BLG-151 (#43)
+///
+/// The accepted input spellings are **not** settled by this crate's move. #43
+/// closes BLG-151 by making `"0"` and `"0x0"` errors and adding a `0X` prefix.
+/// That change is still correct and still needed; it now lands **here**, on
+/// `from_hex` below, rather than in `src/core/address.rs`, which is a re-export
+/// as of this commit. The behaviour was moved verbatim so that this PR decides
+/// nothing about the finding either way.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Address(pub [u8; 32]);
 
@@ -136,13 +145,17 @@ mod tests {
         assert_eq!(addr.to_string(), addr.to_hex());
     }
 
-    /// Both shorthands callers have always used still parse to zero.
+    /// The zero address and its printed form.
+    ///
+    /// Which *input strings* parse to zero is BLG-151's question, and #43 owns
+    /// it: that PR makes `"0"` and `"0x0"` errors and adds a `0X` prefix. This
+    /// slice moves the definition without answering that question, so it pins
+    /// only the value and its output, not the accepted spellings.
     #[test]
-    fn zero_shorthands_parse() {
-        assert_eq!(Address::from_hex("0").ok(), Some(Address::zero()));
-        assert_eq!(Address::from_hex("0x0").ok(), Some(Address::zero()));
+    fn zero_address_prints_as_sixty_four_zeros() {
         assert_eq!(Address::default(), Address::zero());
         assert_eq!(Address::zero().to_hex(), "0".repeat(64));
+        assert_eq!(Address::zero().as_bytes(), &[0u8; 32]);
     }
 
     #[test]

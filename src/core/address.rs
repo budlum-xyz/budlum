@@ -6,6 +6,12 @@
 //! same type, so a phone and a validator cannot drift apart on what an address
 //! is or how it prints. The identity is pinned by `node_address_is_the_shared_type`
 //! below, which fails to compile if a second copy is ever reintroduced.
+//!
+//! # Looking for `from_hex`?
+//!
+//! The body moved to `crates/budlum-types/src/lib.rs`. In particular, BLG-151
+//! (#43), which tightens the accepted input spellings, now applies to that
+//! `from_hex` and not to this file.
 
 pub use budlum_types::Address;
 
@@ -27,15 +33,18 @@ mod single_definition_tests {
         assert_eq!(identity(shared).as_bytes(), &[7u8; 32]);
     }
 
-    /// The wire shape the node has always written must survive the move:
-    /// lowercase hex with no `0x`, and the zero address still parses from `"0"`.
+    /// The output shape the node has always written must survive the move:
+    /// lowercase hex, 64 characters, no prefix, and a refusal on a short string.
+    ///
+    /// The accepted *input* spellings are deliberately not pinned here. #43 owns
+    /// `from_hex`'s input contract under BLG-151 (it makes `"0"`/`"0x0"` errors
+    /// and adds `0X`); a move must not decide that finding either way.
     #[test]
     fn address_wire_shape_survives_the_move() {
         assert_eq!(Address::zero().to_hex(), "0".repeat(64));
-        assert_eq!(Address::from_hex("0").ok(), Some(Address::zero()));
-        assert_eq!(Address::from_hex("0x0").ok(), Some(Address::zero()));
         let addr = Address::from([0xabu8; 32]);
         assert_eq!(addr.to_hex(), "ab".repeat(32));
+        assert_eq!(addr.to_hex().len(), 64);
         assert_eq!(Address::from_hex(&addr.to_hex()).ok(), Some(addr));
         assert!(Address::from_hex("ab").is_err());
     }
