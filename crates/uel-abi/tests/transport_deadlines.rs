@@ -3,12 +3,12 @@
 //! These peers deliberately misbehave. A timeout must remain a transport error,
 //! and a response that cannot be consumed must not leave a reusable connection.
 
-use budlum_uel_abi::frame::{read_frame, write_frame, ABI_VERSION};
+use budlum_uel_abi::EeId;
+use budlum_uel_abi::frame::{ABI_VERSION, read_frame, write_frame};
 use budlum_uel_abi::mock::MockEe;
 use budlum_uel_abi::pb;
-use budlum_uel_abi::transport::{serve_connection, EeClient, TransportError};
-use budlum_uel_abi::EeId;
-use std::io::Write;
+use budlum_uel_abi::transport::{EeClient, TransportError, serve_connection};
+use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -17,9 +17,7 @@ use std::time::{Duration, Instant};
 
 static SOCKET_SEQ: AtomicU32 = AtomicU32::new(0);
 
-fn spawn_peer(
-    peer: impl FnOnce(UnixStream) + Send + 'static,
-) -> (PathBuf, JoinHandle<()>) {
+fn spawn_peer(peer: impl FnOnce(UnixStream) + Send + 'static) -> (PathBuf, JoinHandle<()>) {
     let path = std::env::temp_dir().join(format!(
         "uel-deadline-{}-{}.sock",
         std::process::id(),
@@ -97,8 +95,11 @@ fn uel_abi_reconnect_handshake_shares_the_request_budget() {
         if write_frame(&mut stream, &hello(request.request_id)).is_err() {
             return;
         }
-        // The old implementation starts a fresh budget after the handshake.
+        // Stay connected after reading the deployment: an early peer close
+        // races the client's deadline and tests EOF instead of budget sharing.
         let _ = read_frame(&mut stream);
+        let mut byte = [0u8];
+        let _ = stream.read(&mut byte);
     });
     let mut client = EeClient::new(&path, EeId::EVM).with_timeout(Duration::from_millis(500));
     let started = Instant::now();
@@ -121,10 +122,15 @@ fn uel_abi_unrepresentable_deadline_does_not_panic() {
         let _ = serve_connection(stream, &mut MockEe::new(EeId::EVM));
     });
     let mut client = EeClient::new(&path, EeId::EVM);
-    client.validate_deploy(b"first").expect("transport").expect("code");
+    client
+        .validate_deploy(b"first")
+        .expect("transport")
+        .expect("code");
     client = client.with_timeout(Duration::MAX);
     assert_eq!(
-        client.validate_deploy(b"second").expect_err("invalid budget"),
+        client
+            .validate_deploy(b"second")
+            .expect_err("invalid budget"),
         TransportError::Timeout
     );
     assert!(!client.is_connected());
@@ -173,7 +179,10 @@ fn uel_abi_unusable_final_response_poisons_the_connection() {
         });
         let mut client = EeClient::new(&path, EeId::EVM);
         assert!(client.validate_deploy(b"code").is_err(), "case {case}");
-        assert!(!client.is_connected(), "case {case} retained a poisoned stream");
+        assert!(
+            !client.is_connected(),
+            "case {case} retained a poisoned stream"
+        );
         drop(client);
         worker.join().expect("peer");
         std::fs::remove_file(path).expect("remove socket");
