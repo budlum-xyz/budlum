@@ -253,3 +253,7 @@ pub mod bud3_door;
 // Live-verification regression locks for lane A (docs/audit/live/lane-a.md).
 #[cfg(test)]
 pub mod audit_lane_a;
+
+// Live-verification regression locks for lane B (docs/audit/live/lane-b.md).
+#[cfg(test)]
+pub mod audit_lane_b;
