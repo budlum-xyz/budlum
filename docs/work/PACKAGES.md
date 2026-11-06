@@ -86,7 +86,7 @@ The `PRs` column is a live claim map, not a completion claim. Every PR in it is 
 | WP-42, 1/N | WP-42, WP-04 | directive out of the tree, single integrator ledgers, live stack audit | `ebae99c8` (source #93 `ce8191ec`) |
 | WP-42, 2/N | WP-42 | observed main lint, format and gate repairs | `4bae025d` (source #93 `0c13496b`) |
 | WP-31, 1/N | WP-31 | Solana namespace, classifications, reads and refusals carried from #83 | `1ef57ae8` |
-| WP-31, 2/N | WP-31 | dedicated loopback listener (127.0.0.1:18548), slotSubscribe and four named subscription refusals, correct Solana config shapes | pending |
+| WP-31, 2/N | WP-31 | dedicated loopback listener (127.0.0.1:18548), slotSubscribe and four named subscription refusals, correct Solana config shapes | `bbe519a8` |
 | WP-32, 1/N | WP-32 | Aptos REST table and reads, dedicated listener, shared admission carried from #89 | `591cbfd0`, `faa45950`, `6510e4ec` |
 
 ## Evidence boundary
