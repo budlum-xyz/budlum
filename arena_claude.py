@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-"""arena_claude.py — Claude Code'u Arena API'nin Arena Router'ı üzerinden çalıştırır.
+"""arena_claude.py - run Claude Code through the Arena API's Arena Router.
 
-Model seçimi yok: Claude Code'un bütün model alanları router moduna (auto / fast)
-bağlanır; hangi modelin cevap vereceğine Arena karar verir.
-Sadece standart kütüphane kullanır (Python 3.8+).
+There is no model selection: every Claude Code model field is bound to a router
+mode (auto / fast); Arena decides which model answers.
+Uses only the standard library (Python 3.8+).
 
-Anahtar: ARENA_API_KEY ortam değişkeni (yoksa terminalde gizli sorulur).
+Key: the ARENA_API_KEY environment variable (otherwise prompted hidden in the terminal).
 
-Komutlar:
-  check      anahtarı ve router'ı dener, hangi modelin cevap verdiğini gösterir
-  run        Claude Code'u router ile başlatır (ek argümanlar claude'a geçer)
-             örnek: python arena_claude.py run --resume
-  install    ayarları ~/.claude/settings.json'a yazar; düz `claude` da router'ı kullanır
-  uninstall  install'ın yazdıklarını siler
+Commands:
+  check      test the key and router, show which model answered
+  run        start Claude Code with the router (extra arguments pass to claude)
+             example: python arena_claude.py run --resume
+  install    write settings to ~/.claude/settings.json; plain `claude` also uses the router
+  uninstall  remove what install wrote
 
-İsteğe bağlı ortam değişkenleri:
-  ARENA_GATEWAY_URL  varsayılan https://api.preview.arena.ai (sonunda /v1 olmadan)
-  ARENA_MODE         ana router modu, varsayılan auto
-  ARENA_FAST_MODE    hafif / arka plan işleri için mod, varsayılan fast
+Optional environment variables:
+  ARENA_GATEWAY_URL  default https://api.preview.arena.ai (without a trailing /v1)
+  ARENA_MODE         main router mode, default auto
+  ARENA_FAST_MODE    mode for lightweight / background work, default fast
 """
 import getpass
 import json
@@ -30,7 +30,7 @@ import urllib.request
 from pathlib import Path
 
 GATEWAY = os.environ.get("ARENA_GATEWAY_URL", "https://api.preview.arena.ai").rstrip("/")
-if GATEWAY.endswith("/v1"):  # Claude Code /v1/messages yolunu kendisi ekler
+if GATEWAY.endswith("/v1"):  # Claude Code appends the /v1/messages path itself
     GATEWAY = GATEWAY[:-3]
 MODE = os.environ.get("ARENA_MODE", "auto")
 FAST_MODE = os.environ.get("ARENA_FAST_MODE", "fast")
@@ -38,11 +38,11 @@ SETTINGS = Path.home() / ".claude" / "settings.json"
 
 
 def claude_env(key):
-    """Claude Code ortamı: her model alanı bir router moduna bağlı, model adı yok."""
+    """Claude Code environment: every model field is bound to a router mode, no model name."""
     return {
         "ANTHROPIC_BASE_URL": GATEWAY,
         "ANTHROPIC_AUTH_TOKEN": key,
-        "ANTHROPIC_API_KEY": "",  # boş kalmalı; yoksa Claude Code doğrudan Anthropic'e gider
+        "ANTHROPIC_API_KEY": "",  # must stay empty; otherwise Claude Code goes directly to Anthropic
         "ANTHROPIC_MODEL": MODE,
         "ANTHROPIC_DEFAULT_OPUS_MODEL": MODE,
         "ANTHROPIC_DEFAULT_SONNET_MODEL": MODE,
@@ -55,10 +55,10 @@ def claude_env(key):
 def get_key():
     key = os.environ.get("ARENA_API_KEY", "").strip()
     if not key and sys.stdin.isatty():
-        key = getpass.getpass("Arena API anahtarı (yazarken görünmez): ").strip()
+        key = getpass.getpass("Arena API key (hidden while typing): ").strip()
     if not key:
         sys.exit(
-            "ARENA_API_KEY tanımlı değil.\n"
+            "ARENA_API_KEY is not defined.\n"
             "  bash/zsh:   export ARENA_API_KEY=...\n"
             "  PowerShell: $env:ARENA_API_KEY='...'"
         )
@@ -66,7 +66,7 @@ def get_key():
 
 
 def check(key):
-    """Router'a küçük bir istek atar ve kimin cevap verdiğini yazar. Başarılıysa True döner."""
+    """Send a small request to the router and print who answered. Return True on success."""
     body = json.dumps({
         "model": MODE,
         "max_tokens": 64,
@@ -90,21 +90,21 @@ def check(key):
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")[:300]
         if e.code == 401:
-            hint = "Anahtar reddedildi. Arena panelindeki Keys sayfasında anahtarın aktif mi bak."
+            hint = "Key rejected. Check the Keys page in the Arena panel to see whether the key is active."
         elif e.code == 403:
-            hint = "Erişim yok. Anahtarın bu uç noktaya yetkili olduğundan emin ol."
+            hint = "No access. Make sure the key is authorized for this endpoint."
         elif e.code == 404:
-            hint = "Adres bulunamadı. ARENA_GATEWAY_URL kök adres olmalı (sonunda /v1 olmadan)."
+            hint = "Address not found. ARENA_GATEWAY_URL must be the root address (without a trailing /v1)."
         elif e.code == 429:
-            hint = "Hız sınırı. Biraz bekleyip tekrar dene."
+            hint = "Rate limit. Wait a little and try again."
         elif e.code >= 500:
-            hint = "Arena tarafında geçici bir hata olabilir; biraz sonra tekrar dene."
+            hint = "There may be a temporary error on the Arena side; try again later."
         else:
             hint = ""
-        print(f"HATA {e.code}: {detail}\n{hint}".rstrip(), file=sys.stderr)
+        print(f"ERROR {e.code}: {detail}\n{hint}".rstrip(), file=sys.stderr)
         return False
-    except OSError as e:  # URLError, zaman aşımı, bağlantı reddi
-        print(f"Bağlanılamadı: {getattr(e, 'reason', e)}", file=sys.stderr)
+    except OSError as e:  # URLError, timeout, connection refusal
+        print(f"Could not connect: {getattr(e, 'reason', e)}", file=sys.stderr)
         return False
 
     try:
@@ -113,16 +113,16 @@ def check(key):
         text = "".join(b.get("text", "") for b in blocks if isinstance(b, dict)).strip()
         body_model = data.get("model")
     except (ValueError, AttributeError):
-        print(f"Beklenmeyen cevap: {raw[:200]}", file=sys.stderr)
+        print(f"Unexpected response: {raw[:200]}", file=sys.stderr)
         return False
 
     resolved = headers.get("X-Arena-Resolved-Model") or body_model or "?"
-    print(f"OK  mod: {headers.get('X-Arena-Routing-Mode') or MODE}")
-    print(f"    cevap veren model: {resolved}")
-    print(f"    katman: {headers.get('X-Arena-Routing-Tier') or '?'}")
-    print(f"    cevap: {text or '(boş)'}")
+    print(f"OK  mode: {headers.get('X-Arena-Routing-Mode') or MODE}")
+    print(f"    answering model: {resolved}")
+    print(f"    tier: {headers.get('X-Arena-Routing-Tier') or '?'}")
+    print(f"    response: {text or '(empty)'}")
     if resolved != "?" and "claude" not in resolved.lower():
-        print("    not: bu istekte router Claude olmayan bir model seçti (router kararı).")
+        print("    note: for this request the router chose a non-Claude model (router decision).")
     return True
 
 
@@ -131,10 +131,10 @@ def cmd_run(args):
     claude_args = args[1:] if skip_check else args
     key = get_key()
     if not skip_check and not check(key):
-        sys.exit("Router testi başarısız, Claude Code başlatılmadı (atlamak için: run --no-check).")
+        sys.exit("Router test failed; Claude Code was not started (to skip: run --no-check).")
     exe = shutil.which("claude")
     if not exe:
-        sys.exit("`claude` komutu PATH'te yok; Claude Code kurulu mu?")
+        sys.exit("The `claude` command is not on PATH; is Claude Code installed?")
     env = {**os.environ, **claude_env(key)}
     if os.name == "nt":
         return subprocess.call([exe, *claude_args], env=env)
@@ -147,9 +147,9 @@ def load_settings():
     try:
         data = json.loads(SETTINGS.read_text(encoding="utf-8") or "{}")
     except ValueError:
-        sys.exit(f"{SETTINGS} geçerli JSON değil; önce onu düzelt.")
+        sys.exit(f"{SETTINGS} is not valid JSON; fix it first.")
     if not isinstance(data, dict) or not isinstance(data.get("env", {}), dict):
-        sys.exit(f"{SETTINGS} beklenen biçimde değil (kök ve env nesne olmalı).")
+        sys.exit(f"{SETTINGS} is not in the expected shape (root and env must be objects).")
     return data
 
 
@@ -157,12 +157,12 @@ def save_settings(data):
     SETTINGS.parent.mkdir(parents=True, exist_ok=True)
     if SETTINGS.exists():
         backup = SETTINGS.with_name(SETTINGS.name + ".bak")
-        if not backup.exists():  # ilk (orijinal) hâli bir kez saklanır
+        if not backup.exists():  # preserve the first (original) state once
             shutil.copy2(SETTINGS, backup)
     tmp = SETTINGS.with_name(SETTINGS.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     try:
-        os.chmod(tmp, 0o600)  # anahtar içeriyor: sadece sen oku
+        os.chmod(tmp, 0o600)  # contains a key: read only by you
     except OSError:
         pass
     os.replace(tmp, SETTINGS)
@@ -171,19 +171,19 @@ def save_settings(data):
 def cmd_install():
     key = get_key()
     if not check(key):
-        sys.exit("Router testi başarısız, ayar yazılmadı.")
+        sys.exit("Router test failed; settings were not written.")
     data = load_settings()
     data.setdefault("env", {}).update(claude_env(key))
     save_settings(data)
-    print(f"Yazıldı: {SETTINGS}")
-    print("Anahtar bu dosyada düz metin olarak durur; dosyayı paylaşma, git'e koyma.")
-    print("Açık Claude Code oturumlarını kapatıp yeniden aç; düz `claude` artık router'ı kullanır.")
+    print(f"Wrote: {SETTINGS}")
+    print("The key is stored as plain text in this file; do not share the file or put it in git.")
+    print("Close and reopen open Claude Code sessions; plain `claude` now uses the router.")
     return 0
 
 
 def cmd_uninstall():
     if not SETTINGS.exists():
-        print("Ayar dosyası yok, yapılacak bir şey kalmadı.")
+        print("There is no settings file; nothing left to do.")
         return 0
     data = load_settings()
     env = data.get("env", {})
@@ -193,7 +193,7 @@ def cmd_uninstall():
     if "env" in data and not env:
         del data["env"]
     save_settings(data)
-    print("Silindi: " + (", ".join(removed) or "(zaten yoktu)"))
+    print("Removed: " + (", ".join(removed) or "(already absent)"))
     return 0
 
 
