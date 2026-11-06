@@ -24,7 +24,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
-use tower::{Layer, Service, ServiceBuilder};
+use tower::{Layer, Service};
 use tracing::info;
 
 /// Hard ceiling for the per-IP sliding-window map. Without a bound, an attacker
@@ -530,11 +530,14 @@ impl RpcServer {
 
         validate_rpc_security_config(&self.security)?;
         let tls = self.tls.clone();
-        let http_middleware = ServiceBuilder::new().layer(RpcSecurityLayer::new(
+        // Wrap the combined REST/JSON-RPC service, not only jsonrpsee's inner
+        // dispatcher. Otherwise the compatibility branch would bypass IP,
+        // origin, rate and authentication admission on the shared listener.
+        let security = RpcSecurityLayer::new(
             self.security.clone(),
             self.metrics.clone(),
             self.mode.clone(),
-        ));
+        );
 
         // jsonrpsee 0.26 moved the transport limits off the server builder and
         // onto `ServerConfig`; the defaults are unchanged, so only the values
@@ -554,9 +557,7 @@ impl RpcServer {
         // oversized batches are rejected wholesale instead of partially
         // executed (jsonrpsee drops the whole batch at `Limit`).
         config = config.set_batch_request_config(BatchRequestConfig::Limit(100));
-        let builder = ServerBuilder::default()
-            .set_config(config.build())
-            .set_http_middleware(http_middleware);
+        let builder = ServerBuilder::default().set_config(config.build());
 
         let mode_label = match self.mode {
             RpcMode::Public => "public",
@@ -623,24 +624,26 @@ impl RpcServer {
                 let svc_builder_for_service = svc_builder.clone();
                 let methods_for_service = methods.clone();
                 let aptos_for_service = aptos_gateway.clone();
-                let svc = tower::service_fn(move |mut req: HttpRequest<hyper::body::Incoming>| {
-                    req.extensions_mut().insert::<SocketAddr>(remote_addr);
-                    let is_aptos =
-                        serve_aptos_on_primary && aptos::owns_path(req.uri().path());
-                    let method = req.method().clone();
-                    let path = req.uri().path().to_string();
-                    let aptos_for_request = aptos_for_service.clone();
-                    let mut svc = svc_builder_for_service
-                        .clone()
-                        .build(methods_for_service.clone(), stop_handle_for_service.clone());
-                    async move {
-                        if is_aptos {
-                            Ok(aptos_for_request.handle(&method, &path).await)
-                        } else {
-                            svc.call(req).await
+                let svc = security.clone().layer(tower::service_fn(
+                    move |mut req: HttpRequest<hyper::body::Incoming>| {
+                        req.extensions_mut().insert::<SocketAddr>(remote_addr);
+                        let is_aptos =
+                            serve_aptos_on_primary && aptos::owns_path(req.uri().path());
+                        let method = req.method().clone();
+                        let path = req.uri().path().to_string();
+                        let aptos_for_request = aptos_for_service.clone();
+                        let mut svc = svc_builder_for_service
+                            .clone()
+                            .build(methods_for_service.clone(), stop_handle_for_service.clone());
+                        async move {
+                            if is_aptos {
+                                Ok(aptos_for_request.handle(&method, &path).await)
+                            } else {
+                                svc.call(req).await
+                            }
                         }
-                    }
-                });
+                    },
+                ));
 
                 let shutdown = stop_handle.clone().shutdown();
                 match tls.clone() {
