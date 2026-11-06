@@ -14,6 +14,14 @@ RPC methods expose reads and point writers at `bud_sendRawTransaction`.
 | `ProofMarket` | proof-market escrow, tasks, receipts, payments and refunds |
 | `RelayerIntent` | outbound relayer intents, solver bids, settlement and expiry |
 | `Graft` | Graft applications, payments, ownership claims and solver intents |
+| `SharedSecurity` | Mikoriza registrars and restaking allocations |
+| `DeliverMessage` | cross-domain messages proven against an accepted commitment |
+
+The object layer's writes will arrive as `SettlementTx::ObjectLayer(...)`, one
+variant carrying the whole `ObjectLayerTx` enum. That variant is not in this
+tree yet, and until it is the object layer is closed: `ACTIVATION` carries no
+height and every write is refused. `docs/OBJECT_LAYER.md` is the integrator
+guide.
 
 ## External evidence
 

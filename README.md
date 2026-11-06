@@ -189,6 +189,7 @@ dependencies, so the entire system builds, tests and ships as one tree.
 | **Pollen** | [`src/pollen/`](src/pollen) | Consent-gated data marketplace, grants, encryption, and the gate the AI layer must pass |
 | **BNS** | [`src/bns/`](src/bns) | `.bud` naming: registration, renewal, transfer, subdomains, content and storage records |
 | **Wallet Core** | [`crates/wallet-core/`](crates/wallet-core), [README](crates/wallet-core/README.md) | BIP39 + SLIP-0010 Ed25519 derivation and transaction signing. A wallet, not a relayer |
+| **Object layer (UOL)** | [`src/object_layer/`](src/object_layer), [integrator guide](docs/OBJECT_LAYER.md) | Assets stay under the rule of the chain they were born on: domain charters, asset classes with reference samples, one placement per asset, and a two-step fidelity challenge. Closed on the testnet until its activation height is set |
 
 ### Supporting trees
 
