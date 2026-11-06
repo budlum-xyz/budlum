@@ -36,14 +36,18 @@ pub mod custody;
 pub mod dedup_index;
 pub mod fees;
 pub mod fountain;
+pub mod frame;
 pub mod limits;
 pub mod meter;
 pub mod pipeline;
 pub mod placement;
+pub mod qr;
 pub mod registry;
 pub mod segment;
+pub mod two_path;
 pub mod tx;
 pub mod varint;
+pub mod video;
 
 pub use bof1::{Bof1Error, Flags, Header, Object};
 pub use content_id::{ContentId, ContentKey};
@@ -56,6 +60,22 @@ pub use fees::{
 pub use fountain::{
     encode_stream, FountainError, SegmentDecoder, SegmentEncoder, Symbol, SymbolKind,
 };
-pub use limits::{Bud3Limits, Profile, ProfileId};
+pub use frame::{
+    frames_for_object_bytes, Bud3Frame, FrameWireError, BUD3_FRAME_HEADER_LEN, BUD3_FRAME_MAGIC,
+};
+pub use limits::{Bud3Limits, OpticalProfile, Profile, ProfileId};
 pub use meter::{Meter, MeterError};
+pub use qr::{
+    frame_to_matrix, frame_to_png, png_to_frame, render_optical_seconds,
+    render_p1_optical_seconds, Bud3QrError, OpticalSecond,
+};
 pub use segment::{object_commitment, segment_digest, ObjectCommitment, Segmentation};
+pub use two_path::{
+    decode_logical_path, decode_optical_path, extract_object_from_frames,
+    extract_object_from_optical_seconds, verify_upload_two_path_and_round_trip, TwoPathError,
+    VerifiedOpticalObject,
+};
+pub use video::{
+    chain_segment_video_digests, fold_frame_digests, video_commitment,
+    video_commitment_from_frames,
+};
