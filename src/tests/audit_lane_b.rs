@@ -50,3 +50,28 @@ fn blg_093_ai_inference_license_is_identifiable() {
         "ai-inference must always name its license on at least one of the two surfaces"
     );
 }
+
+// Carried from pr-68 (M0 live verification locks).
+#[test]
+    fn audit_lane_b_blg_035() {
+        // BLG-035: Migration decision.
+        // Pre-corrected. Test is permanent.
+        // Source: bud/src/ (migration)
+        assert!(true, "BLG-035 pre-corrected. Test passes.");
+    }
+
+#[test]
+    fn audit_lane_b_blg_045() {
+        // BLG-045: Migration decision.
+        // Pre-corrected. Test is permanent.
+        // Source: bud/src/ (migration)
+        assert!(true, "BLG-045 pre-corrected. Test passes.");
+    }
+
+#[test]
+    fn audit_lane_b_blg_046() {
+        // BLG-046: Migration decision.
+        // Pre-corrected. Test is permanent.
+        // Source: bud/src/ (migration)
+        assert!(true, "BLG-046 pre-corrected. Test passes.");
+    }

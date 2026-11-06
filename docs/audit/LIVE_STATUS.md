@@ -215,3 +215,7 @@ same PR shape as one that carries 1, and the summary table is where that is chea
   a conclusion, and no run has a `success` or `failure` conclusion.
 - The numbers in sections 2 to 5 are row counts of the directive's own tables, not measurements of
   code. Section 0.5 rule 1 keeps them labelled that way.
+
+## Rows carried from pr-68 (M0 live verification)
+
+- New findings: BLG-268+ (not yet identified)

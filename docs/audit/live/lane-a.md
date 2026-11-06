@@ -203,3 +203,7 @@ When a closing package merges, its PR flips the finding here to Kapalı with
 commit SHA and CI run number. WP-04 (İP-04) consolidates this file, the other
 three lanes, and `docs/audit/LIVE_STATUS.md`; this file is their lane A input,
 not a replacement for it.
+
+## Rows carried from pr-68 (M0 live verification)
+
+- BLG-007, BLG-009, BLG-010, BLG-011, BLG-017, BLG-019, BLG-020, BLG-021, BLG-023, BLG-028, BLG-031, BLG-041, BLG-042, BLG-044, BLG-065, BLG-066, BLG-088, BLG-089, BLG-090, BLG-100, BLG-101, BLG-102, BLG-103, BLG-104, BLG-107, BLG-113, BLG-118, BLG-119, BLG-125, BLG-128, BLG-147, BLG-151, BLG-167, BLG-183, BLG-184, BLG-196, BLG-197, BLG-202, BULGU-005, BULGU-006, BULGU-007, BULGU-008, BULGU-009, BULGU-010, BULGU-013, BULGU-015, BULGU-016, BULGU-021 (Kapatan İP: İP-08, İP-12, İP-13, İP-14, İP-15, İP-16, İP-17)

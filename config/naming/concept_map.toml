@@ -1,5 +1,5 @@
 schema = 1
-mode = "count"            # becomes "absolute" once every count is zero
+mode = "count"            # WP-43 sets "absolute" at the end of T-Launch
 global_allow_paths = [
   "config/naming/",
   "docs/NAMING.md",
@@ -15,6 +15,7 @@ new_code = "hash_chain_election"
 term_en = "hash chain leader election (HCLE)"
 term_tr = "Hash zinciri lider seçimi"
 area = "consensus"
+owner = "WP-12"
 reason = "The name states the mechanism."
 
 [[concept]]
@@ -25,6 +26,7 @@ new_code = "faucet"
 term_en = "testnet faucet"
 term_tr = "Testnet musluğu"
 area = "operations"
+owner = "WP-41"
 reason = "One concept, one term."
 
 [[concept]]
@@ -35,6 +37,7 @@ new_code = "QuantumAlertLevel::{Advisory, Restricted, Isolated}"
 term_en = "quantum alert level 1, 2, 3 (Advisory, Restricted, Isolated)"
 term_tr = "Kuantum alarm düzeyi 1, 2, 3 (Uyarı, Kısıtlı, Yalıtılmış)"
 area = "security"
+owner = "WP-12"
 reason = "Levels are named by their effect."
 
 [[concept]]

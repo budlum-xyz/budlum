@@ -88,3 +88,16 @@ branch that carries the work is `In progress`.
 - **Done criterion status:** all four lane files are on the branch (`lane-d.md`, `LIVE_STATUS.md`,
   `FINDINGS.md`, and this section of `PACKAGES.md`); the lane test file exists and is wired. The
   pull request is open and not merged.
+
+<!-- carried rows from pr-68 -->
+| Package | Lane | Status | Dependency | PR List |
+| İP-01 | A | Open | None | PR #64 (proposed) |
+| İP-02 | B | Open | None | PR #65 (proposed) |
+| İP-03 | C | Open | None | PR #66 (proposed) |
+| İP-04 | D | Open | İP-01, İP-02, İP-03 | PR #67 (proposed) |
+| İP-05 | D | Open (WP-05) | İP-04 | PR #50 (WP-05) |
+| İP-06 | B | Open (WP-06) | İP-02 | PR #60 (WP-06 continuation) |
+| İP-07 | B | Open | İP-06 | PR #68 (proposed) |
+| İP-08 | A | Open | İP-01 | PR #69 (proposed) |
+| İP-09 | C | Open | İP-03 | PR #70 (proposed) |
+| ... (remaining İP-10 to İP-64) ... | | | | |

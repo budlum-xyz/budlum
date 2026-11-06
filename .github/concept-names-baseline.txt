@@ -29,3 +29,5 @@ Universal Gateway|5|8
 Vault (SocialFi)|7|152
 budlumxyz|25|203
 three_* modules|31|201
+# Note (pr-68): Budscan|33|268 -> 0|0: the crate, the patch layer, the browser build configuration and the gates that read those files by name are the name itself, not prose about it. They are the entry's allow_paths, and renaming those paths is what WP-40 delivers.
+# Note (pr-68): Tarif|51|1442 -> 50|1356: docs/ARCHITECTURE.md is the design record, which states what was decided in the vocabulary of the day. It joins the entry's allow_paths beside mobile/android/fdroid/.

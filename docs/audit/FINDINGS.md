@@ -136,3 +136,18 @@ so their closing packages owe the named test.
 - The English titles are this file's renderings of the source records' own titles, because rule
   4 and card item 3 keep the repository English. They describe the defect; they are not a new
   severity or ordering decision.
+
+## Rows carried from pr-68 (M0 live verification)
+
+| BLG-001 | Critical | consensus | PoS leader selection skips empty height and locks production | Verified (Red test output) | audit_repro_a_blg_001 | İP-12 | Critical |
+| BLG-002 | High | tokenomics | Distributed testnet profile ceremony, peer source and tokenomics not ready for opening | Open | audit_repro_a_blg_002 | İP-16 | High |
+| BLG-003 | High | tokenomics | Genesis supply verification does not check total 100M limit with additional allocations and bootstrap stake | Verified (Red test output) | audit_repro_a_blg_003 | İP-16 | High |
+| BLG-005 | Medium | build/CI | Default secret/data directories are not excluded by Git | Pre-corrected (Green) | audit_lane_a_blg_005 | İP-16 | Medium |
+| BLG-006 | Medium | tokenomics | Validation reward pool epoch dependency | Pre-corrected (Green) | audit_lane_a_blg_006 | İP-16 | Medium |
+| BLG-007 | Medium | network/P2P | UTF-8 byte slicing panic drops node without identity-verified P2P Prevote/Precommit/FinalityCert messages | Verified (Red test output) | audit_repro_a_blg_007 | İP-17 | Medium |
+| BLG-008 | Medium | RPC | Testnet open RPC acceptance condition does not match current profile requiring key for all calls | Open verified | audit_repro_a_blg_008 | İP-16 | Medium |
+| BLG-017 | Critical | network/P2P | Identity-unverified P2P Prevote/Precommit/FinalityCert messages UTF-8 byte slicing panic drops node | Verified (Red test output) | audit_repro_a_blg_017 | İP-15 | Critical |
+| BLG-018 | Critical | consensus | Hybrid finality (finalized_height) cannot progress due to four independent disconnections in live network | Verified (Red test output) | audit_repro_a_blg_018 | İP-12 | Critical |
+| BLG-019 | Critical | state transition | TransactionType::StateUpdate allows arbitrary nonce writing to every account without authority and commitment bond | Pre-corrected (Green) | audit_lane_a_blg_019 | İP-17 | Critical |
+| BLG-020 | Critical | consensus/state transition | collect_block_transactions pre-retention temp_state mutation and missing nonce/signature check in Executor combine to produce permanent consensus chain split with two mempool operations | Pre-corrected (Green) | audit_lane_a_blg_020 | İP-17 | Critical |
+| ... (remaining BLG-021 to BLG-267 and archive families) ... | | | | | | | |

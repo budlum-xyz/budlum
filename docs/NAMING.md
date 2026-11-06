@@ -1,6 +1,11 @@
-# Concept names
+# Concept Name Ownership Table (İP-05)
+## English format per Directive 15.3 item 4 and Section 2.3 item 5
 
-Budlum's architecture names say what a thing does. Metaphor names are retired. This file explains the rename machinery; the binding list is `config/naming/concept_map.toml`.
+| Retired Name | English Replacement | Package ID | Reason |
+|--------------|---------------------|------------|--------|
+| Filiz (leader election) | hash chain leader election (HCLE) | WP-12 | The name states the mechanism. |
+| Filiz (faucet) | testnet faucet | WP-41 | One concept, one term. |
+| Kiragi, Don, Zemheri | quantum alert level 1, 2, 3 (Advisory, Restricted, Isolated) | WP-12 | The name states the mechanism. |
 
 ## How the gate works
 
@@ -44,3 +49,7 @@ Budlum's architecture names say what a thing does. Metaphor names are retired. T
 | Sera, Greenhouse, Floem, Phloem, Ksilem, Xylem, Genotip, Genotype, Fenotip, Phenotype, Tomurcuk, Çiçek, Meyve, Kök Sözleşmesi, Yuva, Nakil | `object_layer and Section 2.2 object layer terms` | Universal Object Layer (UOL) terms | object layer |
 
 Brands and standards that stay: Budlum, BUD (token symbol), BudL, the `bud-*` crate prefix, BUD3, EVM, SVM, Move, CosmWasm, WASM, BNS, SocialFi, PoW, PoS, PoA, BFT, ZK.
+
+## Notes
+- ASD-STE100: Short sentences. Single meaning. Active voice. Present tense.
+- Directive Section 2.3 item 5: English ownership table.
