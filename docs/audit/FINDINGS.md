@@ -104,14 +104,15 @@ needs a CI run, and this environment has neither.
 
 ## New findings raised by this lane (section 14.1 rule 9)
 
-Section 14.1 rule 9 says a problem found while reading gets the next free id, `BLG-268` onward. The
-first two are CI drift that was red on `main` while this lane was reading it. Neither is a record
-from the old ledger, so neither is in the table above.
+Section 14.1 rule 9 says a problem found while reading gets the next free id, `BLG-268` onward. All
+three below were red on `main` while this lane was reading it. None is a record from the old ledger,
+so none is in the table above. One of them has a proven cause; the other two do not, and say so.
 
 | Id | Importance | Area | English title | State | Evidence | Test | Closing package | Note |
 |---|---|---|---|---|---|---|---|---|
 | BLG-268 | High | ci | The root `Cargo.lock` was never re-resolved after `bud-codec` became a non-optional path dependency, so every `--locked` command on the root crate fails | Open | `Cargo.toml:205` declares `bud-codec = { path = "crates/bud-codec" }` with no `optional`; `Cargo.lock` has no `bud-codec` entry, and the `budlum-core` package block lists eleven sibling crates but not this one | not run | WP-42 | reproduced by reading, not by running: `crates/bud-codec` needs `zstd 0.13.3` and `ruzstd 0.8.1`, neither of which appears anywhere in the root lock, and eight transitive versions differ from what `crates/bud-codec/Cargo.lock` resolves (`libc` 0.2.186 vs 0.2.191, `cc` 1.2.63 vs 1.11.0 and six more). Regenerating it needs `cargo update` or `cargo metadata` on a machine with a toolchain; hand-writing the entries would invent a resolution and then be rewritten by the next real `cargo` run, which is worse than the red |
 | BLG-269 | High | ci | The RustSec drift pulse is red on `main`, so either an advisory now hits a tracked lockfile or the advisory DB fetch failed | Open | `.github/workflows/watchdog.yml:56` (step `Audit every workspace lockfile`); run `42163252239` | not run | WP-42 | the workflow makes a failed DB fetch a failure by design, so the record must be re-read with log access before it is called an advisory. The job log endpoint returns EOF from this environment |
+| BLG-270 | Medium | ci | The Testnet Rehearsal is red on `main` and the failing step cannot be attributed from this environment | Open | `.github/workflows/testnet-rehearsal.yml:34` (step `Rehearsal (build, start, scenarios, report)`); run `42002851792` | not run | WP-42 | the step runs `xtask/tools` `testnet-rehearsal --compose`, so it does not share the root `--locked` cause of BLG-268: it builds its own workspace. It needs Docker and a compose stack, neither of which this sandbox has. The step uploads `target/testnet-rehearsal.md` as an artifact on every run; a reader with access should read that report before opening a fix |
 
 ## Named-test rule
 
