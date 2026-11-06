@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 pub mod framework;
+pub mod pointer;
 
 use std::any::Any;
 use std::collections::BTreeMap;
@@ -695,9 +696,10 @@ impl MoveWorker {
                                             host,
                                         )
                                     } else {
-                                        Err(StepErr::Revert(format!(
-                                            "entry function {module_name}::{function_name} not found"
-                                        )))
+                                        let m = format!(
+                                            "entry function {module_name}::{function_name} missing"
+                                        );
+                                        Err(StepErr::Revert(m))
                                     }
                                 }
                                 Err(msg) => Err(StepErr::Revert(msg)),

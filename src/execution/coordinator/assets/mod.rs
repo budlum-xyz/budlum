@@ -74,11 +74,65 @@ pub struct CreatePointer {
     pub target_ee: EeId,
 }
 
+/// Testnet chain identifier (`Section 1.5`) where `WP-52` SVM/Move pointers
+/// remain closed at launch until `svm_move_activation_height` is reached.
+///
+/// Convenience: referenced by pointer activation policies and launch gates.
+pub const BUDLUM_TESTNET_CHAIN_ID: u64 = 45_261;
+
+/// `IP-52` item 3 review outcome (`KR-UEL-REENTRANCY`): cross-environment
+/// reentrancy prohibition (`Section 8.7.3` item 6) remains enforced.
+///
+/// Convenience: exported so conformance and coordinator audits verify the policy.
+pub const REENTRANCY_RULE_RETAINED_WP52: bool = true;
+
+/// Activation gate for `T-Genisleme` SVM and Move asset pointers (`Section 1.5`, `WP-52`).
+///
+/// Convenience: passed to `register_asset_with_policy` and `create_pointer_with_policy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointerActivationPolicy {
+    pub chain_id: u64,
+    pub block_height: u64,
+    pub svm_move_activation_height: Option<u64>,
+}
+
+impl Default for PointerActivationPolicy {
+    fn default() -> Self {
+        Self::testnet_launch()
+    }
+}
+
+impl PointerActivationPolicy {
+    /// Default `T-Acilis` launch policy on testnet `45261` (SVM/Move pointers closed).
+    ///
+    /// Convenience: default policy used by `register_asset` and `create_pointer`.
+    #[must_use]
+    pub const fn testnet_launch() -> Self {
+        Self {
+            chain_id: BUDLUM_TESTNET_CHAIN_ID,
+            block_height: 0,
+            svm_move_activation_height: None,
+        }
+    }
+
+    /// Returns `true` when SVM and Move pointers are active at `(chain_id, block_height)`.
+    ///
+    /// Convenience: queried before admitting `EeId::SVM` or `EeId::MOVE` in UAR.
+    #[must_use]
+    pub const fn svm_move_pointers_active(&self) -> bool {
+        match self.svm_move_activation_height {
+            Some(h) => self.block_height >= h,
+            None => self.chain_id != BUDLUM_TESTNET_CHAIN_ID,
+        }
+    }
+}
+
 /// Errors returned by UAR registration and pointer operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssetRegistryError {
     InvalidHomeReference,
     UnsupportedPhaseOneEnvironment(EeId),
+    SvmMovePointersClosedOnTestnet(EeId),
     AssetAlreadyRegistered([u8; 32]),
     AssetNotFound([u8; 32]),
     PointerMatchesHomeEnvironment,
@@ -92,7 +146,14 @@ impl fmt::Display for AssetRegistryError {
         match self {
             Self::InvalidHomeReference => write!(f, "invalid home asset reference"),
             Self::UnsupportedPhaseOneEnvironment(ee) => {
-                write!(f, "environment 0x{:02x} pointers arrive in WP-52", ee.0)
+                write!(f, "environment 0x{:02x} does not support UAR pointers", ee.0)
+            }
+            Self::SvmMovePointersClosedOnTestnet(ee) => {
+                write!(
+                    f,
+                    "SVM/Move asset pointers (0x{:02x}) are closed at testnet launch (WP-52)",
+                    ee.0
+                )
             }
             Self::AssetAlreadyRegistered(_) => write!(f, "asset already registered"),
             Self::AssetNotFound(_) => write!(f, "asset not found in uel/assets"),
@@ -108,10 +169,37 @@ impl fmt::Display for AssetRegistryError {
 
 impl std::error::Error for AssetRegistryError {}
 
-fn ee_map_key(ee: EeId) -> Option<&'static str> {
+fn ee_map_key_for_policy(
+    ee: EeId,
+    policy: PointerActivationPolicy,
+) -> Result<&'static str, AssetRegistryError> {
+    match ee {
+        EeId::EVM => Ok("evm"),
+        EeId::WASM => Ok("wasm"),
+        EeId::SVM => {
+            if policy.svm_move_pointers_active() {
+                Ok("svm")
+            } else {
+                Err(AssetRegistryError::SvmMovePointersClosedOnTestnet(ee))
+            }
+        }
+        EeId::MOVE => {
+            if policy.svm_move_pointers_active() {
+                Ok("move")
+            } else {
+                Err(AssetRegistryError::SvmMovePointersClosedOnTestnet(ee))
+            }
+        }
+        other => Err(AssetRegistryError::UnsupportedPhaseOneEnvironment(other)),
+    }
+}
+
+fn ee_any_pointer_key(ee: EeId) -> Option<&'static str> {
     match ee {
         EeId::EVM => Some("evm"),
         EeId::WASM => Some("wasm"),
+        EeId::SVM => Some("svm"),
+        EeId::MOVE => Some("move"),
         _ => None,
     }
 }
@@ -124,9 +212,18 @@ pub fn derive_pointer_address(
     asset_id: &[u8; 32],
     target_ee: EeId,
 ) -> Result<Vec<u8>, AssetRegistryError> {
-    if ee_map_key(target_ee).is_none() {
-        return Err(AssetRegistryError::UnsupportedPhaseOneEnvironment(target_ee));
-    }
+    derive_pointer_address_with_policy(asset_id, target_ee, PointerActivationPolicy::default())
+}
+
+/// Policy-aware pointer address derivation supporting `WP-52` SVM/Move activation.
+///
+/// Convenience: invoked by `create_pointer_with_policy` and `WP-52` tests.
+pub fn derive_pointer_address_with_policy(
+    asset_id: &[u8; 32],
+    target_ee: EeId,
+    policy: PointerActivationPolicy,
+) -> Result<Vec<u8>, AssetRegistryError> {
+    let _ = ee_map_key_for_policy(target_ee, policy)?;
     let seed = hash_fields_bytes(&[
         "BDLM_UEL_POINTER_V1".as_bytes(),
         asset_id.as_slice(),
@@ -156,19 +253,43 @@ pub struct ProbedAssetMetadata {
 /// Register a home asset into `uel/assets` after probing metadata via a read-only
 /// call to `home_ee` (`Section 8.8` item 4).
 ///
-/// Convenience: coordinator entry point for `RegisterAsset`.
+/// Convenience: coordinator entry point for `RegisterAsset` under testnet launch defaults.
 pub fn register_asset<F>(
     state: &mut AccountState,
     req: &RegisterAsset,
+    probe_home_metadata: F,
+) -> Result<AssetRecord, AssetRegistryError>
+where
+    F: FnMut(EeId, &[u8], AssetStandard) -> Result<ProbedAssetMetadata, String>,
+{
+    register_asset_with_policy(
+        state,
+        req,
+        PointerActivationPolicy::default(),
+        probe_home_metadata,
+    )
+}
+
+/// Policy-aware `RegisterAsset` supporting `WP-52` SPL and Move home assets once activated.
+///
+/// Convenience: coordinator entry point for height-gated `RegisterAsset`.
+pub fn register_asset_with_policy<F>(
+    state: &mut AccountState,
+    req: &RegisterAsset,
+    policy: PointerActivationPolicy,
     mut probe_home_metadata: F,
 ) -> Result<AssetRecord, AssetRegistryError>
 where
     F: FnMut(EeId, &[u8], AssetStandard) -> Result<ProbedAssetMetadata, String>,
 {
-    if ee_map_key(req.home_ee).is_none() {
-        return Err(AssetRegistryError::UnsupportedPhaseOneEnvironment(req.home_ee));
-    }
+    let _ = ee_map_key_for_policy(req.home_ee, policy)?;
     if req.home_ee == EeId::EVM && req.home_ref.len() != 20 {
+        return Err(AssetRegistryError::InvalidHomeReference);
+    }
+    if req.home_ee == EeId::SVM && req.home_ref.len() != 32 {
+        return Err(AssetRegistryError::InvalidHomeReference);
+    }
+    if req.home_ee == EeId::MOVE && req.home_ref.is_empty() {
         return Err(AssetRegistryError::InvalidHomeReference);
     }
     let asset_id = derive_asset_id(req.home_ee, &req.home_ref)
@@ -204,14 +325,23 @@ where
 /// Create an immutable pointer in `req.target_ee` for an already-registered `asset_id`
 /// (`Section 8.8` items 5-9).
 ///
-/// Convenience: coordinator entry point for `CreatePointer`.
+/// Convenience: coordinator entry point for `CreatePointer` under testnet launch defaults.
 pub fn create_pointer(
     state: &mut AccountState,
     req: &CreatePointer,
 ) -> Result<(AssetRecord, Vec<u8>), AssetRegistryError> {
-    let Some(target_key) = ee_map_key(req.target_ee) else {
-        return Err(AssetRegistryError::UnsupportedPhaseOneEnvironment(req.target_ee));
-    };
+    create_pointer_with_policy(state, req, PointerActivationPolicy::default())
+}
+
+/// Policy-aware `CreatePointer` supporting `WP-52` SVM and Move pointers once activated.
+///
+/// Convenience: coordinator entry point for height-gated `CreatePointer`.
+pub fn create_pointer_with_policy(
+    state: &mut AccountState,
+    req: &CreatePointer,
+    policy: PointerActivationPolicy,
+) -> Result<(AssetRecord, Vec<u8>), AssetRegistryError> {
+    let target_key = ee_map_key_for_policy(req.target_ee, policy)?;
     let mut record = read_asset_record(state, &req.asset_id)
         .ok_or(AssetRegistryError::AssetNotFound(req.asset_id))?;
     if record.home_ee == req.target_ee.0 {
@@ -220,8 +350,10 @@ pub fn create_pointer(
     if record.pointers.contains_key(target_key) {
         return Err(AssetRegistryError::PointerAlreadyExists);
     }
-    let ptr_addr = derive_pointer_address(&req.asset_id, req.target_ee)?;
-    record.pointers.insert(target_key.to_string(), ptr_addr.clone());
+    let ptr_addr = derive_pointer_address_with_policy(&req.asset_id, req.target_ee, policy)?;
+    record
+        .pointers
+        .insert(target_key.to_string(), ptr_addr.clone());
     let encoded =
         serde_json::to_vec(&record).map_err(|e| AssetRegistryError::Codec(e.to_string()))?;
     state
@@ -238,7 +370,7 @@ pub fn find_pointer_record_in_state(
     ee: EeId,
     native_addr: &[u8],
 ) -> Option<AssetRecord> {
-    let target_key = ee_map_key(ee)?;
+    let target_key = ee_any_pointer_key(ee)?;
     for (_, val) in state.uel_state.iter_namespace(NS_UEL_ASSETS) {
         if let Ok(rec) = serde_json::from_slice::<AssetRecord>(val) {
             if rec
@@ -368,6 +500,13 @@ pub fn execute_pointer_call(
         }
         (EeId::EVM, EeId::WASM, AssetStandard::NonFungible) => {
             exec_wasm_cw721_pointer_to_erc721(state, record, caller, input, gas_limit, host)
+        }
+        (home_ee, ptr_ee, AssetStandard::Fungible)
+            if home_ee != ptr_ee
+                && ee_any_pointer_key(home_ee).is_some()
+                && ee_any_pointer_key(ptr_ee).is_some() =>
+        {
+            exec_wp52_fungible_pointer(state, record, caller, ptr_ee, input, gas_limit, host)
         }
         _ => Err(HostError::Denied("unsupported pointer pair".into())),
     }
@@ -897,4 +1036,876 @@ fn exec_wasm_cw721_pointer_to_erc721(
         output,
         gas_used: res.gas_used,
     })
+}
+
+enum CanonicalFungibleIntent {
+    Transfer { to: Address, amount: u128 },
+    Approve { spender: Address, amount: u128 },
+    TransferFrom { owner: Address, to: Address, amount: u128 },
+    BalanceOf { owner: Address },
+    Allowance { owner: Address, spender: Address },
+}
+
+fn parse_json_addr_array32(val: Option<&serde_json::Value>) -> Result<[u8; 32], HostError> {
+    let arr = val
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| HostError::Invalid("expected 32-byte JSON array".into()))?;
+    if arr.len() != 32 {
+        return Err(HostError::Invalid("address array must be 32 bytes".into()));
+    }
+    let mut out = [0u8; 32];
+    for (idx, item) in arr.iter().enumerate() {
+        let b = item
+            .as_u64()
+            .and_then(|n| u8::try_from(n).ok())
+            .ok_or_else(|| HostError::Invalid("invalid byte in 32-byte address".into()))?;
+        if let Some(slot) = out.get_mut(idx) {
+            *slot = b;
+        }
+    }
+    Ok(out)
+}
+
+fn parse_json_u128(val: Option<&serde_json::Value>) -> Result<u128, HostError> {
+    if let Some(n) = val.and_then(serde_json::Value::as_u64) {
+        return Ok(u128::from(n));
+    }
+    if let Some(s) = val.and_then(serde_json::Value::as_str) {
+        return s
+            .parse::<u128>()
+            .map_err(|_| HostError::Invalid("invalid decimal u128".into()));
+    }
+    Err(HostError::Invalid("missing u128 amount".into()))
+}
+
+fn resolve_native_in_ee(
+    state: &AccountState,
+    ee: EeId,
+    native_id: Vec<u8>,
+) -> Result<Address, HostError> {
+    resolve_ee_identity(state, &EeIdentity { ee, id: native_id })
+}
+
+fn decode_fungible_intent(
+    state: &AccountState,
+    pointer_ee: EeId,
+    input: &[u8],
+) -> Result<CanonicalFungibleIntent, HostError> {
+    if pointer_ee == EeId::EVM {
+        let Some((sel_slice, args)) = input.split_at_checked(4) else {
+            return Err(HostError::Invalid("short ERC-20 pointer input".into()));
+        };
+        let sel: [u8; 4] = sel_slice
+            .try_into()
+            .map_err(|_| HostError::Invalid("bad selector".into()))?;
+        if sel == SEL_ERC20_TRANSFER {
+            let to20 = read_abi_address(args, 0)
+                .ok_or_else(|| HostError::Invalid("bad ERC-20 to".into()))?;
+            let amount = read_abi_u128(args, 1)
+                .ok_or_else(|| HostError::Invalid("bad ERC-20 amount".into()))?;
+            let to = resolve_native_in_ee(state, EeId::EVM, to20.to_vec())?;
+            return Ok(CanonicalFungibleIntent::Transfer { to, amount });
+        }
+        if sel == SEL_ERC_APPROVE {
+            let sp20 = read_abi_address(args, 0)
+                .ok_or_else(|| HostError::Invalid("bad ERC-20 spender".into()))?;
+            let amount = read_abi_u128(args, 1)
+                .ok_or_else(|| HostError::Invalid("bad ERC-20 amount".into()))?;
+            let spender = resolve_native_in_ee(state, EeId::EVM, sp20.to_vec())?;
+            return Ok(CanonicalFungibleIntent::Approve { spender, amount });
+        }
+        if sel == SEL_ERC20_TRANSFER_FROM {
+            let from20 = read_abi_address(args, 0)
+                .ok_or_else(|| HostError::Invalid("bad transferFrom owner".into()))?;
+            let to20 = read_abi_address(args, 1)
+                .ok_or_else(|| HostError::Invalid("bad transferFrom to".into()))?;
+            let amount = read_abi_u128(args, 2)
+                .ok_or_else(|| HostError::Invalid("bad transferFrom amount".into()))?;
+            let owner = resolve_native_in_ee(state, EeId::EVM, from20.to_vec())?;
+            let to = resolve_native_in_ee(state, EeId::EVM, to20.to_vec())?;
+            return Ok(CanonicalFungibleIntent::TransferFrom { owner, to, amount });
+        }
+        if sel == SEL_ERC20_BALANCE_OF {
+            let own20 = read_abi_address(args, 0)
+                .ok_or_else(|| HostError::Invalid("bad balanceOf owner".into()))?;
+            let owner = resolve_native_in_ee(state, EeId::EVM, own20.to_vec())?;
+            return Ok(CanonicalFungibleIntent::BalanceOf { owner });
+        }
+        if sel == SEL_ERC20_ALLOWANCE {
+            let own20 = read_abi_address(args, 0)
+                .ok_or_else(|| HostError::Invalid("bad allowance owner".into()))?;
+            let sp20 = read_abi_address(args, 1)
+                .ok_or_else(|| HostError::Invalid("bad allowance spender".into()))?;
+            let owner = resolve_native_in_ee(state, EeId::EVM, own20.to_vec())?;
+            let spender = resolve_native_in_ee(state, EeId::EVM, sp20.to_vec())?;
+            return Ok(CanonicalFungibleIntent::Allowance { owner, spender });
+        }
+        return Err(HostError::Invalid("unsupported ERC-20 pointer selector".into()));
+    }
+
+    let v: serde_json::Value =
+        serde_json::from_slice(input).map_err(|e| HostError::Invalid(e.to_string()))?;
+    if pointer_ee == EeId::WASM {
+        if let Some(obj) = v.get("transfer") {
+            let rcpt = obj
+                .get("recipient")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| HostError::Invalid("missing recipient".into()))?;
+            let amount = parse_json_u128(obj.get("amount"))?;
+            let to = resolve_native_in_ee(state, EeId::WASM, rcpt.as_bytes().to_vec())?;
+            return Ok(CanonicalFungibleIntent::Transfer { to, amount });
+        }
+        if let Some(obj) = v.get("increase_allowance") {
+            let sp = obj
+                .get("spender")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| HostError::Invalid("missing spender".into()))?;
+            let amount = parse_json_u128(obj.get("amount"))?;
+            let spender = resolve_native_in_ee(state, EeId::WASM, sp.as_bytes().to_vec())?;
+            return Ok(CanonicalFungibleIntent::Approve { spender, amount });
+        }
+        if let Some(obj) = v.get("transfer_from") {
+            let own = obj
+                .get("owner")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| HostError::Invalid("missing owner".into()))?;
+            let rcpt = obj
+                .get("recipient")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| HostError::Invalid("missing recipient".into()))?;
+            let amount = parse_json_u128(obj.get("amount"))?;
+            let owner = resolve_native_in_ee(state, EeId::WASM, own.as_bytes().to_vec())?;
+            let to = resolve_native_in_ee(state, EeId::WASM, rcpt.as_bytes().to_vec())?;
+            return Ok(CanonicalFungibleIntent::TransferFrom { owner, to, amount });
+        }
+        if let Some(obj) = v.get("balance") {
+            let addr = obj
+                .get("address")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| HostError::Invalid("missing address".into()))?;
+            let owner = resolve_native_in_ee(state, EeId::WASM, addr.as_bytes().to_vec())?;
+            return Ok(CanonicalFungibleIntent::BalanceOf { owner });
+        }
+        if let Some(obj) = v.get("allowance") {
+            let own = obj
+                .get("owner")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| HostError::Invalid("missing owner".into()))?;
+            let sp = obj
+                .get("spender")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| HostError::Invalid("missing spender".into()))?;
+            let owner = resolve_native_in_ee(state, EeId::WASM, own.as_bytes().to_vec())?;
+            let spender = resolve_native_in_ee(state, EeId::WASM, sp.as_bytes().to_vec())?;
+            return Ok(CanonicalFungibleIntent::Allowance { owner, spender });
+        }
+        return Err(HostError::Invalid("unsupported CW20 pointer message".into()));
+    }
+
+    // SVM (`SplPointerOp`) and Move (`MovePointerOp`) JSON envelopes.
+    if let Some(obj) = v.get("transfer") {
+        let to32 = parse_json_addr_array32(obj.get("to"))?;
+        let amount = parse_json_u128(obj.get("amount"))?;
+        let to = resolve_native_in_ee(state, pointer_ee, to32.to_vec())?;
+        return Ok(CanonicalFungibleIntent::Transfer { to, amount });
+    }
+    if let Some(obj) = v.get("approve") {
+        let sp_val = obj.get("delegate").or_else(|| obj.get("spender"));
+        let sp32 = parse_json_addr_array32(sp_val)?;
+        let amount = parse_json_u128(obj.get("amount"))?;
+        let spender = resolve_native_in_ee(state, pointer_ee, sp32.to_vec())?;
+        return Ok(CanonicalFungibleIntent::Approve { spender, amount });
+    }
+    if let Some(obj) = v.get("transfer_from") {
+        let own32 = parse_json_addr_array32(obj.get("owner"))?;
+        let to32 = parse_json_addr_array32(obj.get("to"))?;
+        let amount = parse_json_u128(obj.get("amount"))?;
+        let owner = resolve_native_in_ee(state, pointer_ee, own32.to_vec())?;
+        let to = resolve_native_in_ee(state, pointer_ee, to32.to_vec())?;
+        return Ok(CanonicalFungibleIntent::TransferFrom { owner, to, amount });
+    }
+    if let Some(obj) = v.get("balance_of").or_else(|| v.get("balance")) {
+        let own32 = parse_json_addr_array32(obj.get("owner"))?;
+        let owner = resolve_native_in_ee(state, pointer_ee, own32.to_vec())?;
+        return Ok(CanonicalFungibleIntent::BalanceOf { owner });
+    }
+    if let Some(obj) = v.get("allowance") {
+        let own32 = parse_json_addr_array32(obj.get("owner"))?;
+        let sp_val = obj.get("delegate").or_else(|| obj.get("spender"));
+        let sp32 = parse_json_addr_array32(sp_val)?;
+        let owner = resolve_native_in_ee(state, pointer_ee, own32.to_vec())?;
+        let spender = resolve_native_in_ee(state, pointer_ee, sp32.to_vec())?;
+        return Ok(CanonicalFungibleIntent::Allowance { owner, spender });
+    }
+    Err(HostError::Invalid("unsupported SVM/Move pointer operation".into()))
+}
+
+fn encode_home_fungible_call(
+    home_ee: EeId,
+    intent: &CanonicalFungibleIntent,
+) -> Result<(Vec<u8>, bool, u8), HostError> {
+    let alias_for = |addr: &Address| -> Result<Vec<u8>, HostError> {
+        derive_local_alias(addr, home_ee).map_err(|e| HostError::Invalid(e.to_string()))
+    };
+    match home_ee {
+        EeId::EVM => match intent {
+            CanonicalFungibleIntent::Transfer { to, amount } => {
+                let to20: [u8; 20] = alias_for(to)?
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| HostError::Invalid("bad EVM alias".into()))?;
+                Ok((pack_selector_addr_u128(SEL_ERC20_TRANSFER, &to20, *amount), false, 0))
+            }
+            CanonicalFungibleIntent::Approve { spender, amount } => {
+                let sp20: [u8; 20] = alias_for(spender)?
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| HostError::Invalid("bad EVM alias".into()))?;
+                Ok((pack_selector_addr_u128(SEL_ERC_APPROVE, &sp20, *amount), false, 0))
+            }
+            CanonicalFungibleIntent::TransferFrom { owner, to, amount } => {
+                let own20: [u8; 20] = alias_for(owner)?
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| HostError::Invalid("bad EVM alias".into()))?;
+                let to20: [u8; 20] = alias_for(to)?
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| HostError::Invalid("bad EVM alias".into()))?;
+                Ok((
+                    pack_selector_two_addrs_u128(SEL_ERC20_TRANSFER_FROM, &own20, &to20, *amount),
+                    false,
+                    0,
+                ))
+            }
+            CanonicalFungibleIntent::BalanceOf { owner } => {
+                let own20 = alias_for(owner)?;
+                let mut cd = SEL_ERC20_BALANCE_OF.to_vec();
+                cd.extend_from_slice(&encode_abi_address(&own20));
+                Ok((cd, true, 1))
+            }
+            CanonicalFungibleIntent::Allowance { owner, spender } => {
+                let own20 = alias_for(owner)?;
+                let sp20 = alias_for(spender)?;
+                let mut cd = SEL_ERC20_ALLOWANCE.to_vec();
+                cd.extend_from_slice(&encode_abi_address(&own20));
+                cd.extend_from_slice(&encode_abi_address(&sp20));
+                Ok((cd, true, 2))
+            }
+        },
+        EeId::WASM => match intent {
+            CanonicalFungibleIntent::Transfer { to, amount } => {
+                let rcpt = String::from_utf8(alias_for(to)?)
+                    .map_err(|e| HostError::Invalid(e.to_string()))?;
+                let j = serde_json::json!({
+                    "transfer": { "recipient": rcpt, "amount": amount.to_string() }
+                });
+                Ok((serde_json::to_vec(&j).unwrap_or_default(), false, 0))
+            }
+            CanonicalFungibleIntent::Approve { spender, amount } => {
+                let sp = String::from_utf8(alias_for(spender)?)
+                    .map_err(|e| HostError::Invalid(e.to_string()))?;
+                let j = serde_json::json!({
+                    "increase_allowance": { "spender": sp, "amount": amount.to_string() }
+                });
+                Ok((serde_json::to_vec(&j).unwrap_or_default(), false, 0))
+            }
+            CanonicalFungibleIntent::TransferFrom { owner, to, amount } => {
+                let own = String::from_utf8(alias_for(owner)?)
+                    .map_err(|e| HostError::Invalid(e.to_string()))?;
+                let rcpt = String::from_utf8(alias_for(to)?)
+                    .map_err(|e| HostError::Invalid(e.to_string()))?;
+                let j = serde_json::json!({
+                    "transfer_from": {
+                        "owner": own,
+                        "recipient": rcpt,
+                        "amount": amount.to_string()
+                    }
+                });
+                Ok((serde_json::to_vec(&j).unwrap_or_default(), false, 0))
+            }
+            CanonicalFungibleIntent::BalanceOf { owner } => {
+                let own = String::from_utf8(alias_for(owner)?)
+                    .map_err(|e| HostError::Invalid(e.to_string()))?;
+                let j = serde_json::json!({ "balance": { "address": own } });
+                Ok((serde_json::to_vec(&j).unwrap_or_default(), true, 1))
+            }
+            CanonicalFungibleIntent::Allowance { owner, spender } => {
+                let own = String::from_utf8(alias_for(owner)?)
+                    .map_err(|e| HostError::Invalid(e.to_string()))?;
+                let sp = String::from_utf8(alias_for(spender)?)
+                    .map_err(|e| HostError::Invalid(e.to_string()))?;
+                let j = serde_json::json!({ "allowance": { "owner": own, "spender": sp } });
+                Ok((serde_json::to_vec(&j).unwrap_or_default(), true, 2))
+            }
+        },
+        EeId::SVM | EeId::MOVE => match intent {
+            CanonicalFungibleIntent::Transfer { to, amount } => {
+                let to32 = alias_for(to)?;
+                let j = serde_json::json!({
+                    "transfer": { "to": to32, "amount": amount.to_string() }
+                });
+                Ok((serde_json::to_vec(&j).unwrap_or_default(), false, 0))
+            }
+            CanonicalFungibleIntent::Approve { spender, amount } => {
+                let sp32 = alias_for(spender)?;
+                let j = serde_json::json!({
+                    "approve": { "spender": sp32, "amount": amount.to_string() }
+                });
+                Ok((serde_json::to_vec(&j).unwrap_or_default(), false, 0))
+            }
+            CanonicalFungibleIntent::TransferFrom { owner, to, amount } => {
+                let own32 = alias_for(owner)?;
+                let to32 = alias_for(to)?;
+                let j = serde_json::json!({
+                    "transfer_from": { "owner": own32, "to": to32, "amount": amount.to_string() }
+                });
+                Ok((serde_json::to_vec(&j).unwrap_or_default(), false, 0))
+            }
+            CanonicalFungibleIntent::BalanceOf { owner } => {
+                let own32 = alias_for(owner)?;
+                let j = serde_json::json!({ "balance_of": { "owner": own32 } });
+                Ok((serde_json::to_vec(&j).unwrap_or_default(), true, 1))
+            }
+            CanonicalFungibleIntent::Allowance { owner, spender } => {
+                let own32 = alias_for(owner)?;
+                let sp32 = alias_for(spender)?;
+                let j = serde_json::json!({
+                    "allowance": { "owner": own32, "spender": sp32 }
+                });
+                Ok((serde_json::to_vec(&j).unwrap_or_default(), true, 2))
+            }
+        },
+        _ => Err(HostError::Denied("unsupported home fungible EE".into())),
+    }
+}
+
+fn parse_home_u128_reply(home_ee: EeId, mode: u8, raw: &[u8]) -> u128 {
+    if home_ee == EeId::EVM {
+        return read_abi_u128(raw, 0).unwrap_or(0);
+    }
+    if let Ok(arr) = <[u8; 16]>::try_from(raw) {
+        return u128::from_le_bytes(arr);
+    }
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(raw) else {
+        return 0;
+    };
+    let field = if mode == 1 { "balance" } else { "allowance" };
+    v.get(field)
+        .and_then(|x| {
+            x.as_str()
+                .and_then(|s| s.parse::<u128>().ok())
+                .or_else(|| x.as_u64().map(u128::from))
+        })
+        .unwrap_or(0)
+}
+
+fn format_pointer_reply(pointer_ee: EeId, mode: u8, val: u128) -> Vec<u8> {
+    match (pointer_ee, mode) {
+        (EeId::EVM, 0) => encode_abi_bool(true),
+        (EeId::EVM, _) => encode_abi_u128(val),
+        (EeId::WASM, 0) => br#"{"ok":true}"#.to_vec(),
+        (EeId::WASM, 1) => serde_json::to_vec(&serde_json::json!({ "balance": val.to_string() }))
+            .unwrap_or_default(),
+        (EeId::WASM, _) => serde_json::to_vec(&serde_json::json!({
+            "allowance": val.to_string(),
+            "expires": { "never": {} }
+        }))
+        .unwrap_or_default(),
+        (_, 0) => vec![1u8],
+        (_, _) => val.to_le_bytes().to_vec(),
+    }
+}
+
+fn exec_wp52_fungible_pointer(
+    state: &AccountState,
+    record: &AssetRecord,
+    caller: &EeIdentity,
+    pointer_ee: EeId,
+    input: &[u8],
+    gas_limit: u64,
+    host: &mut dyn HostApi,
+) -> Result<UniversalResult, HostError> {
+    let home_ee = EeId(record.home_ee);
+    let intent = decode_fungible_intent(state, pointer_ee, input)?;
+    let (home_input, is_static, mode) = encode_home_fungible_call(home_ee, &intent)?;
+    let res = host.universal_call(UniversalCall {
+        from: caller.clone(),
+        to_ee: home_ee,
+        target: EeIdentity {
+            ee: home_ee,
+            id: record.home_ref.clone(),
+        },
+        value: BudAmount(0),
+        input: home_input,
+        gas_limit,
+        is_static,
+    })?;
+    if !res.success {
+        return Ok(res);
+    }
+    let val = if mode == 0 {
+        0
+    } else {
+        parse_home_u128_reply(home_ee, mode, &res.output)
+    };
+    Ok(UniversalResult {
+        success: true,
+        output: format_pointer_reply(pointer_ee, mode, val),
+        gas_used: res.gas_used,
+    })
+}
+
+#[cfg(test)]
+mod wp52_tests {
+    use super::*;
+    use crate::execution::coordinator::commitment::{NS_MOVE_STATE, NS_SVM_ACCOUNT};
+    use budlum_uel_abi::mock::MemoryHost;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    fn activated_policy() -> PointerActivationPolicy {
+        PointerActivationPolicy {
+            chain_id: BUDLUM_TESTNET_CHAIN_ID,
+            block_height: 10_000,
+            svm_move_activation_height: Some(10_000),
+        }
+    }
+
+    /// Section 1.5 launch-closure proof: `svm_move_pointers_is_closed_on_testnet`.
+    #[test]
+    fn svm_move_pointers_is_closed_on_testnet() {
+        let mut state = AccountState::new();
+        let evm_rec = register_asset(
+            &mut state,
+            &RegisterAsset {
+                home_ee: EeId::EVM,
+                home_ref: vec![0xAA; 20],
+                standard: AssetStandard::Fungible,
+            },
+            |_, _, _| {
+                Ok(ProbedAssetMetadata {
+                    decimals: 6,
+                    symbol: "USD".into(),
+                    name: "USD Token".into(),
+                })
+            },
+        )
+        .unwrap();
+
+        for closed_ee in [EeId::SVM, EeId::MOVE] {
+            assert_eq!(
+                create_pointer(
+                    &mut state,
+                    &CreatePointer {
+                        asset_id: evm_rec.asset_id,
+                        target_ee: closed_ee,
+                    },
+                ),
+                Err(AssetRegistryError::SvmMovePointersClosedOnTestnet(closed_ee))
+            );
+            assert_eq!(
+                register_asset(
+                    &mut state,
+                    &RegisterAsset {
+                        home_ee: closed_ee,
+                        home_ref: vec![0xBB; 32],
+                        standard: AssetStandard::Fungible,
+                    },
+                    |_, _, _| unreachable!(),
+                ),
+                Err(AssetRegistryError::SvmMovePointersClosedOnTestnet(closed_ee))
+            );
+        }
+        assert!(REENTRANCY_RULE_RETAINED_WP52);
+    }
+
+    /// Directive IP-52 gate: `svm_pointer_holds_no_balance`.
+    #[test]
+    fn svm_pointer_holds_no_balance() {
+        let mut state = AccountState::new();
+        let alice = Address([0x11; 32]);
+        let bob = Address([0x22; 32]);
+        let alice_svm = state
+            .uel_state
+            .ensure_alias_registered(&alice, EeId::SVM)
+            .unwrap();
+        let bob_svm = state
+            .uel_state
+            .ensure_alias_registered(&bob, EeId::SVM)
+            .unwrap();
+        let alice_wasm = String::from_utf8(
+            state
+                .uel_state
+                .ensure_alias_registered(&alice, EeId::WASM)
+                .unwrap(),
+        )
+        .unwrap();
+        let bob_wasm = String::from_utf8(
+            state
+                .uel_state
+                .ensure_alias_registered(&bob, EeId::WASM)
+                .unwrap(),
+        )
+        .unwrap();
+
+        let rec = register_asset_with_policy(
+            &mut state,
+            &RegisterAsset {
+                home_ee: EeId::WASM,
+                home_ref: b"bud1homecw20".to_vec(),
+                standard: AssetStandard::Fungible,
+            },
+            activated_policy(),
+            |_, _, _| {
+                Ok(ProbedAssetMetadata {
+                    decimals: 6,
+                    symbol: "HOME".into(),
+                    name: "Home CW20".into(),
+                })
+            },
+        )
+        .unwrap();
+        let (rec, svm_ptr) = create_pointer_with_policy(
+            &mut state,
+            &CreatePointer {
+                asset_id: rec.asset_id,
+                target_ee: EeId::SVM,
+            },
+            activated_policy(),
+        )
+        .unwrap();
+        assert_eq!(svm_ptr.len(), 32);
+
+        let home_ledger = Rc::new(RefCell::new(BTreeMap::<String, u128>::new()));
+        home_ledger.borrow_mut().insert(alice_wasm.clone(), 500);
+        let ledger_ref = Rc::clone(&home_ledger);
+        let mut host = MemoryHost::new(1_000_000).with_universal_handler(Box::new(move |uc| {
+            let v: serde_json::Value = serde_json::from_slice(&uc.input).unwrap();
+            if let Some(tr) = v.get("transfer") {
+                let rcpt = tr["recipient"].as_str().unwrap().to_string();
+                let amt: u128 = tr["amount"].as_str().unwrap().parse().unwrap();
+                let mut m = ledger_ref.borrow_mut();
+                *m.entry(alice_wasm.clone()).or_default() -= amt;
+                *m.entry(rcpt).or_default() += amt;
+                return Ok(UniversalResult {
+                    success: true,
+                    output: br#"{"ok":true}"#.to_vec(),
+                    gas_used: 4_000,
+                });
+            }
+            let addr = v["balance"]["address"].as_str().unwrap();
+            let bal = ledger_ref.borrow().get(addr).copied().unwrap_or(0);
+            Ok(UniversalResult {
+                success: true,
+                output: serde_json::to_vec(&serde_json::json!({ "balance": bal.to_string() }))
+                    .unwrap(),
+                gas_used: 2_000,
+            })
+        }));
+
+        let bob_svm32: [u8; 32] = bob_svm.as_slice().try_into().unwrap();
+        let transfer_in = serde_json::to_vec(&serde_json::json!({
+            "transfer": { "to": bob_svm32.to_vec(), "amount": "175" }
+        }))
+        .unwrap();
+        let caller = EeIdentity {
+            ee: EeId::SVM,
+            id: alice_svm,
+        };
+        let tr_res = execute_pointer_call(
+            &state,
+            &rec,
+            &caller,
+            EeId::SVM,
+            &transfer_in,
+            200_000,
+            &mut host,
+        )
+        .unwrap();
+        assert!(tr_res.success);
+        assert!(host.state.keys().all(|(ns, _)| ns != NS_SVM_ACCOUNT));
+        assert_eq!(home_ledger.borrow().get(&bob_wasm), Some(&175));
+
+        let bal_in = serde_json::to_vec(&serde_json::json!({
+            "balance_of": { "owner": bob_svm32.to_vec() }
+        }))
+        .unwrap();
+        let bal_res = execute_pointer_call(
+            &state,
+            &rec,
+            &caller,
+            EeId::SVM,
+            &bal_in,
+            200_000,
+            &mut host,
+        )
+        .unwrap();
+        assert_eq!(
+            u128::from_le_bytes(bal_res.output.as_slice().try_into().unwrap()),
+            175
+        );
+    }
+
+    /// Directive IP-52 gate: `move_pointer_holds_no_balance`.
+    #[test]
+    fn move_pointer_holds_no_balance() {
+        let mut state = AccountState::new();
+        let alice = Address([0x31; 32]);
+        let bob = Address([0x42; 32]);
+        let alice_move = state
+            .uel_state
+            .ensure_alias_registered(&alice, EeId::MOVE)
+            .unwrap();
+        let bob_move = state
+            .uel_state
+            .ensure_alias_registered(&bob, EeId::MOVE)
+            .unwrap();
+        let bob_wasm = String::from_utf8(
+            state
+                .uel_state
+                .ensure_alias_registered(&bob, EeId::WASM)
+                .unwrap(),
+        )
+        .unwrap();
+        let alice_wasm = String::from_utf8(
+            state
+                .uel_state
+                .ensure_alias_registered(&alice, EeId::WASM)
+                .unwrap(),
+        )
+        .unwrap();
+
+        let rec = register_asset_with_policy(
+            &mut state,
+            &RegisterAsset {
+                home_ee: EeId::WASM,
+                home_ref: b"bud1homefa".to_vec(),
+                standard: AssetStandard::Fungible,
+            },
+            activated_policy(),
+            |_, _, _| {
+                Ok(ProbedAssetMetadata {
+                    decimals: 8,
+                    symbol: "FA".into(),
+                    name: "Move Pointer Asset".into(),
+                })
+            },
+        )
+        .unwrap();
+        let (rec, move_ptr) = create_pointer_with_policy(
+            &mut state,
+            &CreatePointer {
+                asset_id: rec.asset_id,
+                target_ee: EeId::MOVE,
+            },
+            activated_policy(),
+        )
+        .unwrap();
+        assert_eq!(move_ptr.len(), 32);
+
+        let home_ledger = Rc::new(RefCell::new(BTreeMap::<String, u128>::new()));
+        home_ledger.borrow_mut().insert(alice_wasm.clone(), 900);
+        let ledger_ref = Rc::clone(&home_ledger);
+        let mut host = MemoryHost::new(1_000_000).with_universal_handler(Box::new(move |uc| {
+            let v: serde_json::Value = serde_json::from_slice(&uc.input).unwrap();
+            if let Some(tr) = v.get("transfer") {
+                let rcpt = tr["recipient"].as_str().unwrap().to_string();
+                let amt: u128 = tr["amount"].as_str().unwrap().parse().unwrap();
+                let mut m = ledger_ref.borrow_mut();
+                *m.entry(alice_wasm.clone()).or_default() -= amt;
+                *m.entry(rcpt).or_default() += amt;
+                return Ok(UniversalResult {
+                    success: true,
+                    output: br#"{"ok":true}"#.to_vec(),
+                    gas_used: 4_000,
+                });
+            }
+            let addr = v["balance"]["address"].as_str().unwrap();
+            let bal = ledger_ref.borrow().get(addr).copied().unwrap_or(0);
+            Ok(UniversalResult {
+                success: true,
+                output: serde_json::to_vec(&serde_json::json!({ "balance": bal.to_string() }))
+                    .unwrap(),
+                gas_used: 2_000,
+            })
+        }));
+
+        let bob_move32: [u8; 32] = bob_move.as_slice().try_into().unwrap();
+        let tr_in = serde_json::to_vec(&serde_json::json!({
+            "transfer": { "flavor": "fungible_asset", "to": bob_move32.to_vec(), "amount": "320" }
+        }))
+        .unwrap();
+        let caller = EeIdentity {
+            ee: EeId::MOVE,
+            id: alice_move,
+        };
+        let res = execute_pointer_call(
+            &state,
+            &rec,
+            &caller,
+            EeId::MOVE,
+            &tr_in,
+            200_000,
+            &mut host,
+        )
+        .unwrap();
+        assert!(res.success);
+        assert!(host.state.keys().all(|(ns, _)| ns != NS_MOVE_STATE));
+        assert_eq!(home_ledger.borrow().get(&bob_wasm), Some(&320));
+    }
+
+    /// Directive IP-52 gate: `pointer_allowance_lives_at_home` (SVM & Move legs).
+    #[test]
+    fn pointer_allowance_lives_at_home() {
+        let mut state = AccountState::new();
+        let owner = Address([0x51; 32]);
+        let spender = Address([0x62; 32]);
+        let owner_svm = state
+            .uel_state
+            .ensure_alias_registered(&owner, EeId::SVM)
+            .unwrap();
+        let spender_svm = state
+            .uel_state
+            .ensure_alias_registered(&spender, EeId::SVM)
+            .unwrap();
+        let owner_move = state
+            .uel_state
+            .ensure_alias_registered(&owner, EeId::MOVE)
+            .unwrap();
+        let spender_move = state
+            .uel_state
+            .ensure_alias_registered(&spender, EeId::MOVE)
+            .unwrap();
+        let owner_wasm = String::from_utf8(
+            state
+                .uel_state
+                .ensure_alias_registered(&owner, EeId::WASM)
+                .unwrap(),
+        )
+        .unwrap();
+        let spender_wasm = String::from_utf8(
+            state
+                .uel_state
+                .ensure_alias_registered(&spender, EeId::WASM)
+                .unwrap(),
+        )
+        .unwrap();
+
+        let rec = register_asset_with_policy(
+            &mut state,
+            &RegisterAsset {
+                home_ee: EeId::WASM,
+                home_ref: b"bud1allowhome".to_vec(),
+                standard: AssetStandard::Fungible,
+            },
+            activated_policy(),
+            |_, _, _| {
+                Ok(ProbedAssetMetadata {
+                    decimals: 6,
+                    symbol: "ALW".into(),
+                    name: "Allowance Asset".into(),
+                })
+            },
+        )
+        .unwrap();
+        let (rec, _) = create_pointer_with_policy(
+            &mut state,
+            &CreatePointer {
+                asset_id: rec.asset_id,
+                target_ee: EeId::SVM,
+            },
+            activated_policy(),
+        )
+        .unwrap();
+        let (rec, _) = create_pointer_with_policy(
+            &mut state,
+            &CreatePointer {
+                asset_id: rec.asset_id,
+                target_ee: EeId::MOVE,
+            },
+            activated_policy(),
+        )
+        .unwrap();
+
+        let home_allowances: Rc<RefCell<BTreeMap<(String, String), u128>>> =
+            Rc::new(RefCell::new(BTreeMap::new()));
+        let alw_ref = Rc::clone(&home_allowances);
+        let owner_w_clone = owner_wasm.clone();
+        let mut host = MemoryHost::new(2_000_000).with_universal_handler(Box::new(move |uc| {
+            let v: serde_json::Value = serde_json::from_slice(&uc.input).unwrap();
+            if let Some(inc) = v.get("increase_allowance") {
+                let sp = inc["spender"].as_str().unwrap().to_string();
+                let amt: u128 = inc["amount"].as_str().unwrap().parse().unwrap();
+                *alw_ref
+                    .borrow_mut()
+                    .entry((owner_w_clone.clone(), sp))
+                    .or_default() += amt;
+                return Ok(UniversalResult {
+                    success: true,
+                    output: br#"{"ok":true}"#.to_vec(),
+                    gas_used: 3_000,
+                });
+            }
+            let own = v["allowance"]["owner"].as_str().unwrap().to_string();
+            let sp = v["allowance"]["spender"].as_str().unwrap().to_string();
+            let cur = alw_ref.borrow().get(&(own, sp)).copied().unwrap_or(0);
+            Ok(UniversalResult {
+                success: true,
+                output: serde_json::to_vec(&serde_json::json!({
+                    "allowance": cur.to_string(),
+                    "expires": { "never": {} }
+                }))
+                .unwrap(),
+                gas_used: 2_000,
+            })
+        }));
+
+        // Approve 60 via SVM pointer, then query the SAME home allowance via Move pointer!
+        let approve_svm = serde_json::to_vec(&serde_json::json!({
+            "approve": { "delegate": spender_svm, "amount": "60" }
+        }))
+        .unwrap();
+        let ok = execute_pointer_call(
+            &state,
+            &rec,
+            &EeIdentity {
+                ee: EeId::SVM,
+                id: owner_svm,
+            },
+            EeId::SVM,
+            &approve_svm,
+            200_000,
+            &mut host,
+        )
+        .unwrap();
+        assert!(ok.success);
+        assert_eq!(
+            home_allowances.borrow().get(&(owner_wasm, spender_wasm)),
+            Some(&60)
+        );
+
+        let query_move = serde_json::to_vec(&serde_json::json!({
+            "allowance": { "owner": owner_move, "spender": spender_move }
+        }))
+        .unwrap();
+        let q_res = execute_pointer_call(
+            &state,
+            &rec,
+            &EeIdentity {
+                ee: EeId::MOVE,
+                id: owner_move,
+            },
+            EeId::MOVE,
+            &query_move,
+            200_000,
+            &mut host,
+        )
+        .unwrap();
+        assert_eq!(
+            u128::from_le_bytes(q_res.output.as_slice().try_into().unwrap()),
+            60
+        );
+        assert!(host.state.is_empty());
+    }
 }

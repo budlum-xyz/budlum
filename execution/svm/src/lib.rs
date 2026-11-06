@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod pointer;
 pub mod programs;
 
 use std::any::Any;

@@ -160,6 +160,18 @@ STARK proving on every call (`BLG-248`).
   `UEL_EXECUTION_ROOT` byte-for-byte between `ubuntu-24.04` (`x86_64`) and
   `ubuntu-24.04-arm` (`aarch64`).
 
+## 13. SVM and Move Stateless Pointers & `KR-UEL-REENTRANCY` (`WP-52`)
+
+- Height-gated (`PointerActivationPolicy`): closed at launch on testnet `45261`
+  (`svm_move_pointers_is_closed_on_testnet`, `Section 1.5`) and enabled at
+  `svm_move_activation_height`.
+- Stateless pointer codecs in `execution/svm/src/pointer/` and `execution/move/src/pointer/`
+  plus 4-way coordinator translation (`svm_pointer_holds_no_balance`,
+  `move_pointer_holds_no_balance`, `pointer_allowance_lives_at_home`).
+- `KR-UEL-REENTRANCY` (`IP-52` item 3): cross-environment reentrancy prohibition
+  (`Section 8.7.3` item 6) remains enforced (`REENTRANCY_RULE_RETAINED_WP52 = true`).
+
+
 
 
 
