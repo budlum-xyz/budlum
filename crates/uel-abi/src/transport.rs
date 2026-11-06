@@ -12,14 +12,14 @@
 //! must not write anything.
 
 use crate::frame::{read_frame, write_frame, FrameError, ABI_VERSION};
-use crate::host::{ExecutionEnvironment, HostApi, HostRead};
+pub use crate::host::panic_digest;
+use crate::host::{panic_message, ExecutionEnvironment, HostApi, HostRead};
 use crate::pb;
 use crate::types::{
     BlockContext, BudAmount, CodeInfo, EeCall, EeFault, EeId, EeIdentity, EeLog, EeOutcome,
     EeQuery, EeRefusal, HostError, Namespace, OutOfGas, RefusalCode, UniversalCall,
     UniversalResult, WireError,
 };
-use sha2::{Digest, Sha256};
 use std::cell::{Cell, RefCell};
 use std::io;
 use std::os::unix::net::UnixStream;
@@ -92,28 +92,6 @@ fn envelope(request_id: u64, body: pb::envelope::Body) -> pb::Envelope {
         abi_version: ABI_VERSION,
         request_id,
         body: Some(body),
-    }
-}
-
-/// The digest an environment reports for a caught panic. Domain-separated and
-/// bound to the environment, so two environments panicking with one message
-/// still differ.
-#[must_use]
-pub fn panic_digest(ee: EeId, message: &str) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(b"BDLM_UEL_PANIC_V1");
-    hasher.update([ee.0]);
-    hasher.update(message.as_bytes());
-    hasher.finalize().into()
-}
-
-fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(s) = payload.downcast_ref::<&str>() {
-        (*s).to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "non-string panic".to_string()
     }
 }
 

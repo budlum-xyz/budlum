@@ -20,12 +20,13 @@ pub mod pb {
 pub mod frame;
 pub mod host;
 pub mod mock;
+#[cfg(unix)]
 pub mod transport;
 pub mod types;
 mod wire;
 
 pub use frame::{ABI_VERSION, MAX_FRAME_BYTES};
-pub use host::{ExecutionEnvironment, HostApi, HostRead};
+pub use host::{panic_digest, panic_message, ExecutionEnvironment, HostApi, HostRead};
 pub use types::{
     BlockContext, BudAmount, CodeInfo, EeCall, EeCallKind, EeFault, EeId, EeIdentity, EeLog,
     EeOutcome, EeQuery, EeRefusal, HostError, Namespace, OutOfGas, OutcomeStatus, RefusalCode,
