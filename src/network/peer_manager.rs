@@ -1181,7 +1181,7 @@ mod tests {
     fn eclipse_subnet_bound_rejects_fifth_peer() {
         let mut pm = PeerManager::new();
         pm.set_max_peers_per_subnet(4);
-        let subnet = [10, 0, 0];
+        let subnet: [u8; 3] = [10, 0, 0];
         for _ in 0..4 {
             assert!(pm.can_admit_subnet(Some(subnet)));
             let peer = libp2p::identity::Keypair::generate_ed25519()
@@ -1195,14 +1195,14 @@ mod tests {
             "5th peer on same /24 must be rejected"
         );
         // Different subnet still ok
-        assert!(pm.can_admit_subnet(Some([10, 0, 1])));
+        assert!(pm.can_admit_subnet(Some([10u8, 0, 1])));
     }
 
     #[test]
     fn eclipse_disconnect_frees_subnet_slot() {
         let mut pm = PeerManager::new();
         pm.set_max_peers_per_subnet(1);
-        let subnet = [192, 168, 1];
+        let subnet: [u8; 3] = [192, 168, 1];
         let peer = libp2p::identity::Keypair::generate_ed25519()
             .public()
             .to_peer_id();
@@ -1276,7 +1276,7 @@ mod tests {
     #[test]
     fn eclipse_peer_accounting_is_idempotent() {
         let mut pm = PeerManager::new();
-        let subnet = [172, 18, 0];
+        let subnet: [u8; 3] = [172, 18, 0];
         let peer = libp2p::identity::Keypair::generate_ed25519()
             .public()
             .to_peer_id();
@@ -1298,8 +1298,8 @@ mod tests {
         let mut pm = PeerManager::new();
         pm.set_max_peers_per_subnet(4);
 
-        let subnet_a = [10, 0, 0];
-        let subnet_b = [10, 0, 1];
+        let subnet_a: [u8; 3] = [10, 0, 0];
+        let subnet_b: [u8; 3] = [10, 0, 1];
 
         // Fill subnet A
         for _ in 0..4 {
@@ -1342,7 +1342,7 @@ mod tests {
         let mut pm = PeerManager::new();
         pm.set_max_peers_per_subnet(4);
 
-        let subnet = [192, 168, 1];
+        let subnet: [u8; 3] = [192, 168, 1];
         // Fill the subnet completely
         for _ in 0..4 {
             let peer = libp2p::identity::Keypair::generate_ed25519()
@@ -1353,7 +1353,7 @@ mod tests {
         // New peer on same subnet is rejected - eclipse isolation
         assert!(!pm.can_admit_subnet(Some(subnet)));
         // New peer on different subnet is accepted
-        assert!(pm.can_admit_subnet(Some([192, 168, 2])));
+        assert!(pm.can_admit_subnet(Some([192u8, 168, 2])));
     }
 
     /// Chaos: sybil attack from same /24 subnet is rejected.
@@ -1362,7 +1362,7 @@ mod tests {
         let mut pm = PeerManager::new();
         pm.set_max_peers_per_subnet(4);
 
-        let subnet = [172, 16, 0];
+        let subnet: [u8; 3] = [172, 16, 0];
         // Sybil: 4 peers from same subnet
         for _ in 0..4 {
             let peer = libp2p::identity::Keypair::generate_ed25519()

@@ -87,7 +87,7 @@ mod tests {
     fn subnet_eclipse_bound() {
         let mut pm = PeerManager::new();
         pm.set_max_peers_per_subnet(2);
-        let s = [203, 0, 113];
+        let s: [u8; 3] = [203, 0, 113];
         let p1 = libp2p::identity::Keypair::generate_ed25519()
             .public()
             .to_peer_id();
