@@ -112,7 +112,53 @@ The earlier table (section 4.2 and 4.3 of the old ledger) that holds the per-cla
 this tree, so this table cannot be completed without it. It is written here with the gap stated, not
 filled with an invented mapping (section 0.3 rule 1, section 0.5 rule 1).
 
-## 7. Proposed replacement for section 14.2 of the directive
+## 7. CI baseline
+
+WP-04 card item 2 asks for each workflow's last state, the list of red jobs, and runner memory
+limits. The first two are measured below from the Actions API; the third is not answerable from this
+tree and is recorded as a gap rather than guessed.
+
+Measured 2026-11-06 06:45 UTC, over all 30 workflow files in `.github/workflows/`.
+
+### Last state, per workflow
+
+| State | Count | Workflows |
+|---|---|---|
+| `success` | 5 | Build error relay, Fuzz Nightly, Provenance (SBOM attestation), Release signature, Watchdog (older run) |
+| `failure` | 2 | Testnet Rehearsal (`main`, 2026-11-05T09:29:57Z), Watchdog (`main`, 2026-11-06T04:33:54Z) |
+| `queued` / `pending` | 22 | the remaining files, all triggered by pushes made during this session |
+| `cancelled` | 1 | AIR Mutants Nightly (`2026-11-05T09:32:06Z`) |
+
+The 22 queued runs are not a green signal and not a red one: no step has started. This file's earlier
+snapshots reported 0 completed runs; that is no longer true, and the change is not this lane's doing.
+
+### The two red jobs, and what they assert
+
+Both are on `main`, both are scheduled drift detectors, and both failed in a *single step*:
+
+| Workflow | Job | Failed step | What the step means |
+|---|---|---|---|
+| Watchdog | Main health pulse | `Lockfiles still match their manifests on main` | For every `Cargo.lock` in the tree, `cd` to its directory and run `cargo metadata --format-version 1 --locked`. A nonzero exit means a manifest changed without its lockfile |
+| Watchdog | RustSec drift | `Audit every workspace lockfile` | `cargo audit --file` over all 15 lockfiles, against a freshly fetched advisory DB. The workflow states that a failed DB fetch is itself a failure, so a red here can also mean the DB did not refresh |
+
+The exact `cargo` output is not reachable from this environment: the job log endpoints for both jobs
+return an `EOF` from the blob storage redirect on every attempt, and `--log-failed` returns empty.
+What is cited here is the workflow source and the failed step's name, not the error text. A reader
+with log access should read the failing `=== freshness: <dir> ===` line to name the stale lockfile.
+
+The same job has two further steps that *passed*, which is worth recording because they bound the
+failure: `Workflows still parse (actionlint)` and the two `budlum-gates regen-health-door` runs. So
+the workflow YAML parses and the regen gate is wired; the drift is in a manifest/lockfile pair.
+
+### What could not be measured
+
+- **Runner memory limits.** No workflow pins a runner size: every job uses `ubuntu-latest` (89
+  occurrences) or a matrix value, and no file states a memory ceiling, a swap size, or an OOM
+  budget. The limit is therefore whatever GitHub gives `ubuntu-latest` at run time, which is not in
+  this tree. Card item 2 asks for it, so it is recorded as a gap instead of a number.
+- **Per-job timing.** Not requested by the card and not fetched here.
+
+## 8. Proposed replacement for section 14.2 of the directive
 
 WP-04 card item 7 asks for a proposal, not an edit: the directive is the authority and this lane does
 not rewrite it. The proposal is the table below, which keeps section 14.2's shape (source, id range,
@@ -145,7 +191,7 @@ The mapping the archive column needs is the one section 14.2 does not state: `S1
 the other four use words. The archive row keeps both spellings so the mapping is visible rather than
 implied. If the directive prefers a different mapping, only that row and the totals change.
 
-### What the proposal deliberately does not change
+### 8.1 What the proposal deliberately does not change
 
 - The "267 findings and 44 archive records" reading. The 267 is the `BLG-` range and the 44 is the
   archive; adding them is the counting error section 2 of this file exists to prevent.
@@ -153,7 +199,7 @@ implied. If the directive prefers a different mapping, only that row and the tot
   still true, and this lane's readings make it more true, not less: nine of its records are
   `Previously fixed` and one closes by removal.
 
-### One more number a closing package needs
+### 8.2 One more number a closing package needs
 
 The proposal adds a per-package count to the summary because section 15.7's package table is ordered
 by priority, and priority reads as effort. Lane D is 70 records across 15 packages, and the whole
@@ -162,7 +208,7 @@ WP-61 13, WP-56 11, WP-19 10, WP-43 8, WP-23 7, WP-15 6, WP-41 5, WP-22 5, WP-57
 packages with 4 each and ten with 1 each. A package that carries 44 records cannot be closed in the
 same PR shape as one that carries 1, and the summary table is where that is cheapest to see.
 
-## 8. What this file does not claim
+## 9. What this file does not claim
 
 - No finding is closed, verified or invalidated here.
 - No CI run number is cited: 400 sampled runs on this repository are 155 `cancelled` and 245 without
