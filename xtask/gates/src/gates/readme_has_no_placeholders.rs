@@ -93,8 +93,7 @@ fn markers_on(line: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut start = 0usize;
     let mut word_len = 0usize;
-    let mut chars = line.char_indices().chain(std::iter::once((line.len(), ' ')));
-    while let Some((index, c)) = chars.next() {
+    for (index, c) in line.char_indices().chain(std::iter::once((line.len(), ' '))) {
         if c.is_alphanumeric() || c == '_' {
             if word_len == 0 {
                 start = index;
@@ -183,13 +182,16 @@ fn baseline(root: &Path) -> Result<BTreeMap<String, String>, String> {
         let mut parts = trimmed.splitn(3, '|');
         let key = parts.next();
         let slot = parts.next();
-        let sentence = parts.next();
-        let (Some(key), Some(slot), Some(sentence)) = (key, slot, sentence) else {
+        if parts.next().is_none() {
+            return Err(format!(
+                "{BASELINE}: a line is not `file:line|slot|sentence`: {trimmed}"
+            ));
+        }
+        let (Some(key), Some(slot)) = (key, slot) else {
             return Err(format!(
                 "{BASELINE}: a line is not `file:line|slot|sentence`: {trimmed}"
             ));
         };
-        let _ = sentence;
         let _ = out.insert(key.trim().to_string(), slot.trim().to_string());
     }
     Ok(out)
