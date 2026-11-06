@@ -72,14 +72,14 @@ BLG-291 is not fixed here, and it is smaller than first recorded: #50 already ad
 and Gövde deltas. Only `PUL` in `module_coverage.rs` is still unowned by any open PR.
 This PR's own measured delta stays **0 matches / 0 files**.
 
-Two limits on that row. It was measured with a faithful replication of
+One limit on that row. It was measured with a faithful replication of
 `measure()` and `compare()` — same `SCAN_ROOTS`, `SKIP_DIRS`, `MAX_FILE_BYTES`,
 `global_allow_paths`, per-concept scoping and per-line counting — not with the
-Rust gate, which cannot run here (S-1). And while reading the map, the `PUL` and
-`Tarif` entries were seen to carry `\\b` inside TOML **literal** strings, so the
-compiled regex is a literal backslash followed by `b`, not a word boundary;
-those patterns are inert today. Correcting the escaping would raise the counts
-sharply, so it has to land together with a baseline decision, not before it.
+Rust gate, which cannot run here (S-1). An earlier revision of this row also
+claimed the `PUL`/`Tarif` `\b` patterns were inert because TOML literal strings
+do not process escapes. **That was wrong and is retracted**: the literal string
+passes `\b` through to the regex engine, which reads a word boundary. Both
+spellings compile identically and match `PUL` while refusing `XPULX`.
 
 Why this PR does not fix it: nothing depends on `verifier-registry` today (it is
 a leaf member of the `budzero` workspace), so no wire crosses yet and there is
