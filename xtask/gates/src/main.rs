@@ -109,6 +109,7 @@ mod gates {
     pub mod module_coverage;
     pub mod named_tests;
     pub mod network_hardening_gate;
+    pub mod no_legacy_storage;
     pub mod no_conflict_markers;
     pub mod no_constant_security_verdicts;
     pub mod no_idle_code;
@@ -522,6 +523,14 @@ const GATES: &[Gate] = &[
         run_args: None,
         self_test: gates::tree_is_english::self_test,
         run_log: None,
+    },
+    Gate {
+        name: "no-legacy-storage",
+        replaces: None,
+        run: gates::no_legacy_storage::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::no_legacy_storage::self_test,
     },
     Gate {
         name: "bud3-forbidden-phrases",
