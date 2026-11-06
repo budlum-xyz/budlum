@@ -10,9 +10,9 @@ The only lane ledger on `main` at the snapshot is this delivery's `lane-d.md` (l
 
 | Lane | Agent | Ledger file | State |
 |---|---|---|---|
-| A | A | `docs/audit/live/lane-a.md` | not on `main`; open PRs #12 and #15 to #17 cover the lane A and B ledgers |
-| B | B | `docs/audit/live/lane-b.md` | not on `main`; same package pair as lane A |
-| C | C | `docs/audit/live/lane-c.md` | not on `main`; open PRs #12, #15 and #16 |
+| A | A | `docs/audit/live/lane-a.md` | not on `main`; open PR #12 carries a lane A ledger |
+| B | B | `docs/audit/live/lane-b.md` | not on `main`; open PR #12 carries a lane B ledger |
+| C | C | `docs/audit/live/lane-c.md` | not on `main`; open PRs #12, #15 and #16 carry lane C ledgers |
 | D | D | `docs/audit/live/lane-d.md` | **delivered** by this PR |
 
 The lane A to C ledgers are named in open pull requests and are not files on `main`, so their rows
