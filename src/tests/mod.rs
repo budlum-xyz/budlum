@@ -269,3 +269,8 @@ pub mod backup_covers_persisted_paths;
 // operator runbook, and no row outlives its rule.
 #[cfg(test)]
 pub mod alerts_have_runbook_entries;
+
+// WP-41 item 5: the public TLS edge fronts the ports the services bind, and
+// never an unauthenticated listener.
+#[cfg(test)]
+pub mod caddy_edges_match_the_services;

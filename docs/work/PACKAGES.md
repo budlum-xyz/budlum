@@ -136,3 +136,24 @@ Two rule bugs were found while wiring the rows, which is what the rows are for:
 `src/tests/alerts_have_runbook_entries.rs` holds both directions: an alert with
 no row fails, a row whose alert no longer exists fails, the severities are the
 ones a pager knows, and no rule may call `increase()` on a gauge.
+
+### Delivery 5: WP-41 item 5, the public edge
+
+`ops/Caddyfile.testnet` fronts three services on loopback and now says so
+honestly. Two things were wrong:
+
+* The rate limit the card asks for is the node's own (`[rpc]
+  rate_limit_per_minute`, 600 in `config/testnet.toml`). Caddy's `rate_limit`
+  directive is a third-party module; adding it would make the file fail to load
+  on a stock Caddy, and a config that does not load protects nothing. The file
+  now records that decision where the reader looks for the limit, instead of
+  implying a second one exists.
+* The faucet and indexer are started behind this proxy, so they need
+  `--trusted-proxy 127.0.0.1` or they rate-limit the proxy instead of the
+  client. The file's own comment said this; nothing held it.
+
+`src/tests/caddy_edges_match_the_services.rs` holds the rest: each site
+forwards to the port its service actually binds (read from the service source
+and `config/testnet.toml`, not restated), no site forwards to the operator or
+metrics listener, every site imports the shared hardening, and the services are
+told the proxy is trusted.
