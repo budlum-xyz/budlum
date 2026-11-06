@@ -1170,7 +1170,7 @@ jobs:
     # and ContentId. Copies can diverge silently and their divergence is a silent
     # results (the explorer accepts a name the chain does not; or
     # the explorer says a byte verified while the chain computes a different identity).
-    # `budscan-name-rule-parity` turns those two silences into noise.
+    # `explorer-parity` turns those two silences into noise.
     name: Budscan (explorer core + patch layer)
     runs-on: ubuntu-latest
     steps:
@@ -1202,14 +1202,14 @@ jobs:
         if: always() && steps.rust.outcome == 'success'
         run: |
           set -euo pipefail
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-name-rule-parity --self-test
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-patchset --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- explorer-parity --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- explorer-patchset --self-test
       - name: Name rule and ContentId parity
         if: always() && steps.rust.outcome == 'success'
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-name-rule-parity
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- explorer-parity
       - name: Patch layer (list=disk, no foreign brand)
         if: always() && steps.rust.outcome == 'success'
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-patchset
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- explorer-patchset
 
   # ============================ Standalone crates: bpqs and note-packing ============================
   standalone-crates:

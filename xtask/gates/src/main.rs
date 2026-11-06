@@ -55,8 +55,8 @@ mod gates {
     pub mod bridge_dual_tree;
     pub mod bud3_forbidden_phrases;
     pub mod bud_e2e;
-    pub mod budscan_parity;
-    pub mod budscan_patchset;
+    pub mod explorer_parity;
+    pub mod explorer_patchset;
     pub mod canonical_programs_reproduce;
     pub mod capability_modules_are_wired;
     pub mod cargo_vet;
@@ -324,19 +324,19 @@ const GATES: &[Gate] = &[
         run_log: None,
     },
     Gate {
-        name: "budscan-name-rule-parity",
+        name: "explorer-parity",
         replaces: None,
-        run: gates::budscan_parity::run,
+        run: gates::explorer_parity::run,
         run_args: None,
-        self_test: gates::budscan_parity::self_test,
+        self_test: gates::explorer_parity::self_test,
         run_log: None,
     },
     Gate {
-        name: "budscan-patchset",
+        name: "explorer-patchset",
         replaces: None,
-        run: gates::budscan_patchset::run,
+        run: gates::explorer_patchset::run,
         run_args: None,
-        self_test: gates::budscan_patchset::self_test,
+        self_test: gates::explorer_patchset::self_test,
         run_log: None,
     },
     Gate {
