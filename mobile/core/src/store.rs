@@ -226,11 +226,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mobile_share_id_exhaustion_does_not_overwrite_a_record() {
+    fn mobile_share_id_exhaustion_does_not_overwrite_a_record() -> Result<(), CoreError> {
         let symbol = vec![1; 64];
         let mut store = ShareStore::new();
-        store.next_id = u64::MAX;
-        let assigned = AssignedShare {
+        let mut assigned = AssignedShare {
             object: [1; 32],
             segment: 0,
             esi: 0,
@@ -238,8 +237,16 @@ mod tests {
             placed: vec![(0, symbol_leaf(&symbol))],
             symbol,
         };
-        assert!(store.accept(assigned, 1_000).is_err());
-        assert!(store.is_empty());
+        let original = store.accept(assigned.clone(), 1_000)?;
+        store.next_id = u64::MAX;
+        assigned.object = [2; 32];
+        assert_eq!(
+            store.accept(assigned, 1_000).err().map(|e| e.code),
+            Some("mobile_share_id_exhausted")
+        );
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.get(original.id), Some(&original));
         assert_eq!(store.next_id, u64::MAX);
+        Ok(())
     }
 }
