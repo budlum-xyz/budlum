@@ -120,3 +120,18 @@ confusion, cross-environment BUD conservation, mobile key custody and operator
 authority, the full risk attack set, wallet/CLI/explorer/faucet review, or the
 execution coordinator authored in other deliveries. Those remain open. No Rust
 build, Rust test, device run or CI-green result is claimed here.
+
+## Live continuation refresh
+
+A later 81-open-PR snapshot shows the mobile stack continued without closing any
+PR: #85 scopes audit selection to the object key and binds placement position/ESI;
+#88 retains `(object, proof)` pairs and locks the G-5 presence vector; #91 moves
+the shared class/presence definition into `budlum-types` and records the node-side
+presence mismatch as BLG-350. Those deliveries explicitly cross-reference the
+PR #77 meanings of BLG-288, BLG-289 and BLG-290.
+
+The findings remain open here. #88 reports local Rust 1.99.0 mobile tests, not
+pinned-toolchain CI or a signed node/mobile wire round trip. #91 reports no local
+compile. The release payload conflict (BLG-290) is still unresolved. Parallel PR
+bodies reuse some BLG numbers; references must stay qualified by originating PR
+until merge reconciliation assigns a canonical crosswalk.

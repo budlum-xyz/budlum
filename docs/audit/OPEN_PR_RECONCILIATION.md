@@ -304,3 +304,18 @@ The normalized diff at `31a530e` is 991 changed lines excluding documentation,
 the removed source directive and lockfiles. The delivery remains below the
 1,500-line cap. No CI failure had been observed at the last failure-filtered
 read; that is not a green result and no completion claim is made.
+
+## Live refresh: 81 open PRs
+
+A later REST snapshot found 81 open PRs. New or advanced deliveries since the
+63-PR checkpoint include #84 foundations, #85/#88/#91 mobile continuations,
+#86 live stream, #87 M0/directive, #89 Aptos REST, #92 Android/device/rehearsal,
+#93/#95/#96/#98/#101 integrator/red-base slices, #94 independent review,
+#97 Android continuation, #99/#102 rehearsal genesis, and #100 iOS/WP-48.
+PR #80 advanced to `fd50fb23266d`; PR #83 advanced to `88d0454955e5`; PR #45
+advanced to `23deb99653dc`. The historical collision metrics above are not
+recomputed for this larger snapshot.
+
+Protective decision: keep the fixed session branch and PR #77; carry only owned
+or shared-append corrections here, notify affected PRs, and do not close, merge,
+force-push or push another session's branch.
