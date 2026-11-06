@@ -233,7 +233,20 @@ Section 4 measures.
   that took them would be inventing a repository of record, which Section 0.3
   item 2 forbids it to do.
 
-## 8. Corrections made after integration
+## 8. Which branches are already inside the integration stack
+
+`python3 ops/scripts/integration_audit.py --branches` asks `git merge-base
+--is-ancestor` for every `origin/arena/*` ref against `HEAD`. At the last
+measurement there were 77 such refs: **12 are ancestors of this branch** and
+65 are not. The twelve are the seven merged PR heads (#61, #63, #65, #67, #70,
+#71, #72), their stacked bases, and this branch's own remote ref. All seven
+merged heads are still ancestors, so none of them has moved since the merge.
+
+This is a *branch ancestry* check, not a pull request status check: a PR can be
+open with its head already merged into another branch, which is exactly the
+situation here. No PR was closed to produce these numbers.
+
+## 9. Corrections made after integration
 
 | Earlier claim | Corrected fact | Evidence |
 |---|---|---|
