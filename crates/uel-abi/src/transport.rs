@@ -21,7 +21,7 @@ use crate::types::{
 };
 use sha2::{Digest, Sha256};
 use std::cell::{Cell, RefCell};
-use std::io;
+use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
@@ -92,6 +92,46 @@ fn envelope(request_id: u64, body: pb::envelope::Body) -> pb::Envelope {
         abi_version: ABI_VERSION,
         request_id,
         body: Some(body),
+    }
+}
+
+/// Socket timeouts apply to each system call, not to a whole frame. Refresh
+/// the timeout from one absolute deadline before every read and write so a
+/// peer cannot extend the budget by delivering one byte at a time.
+struct DeadlineIo<'a> {
+    stream: &'a mut UnixStream,
+    deadline: Instant,
+}
+
+impl DeadlineIo<'_> {
+    fn remaining(&self) -> io::Result<Duration> {
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "UEL transport deadline expired",
+            ));
+        }
+        Ok(remaining)
+    }
+}
+
+impl Read for DeadlineIo<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.stream.set_read_timeout(Some(self.remaining()?))?;
+        self.stream.read(buf)
+    }
+}
+
+impl Write for DeadlineIo<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.stream.set_write_timeout(Some(self.remaining()?))?;
+        self.stream.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.remaining()?;
+        self.stream.flush()
     }
 }
 
@@ -249,7 +289,9 @@ impl EeClient {
         }
     }
 
-    /// Replaces the request deadline (the default is [`WATCHDOG`]).
+    /// Replaces the total transport budget (the default is [`WATCHDOG`]).
+    /// The budget includes a reconnect handshake, request writes, host
+    /// callbacks and response reads. It cannot preempt arbitrary host code.
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
@@ -268,18 +310,15 @@ impl EeClient {
         id
     }
 
-    fn connect(&mut self) -> Result<(), TransportError> {
+    fn connect(&mut self, deadline: Instant) -> Result<(), TransportError> {
         let mut stream =
             UnixStream::connect(&self.socket).map_err(|e| TransportError::Connect(e.kind()))?;
-        stream
-            .set_write_timeout(Some(self.timeout))
-            .map_err(|e| TransportError::Frame(e.into()))?;
-        stream
-            .set_read_timeout(Some(self.timeout))
-            .map_err(|e| TransportError::Frame(e.into()))?;
         let id = self.take_request_id();
         write_frame(
-            &mut stream,
+            &mut DeadlineIo {
+                stream: &mut stream,
+                deadline,
+            },
             &envelope(
                 id,
                 pb::envelope::Body::Hello(pb::Hello {
@@ -287,7 +326,10 @@ impl EeClient {
                 }),
             ),
         )?;
-        let reply = read_frame(&mut stream)?;
+        let reply = read_frame(&mut DeadlineIo {
+            stream: &mut stream,
+            deadline,
+        })?;
         if reply.request_id != id {
             return Err(TransportError::Protocol(format!(
                 "handshake response for request {} while waiting for {id}",
@@ -312,15 +354,39 @@ impl EeClient {
         Ok(())
     }
 
+    /// Starts one request. An unrepresentable Instant is a timeout, not a
+    /// panic in the node. Checked arithmetic also handles Duration::MAX.
+    fn begin_request(
+        &mut self,
+        body: pb::envelope::Body,
+    ) -> Result<(u64, Instant), TransportError> {
+        let deadline = match Instant::now().checked_add(self.timeout) {
+            Some(deadline) => deadline,
+            None => {
+                self.stream = None;
+                return Err(TransportError::Timeout);
+            }
+        };
+        let id = self.open_request(body, deadline)?;
+        Ok((id, deadline))
+    }
+
     /// Sends one request frame, connecting if needed. A failed write may have
     /// delivered a prefix or even the complete frame, so it is never retried.
-    fn open_request(&mut self, body: pb::envelope::Body) -> Result<u64, TransportError> {
+    fn open_request(
+        &mut self,
+        body: pb::envelope::Body,
+        deadline: Instant,
+    ) -> Result<u64, TransportError> {
         if self.stream.is_none() {
-            self.connect()?;
+            self.connect(deadline)?;
         }
         let id = self.take_request_id();
         let result = match self.stream.as_mut() {
-            Some(stream) => write_frame(stream, &envelope(id, body)),
+            Some(stream) => write_frame(
+                &mut DeadlineIo { stream, deadline },
+                &envelope(id, body),
+            ),
             None => return Err(TransportError::Protocol("no connection".into())),
         };
         if let Err(error) = result {
@@ -330,13 +396,25 @@ impl EeClient {
         Ok(id)
     }
 
+    /// A malformed final response is as untrustworthy as a failed read.
+    /// Drop the connection even when framing and request correlation passed.
+    fn finish<T>(
+        &mut self,
+        result: Result<T, TransportError>,
+    ) -> Result<T, TransportError> {
+        if result.is_err() {
+            self.stream = None;
+        }
+        result
+    }
+
     /// Reads frames until the final response for `id`, answering host requests.
     fn drive(
         &mut self,
         id: u64,
         mut access: Option<HostAccess<'_>>,
+        deadline: Instant,
     ) -> Result<pb::envelope::Body, TransportError> {
-        let deadline = Instant::now() + self.timeout;
         let result = (|| {
             let stream = self
                 .stream
@@ -347,10 +425,10 @@ impl EeClient {
                 if remaining.is_zero() {
                     return Err(TransportError::Timeout);
                 }
-                stream
-                    .set_read_timeout(Some(remaining))
-                    .map_err(|e| TransportError::Frame(e.into()))?;
-                let frame = read_frame(stream)?;
+                let frame = read_frame(&mut DeadlineIo {
+                    stream: &mut *stream,
+                    deadline,
+                })?;
                 if frame.request_id != id {
                     return Err(TransportError::Protocol(format!(
                         "response for request {} while waiting for {id}",
@@ -366,7 +444,10 @@ impl EeClient {
                             }
                         };
                         write_frame(
-                            stream,
+                            &mut DeadlineIo {
+                                stream: &mut *stream,
+                                deadline,
+                            },
                             &envelope(id, pb::envelope::Body::HostResponse(response)),
                         )?;
                     }
@@ -391,12 +472,12 @@ impl EeClient {
         &mut self,
         code: &[u8],
     ) -> Result<Result<CodeInfo, EeRefusal>, TransportError> {
-        let id = self.open_request(pb::envelope::Body::ValidateDeployRequest(
+        let (id, deadline) = self.begin_request(pb::envelope::Body::ValidateDeployRequest(
             pb::ValidateDeployRequest {
                 code: code.to_vec(),
             },
         ))?;
-        match self.drive(id, None)? {
+        let result = self.drive(id, None, deadline).and_then(|body| match body {
             pb::envelope::Body::ValidateDeployResponse(response) => match response.result {
                 Some(pb::validate_deploy_response::Result::Info(info)) => Ok(Ok(info.try_into()?)),
                 Some(pb::validate_deploy_response::Result::Refusal(refusal)) => {
@@ -407,7 +488,8 @@ impl EeClient {
             _ => Err(TransportError::Protocol(
                 "unexpected response to validate".into(),
             )),
-        }
+        });
+        self.finish(result)
     }
 
     /// Runs one call on the worker, serving its host requests from `host`.
@@ -424,24 +506,32 @@ impl EeClient {
         call: &EeCall,
         host: &mut dyn HostApi,
     ) -> Result<Result<EeOutcome, EeFault>, TransportError> {
-        let id = self.open_request(pb::envelope::Body::ExecuteRequest(pb::ExecuteRequest {
-            ctx: Some(ctx.into()),
-            call: Some(call.into()),
-        }))?;
-        match self.drive(id, Some(HostAccess::Full(host)))? {
-            pb::envelope::Body::ExecuteResponse(response) => match response.result {
-                Some(pb::execute_response::Result::Outcome(outcome)) => Ok(Ok(outcome.try_into()?)),
-                Some(pb::execute_response::Result::Fault(fault)) => {
-                    // A faulted worker closes its connection and must restart.
-                    self.stream = None;
-                    Ok(Err(fault.try_into()?))
-                }
-                None => Err(TransportError::Protocol("empty execute response".into())),
-            },
-            _ => Err(TransportError::Protocol(
-                "unexpected response to execute".into(),
-            )),
-        }
+        let (id, deadline) =
+            self.begin_request(pb::envelope::Body::ExecuteRequest(pb::ExecuteRequest {
+                ctx: Some(ctx.into()),
+                call: Some(call.into()),
+            }))?;
+        let result = self
+            .drive(id, Some(HostAccess::Full(host)), deadline)
+            .and_then(|body| match body {
+                pb::envelope::Body::ExecuteResponse(response) => match response.result {
+                    Some(pb::execute_response::Result::Outcome(outcome)) => {
+                        Ok(Ok(outcome.try_into()?))
+                    }
+                    Some(pb::execute_response::Result::Fault(fault)) => {
+                        let fault = fault.try_into()?;
+                        // Convert before dropping: even a malformed fault is
+                        // an untrustworthy connection, not a reusable stream.
+                        self.stream = None;
+                        Ok(Err(fault))
+                    }
+                    None => Err(TransportError::Protocol("empty execute response".into())),
+                },
+                _ => Err(TransportError::Protocol(
+                    "unexpected response to execute".into(),
+                )),
+            });
+        self.finish(result)
     }
 
     /// Runs a read-only query on the worker.
@@ -457,17 +547,22 @@ impl EeClient {
     ) -> Result<Result<Vec<u8>, EeRefusal>, TransportError> {
         let mut request: pb::QueryRequest = query.into();
         request.ctx = Some(ctx.into());
-        let id = self.open_request(pb::envelope::Body::QueryRequest(request))?;
-        match self.drive(id, Some(HostAccess::ReadOnly(host)))? {
-            pb::envelope::Body::QueryResponse(response) => match response.result {
-                Some(pb::query_response::Result::Output(output)) => Ok(Ok(output)),
-                Some(pb::query_response::Result::Refusal(refusal)) => Ok(Err(refusal.try_into()?)),
-                None => Err(TransportError::Protocol("empty query response".into())),
-            },
-            _ => Err(TransportError::Protocol(
-                "unexpected response to query".into(),
-            )),
-        }
+        let (id, deadline) = self.begin_request(pb::envelope::Body::QueryRequest(request))?;
+        let result = self
+            .drive(id, Some(HostAccess::ReadOnly(host)), deadline)
+            .and_then(|body| match body {
+                pb::envelope::Body::QueryResponse(response) => match response.result {
+                    Some(pb::query_response::Result::Output(output)) => Ok(Ok(output)),
+                    Some(pb::query_response::Result::Refusal(refusal)) => {
+                        Ok(Err(refusal.try_into()?))
+                    }
+                    None => Err(TransportError::Protocol("empty query response".into())),
+                },
+                _ => Err(TransportError::Protocol(
+                    "unexpected response to query".into(),
+                )),
+            });
+        self.finish(result)
     }
 }
 
