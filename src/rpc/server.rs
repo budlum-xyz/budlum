@@ -4,6 +4,7 @@ use crate::core::address::Address;
 use crate::core::block::Block;
 use crate::core::transaction::Transaction;
 use crate::network::node::NodeClient;
+use crate::rpc::compat::ethereum;
 use crate::storage::content_id::ContentId;
 use crate::storage::{emit_hook, NopThreeHook, ThreeEventHook, ThreeHookEvent, ThreeHookKind};
 use bincode;
@@ -6424,6 +6425,254 @@ impl BudlumApiServer for RpcServer {
         let chain_id = self.chain.get_chain_id().await;
         Ok(Self::ai_readiness_json(chain_id, active_operators.len()))
     }
+
+    // ---- Ethereum JSON-RPC compatibility gateway (WP-28, 1/2) ----
+    //
+    // Every answer here is a chain fact or a refusal that names the
+    // Budlum door (see `src/rpc/compat/ethereum/mod.rs`).
+    async fn web3_client_version(&self) -> Result<String, ErrorObjectOwned> {
+        let chain_id = self.chain.get_chain_id().await;
+        Ok(format!("budlum-core/v{}/chain-{chain_id}", env!("CARGO_PKG_VERSION")))
+    }
+
+    async fn compat_net_version(&self) -> Result<String, ErrorObjectOwned> {
+        Ok(self.chain.get_chain_id().await.to_string())
+    }
+
+    async fn compat_net_listening(&self) -> Result<bool, ErrorObjectOwned> {
+        Ok(true)
+    }
+
+    async fn eth_chain_id(&self) -> Result<String, ErrorObjectOwned> {
+        Ok(Self::to_hex(self.chain.get_chain_id().await))
+    }
+
+    async fn eth_syncing(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Ok(serde_json::json!(self.node.is_syncing()))
+    }
+
+    async fn eth_block_number(&self) -> Result<String, ErrorObjectOwned> {
+        let height = self.chain.get_height().await;
+        Ok(Self::to_hex(height))
+    }
+
+    async fn eth_gas_price(&self) -> Result<String, ErrorObjectOwned> {
+        Ok(Self::to_hex(self.chain.get_base_fee().await))
+    }
+
+    async fn eth_max_priority_fee_per_gas(&self) -> Result<String, ErrorObjectOwned> {
+        Ok("0x0".to_string())
+    }
+
+    async fn eth_accounts(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Ok(serde_json::json!([]))
+    }
+
+    async fn eth_get_balance(
+        &self,
+        _address: String,
+        _block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getBalance", "bud_getBalance"))
+    }
+
+    async fn eth_get_code(
+        &self,
+        _address: String,
+        _block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getCode", "bud_getAccountProof"))
+    }
+
+    async fn eth_get_storage_at(
+        &self,
+        _address: String,
+        _position: String,
+        _block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getStorageAt", "bud_getAccountProof"))
+    }
+
+    async fn eth_get_transaction_count(
+        &self,
+        _address: String,
+        _block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getTransactionCount", "bud_getNonce"))
+    }
+
+    async fn eth_call(
+        &self,
+        _call: serde_json::Value,
+        _block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_call", "bud_txPrecheck"))
+    }
+
+    async fn eth_estimate_gas(
+        &self,
+        _call: serde_json::Value,
+        _block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_estimateGas", "bud_estimateGas"))
+    }
+
+    async fn eth_create_access_list(
+        &self,
+        _call: serde_json::Value,
+        _block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_createAccessList", "bud_txPrecheck"))
+    }
+
+    async fn eth_fee_history(
+        &self,
+        _block_count: String,
+        _newest_block: String,
+        _reward_percentiles: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_feeHistory", "bud_gasPrice"))
+    }
+
+    async fn eth_send_raw_transaction(
+        &self,
+        _raw: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_sendRawTransaction", "bud_sendRawTransaction"))
+    }
+
+    async fn eth_get_block_by_number(
+        &self,
+        _block: String,
+        _full: Option<bool>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getBlockByNumber", "bud_getBlockByNumber"))
+    }
+
+    async fn eth_get_block_by_hash(
+        &self,
+        _hash: String,
+        _full: Option<bool>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getBlockByHash", "bud_getBlockByHash"))
+    }
+
+    async fn eth_get_block_transaction_count_by_number(
+        &self,
+        _block: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable(
+            "eth_getBlockTransactionCountByNumber",
+            "bud_getBlockByNumber",
+        ))
+    }
+
+    async fn eth_get_block_transaction_count_by_hash(
+        &self,
+        _hash: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getBlockTransactionCountByHash", "bud_getBlockByHash"))
+    }
+
+    async fn eth_get_transaction_by_hash(
+        &self,
+        _hash: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getTransactionByHash", "bud_getTransactionByHash"))
+    }
+
+    async fn eth_get_transaction_by_block_number_and_index(
+        &self,
+        _block: String,
+        _index: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable(
+            "eth_getTransactionByBlockNumberAndIndex",
+            "bud_getBlockByNumber",
+        ))
+    }
+
+    async fn eth_get_transaction_receipt(
+        &self,
+        _hash: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getTransactionReceipt", "bud_getTransactionReceipt"))
+    }
+
+    async fn eth_get_block_receipts(
+        &self,
+        _block: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getBlockReceipts", "bud_getBlockByNumber"))
+    }
+
+    async fn eth_get_logs(
+        &self,
+        _filter: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getLogs", "bud_getTransactionReceipt"))
+    }
+
+    async fn eth_new_filter(
+        &self,
+        _filter: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_newFilter", "bud_subscribe"))
+    }
+
+    async fn eth_new_block_filter(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_newBlockFilter", "bud_subscribe"))
+    }
+
+    async fn eth_get_filter_changes(
+        &self,
+        _filter_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getFilterChanges", "bud_subscribe"))
+    }
+
+    async fn eth_get_filter_logs(
+        &self,
+        _filter_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getFilterLogs", "bud_subscribe"))
+    }
+
+    async fn eth_uninstall_filter(
+        &self,
+        _filter_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_uninstallFilter", "bud_subscribe"))
+    }
+
+    async fn debug_trace_transaction(
+        &self,
+        _hash: String,
+        _options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("debug_traceTransaction")?;
+        Err(ethereum::ee_unavailable("debug_traceTransaction", "bud_getTransactionReceipt"))
+    }
+
+    async fn debug_trace_call(
+        &self,
+        _call: serde_json::Value,
+        _block: Option<String>,
+        _options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("debug_traceCall")?;
+        Err(ethereum::ee_unavailable("debug_traceCall", "bud_txPrecheck"))
+    }
+
+    async fn eth_get_proof(
+        &self,
+        _address: String,
+        _keys: serde_json::Value,
+        _block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::proof_is_not_an_mpt_proof())
+    }
+
 }
 
 /// Turn the on-the-wire format string into a `RenderFormat`.
@@ -6737,6 +6986,7 @@ mod tests {
     }
 
     async fn status_through_layer(
+        &self,
         mode: RpcMode,
         host: Option<&str>,
         origin: Option<&str>,
