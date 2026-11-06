@@ -1,5 +1,9 @@
 //! Worker-side frame and deploy-validation boundaries.
 
+// A panic is how a test reports a broken invariant; the node-wide panic gate is for
+// production code (the same exemption the root manifest documents for tests).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use budlum_uel_abi::frame::{read_frame, write_frame, FrameError, ABI_VERSION};
 use budlum_uel_abi::mock::MockEe;
 use budlum_uel_abi::pb;
