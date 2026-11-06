@@ -2,7 +2,7 @@
 
 use super::{
     check_routes, classify, healthy_response, move_unavailable, node_info_response, owns_path,
-    Answer, Effect, Listener, RouteMatch, Verb, ENDPOINTS,
+    validate_listener, Answer, Effect, Listener, RouteMatch, Verb, ENDPOINTS,
 };
 use crate::core::block::Block;
 use hyper::{Method, StatusCode};
@@ -231,4 +231,19 @@ fn aptos_health_reports_ready_and_syncing_without_json_wrappers() {
         healthy_response(true).status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
+}
+
+#[test]
+fn aptos_dedicated_listener_is_loopback_only() {
+    assert_eq!(
+        validate_listener("127.0.0.1:18549").expect("IPv4 loopback is valid"),
+        "127.0.0.1:18549".parse().expect("the expected socket is valid")
+    );
+    assert!(validate_listener("[::1]:18549").is_ok());
+    for invalid in ["0.0.0.0:18549", "192.0.2.1:18549", "localhost:18549", "bad"] {
+        assert!(
+            validate_listener(invalid).is_err(),
+            "{invalid} must not open the dedicated public service"
+        );
+    }
 }

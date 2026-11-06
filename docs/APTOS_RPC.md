@@ -1,12 +1,14 @@
 # Aptos REST compatibility
 
-WP-32, delivery 1/N, adds the Aptos REST route table and connects it to the node's production HTTP service. It is an early compatibility surface, not a claim that the Move execution environment or the Aptos SDK conformance suite is complete.
+WP-32, deliveries 1/N and 2/N, add the Aptos REST route table, production routing, and its dedicated listener. This is an early compatibility surface, not a claim that the Move execution environment or the Aptos SDK conformance suite is complete.
 
 ## Current listener and wire behavior
 
-The routes share the configured Budlum RPC listener in this delivery. A request whose path is `/v1` or starts with `/v1/` goes to the Aptos REST handler. Other paths continue to the existing JSON-RPC dispatcher. The same IP admission, authentication, CORS, rate, connection, and request-size controls apply before either handler.
+The normal public node startup opens the dedicated `127.0.0.1:18549` listener from Section 8.11.1. It serves Aptos REST only; it has no JSON-RPC dispatcher. The bind must be a numeric loopback socket. A non-loopback bind, a shared JSON-RPC/Aptos address, or a bind failure stops startup instead of silently exposing or dropping the gateway.
 
-The dedicated `127.0.0.1:18549` listener from Section 8.11.1 is not opened by this delivery. It belongs to the next delivery. The public reverse-proxy address `https://aptos.<TESTNET_DOMAIN>/v1` is therefore not ready either.
+The dedicated listener reuses the RPC IP admission, authentication, CORS, rate, and TLS configuration. A bounded semaphore applies the configured connection limit. POST bodies are not read while Move is unavailable, so the refusal path does not allocate from an untrusted body. The public reverse-proxy address `https://aptos.<TESTNET_DOMAIN>/v1` still needs the WP-41 proxy configuration before it is ready.
+
+An embedded or test `RpcServer` does not open a port implicitly. Without `with_aptos_listener`, its configured HTTP listener can route `/v1` to the same Aptos handler. Normal node startup sets the dedicated listener, so `/v1` stays off the JSON-RPC port.
 
 The route table is `src/rpc/compat/aptos/mod.rs`. Like `method_class.rs`, it records the listener and effect of every method. `RpcServer::run` checks the table at startup and invokes the handler for every matching request. The tests check the directive's complete list, route matching, listener/effect consistency, response shapes, and native refusal doors.
 
@@ -61,6 +63,6 @@ An unknown `/v1` path returns `404`. A known path with the wrong HTTP method ret
 - `Foreign::Aptos`, chain id `205`, sequence-number checks, expiration checks, BCS decoding, and replay protection.
 - Move resources, modules, tables, events, views, simulation, gas estimation, transaction submission, and transaction-version reads.
 - The native `0x1::budlum_universal` module.
-- The dedicated port `18549`, the public Aptos reverse-proxy endpoint, and the Aptos CLI/TypeScript SDK nightly tests.
+- The public Aptos reverse-proxy endpoint and the Aptos CLI/TypeScript SDK nightly tests.
 
 BLG-249 remains open. This delivery supplies the Aptos route vocabulary and two honest node reads; it does not close the Move execution or ecosystem-compatibility finding.
