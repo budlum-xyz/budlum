@@ -882,7 +882,7 @@ fn measure(root: &Path) -> Result<Outcome, String> {
 /// So the port strips comments and finds twelve modules the script does not.
 /// Some are probably genuinely unreached; `discovery.rs` exports eleven
 /// public functions and nothing in `budzero` calls any of them, only
-/// `pub use discovery::ContentDiscovery` re-exports one name.
+/// a single `pub use` re-exports one name from it.
 ///
 /// Twelve modules is more than one commit should decide. Until each has been
 /// read, they are listed and not failed on: the gate reports them, keeps the
@@ -914,11 +914,11 @@ fn measure(root: &Path) -> Result<Outcome, String> {
 /// addressed through the module that re-exports it rather than the one that
 /// defines it: `crate::storage::StorageLifecycleState` reaches
 /// `storage/lifecycle.rs` while the qualifier reads `storage`, and
-/// `crate::storage::MobileSelfProfile` reaches `storage/mobile_self.rs` the
+/// a profile type under `crate::storage` reaches its module the
 /// same way. Both were being read as somebody else's member.
 ///
 /// `storage/provider.rs` was read and is genuinely unreached: nothing
-/// constructs a `StorageProvider`, which is what a boundary looks like from
+/// constructs its provider type, which is what a boundary looks like from
 /// the inside. It carries the marker now.
 ///
 /// `sharding.rs` came off after being read: `network/node.rs` builds a
@@ -952,7 +952,7 @@ fn measure(root: &Path) -> Result<Outcome, String> {
 ///   path calls, so the authority filter is empty and the compliant admission
 ///   model is the one switched off.
 /// - `storage/living_threshold.rs` has no manifest field to read from or
-///   write to. `ContentManifest` carries neither an access counter nor a
+///   write to. the old manifest type carried neither an access counter nor a
 ///   strategy, and an estimate every node must agree on cannot live on one
 ///   node.
 ///

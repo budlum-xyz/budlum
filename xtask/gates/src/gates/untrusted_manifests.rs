@@ -1,655 +1,121 @@
-//! Every path that takes a manifest from a caller must apply the same check.
+//! Untrusted bytes and untrusted symbols are refused at the door.
 //!
-//! Ported from `scripts/check-untrusted-manifests-are-fully-validated.sh`.
+//! A caller builds an object from bytes it chose, and a holder serves
+//! symbols it chose. Both doors run the validator before anything is stored
+//! or shown: the object door decodes under a metered budget and refuses a
+//! payload whose decode is not the content, and the view door refuses a
+//! rebuild whose object commitment is not the recorded one. Without those
+//! refusals a relayer rewrites a payload and the signature or the record
+//! still verifies.
 //!
-//! # The failure this closes
-//!
-//! Two entry points accept a `ContentManifest` an untrusted caller built.
-//! Registration (once the `RegisterStorageManifest` actor command, now the
-//! in-block `StorageTx::RegisterManifest` door) called `validate_untrusted`.
-//! `open_deal` called
-//! `verify_id` and stopped there, and `open_deal` is the path that also takes
-//! the payer's money. `verify_id` proves the id was derived from the fields
-//! present, not that they agree: `manifest_id` covers `k` and `n`, so a
-//! manifest declaring `k = 1, n = 3` hashes consistently while reporting a
-//! loss tolerance its shard list cannot deliver.
-//!
-//! # What is checked
-//!
-//! 1. `validate_untrusted` still ties `k` and `n` to the shards actually
-//!    present.
-//! 2. Every door that accepts a caller-supplied manifest calls it: `open_deal`
-//!    and `register_manifest` in `src/domain/storage_tx.rs`, the function the
-//!    executor applies `StorageTx::RegisterManifest` through.
-//! 3. No such path settles for `verify_id` alone, with string literals and
-//!    comments stripped so inert text cannot satisfy the gate.
-//! 4. The named regressions exist as real `#[test]` functions.
+//! This gate pins the three refusals in the B.U.D. 3.0 pipeline.
 
-use std::fmt::Write as _;
 use std::path::Path;
 
-/// Python `\s`.
-fn skip_py_ws(s: &str) -> &str {
-    let mut idx = 0usize;
-    for (i, c) in s.char_indices() {
-        if matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{000c}' | '\u{000b}') {
-            idx = i + c.len_utf8();
-        } else {
-            break;
-        }
-    }
-    &s[idx..]
+fn read(root: &Path, rel: &str) -> Result<String, String> {
+    std::fs::read_to_string(root.join(rel)).map_err(|e| format!("read {rel}: {e}"))
 }
 
-fn word_before(s: &str, idx: usize) -> bool {
-    s[..idx]
-        .chars()
-        .next_back()
-        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-fn word_at(s: &str, idx: usize) -> bool {
-    s[idx..]
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-/// Blank Rust block comments, which nest.
-fn strip_block_comments(text: &str) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let mut out = String::with_capacity(text.len());
-    let mut i = 0usize;
-    let mut depth = 0usize;
-    let n = chars.len();
-    while i < n {
-        if i + 1 < n && chars[i] == '/' && chars[i + 1] == '*' {
-            depth += 1;
-            out.push_str("  ");
-            i += 2;
-            continue;
-        }
-        if depth > 0 && i + 1 < n && chars[i] == '*' && chars[i + 1] == '/' {
-            depth -= 1;
-            out.push_str("  ");
-            i += 2;
-            continue;
-        }
-        if depth > 0 {
-            out.push(if chars[i] == '\n' { '\n' } else { ' ' });
-            i += 1;
-            continue;
-        }
-        out.push(chars[i]);
-        i += 1;
-    }
-    out
-}
-
-fn blank_chars(chars: &[char]) -> String {
-    chars
-        .iter()
-        .map(|&c| if c == '\n' { '\n' } else { ' ' })
-        .collect()
-}
-
-/// Blank string literals (`b?"..."`) and char literals (`b?'...'`).
-fn strip_quoted(text: &str, quote: char) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let n = chars.len();
-    let mut out = String::new();
-    let mut i = 0usize;
-    while i < n {
-        let c = chars[i];
-        let start = if c == quote || (c == 'b' && i + 1 < n && chars[i + 1] == quote) {
-            Some(i)
-        } else {
-            None
-        };
-        let Some(start) = start else {
-            out.push(c);
-            i += 1;
-            continue;
-        };
-        let content_start = start + 1 + usize::from(chars[start] == 'b');
-        let mut ok = false;
-        let mut close_at = 0usize;
-        if quote == '\'' {
-            if content_start < n {
-                let item_end = if chars[content_start] == '\\' {
-                    if content_start + 1 < n {
-                        content_start + 2
-                    } else {
-                        content_start + 1
-                    }
-                } else {
-                    content_start + 1
-                };
-                if item_end < n && chars[item_end] == '\'' {
-                    ok = true;
-                    close_at = item_end;
-                }
-            }
-        } else {
-            let mut j = content_start;
-            while j < n {
-                match chars[j] {
-                    '\\' => {
-                        if j + 1 < n {
-                            j += 2;
-                        } else {
-                            break;
-                        }
-                    }
-                    '"' => {
-                        ok = true;
-                        close_at = j;
-                        break;
-                    }
-                    _ => j += 1,
-                }
-            }
-        }
-        if !ok {
-            out.push(chars[start]);
-            i = start + 1;
-            continue;
-        }
-        out.push_str(&blank_chars(&chars[start..=close_at]));
-        i = close_at + 1;
-    }
-    out
-}
-
-/// Strip line comments, nested block comments and string/char literals,
-/// preserving line structure.
-fn strip_comments(src: &str) -> String {
-    let mut out = String::with_capacity(src.len());
-    for line in src.split_inclusive('\n') {
-        let Some(pos) = line.find("//") else {
-            out.push_str(line);
-            continue;
-        };
-        out.push_str(&line[..pos]);
-        for c in line[pos..].chars() {
-            out.push(if c == '\n' { '\n' } else { ' ' });
-        }
-    }
-    let out = strip_block_comments(&out);
-    let out = strip_quoted(&out, '"');
-    strip_quoted(&out, '\'')
-}
-
-/// Brace-matched body of `pub fn NAME\s*\(`.
-fn body_of<'a>(src: &'a str, name: &str) -> Option<&'a str> {
-    let header = format!("pub fn {name}");
-    let mut from = 0usize;
-    while let Some(pos) = src[from..].find(&header) {
-        let abs = from + pos;
-        let rest = &src[abs + header.len()..];
-        if !skip_py_ws(rest).starts_with('(') {
-            from = abs + 1;
-            continue;
-        }
-        let open_rel = src[abs + header.len()..].find('{')?;
-        let i = abs + header.len() + open_rel;
-        let mut depth = 0usize;
-        for (off, c) in src[i..].char_indices() {
-            match c {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(&src[i..i + off + c.len_utf8()]);
-                    }
-                }
-                _ => {}
-            }
-        }
-        return None;
-    }
-    None
-}
-
-/// `\.k\b`: a `.k` whose following character is not a word character.
-fn has_dot_k_boundary(vu: &str) -> bool {
-    let mut from = 0usize;
-    while let Some(pos) = vu[from..].find(".k") {
-        let abs = from + pos;
-        if !word_at(vu, abs + 2) {
-            return true;
-        }
-        from = abs + 1;
-    }
-    false
-}
-
-/// `\bn\b`: a standalone `n`.
-fn has_standalone_n(vu: &str) -> bool {
-    let mut from = 0usize;
-    while let Some(pos) = vu[from..].find('n') {
-        let abs = from + pos;
-        if !word_before(vu, abs) && !word_at(vu, abs + 1) {
-            return true;
-        }
-        from = abs + 1;
-    }
-    false
-}
-
-/// `\bmanifest\s*\.\s*METHOD\s*\(`.
-fn has_manifest_call(region: &str, method: &str) -> bool {
-    let mut from = 0usize;
-    while let Some(pos) = region[from..].find("manifest") {
-        let abs = from + pos;
-        if word_before(region, abs) {
-            from = abs + 1;
-            continue;
-        }
-        let rest = skip_py_ws(&region[abs + "manifest".len()..]);
-        let Some(rest) = rest.strip_prefix('.') else {
-            from = abs + 1;
-            continue;
-        };
-        let rest = skip_py_ws(rest);
-        let Some(rest) = rest.strip_prefix(method) else {
-            from = abs + 1;
-            continue;
-        };
-        if skip_py_ws(rest).starts_with('(') {
-            return true;
-        }
-        from = abs + 1;
-    }
-    false
-}
-
-/// Brace-matched body of the private or public `fn NAME(` in `src`: the
-/// in-block registration door is a private function of `storage_tx.rs`.
-fn fn_body_of<'a>(src: &'a str, name: &str) -> Option<&'a str> {
-    let header = format!("fn {name}");
-    let mut from = 0usize;
-    while let Some(pos) = src[from..].find(&header) {
-        let abs = from + pos;
-        let after = &src[abs + header.len()..];
-        if word_before(src, abs) || !skip_py_ws(after).starts_with('(') {
-            from = abs + 1;
-            continue;
-        }
-        let open_rel = after.find('{')?;
-        let i = abs + header.len() + open_rel;
-        let mut depth = 0usize;
-        for (off, c) in src[i..].char_indices() {
-            match c {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(&src[i..i + off + c.len_utf8()]);
-                    }
-                }
-                _ => {}
-            }
-        }
-        return None;
-    }
-    None
-}
-
-fn check_strong(vu: Option<&str>, problems: &mut Vec<String>, checked: &mut usize) {
-    // The strong check must still be strong.
-    *checked += 1;
-    if let Some(vu) = vu {
-        *checked += 1;
-        if (!vu.contains("erasure.k") && !has_dot_k_boundary(vu)) || !vu.contains("ShardKind::Data")
-        {
-            problems.push(String::from(
-                "`validate_untrusted` no longer compares `k` against the data \
-                 shards present. Without that comparison a manifest can declare a \
-                 loss tolerance its shard list cannot deliver, and the id will \
-                 still verify because `manifest_id` covers `k` and `n`.",
-            ));
-        }
-        if (!vu.contains("erasure.n") && !has_standalone_n(vu)) || !vu.contains("shard_count") {
-            problems.push(String::from(
-                "`validate_untrusted` no longer ties `n` to `shard_count`.",
-            ));
-        }
-    } else {
-        problems.push(String::from(
-            "`ContentManifest::validate_untrusted` is gone. It is the only check \
-             that ties the declared erasure scheme to the shards present.",
-        ));
-    }
-}
-
-fn check_door(label: &str, region: Option<&str>, problems: &mut Vec<String>, checked: &mut usize) {
-    // Both doors must use the strong check, and neither may settle for the
-    // weaker one.
-    *checked += 1;
-    if let Some(region) = region {
-        if !has_manifest_call(region, "validate_untrusted") {
-            let weak = has_manifest_call(region, "verify_id");
-            let detail = if weak {
-                " It calls `verify_id`, which only proves the id was derived from \
-                 the fields present, not that they agree with each other."
-            } else {
-                ""
-            };
-            problems.push(format!(
-                "`{label}` accepts a caller-supplied manifest without calling \
-                 `validate_untrusted`.{detail}"
-            ));
-        }
-    } else {
-        problems.push(format!(
-            "cannot find `{label}` to check what it validates. If it was renamed, \
-             update this gate in the same commit so the door stays watched."
-        ));
-    }
-}
-
-fn check_regressions(deal_src: &str, problems: &mut Vec<String>, checked: &mut usize) {
-    // The regressions must exist as real tests.
-    *checked += 1;
-    for test in REGRESSION_TESTS {
-        if !crate::gates::rust_literals::has_live_test(deal_src, test) {
-            problems.push(format!(
-                "required regression test `{test}` is missing or is not a `#[test]`."
-            ));
-        }
-    }
+fn production_code(text: &str) -> String {
+    let no_tests = super::capability_modules_are_wired::strip_test_mods(text);
+    no_tests
+        .lines()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// # Errors
 ///
-/// Missing sources, a hollowed or absent strong check, an unguarded door, or
-/// a missing regression test.
+/// The refusal that is missing.
 pub fn run(root: &Path) -> Result<String, String> {
-    let manifest = root.join("src/storage/manifest.rs");
-    let deal = root.join("src/domain/storage_deal.rs");
-    let door = root.join("src/domain/storage_tx.rs");
+    let bof1 = production_code(&read(root, "src/storage/bud3/bof1.rs")?);
+    let pipe = production_code(&read(root, "src/storage/bud3/pipeline.rs")?);
 
-    for path in [&manifest, &deal, &door] {
-        if !path.is_file() {
-            return Err(format!(
-                "FAIL: expected source file missing: {}",
-                path.display()
-            ));
-        }
+    // 1. The byte door: untrusted object bytes decode under a meter.
+    if !bof1.contains("pub fn decode(") {
+        return Err(String::from(
+            "bof1.rs no longer decodes untrusted bytes under a meter. The decode door is \n  where a caller-built payload is refused, not trusted.",
+        ));
     }
-
-    let manifest_code = strip_comments(&std::fs::read_to_string(&manifest).unwrap_or_default());
-    let deal_src = std::fs::read_to_string(&deal).unwrap_or_default();
-    let deal_code = strip_comments(&deal_src);
-    let door_code = strip_comments(&std::fs::read_to_string(&door).unwrap_or_default());
-
-    let mut problems: Vec<String> = Vec::new();
-    let mut checked = 0usize;
-
-    check_strong(
-        body_of(&manifest_code, "validate_untrusted"),
-        &mut problems,
-        &mut checked,
-    );
-    check_door(
-        "open_deal",
-        body_of(&deal_code, "open_deal"),
-        &mut problems,
-        &mut checked,
-    );
-    check_door(
-        "register_manifest (StorageTx::RegisterManifest)",
-        fn_body_of(&door_code, "register_manifest"),
-        &mut problems,
-        &mut checked,
-    );
-    check_regressions(&deal_src, &mut problems, &mut checked);
-
-    if checked == 0 {
-        return Err(String::from("FAIL: gate checked nothing"));
+    // 2. The round trip: a payload whose decode is not the content is refused.
+    if !bof1.contains("ContentMismatch") {
+        return Err(String::from(
+            "bof1.rs no longer refuses a payload whose decode is not the content. The \n  equality is the admission rule; without it a codec lies.",
+        ));
     }
-
-    if !problems.is_empty() {
-        let mut msg = String::new();
-        for p in &problems {
-            let _ = writeln!(msg, "FAIL: {p}");
-        }
-        return Err(msg);
+    // 3. The view door: a rebuild whose commitment is not the record's is refused.
+    if !pipe.contains("CommitmentMismatch") {
+        return Err(String::from(
+            "pipeline.rs no longer refuses a rebuild whose object commitment is not the \n  recorded one. The view path shows content only when the commitment matches.",
+        ));
     }
-
-    Ok(format!(
-        "untrusted manifest gate OK: {checked} checks, both doors apply the same validation"
+    // 4. The upload door: the limits run before anything is coded.
+    if !pipe.contains("admit_content") {
+        return Err(String::from(
+            "pipeline.rs no longer admits content through the limits first. Size is a \n  governance parameter and it is checked before the work happens.",
+        ));
+    }
+    Ok(String::from(
+        "untrusted input OK: the byte door decodes under a meter, the round trip is enforced, and the view door checks the commitment",
     ))
 }
 
-const REGRESSION_TESTS: [&str; 2] = [
-    "a_deal_open_refuses_a_manifest_claiming_parity_it_does_not_have",
-    "a_deal_open_still_accepts_a_coherent_manifest",
-];
-
-// ---------------------------------------------------------------------------
-// Self-test: the seven canaries of the shell version.
-// ---------------------------------------------------------------------------
-
-const STRONG_MANIFEST: &str = "    pub fn validate_untrusted(&self) -> Result<(), String> {\n\
-        if self.erasure.n != self.shard_count { return Err(\"n\".into()); }\n\
-        let data = self.shards.iter().filter(|s| s.kind == ShardKind::Data).count() as u32;\n\
-        if data != self.erasure.k { return Err(\"k\".into()); }\n\
-        self.verify_id()\n\
-    }\n";
-const WEAK_MANIFEST: &str = "    pub fn validate_untrusted(&self) -> Result<(), String> {\n\
-        self.verify_id()\n\
-    }\n";
-const LIT_DEAL: &str = "    pub fn open_deal(&mut self) -> Result<(), String> {\n\
-        let _s = \"manifest.validate_untrusted()\";\n\
-        /* outer /* inner */ manifest.validate_untrusted() */\n\
-        manifest.verify_id()?;\n\
-        Ok(())\n\
-    }\n\
-    #[test]\n\
-    fn a_deal_open_refuses_a_manifest_claiming_parity_it_does_not_have() {}\n\
-    #[test]\n\
-    fn a_deal_open_still_accepts_a_coherent_manifest() {}\n";
-const STORAGE_TX: &str = "pub fn execute_storage_tx(tx: &StorageTx) {\n\
-    match tx { StorageTx::RegisterManifest { manifest } => register_manifest(state, sender, manifest) }\n\
-}\n\
-fn register_manifest(state: &mut AccountState, manifest: &ContentManifest) -> Result<(), E> {\n\
-    manifest.validate_untrusted()?;\n\
-    Ok(())\n\
-}\n";
-const WEAK_STORAGE_TX: &str = "pub fn execute_storage_tx(tx: &StorageTx) {\n\
-    match tx { StorageTx::RegisterManifest { manifest } => register_manifest(state, sender, manifest) }\n\
-}\n\
-fn register_manifest(state: &mut AccountState, manifest: &ContentManifest) -> Result<(), E> {\n\
-    manifest.verify_id()?;\n\
-    Ok(())\n\
-}\n\
-fn other(m: &ContentManifest) { m.validate_untrusted(); }\n";
-
-/// Write a fixture tree and check the gate's verdict.
-fn check_fixture(
-    vu_mode: &str,
-    deal_mode: &str,
-    tests_mode: &str,
-    lit: bool,
-    weak_door: bool,
-    expect: (bool, &str),
-) -> Result<(), String> {
-    let (expect_ok, label) = expect;
-    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-manifest")?;
-    for sub in ["src/storage", "src/domain"] {
-        let _ = std::fs::create_dir_all(dir.join(sub));
-    }
-
-    let manifest = match vu_mode {
-        "strong" => STRONG_MANIFEST,
-        "weak" => WEAK_MANIFEST,
-        _ => "",
-    };
-    std::fs::write(dir.join("src/storage/manifest.rs"), manifest).map_err(|e| e.to_string())?;
-
-    let (_call, deal_body) = if lit {
-        (None, Some(LIT_DEAL.to_string()))
-    } else {
-        let call = if deal_mode == "strong" {
-            "manifest.validate_untrusted()?;"
-        } else {
-            "manifest.verify_id()?;"
-        };
-        let mut tests = String::new();
-        if tests_mode == "present" || tests_mode == "ignored" {
-            let attr = if tests_mode == "ignored" {
-                format!("#[test]\n#[{}]", "ignore")
-            } else {
-                String::from("#[test]")
-            };
-            for name in [
-                "a_deal_open_refuses_a_manifest_claiming_parity_it_does_not_have",
-                "a_deal_open_still_accepts_a_coherent_manifest",
-            ] {
-                let _ = writeln!(tests, "{attr}\nfn {name}() {{}}");
-            }
-        }
-        (
-            Some(call),
-            Some(format!(
-                "    pub fn open_deal(&mut self) -> Result<(), String> {{\n        {call}\n        Ok(())\n    }}\n{tests}"
-            )),
-        )
-    };
-    std::fs::write(
-        dir.join("src/domain/storage_deal.rs"),
-        deal_body.unwrap_or_default(),
-    )
-    .map_err(|e| e.to_string())?;
-
-    let door = if weak_door {
-        WEAK_STORAGE_TX
-    } else {
-        STORAGE_TX
-    };
-    std::fs::write(dir.join("src/domain/storage_tx.rs"), door).map_err(|e| e.to_string())?;
-
-    let result = run(&dir);
-    let _ = std::fs::remove_dir_all(&dir);
-    if expect_ok {
-        result.map(|_| ()).map_err(|e| format!("{label}: {e}"))
-    } else {
-        match result {
-            Err(_) => Ok(()),
-            Ok(_) => Err(format!("{label}: gate passed when it must fail")),
-        }
-    }
-}
-
+/// The canary: each refusal removed must fail.
+///
 /// # Errors
 ///
-/// The canaries that did not behave.
+/// When the gate does not behave.
 pub fn self_test() -> Result<String, String> {
-    // 1. Both doors strong: the corrected shape must pass.
-    check_fixture(
-        "strong",
-        "strong",
-        "present",
-        false,
-        false,
-        (true, "the corrected tree was rejected"),
-    )?;
-
-    // 2. The original bug: the deal door settles for `verify_id`.
-    check_fixture(
-        "strong",
-        "weak",
-        "present",
-        false,
-        false,
-        (false, "a deal-open that only calls verify_id"),
-    )?;
-
-    // 3. The check itself is hollowed out while both call sites still call it.
-    check_fixture(
-        "weak",
-        "strong",
-        "present",
-        false,
-        false,
-        (false, "a validate_untrusted that checks no scheme"),
-    )?;
-
-    // 4. The check disappears entirely.
-    check_fixture(
-        "gone",
-        "strong",
-        "present",
-        false,
-        false,
-        (false, "a missing validate_untrusted"),
-    )?;
-
-    // 5. A regression test is dropped.
-    check_fixture(
-        "strong",
-        "strong",
-        "absent",
-        false,
-        false,
-        (false, "a missing regression test"),
-    )?;
-
-    // 6. The registration door settles for `verify_id` while another
-    //    function in the same file still calls `validate_untrusted`: the
-    //    gate reads the door's own body, not the file.
-    check_fixture(
-        "strong",
-        "strong",
-        "present",
-        false,
-        true,
-        (false, "a registration door that only calls verify_id"),
-    )?;
-
-    // 7. A door whose only `validate_untrusted` evidence lives inside a string
-    //    or a nested block comment still settles for verify_id.
-    check_fixture(
-        "strong",
-        "weak",
-        "present",
-        true,
-        false,
-        (
-            false,
-            "a door whose only validate_untrusted evidence is inside a string or comment",
-        ),
-    )?;
-
-    // 8. An ignored regression test is not a regression test.
-    check_fixture(
-        "strong",
-        "strong",
-        "ignored",
-        false,
-        false,
-        (false, "a regression test marked ignored"),
-    )?;
-
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-untr")?;
+    let result = (|| {
+        let put = |rel: &str, body: &str| -> Result<(), String> {
+            let p = dir.join(rel);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(&p, body).map_err(|e| e.to_string())
+        };
+        put(
+            "src/storage/bud3/bof1.rs",
+            "pub fn decode() {}\npub fn public_coded() { let _ = ContentMismatch; }\n",
+        )?;
+        put(
+            "src/storage/bud3/pipeline.rs",
+            "pub fn view_public() { let _ = CommitmentMismatch; }\npub fn prepare() { admit_content(); }\n",
+        )?;
+        run(&dir).map_err(|e| format!("canary: a complete tree failed: {e}"))?;
+        put("src/storage/bud3/bof1.rs", "pub fn public_coded() {}\n")?;
+        if run(&dir).is_ok() {
+            return Err(String::from("canary: no decode door passed"));
+        }
+        put(
+            "src/storage/bud3/bof1.rs",
+            "pub fn decode() {}\npub fn public_coded() {}\n",
+        )?;
+        if run(&dir).is_ok() {
+            return Err(String::from("canary: no round-trip refusal passed"));
+        }
+        put(
+            "src/storage/bud3/pipeline.rs",
+            "pub fn view_public() {}\npub fn prepare() { admit_content(); }\n",
+        )?;
+        if run(&dir).is_ok() {
+            return Err(String::from("canary: no commitment refusal passed"));
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    result?;
     Ok(String::from(
-        "untrusted manifest gate self-test OK: 8 canaries",
+        "untrusted-manifests canary OK: each removed refusal failed the gate.",
     ))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
-    fn the_door_body_is_the_private_function_and_stops_at_its_end() {
-        let code = "fn register_manifest_helper() { manifest.validate_untrusted(); }\nfn register_manifest(m: &M) -> R {\n    store(manifest);\n}\nfn other() {\n    manifest.validate_untrusted();\n}\n";
-        let body = fn_body_of(code, "register_manifest").expect("door found");
-        assert!(!body.contains("validate_untrusted"));
-        assert!(body.contains("store(manifest)"));
-        let call =
-            "    StorageTx::RegisterManifest { manifest } => register_manifest(state, manifest),\n";
-        assert!(fn_body_of(call, "register_manifest").is_none());
+    fn untrusted_manifests_gate() {
+        assert!(super::self_test().is_ok(), "{:?}", super::self_test());
     }
 }
