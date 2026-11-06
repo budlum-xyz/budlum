@@ -253,6 +253,7 @@ fn ci_runs_every_standalone_package_test_suite() {
         "execution/evm",
         "execution/move",
         "execution/move-sui",
+        "execution/polkavm",
         "execution/svm",
         "execution/wasm",
         "xtask/tools",

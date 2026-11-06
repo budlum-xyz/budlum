@@ -17,6 +17,7 @@ budlum-ee-cairo = { path = "../cairo" }
 budlum-ee-evm = { path = "../evm" }
 budlum-ee-move = { path = "../move" }
 budlum-ee-move-sui = { path = "../move-sui" }
+budlum-ee-polkavm = { path = "../polkavm" }
 budlum-ee-svm = { path = "../svm" }
 budlum-ee-wasm = { path = "../wasm" }
 budlum-uel-abi = { path = "../../crates/uel-abi" }

@@ -22,6 +22,10 @@ use budlum_ee_move_sui::{
     MoveSuiWorker, SuiCompiledModule, SuiPtb, SuiPtbCommand, ATTO_PER_MIST,
     PROPOSED_SUI_ACTIVATION_HEIGHT,
 };
+use budlum_ee_polkavm::{
+    encode_polkavm_blob, PolkaVmDispatch, PolkaVmInsn, PolkaVmProgram, PolkaVmWorker,
+    PROPOSED_POLKAVM_ACTIVATION_HEIGHT,
+};
 use budlum_ee_svm::programs::{
     SvmAccountMeta, SvmInstructionEnvelope, ATTOS_PER_LAMPORT, NS_SVM_ACCOUNT, STAKE_PROGRAM_ID,
     SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID,
@@ -948,5 +952,50 @@ mod tests {
             panic!("cairo declare");
         };
         assert_eq!(out.status, OutcomeStatus::Success);
+    }
+
+    /// Directive IP-53 (1/5) conformance gate: `uel_conformance_polkavm`.
+    #[test]
+    fn uel_conformance_polkavm() {
+        let mut worker = PolkaVmWorker::new();
+        let prog = PolkaVmProgram {
+            constructor: vec![PolkaVmInsn::LoadImm { rd: 0, imm: 5 }],
+            dispatches: vec![PolkaVmDispatch {
+                selector: [1, 2, 3, 4],
+                insns: vec![
+                    PolkaVmInsn::LoadImm { rd: 0, imm: 99 },
+                    PolkaVmInsn::SealReturnU32 { rs: 0 },
+                ],
+            }],
+        };
+        let Ok(blob) = encode_polkavm_blob(&prog) else {
+            panic!("blob");
+        };
+        let mut host = MemoryHost::new(5_000_000);
+        let Ok(caller) = EeIdentity::new(EeId::POLKAVM, vec![0x81; 32]) else {
+            panic!("caller");
+        };
+        let ctx = BlockContext {
+            chain_id: 45_261,
+            height: PROPOSED_POLKAVM_ACTIVATION_HEIGHT,
+            timestamp_ms: 1_793_923_200_000,
+        };
+        let Ok(dep) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: caller.clone(),
+                target: caller,
+                value: BudAmount(0),
+                input: blob,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0x80; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("polkavm deploy");
+        };
+        assert_eq!(dep.status, OutcomeStatus::Success);
     }
 }

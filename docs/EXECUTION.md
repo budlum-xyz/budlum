@@ -205,6 +205,13 @@ STARK proving on every call (`BLG-248`).
 - Closed at launch on testnet `45261` (`cairo_is_closed_on_testnet`) with proposed
   activation height `55_000`.
 
+## 17. Expansion Catalog Workers (`WP-53`, `0x07`..`0x0B`)
+
+- `0x08` PolkaVM (`execution/polkavm/`, `budlum-ee-polkavm`, RV32EM interpreter with
+  JIT disabled, `ee/polkavm/state`, closed on testnet `45261` until height `60_000`,
+  `polkavm_is_closed_on_testnet`, `uel_conformance_polkavm`).
+
+
 
 
 
