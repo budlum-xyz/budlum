@@ -227,7 +227,7 @@ fn mobile_distinct_symbols_of_one_segment_remain_usable() -> Result<(), Box<dyn 
 
 #[test]
 fn presence_preimage_matches_shared_golden_vector() {
-    use budlum_mobile_core::presence::presence_preimage;
+    use budlum_mobile_core::presence::{presence_message, presence_preimage};
     use sha3::{Digest, Sha3_256};
 
     const EXPECTED: &[u8; 32] = include_bytes!("../../../tests/vectors/presence/v1/digest.bin");
@@ -235,15 +235,19 @@ fn presence_preimage_matches_shared_golden_vector() {
     assert_eq!(Sha3_256::digest(PREIMAGE).as_slice(), EXPECTED);
     assert_eq!(
         presence_preimage(45_261, 11, ValidatorClass::Mobile),
+        *PREIMAGE
+    );
+    assert_eq!(
+        presence_message(45_261, 11, ValidatorClass::Mobile),
         *EXPECTED
     );
     assert_ne!(
-        presence_preimage(45_261, 11, ValidatorClass::Full),
+        presence_message(45_261, 11, ValidatorClass::Full),
         *EXPECTED
     );
     assert_ne!(
-        presence_preimage(45_261, 12, ValidatorClass::Mobile),
+        presence_message(45_261, 12, ValidatorClass::Mobile),
         *EXPECTED
     );
-    assert_ne!(presence_preimage(1, 11, ValidatorClass::Mobile), *EXPECTED);
+    assert_ne!(presence_message(1, 11, ValidatorClass::Mobile), *EXPECTED);
 }

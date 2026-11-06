@@ -28,3 +28,8 @@ That difference is the presence finding recorded in PR #77 as BLG-288 and must
 be reconciled before the node and phone can interoperate. This fixture does not
 change a node wire format or claim the finding closed. Both implementations
 must eventually use the shared types definition rather than duplicate it.
+
+Since #91 the single definition is `budlum_types::presence` (`presence_preimage`
+and `presence_message` in `crates/budlum-types/src/presence.rs`). Its tests read
+both files in this directory, and `mobile/core` re-exports it instead of
+carrying its own copy. The node side still has to call it (BLG-288, BLG-350).
