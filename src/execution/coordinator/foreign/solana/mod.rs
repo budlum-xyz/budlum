@@ -49,6 +49,10 @@ use crate::execution::coordinator::foreign::solana::message::{
     Message, MessageError, MessageVersion,
 };
 use crate::execution::coordinator::foreign::solana::reader::{base58_decode_exact, ReadError};
+use crate::core::address::Address;
+use crate::execution::coordinator::accounts::{
+    derive_foreign_account, AccountModelError, ForeignScheme,
+};
 use crate::mempool::lanes::SOLANA_BLOCKHASH_WINDOW;
 
 /// The most signatures one versioned transaction may carry. The runtime's own
@@ -118,6 +122,12 @@ pub enum ForeignSolanaError {
         /// How many the message resolved to.
         count: usize,
     },
+    /// The transaction carries no signature, so it names no sender.
+    #[error("the transaction carries no signature, so it names no fee payer")]
+    NoPayer,
+    /// The fee payer could not be turned into a unified foreign account.
+    #[error("unified foreign account: {0}")]
+    Account(#[from] AccountModelError),
 }
 
 /// The account bands a resolved message locks, in the runtime's order.
@@ -219,6 +229,26 @@ impl ForeignSolanaTransaction {
             }
         }
         Ok(())
+    }
+
+    /// The unified ledger account of the fee payer.
+    ///
+    /// Directive 8.4: a foreign envelope's account is
+    /// `SHA3-256(BDLM_FOREIGN_ACCOUNT_V1 || scheme || len_le || native_id)`, and
+    /// for SVM `native_id` is the 32-byte Ed25519 public key of the payer, the
+    /// first signer. This is the account the coordinator charges the fee to and
+    /// the one `Adopt` sweeps, so the door cannot be complete without it.
+    ///
+    /// # Errors
+    ///
+    /// [`ForeignSolanaError::NoPayer`] when the transaction carries no signature,
+    /// which cannot happen for a transaction this module accepted.
+    pub fn unified_account(&self) -> Result<Address, ForeignSolanaError> {
+        let payer = self.fee_payer().ok_or(ForeignSolanaError::NoPayer)?;
+        Ok(derive_foreign_account(
+            ForeignScheme::SvmEd25519,
+            &payer,
+        )?)
     }
 
     /// Whether the message's blockhash is one of the last
@@ -640,6 +670,33 @@ mod tests {
             parse_foreign_solana_base64("AB==", &[], &[], &[]),
             Err(ForeignSolanaError::Wire(ReadError::BadBase64))
         ));
+    }
+
+    #[test]
+    fn the_fee_payer_is_the_unified_foreign_account() {
+        use crate::execution::coordinator::accounts::{
+            derive_foreign_account, AccountKind, ForeignScheme, QuantumClass,
+        };
+
+        let key = SigningKey::from_bytes(&[13u8; 32]);
+        let blockhash = [0x09u8; 32];
+        let bytes = signed_transaction(&[key.clone()], blockhash, 0, 1);
+        let transaction = parse_foreign_solana(&bytes, &[], &[blockhash], &[]).unwrap();
+
+        // The door's account and the unified model's account are one derivation.
+        let expected =
+            derive_foreign_account(ForeignScheme::SvmEd25519, &key.verifying_key().to_bytes())
+                .unwrap();
+        assert_eq!(transaction.unified_account().unwrap(), expected);
+
+        // It is a classical account, so the K-3 isolation rule applies to it.
+        assert_eq!(
+            AccountKind::Foreign {
+                scheme: ForeignScheme::SvmEd25519
+            }
+            .quantum_class(),
+            QuantumClass::Classical
+        );
     }
 
     #[test]
