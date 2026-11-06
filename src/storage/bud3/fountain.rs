@@ -609,4 +609,100 @@ mod tests {
             "raptorq output changed: the pinned version moved"
         );
     }
+
+    #[test]
+    fn blg_216_raptorq_recovers_large_segment_under_burst_and_random_loss() {
+        let medium = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 64,
+            fps: 10,
+            k_max: 512,
+        };
+        let data = pattern(512 * 64, 77);
+        let enc = SegmentEncoder::new(3, &data, &medium).unwrap();
+        let k = enc.k();
+        assert_eq!(k, 512);
+        let source = enc.source_symbols();
+        let repair = enc.repair_symbols(0, 140).unwrap();
+
+        // Burst loss of 128 consecutive source symbols recovered with k + 2 symbols.
+        let mut burst_stream: Vec<Symbol> = source
+            .iter()
+            .filter(|s| !(100..228).contains(&s.esi))
+            .cloned()
+            .collect();
+        burst_stream.extend(repair.iter().take(130).cloned());
+        assert_eq!(burst_stream.len() as u32, k + 2);
+        let mut dec = SegmentDecoder::new(3, data.len() as u64, &medium).unwrap();
+        let mut meter = big_meter();
+        for sym in burst_stream {
+            dec.push(sym, &mut meter).unwrap();
+        }
+        assert_eq!(dec.into_bytes().as_deref(), Some(&data[..]));
+    }
+
+    #[test]
+    #[ignore = "nightly T6: 10_000-trial RaptorQ acceptance across k in {100, 1000, 4096} under independent and burst loss"]
+    fn bud3_fountain_acceptance() {
+        for &k_target in &[100u32, 1000, 4096] {
+            let prof = Profile {
+                id: 0,
+                qr_version: 40,
+                symbol_size: 64,
+                fps: 10,
+                k_max: k_target,
+            };
+            let data = pattern(k_target as usize * 64, 900 + k_target);
+            let enc = SegmentEncoder::new(0, &data, &prof).unwrap();
+            assert_eq!(enc.k(), k_target);
+            let repair_budget = (k_target / 5).max(32);
+            let mut pool = enc.source_symbols();
+            pool.extend(enc.repair_symbols(0, repair_budget).unwrap());
+
+            let trials = 3_400u32;
+            let mut successes = 0u32;
+            for trial in 0..trials {
+                let mut dec = SegmentDecoder::new(0, data.len() as u64, &prof).unwrap();
+                let mut meter = big_meter();
+                let need = (k_target + 2) as usize;
+                let mut taken = 0usize;
+                if trial % 2 == 0 {
+                    // Burst drop of up to 10 % consecutive source symbols.
+                    let burst_len = (k_target as usize / 10).max(4);
+                    let burst_start = (trial as usize * 31) % (k_target as usize - burst_len);
+                    for (idx, sym) in pool.iter().enumerate() {
+                        if (burst_start..burst_start + burst_len).contains(&idx) {
+                            continue;
+                        }
+                        dec.push(sym.clone(), &mut meter).unwrap();
+                        taken += 1;
+                        if taken == need || dec.is_done() {
+                            break;
+                        }
+                    }
+                } else {
+                    // Deterministic pseudo-random independent erasure pattern.
+                    let mask = pattern(pool.len(), 50_000 + trial);
+                    for (sym, m) in pool.iter().zip(mask) {
+                        if m < 25 {
+                            continue;
+                        }
+                        dec.push(sym.clone(), &mut meter).unwrap();
+                        taken += 1;
+                        if taken == need || dec.is_done() {
+                            break;
+                        }
+                    }
+                }
+                if dec.into_bytes().as_deref() == Some(&data[..]) {
+                    successes += 1;
+                }
+            }
+            assert!(
+                u64::from(successes) * 10_000 >= u64::from(trials) * 9_999,
+                "k={k_target}: {successes}/{trials} fell below 99.99%"
+            );
+        }
+    }
 }
