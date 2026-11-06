@@ -24,7 +24,7 @@ Reading the columns:
 
 | Package | Lane | Layer | Status | PRs | Findings | Notes |
 |---|---|---|---|---|---|---|
-| WP-42 | D | T-Launch | in progress (1/3) | this pull request | BLG-015 (open), BLG-012 to BLG-016 and BLG-081 to BLG-193 (open) | Slice 1 adds `no-float-in-consensus-paths`, `workflows-cover-every-workspace` and `nightly-workflows-are-required` to `xtask/gates`, wires all three into the `Gates` job of `ci.yml`, adds the `Conformance nightly` workflow that compiles the two endpoint contract workspaces, and adds the missing cron trigger to `determinism.yml`. |
+| WP-42 | D | T-Launch | in progress (1/3) | this pull request | BLG-015 (open), BLG-012 to BLG-016 and BLG-081 to BLG-193 (open) | Slice 1 adds `no-float-in-consensus-paths`, `workflows-cover-every-workspace` and `nightly-workflows-are-required` to `xtask/gates`, wires all three into the `Gates` job of `ci.yml`, adds the `Conformance nightly` workflow that compiles the two endpoint contract workspaces, adds the missing cron trigger to `determinism.yml`, and adds the `bud3_qr_frame_decode` fuzz target with its corpus. |
 
 ## WP-42: CI, gates and supply chain
 
@@ -67,22 +67,41 @@ Slice 1 (this pull request):
    Running it found one real defect: `determinism.yml` ran on push and on a
    pull request only, while Section 16.2 puts it on a nightly run as well. The
    cron trigger is added here.
-4. `.github/workflows/conformance-nightly.yml`. Section 16.2 requires this
+4. `fuzz/fuzz_targets/bud3_qr_frame_decode.rs` (job item 6: every new parser
+   has a fuzz target). The optical frame parser is the third parser on the
+   B.U.D. 3.0 read path and the only one a camera feeds: it reads a declared
+   drop length out of a header, indexes past it, compares a digest and hands
+   the nested drop to a second parser, all over bytes an untrusted holder or a
+   screen controls. The target asserts three things on every input: no panic,
+   an accepted drop within the lab cap (`MAX_DROP_WIRE`), and that an accepted
+   frame with a clear flags nibble re-packs to itself (one frame, one
+   encoding). The stream commitment is fixed so the fast reject does not eat
+   the budget.
+   Declared in `fuzz/Cargo.toml`, scheduled in the `fuzz-nightly.yml` matrix
+   next to the two other B.U.D. 3.0 targets, and seeded with three files: a
+   canonical frame, a frame that sets only the ignorable flag nibble, and a
+   header-only frame that stops at the truncation check. The seeds are valid
+   vectors, not noise: the canonical one decodes and re-encodes byte for byte.
+5. `.github/workflows/conformance-nightly.yml`. Section 16.2 requires this
    workflow and it did not exist. It compiles the CosmWasm and SVM endpoint
    workspaces, which no job reached before, and asserts that their entry points
    still exist. The full conformance suite of Section 8.13 lands here as the
    execution environments arrive.
 
-Still open in this package: the workflow set of Section 16.2 that depends on
+Still open in this package: fuzz targets for the parsers item 6 names whose
+type does not exist in the tree yet (the proof batch of the custody path, the
+`ee.proto` message set, the foreign envelope and the asset message: the last
+two belong to WP-30 and WP-45 and have no type to decode today), the workflow
+set of Section 16.2 that depends on
 workspaces which do not exist yet (`execution.yml` needs the execution
-workspaces of WP-26 to WP-35, `mobile.yml` and `mobile-ios.yml` need WP-11 to WP-38),
-`cargo-deny`/`cargo-vet`/`cargo-geiger` per execution workspace, the Kani
-coverage of TEST-GAP-02, the fuzz targets of item 6, and the closure protocol
-of the findings listed above.
+workspaces of WP-26 to WP-35, `mobile.yml` and `mobile-ios.yml` need WP-11 to
+WP-38), `cargo-deny`/`cargo-vet`/`cargo-geiger` per execution workspace, the
+Kani coverage of TEST-GAP-02, and the closure protocol of the findings listed
+above.
 
-Evidence for slice 1:
+Evidence for this slice:
 
-- Both gates carry canaries (`--self-test`) and are invoked as a canary before
+- All three gates carry canaries (`--self-test`) and are invoked as a canary before
   the plain run in `ci.yml`, which is the repository's red-before-green rule.
 - `no-float-in-consensus-paths` scans 124 files under 8 scoped paths and reports
   no float outside the two pins. The pins hold 4 and 10 occurrences against
@@ -94,6 +113,10 @@ Evidence for slice 1:
   required workflows deferred with their owners (`storage-nightly.yml`,
   `churn-nightly.yml`, `nat-nightly.yml`, `mobile.yml`, `mobile-ios.yml`,
   `supply-chain.yml`).
-- No CI run number yet: this pull request has not run. The findings this package
-  owns stay open until it does, and a self-declared result is not evidence
-  (directive 0.3 item 5).
+- The fuzz set is 19 targets after this change: all 19 declared in
+  `fuzz/Cargo.toml`, all 19 with a harness file, all 19 named by a schedule,
+  all 19 with a seeded corpus directory, and no corpus directory without a
+  target.
+- No CI run number yet: the workflow runs for this pull request are queued and
+  no run has reported. The findings this package owns stay open until one does,
+  and a self-declared result is not evidence (directive 0.3 item 5).
