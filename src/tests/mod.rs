@@ -259,3 +259,8 @@ pub mod readiness_metrics;
 // mandatory alert exists.
 #[cfg(test)]
 pub mod alert_rules_reference_existing_metrics;
+
+// WP-41 item 8: the backup drill covers the paths the node persists now, and
+// the restore it performs refuses a target that is not empty.
+#[cfg(test)]
+pub mod backup_covers_persisted_paths;

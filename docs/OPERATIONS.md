@@ -37,6 +37,9 @@ The node writes verified backups of its database on a schedule
   `--repair-db` to rebuild the index after a failed check.
 - The drill (backup, restore into an empty directory, integrity check):
   `cargo run --manifest-path xtask/tools/Cargo.toml -- backup-drill`.
+- What a backup has to contain beyond the database - the vote high-water
+  marks above all - and what the drill does not prove:
+  `ops/BACKUP_AND_RESTORE.md`.
 
 A backup is not the only way back: the chain is replayed from blocks, so a
 node can also resync from peers. A backup saves the time a full replay takes.

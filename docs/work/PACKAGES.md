@@ -100,3 +100,17 @@ two B.U.D. 3.0 health gauges, custody bytes by class, and faults by execution
 environment. `the_dashboard_queries_series_the_node_exports` holds the
 dashboard to the same inventory as the rules, so a renamed series cannot leave
 a blank panel that reads as a quiet network.
+
+### Delivery 3: WP-41 item 8, the backup drill against the new paths
+
+The drill was written when the node persisted one database directory. It now
+also persists the vote high-water marks (`vote-history.json`, on by default on
+every network) and the ban list. A restored node without its vote marks
+re-signs a height it already voted at, which across a reorg is equivocation and
+half the bond; so "restored" has to include those files, and the drill did not.
+
+`ops/BACKUP_AND_RESTORE.md` states what is in a backup, what is not, and what
+the drill does not prove. `src/tests/backup_covers_persisted_paths.rs` holds it:
+the persisted-path list is read from the source that writes those files, the
+restore's refusal of a non-empty target is exercised, and the check-after-write
+order is a source lock on both the code and the runbook.
