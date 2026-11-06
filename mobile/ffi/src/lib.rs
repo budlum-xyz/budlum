@@ -24,11 +24,13 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use budlum_mobile_core::{
-    Connection, CoreError, CoreStatus, DutyTx, LastAudit, MobileCore, NetworkPolicy, Policy,
-    PowerPolicy, RelayOffer, ValidatorClass, FREE_SPACE_FLOOR_BYTES, QUOTA_DEFAULT_BYTES,
-    QUOTA_MAX_BYTES, QUOTA_MIN_BYTES,
+    Connection, CoreError, CoreStatus, DutyTx, KeyVault, LastAudit, MobileCore, NetworkPolicy,
+    OperatorKey, Policy, PowerPolicy, RelayOffer, SealedOperatorKey, ValidatorClass, VaultError,
+    FREE_SPACE_FLOOR_BYTES, OPERATOR_SEED_LEN, QUOTA_DEFAULT_BYTES, QUOTA_MAX_BYTES,
+    QUOTA_MIN_BYTES,
 };
 use budlum_types::class::AuditWindow;
+use zeroize::Zeroizing;
 
 /// The class a phone registers as (section 7.2). A phone is never `Full`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -285,6 +287,159 @@ pub enum NodeEvent {
 pub trait NodeListener: Send + Sync {
     /// Called once per event, outside the core lock.
     fn on_event(&self, event: NodeEvent);
+}
+
+/// The platform cipher that seals the operator key (section 7.9.6): an
+/// AES-256-GCM key in the Android Keystore, in StrongBox when present, or a
+/// keychain item on iOS. It asks for no user authentication, so the node
+/// signs unattended.
+///
+/// `context` is associated data: `open` refuses a record sealed under
+/// another context, as AES-GCM does when the context goes to `updateAAD`.
+/// The secret crosses the boundary as a plain byte array; the host wipes
+/// its copy once the cipher has consumed it.
+#[uniffi::export(foreign)]
+pub trait PlatformVault: Send + Sync {
+    /// Encrypts `secret` under the device key, bound to `context`.
+    ///
+    /// # Errors
+    ///
+    /// [`VaultFailure::Refused`] when the platform cipher refuses.
+    fn seal(&self, secret: Vec<u8>, context: Vec<u8>) -> Result<Vec<u8>, VaultFailure>;
+
+    /// Decrypts a record that [`PlatformVault::seal`] made under `context`.
+    ///
+    /// # Errors
+    ///
+    /// [`VaultFailure::Refused`] when the record does not authenticate under
+    /// `context` or the device key is gone.
+    fn open(&self, sealed: Vec<u8>, context: Vec<u8>) -> Result<Vec<u8>, VaultFailure>;
+}
+
+/// Why the platform vault refused.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
+pub enum VaultFailure {
+    /// The platform cipher refused, or the host implementation threw.
+    Refused {
+        /// The platform's reason, for logs; never key material.
+        reason: String,
+    },
+}
+
+impl fmt::Display for VaultFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Refused { reason } => write!(f, "vault refused: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for VaultFailure {}
+
+/// An exception the host did not declare reaches the core as a refusal,
+/// not as a panic across the boundary.
+impl From<uniffi::UnexpectedUniFFICallbackError> for VaultFailure {
+    fn from(error: uniffi::UnexpectedUniFFICallbackError) -> Self {
+        Self::Refused {
+            reason: error.reason,
+        }
+    }
+}
+
+/// The host's vault, seen through the core's [`KeyVault`].
+struct HostVault(Arc<dyn PlatformVault>);
+
+fn vault_error(failure: VaultFailure) -> VaultError {
+    match failure {
+        VaultFailure::Refused { reason } => VaultError { reason },
+    }
+}
+
+impl KeyVault for HostVault {
+    fn seal(&self, secret: &[u8], context: &[u8]) -> Result<Vec<u8>, VaultError> {
+        self.0
+            .seal(secret.to_vec(), context.to_vec())
+            .map_err(vault_error)
+    }
+
+    fn open(&self, sealed: &[u8], context: &[u8]) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+        self.0
+            .open(sealed.to_vec(), context.to_vec())
+            .map(Zeroizing::new)
+            .map_err(vault_error)
+    }
+}
+
+/// A sealed operator key, as the app stores it (section 7.9.6).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SealedKey {
+    /// The ML-DSA-65 public key, the one registered on chain.
+    pub public_key: Vec<u8>,
+    /// The seed, as the platform vault sealed it.
+    pub sealed_seed: Vec<u8>,
+}
+
+impl From<SealedOperatorKey> for SealedKey {
+    fn from(sealed: SealedOperatorKey) -> Self {
+        Self {
+            public_key: sealed.public_key,
+            sealed_seed: sealed.sealed_seed,
+        }
+    }
+}
+
+impl From<SealedKey> for SealedOperatorKey {
+    fn from(sealed: SealedKey) -> Self {
+        Self {
+            public_key: sealed.public_key,
+            sealed_seed: sealed.sealed_seed,
+        }
+    }
+}
+
+/// Creates the operator key from 32 bytes of platform entropy
+/// (`SecureRandom` on Android, `SecRandomCopyBytes` on iOS) and seals it
+/// with `vault`. The app stores the returned record; the seed leaves the
+/// core only towards the vault.
+///
+/// # Errors
+///
+/// [`MobileError::Refused`] with `mobile_operator_entropy` when `entropy` is
+/// not 32 bytes, or `mobile_key_vault` when the vault refuses.
+#[uniffi::export]
+pub fn create_operator_key(
+    entropy: Vec<u8>,
+    vault: Arc<dyn PlatformVault>,
+) -> Result<SealedKey, MobileError> {
+    let entropy = Zeroizing::new(entropy);
+    if entropy.len() != OPERATOR_SEED_LEN {
+        return Err(MobileError::refused(
+            "mobile_operator_entropy",
+            "the operator key is made from 32 bytes of entropy",
+        ));
+    }
+    let mut seed = Zeroizing::new([0u8; OPERATOR_SEED_LEN]);
+    seed.copy_from_slice(&entropy);
+    let key = OperatorKey::from_entropy(*seed)?;
+    Ok(key.seal(&HostVault(vault))?.into())
+}
+
+/// Opens a stored operator key and returns its public key; the core checks
+/// that the vault gave back the seed of that public key. `mobile_key_vault`
+/// after a device restore means the device key is gone: the owner rotates
+/// the operator key from the wallet (section 7.9.6).
+///
+/// # Errors
+///
+/// [`MobileError::Refused`] with `mobile_key_vault`,
+/// `mobile_operator_key_sealed` or `mobile_operator_key_mismatch`.
+#[uniffi::export]
+pub fn open_operator_key(
+    sealed: SealedKey,
+    vault: Arc<dyn PlatformVault>,
+) -> Result<Vec<u8>, MobileError> {
+    let key = OperatorKey::open(&HostVault(vault), &sealed.into())?;
+    Ok(key.public_key().to_vec())
 }
 
 /// A refusal from the core, with its stable machine code.
@@ -562,6 +717,93 @@ mod tests {
             },
         ];
         MobileNode::new(vec![7; 32], class, relays, 64 * GIB).expect("node")
+    }
+
+    /// Stores the context in front of the masked secret and refuses to open
+    /// under another one, as AES-GCM refuses foreign associated data.
+    struct MaskVault;
+
+    impl PlatformVault for MaskVault {
+        fn seal(&self, secret: Vec<u8>, context: Vec<u8>) -> Result<Vec<u8>, VaultFailure> {
+            let mut sealed = context;
+            sealed.extend(secret.iter().map(|byte| byte ^ 0x5A));
+            Ok(sealed)
+        }
+
+        fn open(&self, sealed: Vec<u8>, context: Vec<u8>) -> Result<Vec<u8>, VaultFailure> {
+            match sealed.strip_prefix(context.as_slice()) {
+                Some(body) => Ok(body.iter().map(|byte| byte ^ 0x5A).collect()),
+                None => Err(VaultFailure::Refused {
+                    reason: "authentication failed".to_owned(),
+                }),
+            }
+        }
+    }
+
+    /// A vault whose device key is gone.
+    struct LostVault;
+
+    impl PlatformVault for LostVault {
+        fn seal(&self, _secret: Vec<u8>, _context: Vec<u8>) -> Result<Vec<u8>, VaultFailure> {
+            Err(uniffi::UnexpectedUniFFICallbackError::new("KeyPermanentlyInvalidated").into())
+        }
+
+        fn open(&self, _sealed: Vec<u8>, _context: Vec<u8>) -> Result<Vec<u8>, VaultFailure> {
+            Err(uniffi::UnexpectedUniFFICallbackError::new("KeyPermanentlyInvalidated").into())
+        }
+    }
+
+    fn refusal_code<T: std::fmt::Debug>(result: Result<T, MobileError>) -> String {
+        match result {
+            Err(MobileError::Refused { code, .. }) => code,
+            Ok(value) => panic!("expected a refusal, got {value:?}"),
+        }
+    }
+
+    #[test]
+    fn mobile_ffi_operator_key_is_created_sealed_and_opened() {
+        let sealed = create_operator_key(vec![7; 32], Arc::new(MaskVault)).expect("created");
+        assert_eq!(sealed.public_key.len(), 1952, "ML-DSA-65 public key");
+        assert!(!sealed
+            .sealed_seed
+            .windows(32)
+            .any(|window| window == [7; 32]));
+        let opened = open_operator_key(sealed.clone(), Arc::new(MaskVault)).expect("opened");
+        assert_eq!(opened, sealed.public_key);
+
+        let mut other = create_operator_key(vec![8; 32], Arc::new(MaskVault)).expect("created");
+        assert_ne!(other.public_key, sealed.public_key);
+        other.sealed_seed = sealed.sealed_seed;
+        assert_eq!(
+            refusal_code(open_operator_key(other, Arc::new(MaskVault))),
+            "mobile_key_vault"
+        );
+    }
+
+    #[test]
+    fn mobile_ffi_operator_key_needs_32_bytes_of_entropy() {
+        for entropy in [Vec::new(), vec![7; 31], vec![7; 33]] {
+            assert_eq!(
+                refusal_code(create_operator_key(entropy, Arc::new(MaskVault))),
+                "mobile_operator_entropy"
+            );
+        }
+    }
+
+    #[test]
+    fn mobile_ffi_a_lost_device_key_is_a_refusal() {
+        assert_eq!(
+            refusal_code(create_operator_key(vec![7; 32], Arc::new(LostVault))),
+            "mobile_key_vault"
+        );
+        let sealed = create_operator_key(vec![7; 32], Arc::new(MaskVault)).expect("created");
+        match open_operator_key(sealed, Arc::new(LostVault)) {
+            Err(MobileError::Refused { code, reason }) => {
+                assert_eq!(code, "mobile_key_vault");
+                assert!(reason.contains("KeyPermanentlyInvalidated"), "{reason}");
+            }
+            Ok(key) => panic!("opened without the device key: {} bytes", key.len()),
+        }
     }
 
     #[test]
