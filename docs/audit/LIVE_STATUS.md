@@ -112,7 +112,57 @@ The earlier table (section 4.2 and 4.3 of the old ledger) that holds the per-cla
 this tree, so this table cannot be completed without it. It is written here with the gap stated, not
 filled with an invented mapping (section 0.3 rule 1, section 0.5 rule 1).
 
-## 7. What this file does not claim
+## 7. Proposed replacement for section 14.2 of the directive
+
+WP-04 card item 7 asks for a proposal, not an edit: the directive is the authority and this lane does
+not rewrite it. The proposal is the table below, which keeps section 14.2's shape (source, id range,
+count) and adds the two columns a reader needs before trusting a count.
+
+Two things are wrong with section 14.2 as it stands, and the proposal is the fix for each:
+
+1. **"the ledger has 1 closed (BLG-005)" is stale for this branch.** Section 14.3 marks BLG-005
+   `Closed (ledger record), to be verified` and still gives it a closing package (WP-16). Read
+   against the live tree, the record's condition is absent: `.gitignore:16-17` excludes `/secrets/`
+   and `/data/`. The proposal moves the count into the verify column instead of restating it.
+2. **The severity column was never written.** Section 14.2 gives severities for the ledger family
+   only. The four other families carry severities in their own tables and the counts are not
+   summed anywhere, so a reader who wants "how many critical findings does this repository have"
+   cannot answer it from the summary. The proposal sums them and renders every severity in
+   English, because repository content is English (section 0.4): sections 14.3 to 14.5 use four
+   words, and section 14.6 uses an `S1` to `S3` prefix.
+
+| Source | Id range | Count | Critical | High | Medium | Low | Rows found in the 14 tables |
+|---|---|---|---|---|---|---|---|
+| Old finding ledger | BLG-001 to BLG-207 | 207 | 73 | 80 | 51 | 3 | 207 |
+| B.U.D. 3.0 directive, H1 to H15 | BLG-208 to BLG-222 | 15 | 2 | 6 | 6 | 1 | 15 |
+| BudZero directive, E1 to E23 | BLG-223 to BLG-245 | 23 | 0 | 8 | 12 | 3 | 23 |
+| This directive's own review | BLG-246 to BLG-267 | 22 | 2 | 9 | 9 | 2 | 22 |
+| Archive families | BULGU-001 to 027, TEST-GAP-01 to 08, DOC-GAP-01 to 09 | 44 | 1 (`S1`) | 6 (5 `S2` + 1 High) | 34 (30 `S3` + 4 Medium) | 3 | 44 |
+| **Total** | | **311** | **78** | **109** | **112** | **12** | **311** |
+
+The mapping the archive column needs is the one section 14.2 does not state: `S1` reads as Critical,
+`S2` as High and `S3` as Medium, because the archive table marks severities with an `S` prefix while
+the other four use words. The archive row keeps both spellings so the mapping is visible rather than
+implied. If the directive prefers a different mapping, only that row and the totals change.
+
+### What the proposal deliberately does not change
+
+- The "267 findings and 44 archive records" reading. The 267 is the `BLG-` range and the 44 is the
+  archive; adding them is the counting error section 2 of this file exists to prevent.
+- The sample observation paragraph. Its claim that "206 open is not current for this branch" is
+  still true, and this lane's readings make it more true, not less: nine of its records are
+  `Previously fixed` and one closes by removal.
+
+### One more number a closing package needs
+
+The proposal adds a per-package count to the summary because section 15.7's package table is ordered
+by priority, and priority reads as effort. Lane D is 70 records across 15 packages, and the whole
+311 splits as: WP-17 44, WP-42 32, WP-45 31, WP-44 29, WP-07 27, WP-33 26, WP-12 23, WP-16 13,
+WP-61 13, WP-56 11, WP-19 10, WP-43 8, WP-23 7, WP-15 6, WP-41 5, WP-22 5, WP-57 5, then eight
+packages with 4 each and ten with 1 each. A package that carries 44 records cannot be closed in the
+same PR shape as one that carries 1, and the summary table is where that is cheapest to see.
+
+## 8. What this file does not claim
 
 - No finding is closed, verified or invalidated here.
 - No CI run number is cited: 400 sampled runs on this repository are 155 `cancelled` and 245 without

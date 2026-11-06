@@ -302,8 +302,11 @@ DOC-GAP-09.
 
 Three records are not in the list although they touch lane D work: BLG-248 (contract-call
 execution, WP-26) belongs to lane C, and BLG-264 (`WIRING:` count) closes under WP-12, lane A.
-BLG-005 is already closed in the source ledger (section 14.2: "the ledger has 1 closed") and closes
-under no package, so it is outside every lane.
+BLG-005 is the one record section 14.2 calls closed, and section 14.3 still gives it a closing
+package, WP-16. It is outside lane D because WP-16 is not in the lane's scope, not because nothing
+closes it. The tree agrees with the ledger entry: `.gitignore:16-17` excludes `/secrets/` and
+`/data/`, which is what the record was about. No row in the lane's 70 has an empty closing package;
+the parse counts zero.
 
 One correction to an earlier reading in this file: `BULGU-001` through `BULGU-027` are rows of the
 section 14.6 archive table, not family placeholders. Section 14.6 names 27 `BULGU-` ids, 8
