@@ -242,9 +242,13 @@ fn ci_runs_every_standalone_package_test_suite() {
     for pkg in [
         "crates/ai-inference",
         "crates/bpqs",
+        "crates/bud-codec",
         "crates/budscan",
         "crates/note-packing",
+        "crates/uel-abi",
         "crates/wallet-core",
+        "execution/budzero",
+        "execution/evm",
         "xtask/tools",
     ] {
         assert!(

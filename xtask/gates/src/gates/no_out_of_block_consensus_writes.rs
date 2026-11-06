@@ -145,6 +145,7 @@ const READ_NAMES: &[&str] = &[
     "deals_for_manifest",
     "deals_for_shard",
     "under_replicated_shards",
+    "required_fee",
 ];
 
 /// Calls on `self.state` inside a `Blockchain` method body that write it.
