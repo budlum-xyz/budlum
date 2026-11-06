@@ -1148,5 +1148,117 @@ fn bud3_missed_audit_does_not_slash_and_custody_proof_verifies() {
     );
 }
 
+#[test]
+fn bud3_e2e_upload_register_view() {
+    use crate::storage::bud3::placement::Candidate;
+    use crate::storage::bud3::placement::PlacementRow;
+    use crate::storage::bud3::rpc::Bud3RpcService;
+    use crate::storage::bud3::upload::UploadSessionManager;
+    use crate::storage::bud3::view::{view_from_network, MemorySymbolNetwork, MIN_PAID_VIEW_FEE_ATOMS};
+
+    let uploader = Address::from([111u8; 32]);
+    let payer = Address::from([112u8; 32]);
+    let mut state = AccountState::new();
+    state.add_balance(&uploader, 100_000);
+
+    let candidates: Vec<Candidate> = (0..4u8)
+        .map(|i| Candidate {
+            validator: [120 + i; 32],
+            account: [120 + i; 32],
+            class: Class::Full,
+            stake: 5_000,
+            free_quota_bytes: u64::MAX,
+            network: None,
+        })
+        .collect();
+    let row = PlacementRow {
+        n_full: 2,
+        s_full: 6,
+        n_mobile: 0,
+        s_mobile: 0,
+    };
+
+    let original = b"full B.U.D. 3.0 upload -> block register -> second-device network view".repeat(25);
+    let mut upload_mgr = UploadSessionManager::new(Bud3Limits::default());
+    let sid = upload_mgr
+        .open_session(
+            *uploader.as_bytes(),
+            [1; 16],
+            original.len() as u64,
+            0,
+            25,
+            false,
+            1_000,
+        )
+        .unwrap();
+    for chunk in original.chunks(199) {
+        upload_mgr.append_chunk(sid, chunk, 1_001).unwrap();
+    }
+    let finished = upload_mgr
+        .finish_session(sid, &P, &row, &candidates, &state.bud3_registry, 1_002)
+        .unwrap();
+    let obj_key = finished.record.commitment;
+
+    // Commit RegisterObject on chain through Executor::apply_transaction.
+    apply(&mut state, &storage_tx(uploader, 0, 1, 0, finished.unsigned_tx.clone())).unwrap();
+
+    // Distribute coded symbols to the assigned custody holders on the network.
+    let mut net = MemorySymbolNetwork::default();
+    if let StorageTxV3::RegisterObject { shares, .. } = &finished.unsigned_tx {
+        for (seg, sh) in shares {
+            let start = sh.first_esi as usize;
+            let end = start + sh.symbols as usize;
+            net.store_holder_share(
+                sh.validator,
+                obj_key,
+                *seg,
+                finished.segments[*seg as usize][start..end].to_vec(),
+            );
+        }
+    }
+
+    // Second device reconstructs bit-identical content from network holders.
+    let recovered = view_from_network(&state.bud3_registry, &obj_key, None, &net).unwrap();
+    assert_eq!(recovered, original);
+
+    // RPC service serves `bud_storageGetContent` only when paid and runs reveal sessions from network.
+    let mut rpc = Bud3RpcService::default();
+    assert!(rpc
+        .handle(
+            "bud_storageGetContent",
+            &serde_json::json!({
+                "payer": hex::encode(payer.as_bytes()),
+                "object": hex::encode(obj_key),
+                "fee_paid_atoms": 0
+            }),
+            &state.bud3_registry,
+            &net,
+            &row,
+            &candidates,
+            1_005,
+        )
+        .is_err());
+    let paid_resp = rpc
+        .handle(
+            "bud_storageGetContent",
+            &serde_json::json!({
+                "payer": hex::encode(payer.as_bytes()),
+                "object": hex::encode(obj_key),
+                "fee_paid_atoms": MIN_PAID_VIEW_FEE_ATOMS
+            }),
+            &state.bud3_registry,
+            &net,
+            &row,
+            &candidates,
+            1_005,
+        )
+        .unwrap();
+    assert_eq!(
+        hex::decode(paid_resp["content_hex"].as_str().unwrap()).unwrap(),
+        original
+    );
+}
+
+
 
 

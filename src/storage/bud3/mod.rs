@@ -26,7 +26,9 @@
 //! the content (or Padme bucket ceiling plus salt and AEAD tag when sealed).
 
 pub mod bof1;
+pub mod content_gateway;
 pub mod content_id;
+pub mod content_ref;
 pub mod custody;
 pub mod dedup_index;
 pub mod delete;
@@ -43,16 +45,22 @@ pub mod placement;
 pub mod qr;
 pub mod registry;
 pub mod repair;
+pub mod rpc;
 pub mod seal;
 pub mod segment;
 pub mod symbol_protocol;
 pub mod two_path;
 pub mod tx;
+pub mod upload;
 pub mod varint;
 pub mod video;
+pub mod view;
+pub mod volume;
 
 pub use bof1::{Bof1Error, Flags, Header, Object};
+pub use content_gateway::{Bud3ContentGateway, GatewaySymbolBundle};
 pub use content_id::{ContentId, ContentKey};
+pub use content_ref::{ContentRef, ContentRefError};
 pub use delete::{
     check_same_owner_dependency, requires_rehydration_before_transfer, GrantShredAuth,
     ShredOutcome,
@@ -118,4 +126,21 @@ pub use two_path::{
 pub use video::{
     chain_segment_video_digests, fold_frame_digests, video_commitment,
     video_commitment_from_frames,
+};
+pub use rpc::{Bud3RpcService, BUD3_RPC_METHODS};
+pub use upload::{
+    admit_testnet_flags, deterministic_pixel_sample_indices, max_two_segment_memory_bytes,
+    FinishedUploadSession, UploadError, UploadSessionManager, CLOSED_FLAG_BIT3,
+    FULL_PIXEL_VERIFY_CEILING_BYTES, MAX_CONCURRENT_SESSIONS_PER_IP,
+    MAX_DAILY_UPLOAD_BYTES_PER_ACCOUNT, MAX_GATEWAY_SESSIONS, MAX_OPEN_SESSIONS_PER_ACCOUNT,
+    MAX_UPLOAD_SESSION_BYTES, UPLOAD_PROTOCOL_ID, UPLOAD_SESSION_TTL_SECS,
+};
+pub use view::{
+    collect_symbols_full_then_mobile, fallback_decode_public, view_from_network,
+    MemorySymbolNetwork, NetworkSymbolSource, PaidViewReceipt, RevealSessionManager,
+    ViewBud3Error, MIN_PAID_VIEW_FEE_ATOMS,
+};
+pub use volume::{
+    qualifies_for_volume, verify_volume_inclusion, AggregationVolume, VolumeEntry, VolumeError,
+    VolumeInclusionProof, VolumeScope, DEFAULT_VOLUME_BYTES, VOLUME_REENCODE_MAX_SECS,
 };
