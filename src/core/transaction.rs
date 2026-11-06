@@ -2684,6 +2684,49 @@ mod tests {
     }
 
     #[test]
+    fn checked_liquid_cost_matches_the_executor_for_fee_only_doors() {
+        let validator = test_addr_from_byte(2u8);
+        let fee_only = [
+            TransactionType::Unstake,
+            TransactionType::Vote,
+            TransactionType::Undelegate { validator },
+            TransactionType::WithdrawDelegation { validator },
+            TransactionType::SetValidatorCommission { commission: 10 },
+            TransactionType::Redelegate {
+                from_validator: validator,
+                to_validator: test_addr_from_byte(3u8),
+            },
+            TransactionType::ClaimRewards { validator },
+        ];
+        for tx_type in fee_only {
+            let mut tx = Transaction::new_with_fee(
+                test_addr_from_byte(1u8),
+                Address::zero(),
+                100,
+                5,
+                1,
+                vec![],
+            );
+            tx.tx_type = tx_type;
+            assert_eq!(tx.checked_liquid_cost(), Some(5));
+            // A signed amount that is not a liquid debit cannot make the
+            // fee overflow. This is the admission/execution agreement.
+            tx.amount = u64::MAX;
+            assert_eq!(tx.checked_liquid_cost(), Some(5));
+        }
+        let mut transfer = Transaction::new_with_fee(
+            test_addr_from_byte(1u8),
+            validator,
+            u64::MAX,
+            1,
+            1,
+            vec![],
+        );
+        transfer.tx_type = TransactionType::Transfer;
+        assert_eq!(transfer.checked_liquid_cost(), None);
+    }
+
+    #[test]
     fn test_genesis_transaction() {
         let genesis = Transaction::genesis();
         assert!(genesis.verify());
