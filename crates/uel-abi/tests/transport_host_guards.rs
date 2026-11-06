@@ -4,6 +4,10 @@
 //! tests ensure that a broken or malformed coordinator reply cannot enter that
 //! deterministic path and produce an execution receipt.
 
+// Assertions may panic in this test target. Production retains the crate-wide
+// unwrap/expect denial; this is not an allowance for worker or coordinator code.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use budlum_uel_abi::frame::{read_frame, write_frame, FrameError, ABI_VERSION};
 use budlum_uel_abi::mock::{op, MockEe};
 use budlum_uel_abi::pb;
