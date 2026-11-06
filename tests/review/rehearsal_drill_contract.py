@@ -28,6 +28,20 @@ GOOD = {
 }
 
 
+MEASUREMENTS = {
+    "t1": {"finality_delay_before_ms": 900, "finality_delay_after_ms": 900,
+           "objects_lost": 0, "full_class_reads_ok": True},
+    "t2": {"finality_delay_checkpoints": 2, "seat_handover_checkpoints": 3},
+    "t3": {"blocks_halted": 50, "alert_fired": True, "finality_resumed": True},
+    "t4": {"resume_effective_epochs": 1, "repair_completed": True},
+    "t5": {"total_gib": 100, "object_count": 10000,
+           "upload_success_ratio": 1.0, "view_success_ratio": 1.0},
+    "t6": {"tool_scenarios_passed": 6, "tool_scenarios_total": 6,
+           "atomic_evm_call": True},
+    "t7": {"rate_limited": True, "ratio_429": 0.42},
+}
+
+
 class DrillContract(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -64,6 +78,34 @@ class DrillContract(unittest.TestCase):
         result = self.run_drill(GOOD)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Verdict: PASS", (self.out / "T-1.md").read_text())
+
+    def run_all(self, evidence: dict[str, dict]):
+        sandbox = self.dir / "drills"
+        shutil.copytree(DRILLS, sandbox)
+        evidence_dir = self.dir / "evidence"
+        evidence_dir.mkdir(exist_ok=True)
+        for drill, measurement in evidence.items():
+            (evidence_dir / f"{drill}.json").write_text(json.dumps(measurement))
+        env = {k: v for k, v in os.environ.items()
+               if k not in {"REHEARSAL_EVIDENCE", "REHEARSAL_EVIDENCE_DIR"}}
+        env.update({"REHEARSAL_OUT": str(self.out),
+                    "REHEARSAL_EVIDENCE_DIR": str(evidence_dir)})
+        return subprocess.run(
+            ["bash", str(sandbox / "run_all.sh")],
+            env=env, text=True, capture_output=True, timeout=120,
+        )
+
+    def test_run_all_reports_missing_drill_measurement_as_not_run(self):
+        result = self.run_all({"t1": MEASUREMENTS["t1"]})
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("t1_mobile_mass_departure PASS", result.stdout)
+        for drill in ("t2_full_departure", "t7_rpc_load"):
+            self.assertIn(f"{drill} NOT RUN", result.stdout)
+
+    def test_run_all_passes_only_with_one_measurement_per_drill(self):
+        result = self.run_all(MEASUREMENTS)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("7 passed, 0 failed, 0 not run", result.stdout)
 
     def test_run_all_never_reports_an_unevidenced_rehearsal_as_complete(self):
         sandbox = self.dir / "drills"

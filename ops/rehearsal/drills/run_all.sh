@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # WP-46: run drills T-1..T-7, in order, after the 72-hour soak.
-# Each drill needs its own measurement file (REHEARSAL_EVIDENCE). A drill that
-# has no measurement exits 2 and is reported as NOT RUN; it is never counted as
-# a pass, and the run keeps going so one missing file does not hide the rest.
+# Each drill needs its own measurement file. Point REHEARSAL_EVIDENCE_DIR at a
+# directory holding t1.json .. t7.json (one measurement per drill); a single
+# inherited REHEARSAL_EVIDENCE would be applied to all seven and prove nothing.
+# A drill without a measurement exits 2 and is reported as NOT RUN; it is never
+# counted as a pass, and the run keeps going so one missing file does not hide
+# the rest.
 set -uo pipefail
 cd "$(dirname "$0")"
 
@@ -12,8 +15,16 @@ failed=0
 not_run=0
 summary=""
 
+evidence_dir="${REHEARSAL_EVIDENCE_DIR:-}"
+
 for t in $drills; do
     echo "=== $t ==="
+    # Never let one drill's measurement (or a stale inherited variable) stand
+    # in for another's.
+    unset REHEARSAL_EVIDENCE
+    if [ -n "$evidence_dir" ] && [ -f "$evidence_dir/${t%%_*}.json" ]; then
+        export REHEARSAL_EVIDENCE="$evidence_dir/${t%%_*}.json"
+    fi
     ./"$t".sh
     case $? in
         0) passed=$((passed + 1)); summary="$summary$t PASS"$'\n' ;;
