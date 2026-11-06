@@ -149,3 +149,20 @@ fn indexer_binary_is_registered() {
         "no explicit [[bin]] for budlum-indexer"
     );
 }
+
+/// The binding planning directive stays outside the repository tree. Its
+/// section 0.1 item 5 says the document never enters the repository; a tracked
+/// copy fails `tree_is_english` and puts untranslated planning text in the
+/// source corpus (BLG-288, BLG-304).
+#[test]
+fn binding_directive_stays_outside_repository() {
+    let name = "THE_BUDLUM_DIREKTIF.md";
+    assert!(
+        !root().join(name).exists(),
+        "the binding directive must stay outside the repository tree: {name}"
+    );
+    assert!(
+        read(".gitignore").contains("/THE_BUDLUM_DIREKTIF.md"),
+        "an upload of the directive must be ignored, not tracked"
+    );
+}
