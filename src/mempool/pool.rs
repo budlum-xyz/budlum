@@ -194,10 +194,10 @@ impl Mempool {
         }
     }
 
-    /// Admits a typed UEL or duty envelope into its isolated lane.
+    /// Enqueues a typed UEL or duty envelope into its isolated lane.
     ///
     /// exposed for: compatibility RPC gateways and duty gossip (`WP-13`, `WP-28`..`WP-32`).
-    pub fn admit_lane_envelope(
+    pub fn enqueue_lane_envelope(
         &mut self,
         entry: crate::mempool::lanes::LaneEntry,
     ) -> Result<(), MempoolError> {

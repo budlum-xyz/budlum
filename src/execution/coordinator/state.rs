@@ -1,7 +1,7 @@
 //! Execution namespaces, sparse binary Merkle commitments, and `execution_root`.
 //!
 //! Implements sections 8.8 and 8.10:
-//! - Eleven canonical namespaces grouped into seven fixed-depth (256-bit) sparse
+//! - Twelve canonical namespaces grouped into seven fixed-depth (256-bit) sparse
 //!   binary Merkle subtrees (`evm`, `wasm`, `svm`, `move`, `budzero`, `alias`,
 //!   `asset`).
 //! - `execution_root = H("BDLM_UEL_ROOT_V1", evm_root, wasm_root, svm_root,
@@ -43,7 +43,7 @@ pub const NS_BUDZERO_STORAGE: &str = "ee/budzero/storage";
 /// Canonical Universal Asset Registry namespace.
 pub const NS_UEL_ASSETS: &str = "uel/assets";
 
-/// All eleven canonical UEL namespaces in deterministic order.
+/// All twelve canonical UEL namespaces in deterministic order.
 pub const ALL_NAMESPACES: &[&str] = &[
     NS_EVM_ACCOUNT,
     NS_EVM_CODE,
@@ -173,6 +173,8 @@ impl ExecutionState {
     }
 
     /// Sets whether `ee` accepts new contract deployments without halting the chain.
+    ///
+    /// exposed for: governance/operator EE feature flag control (`R-21`, `WP-26`).
     pub fn set_deploy_enabled(&mut self, ee: EeId, enabled: bool) {
         if enabled {
             self.deploy_frozen_ees.remove(&ee.0);
@@ -261,7 +263,8 @@ impl ExecutionState {
         sparse_merkle_subtree(&entries, 0)
     }
 
-    /// Computes `execution_root = H("BDLM_UEL_ROOT_V1", evm, wasm, svm, move, budzero, alias, asset)`.
+    /// Computes `execution_root` over all seven canonical root groups
+    /// (`BDLM_UEL_ROOT_V1`, `evm`, `wasm`, `svm`, `move`, `budzero`, `alias`, `asset`).
     #[must_use]
     pub fn execution_root(&self) -> [u8; 32] {
         let evm = self.group_root(RootGroup::Evm);

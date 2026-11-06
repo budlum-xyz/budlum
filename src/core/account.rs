@@ -600,6 +600,9 @@ pub struct AccountState {
     /// The B.U.D. 3.0 registry: objects, references, shares and audits.
     /// Rooted and snapshotted.
     pub bud3_registry: crate::storage::bud3::registry::Bud3Registry,
+    /// Universal Execution Layer state: per-environment namespaces, alias table,
+    /// asset registry, deploy freeze flags and UEL base fee.
+    pub execution_state: crate::execution::coordinator::state::ExecutionState,
     /// Governance-queued compliance freezes/unfreezes awaiting
     /// application (see [`PendingPoaCompliance`]).
     pub pending_poa_freezes: Vec<PendingPoaCompliance>,
@@ -674,6 +677,7 @@ impl AccountState {
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
             validator_directory: crate::validators::ValidatorDirectory::new(),
             bud3_registry: crate::storage::bud3::registry::Bud3Registry::default(),
+            execution_state: crate::execution::coordinator::state::ExecutionState::new(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -739,6 +743,7 @@ impl AccountState {
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
             validator_directory: crate::validators::ValidatorDirectory::new(),
             bud3_registry: crate::storage::bud3::registry::Bud3Registry::default(),
+            execution_state: crate::execution::coordinator::state::ExecutionState::new(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -813,6 +818,7 @@ impl AccountState {
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
             validator_directory: crate::validators::ValidatorDirectory::new(),
             bud3_registry: crate::storage::bud3::registry::Bud3Registry::default(),
+            execution_state: crate::execution::coordinator::state::ExecutionState::new(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -930,6 +936,7 @@ impl AccountState {
             poa_compliance: snapshot.poa_compliance.clone().unwrap_or_default(),
             validator_directory: snapshot.validator_directory.clone().unwrap_or_default(),
             bud3_registry: snapshot.bud3_registry.clone().unwrap_or_default(),
+            execution_state: crate::execution::coordinator::state::ExecutionState::new(),
             burned_total: snapshot.burned_total,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -3828,6 +3835,23 @@ impl AccountState {
         Ok(())
     }
 
+    /// Executes a batch of UEL transactions against this `AccountState` through
+    /// `coordinator`, committing the resulting `ExecutionState` and fee splits.
+    ///
+    /// exposed for: block execution (`WP-26` slice 2/2).
+    pub fn execute_uel_block(
+        &mut self,
+        coordinator: &mut crate::execution::coordinator::ExecutionCoordinator,
+        ctx: budlum_uel_abi::BlockContext,
+        proposer: Address,
+        txs: &[crate::execution::coordinator::UelTx],
+    ) -> Result<
+        Vec<crate::execution::coordinator::UelReceipt>,
+        crate::execution::coordinator::CoordinatorError,
+    > {
+        coordinator.execute_block(self, ctx, proposer, txs)
+    }
+
     /// Total $BUD locked in validator stake, including inactive/jailed validators.
     ///
     /// This is a supply-denominator helper, not an active-consensus-stake helper:
@@ -4683,6 +4707,12 @@ impl AccountState {
         if !self.bud3_registry.is_empty() {
             final_hasher.update(b"bud3_registry_v1");
             final_hasher.update(self.bud3_registry.state_root());
+        }
+        // UEL execution state folds in once non-empty so pre-UEL chains keep
+        // their pinned genesis and block state roots.
+        if !self.execution_state.is_empty() {
+            final_hasher.update(b"uel_execution_v1");
+            final_hasher.update(self.execution_state.execution_root());
         }
         if !self.external_roots.is_empty() {
             final_hasher.update(b"external_roots_v1");
