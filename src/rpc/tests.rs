@@ -1866,10 +1866,10 @@ mod rpc_tests {
             serde_json::json!("0x0"),
             "a fresh chain has no blocks to report"
         );
-                assert!(record_answered(&server.node_info().await.unwrap()), "bud_nodeInfo");
-                assert!(record_answered(&server.get_status().await.unwrap()), "bud_getStatus");
-                assert!(record_answered(&server.get_validator_set().await.unwrap()), "bud_getValidatorSet");
-                assert!(
+        assert!(record_answered(&server.node_info().await.unwrap()), "bud_nodeInfo");
+        assert!(record_answered(&server.get_status().await.unwrap()), "bud_getStatus");
+        assert!(record_answered(&server.get_validator_set().await.unwrap()), "bud_getValidatorSet");
+        assert!(
             record_answered(
                 &server
                     .get_slashing_history()
@@ -1878,7 +1878,7 @@ mod rpc_tests {
             ),
             "bud_getSlashingHistory"
         );
-                assert!(
+        assert!(
             record_answered(
                 &server
                     .get_restaked_validators()
@@ -1887,8 +1887,8 @@ mod rpc_tests {
             ),
             "bud_getRestakedValidators"
         );
-                assert!(record_answered(&server.get_quantum_alarm().await.unwrap()), "bud_getQuantumAlarm");
-                assert!(
+        assert!(record_answered(&server.get_quantum_alarm().await.unwrap()), "bud_getQuantumAlarm");
+        assert!(
             record_answered(
                 &server
                     .get_external_intake_digest()
@@ -2035,10 +2035,10 @@ mod rpc_tests {
             serde_json::json!("0x0"),
             "a fresh chain has no blocks to report"
         );
-                assert!(record_answered(&server.node_info().await.unwrap()), "bud_nodeInfo");
-                assert!(record_answered(&server.get_status().await.unwrap()), "bud_getStatus");
-                assert!(record_answered(&server.get_validator_set().await.unwrap()), "bud_getValidatorSet");
-                assert!(
+        assert!(record_answered(&server.node_info().await.unwrap()), "bud_nodeInfo");
+        assert!(record_answered(&server.get_status().await.unwrap()), "bud_getStatus");
+        assert!(record_answered(&server.get_validator_set().await.unwrap()), "bud_getValidatorSet");
+        assert!(
             record_answered(
                 &server
                     .get_slashing_history()
@@ -2047,7 +2047,7 @@ mod rpc_tests {
             ),
             "bud_getSlashingHistory"
         );
-                assert!(
+        assert!(
             record_answered(
                 &server
                     .get_restaked_validators()
@@ -2056,8 +2056,8 @@ mod rpc_tests {
             ),
             "bud_getRestakedValidators"
         );
-                assert!(record_answered(&server.get_quantum_alarm().await.unwrap()), "bud_getQuantumAlarm");
-                assert!(
+        assert!(record_answered(&server.get_quantum_alarm().await.unwrap()), "bud_getQuantumAlarm");
+        assert!(
             record_answered(
                 &server
                     .get_external_intake_digest()
@@ -2137,10 +2137,10 @@ mod rpc_tests {
     async fn rpc_listing_reads_answer_with_their_records() {
         let (server, _chain) = setup().await;
 
-                assert!(record_answered(&server.list_relays().await.unwrap()), "bud_listRelays");
-                assert!(record_answered(&server.list_gateways().await.unwrap()), "bud_listGateways");
-                assert!(record_answered(&server.market_get_offers().await.unwrap()), "bud_marketGetOffers");
-                assert!(
+        assert!(record_answered(&server.list_relays().await.unwrap()), "bud_listRelays");
+        assert!(record_answered(&server.list_gateways().await.unwrap()), "bud_listGateways");
+        assert!(record_answered(&server.market_get_offers().await.unwrap()), "bud_marketGetOffers");
+        assert!(
             record_answered(
                 &server
                     .pollen_get_access_grants()
@@ -2149,7 +2149,7 @@ mod rpc_tests {
             ),
             "bud_pollenGetAccessGrants"
         );
-                assert!(
+        assert!(
             record_answered(
                 &server
                     .pollen_get_data_assets()
@@ -2158,7 +2158,7 @@ mod rpc_tests {
             ),
             "bud_pollenGetDataAssets"
         );
-                assert!(
+        assert!(
             record_answered(
                 &server
                     .pollen_get_purchase_receipts()
@@ -2167,7 +2167,7 @@ mod rpc_tests {
             ),
             "bud_pollenGetPurchaseReceipts"
         );
-                assert!(
+        assert!(
             record_answered(
                 &server
                     .pollen_get_sale_authorizations()
@@ -2176,8 +2176,8 @@ mod rpc_tests {
             ),
             "bud_pollenGetSaleAuthorizations"
         );
-                assert!(record_answered(&server.ai_agent_ranking().await.unwrap()), "bud_aiAgentRanking");
-                assert!(
+        assert!(record_answered(&server.ai_agent_ranking().await.unwrap()), "bud_aiAgentRanking");
+        assert!(
             record_answered(
                 &server
                     .ai_get_active_verifiers()
@@ -2186,8 +2186,8 @@ mod rpc_tests {
             ),
             "bud_aiGetActiveVerifiers"
         );
-                assert!(record_answered(&server.ai_open_requests().await.unwrap()), "bud_aiOpenRequests");
-                assert!(
+        assert!(record_answered(&server.ai_open_requests().await.unwrap()), "bud_aiOpenRequests");
+        assert!(
             record_answered(
                 &server
                     .ai_verifier_ranking()
@@ -2196,7 +2196,7 @@ mod rpc_tests {
             ),
             "bud_aiVerifierRanking"
         );
-                assert!(
+        assert!(
             record_answered(
                 &server
                     .ai_verifier_whitelist()
@@ -2205,9 +2205,9 @@ mod rpc_tests {
             ),
             "bud_aiVerifierWhitelist"
         );
-                assert!(record_answered(&server.ai_stats().await.unwrap()), "bud_aiInferenceStats");
-                assert!(record_answered(&server.budlumxyz_get_apps().await.unwrap()), "bud_hubGetApps");
-                assert!(
+        assert!(record_answered(&server.ai_stats().await.unwrap()), "bud_aiInferenceStats");
+        assert!(record_answered(&server.budlumxyz_get_apps().await.unwrap()), "bud_hubGetApps");
+        assert!(
             record_answered(
                 &server
                     .budlumxyz_get_graft_apps()
