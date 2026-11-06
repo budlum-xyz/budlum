@@ -48,12 +48,12 @@ pub struct BloomFilter {
 /// gives the same lanes on every architecture.
 fn two_hashes(digest: &[u8; 32]) -> [u64; 2] {
     let mut lanes = [0u64; 4];
-    for (i, chunk) in digest.chunks_exact(8).enumerate() {
+    for (lane, chunk) in lanes.iter_mut().zip(digest.chunks_exact(8)) {
         let mut v = 0u64;
         for (j, b) in chunk.iter().enumerate() {
             v |= u64::from(*b) << (8 * j);
         }
-        lanes[i] = v;
+        *lane = v;
     }
     [mix(lanes[0] ^ lanes[2]), mix(lanes[1] ^ lanes[3]) | 1]
 }
@@ -80,7 +80,7 @@ impl BloomFilter {
     pub fn with_expected(expected: u64) -> Self {
         let expected = expected.max(1);
         let bits = expected.saturating_mul(BITS_PER_KEY).max(MIN_BITS);
-        let words = ((bits + 63) / 64) as usize;
+        let words = bits.div_ceil(64) as usize;
         Self {
             words: vec![0u64; words],
             bits: words as u64 * 64,
@@ -215,6 +215,15 @@ mod tests {
         let mut digest = [0u8; 32];
         digest[..8].copy_from_slice(&n.to_le_bytes());
         digest
+    }
+
+    #[test]
+    fn filter_capacity_rounds_up_to_whole_words() {
+        for (expected, bits) in [(0, 64), (1, 64), (4, 64), (5, 128), (8, 128), (9, 192)] {
+            let filter = BloomFilter::with_expected(expected);
+            assert_eq!(filter.bits, bits);
+            assert_eq!(filter.words.len() as u64 * 64, bits);
+        }
     }
 
     #[test]
