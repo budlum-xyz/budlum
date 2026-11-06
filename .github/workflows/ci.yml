@@ -2310,6 +2310,25 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- storage-is-priced-by-size --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- storage-is-priced-by-size
+      # Section 11.5 prices storage in **physical** bytes. The two numbers that
+      # are easy to mistake for it are the content length the uploader started
+      # from and the symbol count the fountain produced. Pricing either one
+      # charges for bytes nobody holds, or prices the same object differently
+      # after every repair. The fee module keeps the inputs apart by name and
+      # this step keeps the distinction from being edited out.
+      - name: is the B.U.D. 3.0 fee priced in physical bytes + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-fee-uses-physical-bytes --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-fee-uses-physical-bytes
+      # The endowment pays symbol bytes times the presence multiplier, pays a
+      # share nothing for a window it missed, and sends what it could not
+      # distribute to the network security pool. Each rule is one line of code
+      # that a later edit can delete without any test in the tree noticing, so
+      # the shape of all three is held here.
+      - name: do custody rewards follow audits and presence + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-custody-rewards --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-custody-rewards
       # Two entry points take a manifest an untrusted caller built.
       # Registration (now the `StorageTx::RegisterManifest` door) ran
       # `validate_untrusted`; `open_deal` ran
