@@ -72,21 +72,52 @@ fn privacy_transfers_enabled(chain_id: u64) -> bool {
     // `apply_transfer_with_proofs` is called with proofs, and nothing in the
     // tree calls it that way. So today a transfer proves who signed the
     // transaction, never that the signer owns the note; value conservation and
-    // membership are unwired too. That is survivable on the two networks where
-    // the notes are worth nothing.
+    // membership are unwired too. That is survivable only on the network
+    // where the notes are worth nothing.
     //
-    // The old test was `chain_id != Mainnet`, which answers "is this not the
-    // one network we care about" instead of "is this a network where losing the
-    // notes costs nothing". Every id nobody has claimed yet - a second mainnet,
-    // a public testnet that grows real value - came back enabled.
-    chain_id
-        == crate::core::chain_config::Network::Devnet
-            .chain_id()
-            .value()
-        || chain_id
-            == crate::core::chain_config::Network::Testnet
-                .chain_id()
-                .value()
+    // Testnet (`45261`) was removed from the allowlist: a note
+    // surface without ownership, value-conservation and membership proofs is a
+    // note printer on a public network, not a proving ground. It stays closed
+    // until PTP-1 and the membership proof land. Devnet keeps it enabled.
+    chain_id == crate::core::chain_config::Network::Devnet.chain_id().value()
+}
+
+/// The on-chain AI verification layer: the model registry, the inference
+/// escrow, verifier bonding and agent payments. Closed on every chain except
+/// devnet: the verification findings for proof binding, escrow accounting,
+/// verifier authority after unbonding and the registry state root are open,
+/// and neither VL-1 condition (per-request commit-reveal, integer ranking) is
+/// installed. Opening the layer before both land mints unverifiable
+/// "consensus-verified" AI output on a public network. Devnet is the proving
+/// ground; testnet and mainnet refuse the whole family.
+fn ai_layer_enabled(chain_id: u64) -> bool {
+    chain_id == crate::core::chain_config::Network::Devnet.chain_id().value()
+}
+
+/// The transaction variants that make up the on-chain AI verification layer.
+/// The agentic-economy data market (`AiOfferData` / `AiPurchaseData`) and the
+/// Pollen surface are NOT part of the verification layer and stay open on
+/// their own terms; only the verification, escrow and bonding family is
+/// gated here.
+fn is_ai_layer_tx(tx_type: &TransactionType) -> bool {
+    matches!(
+        tx_type,
+        TransactionType::AiModelRegister(_)
+            | TransactionType::AiInferenceRequest(_)
+            | TransactionType::AiInferenceResult(_)
+            | TransactionType::AiFeeReclaim(_)
+            | TransactionType::AiModelDeactivate(_)
+            | TransactionType::AiModelReactivate(_)
+            | TransactionType::AiRequestCancel(_)
+            | TransactionType::AiDisputeSlash { .. }
+            | TransactionType::AiAgentPayment(_)
+            | TransactionType::AiAgentPaymentRelease(_)
+            | TransactionType::AiAgentPaymentReclaim(_)
+            | TransactionType::AiAttachExecutionProof { .. }
+            | TransactionType::AiOperatorBond
+            | TransactionType::AiOperatorUnbond
+            | TransactionType::AiOperatorWithdraw
+    )
 }
 
 impl Executor {
@@ -185,6 +216,17 @@ impl Executor {
             return Err(BudlumError::validation(
                 "burn_reserve_locked",
                 "Burn reserve is schedule-controlled and cannot originate transactions",
+            ));
+        }
+        // Testnet boundary. The on-chain AI verification layer is closed on
+        // every chain except devnet; refuse before any arm inspects or
+        // mutates state, so no AI-layer transaction can strand escrow, bond
+        // or fee anywhere but the proving ground. The refusal is the
+        // chain's answer, not a hint: the transaction is invalid here.
+        if is_ai_layer_tx(&tx.tx_type) && !ai_layer_enabled(tx.chain_id) {
+            return Err(BudlumError::validation(
+                "ai_layer_closed_on_testnet",
+                "the on-chain AI verification layer is closed on this chain until the verification and registry findings close and the VL-1 conditions are installed",
             ));
         }
 
@@ -2451,7 +2493,7 @@ impl Executor {
                 if !privacy_transfers_enabled(tx.chain_id) {
                     return Err(BudlumError::validation(
                         "privacy_mainnet_disabled",
-                        "privacy note insertion is disabled on mainnet until full proof verification is wired",
+                        "privacy note insertion is closed on this network until ownership, value-conservation and membership proofs are wired",
                     ));
                 }
                 // The same boundary `PrivateTransferSubmit::validate_shape`
@@ -2476,7 +2518,7 @@ impl Executor {
                 if !privacy_transfers_enabled(tx.chain_id) {
                     return Err(BudlumError::validation(
                         "privacy_mainnet_disabled",
-                        "private transfers are disabled on mainnet until ownership, value-conservation, and membership proofs are wired",
+                        "private transfers are closed on this network until ownership, value-conservation and membership proofs are wired",
                     ));
                 }
                 sub.validate_shape()
@@ -3753,7 +3795,10 @@ impl Executor {
 
 #[cfg(test)]
 mod tests {
-    use super::{ai_execution_backend_allowed, check_ai_exec_dims, privacy_transfers_enabled};
+    use super::{
+        ai_execution_backend_allowed, ai_layer_enabled, check_ai_exec_dims, is_ai_layer_tx,
+        privacy_transfers_enabled,
+    };
 
     #[test]
     fn ai_exec_dims_rejects_wide_layer() {
@@ -4085,7 +4130,8 @@ mod tests {
     /// surface is only ever on where losing the notes costs nothing.
     /// `chain_id != Mainnet` answers the wrong question: it turns the feature
     /// ON for every id nobody has claimed yet, including a second mainnet or a
-    /// public testnet that grows real value.
+    /// public testnet that grows real value. The testnet (`45261`) is a
+    /// public network and stays OFF; devnet is the proving ground.
     #[test]
     fn privacy_transfers_stay_off_for_an_unclaimed_chain_id() {
         let mainnet = crate::core::chain_config::Network::Mainnet
@@ -4100,7 +4146,10 @@ mod tests {
 
         assert!(!privacy_transfers_enabled(mainnet), "mainnet must stay off");
         assert!(privacy_transfers_enabled(devnet), "devnet must stay on");
-        assert!(privacy_transfers_enabled(testnet), "testnet must stay on");
+        assert!(
+            !privacy_transfers_enabled(testnet),
+            "testnet must stay off until ownership, value-conservation and membership proofs are wired"
+        );
 
         for unclaimed in [1u64, 42, 1337, 45263, u64::MAX] {
             assert!(
@@ -4115,11 +4164,71 @@ mod tests {
         let mainnet = crate::core::chain_config::Network::Mainnet
             .chain_id()
             .value();
+        let testnet = crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value();
         let devnet = crate::core::chain_config::Network::Devnet
             .chain_id()
             .value();
 
         assert!(!privacy_transfers_enabled(mainnet));
         assert!(privacy_transfers_enabled(devnet));
+        assert!(!privacy_transfers_enabled(testnet));
+    }
+
+    /// The AI verification layer is an allowlist too, and only the proving
+    /// ground is on it. The data market and Pollen surfaces are deliberately
+    /// NOT part of the layer.
+    #[test]
+    fn ai_layer_gate_is_devnet_only() {
+        use crate::core::transaction::TransactionType;
+
+        let mainnet = crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value();
+        let testnet = crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value();
+        let devnet = crate::core::chain_config::Network::Devnet
+            .chain_id()
+            .value();
+
+        assert!(ai_layer_enabled(devnet), "devnet is the proving ground");
+        assert!(!ai_layer_enabled(testnet), "testnet refuses the AI layer");
+        assert!(!ai_layer_enabled(mainnet), "mainnet refuses the AI layer");
+        for unclaimed in [1u64, 42, 1337, 45263, u64::MAX] {
+            assert!(
+                !ai_layer_enabled(unclaimed),
+                "chain id {unclaimed} refuses the AI layer"
+            );
+        }
+
+        // The data market (AiOfferData / AiPurchaseData) and Pollen are not
+        // part of the verification layer.
+        assert!(!is_ai_layer_tx(&TransactionType::AiPurchaseData { offer_id: 0 }));
+        assert!(!is_ai_layer_tx(&TransactionType::PollenRevokeDataAsset(
+            crate::pollen::AssetId([0u8; 32])
+        )));
+
+        // The verification, escrow and bonding family is the layer.
+        assert!(is_ai_layer_tx(&TransactionType::AiOperatorBond));
+        assert!(is_ai_layer_tx(&TransactionType::AiOperatorUnbond));
+        assert!(is_ai_layer_tx(&TransactionType::AiOperatorWithdraw));
+        assert!(is_ai_layer_tx(&TransactionType::AiAgentPaymentRelease([0u8; 32])));
+        assert!(is_ai_layer_tx(&TransactionType::AiAgentPaymentReclaim([0u8; 32])));
+        assert!(is_ai_layer_tx(&TransactionType::AiFeeReclaim(
+            crate::ai::types::AiRequestId::new([0u8; 32])
+        )));
+        // The privacy family is gated by the other allowlist, not this one.
+        assert!(!is_ai_layer_tx(&TransactionType::PrivateTransferSubmit(
+            crate::privacy::PrivateTransferSubmit {
+                spent_commitments: vec![],
+                nullifiers: vec![],
+                output_commitments: vec![],
+                nullifier_proofs: vec![],
+                authorization_sig: vec![],
+                public_digest: [0u8; 32],
+            }
+        )));
     }
 }

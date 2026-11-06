@@ -296,7 +296,7 @@ fn private_transfer_is_refused_on_mainnet_and_unknown_chain_ids() {
         let tx = signed_tx(&kp, chain_id, TransactionType::PrivateTransferSubmit(sub));
         let err = Executor::apply_transaction(&mut state, &tx)
             .expect_err("the privacy gate must refuse this chain id");
-        assert!(err.contains("disabled on mainnet"), "got: {err}");
+        assert!(err.contains("closed on this network"), "got: {err}");
         assert!(state.note_registry.contains_commitment(&c_in));
         assert!(!state.note_registry.contains_commitment(&c_out));
     }
@@ -313,7 +313,7 @@ fn privacy_note_insert_is_refused_on_mainnet_and_unknown_chain_ids() {
         let tx = signed_tx(&kp, chain_id, TransactionType::PrivacyNoteInsert(c));
         let err = Executor::apply_transaction(&mut state, &tx)
             .expect_err("the privacy gate must refuse this chain id");
-        assert!(err.contains("disabled on mainnet"), "got: {err}");
+        assert!(err.contains("closed on this network"), "got: {err}");
         assert!(!state.note_registry.contains_commitment(&c));
     }
 }
@@ -413,4 +413,150 @@ fn private_transfer_replayed_under_another_nonce_or_bare_digest_is_refused() {
         .expect_err("nonce-0 authorization replayed at nonce 1 must be rejected");
     assert!(err.contains("authorization_sig invalid"), "got: {err}");
     assert!(state.note_registry.contains_commitment(&c_in));
+}
+
+/// Testnet (`45261`) is a public network: the privacy note surface stays
+/// closed there until ownership, value-conservation and membership proofs are
+/// wired (BLG-063). The gate is the executor's, so a signed, well-formed
+/// transaction is refused before any arm runs.
+#[test]
+fn private_transfer_is_closed_on_testnet() {
+    use crate::core::chain_config::Network;
+    let testnet = Network::Testnet.chain_id().value();
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    let mut state = funded_state(from, 1_000_000);
+    let (sub, c_in, c_out) = transfer_fixture(&kp, &mut state);
+    let tx = signed_tx(&kp, testnet, TransactionType::PrivateTransferSubmit(sub));
+    let err = crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx)
+        .expect_err("testnet must refuse the privacy surface (BLG-063)");
+    match err {
+        crate::error::BudlumError::Validation { code, .. } => {
+            assert_eq!(code, "privacy_mainnet_disabled");
+        }
+        other => panic!("expected a validation refusal, got {other:?}"),
+    }
+    assert!(state.note_registry.contains_commitment(&c_in));
+    assert!(!state.note_registry.contains_commitment(&c_out));
+}
+
+/// The note registry is the other half of the same surface: insertion is
+/// refused on testnet for the same reason.
+#[test]
+fn note_registry_is_closed_on_testnet() {
+    use crate::core::chain_config::Network;
+    let testnet = Network::Testnet.chain_id().value();
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    let mut state = funded_state(from, 1_000_000);
+    let c = hash_from_field(77);
+    let tx = signed_tx(&kp, testnet, TransactionType::PrivacyNoteInsert(c));
+    let err = crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx)
+        .expect_err("testnet must refuse note insertion (BLG-063)");
+    match err {
+        crate::error::BudlumError::Validation { code, .. } => {
+            assert_eq!(code, "privacy_mainnet_disabled");
+        }
+        other => panic!("expected a validation refusal, got {other:?}"),
+    }
+    assert!(!state.note_registry.contains_commitment(&c));
+}
+
+/// AI execution proofs are closed on testnet (BLG-228): full STARK
+/// verification is not live, and the on-chain AI verification layer is
+/// closed until BLG-059..BLG-062 close and the VL-1 conditions are
+/// installed. The refusal must come from the layer gate, before the
+/// attach arm inspects the proof envelope.
+#[test]
+fn ai_execution_proof_is_closed_on_testnet() {
+    use crate::core::chain_config::Network;
+    let testnet = Network::Testnet.chain_id().value();
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    let mut state = funded_state(from, 1_000_000);
+    let proof = crate::ai::types::AiExecutionProof {
+        model_id: crate::ai::types::AiModelId::new([7u8; 32]),
+        input_commitment: [1u8; 32],
+        output_commitment: [2u8; 32],
+        program_hash: [3u8; 32],
+        proof_bytes: vec![0xAB; 16],
+        steps: 1,
+        gas_used: 1,
+        weights_digest: None,
+        public_inputs: None,
+    };
+    let tx = signed_tx(
+        &kp,
+        testnet,
+        TransactionType::AiAttachExecutionProof {
+            request_id: crate::ai::types::AiRequestId::new([9u8; 32]),
+            proof,
+        },
+    );
+    let err = crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx)
+        .expect_err("testnet must refuse AI execution proofs (BLG-228)");
+    match err {
+        crate::error::BudlumError::Validation { code, .. } => {
+            assert_eq!(code, "ai_layer_closed_on_testnet");
+        }
+        other => panic!("expected a validation refusal, got {other:?}"),
+    }
+}
+
+/// The whole on-chain AI verification layer is closed on testnet (KR-27):
+/// every transaction family variant is refused with the layer's code,
+/// while devnet - the proving ground - is not refused by the gate.
+#[test]
+fn ai_layer_is_closed_on_testnet() {
+    use crate::core::chain_config::Network;
+    let testnet = Network::Testnet.chain_id().value();
+    let devnet = Network::Devnet.chain_id().value();
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+
+    let cases: Vec<TransactionType> = vec![
+        TransactionType::AiOperatorBond,
+        TransactionType::AiOperatorUnbond,
+        TransactionType::AiOperatorWithdraw,
+        TransactionType::AiAgentPaymentRelease([0u8; 32]),
+        TransactionType::AiAgentPaymentReclaim([0u8; 32]),
+        TransactionType::AiFeeReclaim(crate::ai::types::AiRequestId::new([9u8; 32])),
+        TransactionType::AiModelDeactivate(crate::ai::types::AiModelId::new([7u8; 32])),
+        TransactionType::AiModelReactivate(crate::ai::types::AiModelId::new([7u8; 32])),
+        TransactionType::AiRequestCancel(crate::ai::types::AiRequestId::new([9u8; 32])),
+        TransactionType::AiDisputeSlash {
+            request_id: crate::ai::types::AiRequestId::new([9u8; 32]),
+            verifier: test_addr_from_byte(2u8),
+        },
+    ];
+
+    for tx_type in cases {
+        let label = format!("{tx_type:?}");
+        let mut state = funded_state(from, 1_000_000);
+        let tx = signed_tx(&kp, testnet, tx_type);
+        let err = crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx)
+            .expect_err("testnet must refuse the AI layer");
+        match err {
+            crate::error::BudlumError::Validation { code, .. } => {
+                assert_eq!(code, "ai_layer_closed_on_testnet", "case {label}");
+            }
+            other => panic!("case {label}: expected a validation refusal, got {other:?}"),
+        }
+    }
+
+    // Devnet is the proving ground: the gate must not refuse there. The arm
+    // itself may still refuse (bond rules, escrow rules), but never with the
+    // layer's code.
+    let mut state = funded_state(from, 1_000_000);
+    let tx = signed_tx(&kp, devnet, TransactionType::AiOperatorBond);
+    if let Err(err) =
+        crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx)
+    {
+        match err {
+            crate::error::BudlumError::Validation { code, .. } => {
+                assert_ne!(code, "ai_layer_closed_on_testnet");
+            }
+            _ => {}
+        }
+    }
 }
