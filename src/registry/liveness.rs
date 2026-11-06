@@ -22,6 +22,20 @@ use crate::registry::role::roles;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Non-slashing suspension emitted when a validator exceeds its absence window (V-4, BLG-251).
+/// Convenience: exposed for epoch-close suspension handling.
+///
+/// Offline validators are suspended (no new duties, seat eligibility suspended),
+/// never slashed: `stake_slashed_atoms` is structurally zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuspensionNotice {
+    pub validator: Address,
+    pub window_start_epoch: u64,
+    pub window_end_epoch: u64,
+    pub missed_epochs: u64,
+    pub stake_slashed_atoms: u64,
+}
+
 /// Per-validator consecutive-miss tracker.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LivenessTracker {
@@ -126,6 +140,57 @@ impl LivenessTracker {
         }
 
         reports
+    }
+
+    /// Record one epoch's participation under invariant V-4 (BLG-251):
+    /// crossing `threshold` consecutive missed epochs emits a [`SuspensionNotice`]
+    /// with `stake_slashed_atoms == 0` instead of a slashing report.
+    pub fn record_suspension_epoch<F>(
+        &mut self,
+        epoch: u64,
+        expected: &[Address],
+        mut participated: F,
+        threshold: u64,
+    ) -> Vec<SuspensionNotice>
+    where
+        F: FnMut(&Address) -> bool,
+    {
+        let mut suspensions = Vec::new();
+        let expected_set: BTreeSet<Address> = expected.iter().copied().collect();
+
+        for validator in &expected_set {
+            if participated(validator) {
+                self.missed.remove(validator);
+                self.streak_start_epoch.remove(validator);
+                self.reported.remove(validator);
+                continue;
+            }
+
+            let count = self.missed.entry(*validator).or_insert(0);
+            if *count == 0 {
+                self.streak_start_epoch.insert(*validator, epoch);
+            }
+            *count = count.saturating_add(1);
+            let current = *count;
+
+            if threshold > 0 && current >= threshold && !self.reported.contains_key(validator) {
+                let start = self
+                    .streak_start_epoch
+                    .get(validator)
+                    .copied()
+                    .unwrap_or(epoch);
+                suspensions.push(SuspensionNotice {
+                    validator: *validator,
+                    window_start_epoch: start,
+                    window_end_epoch: epoch,
+                    missed_epochs: current,
+                    stake_slashed_atoms: 0,
+                });
+                self.reported.insert(*validator, ());
+            }
+        }
+
+        suspensions
     }
 }
 

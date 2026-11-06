@@ -77,3 +77,10 @@ function = "(imports)"
 pq_companion = "ML-DSA-65 QC of the same producer (consensus/qc.rs); a block needs the QC too"
 category = "b"
 
+[[entry]]
+path = "src/registry/presence.rs"
+function = "*"
+pq_companion = "ML-DSA-65 proposer block signature and validator key-set preimage binding BLS beside ML-DSA-65 (crypto/key_set_preimage.rs)"
+category = "b"
+
+
