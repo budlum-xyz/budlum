@@ -271,3 +271,12 @@ English title column: the English title each record owes `docs/audit/FINDINGS.md
 
 None this pass. No condition was found that directive section 14 does not
 already record. `BLG-268` and later identifiers stay unused.
+
+## Rows carried from pr-12
+
+|---|---|
+| Kapalı | None this pass. |
+|---|---|
+| Kapalı | 0 |
+|---|---|---|---|---|---|
+| TEST-GAP-05 | Low | İP-33 | Directly untested | Açık | The ledger records this as a test gap without an anchor file; scope is the UEL/BudZero gate surface. Closes with İP-33. |

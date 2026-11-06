@@ -243,3 +243,14 @@ not a replacement for it.
 | BLG-235 | High | Gonca E13, SERA-0 | Open | blg_235_zkvm_proof_only_zk_domain | src/cross_domain/external/zkvm_proof.rs; evm sync committee | IP-44, IP-60|
 | BLG-240 | Low | Gonca E18 | Open | blg_240_validator_ordering_f64 | src/ai/registry.rs | IP-45, IP-57|
 | BLG-244 | Low | Gonca E23 | Open | blg_244_off_device_assistant_bytes | Off-device assistant repository (separate repo work item) | IP-57|
+
+## Verification rows carried from pr-68
+
+The merge kept this tree's row wording and lost the reproduction
+evidence columns. The evidence is carried back verbatim.
+
+| BLG-001 | Verified (Red test output) | audit_repro_a_blg_001 | src/consensus/leader.rs (MAX_LEADER_ROUNDS) | İP-12 | Critical |
+| BLG-018 | Verified (Red test output) | audit_repro_a_blg_018 | src/chain/blockchain.rs (finalized_height) | İP-12 | Critical |
+| BLG-246 | Verified (Red test output) | audit_repro_a_blg_246 | src/consensus/filiz.rs (count) | İP-01 | Medium |
+| BLG-264 | Verified (Red test output) | audit_repro_a_blg_264 | src/consensus/filiz.rs (WIRING) | İP-12 | Medium |
+| BLG-251 | Verified (Red test output) | audit_repro_a_blg_251 | src/registry/liveness.rs (SlashingReport) | İP-13 | High |

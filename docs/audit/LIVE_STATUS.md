@@ -480,3 +480,132 @@ same PR shape as one that carries 1, and the summary table is where that is chea
 | BLG-265 | Medium | src/network/mobile.rs | Open | blg_265_mobile_profile_no_android_power_model | src/network/mobile.rs (no Android 15 dataSync 6h/24h power model) | IP-36 |
 | BLG-266 | Medium | src/core/chain_config.rs (min_stake) | Open | blg_266_single_min_stake_no_class_split | src/core/chain_config.rs (one min_stake; no class split; 1000 BUD testnet barrier for phone users) | IP-08, IP-16 |
 - BLG-008, BLG-033, BLG-063 carry "Verified" statuses per the directive snapshot notes and the inspection points above.
+
+## Rows carried from pr-87, second pass (the register remainder)
+
+The union at merge time kept the register rows this tree's table schema
+could express and lost the rest. They are carried here verbatim.
+
+## Status legend
+
+| Status | Meaning |
+|---|---|
+| Open | Finding present on the live branch; reproduction test still to be written by IP-01..04 (S-3: test red before fix). |
+| Verified | Finding confirmed on the live branch (tree inspection plus the directive snapshot note). |
+| Closed | Already closed in the source ledger record; carried as history. |
+| Invalid | Condition no longer exists on the live branch; proven by inspection. |
+| Open - removal (IP-07) | Finding lives in legacy storage code slated for deletion by IP-07; closes when `no_legacy_storage` is green and the files are gone. |
+| Open - partial removal | Partly closed by removal; remainder carried on the named package's card. |
+
+
+| BLG-001 | Critical | Consensus | Open | blg_001_leader_round_skip | src/consensus/filiz.rs, src/consensus/handoff.rs (MAX_LEADER_ROUNDS, affordable_leader_round; snapshot kod izi 2/2) | IP-12 |
+| BLG-005 | Medium | Build/CI | Closed | — | Source ledger record (defter kaydi) | IP-16 |
+| BLG-030 | Critical | RPC | Open | blg_030_public_rpc_consensus_write | src/rpc/ (snapshot 22/23 traces; faucet part is IP-41) | IP-61, IP-41 |
+| BLG-207 | Critical | PoS double-signature slashing | Open | blg_207_pos_engine_verify_evidence | src/consensus/pos.rs (11/12 traces) | IP-12 |
+| BLG-208 | High | BUD3 H1 | Open - removal (IP-07, IP-21) | blg_208_bud_storage_edition_three | src/storage/generated.rs (BudStorageEdition::Three admits_body() false) | IP-07, IP-21 |
+| BLG-222 | Medium | BUD3 H15 | Open | blg_222_dictionary_derived_not_bud3 | src/storage/dictionary.rs, living_threshold.rs, derived.rs | IP-24 |
+| BLG-223 | High | Gonca E1 | Open | blg_223_bud_stark_pcs_zk_false | budzero/bud-proof/src/bud_stark/prover.rs | IP-56 (testnet closure IP-33, IP-45) |
+| BLG-245 | Medium | Gonca E23 | Open | blg_245_sealed_object_full_size_visible | Manifest size fields; read fee model | IP-22 (Padme), IP-56 |
+| BLG-246 | Critical | src/chain/finality.rs | Open | blg_246_quorum_stake_plus_count | src/chain/finality.rs:119-129, :878-902 (quorum_count AND quorum_stake both required) | IP-12 |
+| BLG-267 | High | xtask/gates/classical_crypto_is_paired.rs | Open | blg_267_foreign_tx_compliance_shim | xtask/gates/src/gates/classical_crypto_is_paired.rs (rejects all classical signatures; no compliance shim per 8.6.2) | IP-27 |
+| BULGU-001 | S2 | src/consensus/pos.rs | Open | IP-12 |
+| BULGU-002 | S2 | src/consensus/pos.rs | Open | IP-12 |
+| BULGU-003 | S3 | src/consensus/pos.rs | Open | IP-12 |
+| BULGU-004 | S3 | src/consensus/pos.rs, consensus/mod.rs | Open | IP-12 |
+| BULGU-005 | S3 | src/chain/blockchain.rs | Open | IP-17 |
+| BULGU-006 | S3 | src/chain/blockchain.rs | Open | IP-17 |
+| BULGU-007 | S3 | src/chain/blockchain.rs | Open | IP-17 |
+| BULGU-008 | S3 | src/chain/blockchain.rs | Open | IP-17 |
+| BULGU-009 | S3 | src/chain/blockchain.rs | Open | IP-17 |
+| BULGU-010 | S3 | src/core/transaction.rs | Open | IP-17 |
+| BULGU-011 | S3 | src/rpc/server.rs | Open | IP-61 |
+| BULGU-012 | S3 | src/rpc/server.rs | Open | IP-61 |
+| BULGU-013 | S3 | src/execution/executor.rs | Open | IP-17 |
+| BULGU-014 | S2 | src/network/node.rs | Open | IP-12 |
+| BULGU-015 | S3 | src/chain/chain_actor.rs | Open | IP-17 |
+| BULGU-016 | S3 | src/core/account.rs | Open | IP-17 |
+| BULGU-017 | S3 | src/domain/storage_deal.rs | Open - removal (IP-07) | IP-07 |
+| BULGU-018 | S3 | src/chain/genesis.rs | Open | IP-16 |
+| BULGU-019 | S3 | src/core/account.rs, src/execution/executor.rs | Open | IP-16 |
+| BULGU-020 | S3 | Fee gate class (nine members) | Open | IP-16 |
+| BULGU-021 | S3 | src/sharding/mod.rs | Open | IP-17 |
+| BULGU-022 | S3 | RoleBond gate | Open | IP-08 |
+| BULGU-023 | S2 | src/consensus/pos.rs, src/chain/blockchain.rs | Open | IP-12 |
+| BULGU-024 | S3 | src/chain/blockchain.rs, src/consensus/pos.rs | Open | IP-12 |
+| BULGU-025 | S3 | src/consensus/pos.rs | Open | IP-12 |
+| BULGU-026 | S3 | src/chain/blockchain.rs | Open | IP-12 |
+| BULGU-027 | S3 | src/chain/blockchain.rs | Open | IP-12 |
+| TEST-GAP-01 | High | src/core/account.rs | Open | IP-16 |
+| TEST-GAP-02 | Medium | kani/ | Open | IP-42 |
+| TEST-GAP-03 | Medium | QR video parser | Open | IP-19 |
+| TEST-GAP-04 | Low | src/bin/budlum-domain-producer.rs | Open | IP-42 |
+| TEST-GAP-05 | Medium | budzero folder.rs, ir/mod.rs | Open | IP-33 |
+| TEST-GAP-06 | Medium | bud/kani | Open - removal (IP-07) | IP-07 |
+| TEST-GAP-07 | Low | src/rpc | Open | IP-61 |
+| TEST-GAP-08 | Medium | Proof retention window | Open | IP-12 |
+| DOC-GAP-01 | S1 | config/testnet.toml, src/main.rs, ops/ | Open | IP-41 |
+| DOC-GAP-02 | S3 | CLI, profile, compose, systemd | Open | IP-43 |
+| DOC-GAP-03 | S3 | README, CONTRIBUTING, ops/scripts | Open | IP-43 |
+| DOC-GAP-04 | S3 | ops/budlum-core.service | Open | IP-41 |
+| DOC-GAP-05 | S3 | docs/VALIDATOR_GUIDE.md, docs/TESTNET.md, docs/OPERATIONS.md | Open | IP-43 |
+| DOC-GAP-06 | S3 | docs/TESTNET.md, docs/VALIDATOR_GUIDE.md | Open | IP-46 |
+| DOC-GAP-07 | Invalid | Cargo.toml | Invalid | IP-42 |
+| DOC-GAP-08 | S3 | src/bin/bud.rs | Open | IP-39 |
+| DOC-GAP-09 | S3 | Finding ledger table | Open | IP-43 |
+
+## Defterarşiv aileleri (14.6)
+
+| ID | Severity | Area | Live status | Closes with |
+|---|---|---|---|---|
+| BULGU-001 | S2 | src/consensus/pos.rs | Open | IP-12 |
+| BULGU-002 | S2 | src/consensus/pos.rs | Open | IP-12 |
+| BULGU-003 | S3 | src/consensus/pos.rs | Open | IP-12 |
+| BULGU-004 | S3 | src/consensus/pos.rs, consensus/mod.rs | Open | IP-12 |
+| BULGU-005 | S3 | src/chain/blockchain.rs | Open | IP-17 |
+| BULGU-006 | S3 | src/chain/blockchain.rs | Open | IP-17 |
+| BULGU-007 | S3 | src/chain/blockchain.rs | Open | IP-17 |
+| BULGU-008 | S3 | src/chain/blockchain.rs | Open | IP-17 |
+| BULGU-009 | S3 | src/chain/blockchain.rs | Open | IP-17 |
+| BULGU-010 | S3 | src/core/transaction.rs | Open | IP-17 |
+| BULGU-011 | S3 | src/rpc/server.rs | Open | IP-61 |
+| BULGU-012 | S3 | src/rpc/server.rs | Open | IP-61 |
+| BULGU-013 | S3 | src/execution/executor.rs | Open | IP-17 |
+| BULGU-014 | S2 | src/network/node.rs | Open | IP-12 |
+| BULGU-015 | S3 | src/chain/chain_actor.rs | Open | IP-17 |
+| BULGU-016 | S3 | src/core/account.rs | Open | IP-17 |
+| BULGU-017 | S3 | src/domain/storage_deal.rs | Open - removal (IP-07) | IP-07 |
+| BULGU-018 | S3 | src/chain/genesis.rs | Open | IP-16 |
+| BULGU-019 | S3 | src/core/account.rs, src/execution/executor.rs | Open | IP-16 |
+| BULGU-020 | S3 | Fee gate class (nine members) | Open | IP-16 |
+| BULGU-021 | S3 | src/sharding/mod.rs | Open | IP-17 |
+| BULGU-022 | S3 | RoleBond gate | Open | IP-08 |
+| BULGU-023 | S2 | src/consensus/pos.rs, src/chain/blockchain.rs | Open | IP-12 |
+| BULGU-024 | S3 | src/chain/blockchain.rs, src/consensus/pos.rs | Open | IP-12 |
+| BULGU-025 | S3 | src/consensus/pos.rs | Open | IP-12 |
+| BULGU-026 | S3 | src/chain/blockchain.rs | Open | IP-12 |
+| BULGU-027 | S3 | src/chain/blockchain.rs | Open | IP-12 |
+| TEST-GAP-01 | High | src/core/account.rs | Open | IP-16 |
+| TEST-GAP-02 | Medium | kani/ | Open | IP-42 |
+| TEST-GAP-03 | Medium | QR video parser | Open | IP-19 |
+| TEST-GAP-04 | Low | src/bin/budlum-domain-producer.rs | Open | IP-42 |
+| TEST-GAP-05 | Medium | budzero folder.rs, ir/mod.rs | Open | IP-33 |
+| TEST-GAP-06 | Medium | bud/kani | Open - removal (IP-07) | IP-07 |
+| TEST-GAP-07 | Low | src/rpc | Open | IP-61 |
+| TEST-GAP-08 | Medium | Proof retention window | Open | IP-12 |
+| DOC-GAP-01 | S1 | config/testnet.toml, src/main.rs, ops/ | Open | IP-41 |
+| DOC-GAP-02 | S3 | CLI, profile, compose, systemd | Open | IP-43 |
+| DOC-GAP-03 | S3 | README, CONTRIBUTING, ops/scripts | Open | IP-43 |
+| DOC-GAP-04 | S3 | ops/budlum-core.service | Open | IP-41 |
+| DOC-GAP-05 | S3 | docs/VALIDATOR_GUIDE.md, docs/TESTNET.md, docs/OPERATIONS.md | Open | IP-43 |
+| DOC-GAP-06 | S3 | docs/TESTNET.md, docs/VALIDATOR_GUIDE.md | Open | IP-46 |
+| DOC-GAP-07 | Invalid | Cargo.toml | Invalid | IP-42 |
+| DOC-GAP-08 | S3 | src/bin/bud.rs | Open | IP-39 |
+| DOC-GAP-09 | S3 | Finding ledger table | Open | IP-43 |
+
+### Notes
+
+- DOC-GAP-07 (`budlum-indexer` missing binary record) is INVALID: `src/bin/budlum-indexer.rs` exists on the live branch.
+- BLG-008, BLG-033, BLG-063 carry "Verified" statuses per the directive snapshot notes and the inspection points above.
+- All "Open - removal (IP-07)" findings close when IP-07 deletes the legacy storage code and `no_legacy_storage` is green (14.1 madde 6).
+- Counts per package (from the ledger): IP-07: 18, IP-11: 1, IP-12: 9, IP-15: 4, IP-16: 7, IP-17: 34, IP-19: 4, IP-21: 2, IP-22: 1, IP-23: 4, IP-24: 2, IP-33: 20, IP-39: 3, IP-40: 4, IP-41: 2, IP-42: 28, IP-43: 1, IP-44: 28, IP-45: 25, IP-61: 10. Severity distribution: Critical 73, High 80, Medium 51, Low 3; 18 findings close by removal.
+

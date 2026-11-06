@@ -510,6 +510,24 @@ pub fn run(root: &Path) -> Result<String, String> {
 
 const CANARY_MAP: &str = "schema = 1\nmode = \"count\"\nglobal_allow_paths = [\"config/naming/\", \"docs/NAMING.md\"]\n\n[[concept]]\nold = [\"Canaryname\"]\npatterns = ['(?i)canary-?name']\nnew_code = \"x\"\nterm_en = \"x\"\nterm_tr = \"x\"\narea = \"x\"\nreason = \"x\"\nowner = \"WP-05\"\n";
 
+fn check_owners(concepts: &[Concept]) -> Result<(), String> {
+    let mut bad = String::new();
+    for c in concepts {
+        if !is_package_id(&c.owner) {
+            let _ = writeln!(
+                bad,
+                "  {}: owner {:?} is not a WP-NN package id",
+                c.name, c.owner
+            );
+        }
+    }
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("FAIL: concept map owners:\n{bad}"))
+    }
+}
+
 fn stage(root: &Path, map: &str, baseline: &str) -> Result<(), String> {
     let put = |rel: &str, body: &str| -> Result<(), String> {
         let p = root.join(rel);

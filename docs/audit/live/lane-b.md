@@ -191,3 +191,33 @@ snapshot disagree, the live result is authoritative.
 | BLG-243 | Medium | Gonca E22 | Open | blg_243_event_accumulation_32bit_sum | budzero/README.md; docs/AI_VERIFICATION_STATUS.md | IP-56|
 | BLG-261 | Low | src/deed/mod.rs | Open | blg_261_deed_register_manifest_breaks | src/deed/mod.rs (RegisterManifest breaks when 2.0 removed) | IP-23|
 | BLG-262 | Medium | src/gateway/service.rs | Open | blg_262_content_gateway_bitswap_sled | src/gateway/service.rs (gateway serves via Bitswap + local sled; not bound to B.U.D. 3.0 symbol path) | IP-23|
+
+## Verification rows carried from pr-68
+
+The merge kept this tree's row wording and lost the reproduction
+evidence columns. The evidence is carried back verbatim.
+
+| BLG-035 | Verified (Red test output) | audit_repro_b_blg_035 | bud/src/ (migration) | İP-07 | Medium |
+| BLG-045 | Verified (Red test output) | audit_repro_b_blg_045 | bud/src/ (migration) | İP-07 | Medium |
+| BLG-046 | Verified (Red test output) | audit_repro_b_blg_046 | bud/src/ (migration) | İP-07 | Medium |
+| BLG-047 | Verified (Red test output) | audit_repro_b_blg_047 | bud/src/ (migration) | İP-07 | Medium |
+| BLG-073 | Verified (Red test output) | audit_repro_b_blg_073 | bud/src/ (migration) | İP-07 | Medium |
+| BLG-074 | Verified (Red test output) | audit_repro_b_blg_074 | bud/src/ (migration) | İP-07 | Medium |
+| BLG-075 | Verified (Red test output) | audit_repro_b_blg_075 | bud/src/ (migration) | İP-07 | Medium |
+| BLG-076 | Verified (Red test output) | audit_repro_b_blg_076 | bud/src/ (migration) | İP-07 | Medium |
+| BLG-077 | Verified (Red test output) | audit_repro_b_blg_077 | bud/src/ (migration) | İP-07 | Medium |
+| BLG-078 | Verified (Red test output) | audit_repro_b_blg_078 | bud/src/ (migration) | İP-07 | Medium |
+| BLG-079 | Verified (Red test output) | audit_repro_b_blg_079 | bud/src/ (migration) | İP-07 | Medium |
+| BLG-080 | Verified (Red test output) | audit_repro_b_blg_080 | bud/src/ (migration) | İP-07 | Medium |
+| BLG-122 | Verified (Red test output) | audit_repro_b_blg_122 | bud/src/ (migration) | İP-07 | Medium |
+| BLG-123 | Verified (Red test output) | audit_repro_b_blg_123 | bud/src/ (migration) | İP-07 | Medium |
+| BLG-141 | Verified (Red test output) | audit_repro_b_blg_141 | bud/src/ (migration) | İP-07 | Medium |
+| BLG-152 | Verified (Red test output) | audit_repro_b_blg_152 | bud/src/ (migration) | İP-07 | Medium |
+| BLG-153 | Verified (Red test output) | audit_repro_b_blg_153 | bud/src/ (migration) | İP-07 | Medium |
+| BLG-156 | Verified (Red test output) | audit_repro_b_blg_156 | bud/src/ (migration) | İP-07 | Medium |
+| BLG-208 | Verified (Red test output) | audit_repro_b_blg_208 | bud/src/ (migration) | İP-07 | Medium |
+| BLG-209 | Verified (Red test output) | audit_repro_b_blg_209 | bud/src/ (migration) | İP-07 | Medium |
+| BLG-217 | Verified (Red test output) | audit_repro_b_blg_217 | bud/src/ (migration) | İP-07 | Medium |
+| BLG-253 | Verified (Red test output) | audit_repro_b_blg_253 | src/storage/mobile_self.rs | İP-07 | High |
+| BLG-254 | Verified (Red test output) | audit_repro_b_blg_254 | xtask/gates/src/gates/three_is_recipe_only.rs | İP-07 | High |
+| BLG-258 | Verified (Red test output) | audit_repro_b_blg_258 | budzero/bud-node/ | İP-07 | Medium |

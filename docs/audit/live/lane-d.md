@@ -360,3 +360,51 @@ One correction to an earlier reading in this file: `BULGU-001` through `BULGU-02
 section 14.6 archive table, not family placeholders. Section 14.6 names 27 `BULGU-` ids, 8
 `TEST-GAP-` ids and 9 `DOC-GAP-` ids, and it carries one row for each, 44 in total. The note that
 the archive might be short by 17 rows is withdrawn.
+
+## Rows carried from pr-87 and pr-18 (register and pull-request boundaries)
+
+The lane's own table above assigns records to the lane; the rows below
+carry the reproduction tests and proofs, and pr-18's boundary table.
+
+### Register rows (pr-87)
+
+| BLG-082 | High | Static security analysis / AST validation | Open | blg_082_ast_security_gates | xtask/gates/src/gates/ast_security_gates.rs (24/25 traces) | IP-42|
+| BLG-083 | Medium | Economy / Quality gates | Open | blg_083_supply_count_rate_consensus | xtask/gates/src/gates/economy_invariants.rs (20/20 traces) | IP-42|
+| BLG-084 | High | CI security / integrity gates | Open | blg_084_relay_fail_open_regeneration | xtask/gates/src/gates/relay.rs, regeneration.rs (7/7 traces) | IP-42|
+| BLG-086 | Medium | Gate reliability / CWE-377 / Language | Open | blg_086_turkish_strings_in_gates | xtask/gates/src/gates/ (19/19 traces; Turkish strings remain in gates) | IP-42|
+| BLG-087 | High | Fuzzing / Formal verification / Benchmarks | Open | blg_087_fuzz_targets_consensus | fuzz/, kani/ (29/32 traces; unbounded bincode::deserialize OOM; empty consensus_validate target) | IP-42|
+| BLG-171 | High | CI security gates / Supply chain | Open | blg_171_security_scans_can_fail | xtask/gates/src/gates/ (16/19 traces) | IP-42|
+| BLG-172 | Medium | Developer and operations tools | Open | blg_172_budlum_tools_poa_validators_json | xtask/tools/, ops/ (15/17 traces) | IP-42|
+| BLG-174 | High | ZK/STARK soundness gates | Open | blg_174_accumulators_pinned_first_row | xtask/gates/src/gates/ (18/20 traces) | IP-42|
+| BLG-175 | High | Supply chain / Build integrity gates | Open | blg_175_git_dep_audited_cargo_vet | xtask/gates/src/gates/ (15/17 traces) | IP-42|
+| BLG-176 | Medium | Benchmark accuracy / Module hygiene | Open | blg_176_bench_internal_pipeline_tps_chain_id | benches/ (8/10 traces; chain_id=1337 vs 45262) | IP-42|
+| BLG-177 | Medium | Address agreement gate / Storage admission / Role | Open - partial removal | blg_177_wallet_node_address_agree_extra_digest | src/crypto/primitives.rs vs crates/wallet-core (20/22 traces) | IP-42|
+| BLG-178 | High | ZKVM soundness / Gas calibration / Regression tests | Open | blg_178_zero_tests_witness_skip | xtask/gates/src/gates/ (16/18 traces) | IP-42|
+| BLG-179 | Critical | Snapshot serialization / Genesis schema / Slash | Open | blg_179_serialize_map_keys_enum | xtask/gates/src/gates/ (21/26 traces) | IP-42|
+| BLG-180 | Medium | Storage manifest / Coding audit / AI system | Open | blg_180_content_encryption_gate_tuple_key | xtask/gates/src/gates/ (16/20 traces) | IP-42|
+| BLG-181 | Medium | Fuzz coverage / Module coverage gate / CI shell gate | Open | blg_181_evm_mpt_verify_fixed_128 | fuzz/, xtask/gates/ (13/16 traces) | IP-42|
+| BLG-188 | High | Storage slashing security gate / MEV-free mempool | Open | blg_188_uncheckable_proof_false_true_flip | xtask/gates/src/gates/ (11/13 traces) | IP-42|
+| BLG-189 | Medium | Storage/Transfer pricing gates / Shard placement | Open | blg_189_storage_priced_gate_blindness | xtask/gates/src/gates/ (19/20 traces) | IP-42|
+
+### Pull-request boundaries (pr-18)
+
+## Queue and overlap check
+
+The open PR list and changed paths were read live before claiming this work:
+
+| PR | Scope | Treatment |
+|---|---|---|
+| #8 | Codec register and dedup index | Do not touch storage or codec paths |
+| #9 | WP-12 committee finality | Do not touch finality, validators or protocol paths |
+| #11 | WP-06 persistence migration | Do not touch persistence or its storage callers |
+| #12 | WP-01/02/03 live ledgers | Do not overwrite lane A/B/C files |
+| #13 | WP-20 placement, custody and repair | Do not edit its gates or findings entries |
+| #14 | WP-44 testnet feature closures | Do not edit feature closures or its package entries |
+| #15 | WP-03 audit artifacts | Lane C overlaps #12; consolidation must resolve ownership before importing either |
+
+WP-04 has no dependency for its initial lane audit. Its final consolidation
+waits for WP-01/02/03 to merge. No such merge is present on the live main base.
+This delivery does not duplicate their work and does not represent pending
+PRs as merged packages. It does not take any dependent implementation package.
+
+

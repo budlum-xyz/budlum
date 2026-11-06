@@ -84,3 +84,34 @@ adds an engine writes its own row here in the same PR that adds the dependency:
 This table is the input to TLG items 6 and 7. Both are red until at least
 `0x01`, `0x02`, `0x03`, `0x04` and `0x00` exist and the cross-environment call
 path of İP-30 exists.
+
+## Rows carried from pr-12 (the crate and engine table)
+
+The merge took pr-16's inventory organization and dropped this table;
+the crate and engine list is carried back verbatim.
+
+|---|---|---|---|
+| p3-air / p3-challenger / p3-commit / p3-dft / p3-field / p3-fri / p3-goldilocks / p3-keccak / p3-matrix / p3-maybe-rayon (plonky3) | 0.7.0 (all p3-* in `Cargo.lock`) | MIT/Apache-2.0 (upstream) | Not re-audited locally (no toolchain); supply-chain gates exist (`cargo_vet`, `supply-chain/`, `cargo-vet.yml` workflow, `deny.toml`) |
+| budzero/bud-vm (Budlum interpreter) | workspace `budzero/` (PolyForm Shield 1.0.0 at workspace root) | LicenseRef-PolyForm-Shield-1.0.0 | covered by workspace gates |
+| budzero/bud-proof (STARK verifier, `bud_stark`, Plonky3Adapter) | workspace `budzero/` | LicenseRef-PolyForm-Shield-1.0.0 | covered by workspace gates |
+| budzero/bud-isa, bud-state, bud-pul, verifier-registry | workspace `budzero/` | LicenseRef-PolyForm-Shield-1.0.0 | covered by workspace gates |
+| bud-compiler / bud-cli (BudL toolchain) | workspace `budzero/` | LicenseRef-PolyForm-Shield-1.0.0 | covered by workspace gates |
+| crates/uel-abi (the İP-09 interface) | workspace root | LicenseRef-PolyForm-Shield-1.0.0 | `crates/uel-abi` carries its own `Cargo.lock` |
+| Crate | Version(s) |
+|---|---|
+| bls12_381 | 0.9.0 |
+| ed25519-dalek | 2.2.0, 3.0.0 (two lines in the tree) |
+| k256 | 0.14.0 |
+| p256 | 0.14.0 |
+| ml-dsa | 0.1.1 |
+| sha2 | 0.10.9, 0.11.0 (two lines) |
+| blake3 | see Cargo.lock (present) |
+| Engine (section 8.2) | Present | Notes |
+|---|---|---|
+| revm | **absent** | WP-27 (İP-27) will introduce it; license check owed then (MIT/Apache-2.0 upstream) |
+| wasmi | **absent** | WP-29 (İP-29, CosmWasm ABI) |
+| solana-svm / solana-sbpf | **absent** | WP-31 (İP-31) |
+| aptos-vm / move-vm | **absent** | WP-32 (İP-32) |
+| cosmwasm (production vm.rs) | **absent** | WP-29 |
+| budzero (BudL interpreter + STARK) | present | see above |
+| zkVM (in-house) | present | `src/execution/zkvm.rs`, `ZkVmExecutor` |

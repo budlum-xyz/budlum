@@ -158,3 +158,18 @@ so their closing packages owe the named test.
 | BLG-277 | Medium | naming, CI | The concept map of appendix C has an `owner` field per entry and the repository's map did not. An entry with no owner is a rename nobody performs: the map would name a term to retire and no package to retire it. The gate did not read the field, so the omission was invisible. | `config/naming/concept_map.toml` before this change, appendix C of the directive, `xtask/gates/src/gates/concept_names.rs` | WP-05 |
 | BLG-278 | Medium | build, CI | `tree_is_english` fails on any commit that changes `.github/concept-names-baseline.txt`, because the gate scans the file and the baseline quotes the retired Turkish names as its keys. The file is in `ALLOWED_FILES` now; before, the only reason the gate passed was that the file never changed. | `xtask/gates/src/gates/tree_is_english.rs`, `ALLOWED_FILES`, and `.github/concept-names-baseline.txt` | WP-05 |
 BLG-278 is the kind of finding the suite cannot report about itself: a gate
+
+## Verification rows carried from pr-68
+
+The merge kept this tree's row wording and lost the reproduction
+evidence columns. The evidence is carried back verbatim.
+
+| BLG-004 | Medium | cryptography | Rewriting key file does not narrow existing wide permissions | Verified (Red test output) | audit_repro_a_blg_004 | İP-61 | Medium |
+| BLG-009 | Medium | cryptography | Main PQ API mandatory registered FIPS context and open schema identifier condition not met | Verified (Red test output) | audit_repro_a_blg_009 | İP-61 | Medium |
+| BLG-010 | Medium | cryptography | PKCS#11 key label (key_label) applies after founder binds single key without label | Verified (Red test output) | audit_repro_a_blg_010 | İP-61 | Medium |
+| BLG-011 | Medium | RPC/operation | Distributed ops/budlum-core.service unit does not provide RPC credential read by runtime and opens LimitCORE=infinity | Verified (Red test output) | audit_repro_a_blg_011 | İP-41 | Medium |
+| BLG-012 | Medium | build/CI | Global coverage latch (coverage.rs) reads percentage of first file instead of total and passes NaN base | Verified (Red test output) | audit_repro_d_blg_012 | İP-42 | Medium |
+| BLG-013 | Medium | build/CI | Documented prepush helper always runs intentionally overridden --all-features composition | Verified (Red test output) | audit_repro_d_blg_013 | İP-42 | Medium |
+| BLG-014 | Medium | storage | Backup drill (backup_drill.rs) --check-db exit code ignored and substring match accepted as success | Verified (Red test output) | audit_repro_d_blg_014 | İP-42 | Medium |
+| BLG-015 | Medium | build/CI | Three standalone Rust packages unit tests not run by root cargo test --workspace | Verified (Red test output) | audit_repro_d_blg_015 | İP-42 | Medium |
+| BLG-016 | High | build/CI/supply chain | Fresh RustSec scan finds patchable security notices in 6 of 11 tracked Cargo.lock files | Verified (Red test output) | audit_repro_d_blg_016 | İP-42 | High |
