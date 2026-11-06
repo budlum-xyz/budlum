@@ -109,7 +109,7 @@ fn uel_abi_worker_partial_frame_has_a_deadline_after_first_byte() {
     drop(peer);
     let result = worker.join().expect("worker");
     assert!(
-        matches!(result, Err(TransportError::Frame(FrameError::Timeout))),
+        matches!(result, Err(TransportError::Timeout)),
         "a started frame must expire at the watchdog, got {result:?}"
     );
     assert!(started.elapsed() < Duration::from_millis(2800));
