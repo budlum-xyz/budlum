@@ -171,6 +171,19 @@ STARK proving on every call (`BLG-248`).
 - `KR-UEL-REENTRANCY` (`IP-52` item 3): cross-environment reentrancy prohibition
   (`Section 8.7.3` item 6) remains enforced (`REENTRANCY_RULE_RETAINED_WP52 = true`).
 
+## 14. Deterministic Access-Set Parallel Block Execution (`WP-59`)
+
+- Height-gated (`ParallelSchedulerPolicy` in `src/execution/coordinator/scheduler/`):
+  closed at launch on testnet `45261` (`parallel_scheduler_is_closed_on_testnet`) and
+  switches to deterministic access-set wave execution (`StateKey::Account` +
+  `StateKey::UelSlot`) with automatic sequential barrier fallback on conflict.
+- Intra-environment (`Block-STM`) parallelism stays behind a separate flag and requires
+  passing state-root equality verification (`intra_ee_parallelism_active()`).
+- Calibration timing report (`PARALLEL_BLOCK_TIMING_JSON`) is emitted and uploaded by
+  `conformance-nightly.yml` alongside `parallel_schedule_equals_sequential_root` and
+  `parallel_scheduler_is_deterministic_across_arch`.
+
+
 
 
 

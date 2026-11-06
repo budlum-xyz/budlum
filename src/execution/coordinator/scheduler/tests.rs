@@ -167,6 +167,93 @@ fn parallel_scheduler_is_deterministic_across_arch() {
 
 const PINNED_WAVES: &str = "0,1,2,3|4|5,6,8,9|7,10,12|11|13|14,15,17,18|16,19,21|20|22|23";
 
+#[test]
+fn parallel_scheduler_is_closed_on_testnet() {
+    let default_policy = ParallelSchedulerPolicy::default();
+    assert!(!default_policy.scheduler_active());
+    assert!(!default_policy.intra_ee_parallelism_active());
+
+    let txs = [transfer(1, 2, 5), transfer(3, 4, 5), transfer(5, 6, 5)];
+    let mut state = funded();
+    let rep = execute_block_with_policy(&mut state, &txs, default_policy);
+    assert!(!rep.used_parallel_waves);
+    assert!(!rep.intra_ee_parallelism);
+    assert_eq!(rep.state_root, sequential(&txs));
+}
+
+#[test]
+fn intra_ee_block_stm_requires_separate_flag_and_equality_gate() {
+    let active_only = ParallelSchedulerPolicy {
+        chain_id: 45_261,
+        block_height: 500,
+        activation_height: Some(500),
+        intra_ee_block_stm_enabled: false,
+        intra_ee_equality_verified: true,
+    };
+    assert!(active_only.scheduler_active());
+    assert!(!active_only.intra_ee_parallelism_active());
+
+    let unverified = ParallelSchedulerPolicy {
+        intra_ee_block_stm_enabled: true,
+        intra_ee_equality_verified: false,
+        ..active_only
+    };
+    assert!(!unverified.intra_ee_parallelism_active());
+
+    let both_green = ParallelSchedulerPolicy {
+        intra_ee_block_stm_enabled: true,
+        intra_ee_equality_verified: true,
+        ..active_only
+    };
+    assert!(both_green.intra_ee_parallelism_active());
+}
+
+#[test]
+fn uel_slot_conflicts_fallback_to_sequential_wave() {
+    let slot_a = [0xA1; 32];
+    let slot_b = [0xB2; 32];
+    let s0 = access_set_with_uel_hint(&stake(1, 5), &[], &[(0x01, slot_a)]);
+    let s1 = access_set_with_uel_hint(&stake(2, 5), &[], &[(0x02, slot_b)]);
+    let s2 = access_set_with_uel_hint(&stake(3, 5), &[(0x01, slot_a)], &[]);
+    let p = plan(&[s0, s1, s2]);
+    assert_eq!(p.waves, vec![vec![0, 1], vec![2]]);
+}
+
+#[test]
+fn parallel_block_execution_duration_report_matches_sequential_root() {
+    let txs: Vec<Transaction> = (0..64u64)
+        .map(|i| {
+            let from = (i % 6 + 1) as u8;
+            let to = ((i + 3) % 6 + 1) as u8;
+            transfer(from, to, (i % 7) + 1)
+        })
+        .collect();
+    let mut seq_state = funded();
+    let seq_rep = execute_block_with_policy(
+        &mut seq_state,
+        &txs,
+        ParallelSchedulerPolicy::testnet_launch(),
+    );
+    let mut par_state = funded();
+    let par_rep = execute_block_with_policy(
+        &mut par_state,
+        &txs,
+        ParallelSchedulerPolicy {
+            chain_id: 45_261,
+            block_height: 1_000,
+            activation_height: Some(1_000),
+            intra_ee_block_stm_enabled: false,
+            intra_ee_equality_verified: true,
+        },
+    );
+    assert!(par_rep.used_parallel_waves);
+    assert_eq!(seq_rep.state_root, par_rep.state_root);
+    println!(
+        "PARALLEL_BLOCK_TIMING_JSON={{\"tx_count\":{},\"waves\":{},\"seq_us\":{},\"par_us\":{}}}",
+        par_rep.tx_count, par_rep.wave_count, seq_rep.elapsed_micros, par_rep.elapsed_micros
+    );
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(96))]
 
@@ -187,6 +274,20 @@ proptest! {
                 }
             })
             .collect();
-        prop_assert_eq!(sequential(&txs), planned(&txs));
+        let seq_root = sequential(&txs);
+        prop_assert_eq!(&seq_root, &planned(&txs));
+        let mut par_state = funded();
+        let rep = execute_block_with_policy(
+            &mut par_state,
+            &txs,
+            ParallelSchedulerPolicy {
+                chain_id: 45_261,
+                block_height: 100,
+                activation_height: Some(100),
+                intra_ee_block_stm_enabled: false,
+                intra_ee_equality_verified: true,
+            },
+        );
+        prop_assert_eq!(seq_root, rep.state_root);
     }
 }

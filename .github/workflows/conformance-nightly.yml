@@ -61,11 +61,22 @@ jobs:
           ROOT=$(cat "uel-root-${CONFORMANCE_ARCH}.hex")
           echo "UEL_EXECUTION_ROOT (${CONFORMANCE_ARCH}): ${ROOT}"
           test "${#ROOT}" -eq 64
+      - name: Measure parallel block execution timing (WP-59)
+        env:
+          CONFORMANCE_ARCH: ${{ matrix.arch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --release --lib execution::coordinator::scheduler::tests:: -- --nocapture | tee "scheduler-${CONFORMANCE_ARCH}.log"
+          sed -n 's/^PARALLEL_BLOCK_TIMING_JSON=//p' "scheduler-${CONFORMANCE_ARCH}.log" | head -n1 > "parallel-block-timing-${CONFORMANCE_ARCH}.json"
+          test -s "parallel-block-timing-${CONFORMANCE_ARCH}.json"
       - name: Upload execution_root digest
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: uel-root-${{ matrix.arch }}
-          path: uel-root-${{ matrix.arch }}.hex
+          path: |
+            uel-root-${{ matrix.arch }}.hex
+            parallel-block-timing-${{ matrix.arch }}.json
           if-no-files-found: error
           retention-days: 30
 

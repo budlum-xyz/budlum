@@ -33,15 +33,92 @@
 //! architecture produces the same waves
 //! (`parallel_scheduler_is_deterministic_across_arch`).
 
+use crate::core::account::AccountState;
 use crate::core::address::Address;
 use crate::core::transaction::{Transaction, TransactionType};
+use crate::execution::coordinator::assets::BUDLUM_TESTNET_CHAIN_ID;
+use crate::execution::executor::Executor;
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
+
+/// Activation and intra-EE (`Block-STM`) policy for deterministic parallel block
+/// scheduling (`Section 1.5`, `WP-59`).
+///
+/// Convenience: passed to `execute_block_with_policy` by coordinator and benchmarks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParallelSchedulerPolicy {
+    pub chain_id: u64,
+    pub block_height: u64,
+    pub activation_height: Option<u64>,
+    pub intra_ee_block_stm_enabled: bool,
+    pub intra_ee_equality_verified: bool,
+}
+
+impl Default for ParallelSchedulerPolicy {
+    fn default() -> Self {
+        Self::testnet_launch()
+    }
+}
+
+impl ParallelSchedulerPolicy {
+    /// Default `T-Acilis` launch policy on testnet `45261` (closed at launch).
+    ///
+    /// Convenience: default policy before `WP-59` height activation.
+    #[must_use]
+    pub const fn testnet_launch() -> Self {
+        Self {
+            chain_id: BUDLUM_TESTNET_CHAIN_ID,
+            block_height: 0,
+            activation_height: None,
+            intra_ee_block_stm_enabled: false,
+            intra_ee_equality_verified: false,
+        }
+    }
+
+    /// Returns `true` when cross-tx access-set wave scheduling is active.
+    ///
+    /// Convenience: queried by `execute_block_with_policy` and readiness probes.
+    #[must_use]
+    pub const fn scheduler_active(&self) -> bool {
+        match self.activation_height {
+            Some(h) => self.block_height >= h,
+            None => self.chain_id != BUDLUM_TESTNET_CHAIN_ID,
+        }
+    }
+
+    /// Intra-EE (`Block-STM`) parallelism requires its own explicit flag **and**
+    /// passing state-root equality verification (`IP-59`).
+    ///
+    /// Convenience: queried before enabling intra-EE parallel worker lanes.
+    #[must_use]
+    pub const fn intra_ee_parallelism_active(&self) -> bool {
+        self.scheduler_active()
+            && self.intra_ee_block_stm_enabled
+            && self.intra_ee_equality_verified
+    }
+}
+
+/// Non-consensus timing and wave summary emitted by [`execute_block_with_policy`].
+///
+/// Convenience: consumed by calibration reports (`IP-59`) and equality tests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockExecutionReport {
+    pub tx_count: usize,
+    pub wave_count: usize,
+    pub sequential_fallback_waves: usize,
+    pub used_parallel_waves: bool,
+    pub intra_ee_parallelism: bool,
+    pub elapsed_micros: u64,
+    pub state_root: String,
+}
 
 /// One unit of state a transaction can touch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StateKey {
     /// An account record: balance, nonce, and the account's vesting entry.
     Account(Address),
+    /// A canonical UEL namespace slot `(ee_id, key_digest)` for cross-EE wave planning.
+    UelSlot { ee_id: u8, slot: [u8; 32] },
 }
 
 /// What one transaction may read and write.
@@ -169,6 +246,111 @@ pub fn plan(sets: &[AccessSet]) -> Plan {
         }
     }
     Plan { waves }
+}
+
+/// Derive an [`AccessSet`] combining the sender/recipient account keys with
+/// declared UEL namespace read/write slot digests (`WP-59`).
+///
+/// Convenience: used by UEL wave planners when transactions declare explicit
+/// namespace access lists; falls back to [`AccessSet::global`] if both hints
+/// are empty on a non-transfer transaction.
+#[must_use]
+pub fn access_set_with_uel_hint(
+    tx: &Transaction,
+    uel_reads: &[(u8, [u8; 32])],
+    uel_writes: &[(u8, [u8; 32])],
+) -> AccessSet {
+    if uel_reads.is_empty() && uel_writes.is_empty() {
+        return access_set(tx);
+    }
+    if tx.from == Address::zero() {
+        return AccessSet::global();
+    }
+    let mut reads = BTreeSet::new();
+    let mut writes = BTreeSet::new();
+    writes.insert(StateKey::Account(tx.from));
+    if tx.to != Address::zero() {
+        writes.insert(StateKey::Account(tx.to));
+    }
+    for (ee_id, slot) in uel_reads {
+        reads.insert(StateKey::UelSlot {
+            ee_id: *ee_id,
+            slot: *slot,
+        });
+    }
+    for (ee_id, slot) in uel_writes {
+        writes.insert(StateKey::UelSlot {
+            ee_id: *ee_id,
+            slot: *slot,
+        });
+    }
+    AccessSet {
+        reads,
+        writes,
+        global: false,
+    }
+}
+
+/// Execute `txs` against `state` under `policy`, falling back to strict block
+/// order when `policy.scheduler_active()` is `false` or when a wave contains
+/// conflicting / global transactions (`WP-59`).
+///
+/// Convenience: entry point for height-gated parallel block execution and
+/// calibration timing reports.
+pub fn execute_block_with_policy(
+    state: &mut AccountState,
+    txs: &[Transaction],
+    policy: ParallelSchedulerPolicy,
+) -> BlockExecutionReport {
+    let started = Instant::now();
+    if !policy.scheduler_active() {
+        for tx in txs {
+            let _ = Executor::apply_transaction(state, tx);
+        }
+        let elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        return BlockExecutionReport {
+            tx_count: txs.len(),
+            wave_count: txs.len(),
+            sequential_fallback_waves: txs.len(),
+            used_parallel_waves: false,
+            intra_ee_parallelism: false,
+            elapsed_micros,
+            state_root: state.calculate_state_root(),
+        };
+    }
+
+    let sets: Vec<AccessSet> = txs.iter().map(access_set).collect();
+    let schedule = plan(&sets);
+    let mut sequential_fallback_waves = 0usize;
+    for wave in &schedule.waves {
+        let wave_has_conflict = wave.len() == 1
+            && wave
+                .first()
+                .and_then(|&idx| sets.get(idx))
+                .is_some_and(|s| s.global);
+        if wave_has_conflict {
+            sequential_fallback_waves = sequential_fallback_waves.saturating_add(1);
+        }
+        // Disjoint transactions inside a wave commute; executing in canonical
+        // ascending index order preserves deterministic trace ordering across
+        // architectures while guaranteeing byte-identical roots with any wave
+        // permutation (`parallel_schedule_equals_sequential_root`).
+        for &idx in wave {
+            if let Some(tx) = txs.get(idx) {
+                let _ = Executor::apply_transaction(state, tx);
+            }
+        }
+    }
+    let elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    BlockExecutionReport {
+        tx_count: txs.len(),
+        wave_count: schedule.waves.len(),
+        sequential_fallback_waves,
+        used_parallel_waves: true,
+        intra_ee_parallelism: policy.intra_ee_parallelism_active(),
+        elapsed_micros,
+        state_root: state.calculate_state_root(),
+    }
 }
 
 #[cfg(test)]
