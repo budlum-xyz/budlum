@@ -337,12 +337,47 @@ fn parse_baseline(text: &str) -> Result<BTreeMap<String, Count>, String> {
     Ok(out)
 }
 
+/// Keep the comment block of `previous` and take the data lines of `rendered`.
+///
+/// The writer must not delete a sentence somebody wrote about the numbers it is
+/// about to replace: the recorded measurement is the only evidence that a
+/// baseline was ever measured rather than guessed. Everything above the first
+/// line that is not a comment is carried over; if there is no such block, the
+/// rendered header is used.
+fn merge_comment_head(previous: &str, rendered: &str) -> String {
+    let head: String = previous
+        .lines()
+        .take_while(|l| {
+            let t = l.trim();
+            t.is_empty() || t.starts_with('#')
+        })
+        .map(|l| format!("{l}\n"))
+        .collect();
+    if !head.contains('#') {
+        return rendered.to_string();
+    }
+    let body: String = rendered
+        .lines()
+        .skip_while(|l| {
+            let t = l.trim();
+            t.is_empty() || t.starts_with('#')
+        })
+        .map(|l| format!("{l}\n"))
+        .collect();
+    format!("{head}{body}")
+}
+
 fn render_baseline(counts: &BTreeMap<String, Count>) -> String {
     let mut s = String::from(
         "# Legacy concept-name counts per entry of config/naming/concept_map.toml.\n\
          # One line per entry: name|files|matches. A ratchet: the numbers may only fall.\n\
          # Lower it with: BUDLUM_CONCEPT_NAMES_WRITE=1 budlum-gates concept-names\n\
-         # The map moves to `absolute` mode once every line is zero.\n",
+         # The map moves to `absolute` mode once every line is zero.\n\
+         #\n\
+         # A first write over a file that already existed keeps its prose: the\n\
+         # writer replaces the data lines and leaves every comment above them, so\n\
+         # the measurement recorded here is not silently dropped when the numbers\n\
+         # fall. A reader that cannot find the data block rewrites the header.\n",
     );
     for (name, c) in counts {
         let _ = writeln!(s, "{name}|{}|{}", c.files, c.matches);
@@ -397,7 +432,9 @@ fn check(root: &Path, write: bool) -> Result<String, String> {
                 }
             }
         }
-        std::fs::write(&base_path, render_baseline(&counts))
+        let previous = std::fs::read_to_string(&base_path).unwrap_or_default();
+        let rendered = render_baseline(&counts);
+        std::fs::write(&base_path, merge_comment_head(&previous, &rendered))
             .map_err(|e| format!("cannot write {BASELINE_PATH}: {e}"))?;
         return Ok(format!(
             "wrote {BASELINE_PATH}: {total} legacy match(es) in total."
@@ -666,6 +703,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The writer must not delete the sentences somebody wrote about the
+    /// numbers it replaces, and it must still replace the numbers.
+    #[test]
+    fn the_writer_keeps_the_comment_head() {
+        let previous = "# measured 2026-11-06\n# second line\nA|1|2\nB|3|4\n";
+        let rendered = "# generated\nA|1|1\nB|3|3\n";
+        let merged = merge_comment_head(previous, rendered);
+        assert!(merged.starts_with("# measured 2026-11-06\n# second line\n"), "{merged}");
+        assert!(merged.contains("A|1|1\n") && merged.contains("B|3|3\n"), "{merged}");
+        assert!(!merged.contains("A|1|2"), "the old data line survived: {merged}");
+        // A file with no comment block takes the rendered header.
+        assert_eq!(merge_comment_head("A|1|2\n", rendered), rendered);
     }
 
     #[test]

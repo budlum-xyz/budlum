@@ -41,6 +41,24 @@ the count does not reach zero in this packet. What closes here is the packet's
 own part: the map carries the owning package on every entry, the baseline is the
 gate's own measurement, and the gate refuses a baseline that disagrees with it.
 
+| BLG-012 | High | The coverage ratchet reads the first file's percentage instead of the total and lets a `NaN` baseline through | Closed | `baseline_must_be_a_finite_percentage` and `the_total_is_read_not_the_first_file` in `xtask/gates/src/gates/coverage.rs` | WP-42 | already fixed, before this packet | the pull request names the tree |
+| BLG-014 | Medium | The backup drill ignores the `--check-db` exit code and accepts a substring as success | Closed | `check.status.success()` plus `integrity_line` in `xtask/tools/src/backup_drill.rs`, pinned by `backup_drill::self_test` step 4 and `integrity_line_reports_what_matched` | WP-42 | already fixed, before this packet | the pull request names the tree |
+
+`BLG-012` and `BLG-014` were both already closed in the tree when this packet
+read them: `coverage.rs` takes `data[0].totals.lines.percent` (the totals), and
+`parse_baseline` refuses `nan`, `inf`, a negative floor and anything above 100;
+`backup_drill.rs` returns an error when `--check-db` exits non-zero and parses
+the integrity line with `integrity_line` instead of accepting a substring. The
+WP-42 card lists them because the directive's snapshot predates the fixes. No
+test was added here, because both already have one and a second test of the same
+line proves nothing; the evidence is those tests, by name.
+
+### Partly closed, with the remainder named
+
+| Finding | Severity | Title | Status | What is done | What remains |
+|---|---|---|---|---|---|
+| TEST-GAP-02 | Medium | Kani covers a quarter of the `SECURITY.md` targets | Partly closed | `kani/` builds, and `workflows-cover-every-workspace` makes its coverage by a workflow a measured fact instead of a claim | the harnesses for seat allocation, `frac_attos` arithmetic and the fee formula are proof work, not gate work; they are not in this packet |
+
 ## Open
 
 The rows WP-01 to WP-04 will fill. Until then the directive's Section 14.3

@@ -2000,6 +2000,27 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- gates-are-wired --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- gates-are-wired
+      # A float in a consensus path forks the chain, and it was the one class of
+      # defect no gate in this tree could see: the coverage ratchet counts tests,
+      # the determinism job compares one binary's output across hosts, and the
+      # two are silent about a rule the source itself breaks. Section 15.8 of the
+      # directive names the gate (WP-42 item 4), so it runs by name here rather
+      # than waiting for `--all` to be rebuilt.
+      - name: no float on the consensus path + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-float-in-consensus-paths --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-float-in-consensus-paths
+      # Seven workspace roots; all seven are covered today, measured rather
+      # than assumed, and two of them - `contracts/object-layer/cosmwasm` and
+      # `contracts/object-layer/svm` - only because the gate exempts them with
+      # their toolchain named. A workspace no workflow builds is code nobody
+      # compiles on a pull request. The list is discovered from the manifests
+      # rather than kept by hand, because a hand list is what goes stale when
+      # the eighth workspace arrives.
+      - name: every Cargo workspace is built by a workflow + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- workflows-cover-every-workspace --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- workflows-cover-every-workspace
       # The gates are moving to Rust. A gate decides what enters the main branch,
       # it is inside the trust boundary, and the shell is a bad language for that:
       # a misspelled variable is not an error but an empty string, so a check

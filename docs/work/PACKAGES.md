@@ -33,6 +33,7 @@ status, its pull requests, its last commit, and the findings it closes.
 | WP-06 | B | launch | WP-02 | claimed, open pull request |
 | WP-12 | A | launch | WP-08 | claimed, open pull request |
 | WP-20 | B | launch | WP-08, WP-18 | claimed, open pull request |
+| WP-42 | D | launch | WP-04 | **started in this pull request** (gates 1 and 2 of 8), see below |
 | WP-44 | A | launch | WP-01 | claimed, open pull request |
 
 Every other package has an unmerged dependency, so Section 15.1 item 5 makes it
@@ -64,3 +65,29 @@ is the measurement of this tree; run the gate with
 `BUDLUM_CONCEPT_NAMES_WRITE=1 cargo run --release --manifest-path xtask/gates/Cargo.toml -- concept-names`
 to re-measure. The writer refuses to raise a number, so any change it makes is
 a lowering.
+
+## WP-42: CI, gates and the supply chain
+
+Section 15.8, WP-42 card. Lane D, layer T-Launch, TLG yes. Dependency WP-04,
+whose output (the lane ledgers) is not on `main`; the two gates below read the
+tree, not that output, so the dependency did not hold them.
+
+The card has eight jobs. Two are done here, and the other six are named so the
+next packet does not start from a guess:
+
+| Card item | State | What this packet did |
+|---|---|---|
+| 4. The float gate | done | `no_float_in_consensus_paths`, with the scope the card lists and a canary that stages each skip |
+| (16.3) every workspace is compiled | done | `workflows_cover_every_workspace`, which discovers the workspace roots instead of listing them, and exempts the two contract workspaces with their toolchains named |
+| 1. The workflow set of Section 16.2 | open | nine of the twelve named files do not exist: `execution.yml`, `mobile.yml`, `mobile-ios.yml`, `conformance-nightly.yml`, `storage-nightly.yml`, `churn-nightly.yml`, `nat-nightly.yml`, `supply-chain.yml` and `release.yml`. `release-signature.yml` is not `release.yml`. Adding one of them is a packet with its own tests, so this packet adds none rather than nine untested ones |
+| 2. Runner requirements | open | `determinism.yml` runs x86_64, macOS and Windows but no `aarch64` runner, and no workflow names a 16 GiB requirement or a macOS job for iOS |
+| 3. deny / vet / geiger per execution workspace | mostly done | `ci.yml` runs `cargo-deny` and the licence matrix over eleven manifests, but the `supply-chain-extra.yml` geiger job walks the root and `budzero` only, so `crates/ai-inference` and `crates/budscan` are not measured for unsafe code |
+| 5. Kani coverage of the `SECURITY.md` targets | open | `TEST-GAP-02` is recorded as partly closed in `docs/audit/FINDINGS.md`, with the remainder named |
+| 6. The new fuzz targets | mostly done | the seven named parsers have targets; `uel_abi_frame` runs from `fuzz/` and the list is pinned by `fuzz/`'s manifest |
+| 7. The listed CI and gate findings | partly done | `BLG-012` and `BLG-014` were already closed in the tree; the other thirty-odd findings on the card, and the four gate findings for the two contract workspaces, are untouched |
+| 8. The `budlum-indexer` binary registration | already done | `Cargo.toml` carries the `[[bin]]` row by name, so `DOC-GAP-07` needs verification, not a change |
+
+Measuring the two gates: run
+`cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-float-in-consensus-paths`
+and `... -- workflows-cover-every-workspace`. Both are wired into `ci.yml`'s
+Gates job by name, so `--all` is not the only way they run.
