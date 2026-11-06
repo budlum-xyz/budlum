@@ -5,7 +5,7 @@ use crate::error::CoreError;
 use crate::handover::{fetch_from_holders, Holder, ShareSource};
 use crate::policy::Policy;
 use crate::presence::{network_hint_ipv4, PresenceSignal, ResumeValidator, ValidatorClass};
-use crate::quota::below_floor;
+use crate::quota::{below_floor, QUOTA_MIN_BYTES};
 use crate::relay::{RelayOffer, RelayPool};
 use crate::store::{AssignedShare, ShareId, ShareStore};
 
@@ -300,8 +300,8 @@ impl MobileCore {
     }
 
     /// Release largest shares until free space is at least 2 GB, and lower
-    /// the quota to the bytes that remain. Returns the duty if anything was
-    /// released.
+    /// the quota to the bytes that remain, subject to the 1 GiB minimum.
+    /// Returns the duty if anything was released.
     pub fn release_for_floor(&mut self) -> Option<DutyTx> {
         if !below_floor(self.available_bytes) {
             return None;
@@ -319,7 +319,7 @@ impl MobileCore {
                 None => break,
             }
         }
-        self.policy.quota_bytes = self.store.stored_bytes().max(1);
+        self.policy.quota_bytes = self.store.stored_bytes().max(QUOTA_MIN_BYTES);
         if released.is_empty() {
             None
         } else {
