@@ -14,7 +14,9 @@ pub const FREE_SPACE_FLOOR_BYTES: u64 = 2_000_000_000;
 /// Whether `stored` plus `incoming` fits in `quota`.
 #[must_use]
 pub fn fits(stored: u64, incoming: u64, quota: u64) -> bool {
-    stored.saturating_add(incoming) <= quota
+    stored
+        .checked_add(incoming)
+        .is_some_and(|total| total <= quota)
 }
 
 /// Whether free space is below the 2 GB floor.
