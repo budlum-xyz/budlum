@@ -62,12 +62,8 @@ enum Mode {
 /// One entry of the map, reduced to what the gate reads.
 struct Concept {
     name: String,
-<<<<<<< HEAD
     /// The work package that performs the rename, as `WP-NN`.
     owner: u16,
-=======
-    owner: String,
->>>>>>> refs/pr/50
     patterns: Vec<regex::Regex>,
     paths: Vec<String>,
     allow_paths: Vec<String>,
@@ -175,11 +171,7 @@ fn parse_map(text: &str) -> Result<Map, String> {
             .cloned()
             .ok_or_else(|| format!("concept #{i}: `old` is empty"))?;
         let who = format!("concept `{name}`");
-<<<<<<< HEAD
         for key in ["new_code", "term_en", "term_tr", "area", "reason", "owner"] {
-=======
-        for key in ["new_code", "term_en", "term_tr", "area", "owner", "reason"] {
->>>>>>> refs/pr/50
             required_str(t, key, &who)?;
         }
         let owner = parse_owner(required_str(t, "owner", &who)?)?;
@@ -194,11 +186,7 @@ fn parse_map(text: &str) -> Result<Map, String> {
         }
         concepts.push(Concept {
             name,
-<<<<<<< HEAD
             owner,
-=======
-            owner: required_str(t, "owner", &who)?.to_string(),
->>>>>>> refs/pr/50
             patterns,
             paths: string_list(t, "paths")?,
             allow_paths: string_list(t, "allow_paths")?,
@@ -437,43 +425,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     check(root, std::env::var_os(WRITE_ENV).is_some_and(|v| v == "1"))
 }
 
-<<<<<<< HEAD
 const CANARY_MAP: &str = "schema = 1\nmode = \"count\"\nglobal_allow_paths = [\"config/naming/\", \"docs/NAMING.md\"]\n\n[[concept]]\nold = [\"Canaryname\"]\npatterns = ['(?i)canary-?name']\nnew_code = \"x\"\nterm_en = \"x\"\nterm_tr = \"x\"\narea = \"x\"\nreason = \"x\"\nowner = \"WP-05\"\n";
-=======
-const CANARY_MAP: &str = "schema = 1\nmode = \"count\"\nglobal_allow_paths = [\"config/naming/\", \"docs/NAMING.md\"]\n\n[[concept]]\nold = [\"Canaryname\"]\npatterns = ['(?i)canary-?name']\nnew_code = \"x\"\nterm_en = \"x\"\nterm_tr = \"x\"\narea = \"x\"\nowner = \"WP-05\"\nreason = \"x\"\n";
-
-/// A `WP-NN` id: the package identity the repository and GitHub use
-/// (directive section 15.3 item 1).
-fn is_package_id(s: &str) -> bool {
-    let Some(rest) = s.strip_prefix("WP-") else {
-        return false;
-    };
-    rest.len() == 2 && rest.bytes().all(|b| b.is_ascii_digit())
-}
-
-/// Every entry names the package that retires the name.
-///
-/// The ownership table in `docs/NAMING.md` is written from this field, so an
-/// entry with an unknown or missing owner is a rename that would never be
-/// carried out and a row that document could not state.
-fn check_owners(concepts: &[Concept]) -> Result<(), String> {
-    let mut bad = String::new();
-    for c in concepts {
-        if !is_package_id(&c.owner) {
-            let _ = writeln!(
-                bad,
-                "  {}: owner {:?} is not a WP-NN package id",
-                c.name, c.owner
-            );
-        }
-    }
-    if bad.is_empty() {
-        Ok(())
-    } else {
-        Err(format!("FAIL: concept map owners:\n{bad}"))
-    }
-}
->>>>>>> refs/pr/50
 
 fn stage(root: &Path, map: &str, baseline: &str) -> Result<(), String> {
     let put = |rel: &str, body: &str| -> Result<(), String> {
@@ -529,7 +481,6 @@ pub fn self_test() -> Result<String, String> {
         if check(&dir, false).is_ok() {
             return Err(String::from("canary: absolute mode accepted a legacy name"));
         }
-<<<<<<< HEAD
         let bad_owner = CANARY_MAP.replace("owner = \"WP-05\"", "owner = \"WP-99\"");
         if parse_map(&bad_owner).is_ok() {
             return Err(String::from("canary: an unknown owner was accepted"));
@@ -537,20 +488,6 @@ pub fn self_test() -> Result<String, String> {
         let short_owner = CANARY_MAP.replace("owner = \"WP-05\"", "owner = \"WP-5\"");
         if parse_map(&short_owner).is_ok() {
             return Err(String::from("canary: a malformed owner was accepted"));
-=======
-        stage(
-            &dir,
-            &CANARY_MAP.replace("owner = \"WP-05\"", "owner = \"whoever\""),
-            zero,
-        )?;
-        match check(&dir, false) {
-            Err(e) if e.contains("owner") => {}
-            other => {
-                return Err(format!(
-                    "canary: an entry with a non-package owner was accepted: {other:?}"
-                ))
-            }
->>>>>>> refs/pr/50
         }
         Ok(())
     })();
