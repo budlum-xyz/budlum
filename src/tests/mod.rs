@@ -253,3 +253,7 @@ pub mod bud3_door;
 // The persistence move is behaviour-neutral.
 #[cfg(test)]
 pub mod persistence_move;
+
+// WP-17 state transition, vesting, staking, governance, sharding, and V2 snapshot hardening.
+#[cfg(test)]
+pub mod wp17_state_hardening;

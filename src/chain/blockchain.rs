@@ -3518,7 +3518,21 @@ impl Blockchain {
                 break;
             }
 
-            let pending_cost = pending.total_cost();
+            let pending_cost = if matches!(
+                &pending.tx_type,
+                crate::core::transaction::TransactionType::Unstake
+                    | crate::core::transaction::TransactionType::Vote
+                    | crate::core::transaction::TransactionType::Undelegate { .. }
+                    | crate::core::transaction::TransactionType::WithdrawDelegation { .. }
+                    | crate::core::transaction::TransactionType::SetValidatorCommission { .. }
+                    | crate::core::transaction::TransactionType::Redelegate { .. }
+                    | crate::core::transaction::TransactionType::ClaimRewards { .. }
+                    | crate::core::transaction::TransactionType::AiOperatorWithdraw
+            ) {
+                pending.fee
+            } else {
+                pending.total_cost()
+            };
             if spendable_balance < pending_cost {
                 break;
             }
@@ -3576,7 +3590,14 @@ impl Blockchain {
         }
         let precheck_cost = if matches!(
             &tx.tx_type,
-            crate::core::transaction::TransactionType::Undelegate { .. }
+            crate::core::transaction::TransactionType::AiOperatorWithdraw
+        ) {
+            0
+        } else if matches!(
+            &tx.tx_type,
+            crate::core::transaction::TransactionType::Unstake
+                | crate::core::transaction::TransactionType::Vote
+                | crate::core::transaction::TransactionType::Undelegate { .. }
                 | crate::core::transaction::TransactionType::WithdrawDelegation { .. }
                 | crate::core::transaction::TransactionType::SetValidatorCommission { .. }
                 | crate::core::transaction::TransactionType::Redelegate { .. }
