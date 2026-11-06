@@ -1,7 +1,9 @@
-# B.U.D.: Broad Universal Database (module README)
+# Legacy storage notes (historical)
 
-**By the module-separation rule this is B.U.D.'s own README.**
-The root `README.md` is a dashboard only; maturity and risk warnings live here.
+This document describes a pre-migration storage implementation. It does not
+reflect the current RPC surface. The legacy routes described below are removed.
+See `docs/STORAGE.md` for the current B.U.D. 3.0 construction status.
+
 
 ## Status
 

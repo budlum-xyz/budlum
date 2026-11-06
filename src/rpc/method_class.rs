@@ -174,11 +174,6 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_adminBanPeer", Operator, LocalAdmin),
     row("bud_adminUnbanPeer", Operator, LocalAdmin),
     row("bud_adminListBannedPeers", Operator, Read),
-    // refused; manifest registration is `StorageTx::RegisterManifest`.
-    row("bud_storageRegisterManifest", Operator, Refused),
-    row("bud_storageVerifyEncoding", Public, Read),
-    row("bud_storageQrFeedPreview", Public, Read),
-    row("bud_storageQrFeedFrames", Public, Read),
     // Refused on every chain until grants ride a block transaction.
     row("bud_storageIssueViewGrant", Public, Refused),
     row("bud_storageRevokeViewGrant", Public, Refused),
@@ -188,26 +183,6 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_storageOpenReveal", Public, LocalAdmin),
     row("bud_storageRevealFrames", Public, LocalAdmin),
     row("bud_storageCloseReveal", Public, LocalAdmin),
-    row("bud_storageRegisterConfidentialCommit", Operator, Refused),
-    row("bud_storageGetConfidentialCommit", Public, Read),
-    // refused; the doors are `StorageTx::OpenDeal` and
-    // `StorageTx::AcceptReallocation`.
-    row("bud_storageOpenDeal", Operator, Refused),
-    row("bud_storageAcceptReallocation", Operator, Refused),
-    row("bud_storageGetManifest", Public, Read),
-    row("bud_storageGetDealsByManifest", Public, Read),
-    row("bud_storageGetDealsByShard", Public, Read),
-    row("bud_storageGetChallenges", Public, Read),
-    // refused; the doors are `StorageTx::OpenChallenge` and
-    // `StorageTx::AnswerChallenge`.
-    row("bud_storageOpenChallenge", Operator, Refused),
-    row("bud_storageAnswerChallenge", Operator, Refused),
-    row("bud_storageGetEconomicsSummary", Public, Read),
-    row("bud_storageGetEconomicsEvents", Public, Read),
-    row("bud_storageGetOperatorEconomics", Public, Read),
-    row("bud_storageGetOutcome", Public, Read),
-    row("bud_storageRepairBand", Public, Read),
-    row("bud_storageActiveOperators", Public, Read),
     row("bud_bnsResolve", Public, Read),
     row("bud_bnsResolveFull", Public, Read),
     row("bud_bnsResolveContent", Public, Read),
@@ -404,6 +379,38 @@ mod tests {
             gated, marked,
             "a handler calls require_operator without an Operator row, or the reverse"
         );
+    }
+
+    #[test]
+    fn legacy_storage_rpc_methods_are_not_declared_or_classified() {
+        const REMOVED: &[&str] = &[
+            "bud_storageAcceptReallocation",
+            "bud_storageActiveOperators",
+            "bud_storageAnswerChallenge",
+            "bud_storageGetChallenges",
+            "bud_storageGetConfidentialCommit",
+            "bud_storageGetDealsByManifest",
+            "bud_storageGetDealsByShard",
+            "bud_storageGetEconomicsEvents",
+            "bud_storageGetEconomicsSummary",
+            "bud_storageGetManifest",
+            "bud_storageGetOperatorEconomics",
+            "bud_storageGetOutcome",
+            "bud_storageOpenChallenge",
+            "bud_storageOpenDeal",
+            "bud_storageRegisterConfidentialCommit",
+            "bud_storageRegisterManifest",
+            "bud_storageRepairBand",
+            "bud_storageVerifyEncoding",
+            "bud_storageQrFeedFrames",
+            "bud_storageQrFeedPreview",
+        ];
+        let declared: BTreeSet<String> = declared_methods().into_iter().collect();
+        let classified: BTreeSet<&str> = METHOD_CLASSES.iter().map(|row| row.name).collect();
+        for name in REMOVED {
+            assert!(!declared.contains(*name), "{name} remains declared in api.rs");
+            assert!(!classified.contains(name), "{name} remains in METHOD_CLASSES");
+        }
     }
 
     #[test]

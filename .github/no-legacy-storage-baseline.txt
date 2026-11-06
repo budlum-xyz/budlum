@@ -34,10 +34,8 @@ src/network/node.rs
 src/network/proto_conversions.rs
 src/pollen/content_gate.rs
 src/registry/role.rs
-src/rpc/api.rs
 src/rpc/method_class.rs
 src/rpc/server.rs
-src/rpc/tests.rs
 src/storage/README.md
 src/storage/assignment.rs
 src/storage/content_id.rs
