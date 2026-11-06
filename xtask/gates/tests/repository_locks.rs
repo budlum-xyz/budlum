@@ -293,3 +293,15 @@ fn rust_syntax_gate_is_wired() {
     let gate = read("xtask/gates/src/gates/rust_syntax_is_parseable.rs");
     assert!(gate.contains("syn::parse_file("));
 }
+
+#[test]
+fn no_legacy_storage_gate_is_registered_once() {
+    let main = read("xtask/gates/src/main.rs");
+    assert!(main.contains("pub mod no_legacy_storage;"));
+    assert_eq!(
+        main.matches("name: \"no-legacy-storage\"").count(),
+        1,
+        "no-legacy-storage must be registered exactly once in main.rs"
+    );
+}
+
