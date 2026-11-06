@@ -3,6 +3,7 @@
   "pq_scheme": "ml-dsa-65",
   "allocations": [],
   "validators": [],
+  "validator_consensus_keys": [],
   "block_reward": 0,
   "base_fee": 1,
   "gas_schedule": {

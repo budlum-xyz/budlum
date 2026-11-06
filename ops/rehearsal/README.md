@@ -18,10 +18,21 @@ throwaway network before the real ceremony.
 
 ## Procedure
 
-1. Ceremony rehearsal: `ops/rehearsal/genesis_rehearsal.sh <dir-with-public-registrations>`
-   writes the rehearsal genesis, records its SHA-256 digest under
-   `docs/rehearsal/` and refuses fewer than 8 Full validators.
-2. Bring the network up from `config/rehearsal-genesis.json`.
+1. Ceremony rehearsal: generate each public record with `bud validator init`
+   (`--key-file <private-path>`, `--chain-id 45261`, `--record-out <path>`), then run
+   `ops/rehearsal/genesis_rehearsal.sh <dir-with-public-registrations>`. The
+   script accepts the `OperatorRecord` schema emitted by that command. It
+   stages only the validator address and complete public consensus keys, rejects
+   duplicate validators, duplicate consensus keys, extra fields and fewer than
+   8 records, then calls `bud genesis assemble --network testnet` to verify the
+   chain-bound proofs and build a `GenesisConfig`-compatible file. The template's
+   timestamp and network parameters must match the assembled testnet genesis.
+   Build the binary with `cargo build --release --bin bud`; if `bud` is not on
+   `PATH`, set `BUD_BIN=target/release/bud`. The script records the published
+   file's SHA-256 digest under `docs/rehearsal/`. Key files are never input to
+   this script.
+2. Bring the rehearsal network up from the generated
+   `docs/rehearsal/rehearsal-genesis.json`, not from the empty template.
 3. Run the 72-hour soak, then the drills in `ops/rehearsal/drills/`.
 4. Every drill writes its evidence (metric output, node log summary,
    timeline) under `docs/rehearsal/`.
