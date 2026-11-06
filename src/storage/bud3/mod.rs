@@ -19,6 +19,7 @@
 //! | [`custody`] | Sub-block tree, symbol root, the audit draw and custody proofs |
 //! | [`pipeline`] | Upload (content to record and symbols) and view (symbols to checked content) |
 //! | [`fountain`] | RFC 6330 per-segment encoder and decoder, and the streaming encoder |
+//! | [`upload`] | The upload session: chunked content, the streamed content id and the gateway's limits |
 //!
 //! The commitment is fixed-size (32 bytes). The object is not fixed-size: it
 //! is the header plus the payload, and it is at most the header larger than
@@ -41,6 +42,7 @@ pub mod placement;
 pub mod registry;
 pub mod segment;
 pub mod tx;
+pub mod upload;
 pub mod varint;
 
 pub use bof1::{Bof1Error, Flags, Header, Object};
