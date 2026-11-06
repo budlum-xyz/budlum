@@ -73,7 +73,7 @@ impl Payload {
     /// The payload length, which is the object header's `payload_len`.
     #[must_use]
     pub fn len(&self) -> u64 {
-        self.0.len() as u64
+        u64::try_from(self.0.len()).unwrap_or(u64::MAX)
     }
 
     /// An empty payload is still a payload: zero content codes to zero bytes.
@@ -161,7 +161,9 @@ impl QrVideo {
         if self.fps == 0 {
             return 0;
         }
-        (self.frames.len() as u64).div_ceil(u64::from(self.fps))
+        u64::try_from(self.frames.len())
+            .unwrap_or(u64::MAX)
+            .div_ceil(u64::from(self.fps))
     }
 }
 
@@ -255,7 +257,6 @@ impl RefCount {
         self.references.saturating_add(self.bound)
     }
 
-    /// reference path is the caller.
     /// Whether the object is unreferenced and may be deleted.
     #[must_use]
     pub const fn is_zero(&self) -> bool {
