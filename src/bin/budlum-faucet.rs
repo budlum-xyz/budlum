@@ -454,7 +454,9 @@ impl Ledger {
 
     fn roll_day(&mut self, now: u64) {
         let day = now / SECONDS_PER_DAY;
-        if day != self.day {
+        // A wall-clock correction must not reset the cap a second time.
+        // Keep the newest day seen until the clock catches up again.
+        if day > self.day {
             self.day = day;
             self.sent_today = 0;
             self.requests_previous_day = self.requests_today;
@@ -1055,6 +1057,33 @@ mod tests {
                 &Address::from([9u8; 32]),
                 ip(9),
                 day + super::SECONDS_PER_DAY,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn faucet_limits_hold_when_the_clock_moves_backwards() {
+        let p = Policy::from_bud(100, 1, 100).unwrap();
+        let mut ledger = Ledger::default();
+        let today = 10 * super::SECONDS_PER_DAY;
+        let to = Address::from([1u8; 32]);
+        ledger.check(&p, &to, ip(1), today).unwrap();
+        ledger.record(&p, to, ip(1), today);
+
+        // A backwards correction, then a return to the same day, must not
+        // create either a second cap or a second daily reset.
+        for now in [today - super::SECONDS_PER_DAY, today + 2] {
+            assert_eq!(
+                ledger.check(&p, &Address::from([2u8; 32]), ip(2), now),
+                Err(Refusal::DailyCap)
+            );
+        }
+        ledger
+            .check(
+                &p,
+                &Address::from([2u8; 32]),
+                ip(2),
+                today + super::SECONDS_PER_DAY,
             )
             .unwrap();
     }

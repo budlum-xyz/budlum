@@ -228,4 +228,19 @@ mod tests {
         )
         .is_err());
     }
+
+    #[test]
+    fn blg_150_consensus_signer_separates_block_prevote_and_precommit() {
+        let keypair = KeyPair::generate().unwrap();
+        let signer = KeyPairSigner::new(keypair.clone());
+        let payload = [0x42u8; 32];
+        let block_sig = signer.sign_block(&payload).unwrap();
+        let prevote_sig = signer.sign_prevote(&payload).unwrap();
+        let precommit_sig = signer.sign_precommit(&payload).unwrap();
+
+        assert_ne!(block_sig, prevote_sig);
+        assert_ne!(block_sig, precommit_sig);
+        assert_ne!(prevote_sig, precommit_sig);
+        assert_eq!(signer.address(), Address::from(keypair.public_key_bytes()));
+    }
 }
