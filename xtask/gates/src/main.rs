@@ -433,6 +433,16 @@ const GATES: &[Gate] = &[
         run_args: None,
         self_test: gates::shard_placement::self_test,
     },
+    // WP-10/İP-21 rename (Section 5.4): placement is a B.U.D. 3.0 concern,
+    // not a generic "shard" notion. Alias until file move in WP-40.
+    Gate {
+        name: "bud3-placement",
+        replaces: Some("shard-placement-is-sticky-and-staked"),
+        run: gates::shard_placement::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::shard_placement::self_test,
+    },
     Gate {
         name: "suppressions-are-justified",
         replaces: None,
@@ -1007,6 +1017,16 @@ const GATES: &[Gate] = &[
         run_args: None,
         self_test: gates::repair_fires::self_test,
     },
+    // WP-10/İP-19 rename (Section 5.4): repair is a B.U.D. 3.0 custody
+    // workflow. Alias until file move in WP-40.
+    Gate {
+        name: "bud3-repair-fires",
+        replaces: Some("repair-fires-on-loss"),
+        run: gates::repair_fires::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::repair_fires::self_test,
+    },
     Gate {
         name: "storage-proof-production-boundary",
         replaces: Some("check-storage-proof-production-boundary.sh"),
@@ -1059,6 +1079,17 @@ const GATES: &[Gate] = &[
         self_test: gates::qr_is_derivative_only::self_test,
         run_log: None,
     },
+    // WP-10/İP-25 rename (Section 5.4): QR is a B.U.D. 3.0 presentation,
+    // not a generic "derivative". The old name stays as an alias; the
+    // module body will be renamed in WP-40 along with the file move.
+    Gate {
+        name: "bud3-qr-is-presentation",
+        replaces: Some("qr-is-derivative-only"),
+        run: gates::qr_is_derivative_only::run,
+        run_args: None,
+        self_test: gates::qr_is_derivative_only::self_test,
+        run_log: None,
+    },
     Gate {
         name: "three-is-recipe-only",
         replaces: None,
@@ -1070,6 +1101,17 @@ const GATES: &[Gate] = &[
     Gate {
         name: "storage-is-priced-by-size",
         replaces: Some("check-storage-is-priced-by-size.sh"),
+        run: gates::storage_priced::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::storage_priced::self_test,
+    },
+    // WP-10/İP-25 rename (Section 5.4): pricing operates on the physical
+    // bytes stored after deduplication and erasure coding, not the logical
+    // upload size. Alias until file move in WP-40.
+    Gate {
+        name: "bud3-fee-uses-physical-bytes",
+        replaces: Some("storage-is-priced-by-size"),
         run: gates::storage_priced::run,
         run_log: None,
         run_args: None,
@@ -1110,6 +1152,18 @@ const GATES: &[Gate] = &[
     Gate {
         name: "storage-penalties-are-enforced",
         replaces: Some("check-storage-penalties-are-enforced.sh"),
+        run: gates::storage_penalties::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::storage_penalties::self_test,
+    },
+    // WP-10/İP-22 rename (Section 5.4): what the old gate framed as
+    // penalties is really the B.U.D. 3.0 custody reward curve (positive
+    // rewards for holding data, slashing for losing it). Alias until the
+    // module is rewritten in İP-22.
+    Gate {
+        name: "bud3-custody-rewards",
+        replaces: Some("storage-penalties-are-enforced"),
         run: gates::storage_penalties::run,
         run_log: None,
         run_args: None,

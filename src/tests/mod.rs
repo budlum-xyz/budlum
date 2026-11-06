@@ -249,3 +249,7 @@ pub mod validator_classes;
 // The B.U.D. 3.0 storage door end to end.
 #[cfg(test)]
 pub mod bud3_door;
+// Refusal pins: every content-registration path returns Bud3NotReady from
+// WP-07 until WP-21 lands (Section 5.7).
+#[cfg(test)]
+pub mod bud3_refusal_pins;

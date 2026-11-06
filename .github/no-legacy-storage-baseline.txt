@@ -86,3 +86,4 @@ budzero/bud-node/
 src/domain/storage_deal.rs
 src/domain/deal_open.rs
 src/chain/storage_maintenance.rs
+src/domain/regeneration_stage.rs
