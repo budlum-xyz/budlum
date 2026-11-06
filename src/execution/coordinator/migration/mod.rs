@@ -12,8 +12,10 @@
 //!    against the source state root (`crate::cross_domain::evm::account_proof`).
 //! 3. **Storage chunks.** Each slot is proven against the storage root.
 //! 4. **Finalization.** The record the account door installs: same address,
-//!    code whose hash equals the proven code hash, proven storage root, and
-//!    `imported_from`. The old native balance does not travel.
+//!    code whose hash equals the proven code hash, and the complete imported
+//!    storage. The storage trie root is rebuilt and must equal the account
+//!    proof's root; individual inclusion proofs alone cannot prove completeness.
+//!    `imported_from` is recorded and the old native balance does not travel.
 //!
 //! The `bud-migrate` binary is the caller. Deployment authority needs a proven
 //! source transaction and receipt; a trusted RPC `from` or `contractAddress`
@@ -30,6 +32,7 @@ use crate::crypto::secp256k1_recover::{recover_address, RecoverError};
 pub mod dependencies;
 pub mod deployment;
 pub mod fee;
+pub mod storage_root;
 
 pub use dependencies::{dependency_report, DependencyReport};
 pub use deployment::{verify_deployment, DeploymentProof, DeploymentProofError};
@@ -158,6 +161,11 @@ pub enum ImportError {
     },
     /// A slot arrives twice with two different values.
     SlotConflicts { slot: [u8; 32] },
+    /// The imported slots are incomplete or do not reproduce the proven root.
+    StorageRootMismatch {
+        expected: [u8; 32],
+        computed: [u8; 32],
+    },
     /// Proof work or the migration fee exceeded its integer bound.
     Fee(MigrationFeeOverflow),
 }
@@ -213,6 +221,12 @@ impl std::fmt::Display for ImportError {
             ImportError::SlotConflicts { slot } => {
                 write!(f, "migration: slot 0x{} conflicts", hex::encode(slot))
             }
+            ImportError::StorageRootMismatch { expected, computed } => write!(
+                f,
+                "migration: imported storage root 0x{} does not match proven root 0x{}; the import is incomplete or inconsistent",
+                hex::encode(computed),
+                hex::encode(expected)
+            ),
             other => write!(f, "migration: {}", other.message()),
         }
     }
@@ -454,7 +468,9 @@ impl MigrationPlan {
     /// # Errors
     ///
     /// [`ImportError::CodeHashMismatch`] when the code no longer hashes to the
-    /// proven code hash.
+    /// proven code hash, [`ImportError::StorageRootMismatch`] when the imported
+    /// entries do not reproduce the complete proven storage trie, or a fee
+    /// overflow refusal.
     pub fn finalize(self) -> Result<MigrationRecord, ImportError> {
         let MigrationPlan {
             source,
@@ -467,6 +483,13 @@ impl MigrationPlan {
         let proven_code_hash = account_proof::code_hash(&code);
         if proven_code_hash != account.code_hash {
             return Err(ImportError::CodeHashMismatch);
+        }
+        let computed_storage_root = storage_root::compute_storage_root(&storage);
+        if computed_storage_root != account.storage_root {
+            return Err(ImportError::StorageRootMismatch {
+                expected: account.storage_root,
+                computed: computed_storage_root,
+            });
         }
         let usage = MigrationUsage {
             proof_nodes,
@@ -726,6 +749,17 @@ mod tests {
         assert_eq!(record.fee.verification_bgu, 174);
         assert_eq!(record.fee.storage_bytes, 81);
         assert_eq!(record.fee.total_attos, 927);
+    }
+
+    #[test]
+    fn migration_finalize_refuses_incomplete_storage() {
+        let plan = begin_import(request().0).expect("the request is authorized and proven");
+        let expected = plan.account().storage_root;
+        let computed = storage_root::compute_storage_root(&BTreeMap::new());
+        assert_eq!(
+            plan.finalize(),
+            Err(ImportError::StorageRootMismatch { expected, computed })
+        );
     }
 
     #[test]
