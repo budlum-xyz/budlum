@@ -427,7 +427,7 @@ pub fn self_test() -> Result<String, String> {
     }
 
     // Canary 6: the gate must not pass on a tree it cannot read.
-    if run(std::path::Path::new("/nonexistent-budscan-patchset-canary")).is_ok() {
+    if run(std::path::Path::new("/nonexistent-explorer-patchset-canary")).is_ok() {
         problems.push(String::from(
             "VACUOUS: the gate passed on a tree that does not exist",
         ));

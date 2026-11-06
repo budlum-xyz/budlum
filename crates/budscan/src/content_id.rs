@@ -10,7 +10,7 @@
 //! If the browser depended on `budlum-core` it would also pull in libp2p,
 //! tokio, jsonrpsee and sled, and that graph is unwanted inside a browser's
 //! trust boundary. The price is that the two copies can drift apart, and that
-//! price is not left unpaid: the `budscan-name-rule-parity` gate measures in CI
+//! price is not left unpaid: the `explorer-parity` gate measures in CI
 //! that both definitions carry the same domain tag and the same pinned vector.
 //! The copy is not free, it is measured.
 //!

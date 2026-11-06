@@ -435,7 +435,7 @@ const BUDGETS: &[Budget] = &[
         reason: "two visitor state structs whose booleans are independent guard flags of one syn walk; a bit set would hide which guard each flag records",
     },
     Budget {
-        file: "xtask/gates/src/gates/budscan_patchset.rs",
+        file: "xtask/gates/src/gates/explorer_patchset.rs",
         lint: "clippy::too_many_lines",
         count: 1,
         reason: "the patch-set check is one linear sequence of independent verdicts; splitting it would scatter the failure messages that read in order",
