@@ -26,6 +26,8 @@ cli = ["uniffi/cli", "uniffi/cargo-metadata"]
 
 [dependencies]
 budlum-mobile-core = { path = "../core" }
+# The section 7.2 class table, exported so the apps hold no copy (K-4).
+budlum-types = { path = "../../crates/budlum-types" }
 uniffi = { version = "=0.32.2", default-features = false }
 
 [lints.rust]

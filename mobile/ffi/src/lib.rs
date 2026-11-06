@@ -25,8 +25,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use budlum_mobile_core::{
     Connection, CoreError, CoreStatus, DutyTx, LastAudit, MobileCore, NetworkPolicy, Policy,
-    PowerPolicy, RelayOffer, ValidatorClass,
+    PowerPolicy, RelayOffer, ValidatorClass, FREE_SPACE_FLOOR_BYTES, QUOTA_DEFAULT_BYTES,
+    QUOTA_MAX_BYTES, QUOTA_MIN_BYTES,
 };
+use budlum_types::class::AuditWindow;
 
 /// The class a phone registers as (section 7.2). A phone is never `Full`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -43,6 +45,63 @@ impl PhoneClass {
             Self::Mobile => ValidatorClass::Mobile,
             Self::MobileOpportunistic => ValidatorClass::MobileOpportunistic,
         }
+    }
+}
+
+/// How long a validator has to answer a custody audit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum AuditSpan {
+    /// A number of epochs (the Full class).
+    Epochs {
+        /// Epochs.
+        epochs: u64,
+    },
+    /// A number of hours (both phone classes).
+    Hours {
+        /// Hours.
+        hours: u64,
+    },
+}
+
+/// The consensus parameters of a phone class and the core's storage limits,
+/// read from `budlum-types` and the core so the apps keep no copy of the
+/// section 7.2 table (K-4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct ClassParameters {
+    /// Epochs per presence window.
+    pub presence_window_epochs: u64,
+    /// Hours unseen before suspension. Suspension is not a slash (V-4).
+    pub suspension_hours: u64,
+    /// The custody audit answer window.
+    pub audit_window: AuditSpan,
+    /// The class quota ceiling, or none when only the user range applies.
+    pub max_custody_quota_bytes: Option<u64>,
+    /// The smallest quota a user may choose.
+    pub quota_min_bytes: u64,
+    /// The largest quota a user may choose.
+    pub quota_max_bytes: u64,
+    /// The quota of a new node.
+    pub quota_default_bytes: u64,
+    /// Free space the core keeps on the device by releasing shares.
+    pub free_space_floor_bytes: u64,
+}
+
+/// The parameters of `class`.
+#[uniffi::export]
+pub fn class_parameters(class: PhoneClass) -> ClassParameters {
+    let class = class.class();
+    ClassParameters {
+        presence_window_epochs: class.presence_window_epochs(),
+        suspension_hours: class.suspension_hours(),
+        audit_window: match class.audit_window() {
+            AuditWindow::Epochs(epochs) => AuditSpan::Epochs { epochs },
+            AuditWindow::Hours(hours) => AuditSpan::Hours { hours },
+        },
+        max_custody_quota_bytes: class.max_custody_quota_bytes(),
+        quota_min_bytes: QUOTA_MIN_BYTES,
+        quota_max_bytes: QUOTA_MAX_BYTES,
+        quota_default_bytes: QUOTA_DEFAULT_BYTES,
+        free_space_floor_bytes: FREE_SPACE_FLOOR_BYTES,
     }
 }
 
@@ -603,6 +662,24 @@ mod tests {
                 ][..]
             )
         );
+    }
+
+    #[test]
+    fn mobile_ffi_class_parameters_are_the_section_7_2_table() {
+        let android = class_parameters(PhoneClass::Mobile);
+        assert_eq!(android.presence_window_epochs, 4);
+        assert_eq!(android.suspension_hours, 72);
+        assert_eq!(android.audit_window, AuditSpan::Hours { hours: 24 });
+        assert_eq!(android.max_custody_quota_bytes, None);
+        assert_eq!(android.quota_default_bytes, 4 * GIB);
+
+        let ios = class_parameters(PhoneClass::MobileOpportunistic);
+        assert_eq!(ios.presence_window_epochs, 4);
+        assert_eq!(ios.suspension_hours, 168);
+        assert_eq!(ios.audit_window, AuditSpan::Hours { hours: 48 });
+        assert_eq!(ios.max_custody_quota_bytes, Some(8 * GIB));
+        assert_eq!((ios.quota_min_bytes, ios.quota_max_bytes), (GIB, 64 * GIB));
+        assert_eq!(ios.free_space_floor_bytes, 2_000_000_000);
     }
 
     #[test]
