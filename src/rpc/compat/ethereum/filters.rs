@@ -341,13 +341,17 @@ impl BoundedEthFilters {
     /// Convenience: backs `eth_getFilterChanges`.
     pub fn poll_filter(
         &mut self,
+        peer: &str,
         id: u128,
         new_head_block: u64,
         now_ms: u64,
     ) -> Result<(EthFilterKind, u64), FilterError> {
         let ttl = self.ttl_ms;
         let out = match self.entries.get(&id) {
-            Some(rec) if now_ms.saturating_sub(rec.last_polled_ms) <= ttl => {
+            Some(rec)
+                if rec.owner_peer == peer
+                    && now_ms.saturating_sub(rec.last_polled_ms) <= ttl =>
+            {
                 (rec.kind.clone(), rec.last_polled_block)
             }
             _ => return Err(FilterError::NotFound(id)),
@@ -365,15 +369,21 @@ impl BoundedEthFilters {
     /// Convenience: backs `eth_getFilterLogs`.
     pub fn inspect_log_filter(
         &mut self,
+        peer: &str,
         id: u128,
         now_ms: u64,
     ) -> Result<ParsedLogFilter, FilterError> {
         let ttl = self.ttl_ms;
         let found = match self.entries.get(&id) {
-            Some(rec) if now_ms.saturating_sub(rec.last_polled_ms) <= ttl => match &rec.kind {
-                EthFilterKind::Logs(f) => Some(f.clone()),
-                EthFilterKind::Blocks => None,
-            },
+            Some(rec)
+                if rec.owner_peer == peer
+                    && now_ms.saturating_sub(rec.last_polled_ms) <= ttl =>
+            {
+                match &rec.kind {
+                    EthFilterKind::Logs(f) => Some(f.clone()),
+                    EthFilterKind::Blocks => None,
+                }
+            }
             _ => return Err(FilterError::NotFound(id)),
         };
         let Some(parsed) = found else {
@@ -391,8 +401,15 @@ impl BoundedEthFilters {
     /// Remove filter `id`, returning `true` if it existed and was still live.
     ///
     /// Convenience: backs `eth_uninstallFilter`.
-    pub fn uninstall(&mut self, id: u128, now_ms: u64) -> bool {
+    pub fn uninstall(&mut self, peer: &str, id: u128, now_ms: u64) -> bool {
         self.evict_expired(now_ms);
+        if !self
+            .entries
+            .get(&id)
+            .is_some_and(|record| record.owner_peer == peer)
+        {
+            return false;
+        }
         self.entries.remove(&id).is_some()
     }
 }

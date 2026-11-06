@@ -19,6 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use jsonrpsee::core::server::Methods;
 use jsonrpsee::proc_macros::rpc;
+use jsonrpsee::{ConnectionId, Extensions};
 use jsonrpsee::server::{BatchRequestConfig, ServerBuilder, ServerConfig, ServerHandle};
 use jsonrpsee::types::error::ErrorObjectOwned;
 use tokio::sync::broadcast;
@@ -310,6 +311,15 @@ fn err_execution(msg: impl Into<String>) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(JSONRPC_EXECUTION_ERROR, msg.into(), None::<()>)
 }
 
+/// Return a server-assigned identity for the transport connection that owns a
+/// stateful filter. Never use a client-supplied JSON-RPC parameter as this key.
+fn filter_owner(extensions: &Extensions) -> Result<String, ErrorObjectOwned> {
+    let connection_id = extensions
+        .get::<ConnectionId>()
+        .ok_or_else(|| err_execution("RPC connection identity is unavailable"))?;
+    Ok(format!("connection:{}", connection_id.0))
+}
+
 fn err_filter(err: FilterError) -> ErrorObjectOwned {
     match err {
         FilterError::GlobalCapReached(_) | FilterError::PeerQuotaReached { .. } => {
@@ -476,25 +486,25 @@ pub trait EthCompatApi {
         filter: RawEthFilter,
     ) -> Result<Vec<serde_json::Value>, ErrorObjectOwned>;
 
-    #[method(name = "eth_newFilter")]
+    #[method(name = "eth_newFilter", with_extensions)]
     async fn eth_new_filter(&self, filter: RawEthFilter) -> Result<String, ErrorObjectOwned>;
 
-    #[method(name = "eth_newBlockFilter")]
+    #[method(name = "eth_newBlockFilter", with_extensions)]
     async fn eth_new_block_filter(&self) -> Result<String, ErrorObjectOwned>;
 
-    #[method(name = "eth_getFilterChanges")]
+    #[method(name = "eth_getFilterChanges", with_extensions)]
     async fn eth_get_filter_changes(
         &self,
         filter_id: String,
     ) -> Result<Vec<serde_json::Value>, ErrorObjectOwned>;
 
-    #[method(name = "eth_getFilterLogs")]
+    #[method(name = "eth_getFilterLogs", with_extensions)]
     async fn eth_get_filter_logs(
         &self,
         filter_id: String,
     ) -> Result<Vec<serde_json::Value>, ErrorObjectOwned>;
 
-    #[method(name = "eth_uninstallFilter")]
+    #[method(name = "eth_uninstallFilter", with_extensions)]
     async fn eth_uninstall_filter(&self, filter_id: String) -> Result<bool, ErrorObjectOwned>;
 
     #[method(name = "eth_accounts")]
@@ -1170,7 +1180,12 @@ impl EthCompatApiServer for EthCompatServer {
         Self::query_logs_in_inner(&guard, &parsed)
     }
 
-    async fn eth_new_filter(&self, filter: RawEthFilter) -> Result<String, ErrorObjectOwned> {
+    async fn eth_new_filter(
+        &self,
+        extensions: &Extensions,
+        filter: RawEthFilter,
+    ) -> Result<String, ErrorObjectOwned> {
+        let peer = filter_owner(extensions)?;
         let mut guard = self
             .backend
             .inner
@@ -1179,12 +1194,16 @@ impl EthCompatApiServer for EthCompatServer {
         let head = guard.head_height();
         let id = guard
             .filters
-            .install_log_filter("rpc-client", &filter, head, now_epoch_ms())
+            .install_log_filter(&peer, &filter, head, now_epoch_ms())
             .map_err(err_filter)?;
         Ok(format_u128_hex(id))
     }
 
-    async fn eth_new_block_filter(&self) -> Result<String, ErrorObjectOwned> {
+    async fn eth_new_block_filter(
+        &self,
+        extensions: &Extensions,
+    ) -> Result<String, ErrorObjectOwned> {
+        let peer = filter_owner(extensions)?;
         let mut guard = self
             .backend
             .inner
@@ -1193,15 +1212,17 @@ impl EthCompatApiServer for EthCompatServer {
         let head = guard.head_height();
         let id = guard
             .filters
-            .install_block_filter("rpc-client", head, now_epoch_ms())
+            .install_block_filter(&peer, head, now_epoch_ms())
             .map_err(err_filter)?;
         Ok(format_u128_hex(id))
     }
 
     async fn eth_get_filter_changes(
         &self,
+        extensions: &Extensions,
         filter_id: String,
     ) -> Result<Vec<serde_json::Value>, ErrorObjectOwned> {
+        let peer = filter_owner(extensions)?;
         let id = parse_filter_id_u128(&filter_id)?;
         let mut guard = self
             .backend
@@ -1211,7 +1232,7 @@ impl EthCompatApiServer for EthCompatServer {
         let head = guard.head_height();
         let (kind, prev) = guard
             .filters
-            .poll_filter(id, head, now_epoch_ms())
+            .poll_filter(&peer, id, head, now_epoch_ms())
             .map_err(err_filter)?;
         if head <= prev {
             return Ok(Vec::new());
@@ -1237,8 +1258,10 @@ impl EthCompatApiServer for EthCompatServer {
 
     async fn eth_get_filter_logs(
         &self,
+        extensions: &Extensions,
         filter_id: String,
     ) -> Result<Vec<serde_json::Value>, ErrorObjectOwned> {
+        let peer = filter_owner(extensions)?;
         let id = parse_filter_id_u128(&filter_id)?;
         let mut guard = self
             .backend
@@ -1247,19 +1270,24 @@ impl EthCompatApiServer for EthCompatServer {
             .map_err(|_| err_execution("lock poisoned"))?;
         let parsed = guard
             .filters
-            .inspect_log_filter(id, now_epoch_ms())
+            .inspect_log_filter(&peer, id, now_epoch_ms())
             .map_err(err_filter)?;
         Self::query_logs_in_inner(&guard, &parsed)
     }
 
-    async fn eth_uninstall_filter(&self, filter_id: String) -> Result<bool, ErrorObjectOwned> {
+    async fn eth_uninstall_filter(
+        &self,
+        extensions: &Extensions,
+        filter_id: String,
+    ) -> Result<bool, ErrorObjectOwned> {
+        let peer = filter_owner(extensions)?;
         let id = parse_filter_id_u128(&filter_id)?;
         let mut guard = self
             .backend
             .inner
             .lock()
             .map_err(|_| err_execution("lock poisoned"))?;
-        Ok(guard.filters.uninstall(id, now_epoch_ms()))
+        Ok(guard.filters.uninstall(&peer, id, now_epoch_ms()))
     }
 
     async fn eth_accounts(&self) -> Result<Vec<String>, ErrorObjectOwned> {
@@ -1521,6 +1549,16 @@ mod tests {
     }
 
     #[test]
+    fn filter_owner_comes_from_the_server_connection_extension() {
+        let mut extensions = Extensions::new();
+        extensions.insert(ConnectionId(17));
+        assert_eq!(filter_owner(&extensions).unwrap(), "connection:17");
+
+        let no_connection = Extensions::new();
+        assert!(filter_owner(&no_connection).is_err());
+    }
+
+    #[test]
     fn eth_filters_are_bounded() {
         let mut table = BoundedEthFilters::new(4, 2, 10_000);
         let raw = RawEthFilter::default();
@@ -1544,12 +1582,25 @@ mod tests {
             Err(FilterError::GlobalCapReached(4))
         );
 
+        // A different connection cannot inspect, advance, or remove peer A's
+        // filter, even when it knows the sequential filter id.
+        assert_eq!(
+            table.poll_filter("peer-b", f1, 5, 2_000),
+            Err(FilterError::NotFound(f1))
+        );
+        assert_eq!(
+            table.inspect_log_filter("peer-b", f1, 2_000),
+            Err(FilterError::NotFound(f1))
+        );
+        assert!(!table.uninstall("peer-b", f1, 2_000));
+        assert_eq!(table.len(), 4);
+
         // Refresh f1 at t = 8_000; advance to t = 12_000 so f2, f3, f4 expire (> 10_000ms idle)
         // while f1 remains live!
-        let _ = table.poll_filter(f1, 5, 8_000).unwrap();
+        let _ = table.poll_filter("peer-a", f1, 5, 8_000).unwrap();
         let c_id = table.install_block_filter("peer-c", 5, 12_000).unwrap();
         assert_eq!(table.len(), 2); // f1 + c_id
-        assert!(table.uninstall(c_id, 12_000));
+        assert!(table.uninstall("peer-c", c_id, 12_000));
         assert_eq!(table.len(), 1);
     }
 }
