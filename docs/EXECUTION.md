@@ -130,6 +130,15 @@ STARK proving on every call (`BLG-248`).
   namespace, `RegisterAsset`, `CreatePointer`, and stateless CW20/ERC-20 & CW721/ERC-721
   pointers whose balances and allowances live exclusively in the home environment.
 
+## 10. SVM Execution Environment (`WP-31`, `BLG-249`)
+
+- Out-of-process worker: `budlum-ee-svm` (`execution/svm/`, `solana-sbpf = "=0.10.0"`
+  with `default-features = false` so JIT is disabled at compile time).
+- Built-in programs: System, SPL Token, Token-2022, Associated Token Account, Memo,
+  BPF Upgradeable Loader, and Universal Call (`SHA256("BDLM_SVM_UNIVERSAL_PROGRAM_V1")`).
+  Solana `Vote` and `Stake` programs are deterministically refused (`Section 8.15`).
+
+
 
 
 
