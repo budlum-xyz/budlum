@@ -181,6 +181,45 @@ impl Header {
     pub const fn is_sealed(&self) -> bool {
         self.flags.has(Flags::SEALED)
     }
+
+    /// Whether the object is one segment of a live stream (bit1).
+    #[must_use]
+    pub const fn is_live(&self) -> bool {
+        self.flags.has(Flags::LIVE)
+    }
+
+    /// The canonical encoded length of this header.
+    ///
+    /// The object does not carry its header length: the reader derives it,
+    /// and the uploader needs it to cut the object into segments before the
+    /// payload has been copied. Every field is counted exactly when its flag
+    /// is set, which is the rule [`Object::encode`] writes by.
+    #[must_use]
+    pub const fn encoded_len(&self) -> usize {
+        let profile = varint::len(u64::from(self.profile));
+        let codec = varint::len(u64::from(self.codec));
+        let dictionary = varint::len(u64::from(self.dictionary));
+        let content_len = varint::len(self.content_len);
+        let payload_len = varint::len(self.payload_len);
+        let base = 32;
+        let prev = 32;
+        let context = 32;
+        2 + 1
+            + 1
+            + profile
+            + codec
+            + dictionary
+            + content_len
+            + 32
+            + payload_len
+            + if self.flags.has(Flags::HAS_BASE) { base } else { 0 }
+            + if self.flags.has(Flags::LIVE) { prev } else { 0 }
+            + if self.flags.has(Flags::HAS_CONTEXT) {
+                context
+            } else {
+                0
+            }
+    }
 }
 
 /// A BOF-1 object: header and payload.

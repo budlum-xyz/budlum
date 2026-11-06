@@ -679,6 +679,30 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-conflict-markers 2>&1 | tee -a /tmp/gate-out.log
           exit "${PIPESTATUS[0]}"
+      # WP-19. The B.U.D. 3.0 object model and the presentation split: every
+      # content class enters one object (Section 6.3.2) and QR/PNG bytes reach
+      # no identity (Section 6.15). Both are source-reading gates, so both ship
+      # with the canary that proves they can fail.
+      - name: B.U.D. 3.0 object is universal canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-object-is-universal --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: Every content class enters the object
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-object-is-universal 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: B.U.D. 3.0 QR is a presentation canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-qr-is-presentation --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: QR and PNG bytes reach no identity
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-qr-is-presentation 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       # The gate existed for weeks as a file: declared in no module, invoked in
       # no list, named in no workflow. `no-orphan-source-files` cannot see it
       # (its SCAN_ROOTS are src/budzero/wallet-core) and `gates-are-wired` only

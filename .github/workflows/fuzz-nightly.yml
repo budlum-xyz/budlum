@@ -54,6 +54,9 @@ jobs:
           # decoder both read bytes from untrusted holders.
           - bud3_bof1_decode
           - bud3_symbol_decode
+          # The optical frame reader takes bytes off a camera, which is the
+          # least trustworthy input in the tree.
+          - bud3_frame_decode
           # BPQS WOTS chain-walk refusal safety (crates/bpqs). Runs the
           # quick gate too; here it gets the deep budget.
           - bpqs_wots_reject
