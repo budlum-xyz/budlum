@@ -20,6 +20,7 @@
 
 pub mod d4_merge_tests;
 pub mod evidence;
+pub mod handover;
 pub mod identity;
 pub mod identity_fill;
 pub mod invalid_vote;
@@ -64,6 +65,11 @@ pub use presence::{
 };
 
 pub use evidence::{EvidenceError, ProofProvenance, SlashingProof, SlashingReport};
+pub use handover::{
+    ChurnRunSummary, ChurnSimulator, HandoverCoordinator, HandoverDutyKind, RecoveryMode,
+    CHECKPOINT_INTERVAL_BLOCKS, CUSTODY_READ_TIMEOUT_MS, FINALITY_STALL_RECOVERY_BLOCKS,
+    MAX_VALIDATOR_SEAT_FRACTION_DENOM, SEAT_ABSENCE_HANDOVER_CHECKPOINTS,
+};
 pub use params::{ApplicationFeeSplit, RegistryParams};
 pub use permissionless::{
     MemberStatus, PermissionlessRegistry, Registration, RegistryError, SlashOutcome,

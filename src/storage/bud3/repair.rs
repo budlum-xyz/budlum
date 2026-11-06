@@ -238,6 +238,46 @@ pub const fn bad_repair_slash_amount(repairer_stake: u64) -> u64 {
     repairer_stake.saturating_mul(BAD_REPAIR_SLASH_BPS) / 10_000
 }
 
+/// Blocks an assigned Full validator has to submit `RecordRepair` before
+/// Instant Task Handover transfers the task to the next candidate (Section 7.6: 20 blocks).
+pub const REPAIR_TASK_HANDOVER_BLOCKS: u64 = 20;
+
+/// Scheduled segment repair duty tracked for 20-block Instant Task Handover (Section 7.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScheduledRepairDuty {
+    pub object: ObjectKey,
+    pub segment: u64,
+    pub assignee: [u8; 32],
+    pub assigned_height: u64,
+    pub started: bool,
+}
+
+/// Hand over a scheduled repair duty to the next Full candidate if `RecordRepair`
+/// was not initiated within `REPAIR_TASK_HANDOVER_BLOCKS` blocks (Section 7.6).
+#[must_use]
+pub fn handover_expired_repair_duty(
+    duty: &ScheduledRepairDuty,
+    current_height: u64,
+    ordered_full_candidates: &[[u8; 32]],
+) -> Option<ScheduledRepairDuty> {
+    if duty.started
+        || current_height.saturating_sub(duty.assigned_height) < REPAIR_TASK_HANDOVER_BLOCKS
+    {
+        return None;
+    }
+    let next_assignee = ordered_full_candidates
+        .iter()
+        .copied()
+        .find(|v| *v != duty.assignee)?;
+    Some(ScheduledRepairDuty {
+        object: duty.object,
+        segment: duty.segment,
+        assignee: next_assignee,
+        assigned_height: current_height,
+        started: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

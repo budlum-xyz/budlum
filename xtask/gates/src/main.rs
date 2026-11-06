@@ -105,6 +105,7 @@ mod gates {
     pub mod gov_slash_evidence_is_validator_only;
     pub mod governance_invariants;
     pub mod guards_reachable;
+    pub mod handover_and_recovery;
     pub mod hash_inputs_are_length_prefixed;
     pub mod indexing_is_not_new;
     pub mod kani;
@@ -1485,6 +1486,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::offline_never_slashes::self_test,
+    },
+    Gate {
+        name: "handover-and-recovery",
+        replaces: None,
+        run: gates::handover_and_recovery::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::handover_and_recovery::self_test,
     },
 ];
 

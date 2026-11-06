@@ -6,7 +6,7 @@
 //! Expected consensus participation. When that count crosses
 //! [`RegistryParams::liveness_max_missed_epochs`], a canonical
 //! [`SlashingReport`] (proof = `Liveness`, provenance = `ConsensusVerified`) is
-//! Emitted so the *existing* report→slash flow can act on it - no new slashing
+//! Emitted so the *existing* report->slash flow can act on it - no new slashing
 //! Path is introduced.
 //!
 //! ## Counting semantics (consecutive, not cumulative)
