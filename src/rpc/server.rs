@@ -178,6 +178,7 @@ struct RpcSecurityLayer {
     per_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
     metrics: Option<Arc<crate::core::metrics::Metrics>>,
     mode: RpcMode,
+    remote_addr: Option<SocketAddr>,
 }
 
 impl RpcSecurityLayer {
@@ -191,7 +192,13 @@ impl RpcSecurityLayer {
             per_ip_rates: Arc::new(Mutex::new(HashMap::new())),
             metrics,
             mode,
+            remote_addr: None,
         }
+    }
+
+    fn for_remote_addr(mut self, remote_addr: SocketAddr) -> Self {
+        self.remote_addr = Some(remote_addr);
+        self
     }
 }
 
@@ -205,6 +212,7 @@ impl<S> Layer<S> for RpcSecurityLayer {
             per_ip_rates: self.per_ip_rates.clone(),
             metrics: self.metrics.clone(),
             mode: self.mode.clone(),
+            remote_addr: self.remote_addr,
         }
     }
 }
@@ -216,6 +224,7 @@ struct RpcSecurityService<S> {
     per_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
     metrics: Option<Arc<crate::core::metrics::Metrics>>,
     mode: RpcMode,
+    remote_addr: Option<SocketAddr>,
 }
 
 impl<S, B> Service<HttpRequest<B>> for RpcSecurityService<S>
@@ -233,7 +242,10 @@ where
         self.inner.poll_ready(cx)
     }
 
-    fn call(&mut self, req: HttpRequest<B>) -> Self::Future {
+    fn call(&mut self, mut req: HttpRequest<B>) -> Self::Future {
+        if let Some(remote_addr) = self.remote_addr {
+            req.extensions_mut().insert::<SocketAddr>(remote_addr);
+        }
         if !is_ip_allowed(&self.config, &req) {
             return Box::pin(async { Ok(text_response(StatusCode::FORBIDDEN, "Forbidden")) });
         }
@@ -411,9 +423,8 @@ impl AptosListener {
                     Err(_) => break,
                 };
                 let gateway_for_service = gateway.clone();
-                let service = security.clone().layer(tower::service_fn(
-                    move |mut req: HttpRequest<hyper::body::Incoming>| {
-                        req.extensions_mut().insert::<SocketAddr>(remote_addr);
+                let service = security.clone().for_remote_addr(remote_addr).layer(
+                    tower::service_fn(move |req: HttpRequest<hyper::body::Incoming>| {
                         let gateway_for_request = gateway_for_service.clone();
                         async move {
                             Ok::<_, std::convert::Infallible>(
@@ -648,9 +659,8 @@ impl RpcServer {
                 let svc_builder_for_service = svc_builder.clone();
                 let methods_for_service = methods.clone();
                 let aptos_for_service = aptos_gateway.clone();
-                let svc = security.clone().layer(tower::service_fn(
-                    move |mut req: HttpRequest<hyper::body::Incoming>| {
-                        req.extensions_mut().insert::<SocketAddr>(remote_addr);
+                let svc = security.clone().for_remote_addr(remote_addr).layer(
+                    tower::service_fn(move |req: HttpRequest<hyper::body::Incoming>| {
                         let is_aptos =
                             serve_aptos_on_primary && aptos::owns_path(req.uri().path());
                         let aptos_for_request = aptos_for_service.clone();
