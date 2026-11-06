@@ -95,7 +95,29 @@ pub struct StarkConfig<Pcs, Challenge, Challenger> {
     _phantom: PhantomData<Challenge>,
 }
 
+pub const GOLDILOCKS_MODULUS: u64 = 18_446_744_069_414_584_321;
+
 impl<Pcs, Challenge, Challenger> StarkConfig<Pcs, Challenge, Challenger> {
+    /// Fallible constructor enforcing non-empty canonical Goldilocks security parameters.
+    pub fn try_new_with_security(
+        pcs: Pcs,
+        challenger: Challenger,
+        security: Vec<u64>,
+    ) -> Result<Self, &'static str> {
+        if security.is_empty() {
+            return Err("StarkConfig security parameters cannot be empty");
+        }
+        if security.iter().any(|&x| x >= GOLDILOCKS_MODULUS) {
+            return Err("StarkConfig security parameter exceeds Goldilocks modulus");
+        }
+        Ok(Self {
+            pcs,
+            challenger,
+            security,
+            _phantom: PhantomData,
+        })
+    }
+
     /// Build a configuration whose security parameters are stated.
     ///
     /// `security` must be the parameters that actually govern this instance,
@@ -104,12 +126,8 @@ impl<Pcs, Challenge, Challenger> StarkConfig<Pcs, Challenge, Challenger> {
     /// `FriParameters` value it hands to the PCS rather than writing them out
     /// a second time.
     pub fn new_with_security(pcs: Pcs, challenger: Challenger, security: Vec<u64>) -> Self {
-        Self {
-            pcs,
-            challenger,
-            security,
-            _phantom: PhantomData,
-        }
+        Self::try_new_with_security(pcs, challenger, security)
+            .expect("invalid StarkConfig security parameters")
     }
 }
 
