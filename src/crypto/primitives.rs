@@ -2,7 +2,7 @@
 use super::ctx;
 #[cfg(any(feature = "pq-ml-dsa", feature = "wallet-ml-dsa"))]
 use super::{pq, scheme::SchemeId};
-use bls12_381::{G2Affine, G2Projective, Scalar};
+use bls12_381::{G1Affine, G2Affine, G2Projective, Scalar};
 use ed25519_dalek::{
     Signature, Signer, SigningKey, VerifyingKey, SECRET_KEY_LENGTH, SIGNATURE_LENGTH,
 };
@@ -183,9 +183,7 @@ impl BlsKeypair {
 
         let mut pk_bytes = [0u8; 96];
         pk_bytes.copy_from_slice(&bytes[32..128]);
-        let pk_affine = G2Affine::from_compressed(&pk_bytes);
-        let _pk_checked: G2Affine = Option::from(pk_affine)
-            .ok_or_else(|| CryptoError::InvalidKey("Invalid BLS public key encoding".into()))?;
+        Self::validate_bls_public_key(&pk_bytes)?;
 
         let expected = G2Affine::from(G2Projective::generator() * sk);
         if expected.to_compressed() != pk_bytes {
@@ -198,6 +196,46 @@ impl BlsKeypair {
             secret_key: sk,
             public_key: pk_bytes.to_vec(),
         })
+    }
+
+    fn validate_bls_public_key(public_key: &[u8]) -> Result<(), CryptoError> {
+        let pk_bytes: [u8; 96] = public_key
+            .try_into()
+            .map_err(|_| CryptoError::InvalidKey("Invalid BLS public key length".into()))?;
+        let pk_affine = G2Affine::from_compressed_unchecked(&pk_bytes)
+            .into_option()
+            .ok_or_else(|| CryptoError::InvalidKey("Invalid BLS public key encoding".into()))?;
+        if !bool::from(pk_affine.is_on_curve()) {
+            return Err(CryptoError::InvalidKey(
+                "Invalid BLS public key encoding".into(),
+            ));
+        }
+        if !bool::from(pk_affine.is_torsion_free()) || bool::from(pk_affine.is_identity()) {
+            return Err(CryptoError::InvalidKey(
+                "BLS public key is identity or outside the prime-order subgroup".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_bls_signature(sig: &[u8]) -> Result<(), CryptoError> {
+        let sig_bytes: [u8; 48] = sig
+            .try_into()
+            .map_err(|_| CryptoError::Verification("Invalid BLS signature length".into()))?;
+        let sig_affine = G1Affine::from_compressed_unchecked(&sig_bytes)
+            .into_option()
+            .ok_or_else(|| CryptoError::Verification("Invalid BLS signature encoding".into()))?;
+        if !bool::from(sig_affine.is_on_curve()) {
+            return Err(CryptoError::Verification(
+                "Invalid BLS signature encoding".into(),
+            ));
+        }
+        if !bool::from(sig_affine.is_torsion_free()) || bool::from(sig_affine.is_identity()) {
+            return Err(CryptoError::Verification(
+                "BLS signature is identity or outside the prime-order subgroup".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Generate the canonical proof of possession for this public key,
@@ -217,6 +255,9 @@ impl BlsKeypair {
         chain_id: u64,
         address: &crate::core::address::Address,
     ) -> Result<(), CryptoError> {
+        Self::validate_bls_public_key(public_key)
+            .map_err(|e| CryptoError::Verification(e.to_string()))?;
+        Self::validate_bls_signature(pop)?;
         let entry = crate::chain::finality::ValidatorEntry {
             address: *address,
             stake: 0,
@@ -1299,4 +1340,68 @@ fn test_bls_proof_of_possession() {
         &wrong_key,
         DEFAULT_CHAIN_ID
     ));
+}
+
+#[cfg(test)]
+#[test]
+fn blg_004_key_file_rewrite_is_atomic_and_owner_only() {
+    let dir = std::env::temp_dir().join(format!(
+        "budlum-blg004-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let key_path = dir.join("validator.key");
+
+    // Pre-create with wide permissions; rewriting must replace via atomic rename with 0600.
+    std::fs::write(&key_path, b"stale").expect("seed file");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644))
+            .expect("widen permissions");
+    }
+
+    let kp = KeyPair::generate().expect("generate ed25519 key");
+    kp.save(&key_path).expect("save keypair");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&key_path)
+            .expect("stat rewritten key")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "rewritten key file must be mode 0600");
+    }
+    let loaded = KeyPair::load(&key_path).expect("load keypair");
+    assert_eq!(loaded.public_key_bytes(), kp.public_key_bytes());
+    assert!(!dir.join("validator.key.tmp").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(test)]
+#[test]
+fn blg_200_bls_rejects_zero_scalar_and_identity_points() {
+    use crate::core::address::Address;
+    use crate::core::transaction::DEFAULT_CHAIN_ID;
+
+    assert!(BlsKeypair::from_seed(&[0u8; 64]).is_err());
+
+    let valid = BlsKeypair::generate().expect("generate bls keypair");
+    let id_g2 = G2Affine::identity().to_compressed();
+    let mut zero_sk_with_identity_pk = Vec::with_capacity(128);
+    zero_sk_with_identity_pk.extend_from_slice(&[0u8; 32]);
+    zero_sk_with_identity_pk.extend_from_slice(&id_g2);
+    assert!(BlsKeypair::from_bytes(&zero_sk_with_identity_pk).is_err());
+
+    let mut nonzero_sk_with_identity_pk = valid.to_bytes();
+    nonzero_sk_with_identity_pk[32..128].copy_from_slice(&id_g2);
+    assert!(BlsKeypair::from_bytes(&nonzero_sk_with_identity_pk).is_err());
+
+    let addr = Address::from([7u8; 32]);
+    let pop = valid.generate_pop(DEFAULT_CHAIN_ID, &addr);
+    let id_g1 = G1Affine::identity().to_compressed();
+    assert!(BlsKeypair::verify_pop(&id_g2, &pop, DEFAULT_CHAIN_ID, &addr).is_err());
+    assert!(BlsKeypair::verify_pop(&valid.public_key, &id_g1, DEFAULT_CHAIN_ID, &addr).is_err());
 }

@@ -919,6 +919,33 @@ mod tests {
         assert_eq!(slh_dsa_seed_len(SchemeId::SLH_DSA_SHAKE_256S), Ok(96));
         assert_eq!(slh_dsa_seed_len(SchemeId::SLH_DSA_SHAKE_128S), Ok(48));
     }
+
+    #[test]
+    fn blg_009_pq_verify_requires_registered_context_and_explicit_scheme() {
+        let pk65 = ml_dsa_public_key(SchemeId::ML_DSA_65, &seed(11)).unwrap();
+        let sig65 = ml_dsa_sign(SchemeId::ML_DSA_65, &seed(11), MSG, ctx::TX_V7, &[0u8; 32])
+            .unwrap();
+        assert_eq!(
+            verify(SchemeId::ML_DSA_65, &pk65, MSG, b"", &sig65),
+            Err(PqError::EmptyContext)
+        );
+        let oversized_ctx = [b'x'; MAX_CONTEXT_LEN + 1];
+        assert_eq!(
+            verify(SchemeId::ML_DSA_65, &pk65, MSG, &oversized_ctx, &sig65),
+            Err(PqError::ContextTooLong(MAX_CONTEXT_LEN + 1))
+        );
+        assert!(matches!(
+            verify(SchemeId::ML_DSA_87, &pk65, MSG, ctx::TX_V7, &sig65),
+            Err(PqError::PublicKeyLength {
+                scheme: SchemeId::ML_DSA_87,
+                ..
+            })
+        ));
+        assert_eq!(
+            verify(SchemeId(0xFFFF), &pk65, MSG, ctx::TX_V7, &sig65),
+            Err(PqError::UnknownScheme(SchemeId(0xFFFF)))
+        );
+    }
 }
 
 #[cfg(test)]
