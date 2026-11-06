@@ -50,3 +50,19 @@ proposed.
    the aggregator, `src/cross_domain/evm/rlp.rs` for the depth bound.
 3. BLG-008 and BLG-032 keep the listener half in WP-16 and the gateway half in
    WP-21; WP-61 touches neither path.
+
+## Queue corrections read from the open pull requests
+
+These lines exist because the claim protocol of section 15.3 runs through the pull
+request body while the issue tracker is disabled, and a claim that does not match
+the tree misleads the next agent. Each statement below was read with `gh pr view`
+on 2026-11-06, against `main` at `cccf1da1f4bcfe97503a3a00cfba24b172b49b31`, which
+carries one commit.
+
+| PR | Claim as written | What the tree says |
+|---|---|---|
+| #14 (WP-44) | "WP-44 depends only on WP-01, which is merged" | WP-01 is not merged: it is open as #12, and `main` has no merge of it. The dependency is unmerged, so #14 is a deviation, exactly like this branch's; saying otherwise moves a package up the queue by claiming a fact the tree does not hold. |
+| #15, #16 (WP-03) | both deliver WP-03 | Two pull requests carry one package. One of them has to close, or the second becomes a re-delivery of the first with a second set of conflicts on `docs/audit/FINDINGS.md`. |
+| #18, #21 (WP-04) | both deliver WP-04 | Same shape as #15 and #16. #21 additionally records the 30-workflow CI baseline in `docs/audit/live/ci-baseline.md`, which is the useful half. |
+| #17, #19, #22, #23 (WP-00) | stop reports, no code | Four reports that the strict readiness reading blocks every package. The reading is right; a fifth report is not a delivery, and the queue has moved by taking free lock paths instead. |
+| #13 (WP-20), #14 (WP-44), this branch | each creates `docs/audit/FINDINGS.md` and `docs/work/PACKAGES.md` | All three add the same two new files, so two of the three will conflict on merge. Append-only intent, but git cannot merge two file creations; the second and third to merge rebase their section onto the first. |
