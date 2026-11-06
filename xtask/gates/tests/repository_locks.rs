@@ -149,3 +149,95 @@ fn indexer_binary_is_registered() {
         "no explicit [[bin]] for budlum-indexer"
     );
 }
+
+/// The binding planning directive stays outside the repository tree. Its
+/// section 0.1 item 5 says the document never enters the repository; a tracked
+/// copy fails `tree_is_english` and puts untranslated planning text in the
+/// source corpus (BLG-288, BLG-304).
+#[test]
+fn binding_directive_stays_outside_repository() {
+    let name = "THE_BUDLUM_DIREKTIF.md";
+    assert!(
+        !root().join(name).exists(),
+        "the binding directive must stay outside the repository tree: {name}"
+    );
+    assert!(
+        read(".gitignore").contains("/THE_BUDLUM_DIREKTIF.md"),
+        "an upload of the directive must be ignored, not tracked"
+    );
+}
+
+/// `required_fee` is the admission fee quote that `chain_actor` answers
+/// `get_required_fee` with. The consensus-write gate must classify it as a
+/// read, so the gate does not refuse the pure quote on a clean tree
+/// (BLG-307).
+#[test]
+fn required_fee_is_classified_as_a_read() {
+    let gate = read("xtask/gates/src/gates/no_out_of_block_consensus_writes.rs");
+    let names = gate
+        .split("const READ_NAMES: &[&str] = &[")
+        .nth(1)
+        .and_then(|t| t.split("];").next())
+        .unwrap_or_default();
+    assert!(
+        names.contains("\"required_fee\""),
+        "required_fee must be listed in READ_NAMES"
+    );
+}
+
+/// The single denied lint that made four CI jobs red on `main`. A manual
+/// `(x + 63) / 64` is refused by clippy as `manual_div_ceil` under
+/// `-D warnings` (BLG-305).
+#[test]
+fn the_bloom_filter_uses_div_ceil() {
+    let src = read("src/storage/bud3/dedup_index.rs");
+    assert!(
+        src.contains("bits.div_ceil(64)"),
+        "the filter must use the checked integer method, not a manual ceiling"
+    );
+    assert!(
+        !src.contains("((bits + 63) / 64)"),
+        "a manual div_ceil reimplementation is a denied clippy lint"
+    );
+}
+
+/// The two runtime indexes outside the indexing baseline were rewritten to
+/// shapes that cannot panic (BLG-308). No baseline entry was added.
+#[test]
+fn the_two_runtime_indexes_are_panic_free() {
+    let http = read("src/bin/support/http.rs");
+    assert!(
+        http.contains("octets.get_mut(8..)"),
+        "the IPv6 bucket must use get_mut, not a runtime slice index"
+    );
+    let filter = read("src/storage/bud3/dedup_index.rs");
+    assert!(
+        filter.contains("lanes.iter_mut().zip(digest.chunks_exact(8))"),
+        "the digest lanes must be filled by zip, not a runtime index"
+    );
+    assert!(
+        !filter.contains("lanes[i] = v"),
+        "a runtime index on the lane array is outside the indexing baseline"
+    );
+}
+
+/// The three `cargo fmt --all -- --check` hunks on `main` are applied, so the
+/// Format step has no diff left to report (BLG-306).
+#[test]
+fn the_three_format_hunks_are_applied() {
+    let codec = read("crates/bud-codec/src/lib.rs");
+    assert!(
+        codec.contains("0x20, // single segment, one-byte content size"),
+        "the codec vector is not rustfmt-shaped"
+    );
+    let bof1 = read("src/storage/bud3/bof1.rs");
+    assert!(
+        bof1.contains("bud_codec::decode(codec, &payload, id.len).map_err"),
+        "the BOF-1 decoder call is not rustfmt-shaped"
+    );
+    let door = read("src/tests/bud3_door.rs");
+    assert!(
+        door.contains("state.calculate_state_root(),\n        root,"),
+        "the state-root assertion is not rustfmt-shaped"
+    );
+}
