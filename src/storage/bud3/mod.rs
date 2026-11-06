@@ -23,6 +23,7 @@
 //! | [`object`] | The object path: streaming commitment, logical frames, the video commitment, the text form |
 //! | [`frames`] | The optical path: symbols to QR rasters and back, the two-path gate (Y11) |
 //! | [`stages`] | The A0 stage chain: recognition, dedup, transform, entropy coding, sealing |
+//! | [`live`] | The live stream: time segments, the `prev_object` chain, the closing NFT binding |
 //! | [`volume`] | The aggregation volume for objects smaller than one symbol |
 //!
 //! The commitment is fixed-size (32 bytes). The object is not fixed-size: it
@@ -42,6 +43,7 @@ pub mod dedup_index;
 pub mod fountain;
 pub mod frames;
 pub mod limits;
+pub mod live;
 pub mod meter;
 pub mod object;
 pub mod pipeline;

@@ -246,11 +246,14 @@ pub mod regression_ops_crypto;
 #[cfg(test)]
 pub mod validator_classes;
 
-// The B.U.D. 3.0 storage door end to end.
+// The B.U.D. 3.0 storage door end to end, plus the shared compression context
+// (WP-54, T27 to T33) and the live stream (WP-55, T13).
 #[cfg(test)]
 pub mod bud3_context;
 #[cfg(test)]
 pub mod bud3_door;
+#[cfg(test)]
+pub mod bud3_live;
 // WP-19: the object path, the two paths, the video commitment, the text form
 // and the parsers (Section 6.4, 6.5, 6.15, 6.23 T9 and T10).
 #[cfg(test)]
