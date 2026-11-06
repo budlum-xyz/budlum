@@ -1332,6 +1332,7 @@ jobs:
             crates/uel-abi
             execution/budzero
             execution/evm
+            execution/wasm
       - id: protoc
         name: Install protoc
         if: always() && steps.rust.outcome == 'success'
@@ -1354,6 +1355,9 @@ jobs:
       - name: Format (ee-evm)
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --manifest-path execution/evm/Cargo.toml --all -- --check
+      - name: Format (ee-wasm)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path execution/wasm/Cargo.toml --all -- --check
       - name: Clippy (bpqs)
         if: always() && steps.rust.outcome == 'success'
         run: cargo clippy --manifest-path crates/bpqs/Cargo.toml --all-targets -- -D warnings
@@ -1372,6 +1376,9 @@ jobs:
       - name: Clippy (ee-evm)
         if: always() && steps.protoc.outcome == 'success'
         run: cargo clippy --manifest-path execution/evm/Cargo.toml --all-targets -- -D warnings
+      - name: Clippy (ee-wasm)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo clippy --manifest-path execution/wasm/Cargo.toml --all-targets -- -D warnings
       - name: Tests (bpqs)
         if: always() && steps.rust.outcome == 'success'
         run: cargo test --manifest-path crates/bpqs/Cargo.toml
@@ -1390,6 +1397,9 @@ jobs:
       - name: Tests (ee-evm)
         if: always() && steps.protoc.outcome == 'success'
         run: cargo test --manifest-path execution/evm/Cargo.toml
+      - name: Tests (ee-wasm)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo test --manifest-path execution/wasm/Cargo.toml
 
   # ============================  / Bolum 4 (BNS gate) ============================
       - name: Format

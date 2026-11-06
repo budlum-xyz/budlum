@@ -2,6 +2,7 @@
 //! EVM alias collision guards, `Adopt` one-shot sweep, quantum-alert gating, and
 //! per-namespace state-growth metering (`WP-27`, `BLG-267`).
 
+pub mod cosmos;
 pub mod ethereum;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,7 +17,11 @@ use crate::execution::coordinator::accounts::{
     derive_foreign_account, derive_local_alias, AccountKind, ForeignScheme, QuantumClass,
 };
 use crate::execution::coordinator::bud_unit::{
-    add_attos_to_account, account_total_attos, sub_attos_from_account,
+    account_total_attos, add_attos_to_account, sub_attos_from_account, ATTOS_PER_ATOM,
+};
+use crate::execution::coordinator::foreign::cosmos::{
+    decode_and_verify_cosmos_tx, CosmosEnvelopeError, CosmosWasmMsg, DecodedCosmosTx,
+    BUDLUM_COSMOS_CHAIN_ID,
 };
 use crate::execution::coordinator::foreign::ethereum::{
     decode_and_recover_eth_tx, ecrecover_eth_address, DecodedEthTx, EthEnvelopeError,
@@ -50,6 +55,7 @@ pub enum QuantumAlertLevel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ForeignLaneError {
     EthEnvelope(EthEnvelopeError),
+    CosmosEnvelope(CosmosEnvelopeError),
     AliasCollision([u8; 20]),
     CreateTargetCollidesWithAlias([u8; 20]),
     ReplayNonceMismatch { expected: u64, actual: u64 },
@@ -66,6 +72,7 @@ impl fmt::Display for ForeignLaneError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EthEnvelope(e) => write!(f, "{e}"),
+            Self::CosmosEnvelope(e) => write!(f, "{e}"),
             Self::AliasCollision(addr) => {
                 write!(f, "EVM address 0x{} collides with registered PQ alias", hex::encode(addr))
             }
@@ -107,6 +114,12 @@ impl std::error::Error for ForeignLaneError {}
 impl From<EthEnvelopeError> for ForeignLaneError {
     fn from(value: EthEnvelopeError) -> Self {
         Self::EthEnvelope(value)
+    }
+}
+
+impl From<CosmosEnvelopeError> for ForeignLaneError {
+    fn from(value: CosmosEnvelopeError) -> Self {
+        Self::CosmosEnvelope(value)
     }
 }
 
@@ -217,8 +230,11 @@ impl StateGrowthMeter {
 #[derive(Debug, Clone, Default)]
 pub struct ForeignCoordinatorBook {
     evm_alias_to_pq: BTreeMap<[u8; 20], Address>,
+    wasm_alias_to_pq: BTreeMap<String, Address>,
     pq_accounts: BTreeSet<Address>,
     foreign_nonces: BTreeMap<Address, u64>,
+    cosmos_account_numbers: BTreeMap<Address, u64>,
+    next_cosmos_account_number: u64,
     adopted_tombstones: BTreeSet<Address>,
     pub alert_level: QuantumAlertLevel,
     pub growth_meter: StateGrowthMeter,
@@ -243,8 +259,14 @@ impl ForeignCoordinatorBook {
         let Ok(alias20) = <[u8; 20]>::try_from(raw_alias.as_slice()) else {
             return Err(ForeignLaneError::InvalidAdoptSignature);
         };
+        let raw_wasm_alias = derive_local_alias(&pq_addr, EeId::WASM)
+            .map_err(|_| ForeignLaneError::InvalidAdoptSignature)?;
+        let Ok(wasm_bech32) = String::from_utf8(raw_wasm_alias) else {
+            return Err(ForeignLaneError::InvalidAdoptSignature);
+        };
         self.pq_accounts.insert(pq_addr);
         self.evm_alias_to_pq.insert(alias20, pq_addr);
+        self.wasm_alias_to_pq.insert(wasm_bech32, pq_addr);
         self.growth_meter
             .record_write("uel/alias", 33, None, Some(20));
         Ok(alias20)
@@ -408,6 +430,176 @@ impl ForeignCoordinatorBook {
         }
         self.foreign_nonces
             .insert(foreign_bud_addr, expected_nonce.saturating_add(1));
+        Ok(tx)
+    }
+
+    /// Return the assigned Cosmos `account_number` and `sequence` for `foreign_bud_addr`.
+    ///
+    /// Convenience: queried by `/cosmos.auth.v1beta1.Query/Account` (`Section 8.11.5`).
+    #[must_use]
+    pub fn cosmos_account_meta(&self, foreign_bud_addr: &Address) -> (u64, u64) {
+        let acct_num = self
+            .cosmos_account_numbers
+            .get(foreign_bud_addr)
+            .copied()
+            .unwrap_or(0);
+        let seq = self
+            .foreign_nonces
+            .get(foreign_bud_addr)
+            .copied()
+            .unwrap_or(0);
+        (acct_num, seq)
+    }
+
+    /// Validate and apply a `Foreign::Cosmos` (`TxRaw`) envelope against `state`.
+    ///
+    /// Enforces `SIGN_MODE_DIRECT` over `budlum-testnet-1`, `account_number`,
+    /// sequential `sequence` (`uel_foreign_tx_replay_refused`), `QuantumAlertLevel`,
+    /// and `QuantumClass::Classical` custody isolation (`K-3`).
+    ///
+    /// Convenience: coordinator entry point for `Foreign::Cosmos` transactions (`WP-29`).
+    pub fn apply_cosmos_envelope(
+        &mut self,
+        raw_tx: &[u8],
+        expected_account_number: u64,
+        state: &mut AccountState,
+    ) -> Result<DecodedCosmosTx, ForeignLaneError> {
+        let tx = decode_and_verify_cosmos_tx(
+            raw_tx,
+            BUDLUM_COSMOS_CHAIN_ID,
+            expected_account_number,
+        )?;
+
+        let foreign_bud_addr =
+            derive_foreign_account(ForeignScheme::CosmosSecp256k1, &tx.sender_raw)
+                .map_err(|_| ForeignLaneError::InvalidAdoptSignature)?;
+        if self.quantum_class_of(&foreign_bud_addr) == QuantumClass::PostQuantum {
+            return Err(ForeignLaneError::ClassicalCannotTouchPqHoldings(
+                foreign_bud_addr,
+            ));
+        }
+
+        if let Some(&stored_acct_num) = self.cosmos_account_numbers.get(&foreign_bud_addr) {
+            if stored_acct_num != expected_account_number {
+                return Err(ForeignLaneError::CosmosEnvelope(
+                    CosmosEnvelopeError::InvalidSignature,
+                ));
+            }
+        } else if expected_account_number != 0 {
+            return Err(ForeignLaneError::CosmosEnvelope(
+                CosmosEnvelopeError::InvalidSignature,
+            ));
+        }
+
+        match self.alert_level {
+            QuantumAlertLevel::Normal | QuantumAlertLevel::Warning => {}
+            QuantumAlertLevel::Restricted => {
+                let only_pq_sends = tx.messages.iter().all(|m| match m {
+                    CosmosWasmMsg::BankSend { to_address, .. } => {
+                        self.wasm_alias_to_pq.contains_key(to_address)
+                    }
+                    _ => false,
+                });
+                if !only_pq_sends {
+                    return Err(ForeignLaneError::QuantumAlertClosed {
+                        level: self.alert_level,
+                    });
+                }
+            }
+            QuantumAlertLevel::Isolated => {
+                return Err(ForeignLaneError::QuantumAlertClosed {
+                    level: self.alert_level,
+                });
+            }
+        }
+
+        let expected_seq = self
+            .foreign_nonces
+            .get(&foreign_bud_addr)
+            .copied()
+            .unwrap_or(0);
+        if tx.sequence != expected_seq {
+            return Err(ForeignLaneError::ReplayNonceMismatch {
+                expected: expected_seq,
+                actual: tx.sequence,
+            });
+        }
+
+        let mut total_ubud = tx.fee_ubud;
+        for m in &tx.messages {
+            if let CosmosWasmMsg::BankSend { amount_ubud, .. } = m {
+                total_ubud = total_ubud
+                    .checked_add(*amount_ubud)
+                    .ok_or(ForeignLaneError::BalanceOverflow)?;
+            }
+        }
+        let total_debit = u128::from(total_ubud)
+            .checked_mul(ATTOS_PER_ATOM)
+            .ok_or(ForeignLaneError::BalanceOverflow)?;
+        let available = state
+            .accounts
+            .get(&foreign_bud_addr)
+            .map_or(0u128, account_total_attos);
+        if available < total_debit {
+            return Err(ForeignLaneError::InsufficientForeignBalance {
+                available,
+                required: total_debit,
+            });
+        }
+
+        let mut sender_next = state
+            .accounts
+            .get(&foreign_bud_addr)
+            .cloned()
+            .unwrap_or_else(|| crate::core::account::Account::new(foreign_bud_addr, 0));
+        sub_attos_from_account(&mut sender_next, total_debit).map_err(|_| {
+            ForeignLaneError::InsufficientForeignBalance {
+                available,
+                required: total_debit,
+            }
+        })?;
+
+        let mut staged_recipients: BTreeMap<Address, crate::core::account::Account> =
+            BTreeMap::new();
+        for m in &tx.messages {
+            if let CosmosWasmMsg::BankSend {
+                to_address,
+                amount_ubud,
+                ..
+            } = m
+            {
+                let send_attos = u128::from(*amount_ubud)
+                    .checked_mul(ATTOS_PER_ATOM)
+                    .ok_or(ForeignLaneError::BalanceOverflow)?;
+                if let Some(&pq_rcpt) = self.wasm_alias_to_pq.get(to_address) {
+                    if pq_rcpt == foreign_bud_addr {
+                        add_attos_to_account(&mut sender_next, send_attos)
+                            .map_err(|_| ForeignLaneError::BalanceOverflow)?;
+                    } else {
+                        let mut acc = staged_recipients
+                            .remove(&pq_rcpt)
+                            .or_else(|| state.accounts.get(&pq_rcpt).cloned())
+                            .unwrap_or_else(|| crate::core::account::Account::new(pq_rcpt, 0));
+                        add_attos_to_account(&mut acc, send_attos)
+                            .map_err(|_| ForeignLaneError::BalanceOverflow)?;
+                        staged_recipients.insert(pq_rcpt, acc);
+                    }
+                }
+            }
+        }
+
+        state.accounts.insert(foreign_bud_addr, sender_next);
+        for (rcpt, acc) in staged_recipients {
+            state.accounts.insert(rcpt, acc);
+        }
+        if !self.cosmos_account_numbers.contains_key(&foreign_bud_addr) {
+            let assigned = self.next_cosmos_account_number;
+            self.next_cosmos_account_number = self.next_cosmos_account_number.saturating_add(1);
+            self.cosmos_account_numbers
+                .insert(foreign_bud_addr, assigned);
+        }
+        self.foreign_nonces
+            .insert(foreign_bud_addr, expected_seq.saturating_add(1));
         Ok(tx)
     }
 
@@ -757,5 +949,139 @@ mod tests {
         let prom = meter.prometheus_lines();
         assert!(prom.contains("budlum_state_bytes{ns=\"ee/evm/storage\"} 84"));
         assert!(prom.contains("budlum_state_bytes{ns=\"ee/evm/code\"} 132"));
+    }
+
+    #[test]
+    fn uel_foreign_tx_replay_refused_cosmos() {
+        use crate::execution::coordinator::foreign::cosmos::{
+            cosmos_address_from_compressed_pubkey, cosmos_bech32_address, AuthInfoProto,
+            CosmosCoinProto, CosmosFeeProto, ModeInfoProto, ModeInfoSingleProto, MsgSendProto,
+            ProtoAny, Secp256k1PubKeyProto, SignDocProto, SignerInfoProto, TxBodyProto,
+            TxRawProto, SECP256K1_PUBKEY_TYPE_URL, SIGN_MODE_DIRECT,
+        };
+        use k256::elliptic_curve::ops::Reduce;
+        use k256::elliptic_curve::sec1::ToSec1Point;
+        use k256::elliptic_curve::PrimeField;
+        use k256::{FieldBytes, ProjectivePoint, Scalar};
+        use prost::Message;
+        use sha2::{Digest as _, Sha256};
+
+        let sk = [0x55u8; 32];
+        let d = Scalar::from_repr(sk.into()).unwrap();
+        let pub33: [u8; 33] = (ProjectivePoint::GENERATOR * d)
+            .to_affine()
+            .to_sec1_point(true)
+            .as_bytes()
+            .try_into()
+            .unwrap();
+        let raw20 = cosmos_address_from_compressed_pubkey(&pub33).unwrap();
+        let sender_bech32 = cosmos_bech32_address(&raw20);
+
+        let mut book = ForeignCoordinatorBook::new();
+        let pq_dest = Address([0x88; 32]);
+        let _ = book.register_pq_account(pq_dest).unwrap();
+        let dest_bech32 = String::from_utf8(derive_local_alias(&pq_dest, EeId::WASM).unwrap())
+            .unwrap();
+
+        let mut state = AccountState::new();
+        let foreign_bud = derive_foreign_account(ForeignScheme::CosmosSecp256k1, &raw20).unwrap();
+        add_attos_to_account(
+            state.get_or_create(&foreign_bud),
+            10_000 * ATTOS_PER_ATOM,
+        )
+        .unwrap();
+
+        let body_bytes = TxBodyProto {
+            messages: vec![ProtoAny {
+                type_url: "/cosmos.bank.v1beta1.MsgSend".to_string(),
+                value: MsgSendProto {
+                    from_address: sender_bech32,
+                    to_address: dest_bech32,
+                    amount: vec![CosmosCoinProto {
+                        denom: "ubud".to_string(),
+                        amount: "100".to_string(),
+                    }],
+                }
+                .encode_to_vec(),
+            }],
+            memo: String::new(),
+            timeout_height: 0,
+        }
+        .encode_to_vec();
+
+        let auth_bytes = AuthInfoProto {
+            signer_infos: vec![SignerInfoProto {
+                public_key: Some(ProtoAny {
+                    type_url: SECP256K1_PUBKEY_TYPE_URL.to_string(),
+                    value: Secp256k1PubKeyProto {
+                        key: pub33.to_vec(),
+                    }
+                    .encode_to_vec(),
+                }),
+                mode_info: Some(ModeInfoProto {
+                    single: Some(ModeInfoSingleProto {
+                        mode: SIGN_MODE_DIRECT,
+                    }),
+                }),
+                sequence: 0,
+            }],
+            fee: Some(CosmosFeeProto {
+                amount: vec![CosmosCoinProto {
+                    denom: "ubud".to_string(),
+                    amount: "10".to_string(),
+                }],
+                gas_limit: 150_000,
+                payer: String::new(),
+                granter: String::new(),
+            }),
+        }
+        .encode_to_vec();
+
+        let sign_doc = SignDocProto {
+            body_bytes: body_bytes.clone(),
+            auth_info_bytes: auth_bytes.clone(),
+            chain_id: BUDLUM_COSMOS_CHAIN_ID.to_string(),
+            account_number: 0,
+        }
+        .encode_to_vec();
+
+        let digest: [u8; 32] = Sha256::digest(&sign_doc).into();
+        let e = <Scalar as Reduce<FieldBytes>>::reduce(&FieldBytes::from(digest));
+        let k = Scalar::from_repr([0x19u8; 32].into()).unwrap();
+        let big_r = (ProjectivePoint::GENERATOR * k).to_affine().to_sec1_point(true);
+        let rx = FieldBytes::try_from(&big_r.as_bytes()[1..33]).unwrap();
+        let r = <Scalar as Reduce<FieldBytes>>::reduce(&rx);
+        let mut s = k.invert().unwrap() * (e + r * d);
+        let half: [u8; 32] = [
+            0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0x5d, 0x57, 0x6e, 0x73, 0x57, 0xa4, 0x50, 0x1d, 0xdf, 0xe9, 0x2f, 0x46,
+            0x68, 0x1b, 0x20, 0xa0,
+        ];
+        let sb: [u8; 32] = s.to_bytes().into();
+        if sb > half {
+            s = -s;
+        }
+        let mut sig = [0u8; 64];
+        sig[..32].copy_from_slice(r.to_bytes().as_slice());
+        sig[32..].copy_from_slice(s.to_bytes().as_slice());
+
+        let raw = TxRawProto {
+            body_bytes,
+            auth_info_bytes: auth_bytes,
+            signatures: vec![sig.to_vec()],
+        }
+        .encode_to_vec();
+
+        let ok = book.apply_cosmos_envelope(&raw, 0, &mut state).unwrap();
+        assert_eq!(ok.sequence, 0);
+
+        // Replaying the exact same signed TxRaw (sequence 0) must be refused!
+        assert_eq!(
+            book.apply_cosmos_envelope(&raw, 0, &mut state),
+            Err(ForeignLaneError::ReplayNonceMismatch {
+                expected: 1,
+                actual: 0,
+            })
+        );
     }
 }
