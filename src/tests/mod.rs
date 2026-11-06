@@ -181,6 +181,11 @@ pub mod advisory_reachability;
 #[cfg(test)]
 pub mod ai_verification_status_locks;
 pub mod audit_findings_locks;
+// Lane D of the live audit: the regression tests that outlive the lane. The
+// file is a lock path of WP-04, and section 14.1 rule 7 is the reason it
+// exists rather than a note in a markdown table. // tests
+#[cfg(test)]
+pub mod audit_lane_d;
 #[cfg(test)]
 pub mod consensus_rounds;
 #[cfg(test)]

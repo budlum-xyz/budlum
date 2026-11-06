@@ -71,7 +71,7 @@ exactly that agreement.
 ## Acceptance criteria
 
 - [x] `fuzz/Cargo.toml` exists.
-- [x] 14 targets exist under `fuzz/fuzz_targets/`.
+- [x] 18 targets exist under `fuzz/fuzz_targets/`.
 - [x] Every target is registered as an explicit `[[bin]]` in `Cargo.toml`.
 - [x] The F10.1 RLP and MPT panic/DoS targets are registered; the MPT input is
       bounded to 64 nodes and 128 bytes per node.
@@ -81,7 +81,7 @@ exactly that agreement.
 
 ## Related
 
-- `ops/scripts/audit-deps.sh`: the dependency audit report.
-- `ops/scripts/generate-sbom.sh`: CycloneDX SBOM generation.
+- `cargo run --release --manifest-path ../xtask/tools/Cargo.toml -- audit-deps`: the dependency audit report.
+- `cargo run --release --manifest-path ../xtask/tools/Cargo.toml -- generate-sbom`: CycloneDX SBOM generation.
 - `target/audit/DEPENDENCY_AUDIT.md`: the latest dependency audit status.
 - `target/audit/SBOM.md`: the SBOM generation procedure.

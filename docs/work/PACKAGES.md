@@ -21,6 +21,7 @@ branch that carries the work is `In progress`.
 | WP-12 | A | In progress | WP-08 (on `main`) | #9 (`arena/5b54fce9-budlum`) | `d6a96eb9` base | see PR #9 | see PR #9 |
 | WP-20 | B | In progress | WP-08, WP-18 | #13 (`arena/df5c50ec-budlum`) | see PR #13 | see PR #13 | see PR #13 |
 | WP-24 | B | In progress | WP-10 | #8 (`arena/b7784c85-budlum`) | see PR #8 | see PR #8 | see PR #8 |
+| WP-04 | D | In progress | none | #35 (`arena/3ef3b577-budlum`) | see PR #35 | see PR #35 | none (verification only) |
 
 ## WP-03: live verification, lane C (execution, BudZero, domains, privacy, AI)
 
@@ -50,3 +51,40 @@ branch that carries the work is `In progress`.
 - **Findings moved to `Kapalı (önceden düzeltilmiş)`:** BLG-039, BLG-114,
   BLG-136, BLG-162. Their permanent tests are named in the ledger and held by the
   locks above.
+
+## WP-04: live verification, lane D (clients, operations, CI, documentation, combined state)
+
+- **Lane / layer:** D, T-Acilis, TLG yes.
+- **Dependency:** none. Started on `cccf1da` (`main`), pull request #35.
+- **Scope:** the section 14 rows whose closing package is WP-05, WP-11, WP-36, WP-40, WP-41,
+  WP-42, WP-43, or WP-46, plus WP-61. That is 70 records, all of them listed verbatim in
+  `lane-d.md` section 8.
+- **Deliverables:**
+  - `docs/audit/live/lane-d.md`: the 70 records, with the lane's scope derivation, the per-package
+    counts, what was read and what was not, and the lane's own corrections to its earlier readings.
+  - `docs/audit/LIVE_STATUS.md`: the ledger index, the section 14 row arithmetic, the per-package
+    distribution, the CI baseline (card item 2), and the proposed replacement for section 14.2
+    (card item 7).
+  - `docs/audit/FINDINGS.md`: the 70 rows in English, one per record, with the five state words of
+    section 14.1 rule 3 and the WP-04 vocabulary mapped to them.
+  - `src/tests/audit_lane_d.rs`: the lane's permanent tests, wired into `src/tests/mod.rs`.
+- **State of the readings:** 10 records are `Previously fixed` (BLG-012, BLG-013, BLG-014, BLG-022,
+  BLG-099, BLG-192, BULGU-011, BULGU-012, DOC-GAP-03, DOC-GAP-07) and 1 is `Will close by removal`
+  (BLG-254).
+  Four of those carry a record-named test in `src/tests/audit_lane_d.rs`
+  (`blg_099_`, `blg_022_`, `blg_192_`, `bulgu_012_`). Six records are narrowed rather than decided
+  (BLG-015, BLG-016, BLG-081, BLG-085, BLG-095, BLG-097): each names the clause that is still open.
+  The remaining records stay `Open` because section 15.8 places the old ledger outside this
+  repository and it is not in this checkout.
+- **Findings moved by this package:** BLG-012, BLG-013, BLG-014, BLG-022, BLG-099, BLG-192,
+  BULGU-011, BULGU-012, DOC-GAP-03, DOC-GAP-07 to `Previously fixed`; DOC-GAP-03 fixed in this pull request (both READMEs
+  named a script that `ops/scripts/` no longer holds, and `fuzz/README.md` named two more).
+- **Not delivered, with the reason:**
+  - Card item 5 (one GitHub record per package) is impossible on this repository: the API reports
+    `has_issues: false`, so no issue can be opened. Section 15.3 item 1's flow cannot run until
+    issues are enabled on the repository, which is a settings change, not a code change.
+  - The 64 package records of the done criterion cannot be created for the same reason, so
+    "M0 complete" is not claimed.
+- **Done criterion status:** all four lane files are on the branch (`lane-d.md`, `LIVE_STATUS.md`,
+  `FINDINGS.md`, and this section of `PACKAGES.md`); the lane test file exists and is wired. The
+  pull request is open and not merged.
