@@ -94,7 +94,18 @@ impl ZkVmExecutor {
         gas_limit: u64,
         ctx: TxContext,
     ) -> Result<ZkVmReceipt, String> {
-        Self::execute_bytecode_inner(bytecode, gas_limit, true, ctx)
+        Self::execute_bytecode_inner(bytecode, gas_limit, true, true, ctx)
+    }
+
+    /// Consensus validator execution mode (`BLG-040`, `WP-33`): executes
+    /// bytecode under full mainnet opcode gates without running inline STARK
+    /// proving on every validator.
+    pub fn execute_bytecode_vm_only(
+        bytecode: &[u8],
+        gas_limit: u64,
+        ctx: TxContext,
+    ) -> Result<ZkVmReceipt, String> {
+        Self::execute_bytecode_inner(bytecode, gas_limit, true, false, ctx)
     }
 
     /// Explicitly gated execution. Same behaviour as `execute_bytecode`; kept
@@ -104,7 +115,7 @@ impl ZkVmExecutor {
         bytecode: &[u8],
         gas_limit: u64,
     ) -> Result<ZkVmReceipt, String> {
-        Self::execute_bytecode_inner(bytecode, gas_limit, true, TxContext::default())
+        Self::execute_bytecode_inner(bytecode, gas_limit, true, true, TxContext::default())
     }
 
     /// Ungated execution for local tooling and tests.
@@ -116,13 +127,14 @@ impl ZkVmExecutor {
         bytecode: &[u8],
         gas_limit: u64,
     ) -> Result<ZkVmReceipt, String> {
-        Self::execute_bytecode_inner(bytecode, gas_limit, false, TxContext::default())
+        Self::execute_bytecode_inner(bytecode, gas_limit, false, true, TxContext::default())
     }
 
     fn execute_bytecode_inner(
         bytecode: &[u8],
         gas_limit: u64,
         mainnet: bool,
+        prove_inline: bool,
         ctx: TxContext,
     ) -> Result<ZkVmReceipt, String> {
         if bytecode.is_empty() {
@@ -168,17 +180,22 @@ impl ZkVmExecutor {
             });
         }
 
-        let public_inputs = build_public_inputs(&program, &vm, &receipt);
-        let proof = Prover::prove(&vm.trace, &public_inputs, &program)
-            .map_err(|err| format!("BudZKVM proof generation failed: {err:?}"))?;
-        Prover::verify(&proof, &public_inputs, &program)
-            .map_err(|err| format!("BudZKVM proof verification failed: {err:?}"))?;
+        let proof_bytes = if prove_inline {
+            let public_inputs = build_public_inputs(&program, &vm, &receipt);
+            let proof = Prover::prove(&vm.trace, &public_inputs, &program)
+                .map_err(|err| format!("BudZKVM proof generation failed: {err:?}"))?;
+            Prover::verify(&proof, &public_inputs, &program)
+                .map_err(|err| format!("BudZKVM proof verification failed: {err:?}"))?;
+            proof.proof_bytes.len()
+        } else {
+            0
+        };
 
         Ok(ZkVmReceipt {
             gas_used: receipt.gas_used,
             steps: receipt.trace_len as usize,
             events: receipt.events.clone(),
-            proof_bytes: proof.proof_bytes.len(),
+            proof_bytes,
         })
     }
 }
@@ -866,5 +883,70 @@ mod tests {
             err.contains("activation") || err.contains("Activation"),
             "VerifyInference was refused, but not by the activation gate: {err}"
         );
+    }
+
+    #[test]
+    fn blg_040_validator_contract_call_skips_inline_proving_and_gates_merkle() {
+        let ok_prog: Vec<u8> = [
+            Instruction {
+                opcode: Opcode::Load,
+                rd: 1,
+                rs1: 0,
+                rs2: 0,
+                imm: 99,
+            },
+            Instruction {
+                opcode: Opcode::Log,
+                rd: 0,
+                rs1: 1,
+                rs2: 0,
+                imm: 0,
+            },
+            Instruction {
+                opcode: Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            },
+        ]
+        .into_iter()
+        .flat_map(|ins| ins.encode().to_le_bytes())
+        .collect();
+
+        let receipt = ZkVmExecutor::execute_bytecode_vm_only(
+            &ok_prog,
+            DEFAULT_CONTRACT_GAS_LIMIT,
+            TxContext::default(),
+        )
+        .unwrap();
+        assert_eq!(receipt.proof_bytes, 0);
+        assert_eq!(receipt.events, vec![99]);
+
+        let merkle_prog: Vec<u8> = [
+            Instruction {
+                opcode: Opcode::VerifyMerkle,
+                rd: 1,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            },
+            Instruction {
+                opcode: Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            },
+        ]
+        .into_iter()
+        .flat_map(|ins| ins.encode().to_le_bytes())
+        .collect();
+        assert!(ZkVmExecutor::execute_bytecode_vm_only(
+            &merkle_prog,
+            DEFAULT_CONTRACT_GAS_LIMIT,
+            TxContext::default()
+        )
+        .is_err());
     }
 }

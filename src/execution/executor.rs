@@ -822,9 +822,12 @@ impl Executor {
                 // block height go into the context the syscalls read and the
                 // public inputs repeat, instead of the zeros a fresh VM holds.
                 let ctx = crate::execution::zkvm::TxContext::of(tx, state.current_block_height);
-                let receipt =
-                    ZkVmExecutor::execute_bytecode(&tx.data, DEFAULT_CONTRACT_GAS_LIMIT, ctx)
-                        .map_err(|e| BudlumError::validation("contract_execution_failed", e))?;
+                let receipt = ZkVmExecutor::execute_bytecode_vm_only(
+                    &tx.data,
+                    DEFAULT_CONTRACT_GAS_LIMIT,
+                    ctx,
+                )
+                .map_err(|e| BudlumError::validation("contract_execution_failed", e))?;
 
                 if !receipt.events.is_empty()
                     && receipt.events[0] == 0x00A1_00A1
