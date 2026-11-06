@@ -1,0 +1,28 @@
+[package]
+name = "budlum-types"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+description = "The shared wire types the node and the mobile core both bind: one definition per primitive (K-4)"
+
+# Deliberately small. The mobile core must not link the whole node (7.9.5), so
+# the types it needs live here instead of behind `budlum-core`. Every dependency
+# added here is a dependency the phone inherits, so this list stays short.
+[dependencies]
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unused_import_braces = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[profile.release]
+overflow-checks = true
+panic = "abort"
