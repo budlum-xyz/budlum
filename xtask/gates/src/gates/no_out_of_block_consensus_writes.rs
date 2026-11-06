@@ -517,9 +517,7 @@ mod tests {
 
     #[test]
     fn required_fee_is_a_state_read() {
-        assert!(check_actor_state_access(
-            "let fee = self.blockchain.state.required_fee(&tx);"
-        )
-        .is_ok());
+        let src = "let fee = self.blockchain.state.required_fee(&tx);";
+        assert!(check_actor_state_access(src).is_ok());
     }
 }
