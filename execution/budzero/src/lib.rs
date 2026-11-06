@@ -413,7 +413,7 @@ impl ExecutionEnvironment for BudZeroWorker {
 mod tests {
     use super::*;
     use bud_isa::Opcode;
-    use budlum_uel_abi::mock::InMemoryHost;
+    use budlum_uel_abi::mock::MemoryHost;
     use budlum_uel_abi::{BudAmount, EeIdentity};
 
     #[test]
@@ -479,7 +479,7 @@ mod tests {
             .to_le_bytes(),
         );
 
-        let mut host = InMemoryHost::new(2_000_000);
+        let mut host = MemoryHost::new(2_000_000);
         let Ok(caller) = EeIdentity::new(EeId::BUDZERO, vec![0xAB; 32]) else {
             panic!("caller");
         };
