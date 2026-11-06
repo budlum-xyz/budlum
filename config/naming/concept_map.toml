@@ -17,6 +17,7 @@ term_tr = "Hash zinciri lider seçimi"
 area = "consensus"
 owner = "WP-12"
 reason = "The name states the mechanism."
+owner = "WP-12"
 
 [[concept]]
 old = ["Filiz (faucet)"]
@@ -28,6 +29,7 @@ term_tr = "Testnet musluğu"
 area = "operations"
 owner = "WP-41"
 reason = "One concept, one term."
+owner = "WP-41"
 
 [[concept]]
 old = ["Kiragi", "Don", "Zemheri"]
@@ -39,6 +41,7 @@ term_tr = "Kuantum alarm düzeyi 1, 2, 3 (Uyarı, Kısıtlı, Yalıtılmış)"
 area = "security"
 owner = "WP-12"
 reason = "Levels are named by their effect."
+owner = "WP-12"
 
 [[concept]]
 old = ["Mikoriza", "Mycorrhiza"]
@@ -48,6 +51,7 @@ term_en = "shared security"
 term_tr = "Paylaşılan güvenlik"
 area = "settlement"
 reason = "Standard industry term."
+owner = "WP-44"
 
 [[concept]]
 old = ["Graft", "Aşı"]
@@ -57,6 +61,7 @@ term_en = "remote app binding"
 term_tr = "Uzak Uygulama Bağı"
 area = "settlement"
 reason = "The name states the function."
+owner = "WP-44"
 
 [[concept]]
 old = ["Pollen"]
@@ -66,6 +71,7 @@ term_en = "Data Market"
 term_tr = "Veri Pazarı"
 area = "application"
 reason = "The name states the function."
+owner = "WP-23"
 
 [[concept]]
 old = ["Budscan", "BudScan"]
@@ -75,6 +81,7 @@ term_en = "Budlum Explorer"
 term_tr = "Budlum Gezgini"
 area = "application"
 reason = "Standard industry term."
+owner = "WP-40"
 allow_paths = ["xtask/gates/tests/repository_locks.rs"]
 
 [[concept]]
@@ -86,6 +93,7 @@ term_en = "explorer evidence model"
 term_tr = "Gezgin kanıt modeli"
 area = "application"
 reason = "The name states the function."
+owner = "WP-40"
 
 [[concept]]
 old = ["D-Web Passport"]
@@ -96,6 +104,7 @@ term_en = "identity profile"
 term_tr = "Kimlik profili"
 area = "application"
 reason = "The name states the function."
+owner = "WP-23"
 
 [[concept]]
 old = ["Vault (SocialFi)"]
@@ -106,6 +115,7 @@ term_en = "NFT folders"
 term_tr = "NFT klasörleri"
 area = "application"
 reason = "The name states the function."
+owner = "WP-23"
 
 [[concept]]
 old = ["DeEd"]
@@ -115,6 +125,7 @@ term_en = "education domain"
 term_tr = "Eğitim domaini"
 area = "application"
 reason = "The name states the function."
+owner = "WP-23"
 
 [[concept]]
 old = ["budlumxyz"]
@@ -124,6 +135,7 @@ term_en = "app registry"
 term_tr = "Uygulama kaydı"
 area = "application"
 reason = "The name states the function."
+owner = "WP-23"
 
 [[concept]]
 old = ["Developer OS"]
@@ -133,6 +145,7 @@ term_en = "project manifest"
 term_tr = "Proje bildirimi"
 area = "tooling"
 reason = "The name states the function."
+owner = "WP-39"
 
 [[concept]]
 old = ["Universal Gateway", "BudGateway"]
@@ -142,6 +155,7 @@ term_en = "content gateway"
 term_tr = "İçerik ağ geçidi"
 area = "storage"
 reason = "The name states the function."
+owner = "WP-23"
 
 [[concept]]
 old = ["Regeneration", "Turritopsis model"]
@@ -151,6 +165,7 @@ term_en = "node state recovery"
 term_tr = "Düğüm durum kurtarma"
 area = "node"
 reason = "Standard industry term."
+owner = "WP-06"
 
 [[concept]]
 old = ["PUL", "PUL-Full", "Pul-Lite"]
@@ -160,6 +175,7 @@ term_en = "signature aggregation proof"
 term_tr = "İmza toplama kanıtı"
 area = "budzero"
 reason = "The name states the function."
+owner = "WP-33"
 allow_paths = ["xtask/gates/src/gates/module_coverage.rs"]
 
 [[concept]]
@@ -170,6 +186,7 @@ term_en = "B.U.D. 3.0 object, object commitment, BUD3 Object Format 1 (BOF-1)"
 term_tr = "B.U.D. 3.0 nesnesi, nesne taahhüdü, BOF-1"
 area = "storage"
 reason = "One storage object, one term."
+owner = "WP-19"
 allow_paths = ["mobile/android/fdroid/", "xtask/gates/src/gates/bud3_forbidden_phrases.rs"]
 
 [[concept]]
@@ -180,6 +197,7 @@ term_en = "bud3 modules"
 term_tr = "bud3 modülleri"
 area = "storage"
 reason = "One implementation of B.U.D. 3.0."
+owner = "WP-21"
 
 [[concept]]
 old = ["Liquid storage"]
@@ -189,6 +207,7 @@ term_en = "class-aware wide-stripe placement"
 term_tr = "Geniş şeritli yerleşim"
 area = "storage"
 reason = "Standard industry term."
+owner = "WP-20"
 
 [[concept]]
 old = ["Living Threshold", "temperature transition"]
@@ -198,6 +217,7 @@ term_en = "access tiering policy"
 term_tr = "Erişim katmanı politikası"
 area = "storage"
 reason = "Standard industry term."
+owner = "WP-24"
 
 [[concept]]
 old = ["Mobile Self", "Server Admission"]
@@ -207,6 +227,7 @@ term_en = "removed; replaced by the Mobile validator class"
 term_tr = "Kaldırılır; yerine Mobil doğrulayıcı sınıfı"
 area = "storage"
 reason = "B.U.D. 1.0 model is removed."
+owner = "WP-07"
 
 [[concept]]
 old = ["Gonca", "Kabuk", "Kabuk-A", "Kabuk-Z", "Öz kökü", "Mezar kümesi", "Emanet açma", "Gonca kanıtı"]
@@ -216,6 +237,7 @@ term_en = "sealed object and its parts"
 term_tr = "Mühürlü nesne ve parçaları"
 area = "budzero privacy"
 reason = "Standard cryptographic terms."
+owner = "WP-22"
 
 [[concept]]
 old = ["GT-1"]
@@ -225,6 +247,7 @@ term_en = "Private Transfer Protocol 1 (PTP-1)"
 term_tr = "Gizli Transfer Protokolü 1 (PTP-1)"
 area = "budzero privacy"
 reason = "The name states the function."
+owner = "WP-56"
 
 [[concept]]
 old = ["Anaç", "Anaç kanıtı", "Tek kanıt", "Kök görünüm"]
@@ -234,6 +257,7 @@ term_en = "domain finality proof, block aggregate proof, remote state view"
 term_tr = "Domain kesinlik kanıtı, blok toplu kanıtı, uzak durum görünümü"
 area = "budzero"
 reason = "The names state the function."
+owner = "WP-60"
 
 [[concept]]
 old = ["Fotosentez", "DS-0..DS-3", "BÇP", "YKP", "Lubot"]
@@ -243,6 +267,7 @@ term_en = "AI Verification Layer, verification level VL-0..VL-3, Deterministic I
 term_tr = "AI Doğrulama Katmanı, VL-0 ile VL-3, DIP, APB, cihaz içi asistan"
 area = "ai"
 reason = "The names state the function."
+owner = "WP-45"
 allow_paths = ["xtask/gates/src/gates/no_upstream_brands.rs", ".quality/typos.toml"]
 
 [[concept]]
@@ -253,6 +278,7 @@ term_en = "BudZero core, BudZero RV32, BudZero guest SDK, mobile prover profile"
 term_tr = "BudZero çekirdeği, BudZero RV32, BudZero konuk SDK, mobil kanıtlayıcı profili"
 area = "budzero"
 reason = "BudZero is the concept term."
+owner = "WP-33"
 allow_paths = ["xtask/gates/src/gates/bud3_forbidden_phrases.rs"]
 
 [[concept]]
@@ -263,3 +289,4 @@ term_en = "Universal Object Layer (UOL) terms"
 term_tr = "Evrensel Nesne Katmanı (UOL) terimleri"
 area = "object layer"
 reason = "Professional terms replace metaphors."
+owner = "WP-49"
