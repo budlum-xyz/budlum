@@ -5,6 +5,7 @@ use crate::core::block::Block;
 use crate::core::transaction::Transaction;
 use crate::domain::storage_deal::{RetrievalChallengeRequest, RetrievalResponse, StorageDeal};
 use crate::network::node::NodeClient;
+use crate::rpc::compat::solana;
 use crate::storage::content_id::ContentId;
 use crate::storage::{emit_hook, NopThreeHook, ThreeEventHook, ThreeHookEvent, ThreeHookKind};
 use bincode;
@@ -7112,6 +7113,206 @@ impl BudlumApiServer for RpcServer {
             .await;
         let chain_id = self.chain.get_chain_id().await;
         Ok(Self::ai_readiness_json(chain_id, active_operators.len()))
+    }
+
+    // ---- Solana JSON-RPC compatibility gateway (WP-31, 1/N) ----
+    //
+    // Every answer here is a node or chain fact, or a refusal that names the
+    // Budlum door (see `src/rpc/compat/solana/mod.rs`). The SVM account model,
+    // token programs, message fees and transactions wait for WP-31 2/N and
+    // the SVM worker; a balance read here would be a number no SVM account
+    // backs.
+
+    async fn solana_get_health(&self) -> Result<String, ErrorObjectOwned> {
+        Ok("ok".to_string())
+    }
+
+    async fn solana_get_version(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Ok(serde_json::json!({
+            "solana-core": format!("budlum-core/{}", env!("CARGO_PKG_VERSION")),
+            "feature-set": 0,
+        }))
+    }
+
+    async fn solana_get_genesis_hash(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::not_exposed("getGenesisHash", "bud_getBlockByNumber"))
+    }
+
+    async fn solana_get_slot(&self) -> Result<u64, ErrorObjectOwned> {
+        Ok(self.chain.get_height().await)
+    }
+
+    async fn solana_get_block_height(&self) -> Result<u64, ErrorObjectOwned> {
+        Ok(self.chain.get_height().await)
+    }
+
+    async fn solana_get_epoch_info(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::not_exposed("getEpochInfo", "bud_getStatus"))
+    }
+
+    async fn solana_get_latest_blockhash(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::not_exposed("getLatestBlockhash", "bud_getBlockByNumber"))
+    }
+
+    async fn solana_is_blockhash_valid(
+        &self,
+        _blockhash: String,
+        _commitment: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::not_exposed("isBlockhashValid", "bud_getBlockByNumber"))
+    }
+
+    async fn solana_get_balance(
+        &self,
+        _address: String,
+        _commitment: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getBalance", "bud_getBalance"))
+    }
+
+    async fn solana_get_account_info(
+        &self,
+        _address: String,
+        _commitment: Option<String>,
+        _encoding: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getAccountInfo", "bud_getAccountProof"))
+    }
+
+    async fn solana_get_multiple_accounts(
+        &self,
+        _addresses: Vec<String>,
+        _commitment: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getMultipleAccounts", "bud_getAccountProof"))
+    }
+
+    async fn solana_get_program_accounts(
+        &self,
+        _program_id: String,
+        _commitment: Option<String>,
+        _filters: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getProgramAccounts", "bud_getAccountProof"))
+    }
+
+    async fn solana_get_token_accounts_by_owner(
+        &self,
+        _owner: String,
+        _token_accounts_filter: serde_json::Value,
+        _commitment: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable(
+            "getTokenAccountsByOwner",
+            "bud_getAccountProof",
+        ))
+    }
+
+    async fn solana_get_token_account_balance(
+        &self,
+        _token_account: String,
+        _commitment: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getTokenAccountBalance", "bud_getBalance"))
+    }
+
+    async fn solana_get_token_supply(
+        &self,
+        _commitment: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getTokenSupply", "bud_getStatus"))
+    }
+
+    async fn solana_get_minimum_balance_for_rent_exemption(
+        &self,
+        _data_size: u64,
+        _commitment: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable(
+            "getMinimumBalanceForRentExemption",
+            "bud_getStatus",
+        ))
+    }
+
+    async fn solana_get_fee_for_message(
+        &self,
+        _message: String,
+        _commitment: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getFeeForMessage", "bud_gasPrice"))
+    }
+
+    async fn solana_get_recent_prioritization_fees(
+        &self,
+        _addresses: Option<Vec<String>>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable(
+            "getRecentPrioritizationFees",
+            "bud_gasPrice",
+        ))
+    }
+
+    async fn solana_send_transaction(
+        &self,
+        _transaction: String,
+        _options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("sendTransaction", "bud_sendRawTransaction"))
+    }
+
+    async fn solana_simulate_transaction(
+        &self,
+        _transaction: String,
+        _options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("simulateTransaction", "bud_txPrecheck"))
+    }
+
+    async fn solana_get_signature_statuses(
+        &self,
+        _signatures: Vec<String>,
+        _options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable(
+            "getSignatureStatuses",
+            "bud_getTransactionReceipt",
+        ))
+    }
+
+    async fn solana_get_signatures_for_address(
+        &self,
+        _address: String,
+        _options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable(
+            "getSignaturesForAddress",
+            "bud_getTransactionByHash",
+        ))
+    }
+
+    async fn solana_get_transaction(
+        &self,
+        _signature: String,
+        _options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getTransaction", "bud_getTransactionByHash"))
+    }
+
+    async fn solana_get_block(
+        &self,
+        _slot: u64,
+        _options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getBlock", "bud_getBlockByNumber"))
+    }
+
+    async fn solana_request_airdrop(
+        &self,
+        _address: String,
+        _lamports: u64,
+        _commitment: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::faucet_unavailable("requestAirdrop"))
     }
 }
 

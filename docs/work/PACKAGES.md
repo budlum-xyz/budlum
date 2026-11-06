@@ -4,7 +4,7 @@
 | Document | `docs/work/PACKAGES.md`, required by directive 15.5.7 and 15.6 (M0) |
 | Owner | this integration pull request (BLG-289: one named integrator) |
 | Live base | `main` = `cccf1da1f4bcfe97503a3a00cfba24b172b49b31` |
-| Live snapshot | 70 open pull requests, 2026-11-06 |
+| Live snapshot | 72 open pull requests before this continuation opened #95, 2026-11-06 |
 | Status words | `open` = no delivery merged; `partial` = a slice is open in a PR; `undone` = no owner at all; `merged` = on `main` |
 | Rule | a row changes only in the pull request that owns the package; append-only shared file, resolved by rebase (15.3.4) |
 
@@ -44,7 +44,7 @@ The `PRs` column is a live claim map, not a completion claim. Every PR in it is 
 | WP-28 | Ethereum JSON-RPC gateway | C | T-Launch | yes | WP-27 | #24, #56, #72, #75, #76 | partial | WP-28, 2/2: subscriptions and filter delivery |
 | WP-29 | WASM (CosmWasm ABI) and Cosmos RPC subset | C | T-Launch | yes | WP-26 | #24 | partial | package completion evidence: final SHA, CI run number, every card item |
 | WP-30 | Universal Call and Universal Asset Registry | C | T-Launch | yes | WP-27, WP-29 | #24 | partial | package completion evidence: final SHA, CI run number, every card item |
-| WP-31 | SVM and Solana RPC subset | C | T-Launch | yes | WP-26 | #51, #83 | partial | WP-31, 2/N: subscriptions and SVM-state reads |
+| WP-31 | SVM and Solana RPC subset | C | T-Launch | yes | WP-26 | #51, #83, #95 | partial | #83 1/N carried on #95; dedicated listener, subscriptions, SVM worker and SVM-state reads remain |
 | WP-32 | Move (Aptos) and Aptos REST subset | C | T-Launch | yes | WP-26 | #89 | partial | WP-32, 2/N: Move worker, account namespace, BCS and SDK conformance |
 | WP-33 | BudZero execution environment and BudZero robustness | C | T-Launch | yes | WP-26 | #24, #43 | partial | package completion evidence: final SHA, CI run number, every card item |
 | WP-34 | Migration Kit | C | T-Launch | no | WP-28 | #46, #61 | partial | package completion evidence: final SHA, CI run number, every card item |
@@ -55,7 +55,7 @@ The `PRs` column is a live claim map, not a completion claim. Every PR in it is 
 | WP-39 | Wallet core and CLI | D | T-Launch | yes | WP-08, WP-21, WP-27 | #43 | partial | package completion evidence: final SHA, CI run number, every card item |
 | WP-40 | Explorer and indexer | D | T-Launch | yes | WP-21, WP-26 | #43, #73 | partial | WP-40, 2/N: explorer pages and indexer events |
 | WP-41 | Faucet and operations | D | T-Launch | yes | WP-16 | #34, #52, #58, #59 | partial | package completion evidence: final SHA, CI run number, every card item |
-| WP-42 | CI, gates and supply chain | D | T-Launch | yes | WP-04 | #24, #29, #30, #31, #42, #63, #74, #75, #84 | partial | package completion evidence: final SHA, CI run number, every card item |
+| WP-42 | CI, gates and supply chain | D | T-Launch | yes | WP-04 | #24, #29, #30, #31, #42, #63, #74, #75, #84, #93, #95 | partial | package completion evidence: final SHA, CI run number, every card item |
 | WP-43 | Documents, README and TLG report | D | T-Launch | yes | WP-46, WP-47, WP-48 | #51 | partial | WP-43, 2/N: README numbers and the TLG report |
 | WP-44 | Domains, bridge, settlement and contracts | A | T-Launch | yes | WP-01 | #14, #43, #60 | partial | package completion evidence: final SHA, CI run number, every card item |
 | WP-45 | Privacy, AI and account abstraction: testnet boundary | B | T-Launch | yes | WP-22 | #43, #44, #49 | partial | package completion evidence: final SHA, CI run number, every card item |
@@ -83,7 +83,9 @@ The `PRs` column is a live claim map, not a completion claim. Every PR in it is 
 
 | Slice | WP | Content | Commit |
 |---|---|---|---|
-| WP-42, 1/N | WP-42, WP-04 | directive out of the tree, single integrator ledgers, live stack audit | first commit |
+| WP-42, 1/N | WP-42, WP-04 | directive out of the tree, single integrator ledgers, live stack audit | `ebae99c8` (source #93 `ce8191ec`) |
+| WP-42, 2/N | WP-42 | observed main lint, format and gate repairs | `4bae025d` (source #93 `0c13496b`) |
+| WP-31, 1/N | WP-31 | Solana namespace, classifications, reads and refusals carried from #83 | this commit |
 
 ## Evidence boundary
 
