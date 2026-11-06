@@ -20,6 +20,8 @@
 //! | [`repair`] | Segment repair scheduling and 20-block Instant Duty Handover |
 //! | [`pipeline`] | Upload (content to record and symbols) and view (symbols to checked content) |
 //! | [`fountain`] | RFC 6330 per-segment encoder and decoder, and the streaming encoder |
+//! | [`compression_context`] | Post-launch shared compression context, corpus rotation and access tiering (WP-54) |
+//! | [`private_dedup`] | Post-launch threshold-OPRF private cross-owner deduplication (WP-54) |
 //!
 //! The commitment is fixed-size (32 bytes). The object is not fixed-size: it
 //! is the header plus the payload, and it is at most the header larger than
@@ -31,6 +33,7 @@
 //! own tests and the golden vectors under `tests/vectors/bud3/`.
 
 pub mod bof1;
+pub mod compression_context;
 pub mod content_id;
 pub mod custody;
 pub mod dedup_index;
@@ -39,6 +42,7 @@ pub mod limits;
 pub mod meter;
 pub mod pipeline;
 pub mod placement;
+pub mod private_dedup;
 pub mod registry;
 pub mod repair;
 pub mod segment;
