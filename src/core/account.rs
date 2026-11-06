@@ -89,13 +89,20 @@ impl Account {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Validator {
     pub address: Address,
+    /// SIGNING: excluded - consensus state updated by block application.
     pub stake: u64,
     pub active: bool,
+    /// SIGNING: excluded - consensus state updated by slashing.
     pub slashed: bool,
+    /// SIGNING: excluded - consensus state updated by jailing.
     pub jailed: bool,
+    /// SIGNING: excluded - consensus state updated by jailing.
     pub jail_until: u64,
+    /// SIGNING: excluded - consensus state updated by block application.
     pub last_proposed_block: Option<u64>,
+    /// SIGNING: excluded - consensus state tallied by finality votes.
     pub votes_for: u64,
+    /// SIGNING: excluded - consensus state tallied by finality votes.
     pub votes_against: u64,
     #[serde(default)]
     pub vrf_public_key: Vec<u8>,
@@ -108,11 +115,13 @@ pub struct Validator {
     /// Mikoriza restaked weight: written only by
     /// `settlement::shared_security::apply_restaked_weights` at the epoch
     /// boundary, already capped. Zero for a validator with no allocation.
+    /// SIGNING: excluded - consensus state written at the epoch boundary.
     #[serde(default)]
     pub restaked_weight: u64,
     /// Filiz Chain leader-election commitment: written by the
     /// `RegisterFiliz` door and advanced by each canonical block the
     /// validator produced. `None` until the validator registers a chain.
+    /// SIGNING: excluded - consensus state advanced by block production.
     #[serde(default)]
     pub filiz: Option<crate::consensus::filiz::FilizRegistration>,
     /// Multi-role architecture: tracks which roles this validator has bonded for.
@@ -122,6 +131,7 @@ pub struct Validator {
     /// - AI_OPERATOR (RoleId 8): AI inference layer AI compute provider
     ///
     /// Cross-role slashing: slashing any role jails ALL roles.
+    /// SIGNING: excluded - consensus state written by the role-bonding doors.
     #[serde(default)]
     pub roles: BTreeSet<RoleId>,
 }

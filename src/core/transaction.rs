@@ -3578,12 +3578,14 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
             put_u32(out, *role);
         }
         TransactionType::Vault(vault_tx) => encode_vault_tx(vault_tx, out),
-        // The whole payload is signed: its canonical bincode bytes - the
-        // binding-record header first - length-prefixed.
+        // The whole payload is signed: the binding-record header first, then
+        // the canonical bincode bytes of the body - both length-prefixed, so
+        // the preimage commits the body field by name.
         TransactionType::Storage(storage_tx) => {
+            put_bytes(out, crate::storage::bud3::tx::BINDING_HEADER);
             put_bytes(
                 out,
-                &bincode::serialize(storage_tx.as_ref()).unwrap_or_default(),
+                &bincode::serialize(&storage_tx.as_ref().body).unwrap_or_default(),
             );
         }
         TransactionType::RelayCrossDomainMessage(message) => encode_message(message, out),
