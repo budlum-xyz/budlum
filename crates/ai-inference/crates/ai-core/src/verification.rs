@@ -5,6 +5,8 @@
 //!   (`TAI3`, `TAI4`, `TAI5`, `TAI6`, `TAI10`, `TAI12`),
 //! - Answer Proof Bundle (`APB`) sentence typing, consent-gated citations, and
 //!   single-Markdown `apb` block rendering (`TY1`..`TY6`).
+//!
+//! WIRING: unwired - staged for WP-57 AI verification layer activation.
 
 use sha2::{Digest, Sha256};
 
@@ -217,7 +219,7 @@ pub struct TileStepProof {
     pub lhs: Vec<i32>,
     pub rhs: Vec<i32>,
     pub out: Vec<i32>,
-    pub step_commitment: [u8; 32],
+    pub tile_step_digest: [u8; 32],
 }
 
 fn encode_i32_slice(vals: &[i32]) -> Vec<u8> {
@@ -261,7 +263,7 @@ impl TileStepProof {
         let lhs_b = encode_i32_slice(&lhs);
         let rhs_b = encode_i32_slice(&rhs);
         let out_b = encode_i32_slice(&out);
-        let step_commitment = sha256_prefixed(
+        let tile_step_digest = sha256_prefixed(
             b"budlum/ai/tile64/v1",
             &[&request_id, &step_le, &weights_root, &lhs_b, &rhs_b, &out_b],
         );
@@ -272,7 +274,7 @@ impl TileStepProof {
             lhs,
             rhs,
             out,
-            step_commitment,
+            tile_step_digest,
         })
     }
 
@@ -301,7 +303,7 @@ impl TileStepProof {
             self.lhs.clone(),
             self.rhs.clone(),
         )?;
-        if recomputed.out != self.out || recomputed.step_commitment != self.step_commitment {
+        if recomputed.out != self.out || recomputed.tile_step_digest != self.tile_step_digest {
             return Err("tampered 64x64 tile output or commitment (TAI6)");
         }
         Ok(())

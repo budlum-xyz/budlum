@@ -868,7 +868,7 @@ impl MarketplaceRegistry {
                 "cannot bind content that does not match the asset's registered manifest".into(),
             );
         }
-        if !self.protected_content.is_protected(&manifest_id)
+        if self.protected_content.asset_for(&manifest_id).is_none()
             && self.protected_content.len() >= MAX_PROTECTED_CONTENT
         {
             return Err("protected content registry is full".into());

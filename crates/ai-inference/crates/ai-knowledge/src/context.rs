@@ -140,7 +140,7 @@ pub fn render(ctx: &CompactContext, max_chars: Option<usize>) -> String {
             .iter()
             .map(|f| {
                 let obj = if is_secret_label(&f.subject) || is_secret_label(&f.predicate) {
-                    crate::redact::REDACTION_TOKEN.to_string()
+                    String::from("<SECRET:MASKED>")
                 } else {
                     f.object.clone()
                 };

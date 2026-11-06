@@ -1,6 +1,8 @@
 //! 256-bit four-limb Goldilocks digest (`Digest4`) and suite-tagged commitments
 //! for `note-packing` V2 (WP-56 Step 1, KP-2 `no_64bit_commitments`, KP-5
 //! `commitments_carry_hash_suite`).
+//!
+//! WIRING: unwired - staged for WP-56 Digest4 V2 activation.
 
 use crate::{is_canonical_field, NoteHash};
 

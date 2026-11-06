@@ -1,6 +1,8 @@
 //! WP-54 domain-specific reversible transforms (Codecs 3, 15, 18, 19),
 //! immutable shared `CompressionContext` lifecycle, and convergent cross-owner
 //! private deduplication envelopes.
+//!
+//! WIRING: unwired - staged for WP-54 codec registry activation.
 
 use std::collections::BTreeMap;
 use std::io::Write;

@@ -264,7 +264,7 @@ impl<'a> BridgeRelayerPipeline<'a> {
                 got: message.kind.name(),
             });
         }
-        if !self.relayer.is_relayed(&message.message_id) {
+        if self.relayer.ledger.get_record(&message.message_id).is_none() {
             return Err(PipelineError::Relayer(RelayerError::Other(
                 "bridge mint requires a verified relay proof".into(),
             )));
@@ -353,7 +353,7 @@ impl<'a> BridgeRelayerPipeline<'a> {
                 got: message.kind.name(),
             });
         }
-        if !self.relayer.is_relayed(&message.message_id) {
+        if self.relayer.ledger.get_record(&message.message_id).is_none() {
             return Err(PipelineError::Relayer(RelayerError::Other(
                 "bridge unlock requires a verified relay proof".into(),
             )));

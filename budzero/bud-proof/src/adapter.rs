@@ -319,7 +319,7 @@ impl ProofEnvelope {
                 )));
             }
         }
-        let max_deg = crate::bud_stark::MAX_VERIFIER_DEGREE_BITS as u32;
+        let max_deg: u32 = 26;
         if self.degree_bits > max_deg {
             return Err(VerifyError::InvalidEnvelope(format!(
                 "degree_bits {} exceeds the {max_deg} cap",
