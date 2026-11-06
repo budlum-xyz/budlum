@@ -317,3 +317,145 @@ fn sparse_merkle_subtree(entries: &[([u8; 32], [u8; 32])], depth: usize) -> [u8;
         hash_fields_bytes(&[b"BDLM_UEL_NS_NODE_V1", &left, &right])
     }
 }
+
+/// Depth-256 sparse binary Merkle proof for `bud_getExecutionProof` (section 8.10.6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UelExecutionProof {
+    pub namespace: String,
+    pub key: Vec<u8>,
+    pub value: Option<Vec<u8>>,
+    /// Non-zero sibling hashes `(depth, sibling_hash)` along the 256-bit path.
+    pub non_zero_siblings: Vec<(u8, [u8; 32])>,
+    /// All seven group roots `[evm, wasm, svm, move, budzero, alias, asset]`.
+    pub group_roots: [[u8; 32]; 7],
+}
+
+impl ExecutionState {
+    /// Builds a sparse Merkle inclusion or non-inclusion proof for `(ns, key)`.
+    pub fn build_execution_proof(&self, ns: &str, key: &[u8]) -> Result<UelExecutionProof, String> {
+        let Some(group) = RootGroup::for_namespace(ns) else {
+            return Err(format!("unknown UEL namespace `{ns}`"));
+        };
+        let value = self.read(ns, key)?;
+        let target_path = hash_fields_bytes(&[b"BDLM_UEL_NS_KEY_V1", ns.as_bytes(), key]);
+
+        let mut leaves: BTreeMap<[u8; 32], [u8; 32]> = BTreeMap::new();
+        for (cur_ns, bucket) in &self.namespaces {
+            if RootGroup::for_namespace(cur_ns) != Some(group) {
+                continue;
+            }
+            for (hex_k, val) in bucket {
+                let Ok(raw_k) = hex::decode(hex_k) else {
+                    continue;
+                };
+                let pk = hash_fields_bytes(&[b"BDLM_UEL_NS_KEY_V1", cur_ns.as_bytes(), &raw_k]);
+                let lh =
+                    hash_fields_bytes(&[b"BDLM_UEL_NS_LEAF_V1", cur_ns.as_bytes(), &raw_k, val]);
+                leaves.insert(pk, lh);
+            }
+        }
+        let entries: Vec<([u8; 32], [u8; 32])> = leaves.into_iter().collect();
+        let mut siblings = Vec::new();
+        collect_sparse_siblings(&entries, &target_path, 0, &mut siblings);
+
+        let group_roots = [
+            self.group_root(RootGroup::Evm),
+            self.group_root(RootGroup::Wasm),
+            self.group_root(RootGroup::Svm),
+            self.group_root(RootGroup::Move),
+            self.group_root(RootGroup::BudZero),
+            self.group_root(RootGroup::Alias),
+            self.group_root(RootGroup::Asset),
+        ];
+        Ok(UelExecutionProof {
+            namespace: String::from(ns),
+            key: key.to_vec(),
+            value,
+            non_zero_siblings: siblings,
+            group_roots,
+        })
+    }
+}
+
+fn collect_sparse_siblings(
+    entries: &[([u8; 32], [u8; 32])],
+    target_path: &[u8; 32],
+    depth: usize,
+    out: &mut Vec<(u8, [u8; 32])>,
+) {
+    if entries.is_empty() || depth >= 256 {
+        return;
+    }
+    let split = entries.partition_point(|(k, _)| !bit_at_msb(k, depth));
+    let (left_slice, right_slice) = entries.split_at(split);
+    if bit_at_msb(target_path, depth) {
+        let sib = sparse_merkle_subtree(left_slice, depth + 1);
+        if sib != [0u8; 32] {
+            out.push((depth as u8, sib));
+        }
+        collect_sparse_siblings(right_slice, target_path, depth + 1, out);
+    } else {
+        let sib = sparse_merkle_subtree(right_slice, depth + 1);
+        if sib != [0u8; 32] {
+            out.push((depth as u8, sib));
+        }
+        collect_sparse_siblings(left_slice, target_path, depth + 1, out);
+    }
+}
+
+/// Evaluates a [`UelExecutionProof`] against `expected_execution_root`.
+#[must_use]
+pub fn uel_proof_matches_root(
+    proof: &UelExecutionProof,
+    expected_execution_root: &[u8; 32],
+) -> bool {
+    let Some(group) = RootGroup::for_namespace(&proof.namespace) else {
+        return false;
+    };
+    let path_key = hash_fields_bytes(&[
+        b"BDLM_UEL_NS_KEY_V1",
+        proof.namespace.as_bytes(),
+        &proof.key,
+    ]);
+    let mut cur = match &proof.value {
+        Some(v) => hash_fields_bytes(&[
+            b"BDLM_UEL_NS_LEAF_V1",
+            proof.namespace.as_bytes(),
+            &proof.key,
+            v,
+        ]),
+        None => [0u8; 32],
+    };
+    let mut sib_map: BTreeMap<u8, [u8; 32]> = BTreeMap::new();
+    for &(d, h) in &proof.non_zero_siblings {
+        if sib_map.insert(d, h).is_some() {
+            return false;
+        }
+    }
+    for depth in (0usize..256usize).rev() {
+        let sib = sib_map.get(&(depth as u8)).copied().unwrap_or([0u8; 32]);
+        if cur == [0u8; 32] && sib == [0u8; 32] {
+            continue;
+        }
+        cur = if bit_at_msb(&path_key, depth) {
+            hash_fields_bytes(&[b"BDLM_UEL_NS_NODE_V1", &sib, &cur])
+        } else {
+            hash_fields_bytes(&[b"BDLM_UEL_NS_NODE_V1", &cur, &sib])
+        };
+    }
+    let idx = match group {
+        RootGroup::Evm => 0,
+        RootGroup::Wasm => 1,
+        RootGroup::Svm => 2,
+        RootGroup::Move => 3,
+        RootGroup::BudZero => 4,
+        RootGroup::Alias => 5,
+        RootGroup::Asset => 6,
+    };
+    if proof.group_roots.get(idx) != Some(&cur) {
+        return false;
+    }
+    let [g0, g1, g2, g3, g4, g5, g6] = proof.group_roots;
+    let folded = hash_fields_bytes(&[b"BDLM_UEL_ROOT_V1", &g0, &g1, &g2, &g3, &g4, &g5, &g6]);
+    folded == *expected_execution_root
+}

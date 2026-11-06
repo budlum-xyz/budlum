@@ -41,9 +41,39 @@ pub struct ZkVmReceipt {
 /// not the zeros a fresh `Vm` starts with. `sender` is the first eight bytes
 /// of the address, little endian: the VM word is 64 bits wide and the public
 /// input carries the same word.
+/// Encodes a 32-byte `Address` as four little-endian 64-bit words (`BLG-230`, `WP-33`).
+#[must_use]
+pub fn address_to_four_words(addr: &crate::core::address::Address) -> [u64; 4] {
+    let raw = addr.as_bytes();
+    let mut out = [0u64; 4];
+    for (idx, dst) in out.iter_mut().enumerate() {
+        let start = idx * 8;
+        if let Some(chunk) = raw.get(start..start + 8) {
+            if let Ok(arr) = <[u8; 8]>::try_from(chunk) {
+                *dst = u64::from_le_bytes(arr);
+            }
+        }
+    }
+    out
+}
+
+/// Reconstructs a 32-byte `Address` from its four 64-bit little-endian words (`WP-33`).
+#[must_use]
+pub fn four_words_to_address(words: [u64; 4]) -> crate::core::address::Address {
+    let mut out = [0u8; 32];
+    for (idx, w) in words.iter().copied().enumerate() {
+        let start = idx * 8;
+        if let Some(dst) = out.get_mut(start..start + 8) {
+            dst.copy_from_slice(&w.to_le_bytes());
+        }
+    }
+    crate::core::address::Address::from(out)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TxContext {
     pub sender: u64,
+    pub sender_words: [u64; 4],
     pub nonce: u64,
     pub block_height: u64,
 }
@@ -52,10 +82,11 @@ impl TxContext {
     /// The context of `tx` executing in the block at `block_height`.
     #[must_use]
     pub fn of(tx: &crate::core::transaction::Transaction, block_height: u64) -> Self {
-        let mut word = [0u8; 8];
-        word.copy_from_slice(&tx.from.as_bytes()[..8]);
+        let words = address_to_four_words(&tx.from);
+        let [w0, ..] = words;
         Self {
-            sender: u64::from_le_bytes(word),
+            sender: w0,
+            sender_words: words,
             nonce: tx.nonce,
             block_height,
         }

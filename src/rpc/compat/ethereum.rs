@@ -346,10 +346,7 @@ impl EthereumCompatGateway {
                 }
             }
             "eth_getBlockByNumber" | "eth_getBlockByHash" => {
-                let exec_root = state
-                    .execution_state
-                    .execution_root()
-                    .unwrap_or([0u8; 32]);
+                let exec_root = state.execution_state.execution_root();
                 let base_fee = state.execution_state.base_fee_per_bgu_attos;
                 JsonRpcResponse::ok(
                     id,

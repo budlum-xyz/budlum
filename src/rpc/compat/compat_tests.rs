@@ -84,7 +84,7 @@ fn eth_rpc_method_table_is_complete() {
     let state = AccountState::new();
     let expected_root = format!(
         "0x{}",
-        hex::encode(state.execution_state.execution_root().expect("root"))
+        hex::encode(state.execution_state.execution_root())
     );
     let blk = gw.handle_request(
         CompatListener::Public,

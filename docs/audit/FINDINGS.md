@@ -39,7 +39,12 @@ finding whose fix is carried or merged.
 | Identity | Status | Location | Verification test / gate | Pull request |
 |---|---|---|---|---|
 | BLG-088 | closed (in review, PR #36) | `crates/uel-abi/src/transport.rs`, `crates/uel-abi/tests/transport.rs` | `handshake_echoes_request_id_and_rejects_mismatch` | PR `#36` |
-| BLG-248 | closed (in review, PR #36) | `src/execution/coordinator/mod.rs` (`StatefulBudZeroEe`), `src/execution/coordinator/state.rs` | `budzero_stateful_storage_persists_across_blocks` | PR `#36` |
+| BLG-039 | closed (in review, PR #36) | `src/execution/proof_verifier.rs`, `src/execution/budzero_ee/mod.rs` | `blg_039_and_blg_142_verifier_dos_bounds_and_optional_proof_market` | PR `#36` |
+| BLG-142 | closed (in review, PR #36) | `src/execution/budzero_ee/mod.rs` | `blg_039_and_blg_142_verifier_dos_bounds_and_optional_proof_market` | PR `#36` |
+| BLG-223 (opcode leg) | closed on testnet (in review, PR #36) | `src/execution/budzero_ee/mod.rs`, `src/execution/zkvm.rs` | `verify_merkle_is_closed_on_testnet` | PR `#36` |
+| BLG-226 | closed on testnet (in review, PR #36) | `src/execution/budzero_ee/mod.rs`, `src/execution/zkvm.rs` | `verify_inference_is_closed_on_testnet` | PR `#36` |
+| BLG-230 (execution leg) | closed (in review, PR #36) | `src/execution/zkvm.rs` (`address_to_four_words`), `src/execution/budzero_ee/mod.rs` | `budzero_sender_is_four_words` | PR `#36` |
+| BLG-248 | closed (in review, PR #36) | `src/execution/coordinator/mod.rs` (`StatefulBudZeroEe`), `src/execution/coordinator/state.rs` | `budzero_stateful_storage_persists_across_blocks`, `budzero_ee_stateful_program_persists` | PR `#36` |
 | BLG-250 | closed (in review, PR #36) | `execution/Cargo.toml`, `src/execution/coordinator/worker.rs`, `xtask/gates/src/gates/ee_workers_build_with_unwind.rs` | `uel_worker_panic_yields_fault_receipt`, `uel_worker_death_does_not_commit`, gate `ee-workers-build-with-unwind` | PR `#36` |
 | BLG-256 | closed (in review, PR #36) | `src/core/account.rs`, `xtask/gates/src/gates/economy_invariants.rs` | `frac_attos_stays_below_1e12`, `uel_bud_conservation`, gate `economy-invariants` | PR `#36` |
 | BLG-260 | closed (in review, PR #36) | `src/execution/coordinator/overlay.rs` (`BlockReadCache`, `TxOverlay`), `docs/EXECUTION.md` | `coordinator_overlay_rolls_back_frame`, `execution_root_binds_every_namespace`, `uel_cross_arch_roots_equal` | PR `#36` |

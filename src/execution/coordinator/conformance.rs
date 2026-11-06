@@ -163,7 +163,7 @@ pub fn run_evm_conformance() -> Result<ConformanceReport, String> {
         return Err(String::from("EVM PUSH0+ADD+SSTORE conformance output mismatch"));
     }
 
-    let root = state.execution_state.execution_root()?;
+    let root = state.execution_state.execution_root();
     Ok(ConformanceReport {
         ee: EeId::EVM,
         passed_vectors: 4,
@@ -211,7 +211,7 @@ pub fn run_wasm_conformance() -> Result<ConformanceReport, String> {
     if r0.status != UelReceiptStatus::Success {
         return Err(String::from("WASM deploy failed"));
     }
-    let root = state.execution_state.execution_root()?;
+    let root = state.execution_state.execution_root();
     Ok(ConformanceReport {
         ee: EeId::WASM,
         passed_vectors: 3,
@@ -307,7 +307,7 @@ pub fn run_svm_conformance() -> Result<ConformanceReport, String> {
     {
         return Err(String::from("SVM conformance statuses unexpected"));
     }
-    let root = state.execution_state.execution_root()?;
+    let root = state.execution_state.execution_root();
     Ok(ConformanceReport {
         ee: EeId::SVM,
         passed_vectors: 3,
@@ -375,7 +375,7 @@ pub fn run_move_conformance() -> Result<ConformanceReport, String> {
     {
         return Err(String::from("Move conformance statuses unexpected"));
     }
-    let root = state.execution_state.execution_root()?;
+    let root = state.execution_state.execution_root();
     Ok(ConformanceReport {
         ee: EeId::MOVE,
         passed_vectors: 2,
@@ -414,7 +414,7 @@ pub fn run_budzero_conformance() -> Result<ConformanceReport, String> {
     if recs.first().map(|r| r.status) != Some(UelReceiptStatus::Success) {
         return Err(String::from("BudZero conformance deploy failed"));
     }
-    let root = state.execution_state.execution_root()?;
+    let root = state.execution_state.execution_root();
     Ok(ConformanceReport {
         ee: EeId::BUDZERO,
         passed_vectors: 2,

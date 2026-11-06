@@ -150,6 +150,12 @@ impl ExecutionEnvironment for StatefulBudZeroEe {
                 message: String::from("BudZero deploy code exceeds 256 KiB"),
             });
         }
+        if let Err(message) = crate::execution::budzero_ee::decode_budzero_for_testnet(code) {
+            return Err(EeRefusal {
+                code: RefusalCode::Denied,
+                message,
+            });
+        }
         let code_hash: [u8; 32] = Sha256::digest(code).into();
         Ok(CodeInfo {
             code_hash,
@@ -223,12 +229,19 @@ impl ExecutionEnvironment for StatefulBudZeroEe {
                         });
                     }
                 };
-                let mut caller_word = [0u8; 8];
-                if let Some(src) = call.caller.id.get(..8) {
-                    caller_word.copy_from_slice(src);
+                let mut caller_addr = [0u8; 32];
+                let copy_len = call.caller.id.len().min(32);
+                if let (Some(dst), Some(src)) =
+                    (caller_addr.get_mut(..copy_len), call.caller.id.get(..copy_len))
+                {
+                    dst.copy_from_slice(src);
                 }
+                let sender_words =
+                    crate::execution::zkvm::address_to_four_words(&Address::from(caller_addr));
+                let [w0, ..] = sender_words;
                 let vm_ctx = TxContext {
-                    sender: u64::from_le_bytes(caller_word),
+                    sender: w0,
+                    sender_words,
                     nonce: 0,
                     block_height: ctx.height,
                 };
