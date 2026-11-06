@@ -112,7 +112,7 @@ impl Default for MainnetActivation {
     /// and cheap enough to collide by brute force, so the commitments
     /// neither hid nor bound.
     ///
-    /// The permutation is now the full Goldilocks width-8 instance: `R_F = 8`,
+    /// The permutation is now the full Goldilocks width-12 instance: `R_F = 8`,
     /// `R_P = 22`, 30 rounds, and the AIR constrains every one of them. The
     /// reason for the gate is gone, so the gate is gone.
     ///

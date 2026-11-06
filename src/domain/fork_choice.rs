@@ -74,18 +74,17 @@ pub struct DomainForkChoice {
 impl ConsensusDomainForkChoice for DomainForkChoice {
     fn fork_choice(&self, candidates: &[ForkCandidate]) -> Result<ResolvedHead, ForkChoiceError> {
         ensure_single_domain(self.domain_id, candidates)?;
-        // A lone BFT or PoA candidate still needs its certificate or quorum. Only the
-        // kinds without a per-candidate proof flag take the single candidate shortcut.
+        let mut head = match &self.kind {
+            ConsensusKind::PoW => resolve_pow(candidates)?,
+            ConsensusKind::PoS => resolve_pos(candidates)?,
+            ConsensusKind::Bft => resolve_bft(candidates)?,
+            ConsensusKind::PoA => resolve_poa(candidates)?,
+            _ => return Err(ForkChoiceError::UnsupportedConsensusKind),
+        };
         if candidates.len() == 1 && !matches!(self.kind, ConsensusKind::Bft | ConsensusKind::PoA) {
-            return Ok(resolve_single(candidates[0].clone()));
+            head.reason = ForkChoiceReason::SingleCandidate;
         }
-        match &self.kind {
-            ConsensusKind::PoW => resolve_pow(candidates),
-            ConsensusKind::PoS => resolve_pos(candidates),
-            ConsensusKind::Bft => resolve_bft(candidates),
-            ConsensusKind::PoA => resolve_poa(candidates),
-            _ => Err(ForkChoiceError::UnsupportedConsensusKind),
-        }
+        Ok(head)
     }
 }
 
@@ -125,26 +124,10 @@ fn ensure_single_domain(
     Ok(())
 }
 
-fn resolve_single(candidate: ForkCandidate) -> ResolvedHead {
-    ResolvedHead {
-        domain_id: candidate.domain_id,
-        head_hash: candidate.head_hash,
-        height: candidate.height,
-        finality: if candidate.finalized_checkpoint.is_some() {
-            DomainFinalityStatus::Finalized
-        } else if candidate.justified_checkpoint.is_some() {
-            DomainFinalityStatus::Justified
-        } else {
-            DomainFinalityStatus::Probabilistic
-        },
-        reason: ForkChoiceReason::SingleCandidate,
-    }
-}
-
 fn resolve_pow(candidates: &[ForkCandidate]) -> Result<ResolvedHead, ForkChoiceError> {
     let best = candidates
         .iter()
-        .map(|c| c.cumulative_work.map(|work| (c, work)))
+        .map(|c| c.cumulative_work.filter(|w| *w > 0).map(|work| (c, work)))
         .collect::<Option<Vec<_>>>()
         .ok_or(ForkChoiceError::MissingCumulativeWork)?
         .into_iter()
@@ -167,7 +150,7 @@ fn resolve_pow(candidates: &[ForkCandidate]) -> Result<ResolvedHead, ForkChoiceE
 fn resolve_pos(candidates: &[ForkCandidate]) -> Result<ResolvedHead, ForkChoiceError> {
     let best = candidates
         .iter()
-        .map(|c| c.vote_weight.map(|weight| (c, weight)))
+        .map(|c| c.vote_weight.filter(|w| *w > 0).map(|weight| (c, weight)))
         .collect::<Option<Vec<_>>>()
         .ok_or(ForkChoiceError::MissingVoteWeight)?
         .into_iter()
@@ -381,5 +364,46 @@ mod tests {
             resolver.fork_choice(&[a, b]).unwrap_err(),
             ForkChoiceError::MixedDomainCandidates
         );
+    }
+
+    #[test]
+    fn blg_058_single_candidate_cannot_bypass_work_or_vote_weight() {
+        let pow = DomainForkChoice {
+            domain_id: 1,
+            kind: ConsensusKind::PoW,
+        };
+        let mut lone_pow = candidate(1, 10, 0x51);
+        lone_pow.finalized_checkpoint = Some(hash(0xFF));
+        assert_eq!(
+            pow.fork_choice(std::slice::from_ref(&lone_pow)).unwrap_err(),
+            ForkChoiceError::MissingCumulativeWork
+        );
+        lone_pow.cumulative_work = Some(0);
+        assert_eq!(
+            pow.fork_choice(std::slice::from_ref(&lone_pow)).unwrap_err(),
+            ForkChoiceError::MissingCumulativeWork
+        );
+        lone_pow.cumulative_work = Some(42);
+        let resolved_pow = pow.fork_choice(&[lone_pow]).unwrap();
+        assert_eq!(resolved_pow.finality, DomainFinalityStatus::Probabilistic);
+        assert_eq!(resolved_pow.reason, ForkChoiceReason::SingleCandidate);
+
+        let pos = DomainForkChoice {
+            domain_id: 2,
+            kind: ConsensusKind::PoS,
+        };
+        let mut lone_pos = candidate(2, 10, 0x61);
+        assert_eq!(
+            pos.fork_choice(std::slice::from_ref(&lone_pos)).unwrap_err(),
+            ForkChoiceError::MissingVoteWeight
+        );
+        lone_pos.vote_weight = Some(0);
+        assert_eq!(
+            pos.fork_choice(std::slice::from_ref(&lone_pos)).unwrap_err(),
+            ForkChoiceError::MissingVoteWeight
+        );
+        lone_pos.vote_weight = Some(100);
+        let resolved_pos = pos.fork_choice(&[lone_pos]).unwrap();
+        assert_eq!(resolved_pos.reason, ForkChoiceReason::SingleCandidate);
     }
 }
