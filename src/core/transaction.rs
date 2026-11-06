@@ -4446,6 +4446,22 @@ fn encode_storage_v3_tx(tx: &crate::storage::bud3::tx::StorageTxV3, out: &mut Ve
                 encode_storage_v3_shred_auth(auth, out);
             }
         }
+        StorageTxV3::ReleaseShares {
+            object,
+            segment,
+            lower_quota_bytes,
+        } => {
+            put_u8(out, 11);
+            put_fixed(out, object);
+            match segment {
+                Some(seg) => {
+                    put_u8(out, 1);
+                    put_u64(out, *seg);
+                }
+                None => put_u8(out, 0),
+            }
+            put_u64(out, *lower_quota_bytes);
+        }
     }
 }
 

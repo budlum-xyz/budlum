@@ -239,6 +239,7 @@ pub struct Bud3Registry {
     grants: BTreeMap<[u8; 32], GrantRow>,
     revoked_grants: BTreeSet<[u8; 32]>,
     base_deps: BTreeMap<ObjectKey, BTreeSet<ObjectKey>>,
+    validator_quotas: BTreeMap<Address, u64>,
 }
 
 /// The serialized form of [`Bud3Registry`].
@@ -261,6 +262,8 @@ struct FlatRegistry {
     revoked_grants: Vec<[u8; 32]>,
     #[serde(default)]
     base_deps: Vec<(ObjectKey, Vec<ObjectKey>)>,
+    #[serde(default)]
+    validator_quotas: Vec<(Address, u64)>,
 }
 
 impl From<Bud3Registry> for FlatRegistry {
@@ -281,6 +284,7 @@ impl From<Bud3Registry> for FlatRegistry {
                 .into_iter()
                 .map(|(k, set)| (k, set.into_iter().collect()))
                 .collect(),
+            validator_quotas: r.validator_quotas.into_iter().collect(),
         }
     }
 }
@@ -303,6 +307,7 @@ impl From<FlatRegistry> for Bud3Registry {
                 .into_iter()
                 .map(|(k, v)| (k, v.into_iter().collect()))
                 .collect(),
+            validator_quotas: f.validator_quotas.into_iter().collect(),
         }
     }
 }
@@ -776,9 +781,70 @@ impl Bud3Registry {
         due
     }
 
-    /// `DeclineContent`: a validator refuses future shares of a content id.
+    /// `DeclineContent`: a validator refuses shares of `content`. Any existing
+    /// share held by `validator` on an object with `content` enters share-loss
+    /// reassignment without penalty (WP-20 item 10).
     pub fn decline(&mut self, validator: Address, content: &ContentId) {
         self.declines.insert((content.digest, validator));
+        for obj in self.objects.values_mut() {
+            if obj.record.content_id.digest == content.digest {
+                for s in obj
+                    .shares
+                    .iter_mut()
+                    .filter(|s| s.share.validator == validator && !s.lost)
+                {
+                    s.lost = true;
+                    s.open_audit = None;
+                }
+            }
+        }
+    }
+
+    /// Convenience: set `validator`'s declared custody quota in bytes.
+    pub fn set_validator_quota(&mut self, validator: Address, quota_bytes: u64) {
+        self.validator_quotas.insert(validator, quota_bytes);
+    }
+
+    /// Convenience: read `validator`'s declared custody quota in bytes.
+    #[must_use]
+    pub fn validator_quota(&self, validator: &Address) -> u64 {
+        self.validator_quotas.get(validator).copied().unwrap_or(0)
+    }
+
+    /// `ReleaseShares`: `holder` voluntarily releases its share(s) of `key`
+    /// (on `segment`, or across all segments when `None`) and lowers its
+    /// declared quota by `lower_quota_bytes` without any slash or penalty
+    /// (WP-20 item 11). Released shares enter the share-loss reassignment path.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::UnknownObject`].
+    pub fn release_shares(
+        &mut self,
+        holder: &Address,
+        key: &ObjectKey,
+        segment: Option<u64>,
+        lower_quota_bytes: u64,
+    ) -> Result<usize, RegistryError> {
+        let obj = self
+            .objects
+            .get_mut(key)
+            .ok_or(RegistryError::UnknownObject)?;
+        let mut released = 0usize;
+        for s in &mut obj.shares {
+            let seg_matches = segment.is_none_or(|want| s.segment == want);
+            if s.share.validator == *holder && seg_matches && !s.lost {
+                s.lost = true;
+                s.open_audit = None;
+                released += 1;
+            }
+        }
+        if lower_quota_bytes > 0 {
+            let current = self.validator_quotas.get(holder).copied().unwrap_or(0);
+            self.validator_quotas
+                .insert(*holder, current.saturating_sub(lower_quota_bytes));
+        }
+        Ok(released)
     }
 
     /// `CustodyAck`: the holder confirms its shares of `key`. Returns how many
@@ -836,6 +902,26 @@ impl Bud3Registry {
             }
         }
         opened
+    }
+
+    /// Convenience: list every currently open `(object, audit, deadline_epoch)`
+    /// assigned to `holder`.
+    #[must_use]
+    pub fn open_audits_for(
+        &self,
+        holder: &Address,
+    ) -> Vec<(ObjectKey, super::custody::Audit, u64)> {
+        let mut out = Vec::new();
+        for (key, obj) in &self.objects {
+            for s in &obj.shares {
+                if s.share.validator == *holder && !s.lost {
+                    if let Some((audit, deadline)) = s.open_audit {
+                        out.push((*key, audit, deadline));
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// `CustodyProofBatch`: check each proof of `holder` against its open
@@ -1270,6 +1356,7 @@ impl Bud3Registry {
             && self.grants.is_empty()
             && self.revoked_grants.is_empty()
             && self.base_deps.is_empty()
+            && self.validator_quotas.is_empty()
     }
 
     /// The registry state root over every map, in order.
@@ -1377,6 +1464,9 @@ impl Bud3Registry {
             for dep in deps {
                 fold(&[b"base_dep", base, dep]);
             }
+        }
+        for (validator, quota) in &self.validator_quotas {
+            fold(&[b"quota", validator, &quota.to_le_bytes()]);
         }
         acc
     }

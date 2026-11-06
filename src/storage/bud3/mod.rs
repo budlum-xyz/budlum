@@ -36,13 +36,16 @@ pub mod frame;
 pub mod grants;
 pub mod keys;
 pub mod limits;
+pub mod maintenance;
 pub mod meter;
 pub mod pipeline;
 pub mod placement;
 pub mod qr;
 pub mod registry;
+pub mod repair;
 pub mod seal;
 pub mod segment;
+pub mod symbol_protocol;
 pub mod two_path;
 pub mod tx;
 pub mod varint;
@@ -73,20 +76,40 @@ pub use keys::{
     KeyPkgBud3Error, KEYPKG_PLAINTEXT_LEN,
 };
 pub use limits::{Bud3Limits, OpticalProfile, Profile, ProfileId};
+pub use maintenance::{
+    prioritize_shrink_repairs, select_reassignment_holders, Bud3StorageMetrics, SegmentRisk,
+};
 pub use meter::{Meter, MeterError};
 pub use pipeline::{
     prepare_public_upload, prepare_public_upload_two_path, prepare_sealed_upload, view_public,
     view_public_optical, view_sealed, ObjectRecord, PipelineError, PreparedUpload,
 };
+pub use placement::{
+    place, rank, segment_key, Candidate, Class, PlacementError, PlacementRow, PlacementTable,
+    Share, MOBILE_SYMBOL_FLOOR_MILLI,
+};
 pub use qr::{
     frame_to_matrix, frame_to_png, png_to_frame, render_optical_seconds,
     render_p1_optical_seconds, Bud3QrError, OpticalSecond,
+};
+pub use repair::{
+    assign_repairer, bad_repair_slash_amount, build_segment_repair, is_unseen_share_lost,
+    repair_task_key, should_audit_repair_batch, verify_repaired_symbol, PreparedRepair,
+    RepairError, BAD_REPAIR_SLASH_BPS, FULL_UNSEEN_LOSS_SECS, MOBILE_UNSEEN_LOSS_SECS,
+    REPAIR_AUDIT_PPM, REPAIR_HANDOVER_BLOCKS,
 };
 pub use seal::{
     open_sealed_object, padme_padded_len, seal_object, SealBud3Error, MIN_SEALED_BUCKET_BYTES,
     SEAL_AUTH_TAG_LEN, SEAL_SALT_LEN,
 };
 pub use segment::{object_commitment, segment_digest, ObjectCommitment, Segmentation};
+pub use symbol_protocol::{
+    build_symbol_range_response, verify_symbol_range_response, CustodyPushMessage, LinkMetering,
+    MobileServePolicy, SymbolPeerLimiter, SymbolProtocolError, SymbolRangeRequest,
+    SymbolRangeResponse, VerifiedSymbolItem, CUSTODY_PROTOCOL_ID, MAX_CUSTODY_STREAMS_PER_PEER,
+    MAX_STREAMS_PER_SHARE, MAX_SYMBOLS_PER_REQUEST, MAX_SYMBOL_REQUESTS_PER_SEC,
+    SYMBOLS_PROTOCOL_ID,
+};
 pub use two_path::{
     decode_logical_path, decode_optical_path, extract_object_from_frames,
     extract_object_from_optical_seconds, verify_upload_two_path_and_round_trip, TwoPathError,

@@ -28,6 +28,10 @@ use crate::core::hash::hash_fields_bytes;
 /// Rendezvous draw tag.
 pub const PLACEMENT_TAG: &[u8] = b"BDLM_BUD3_PLACEMENT_V1";
 
+/// Mobile symbol share floor (`phi = 30%`, expressed in thousandths `300 / 1000`,
+/// Section 6.9.2 TESTNET-DEFAULT).
+pub const MOBILE_SYMBOL_FLOOR_MILLI: u64 = 300;
+
 /// The validator class as placement sees it.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
@@ -193,6 +197,64 @@ impl PlacementTable {
             .filter(|r| r.n_full <= full && r.n_mobile <= mobile)
             .max_by_key(|r| (r.n_full, r.n_mobile))
             .copied()
+    }
+
+    /// Lookup with the Section 6.13 network-shrink fallback: if the active Full
+    /// validator count drops below every table bucket (down to `full == 1`),
+    /// each remaining Full validator holds `ceil((k + 2) / full)` symbols so a
+    /// single surviving Full validator still holds at least `k + 2` symbols.
+    #[must_use]
+    pub fn lookup_with_shrink(&self, full: u32, mobile: u32) -> Option<PlacementRow> {
+        if let Some(row) = self.lookup(full, mobile) {
+            return Some(row);
+        }
+        if full == 0 {
+            return None;
+        }
+        let need = u64::from(self.k).saturating_add(2);
+        let per_full_u64 = need.div_ceil(u64::from(full));
+        let s_full = u32::try_from(per_full_u64).ok()?;
+        Some(PlacementRow {
+            n_full: full,
+            s_full,
+            n_mobile: 0,
+            s_mobile: 0,
+        })
+    }
+
+    /// Split physical bytes per segment into `(user_physical_bytes, decentralization_physical_bytes)`
+    /// per Section 6.9.5:
+    /// - `user_physical_bytes` is the cost-optimal Full-only row's physical byte
+    ///   footprint when a matching `(n_full, 0)` bucket exists (or the chosen
+    ///   row itself when Mobile makes early-testnet placement cheaper).
+    /// - `decentralization_physical_bytes` is the extra physical byte footprint
+    ///   introduced by the `phi = 30%` Mobile symbol floor, paid from the Network
+    ///   Security Pool rather than by the uploader.
+    #[must_use]
+    pub fn physical_bytes_split(
+        &self,
+        full: u32,
+        mobile: u32,
+        symbol_size: u32,
+    ) -> Option<(u64, u64)> {
+        let chosen = self.lookup_with_shrink(full, mobile)?;
+        let total_bytes = chosen.total_symbols().saturating_mul(u64::from(symbol_size));
+        if chosen.n_mobile == 0 {
+            return Some((total_bytes, 0));
+        }
+        let baseline_bytes = self
+            .lookup(chosen.n_full, 0)
+            .map(|full_only| {
+                full_only
+                    .total_symbols()
+                    .saturating_mul(u64::from(symbol_size))
+            })
+            .unwrap_or(total_bytes);
+        if total_bytes > baseline_bytes {
+            Some((baseline_bytes, total_bytes - baseline_bytes))
+        } else {
+            Some((total_bytes, 0))
+        }
     }
 }
 
@@ -526,5 +588,77 @@ mod tests {
         c[0].free_quota_bytes = 0;
         let shares = place(&[2; 32], &c, &row, 4096, 2911).unwrap();
         assert!(shares.iter().all(|s| s.validator != c[0].validator));
+    }
+
+    #[test]
+    fn bud3_mobile_floor_holds() {
+        let table = PlacementTable::testnet_default();
+        table.validate().unwrap();
+        for row in &table.rows {
+            if row.n_mobile > 0 && row.n_full >= 16 {
+                assert!(
+                    row.mobile_share_milli() >= MOBILE_SYMBOL_FLOOR_MILLI,
+                    "row {row:?} violated 30% mobile floor: {} milli",
+                    row.mobile_share_milli()
+                );
+            }
+        }
+        // At 64 Full + 512 Mobile, the 30% floor adds decentralization_physical_bytes > 0.
+        let (user_b, dec_b) = table.physical_bytes_split(64, 512, 2911).unwrap();
+        assert_eq!(user_b, 64 * 76 * 2911);
+        assert!(dec_b > 0);
+        assert_eq!(user_b + dec_b, (64 * 54 + 512 * 4) * 2911);
+    }
+
+    #[test]
+    fn bud3_mobile_churn_no_loss() {
+        use super::super::limits::{Bud3Limits, Profile};
+        use super::super::pipeline::{prepare_public_upload, view_public};
+
+        let table = PlacementTable::testnet_default();
+        let row = table.lookup(8, 256).unwrap();
+        assert_eq!((row.n_full, row.s_full, row.n_mobile, row.s_mobile), (8, 443, 256, 13));
+
+        // 8 Full + 256 Mobile validators place an object; all 256 Mobile validators
+        // disappear simultaneously; the object decodes bit-identically from Full shares alone.
+        let candidates = pool(8, 256);
+        let payload = b"B.U.D. 3.0 survives complete 256-phone churn on 8 Full validators".repeat(64);
+        let total_syms = u32::try_from(row.total_symbols()).unwrap();
+        let up = prepare_public_upload(
+            &payload,
+            &Profile::P0,
+            &Bud3Limits::default(),
+            total_syms,
+        )
+        .unwrap();
+        let seg_key = segment_key(&up.record.commitment, 0);
+        let shares = place(&seg_key, &candidates, &row, 16, Profile::P0.symbol_size).unwrap();
+        assert_eq!(shares.iter().filter(|s| s.class == Class::Full).count(), 8);
+        assert_eq!(shares.iter().filter(|s| s.class == Class::Mobile).count(), 256);
+
+        // Drop every Mobile share completely; collect only Full validator ESIs.
+        let full_symbols: Vec<_> = shares
+            .iter()
+            .filter(|s| s.class == Class::Full)
+            .flat_map(|s| {
+                let start = s.first_esi as usize;
+                let end = start + s.symbols as usize;
+                up.segments[0][start..end].iter().cloned()
+            })
+            .collect();
+        let recovered = view_public(&up.record, full_symbols).unwrap();
+        assert_eq!(recovered, payload);
+    }
+
+    #[test]
+    fn bud3_network_shrink_down_to_single_full_validator() {
+        let table = PlacementTable::testnet_default();
+        for full in [4u32, 2, 1] {
+            let row = table.lookup_with_shrink(full, 0).unwrap();
+            assert_eq!(row.n_full, full);
+            assert!(row.survives_mobile_exit(table.k));
+        }
+        let single = table.lookup_with_shrink(1, 0).unwrap();
+        assert_eq!(single.s_full, table.k + 2);
     }
 }

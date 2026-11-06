@@ -89,6 +89,15 @@ pub enum StorageTxV3 {
         /// One-time ML-DSA-65 shred authorizations for active view grants.
         grant_shreds: Vec<GrantShredAuth>,
     },
+    /// Voluntarily release shares and lower declared custody quota without penalty (`ReleaseShares`).
+    ReleaseShares {
+        /// Object holding the share(s) to release.
+        object: ObjectKey,
+        /// Specific segment index, or `None` for all segments of `object`.
+        segment: Option<u64>,
+        /// Bytes by which to lower the holder's declared custody quota.
+        lower_quota_bytes: u64,
+    },
 }
 
 /// What an applied transaction did.
@@ -116,6 +125,8 @@ pub enum Applied {
     GrantRevoked,
     /// Social delete shredded grant capsules and burned the NFT reference.
     SociallyDeleted(ShredOutcome),
+    /// Shares voluntarily released for reassignment without penalty.
+    Released(usize),
 }
 
 /// Apply one transaction signed by `signer` at `epoch`.
@@ -184,6 +195,13 @@ pub fn apply(
         StorageTxV3::SocialDelete { nft, grant_shreds } => registry
             .social_delete(&nft, &signer, &grant_shreds, epoch)
             .map(Applied::SociallyDeleted),
+        StorageTxV3::ReleaseShares {
+            object,
+            segment,
+            lower_quota_bytes,
+        } => registry
+            .release_shares(&signer, &object, segment, lower_quota_bytes)
+            .map(Applied::Released),
     }
 }
 

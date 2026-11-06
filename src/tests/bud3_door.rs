@@ -878,4 +878,275 @@ fn bud3_public_dedup_sealed_isolation_and_dependency_rules() {
     assert!(state.bud3_registry.is_tombstoned(&alice_base));
 }
 
+#[test]
+fn bud3_decline_content_reassigns_and_release_shares_lowers_quota_without_penalty() {
+    use crate::storage::bud3::repair::build_segment_repair;
+
+    let uploader = Address::from([90u8; 32]);
+    let holder_a = Address::from([91u8; 32]);
+    let holder_b = Address::from([92u8; 32]);
+    let repairer = Address::from([93u8; 32]);
+    let replacement = Address::from([94u8; 32]);
+
+    let mut state = AccountState::new();
+    for addr in [uploader, holder_a, holder_b, repairer, replacement] {
+        state.add_balance(&addr, 20_000);
+    }
+    state
+        .bud3_registry
+        .set_validator_quota(*holder_b.as_bytes(), 100_000);
+
+    let payload = b"content subject to voluntary decline and share release";
+    let up = prepare_public_upload(payload, &P, &Bud3Limits::default(), 16).unwrap();
+    let obj_key = up.record.commitment;
+    let content_id = up.record.content_id;
+
+    let shares = vec![
+        (
+            0,
+            Share {
+                validator: *holder_a.as_bytes(),
+                class: Class::Full,
+                first_esi: 0,
+                symbols: 8,
+            },
+        ),
+        (
+            0,
+            Share {
+                validator: *holder_b.as_bytes(),
+                class: Class::Full,
+                first_esi: 8,
+                symbols: 8,
+            },
+        ),
+    ];
+
+    apply(
+        &mut state,
+        &storage_tx(
+            uploader,
+            0,
+            1,
+            0,
+            StorageTxV3::RegisterObject {
+                record: up.record.clone(),
+                shares,
+                lifetime_epochs: 20,
+            },
+        ),
+    )
+    .unwrap();
+
+    // Holder A declines the content: no balance penalty beyond tx fee, and segment 0 becomes due for repair.
+    let bal_before = state.get_balance(&holder_a);
+    apply(
+        &mut state,
+        &storage_tx(
+            holder_a,
+            0,
+            1,
+            0,
+            StorageTxV3::DeclineContent {
+                content: content_id,
+            },
+        ),
+    )
+    .unwrap();
+    assert_eq!(state.get_balance(&holder_a), bal_before - 1);
+    assert_eq!(state.bud3_registry.repairs_due(&obj_key), vec![0]);
+
+    // Repairer reconstructs segment 0 and assigns fresh ESIs (16..24) to `replacement`.
+    let prep = build_segment_repair(
+        repairer.as_bytes(),
+        0,
+        up.record.object_len,
+        &P,
+        16,
+        &[(*replacement.as_bytes(), Class::Full, 8)],
+        up.segments[0].clone(),
+    )
+    .unwrap();
+    apply(
+        &mut state,
+        &storage_tx(
+            repairer,
+            0,
+            1,
+            0,
+            StorageTxV3::RecordRepair {
+                object: obj_key,
+                segment: 0,
+                new_shares: prep.new_shares,
+                new_root: prep.new_root,
+            },
+        ),
+    )
+    .unwrap();
+
+    // Replacement confirms its share; Holder B voluntarily releases its share and lowers quota without penalty.
+    apply(
+        &mut state,
+        &storage_tx(
+            replacement,
+            0,
+            1,
+            0,
+            StorageTxV3::CustodyAck { object: obj_key },
+        ),
+    )
+    .unwrap();
+    let holder_b_before = state.get_balance(&holder_b);
+    apply(
+        &mut state,
+        &storage_tx(
+            holder_b,
+            0,
+            1,
+            0,
+            StorageTxV3::ReleaseShares {
+                object: obj_key,
+                segment: Some(0),
+                lower_quota_bytes: 40_000,
+            },
+        ),
+    )
+    .unwrap();
+    assert_eq!(state.get_balance(&holder_b), holder_b_before - 1);
+    assert_eq!(
+        state.bud3_registry.validator_quota(holder_b.as_bytes()),
+        60_000
+    );
+}
+
+#[test]
+fn bud3_missed_audit_does_not_slash_and_custody_proof_verifies() {
+    use crate::storage::bud3::custody::{prove, symbol_leaf, PPM};
+    use crate::storage::bud3::registry::AuditParams;
+
+    let uploader = Address::from([101u8; 32]);
+    let honest_holder = Address::from([102u8; 32]);
+    let sleepy_holder = Address::from([103u8; 32]);
+    let mut state = AccountState::new();
+    for addr in [uploader, honest_holder, sleepy_holder] {
+        state.add_balance(&addr, 50_000);
+    }
+
+    let up = prepare_public_upload(b"audited custody payload", &P, &Bud3Limits::default(), 12)
+        .unwrap();
+    let obj_key = up.record.commitment;
+    let shares = vec![
+        (
+            0,
+            Share {
+                validator: *honest_holder.as_bytes(),
+                class: Class::Full,
+                first_esi: 0,
+                symbols: 6,
+            },
+        ),
+        (
+            0,
+            Share {
+                validator: *sleepy_holder.as_bytes(),
+                class: Class::Full,
+                first_esi: 6,
+                symbols: 6,
+            },
+        ),
+    ];
+    apply(
+        &mut state,
+        &storage_tx(
+            uploader,
+            0,
+            1,
+            0,
+            StorageTxV3::RegisterObject {
+                record: up.record,
+                shares,
+                lifetime_epochs: 20,
+            },
+        ),
+    )
+    .unwrap();
+    apply(
+        &mut state,
+        &storage_tx(
+            honest_holder,
+            0,
+            1,
+            0,
+            StorageTxV3::CustodyAck { object: obj_key },
+        ),
+    )
+    .unwrap();
+    apply(
+        &mut state,
+        &storage_tx(
+            sleepy_holder,
+            0,
+            1,
+            0,
+            StorageTxV3::CustodyAck { object: obj_key },
+        ),
+    )
+    .unwrap();
+
+    // Open guaranteed audits (100% probability, 1-epoch window) for both confirmed holders.
+    let opened = state.bud3_registry.open_audits(
+        &[0x55; 32],
+        1,
+        &AuditParams {
+            full_ppm: PPM,
+            mobile_ppm: PPM,
+            full_window: 1,
+            mobile_window: 1,
+        },
+    );
+    assert_eq!(opened, 2);
+
+    // Honest holder builds and submits a valid CustodyProofBatch.
+    let leaves: Vec<(u32, [u8; 32])> = up.segments[0]
+        .iter()
+        .map(|s| (s.esi, symbol_leaf(&s.data)))
+        .collect();
+    let open_honest = state
+        .bud3_registry
+        .open_audits_for(honest_holder.as_bytes());
+    assert_eq!(open_honest.len(), 1);
+    let (_, audit, _) = open_honest[0];
+    let pos = usize::try_from(audit.position).unwrap();
+    let sub = usize::try_from(audit.sub_block).unwrap();
+    let proof = prove(0, &leaves, pos, &up.segments[0][pos].data, sub).unwrap();
+    apply(
+        &mut state,
+        &storage_tx(
+            honest_holder,
+            1,
+            1,
+            0,
+            StorageTxV3::CustodyProofBatch {
+                proofs: vec![(obj_key, proof)],
+            },
+        ),
+    )
+    .unwrap();
+
+    // Sleepy holder misses its window at epoch 3: balance is untouched (zero slash!),
+    // while its missed-window reward routes to the security pool.
+    let sleepy_balance_before = state.get_balance(&sleepy_holder);
+    let missed = state.bud3_registry.close_windows(3);
+    assert_eq!(missed, 1);
+    assert_eq!(state.get_balance(&sleepy_holder), sleepy_balance_before);
+    assert!(state.bud3_registry.validator_custody_credit(honest_holder.as_bytes()) > 0);
+    assert_eq!(
+        state
+            .bud3_registry
+            .validator_custody_credit(sleepy_holder.as_bytes()),
+        0
+    );
+}
+
+
 
