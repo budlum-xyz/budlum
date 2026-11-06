@@ -34,8 +34,10 @@
 //! are held to, and a handler that is absent refuses by name rather than
 //! failing at the transport.
 
+pub mod config;
 pub mod limits;
 pub mod methods;
 
+pub use config::{Config, ConfigError, DEFAULT_LISTEN, DEFAULT_PORT, FOREIGN_ETHEREUM_CHAIN_ID};
 pub use limits::{FilterBudget, MAX_FILTERS_PER_PEER, MAX_FILTER_TTL_BLOCKS};
 pub use methods::{is_served, lookup, render, Effect, Listener, Method, Refusal, METHODS};

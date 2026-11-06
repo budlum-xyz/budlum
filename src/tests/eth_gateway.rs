@@ -7,6 +7,9 @@
 //! bound a stranger cannot cross. The module's own tests hold the internals;
 //! these hold the contract.
 
+use crate::rpc::compat::ethereum::config::{
+    Config, ConfigError, DEFAULT_LISTEN, DEFAULT_PORT, FOREIGN_ETHEREUM_CHAIN_ID,
+};
 use crate::rpc::compat::ethereum::limits::{
     FilterBudget, FilterRefused, InstalledFilter, MAX_FILTERS_PER_PEER, MAX_FILTERS_TOTAL,
     MAX_FILTER_TTL_BLOCKS,
@@ -150,4 +153,28 @@ fn the_node_filter_budget_is_larger_than_one_peer_share() {
     };
     assert!(!fresh.is_expired(10));
     assert!(fresh.is_expired(10 + MAX_FILTER_TTL_BLOCKS + 1));
+}
+
+/// `eth_gateway_binds_loopback_only`: section 8.11.1's port table, enforced
+/// rather than documented. A public bind is refused by name, and the foreign
+/// chain id is a separate constant from this chain's answer so that neither can
+/// be changed by editing the other.
+#[test]
+fn eth_gateway_binds_loopback_only() {
+    let default = Config::default();
+    assert_eq!(default.listen, DEFAULT_LISTEN);
+    assert_eq!(default.port(), Ok(DEFAULT_PORT));
+    assert_eq!(default.validate(), Ok(()));
+
+    assert_eq!(
+        Config::new("0.0.0.0:18547").validate(),
+        Err(ConfigError::NotLoopback)
+    );
+    assert_eq!(
+        Config::new("127.0.0.1:18545").validate(),
+        Err(ConfigError::PortCollision),
+        "the native listener's port is not a gateway's"
+    );
+    // The foreign envelope's identity is not this chain's id.
+    assert_eq!(FOREIGN_ETHEREUM_CHAIN_ID, 45261);
 }
