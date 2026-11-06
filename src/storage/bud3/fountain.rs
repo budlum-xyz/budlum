@@ -15,6 +15,19 @@
 //! length, ESI range) before the crate sees it, so a malformed symbol is
 //! refused and never reaches a crate assertion, and it caps the symbols it
 //! keeps so a flood of repair symbols cannot grow its memory.
+//!
+//! # What the retired carousel did, and what replaces it
+//!
+//! `storage::qr_carousel` (legacy, removed by the storage migration) repaired
+//! losses with a low-degree random XOR rule and an `u8` degree cap. That had
+//! two consequences. Past degree 255 the rule saturated, the "independent"
+//! repair symbols started repeating each other, and a large segment lost
+//! symbols it could never recover (BLG-216). And its ceilings were `u32`
+//! (preview 1 MiB, package 64 MiB, `k <= 4096`, video 50 000 frames), so an
+//! object past 4 GiB was silently cut (BLG-213). Here symbol identity is the
+//! 24-bit ESI with no degree counter, so independence does not saturate, and
+//! every length and offset is `u64`, so the only object ceiling is the genesis
+//! parameter `Bud3Limits::max_content_bytes`.
 
 use super::limits::Profile;
 use super::meter::{Meter, MeterError};
@@ -84,6 +97,8 @@ pub enum FountainError {
     Io(String),
     /// The object length does not fit this platform.
     TooLarge,
+    /// The object is larger than the genesis limit.
+    ContentTooLarge { len: u64, max: u64 },
 }
 
 impl From<MeterError> for FountainError {
@@ -308,6 +323,24 @@ impl SegmentDecoder {
     }
 }
 
+/// The object ceiling check the streamer runs before it reads one byte: the
+/// ceiling is the genesis parameter, not a constant in this module, so a
+/// governance change moves the streamer with it (section 6.21.1).
+///
+/// # Errors
+///
+/// [`FountainError::ContentTooLarge`] when `object_len` is above
+/// `max_content_bytes`.
+pub fn check_object_ceiling(object_len: u64, max_content_bytes: u64) -> Result<(), FountainError> {
+    if object_len > max_content_bytes {
+        return Err(FountainError::ContentTooLarge {
+            len: object_len,
+            max: max_content_bytes,
+        });
+    }
+    Ok(())
+}
+
 /// Stream an object through A2: read it segment by segment from `reader`,
 /// hand every source symbol and `repair_per_segment` repair symbols to
 /// `sink`, and return the object commitment. One segment buffer and one
@@ -316,19 +349,22 @@ impl SegmentDecoder {
 ///
 /// # Errors
 ///
-/// [`FountainError::Io`] when the reader fails or ends before `object_len`
-/// bytes, a coding error, or the error `sink` returns.
+/// [`FountainError::ContentTooLarge`] when `object_len` is above
+/// `max_content_bytes`, [`FountainError::Io`] when the reader fails or ends
+/// before `object_len` bytes, a coding error, or the error `sink` returns.
 pub fn encode_stream<R, F>(
     mut reader: R,
     object_len: u64,
     profile: &Profile,
     repair_per_segment: u32,
+    max_content_bytes: u64,
     mut sink: F,
 ) -> Result<ObjectCommitment, FountainError>
 where
     R: Read,
     F: FnMut(Symbol) -> Result<(), FountainError>,
 {
+    check_object_ceiling(object_len, max_content_bytes)?;
     let seg = Segmentation::new(object_len, profile).ok_or(FountainError::InvalidProfile)?;
     let mut digests = Vec::new();
     let mut buf: Vec<u8> = Vec::new();
@@ -379,7 +415,41 @@ mod tests {
     }
 
     fn big_meter() -> Meter {
-        Meter::new(u64::MAX, u64::MAX)
+        Meter::new(1 << 30, 1 << 20)
+    }
+
+    /// How many times the acceptance sweep repeats each loss case. The
+    /// directive asks for 10 000 independent trials over `k` in `{100, 1000,
+    /// 4096}`; that is the nightly figure and it is reached by setting
+    /// `BUDLUM_BUD3_ACCEPTANCE_TRIALS`. The default keeps an ordinary debug
+    /// `cargo test --lib` in the same shape at a fraction of the cost, which is
+    /// the split `pq_vectors_differential_random_inputs` already uses.
+    fn acceptance_trials() -> usize {
+        std::env::var("BUDLUM_BUD3_ACCEPTANCE_TRIALS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8)
+    }
+
+    /// A deterministic index generator: the same trial always drops the same
+    /// symbols, so a red run is reproducible from its seed.
+    fn next(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// A profile that codes `k` source symbols of 64 bytes each.
+    fn profile_for(k: u32) -> Profile {
+        Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 64,
+            fps: 10,
+            k_max: k,
+        }
     }
 
     #[test]
@@ -463,6 +533,59 @@ mod tests {
         }
     }
 
+    /// T6: `k + 2` distinct symbols recover the segment under independent and
+    /// burst loss, for `k` in `{100, 1000, 4096}`, at a success rate of at
+    /// least 99.99 %. The trial count is [`acceptance_trials`]; the nightly
+    /// figure of 10 000 is reached with `BUDLUM_BUD3_ACCEPTANCE_TRIALS`.
+    #[test]
+    fn bud3_fountain_acceptance() {
+        let trials = acceptance_trials();
+        assert!(trials > 0, "a sweep of zero trials proves nothing");
+        let mut decoded = 0usize;
+        let mut failures = 0usize;
+        for k in [100u32, 1000, 4096] {
+            let p = profile_for(k);
+            let len = usize::try_from(u64::from(k) * u64::from(p.symbol_size)).unwrap();
+            let data = pattern(len, k);
+            let enc = SegmentEncoder::new(0, &data, &p).unwrap();
+            assert_eq!(enc.k(), k);
+            // `k + 2` distinct symbols: every source symbol and two repairs.
+            let mut pool = enc.source_symbols();
+            pool.extend(enc.repair_symbols(0, 2).unwrap());
+            let n = pool.len();
+            assert_eq!(n as u32, k + 2);
+            for trial in 0..trials {
+                let mut state = 0xB0D3_0000_0001u64 ^ u64::from(k) ^ ((trial as u64) << 32);
+                // Independent loss: one symbol at a random index disappears.
+                let lost = usize::try_from(next(&mut state) % n as u64).unwrap();
+                // Burst loss: a window of three symbols disappears, wrapping.
+                // Two of the three are source symbols, which is what the two
+                // repair symbols cover.
+                const BURST: usize = 3;
+                let burst = usize::try_from(next(&mut state) % n as u64).unwrap();
+                let mut dec = SegmentDecoder::new(0, data.len() as u64, &p).unwrap();
+                let mut meter = big_meter();
+                for (i, symbol) in pool.iter().enumerate() {
+                    if i == lost || (0..BURST).any(|d| (burst + d) % n == i) {
+                        continue;
+                    }
+                    dec.push(symbol.clone(), &mut meter).unwrap();
+                }
+                if dec.into_bytes().as_deref() != Some(&data[..]) {
+                    failures += 1;
+                }
+                decoded += 1;
+            }
+        }
+        assert_eq!(decoded, trials * 3, "every k in the sweep ran every trial");
+        // The directive's bar: at least 99.99 % recovery. Stated as a ratio so
+        // the nightly figure and the default both read the same rule.
+        assert!(
+            failures * 10_000 <= decoded,
+            "T6 wants at least 99.99 % recovery; {failures} of {decoded} trials failed"
+        );
+    }
+
     #[test]
     fn malformed_symbols_are_refused_before_the_crate() {
         let mut dec = SegmentDecoder::new(2, 100, &SMALL).unwrap();
@@ -526,6 +649,100 @@ mod tests {
         assert!(!dec.is_done());
     }
 
+    /// BLG-216: the retired carousel repaired with a low-degree random XOR rule
+    /// whose degree counter saturated at `u8::MAX`, after which its "independent"
+    /// repair symbols repeated each other and a large segment could not be
+    /// recovered. RFC 6330 has no degree counter: symbol identity is the 24-bit
+    /// ESI, so symbols far past 255 stay distinct and independent.
+    #[test]
+    fn bud3_old_ceilings_are_gone() {
+        let p = profile_for(4096);
+        let len = usize::try_from(u64::from(p.k_max) * u64::from(p.symbol_size)).unwrap();
+        let data = pattern(len, 7);
+        let enc = SegmentEncoder::new(0, &data, &p).unwrap();
+        assert_eq!(enc.k(), 4096);
+        // The retired rule saturated at degree 255; `k` here is sixteen times that.
+        assert!(enc.k() > 16 * 255);
+        // Two thousand repair symbols: every ESI distinct, none inside the
+        // retired `u8` degree space.
+        let repair = enc.repair_symbols(0, 2048).unwrap();
+        assert_eq!(repair.len(), 2048);
+        let mut seen = std::collections::BTreeSet::new();
+        for s in &repair {
+            assert!(seen.insert(s.esi), "repair ESI {} was produced twice", s.esi);
+        }
+        let far = enc.repair_symbols(20_000, 4).unwrap();
+        assert!(far.iter().all(|s| s.esi > 255));
+        assert!(far.iter().all(|s| s.esi > u32::from(u16::MAX)));
+        // Independence, measured rather than asserted: the 4096 source symbols
+        // and one repair symbol from the far end of the ESI space still build
+        // the segment, so the far symbol carried new information and not a
+        // repeat of a source symbol.
+        let far_one = enc.repair_symbols(20_000, 1).unwrap().remove(0);
+        let mut symbols = enc.source_symbols();
+        let same_as_source = symbols.iter().any(|s| s.data == far_one.data);
+        assert!(!same_as_source, "a far repair symbol repeated a source symbol");
+        symbols.push(far_one);
+        let mut dec = SegmentDecoder::new(0, data.len() as u64, &p).unwrap();
+        let mut meter = Meter::new(1 << 30, 1 << 20);
+        for s in symbols {
+            dec.push(s, &mut meter).unwrap();
+        }
+        assert_eq!(dec.into_bytes().as_deref(), Some(&data[..]));
+    }
+
+    /// BLG-213: the old ceilings were `u32` bytes, so an object past 4 GiB was
+    /// silently cut. The layout, the streamer and the genesis parameter now
+    /// carry `u64`, and the only ceiling is `max_content_bytes`.
+    #[test]
+    fn bud3_sixteen_gib_object() {
+        let p = Profile::P0;
+        let limits = super::super::limits::Bud3Limits::TESTNET_DEFAULT;
+        let four_gib_plus = 4 * super::super::limits::GIB + 1;
+        let sixteen_gib = 16 * super::super::limits::GIB;
+        assert_eq!(limits.max_content_bytes, sixteen_gib);
+        // The genesis parameter is the ceiling, checked before the first read.
+        check_object_ceiling(four_gib_plus, limits.max_content_bytes).unwrap();
+        check_object_ceiling(sixteen_gib, limits.max_content_bytes).unwrap();
+        assert_eq!(
+            check_object_ceiling(sixteen_gib + 1, limits.max_content_bytes),
+            Err(FountainError::ContentTooLarge {
+                len: sixteen_gib + 1,
+                max: sixteen_gib
+            })
+        );
+        // The layout has no `u32` truncation point.
+        let seg = Segmentation::new(sixteen_gib, &p).unwrap();
+        assert!(seg.count() > 1400, "16 GiB is {} segments", seg.count());
+        let last = seg.count() - 1;
+        assert!(seg.offset(last).unwrap() > 4 * super::super::limits::GIB);
+        let total: u64 = (0..seg.count()).map(|i| seg.len(i).unwrap()).sum();
+        assert_eq!(total, sixteen_gib);
+        // The retired ceiling was 4096 x 2911 - 1 bytes, one byte below 64 MiB.
+        const LEGACY_OBJECT_CEILING_BYTES: u64 = 4096 * 2911 - 1;
+        assert!(sixteen_gib > LEGACY_OBJECT_CEILING_BYTES);
+    }
+
+    /// The ceiling check runs before the reader is touched, so an object above
+    /// the genesis limit costs nothing.
+    #[test]
+    fn an_over_ceiling_object_is_refused_before_it_is_read() {
+        let object = pattern(10, 7);
+        let mut reads = 0usize;
+        let r = encode_stream(object.as_slice(), 1 << 20, &SMALL, 0, (1 << 20) - 1, |_| {
+            reads += 1;
+            Ok(())
+        });
+        assert_eq!(
+            r,
+            Err(FountainError::ContentTooLarge {
+                len: 1 << 20,
+                max: (1 << 20) - 1
+            })
+        );
+        assert_eq!(reads, 0, "the ceiling check runs before the first read");
+    }
+
     #[test]
     fn oversized_segments_and_invalid_profiles_are_refused() {
         let too_long = vec![0u8; SMALL.segment_bytes() as usize + 1];
@@ -550,7 +767,7 @@ mod tests {
     fn stream_encoding_matches_the_in_memory_commitment() {
         let object = pattern(64 * 32 * 3 + 500, 6);
         let mut per_segment: std::collections::BTreeMap<u64, Vec<Symbol>> = Default::default();
-        let c = encode_stream(&object[..], object.len() as u64, &SMALL, 4, |s| {
+        let c = encode_stream(&object[..], object.len() as u64, &SMALL, 4, 1 << 20, |s| {
             per_segment.entry(s.segment).or_default().push(s);
             Ok(())
         })
@@ -575,7 +792,7 @@ mod tests {
     #[test]
     fn a_short_reader_is_an_error() {
         let object = pattern(100, 7);
-        let r = encode_stream(&object[..], 200, &SMALL, 0, |_| Ok(()));
+        let r = encode_stream(&object[..], 200, &SMALL, 0, 1 << 20, |_| Ok(()));
         assert!(matches!(r, Err(FountainError::Io(_))));
     }
 
