@@ -212,7 +212,7 @@ impl Executor {
             _ => {}
         }
 
-        let liquid_cost = match tx.tx_type {
+        let total_cost = match tx.tx_type {
             TransactionType::Unstake
             | TransactionType::Vote
             | TransactionType::Undelegate { .. }
@@ -220,20 +220,23 @@ impl Executor {
             | TransactionType::SetValidatorCommission { .. }
             | TransactionType::Redelegate { .. }
             | TransactionType::ClaimRewards { .. } => tx.fee,
-            _ => tx.total_cost(),
+            _ => tx.checked_total_cost().ok_or_else(|| {
+                BudlumError::validation(
+                    "transaction_cost_overflow",
+                    "Transaction amount plus fee overflows u64",
+                )
+            })?,
         };
 
         {
             let sender_account = state.get_or_create(&tx.from);
-            if sender_account.balance < liquid_cost {
+            if sender_account.balance < total_cost {
                 return Err(BudlumError::validation(
                     "insufficient_balance",
                     "Insufficient balance",
                 ));
             }
         }
-
-        let total_cost = tx.total_cost();
 
         match &tx.tx_type {
             TransactionType::Transfer => {
@@ -3825,6 +3828,39 @@ mod tests {
         assert_eq!(state.get_nonce(&alice), 0);
         assert_eq!(state.get_balance(&bob), 0);
         assert_eq!(state.get_balance(&carol), 0);
+    }
+
+    #[test]
+    fn an_overflowing_amount_and_fee_is_rejected_before_state_mutation() {
+        use crate::core::account::AccountState;
+        use crate::core::address::Address;
+        use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
+        use crate::execution::executor::Executor;
+
+        let sender = Address::from([0x51; 32]);
+        let recipient = Address::from([0x52; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&sender, u64::MAX);
+        let root_before = state.calculate_state_root();
+
+        let mut tx = Transaction::new_with_chain_id(
+            sender,
+            recipient,
+            u64::MAX,
+            1,
+            0,
+            vec![],
+            DEFAULT_CHAIN_ID,
+            TransactionType::Transfer,
+        );
+        tx.hash = tx.calculate_hash();
+
+        let error = Executor::apply_transaction_checked(&mut state, &tx).unwrap_err();
+        assert_eq!(error.code(), "transaction_cost_overflow");
+        assert_eq!(state.calculate_state_root(), root_before);
+        assert_eq!(state.get_balance(&sender), u64::MAX);
+        assert_eq!(state.get_balance(&recipient), 0);
+        assert_eq!(state.get_nonce(&sender), 0);
     }
 
     /// A refused governance vote leaves the sender untouched. The
