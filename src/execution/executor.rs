@@ -229,11 +229,13 @@ impl Executor {
         };
 
         {
-            let sender_account = state.get_or_create(&tx.from);
-            if sender_account.balance < total_cost {
+            // Combine #66's overflow-checked debit with #67's spendable-balance
+            // gate. Neither locked funds nor a saturated amount can pay a fee.
+            let sender_spendable = state.spendable_balance(&tx.from);
+            if sender_spendable < total_cost {
                 return Err(BudlumError::validation(
                     "insufficient_balance",
-                    "Insufficient balance",
+                    "Insufficient spendable balance",
                 ));
             }
         }
