@@ -124,6 +124,44 @@ mod tests {
     }
 
     #[test]
+    fn mobile_core_refuses_unprovable_share_placements() {
+        let symbol = vec![0xabu8; 64];
+        let (assigned, audit) = placed_symbol(&symbol, 7);
+        let mut core = fixture(8 * QUOTA_MIN_BYTES);
+
+        let mut out_of_range = assigned.clone();
+        out_of_range.position = 1;
+        assert_eq!(
+            core.accept_share(out_of_range).expect_err("position").code,
+            "mobile_share_leaf_mismatch"
+        );
+
+        let mut wrong_position = assigned.clone();
+        wrong_position.placed.insert(0, (3, symbol_leaf(b"other")));
+        assert_eq!(
+            core.accept_share(wrong_position).expect_err("wrong entry").code,
+            "mobile_share_leaf_mismatch"
+        );
+
+        let mut duplicate = assigned.clone();
+        duplicate.placed.push(duplicate.placed[0]);
+        assert_eq!(
+            core.accept_share(duplicate).expect_err("duplicate ESI").code,
+            "mobile_share_placement_order"
+        );
+
+        let mut unordered = assigned.clone();
+        unordered.placed.push((3, symbol_leaf(b"other")));
+        assert_eq!(
+            core.accept_share(unordered).expect_err("unordered").code,
+            "mobile_share_placement_order"
+        );
+        assert_eq!(core.status().stored_bytes, 0);
+        core.accept_share(assigned).expect("valid placement");
+        core.answer_audit(audit).expect("valid proof");
+    }
+
+    #[test]
     fn mobile_core_presence_signal_verifies() {
         let core = fixture(8 * QUOTA_MIN_BYTES);
         let DutyTx::Presence(signal) = core.presence_signal(11, [10, 0, 0, 8], mock_sign) else {
