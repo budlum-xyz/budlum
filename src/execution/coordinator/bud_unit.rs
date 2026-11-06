@@ -151,6 +151,8 @@ pub(crate) fn checked_add_pair(
 /// Conservation-preserving transfer of `attos` attoBUD in `state` under `ee`'s
 /// unit divisibility rule, returning the recipient's updated visible balance in
 /// `ee`'s native unit (truncated to `u64::MAX` when above `u64` for EVM wei).
+///
+/// Convenience: called by the execution coordinator when settling EE transfers.
 pub fn transfer_atto_bud_in_state(
     state: &mut AccountState,
     from: &Address,

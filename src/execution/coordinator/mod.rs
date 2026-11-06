@@ -1,8 +1,11 @@
-//! The execution coordinator and unified BUD accounting.
+//! The execution coordinator, unified account/alias model, BUD unit
+//! conversions, and sparse-Merkle namespace state commitment.
 //!
-//! WIRING: the block executor reaches the coordinator once stateful contract
-//! calls and envelopes route through it; `bud_unit` is already wired into
-//! [`crate::core::account::AccountState`].
+//! WIRING: `bud_unit` and `commitment` (including `accounts` alias/asset
+//! derivations) are wired into [`crate::core::account::AccountState`]; the
+//! block executor routes stateful contract execution through the coordinator.
 
+pub mod accounts;
 pub mod bud_unit;
+pub mod commitment;
 pub mod scheduler;

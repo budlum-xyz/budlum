@@ -503,6 +503,9 @@ pub struct AccountState {
     /// The B.U.D. 3.0 registry: objects, references, shares and audits.
     /// Rooted and snapshotted.
     pub bud3_registry: crate::storage::bud3::registry::Bud3Registry,
+    /// Universal Execution Layer namespace key-value store (`ee/*`, `uel/*`).
+    /// Folded into the state root via `execution_root()` once non-empty.
+    pub uel_state: crate::execution::coordinator::commitment::UelNamespaceStore,
     /// Governance-queued compliance freezes/unfreezes awaiting
     /// application (see [`PendingPoaCompliance`]).
     pub pending_poa_freezes: Vec<PendingPoaCompliance>,
@@ -577,6 +580,7 @@ impl AccountState {
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
             validator_directory: crate::validators::ValidatorDirectory::new(),
             bud3_registry: crate::storage::bud3::registry::Bud3Registry::default(),
+            uel_state: crate::execution::coordinator::commitment::UelNamespaceStore::default(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -642,6 +646,7 @@ impl AccountState {
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
             validator_directory: crate::validators::ValidatorDirectory::new(),
             bud3_registry: crate::storage::bud3::registry::Bud3Registry::default(),
+            uel_state: crate::execution::coordinator::commitment::UelNamespaceStore::default(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -716,6 +721,7 @@ impl AccountState {
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
             validator_directory: crate::validators::ValidatorDirectory::new(),
             bud3_registry: crate::storage::bud3::registry::Bud3Registry::default(),
+            uel_state: crate::execution::coordinator::commitment::UelNamespaceStore::default(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -833,6 +839,7 @@ impl AccountState {
             poa_compliance: snapshot.poa_compliance.clone().unwrap_or_default(),
             validator_directory: snapshot.validator_directory.clone().unwrap_or_default(),
             bud3_registry: snapshot.bud3_registry.clone().unwrap_or_default(),
+            uel_state: crate::execution::coordinator::commitment::UelNamespaceStore::default(),
             burned_total: snapshot.burned_total,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -4450,6 +4457,10 @@ impl AccountState {
         if !self.bud3_registry.is_empty() {
             final_hasher.update(b"bud3_registry_v1");
             final_hasher.update(self.bud3_registry.state_root());
+        }
+        if !self.uel_state.is_empty() {
+            final_hasher.update(b"uel_execution_v1");
+            final_hasher.update(self.uel_state.execution_root());
         }
         if !self.external_roots.is_empty() {
             final_hasher.update(b"external_roots_v1");
