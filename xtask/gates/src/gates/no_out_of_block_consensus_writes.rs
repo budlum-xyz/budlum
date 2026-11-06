@@ -131,9 +131,9 @@ const READ_PREFIXES: &[&str] = &[
 ];
 
 /// Read methods whose names no prefix above covers, matched exactly: an
-/// identity record and credential lookup, a protected-content lookup, and
-/// the coding-audit answer check (`&self`, it judges an answer and stores
-/// nothing).
+/// identity record and credential lookup, a protected-content lookup, the
+/// coding-audit answer check (`&self`, it judges an answer and stores
+/// nothing), and the admission-fee quote (`&self`, it only computes a fee).
 const READ_NAMES: &[&str] = &[
     "record",
     "credential",
@@ -514,5 +514,16 @@ mod tests {
         assert!(check_actor_state_access("self.blockchain.state.add_balance(&a, 1);").is_err());
         assert!(check_actor_state_access("self.blockchain.state.epoch_index = 3;").is_err());
         assert!(check_actor_state_access("if self.blockchain.state.epoch_index == 3 {}").is_ok());
+    }
+
+    #[test]
+    fn required_fee_quote_is_a_read_without_widening_the_exception() {
+        assert!(
+            check_actor_state_access("let fee = self.blockchain.state.required_fee(&tx);").is_ok()
+        );
+        assert!(
+            check_actor_state_access("let fee = self.blockchain.state.required_fee_override(&tx);")
+                .is_err()
+        );
     }
 }
