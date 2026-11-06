@@ -282,3 +282,14 @@ fn the_two_ratchets_are_closed_by_wiring() {
         "a stale baseline line must be deleted, not kept"
     );
 }
+
+/// The `syn`-backed syntax gate is registered in `main.rs` so `--all` and
+/// `--self-test` catch mangled `.rs` files before merge (BLG-299).
+#[test]
+fn rust_syntax_gate_is_wired() {
+    let main = read("xtask/gates/src/main.rs");
+    assert!(main.contains("pub mod rust_syntax_is_parseable;"));
+    assert!(main.contains("name: \"rust-syntax-is-parseable\""));
+    let gate = read("xtask/gates/src/gates/rust_syntax_is_parseable.rs");
+    assert!(gate.contains("syn::parse_file("));
+}
