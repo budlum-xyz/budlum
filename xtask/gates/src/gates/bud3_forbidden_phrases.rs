@@ -15,8 +15,9 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::Path;
 
-/// The phrases, lowercase. Matching is case-insensitive.
-const PHRASES: &[&str] = &[
+/// The phrases, lowercase. Matching is case-insensitive. The English-tree gate
+/// reads this list to exempt only literal dictionary entries, not the file.
+pub(super) const PHRASES: &[&str] = &[
     "zero storage",
     "storage-zero",
     "fixed-size recipe",

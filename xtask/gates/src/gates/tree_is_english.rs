@@ -333,6 +333,10 @@ const SKIP_EXTS: &[&str] = &[
     "lock", "svg", "woff", "woff2", "ttf", "webp",
 ];
 
+/// The source of the bilingual storage-claims dictionary. Only exact string
+/// literal entries from its actual phrase list are exempt, not other lines.
+const FORBIDDEN_PHRASES_SOURCE: &str = "xtask/gates/src/gates/bud3_forbidden_phrases.rs";
+
 /// The recorded per-file counts of Turkish lines that still remain.
 const BASELINE_PATH: &str = ".github/turkish-baseline.txt";
 
@@ -440,6 +444,18 @@ fn is_allowed(root: &Path, path: &Path) -> bool {
     ALLOWED_FILES.contains(&rel.as_str()) || ALLOWED_DIRS.iter().any(|dir| rel.starts_with(dir))
 }
 
+/// The bilingual claims guard must be able to name the phrases it bans. Only
+/// an exact, standalone literal drawn from that guard's live list is allowed;
+/// Turkish comments, unrelated literals, and other files are still scanned.
+fn is_dictionary_literal(rel: &str, line: &str) -> bool {
+    rel == FORBIDDEN_PHRASES_SOURCE
+        && line
+            .trim()
+            .strip_prefix('"')
+            .and_then(|text| text.strip_suffix("\","))
+            .is_some_and(|phrase| super::bud3_forbidden_phrases::PHRASES.contains(&phrase))
+}
+
 /// Is this path skipped by extension?
 fn skipped_ext(path: &Path) -> bool {
     path.extension()
@@ -533,6 +549,9 @@ fn scan(root: &Path) -> Scan {
             .to_string_lossy()
             .replace('\\', "/");
         for (lineno, line) in text.lines().enumerate() {
+            if is_dictionary_literal(&rel, line) {
+                continue;
+            }
             let scrubbed = scrub(line);
             let finding = turkish_char(&scrubbed)
                 .map(|c| format!("Turkish character '{c}'"))
@@ -616,9 +635,9 @@ pub fn run(root: &Path) -> Result<String, String> {
         }
         msg.push_str(
             "\n  The tree is written in English. Translate the line.\n  \
-             Turkish is allowed only in README.tr.md, in a Turkish localisation\n  \
-             directory, and in the word \"Türkçe\", which is the label on the link\n  \
-             pointing at that README.\n  \
+             Turkish is allowed in README.tr.md, in a Turkish localisation\n  \
+             directory, in the README link label \"Türkçe\", and as exact dictionary\n  \
+             entries in the bilingual storage-claims gate.\n  \
              The baseline only shrinks: do not raise a number in ",
         );
         msg.push_str(BASELINE_PATH);
@@ -1045,6 +1064,57 @@ fn exemption_canaries(clean: &Path, tmp: &Path) -> Result<usize, String> {
     Ok(ran)
 }
 
+/// The bilingual dictionary exception must allow only a live phrase literal at
+/// its exact source path, while continuing to reject Turkish around it.
+fn dictionary_canaries(clean: &Path, tmp: &Path) -> Result<usize, String> {
+    let phrase = super::bud3_forbidden_phrases::PHRASES
+        .iter()
+        .find(|phrase| turkish_char(phrase).is_some())
+        .ok_or_else(|| String::from("canary: the bilingual dictionary has no Turkish phrase"))?;
+    let cases = [
+        (
+            "dictionary-literal",
+            FORBIDDEN_PHRASES_SOURCE,
+            format!("\"{phrase}\",\n"),
+            true,
+        ),
+        (
+            "dictionary-other-file",
+            "src/other.rs",
+            format!("\"{phrase}\",\n"),
+            false,
+        ),
+        (
+            "dictionary-comment",
+            FORBIDDEN_PHRASES_SOURCE,
+            format!("// {phrase}\n"),
+            false,
+        ),
+        (
+            "dictionary-unknown",
+            FORBIDDEN_PHRASES_SOURCE,
+            String::from("\"kullanıcı verisi\",\n"),
+            false,
+        ),
+        (
+            "dictionary-trailing",
+            FORBIDDEN_PHRASES_SOURCE,
+            format!("\"{phrase}\", // kullanıcı\n"),
+            false,
+        ),
+    ];
+    let mut ran = 0;
+    for (name, file, body, expected) in cases {
+        let accepted = counted_accepts_with(&mut ran, clean, tmp, name, file, &body)?;
+        if accepted != expected {
+            return Err(format!(
+                "canary: {name} accepted={accepted}, expected {expected}"
+            ));
+        }
+    }
+    Ok(ran)
+}
+
 /// [`accepts_with`], counting the canary as it runs.
 ///
 /// The count is what makes the split honest: a group that silently runs zero
@@ -1075,13 +1145,14 @@ type CanaryGroup = (&'static str, fn(&Path, &Path) -> Result<usize, String>);
 /// A table rather than one call per line: dropping a line would drop a whole
 /// group of canaries and nothing would go red. The length is reported in the
 /// success message, so a removed group changes the gate's own output.
-const CANARY_GROUPS: [CanaryGroup; 3] = [
+const CANARY_GROUPS: [CanaryGroup; 4] = [
     (
         "scan",
         scan_canaries as fn(&Path, &Path) -> Result<usize, String>,
     ),
     ("collision", collision_canaries),
     ("exemption", exemption_canaries),
+    ("dictionary", dictionary_canaries),
 ];
 
 /// How many canaries [`CANARY_GROUPS`] must run in total.
@@ -1089,7 +1160,7 @@ const CANARY_GROUPS: [CanaryGroup; 3] = [
 /// Hard-coded on purpose. A group that stops testing anything still returns
 /// `Ok`, so the only way to notice is to know the number beforehand. Raise it
 /// deliberately when a canary is added; a drop is a defect.
-const EXPECTED_CANARIES: usize = 65;
+const EXPECTED_CANARIES: usize = 70;
 
 pub fn self_test() -> Result<String, String> {
     let tmp = scratch_dir()?;
