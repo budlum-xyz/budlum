@@ -1,8 +1,8 @@
-//! The execution coordinator. A later step builds the coordinator
-//! itself; this module holds the parts that already stand on their own.
+//! The execution coordinator and unified BUD accounting.
 //!
-//! WIRING: the block executor reaches the scheduler once the coordinator
-//! runs blocks through it; until then it is exercised by its
-//! equality tests against sequential execution.
+//! WIRING: the block executor reaches the coordinator once stateful contract
+//! calls and envelopes route through it; `bud_unit` is already wired into
+//! [`crate::core::account::AccountState`].
 
+pub mod bud_unit;
 pub mod scheduler;
