@@ -12,7 +12,13 @@ name = "budlum_mobile_core"
 path = "src/lib.rs"
 
 [dependencies]
+# The class, the presence message and the presence signal: one definition the
+# node binds too (K-4), so the phone signs the bytes the node verifies.
+budlum-types = { path = "../../crates/budlum-types" }
 sha2 = "=0.11.1"
+
+[dev-dependencies]
+# The shared presence vector is checked against an independent SHA3 call.
 sha3 = "=0.12.0"
 
 [lints.rust]

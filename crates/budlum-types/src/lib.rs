@@ -22,7 +22,8 @@
 //!
 //! The first slice carried the address. The second carries what the mobile
 //! core needs to sign its first message: the validator class with its per-class
-//! windows ([`class`]) and the presence message ([`presence`], section 7.8).
+//! windows ([`class`]) and the presence preimage, message, signal and network
+//! hint ([`presence`], section 7.8).
 //! The transaction, signature, handoff-certificate, checkpoint-certificate and
 //! B.U.D. 3.0 symbol/share/proof types follow in later slices of the same
 //! package; each move has to keep the wire shape byte-identical, so they move

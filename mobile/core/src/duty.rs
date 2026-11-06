@@ -232,7 +232,7 @@ impl MobileCore {
         F: FnOnce(&[u8; 32]) -> Vec<u8>,
     {
         let signal = PresenceSignal::sign(
-            self.owner,
+            self.owner.into(),
             self.chain_id,
             window,
             self.class,

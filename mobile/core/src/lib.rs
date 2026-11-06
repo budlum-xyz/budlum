@@ -1,11 +1,11 @@
 //! Budlum mobile validator core (`budlum-mobile-core`).
 //!
 //! WP-11, 2/N. The production path is [`duty::MobileCore`]. A phone runs
-//! custody duties without linking `budlum-core`. Later slices add UniFFI,
-//! libp2p, the light client and `crates/budlum-types`.
+//! custody duties without linking `budlum-core`. The validator class and the
+//! presence message come from `crates/budlum-types`, the crate the node binds
+//! too. Later slices add UniFFI, libp2p and the light client.
 
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
 pub mod custody;
 pub mod duty;
@@ -24,8 +24,8 @@ pub use error::CoreError;
 pub use handover::{fetch_from_holders, Holder, ShareSource, SHARE_OWNER_TIMEOUT};
 pub use policy::{NetworkPolicy, Policy, PowerPolicy};
 pub use presence::{
-    is_presence_double_sign, presence_preimage, PresenceSignal, ResumeValidator, ValidatorClass,
-    PRESENCE_TAG, PRESENCE_TOPIC,
+    presence_message, presence_preimage, PresenceSignal, ResumeValidator, ValidatorClass,
+    PRESENCE_DOMAIN_TAG, PRESENCE_TOPIC,
 };
 pub use quota::{FREE_SPACE_FLOOR_BYTES, QUOTA_DEFAULT_BYTES, QUOTA_MAX_BYTES, QUOTA_MIN_BYTES};
 pub use relay::{RelayOffer, RelayPool};
@@ -205,24 +205,24 @@ mod tests {
         };
         assert!(signal.verify_with(TESTNET_CHAIN_ID, mock_verify));
         assert!(!signal.verify_with(1, mock_verify));
-        let preimage = presence_preimage(TESTNET_CHAIN_ID, 11, ValidatorClass::Mobile);
-        assert_eq!(signal.sig_bls, mock_sign(&preimage));
+        let message = presence_message(TESTNET_CHAIN_ID, 11, ValidatorClass::Mobile);
+        assert_eq!(signal.sig_bls, mock_sign(&message));
         // Same window, different class: a double-sign.
         let other = PresenceSignal::sign(
-            OWNER,
+            OWNER.into(),
             TESTNET_CHAIN_ID,
             11,
             ValidatorClass::Full,
             signal.network_hint,
             mock_sign,
         );
-        assert!(is_presence_double_sign(&signal, &other));
+        assert!(signal.is_double_sign_with(&other));
         assert_ne!(
-            presence_preimage(TESTNET_CHAIN_ID, 11, ValidatorClass::Mobile),
-            presence_preimage(TESTNET_CHAIN_ID, 11, ValidatorClass::Full)
+            presence_message(TESTNET_CHAIN_ID, 11, ValidatorClass::Mobile),
+            presence_message(TESTNET_CHAIN_ID, 11, ValidatorClass::Full)
         );
         assert_eq!(PRESENCE_TOPIC, "/budlum/presence/1");
-        assert_eq!(PRESENCE_TAG, b"BDLM_PRESENCE_V1");
+        assert_eq!(PRESENCE_DOMAIN_TAG, b"BDLM_PRESENCE_V1");
     }
 
     #[test]
