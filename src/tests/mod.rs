@@ -279,3 +279,8 @@ pub mod caddy_edges_match_the_services;
 // read, and the rule file is mounted where the config expects it.
 #[cfg(test)]
 pub mod scrape_topology_covers_the_rules;
+
+// WP-41 item 4: the compose stacks name the services and ports the launch
+// runs, and both scrape with the same pinned Prometheus.
+#[cfg(test)]
+pub mod compose_topology_matches_services;

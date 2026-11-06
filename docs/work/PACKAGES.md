@@ -173,3 +173,21 @@ purpose: it needs host namespaces and a read-only mount of `/`.
 every non-`budlum_` series a rule reads has a job that produces it, both compose
 files mount the rule file where the config reads it, and the evaluation interval
 is a whole multiple of the scrape interval.
+
+### Delivery 7: WP-41 item 4, what the stacks actually start
+
+The card lists the compose profiles. The stacks already exist; what was missing
+was a check that they start the services the launch runs. The rehearsal stack
+has had a faucet and an indexer from the start and the item's list does not
+mention them, so a rehearsal where the faucet is the broken service reads as
+"the mesh did not form".
+
+`src/tests/compose_topology_matches_services.rs` holds the rehearsal stack to
+the ten services a rehearsal needs, checks that every published port is bound to
+loopback (the rehearsal turns the RPC key gate off so the stack can be probed),
+and requires both stacks to scrape with the same digest-pinned Prometheus.
+
+Deliberately not done: the devnet mesh still starts neither the faucet nor the
+indexer. It is a consensus mesh, and adding the launch's HTTP services to it
+would make `docker compose up` in the quick start depend on two more images and
+two more keys for a smoke test that does not read them.
