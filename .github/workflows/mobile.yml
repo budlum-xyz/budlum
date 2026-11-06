@@ -1,0 +1,72 @@
+# WP-36 CI: Android validator app build + unit tests.
+# Emulator instrumentation tests (android_onboarding_reaches_registered_state,
+# android_workmanager_answers_audit_when_service_stopped) run on manual
+# dispatch until the UniFFI mobile-core binding lands in a later WP-36 PR.
+name: mobile
+
+on:
+  push:
+    branches: [main, 'arena/**']
+    paths:
+      - 'mobile/android/**'
+      - '.github/workflows/mobile.yml'
+  pull_request:
+    paths:
+      - 'mobile/android/**'
+      - '.github/workflows/mobile.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Android SDK platform 36
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install 'platforms;android-36' 'build-tools;36.0.0'
+
+      - name: Build debug APK
+        working-directory: mobile/android
+        run: gradle assembleDebug --no-daemon
+
+      - name: Unit tests
+        working-directory: mobile/android
+        run: gradle testDebugUnitTest --no-daemon
+
+  instrumentation-tests:
+    # Device/emulator acceptance tests. Manual dispatch only for now; wired
+    # into PR gating once the emulator suite exists.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: default
+          working-directory: mobile/android
+          run: gradle connectedDebugAndroidTest --no-daemon
