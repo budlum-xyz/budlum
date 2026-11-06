@@ -5187,6 +5187,36 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "burned-supply counter overflowed u64")]
+    fn destroyed_supply_never_clamps_to_a_smaller_counter() {
+        let mut state = AccountState::new();
+        state.burned_total = u64::MAX;
+        state.record_destroyed(1);
+    }
+
+    #[test]
+    #[should_panic(expected = "burned-supply counter overflowed u64")]
+    fn balance_burn_does_not_destroy_value_when_its_counter_cannot_record_it() {
+        let a = test_addr_from_byte(21u8);
+        let mut state = AccountState::new();
+        state.add_balance(&a, 10);
+        state.burned_total = u64::MAX;
+        state.burn_from(&a, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "burned-supply counter overflowed u64")]
+    fn external_slash_checks_its_burn_counter_before_moving_value() {
+        let poster = test_addr_from_byte(21u8);
+        let challenger = test_addr_from_byte(22u8);
+        let mut state = AccountState::new();
+        state.add_balance(&poster, 100);
+        state.lock_external_bond(&poster, 80).expect("bond");
+        state.burned_total = u64::MAX;
+        let _ = state.slash_external_bond(&poster, 50, 20, &challenger);
+    }
+
+    #[test]
     fn total_bud_committed_counts_ai_role_bond_without_double_counting_validator() {
         let operator = test_addr_from_byte(14u8);
         let mut state = AccountState::new();
