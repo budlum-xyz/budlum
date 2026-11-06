@@ -21,13 +21,13 @@ evidence.
 
 ## 2. Path readiness (card item 1 and section 0.4)
 
-WP-04 locks five paths. Only two of them are free at the snapshot:
+WP-04 locks five paths. Three of them are free at the snapshot:
 
 | Path | Live claim at the snapshot | This delivery |
 |---|---|---|
 | `docs/audit/live/lane-d.md` | none | **delivered** |
 | `docs/audit/LIVE_STATUS.md` | none | **delivered** |
-| `docs/audit/FINDINGS.md` | none | pending: needs the record bodies (section 5) |
+| `docs/audit/FINDINGS.md` | none | **delivered**: the 70 lane D records, English titles, live state |
 | `docs/work/PACKAGES.md` | open PR #16 writes it from its own base | pending: a write here forks the file against #16 |
 | `src/tests/audit_lane_d.rs` | PR #18 and PR #21 | blocked |
 
@@ -127,8 +127,10 @@ in this checkout: `docs/audit/` holds only `AUDIT_FINDINGS.md`, which carries ze
 `| BLG-NNN |` shape, and `TESTNET_TRACEABILITY.md`. The directive's own tables in section 14 give the
 id, importance, area, Turkish title and closing package, and those are what section 3 records.
 
-Without the descriptions the lane cannot honestly write "already fixed" or "invalid" for a record it
-did not read. Two ways forward, both allowed by the directive:
+`docs/audit/FINDINGS.md` is written from the directive's own tables: identity, importance, area,
+English title, live state, test and closing package. Five records carry a state read from the live
+tree, and the rest stay `Open`, because without the descriptions the lane cannot honestly write
+"already fixed" or "invalid" for a record it did not read. Two ways forward, both allowed by the directive:
 
 1. the ledger is supplied to the session, and WP-04 item 3 is completed against it; or
 2. every record is re-derived from the live tree, which is what section 4 starts.
