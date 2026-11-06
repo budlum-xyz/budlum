@@ -71,19 +71,30 @@ pub fn build_wallet_context(
 ) -> AtlasWalletContext {
     let assets_owned = data_assets
         .iter()
-        .filter(|asset| asset.owner == address)
+        .filter(|asset| asset.owner == address && asset.is_active())
         .count();
     let grants_issued = access_grants
         .iter()
-        .filter(|grant| grant.owner == address)
+        .filter(|grant| {
+            grant.owner == address
+                && grant.status == Default::default()
+                && grant.reads_used < grant.max_reads
+        })
         .count();
     let grants_received = access_grants
         .iter()
-        .filter(|grant| grant.grantee == address)
+        .filter(|grant| {
+            grant.grantee == address
+                && grant.status == Default::default()
+                && grant.reads_used < grant.max_reads
+        })
         .count();
     let sale_authorizations = sale_authorizations
         .iter()
-        .filter(|authorization| authorization.seller == address)
+        .filter(|authorization| {
+            authorization.seller == address
+                && authorization.grants_issued < authorization.max_grants
+        })
         .count();
 
     AtlasWalletContext {
@@ -106,7 +117,7 @@ pub fn build_wallet_context(
             AtlasEvidenceCard {
                 subject: "pollen_lineage".into(),
                 status: AtlasEvidenceStatus::Derived,
-                source: "Pollen registry indexes".into(),
+                source: "data-market registry indexes".into(),
                 warning: Some(
                     "Atlas derives graph counts from registry commitments; it does not expose data bytes"
                         .into(),
@@ -145,7 +156,7 @@ pub struct EvidenceRecord {
     pub domain_id: DomainId,
     /// Domain height.
     pub domain_height: u64,
-    /// Event indeksi.
+    /// Event index.
     pub event_index: u32,
     /// Event kind.
     pub event_kind: String,
@@ -181,13 +192,13 @@ impl EvidenceRecord {
 /// A node in the wallet context graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalletContextNode {
-    /// Adres.
+    /// Account address.
     pub address: Address,
     /// Node kind.
     pub node_type: WalletNodeType,
     /// Number of relations.
     pub connection_count: u32,
-    /// Son aktivite epoch'u.
+    /// Last active epoch.
     pub last_active_epoch: u64,
 }
 
@@ -240,9 +251,9 @@ pub enum WalletEdgeType {
     BnsRegistration,
     /// A storage agreement.
     StorageDeal,
-    /// Governance oy.
+    /// A governance vote.
     GovernanceVote,
-    /// A Pollen access grant.
+    /// A data-market access grant.
     PollenGrant,
 }
 
@@ -255,7 +266,7 @@ pub struct WalletContextGraph {
     pub nodes: Vec<WalletContextNode>,
     /// Connecting edges.
     pub edges: Vec<WalletContextEdge>,
-    /// Toplam transfer hacmi (u64 BUD).
+    /// Total transfer volume (u64 BUD).
     pub total_transfer_volume: u64,
     /// Graph depth, in hops.
     pub depth: u32,
@@ -329,9 +340,9 @@ impl DomainSummary {
 /// The trace result for a cross-domain message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrossDomainTrace {
-    /// Kaynak domain.
+    /// Source domain.
     pub source_domain: DomainId,
-    /// Hedef domain.
+    /// Target domain.
     pub target_domain: DomainId,
     /// Source height.
     pub source_height: u64,
@@ -383,7 +394,7 @@ pub enum MessageTraceStatus {
     Failed,
 }
 
-/// Atlas sorgu motoru.
+/// Evidence query engine.
 #[derive(Debug, Clone, Default)]
 pub struct AtlasQueryEngine {
     /// The evidence ledger.
@@ -413,10 +424,10 @@ impl AtlasQueryEngine {
         {
             let oldest = self
                 .domain_summaries
-                .keys()
-                .next()
-                .copied()
-                .ok_or_else(|| "Atlas domain summary index empty".to_string())?;
+                .iter()
+                .min_by_key(|(&id, s)| (s.last_commit_epoch, id))
+                .map(|(&id, _)| id)
+                .ok_or_else(|| "domain summary index empty".to_string())?;
             self.domain_summaries.remove(&oldest);
         }
         self.domain_summaries.insert(summary.domain_id, summary);
@@ -691,5 +702,38 @@ mod query_engine_tests {
         }
         assert_eq!(engine.domain_summaries.len(), MAX_ATLAS_DOMAIN_SUMMARIES);
         assert!(engine.get_domain_summary(1).is_none());
+    }
+
+    #[test]
+    fn blg_129_active_domain_survives_stale_summary_eviction() {
+        let mut engine: super::AtlasQueryEngine = Default::default();
+        engine
+            .upsert_domain_summary(DomainSummary {
+                domain_id: 1,
+                name: "hub".into(),
+                consensus_kind: ConsensusKind::PoS,
+                current_height: 500,
+                total_transactions: 50,
+                total_events: 10,
+                active_validators: 8,
+                last_commit_epoch: 500,
+            })
+            .unwrap();
+        for i in 2..=(MAX_ATLAS_DOMAIN_SUMMARIES as u32 + 1) {
+            engine
+                .upsert_domain_summary(DomainSummary {
+                    domain_id: i,
+                    name: format!("d-{i}"),
+                    consensus_kind: ConsensusKind::PoS,
+                    current_height: 1,
+                    total_transactions: 0,
+                    total_events: 0,
+                    active_validators: 0,
+                    last_commit_epoch: 1,
+                })
+                .unwrap();
+        }
+        assert!(engine.get_domain_summary(1).is_some());
+        assert!(engine.get_domain_summary(2).is_none());
     }
 }

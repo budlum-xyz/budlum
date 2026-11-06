@@ -266,3 +266,8 @@ pub mod wp44_domains_bridge_settlement;
 #[cfg(test)]
 pub mod wp14_handover_recovery;
 
+// WP-48 Independent Review 2 security, conservation, and privilege-boundary suite.
+#[cfg(test)]
+pub mod wp48_review2_security;
+
+
