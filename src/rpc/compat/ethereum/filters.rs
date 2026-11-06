@@ -11,9 +11,12 @@
 //! no change list is invented here. The bound is real today: a client cannot
 //! open an unbounded number of filters while it waits for that environment.
 //!
-//! The peer key comes from the connection extension the HTTP listener sets.
-//! When the extension is absent, every caller shares one anonymous bucket.
-//! That is fail-closed: the quota can only become tighter, never looser.
+//! The owner key comes from the connection extension. jsonrpsee assigns a
+//! `ConnectionId` per transport connection; that is the primary key, because
+//! one IP behind a NAT can carry many independent wallets. The socket address
+//! is the fallback key when the server does not supply a connection id. When
+//! neither exists, all callers share one anonymous bucket. That is
+//! fail-closed: the quota can only become tighter, never looser.
 //!
 //! The limits are TESTNET-DEFAULT values. Governance changes them after the
 //! measurements of WP-35. Nothing here claims a measurement.
@@ -257,12 +260,20 @@ pub fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// The quota key for one connection. The IP is enough: a new port on the same
-/// host must not create a new quota bucket.
+/// The quota key for one connection.
+///
+/// A server-assigned connection id is stronger than an IP: two wallets behind
+/// one NAT address must not share a quota bucket, and two ports on one host
+/// must not create two buckets. The socket address is used only when the
+/// server did not attach a connection id.
 pub fn peer_of(ext: &jsonrpsee::Extensions) -> String {
-    ext.get::<SocketAddr>()
-        .map(|addr| addr.ip().to_string())
-        .unwrap_or_else(|| ANONYMOUS_PEER.to_string())
+    if let Some(id) = ext.get::<jsonrpsee::ConnectionId>() {
+        return format!("connection:{}", id.0);
+    }
+    if let Some(addr) = ext.get::<SocketAddr>() {
+        return format!("socket:{}", addr.ip());
+    }
+    ANONYMOUS_PEER.to_string()
 }
 
 #[cfg(test)]
@@ -384,6 +395,19 @@ mod tests {
         );
         assert_eq!(pool.changes("owner", "0xdead", 2), Err(FilterError::UnknownFilter));
         assert_eq!(pool.len(), 1, "a refusal does not drop the filter");
+    }
+
+    #[test]
+    fn eth_filter_owner_is_the_server_connection() {
+        let mut ext = jsonrpsee::Extensions::new();
+        assert_eq!(peer_of(&ext), ANONYMOUS_PEER);
+        ext.insert(SocketAddr::from(([127, 0, 0, 1], 18547)));
+        assert_eq!(peer_of(&ext), "socket:127.0.0.1");
+        ext.insert(jsonrpsee::ConnectionId(7));
+        assert_eq!(peer_of(&ext), "connection:7");
+        let mut other = jsonrpsee::Extensions::new();
+        other.insert(jsonrpsee::ConnectionId(8));
+        assert_ne!(peer_of(&ext), peer_of(&other));
     }
 
     #[test]
