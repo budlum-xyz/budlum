@@ -96,7 +96,10 @@ fn uel_abi_reconnect_handshake_shares_the_request_budget() {
             return;
         }
         // The old implementation starts a fresh budget after the handshake.
+        // Keep the connection open and silent so the client must expire its
+        // shared budget instead of observing an early peer close.
         let _ = read_frame(&mut stream);
+        thread::sleep(Duration::from_millis(400));
     });
     let mut client = EeClient::new(&path, EeId::EVM).with_timeout(Duration::from_millis(500));
     let started = Instant::now();
