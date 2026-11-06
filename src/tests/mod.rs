@@ -243,3 +243,15 @@ pub mod validator_classes;
 // The B.U.D. 3.0 storage door end to end.
 #[cfg(test)]
 pub mod bud3_door;
+
+// Live-verification regression locks for lane A (docs/audit/live/lane-a.md).
+#[cfg(test)]
+pub mod audit_lane_a;
+
+// Live-verification regression locks for lane B (docs/audit/live/lane-b.md).
+#[cfg(test)]
+pub mod audit_lane_b;
+
+// Live-verification regression locks for lane C (docs/audit/live/lane-c.md).
+#[cfg(test)]
+pub mod audit_lane_c;
