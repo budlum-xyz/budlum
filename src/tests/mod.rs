@@ -252,6 +252,8 @@ pub mod audit_lane_a;
 #[cfg(test)]
 pub mod audit_lane_b;
 
-// Live-verification regression locks for lane C (docs/audit/live/lane-c.md).
+// Lane C live verification (WP-03): the guards that hold the closed feet of
+// the lane C ledger closed. A failing lock means the tree regressed below
+// docs/audit/live/lane-c.md, not that a closing package did its work.
 #[cfg(test)]
 pub mod audit_lane_c;
