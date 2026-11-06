@@ -11,19 +11,26 @@
 //!   * **verification** (§6.10 item 8): every epoch a random 1% of segments are
 //!     re-derived from their source symbols and compared with the symbol the
 //!     repairer committed to. A mismatch is a proved bad repair;
-//!   * **the report** (Bölüm 11.7): the mismatch becomes a
+//!   * **the report** (Bolum 11.7): the mismatch becomes a
 //!     [`SlashingReport`] under [`SlashingCondition::BadRepair`], priced by
 //!     `RegistryParams::bad_repair_slash_ratio_fixed` at 1%.
 //!
+//! WIRING: unwired - the same door as the rest of `bud3`. `repairer_at`,
+//! `verify` and `bad_repair_report` are called when the block loop takes over
+//! repair assignment and the epoch close runs the 1% draw; until then the
+//! `bud3-repair-fires` gate holds the shape of the path and the tests here
+//! exercise it. `RepairTask` and `Assignment` travel with them.
+//!
 //! # Why verification is a draw and not a full check
 //!
-//! Re-deriving a repair symbol costs the same as one decode of the segment.
-//! Checking every repaired symbol of every segment every epoch is what the
-//! storage bill would look like if repair were free, and it is not: the
-//! directive pays repair work from the repair and relay pool (§11.4). A 1%
-//! draw makes a bad repairer's expected penalty zero only if it repairs
-//! correctly, and the draw is over a sample it cannot predict, because the
-//! seed is consensus state rather than anything the repairer supplies.
+//! Re-deriving a repair symbol costs about as much as decoding the segment it
+//! belongs to. Checking every repaired symbol of every segment every epoch
+//! would be affordable only if repair were free, and it is not: repair work is
+//! paid from the repair and relay pool (§11.4). A 1% draw is enough to make a
+//! bad repairer's expected penalty positive while keeping the verification
+//! cost at a hundredth of a decode per segment per epoch, and the sample is one
+//! the repairer cannot predict, because the seed is consensus state rather
+//! than anything the repairer supplies.
 
 use super::custody::symbol_leaf;
 use super::fountain::SegmentEncoder;
@@ -35,12 +42,12 @@ use crate::registry::permissionless::SlashingCondition;
 use crate::registry::roles;
 
 /// Blocks a repairer has to start before the task moves to the next candidate
-/// (§6.10 item 3: "Görevli 20 blok içinde başlamazsa görev sıradaki adaya
-/// geçer").
+/// (§6.10 item 3: an assignee that has not begun within 20 blocks hands the
+/// task to the next candidate).
 pub const REPAIR_START_DEADLINE_BLOCKS: u64 = 20;
 
 /// One part in `REPAIR_AUDIT_DENOMINATOR` of the repaired segments is
-/// re-derived each epoch (§6.10 item 8: "her dönem rastgele yüzde 1").
+/// re-derived each epoch (§6.10 item 8: a random 1% every epoch).
 pub const REPAIR_AUDIT_DENOMINATOR: u64 = 100;
 
 /// A repair task waiting for a repairer.
@@ -75,7 +82,7 @@ pub struct Assignment {
 ///
 /// Only Full validators are eligible: a Mobile validator can be offline for a
 /// week at a time by design and cannot be relied on to decode a segment
-/// (§6.10 item 3, "Onarım görevi bir Tam doğrulayıcıya atanır").
+/// (§6.10 item 3: a repair task is assigned to a Full validator).
 #[must_use]
 pub fn assign(task: &RepairTask, candidates: &[Candidate]) -> Vec<Assignment> {
     let full: Vec<Candidate> = candidates

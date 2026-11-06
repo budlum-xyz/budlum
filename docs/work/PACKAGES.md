@@ -1,6 +1,6 @@
 # Work packages
 
-One section per directive work package (`İP-NN`, written `WP-NN` in the
+One section per directive work package (`IP-NN`, written `WP-NN` in the
 repository and on GitHub). The directive requires this file to be updated by
 each package's last pull request (Section 15.5, item 7), because a status that
 only lives in a PR description disappears when the PR is squash-merged.
@@ -191,3 +191,30 @@ Deliberately not done: the devnet mesh still starts neither the faucet nor the
 indexer. It is a consensus mesh, and adding the launch's HTTP services to it
 would make `docker compose up` in the quick start depend on two more images and
 two more keys for a smoke test that does not read them.
+
+### Delivery 8: IP-20's three gates, and the missing repair limb
+
+IP-20 item 12 names three gates that did not exist as files or as entries in
+the gate registry: `bud3_placement`, `bud3_repair_fires`, `bud3_custody_proofs`.
+All three are now in `xtask/gates/src/gates/`, registered in `GATES`, and wired
+into `ci.yml` with a canary each, the same shape as every other protected gate.
+
+* `bud3-placement` - G-2 on the consensus path: no float type, literal or
+  method anywhere in `src/storage/bud3/{placement,repair,registry}.rs` before
+  `#[cfg(test)]`. It earned its keep immediately: the log2 unit test in
+  `placement.rs` converted the fixed-point result to `f64` to compare against
+  the real number, which is exactly the pattern the rule forbids in the file
+  the rule is about. The test now checks the integer logarithm against its
+  expected Q32 value, its bracket and its monotonicity, with no float at all.
+* `bud3-repair-fires` - the repair path as a list of edges (state root folds
+  the registry, the tx door reaches `apply`, the assignment produces a
+  repairer, the verifier and the 1% report are reachable, a block cannot carry
+  an unverified bad-repair report). A repair function with no caller is a
+  function that never repairs.
+* `bud3-custody-proofs` - the verification calls that must be present
+  (`verify` against the stored root, the duplicate-proof guard, the pass that
+  clears the loss counter, the window close) and the shortcuts that must not
+  (a context taken from the proof itself, a TODO in the verifier).
+
+The repair limb those gates hold - `src/storage/bud3/repair.rs` - is in IP-20's
+lock list and did not exist; see AF-32 for what it carries.

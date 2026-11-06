@@ -1,18 +1,18 @@
 //! B.U.D. 3.0 custody, repair and placement: the tests the directive names
-//! (İP-20: T17, T26, T34-T40) from a level above the individual modules.
+//! (IP-20: T17, T26, T34-T40) from a level above the individual modules.
 //!
 //! The registry's own unit tests cover one object's mechanics. These cover the
 //! claims an operator, a Mobile holder and a repairer depend on, and the ones a
 //! rehearsal cannot show in a day:
 //!
 //!   * a valid custody proof is accepted and a missed audit costs no stake and
-//!     no share (§11.7 "Denetim kaçırma ... Kesinti yok"),
+//!     no share (§11.7, a missed audit: no penalty),
 //!   * a proved bad repair costs 1% of the repairer's stake and nothing else
-//!     (§11.7 "Kanıtlı hatalı onarım"),
+//!     (§11.7, a proved bad repair),
 //!   * a repair emits fresh ESIs and the old shares outlive the new ones only
 //!     until they are acknowledged (§6.10 items 6-7),
 //!   * a decline moves the share instead of blocking the upload, with no
-//!     penalty (§11.7 "İçerik reddi ... Kesinti yok"),
+//!     penalty (§11.7, a content decline: no penalty),
 //!   * the placement table still reproduces from its parameters and still
 //!     holds the 30% Mobile floor (§6.9.2, §6.9.3 item 5, T39, T34),
 //!   * the network can shrink to one Full validator and every object still
@@ -413,7 +413,7 @@ fn repair_fires_only_at_half_the_tolerance() {
     }
 }
 
-/// §11.7 row "İçerik reddi", T40: a decline moves the share to another
+/// §11.7 row "Content decline", T40: a decline moves the share to another
 /// validator, produces no penalty, and does not block the upload.
 #[test]
 fn bud3_decline_content_reassigns() {
@@ -881,7 +881,7 @@ fn a_sealed_record_never_matches_public_content() {
     assert!(!id.matches_public(&content(401)));
 }
 
-/// `release_shares_lowers_quota_without_penalty` (İP-20 item 11): a holder
+/// `release_shares_lowers_quota_without_penalty` (IP-20 item 11): a holder
 /// that gives shares up lowers its quota, the released shares come back under
 /// the ordinary loss rule, and nothing is slashed.
 #[test]
