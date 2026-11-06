@@ -127,7 +127,11 @@ pub fn derive_pointer_address(
     if ee_map_key(target_ee).is_none() {
         return Err(AssetRegistryError::UnsupportedPhaseOneEnvironment(target_ee));
     }
-    let seed = hash_fields_bytes(b"BDLM_UEL_POINTER_V1", &[asset_id.as_slice(), &[target_ee.0]]);
+    let seed = hash_fields_bytes(&[
+        "BDLM_UEL_POINTER_V1".as_bytes(),
+        asset_id.as_slice(),
+        &[target_ee.0],
+    ]);
     derive_local_alias(&Address(seed), target_ee)
         .map_err(|_| AssetRegistryError::InvalidHomeReference)
 }

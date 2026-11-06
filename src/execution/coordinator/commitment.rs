@@ -305,6 +305,16 @@ impl UelNamespaceStore {
             .map(Vec::as_slice)
     }
 
+    /// Deterministically iterate `(key, value)` pairs stored in `ns` in ascending key order.
+    ///
+    /// Convenience: exposed for Universal Asset Registry pointer scans and read overlays.
+    pub fn iter_namespace(&self, ns: &str) -> impl Iterator<Item = (&[u8], &[u8])> {
+        self.namespaces
+            .get(ns)
+            .into_iter()
+            .flat_map(|map| map.iter().map(|(k, v)| (k.as_slice(), v.as_slice())))
+    }
+
     /// Total stored value + key bytes in `ns` (`budlum_state_bytes{ns}`).
     ///
     /// Convenience: exposed for per-namespace state telemetry gauges.
