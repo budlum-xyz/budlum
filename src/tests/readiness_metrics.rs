@@ -48,9 +48,11 @@ fn register_object(
         fps: 10,
         k_max: 16,
     };
-    let content = b"readiness metrics".repeat(8);
+    // One segment: 64 bytes of content is well under `symbol_size`, so the
+    // object codes a single segment and the arithmetic below is one root.
     let upload =
-        prepare_public_upload(&content, &profile, &Bud3Limits::default(), 12).expect("prepare");
+        prepare_public_upload(&[7u8; 64], &profile, &Bud3Limits::default(), 24).expect("prepare");
+    assert_eq!(upload.segments.len(), 1, "the fixture is one segment");
     let key = upload.record.commitment;
     let segments = upload.segments.len() as u64;
     let symbols = u64::from(upload.record.symbols_per_segment);
