@@ -2,6 +2,7 @@ package dev.budlum.validator.keys
 
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import android.security.keystore.StrongBoxUnavailableException
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -32,26 +33,32 @@ object KeyVault {
     private const val GCM_IV_BYTES = 12
 
     /** AES-256-GCM wrapping key from the Android Keystore, StrongBox preferred. */
+    @Synchronized
     fun keystoreWrapKey(): SecretKey {
         val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
         (ks.getEntry(AES_KEY_ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
 
-        val builder = KeyGenParameterSpec.Builder(
-            AES_KEY_ALIAS,
-            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+        return generatePreferStrongBox(
+            generate = { strongBox ->
+                val builder = KeyGenParameterSpec.Builder(
+                    AES_KEY_ALIAS,
+                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+                )
+                    .setKeySize(256)
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    // The operator key must be usable by background duties.
+                    .setUserAuthenticationRequired(false)
+                    .setUnlockedDeviceRequired(false)
+                if (strongBox && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                    builder.setIsStrongBoxBacked(true)
+                }
+                KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
+                    .apply { init(builder.build()) }
+                    .generateKey()
+            },
+            isUnavailable = { it is StrongBoxUnavailableException },
         )
-            .setKeySize(256)
-            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-            // Background use: no user authentication, no unlocked-device requirement.
-            .setUserAuthenticationRequired(false)
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
-            builder.setIsStrongBoxBacked(true)
-        }
-        val key = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
-            .apply { init(builder.build()) }
-            .generateKey()
-        return key
     }
 
     /**
