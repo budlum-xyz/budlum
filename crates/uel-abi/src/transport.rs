@@ -135,6 +135,12 @@ impl Write for DeadlineIo<'_> {
     }
 }
 
+fn deadline_after(timeout: Duration) -> Result<Instant, TransportError> {
+    Instant::now()
+        .checked_add(timeout)
+        .ok_or(TransportError::Timeout)
+}
+
 /// The digest an environment reports for a caught panic. Domain-separated and
 /// bound to the environment, so two environments panicking with one message
 /// still differ.
@@ -360,7 +366,7 @@ impl EeClient {
         &mut self,
         body: pb::envelope::Body,
     ) -> Result<(u64, Instant), TransportError> {
-        let deadline = match Instant::now().checked_add(self.timeout) {
+        let deadline = match deadline_after(self.timeout) {
             Some(deadline) => deadline,
             None => {
                 self.stream = None;
@@ -585,6 +591,7 @@ pub enum ServeEnd {
 struct RemoteHost<'a> {
     stream: RefCell<&'a mut UnixStream>,
     request_id: u64,
+    deadline: Instant,
     broken: Cell<bool>,
 }
 
@@ -593,28 +600,73 @@ impl RemoteHost<'_> {
         if self.broken.get() {
             return Err(HostError::Denied("connection lost".into()));
         }
+        // Match the successful oneof arm to the operation. A balance is not
+        // a read result, and an empty or undefined error is not a policy
+        // refusal. The discriminant carries no payload and changes no wire.
+        let expected = match &op {
+            pb::host_request::Op::Read(_) => {
+                pb::host_response::Result::Read(pb::HostReadResult::default())
+            }
+            pb::host_request::Op::UniversalCall(_) => {
+                pb::host_response::Result::Universal(pb::UniversalResult::default())
+            }
+            pb::host_request::Op::BudBalance(_) => {
+                pb::host_response::Result::Balance(pb::Amount::default())
+            }
+            pb::host_request::Op::Write(_)
+            | pb::host_request::Op::EmitLog(_)
+            | pb::host_request::Op::Charge(_)
+            | pb::host_request::Op::BudTransfer(_) => {
+                pb::host_response::Result::Ok(pb::HostEmpty::default())
+            }
+        };
         let mut stream = self.stream.borrow_mut();
         let request = envelope(
             self.request_id,
             pb::envelope::Body::HostRequest(pb::HostRequest { op: Some(op) }),
         );
-        let outcome = write_frame(&mut **stream, &request).and_then(|()| read_frame(&mut **stream));
-        match outcome {
+        let outcome = write_frame(
+            &mut DeadlineIo {
+                stream: &mut **stream,
+                deadline: self.deadline,
+            },
+            &request,
+        )
+        .and_then(|()| {
+            read_frame(&mut DeadlineIo {
+                stream: &mut **stream,
+                deadline: self.deadline,
+            })
+        });
+        let response = match outcome {
             Ok(frame) if frame.request_id == self.request_id => match frame.body {
-                Some(pb::envelope::Body::HostResponse(response)) => Ok(response),
+                Some(pb::envelope::Body::HostResponse(response)) => response,
                 _ => {
                     self.broken.set(true);
-                    Err(HostError::Invalid("expected a host response".into()))
+                    return Err(HostError::Denied("expected a host response".into()));
                 }
             },
             _ => {
-                // The coordinator treats a broken connection as the
-                // non-deterministic class and discards whatever the engine
-                // concludes from here, so any error value is as good as another.
                 self.broken.set(true);
-                Err(HostError::Denied("connection lost".into()))
+                return Err(HostError::Denied("connection lost".into()));
             }
+        };
+        let valid = match &response.result {
+            Some(pb::host_response::Result::Error(error)) => {
+                pb::HostErrorCode::try_from(error.code)
+                    .is_ok_and(|code| code != pb::HostErrorCode::Unspecified)
+            }
+            Some(result) => std::mem::discriminant(result) == std::mem::discriminant(&expected),
+            None => false,
+        };
+        if !valid {
+            // Engines may map an ordinary HostError to a deterministic
+            // revert. Mark the proxy broken so serve_connection discards
+            // that verdict instead of turning corruption into a receipt.
+            self.broken.set(true);
+            return Err(HostError::Denied("malformed host response".into()));
         }
+        Ok(response)
     }
 
     fn expect_ok(&self, op: pb::host_request::Op) -> Result<(), HostError> {
@@ -774,10 +826,12 @@ pub fn serve_connection(
                     field: "execute.call",
                 })?)?;
                 let ee_id = ee.id();
+                let deadline = deadline_after(WATCHDOG)?;
                 let (verdict, lost) = {
                     let mut host = RemoteHost {
                         stream: RefCell::new(&mut stream),
                         request_id: id,
+                        deadline,
                         broken: Cell::new(false),
                     };
                     let verdict =
@@ -804,7 +858,10 @@ pub fn serve_connection(
                     }
                 };
                 write_frame(
-                    &mut stream,
+                    &mut DeadlineIo {
+                        stream: &mut stream,
+                        deadline,
+                    },
                     &envelope(
                         id,
                         pb::envelope::Body::ExecuteResponse(pb::ExecuteResponse {
@@ -830,10 +887,12 @@ pub fn serve_connection(
                         .try_into()?,
                     input: request.input,
                 };
+                let deadline = deadline_after(WATCHDOG)?;
                 let (verdict, lost) = {
                     let host = RemoteHost {
                         stream: RefCell::new(&mut stream),
                         request_id: id,
+                        deadline,
                         broken: Cell::new(false),
                     };
                     let verdict = catch_unwind(AssertUnwindSafe(|| ee.query(&ctx, &query, &host)));
@@ -868,7 +927,10 @@ pub fn serve_connection(
                     }
                 };
                 write_frame(
-                    &mut stream,
+                    &mut DeadlineIo {
+                        stream: &mut stream,
+                        deadline,
+                    },
                     &envelope(
                         id,
                         pb::envelope::Body::QueryResponse(pb::QueryResponse {
