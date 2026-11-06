@@ -1839,11 +1839,9 @@ impl AccountState {
                 | TransactionType::WithdrawDelegation { .. }
                 | TransactionType::SetValidatorCommission { .. }
         );
-        if debits_amount && tx.amount.checked_add(tx.fee).is_none() {
-            return Err("Transaction amount + fee overflows u64".into());
-        }
         let total_cost = if debits_amount {
-            tx.total_cost()
+            tx.checked_total_cost()
+                .ok_or_else(|| "Transaction amount + fee overflows u64".to_string())?
         } else {
             tx.fee
         };
