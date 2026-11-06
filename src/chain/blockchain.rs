@@ -75,7 +75,7 @@ pub struct GlobalHeaderProof {
     pub state_root_body: Option<crate::domain::Hash32>,
 }
 
-/// What the regeneration tick reads about one stage and height.
+/// What the state recovery tick reads about one stage and height.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PqStageObservation {
     /// The commitment this node holds.
@@ -169,9 +169,9 @@ pub struct Blockchain {
     /// checkpoint header a committed block carries; the default is GatedOff
     /// (skip).
     pub anchor_emission: AnchorEmission,
-    /// The seals regeneration may trust: Root Seals and verified
+    /// The seals state recovery may trust: Root Seals and verified
     /// anchors from the emission pipeline, finality checkpoints with a
-    /// verified ML-DSA QC. Read by the node's regeneration health tick.
+    /// verified ML-DSA QC. Read by the node's state recovery tick.
     pub pq_source: crate::domain::PqCanonicalSource,
     /// The weakest quantum class each emitted anchor window carried, so the
     /// local recomputation of its aggregate root uses the class it was signed
@@ -1996,17 +1996,17 @@ impl Blockchain {
         crate::settlement::aggregate_finality_roots(&digests).ok()
     }
 
-    /// What the regeneration tick needs about one stage and height: the
+    /// What the state recovery tick needs about one stage and height: the
     /// commitment this node holds, and the canonical commitment with the seal
     /// behind it. A finalized checkpoint that is not in the source yet is
     /// taken from storage when its certificate and verified QC blob are both
     /// there (a restart empties the memory source).
     pub fn pq_stage_observation(
         &mut self,
-        stage: crate::domain::regeneration_stage::Stage,
+        stage: crate::chain::state_recovery::stage::Stage,
         height: u64,
     ) -> PqStageObservation {
-        use crate::domain::regeneration_stage::Stage;
+        use crate::chain::state_recovery::stage::Stage;
         if stage == Stage::Medusa && self.pq_source.canonical(stage, height).is_none() {
             self.rehydrate_finality(height);
         }
@@ -2069,7 +2069,7 @@ impl Blockchain {
     /// or below `live` (Ephyra).
     #[must_use]
     pub fn pq_sealed_heights(&self, live: u64) -> (Option<u64>, Option<u64>) {
-        use crate::domain::regeneration_stage::Stage;
+        use crate::chain::state_recovery::stage::Stage;
         (
             self.pq_source.latest_height(Stage::Polyp),
             self.pq_source.latest_at_or_below(Stage::Ephyra, live),

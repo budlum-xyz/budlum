@@ -1,9 +1,9 @@
-//! The regeneration mempool: transactions that a
+//! The recovery mempool: transactions that a
 //! reversion gave up are kept, not dropped, and offered again once the node
 //! has grown back.
 //!
 //! WIRING: wired - the node runtime stashes the transactions of the heights a
-//! `TickOutcome::Reverted` gave up (`Node::regen_health_tick` in
+//! `TickOutcome::Reverted` gave up (`Node::state_recovery_tick` in
 //! `src/network/node.rs`) and, on the first healthy tick after the ledger is
 //! back at the adult stage, takes the ones the canonical chain did not include
 //! and re-submits and re-broadcasts them. Rules are pinned by this file's
@@ -36,12 +36,12 @@ struct Stashed {
 
 /// The store of transactions a reversion gave up.
 #[derive(Debug, Clone, Default)]
-pub struct RegenMempool {
+pub struct RecoveryMempool {
     entries: BTreeMap<String, Stashed>,
     bytes: usize,
 }
 
-impl RegenMempool {
+impl RecoveryMempool {
     /// An empty store.
     #[must_use]
     pub fn new() -> Self {
@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn a_transaction_is_kept_once_and_returned_when_unconfirmed() {
-        let mut store = RegenMempool::new();
+        let mut store = RecoveryMempool::new();
         assert_eq!(store.stash(&[tx("a"), tx("b"), tx("a")], 50, &size), 2);
         assert_eq!(store.len(), 2);
         assert_eq!(store.bytes(), 200);
@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn a_stale_transaction_is_dropped() {
-        let mut store = RegenMempool::new();
+        let mut store = RecoveryMempool::new();
         store.stash(&[tx("old")], 10, &size);
         assert!(store
             .take_unconfirmed(10 + STASH_TTL_HEIGHTS + 1, &|_| false)
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn the_count_bound_evicts_the_oldest_height() {
-        let mut store = RegenMempool::new();
+        let mut store = RecoveryMempool::new();
         let first: Vec<Transaction> = (0..MAX_STASHED_TXS).map(|i| tx(&format!("o{i}"))).collect();
         store.stash(&first, 1, &size);
         assert_eq!(store.len(), MAX_STASHED_TXS);
@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn the_byte_bound_refuses_an_oversize_transaction_and_evicts_for_room() {
-        let mut store = RegenMempool::new();
+        let mut store = RecoveryMempool::new();
         assert_eq!(store.stash(&[tx("huge")], 1, &|_| MAX_STASHED_BYTES + 1), 0);
         assert_eq!(store.stash(&[tx("a")], 1, &|_| MAX_STASHED_BYTES), 1);
         assert_eq!(store.stash(&[tx("b")], 2, &|_| 10), 1);
@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn a_transaction_without_a_hash_is_not_kept() {
-        let mut store = RegenMempool::new();
+        let mut store = RecoveryMempool::new();
         assert_eq!(store.stash(&[tx("")], 1, &size), 0);
     }
 }

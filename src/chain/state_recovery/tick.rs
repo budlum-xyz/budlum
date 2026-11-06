@@ -1,6 +1,6 @@
-//! The node runtime's regeneration health tick.
+//! The node runtime's state recovery tick.
 //!
-//! WIRING: `Node::run` calls [`RegenHealthTick::observe`] once per finality
+//! WIRING: `Node::run` calls [`StateRecoveryTick::observe`] once per finality
 //! beat, with the node's view of its latest finalized checkpoints. The tick
 //! calls [`assess`] and executes the verdict through the reversion ledger.
 //!
@@ -34,18 +34,18 @@
 //!
 //! A repair verdict opens a sync round, which is how the runtime fetches
 //! canonical blocks and replaces a diverged branch. A revert verdict moves
-//! the ledger through [`RegenerationLedger::revert`] (or
-//! [`RegenerationLedger::revert_after_forgery`] when the audit trail does not
+//! the ledger through [`RecoveryLedger::revert`] (or
+//! [`RecoveryLedger::revert_after_forgery`] when the audit trail does not
 //! validate) and also opens a sync round to re-grow. The ledger grows back
-//! through [`RegenerationLedger::grow`] only when the node's own block at the
+//! through [`RecoveryLedger::grow`] only when the node's own block at the
 //! next checkpoint matches the certificate. Rolling chain storage back to
 //! the target checkpoint is a chain state transition that the chain actor
 //! does not define, so this tick does not do it.
 
 use crate::domain::pq_canonical::SealId;
-use crate::domain::regen_health::{assess, AlarmReason, HealthPolicy, HealthVerdict};
-use crate::domain::regeneration_stage::{
-    RegenerationLedger, Reversion, ReversionError, Stage, StageSnapshot, Stress,
+use crate::chain::state_recovery::health::{assess, AlarmReason, HealthPolicy, HealthVerdict};
+use crate::chain::state_recovery::stage::{
+    RecoveryLedger, Reversion, ReversionError, Stage, StageSnapshot, Stress,
 };
 
 /// One sealed checkpoint of one stage as the node sees it.
@@ -74,8 +74,8 @@ pub struct CheckpointView {
     /// Height of the latest Root Seal (Polyp).
     pub polyp: Option<u64>,
     /// Every checkpoint the node fetched for this tick: at least `live`,
-    /// `previous`, `polyp` and [`RegenHealthTick::held_stage`] at
-    /// [`RegenHealthTick::held_height`].
+    /// `previous`, `polyp` and [`StateRecoveryTick::held_stage`] at
+    /// [`StateRecoveryTick::held_height`].
     pub checkpoints: Vec<Checkpoint>,
 }
 
@@ -157,22 +157,22 @@ impl TickOutcome {
 
 /// The node's reversion ledger and the policy the tick assesses it with.
 #[derive(Debug, Clone)]
-pub struct RegenHealthTick {
-    ledger: RegenerationLedger,
+pub struct StateRecoveryTick {
+    ledger: RecoveryLedger,
     policy: HealthPolicy,
 }
 
-impl Default for RegenHealthTick {
+impl Default for StateRecoveryTick {
     fn default() -> Self {
         Self::new(HealthPolicy::default())
     }
 }
 
-impl RegenHealthTick {
+impl StateRecoveryTick {
     #[must_use]
     pub fn new(policy: HealthPolicy) -> Self {
         Self {
-            ledger: RegenerationLedger::default(),
+            ledger: RecoveryLedger::default(),
             policy,
         }
     }
@@ -305,7 +305,7 @@ mod tests {
     use super::*;
     use crate::crypto::scheme::SchemeId;
     use crate::domain::pq_canonical::{test_seal, SealKind};
-    use crate::domain::regeneration_stage::ReversionPolicy;
+    use crate::chain::state_recovery::stage::ReversionPolicy;
 
     const INTERVAL: u64 = 100;
 
@@ -352,13 +352,13 @@ mod tests {
 
     #[test]
     fn nothing_finalized_is_idle() {
-        let mut tick = RegenHealthTick::default();
+        let mut tick = StateRecoveryTick::default();
         assert_eq!(tick.observe(&CheckpointView::default()), TickOutcome::Idle);
     }
 
     #[test]
     fn a_healthy_ledger_takes_no_action() {
-        let mut tick = RegenHealthTick::default();
+        let mut tick = StateRecoveryTick::default();
         let outcome = tick.observe(&view(honest(300)));
         assert_eq!(outcome, TickOutcome::Healthy);
         assert!(!outcome.opens_sync());
@@ -369,7 +369,7 @@ mod tests {
     fn damage_with_cheap_repair_opens_the_repair_sync() {
         // A young chain: re-verifying 300 blocks in place is cheaper than
         // ten times the 100 heights a reversion would give up.
-        let mut tick = RegenHealthTick::default();
+        let mut tick = StateRecoveryTick::default();
         let outcome = tick.observe(&view(diverged(300)));
         assert_eq!(
             outcome,
@@ -386,7 +386,7 @@ mod tests {
 
     #[test]
     fn damage_with_costly_repair_reverts_and_regrows_when_canonical() {
-        let mut tick = RegenHealthTick::default();
+        let mut tick = StateRecoveryTick::default();
         let outcome = tick.observe(&view(diverged(2000)));
         match &outcome {
             TickOutcome::Reverted(r) => {
@@ -424,7 +424,7 @@ mod tests {
             },
             ..HealthPolicy::default()
         };
-        let mut tick = RegenHealthTick::new(policy);
+        let mut tick = StateRecoveryTick::new(policy);
         assert!(matches!(
             tick.observe(&view(diverged(2000))),
             TickOutcome::Reverted(_)
@@ -435,7 +435,7 @@ mod tests {
         let outcome = tick.observe(&view(diverged(2100)));
         match &outcome {
             TickOutcome::Alarm { reason, stress } => {
-                assert_eq!(reason.kind(), "regen-alarm-budget-exhausted");
+                assert_eq!(reason.kind(), "recovery-alarm-budget-exhausted");
                 assert_eq!(
                     *reason,
                     AlarmReason::ReversionBudgetExhausted {
@@ -453,7 +453,7 @@ mod tests {
 
     #[test]
     fn a_missing_certificate_alarms_and_never_reverts_blind() {
-        let mut tick = RegenHealthTick::default();
+        let mut tick = StateRecoveryTick::default();
         let live = Checkpoint {
             canonical: None,
             ..diverged(2000)
@@ -461,7 +461,7 @@ mod tests {
         let outcome = tick.observe(&view(live));
         match &outcome {
             TickOutcome::Alarm { reason, .. } => {
-                assert_eq!(reason.kind(), "regen-alarm-no-canonical-source");
+                assert_eq!(reason.kind(), "recovery-alarm-no-canonical-source");
             }
             other => panic!("expected Alarm, got {other:?}"),
         }
@@ -470,7 +470,7 @@ mod tests {
 
     #[test]
     fn a_missing_local_block_cannot_match_the_certificate() {
-        let mut tick = RegenHealthTick::default();
+        let mut tick = StateRecoveryTick::default();
         let live = Checkpoint {
             local: None,
             ..honest(300)
@@ -485,7 +485,7 @@ mod tests {
     fn a_bls_only_certificate_is_no_canonical_source() {
         // The checkpoint matches nothing the node holds, and its only seal is
         // the BLS certificate: the tick must alarm, not repair or revert to it.
-        let mut tick = RegenHealthTick::default();
+        let mut tick = StateRecoveryTick::default();
         let live = Checkpoint {
             seal: Some(SealId::new(
                 SealKind::FinalityQc,
@@ -496,7 +496,7 @@ mod tests {
         };
         match tick.observe(&view(live)) {
             TickOutcome::Alarm { reason, .. } => {
-                assert_eq!(reason.kind(), "regen-alarm-no-canonical-source");
+                assert_eq!(reason.kind(), "recovery-alarm-no-canonical-source");
             }
             other => panic!("expected Alarm, got {other:?}"),
         }
@@ -505,7 +505,7 @@ mod tests {
 
     #[test]
     fn an_unsealed_snapshot_is_no_canonical_source() {
-        let mut tick = RegenHealthTick::default();
+        let mut tick = StateRecoveryTick::default();
         let live = Checkpoint {
             seal: None,
             ..diverged(2000)
@@ -515,7 +515,7 @@ mod tests {
             TickOutcome::Alarm { .. }
         ));
         // Even a healthy-looking view is not signed off without a seal.
-        let mut tick = RegenHealthTick::default();
+        let mut tick = StateRecoveryTick::default();
         let unsealed = Checkpoint {
             seal: None,
             ..honest(300)
@@ -532,7 +532,7 @@ mod tests {
         // Ephyra anchor. That anchor's seal names another height: it does not
         // anchor this stage and height, so the target has no canonical source
         // and the ledger never moves.
-        let mut tick = RegenHealthTick::default();
+        let mut tick = StateRecoveryTick::default();
         let forged_anchor = Checkpoint {
             seal: Some(test_seal(Stage::Ephyra, 1)),
             ..honest_at(Stage::Ephyra, 1900)
@@ -557,7 +557,7 @@ mod tests {
         // Damage that the Ephyra anchor would normally clear. A lattice break
         // took the anchor's family away, so the observation carries no seal for
         // it and the tick reverts two stages, to the root seal.
-        let mut tick = RegenHealthTick::default();
+        let mut tick = StateRecoveryTick::default();
         let dead_anchor = Checkpoint {
             canonical: None,
             seal: None,
@@ -582,7 +582,7 @@ mod tests {
 
     #[test]
     fn the_root_seal_is_the_polyp_target_of_a_full_reversion() {
-        let mut tick = RegenHealthTick::default();
+        let mut tick = StateRecoveryTick::default();
         // No anchor is held, so only the Polyp seal can clear the damage.
         let view = CheckpointView {
             live: 2000,
