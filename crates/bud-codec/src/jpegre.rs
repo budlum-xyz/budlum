@@ -104,7 +104,6 @@ impl JpegAnalysis {
         }
         let header_bytes = scan_start as u64;
         let scan_data_bytes = data.len().saturating_sub(scan_start) as u64;
-        let total = data.len() as u64;
         Some(JpegAnalysis {
             width,
             height,

@@ -31,7 +31,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::regeneration_stage::Stage;
+use crate::chain::state_recovery::regeneration_stage::Stage;
 use crate::crypto::scheme::{SchemeFamily, SchemeId};
 use crate::settlement::anchor_ledger::AnchorKeyLedger;
 use crate::settlement::pq_anchor::{verify_anchor_full, PqAnchor};

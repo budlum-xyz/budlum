@@ -118,7 +118,7 @@ pub use provider::{
     provider_challenge_id, ChallengeId, DealId, InMemoryStorageProvider, ProviderChallengeResult,
     PutReceipt, StorageProof, StorageProvider, StorageProviderError,
 };
-pub use pruning::{NodeMode, PruningPolicy};
+pub use crate::persistence::pruning::{NodeMode, PruningPolicy};
 pub use render::{render, render_and_verify, RenderError, RenderFormat};
 pub use server_admission::{admit_device_as_server, ServerAdmission, ServerAdmissionRefusal};
 

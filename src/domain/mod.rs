@@ -30,8 +30,10 @@ pub use plugin::{
 };
 pub use plugin_registry::DomainPluginRegistry;
 pub use pq_canonical::{PqCanonicalSource, SealId, SealKind, SourceError};
-pub use regen_health::{assess, AlarmReason, HealthPolicy, HealthVerdict};
-pub use regen_mempool::RegenMempool;
+pub use crate::chain::state_recovery::regen_health::{
+    assess, AlarmReason, HealthPolicy, HealthVerdict,
+};
+pub use crate::chain::state_recovery::regen_mempool::RegenMempool;
 pub use registry::ConsensusDomainRegistry;
 pub use sovereign::{
     AuditExportBundle, ComplianceEvidence, DomainLifecycleState, SovereignDomainClass,

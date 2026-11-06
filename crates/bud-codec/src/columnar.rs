@@ -416,7 +416,7 @@ pub fn columnar_from_blob(bytes: &[u8]) -> Option<JsonColumnar> {
         return None;
     }
     Some(JsonColumnar {
-        mode: ColumnarMode::Exact,
+        mode,
         keys,
         col_types,
         columns,
