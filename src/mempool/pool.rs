@@ -1,5 +1,6 @@
 use crate::core::address::Address;
 use crate::core::transaction::Transaction;
+use crate::mempool::duty_lane::{self, DutyRefusal};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 // (2026-07-21) consensus determinism: transactions sharing a fee arrived in
@@ -40,6 +41,23 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 /// this budget only engages under the flood it exists for.
 pub const DEFAULT_MAX_POOL_BYTES: usize = 256 * 1024 * 1024;
 
+/// The duty lane's block share under the default block budget.
+///
+/// Section 7.3 item 6 sets the share at 20 percent of a block's bytes
+/// (TESTNET-DEFAULT), and the share is derived from `consensus::MAX_BLOCK_SIZE`
+/// rather than written as a number beside it: a block budget that changes
+/// changes the share with it.
+pub const DEFAULT_DUTY_BLOCK_BYTES: usize =
+    duty_lane::block_share_bytes(crate::consensus::MAX_BLOCK_SIZE);
+
+/// How many blocks of the duty lane's share the pool holds.
+///
+/// This is a bound on the wait, not a memory figure. The lane's block share is
+/// what one block can clear, so four blocks is the point past which a waiting
+/// batch would sit longer than the window it belongs to, and holding more of
+/// them only spends pool bytes on duty work no block could carry in time.
+const DUTY_LANE_POOL_BLOCKS: usize = 4;
+
 #[derive(Debug, Clone)]
 pub struct MempoolConfig {
     pub max_size: usize,
@@ -59,6 +77,15 @@ pub struct MempoolConfig {
     /// the number that check read. Two different measures of "size" on the
     /// admission path is how a bound gets enforced against the wrong quantity.
     pub max_pool_bytes: usize,
+
+    /// The bytes of a block the duty lane may fill.
+    ///
+    /// Section 7.3 item 6: the Mobile validator duty lane is bounded by this
+    /// share of the block (20 percent, TESTNET-DEFAULT), measured the way the
+    /// block validator measures a block. It is a field rather than a constant
+    /// so a test can size a block in a few hundred bytes and watch the share
+    /// hold, and so governance can move the share with the block budget.
+    pub duty_block_bytes: usize,
 }
 
 impl Default for MempoolConfig {
@@ -70,6 +97,7 @@ impl Default for MempoolConfig {
             tx_ttl_secs: 3600,
             rbf_bump_percent: 10,
             max_pool_bytes: DEFAULT_MAX_POOL_BYTES,
+            duty_block_bytes: DEFAULT_DUTY_BLOCK_BYTES,
         }
     }
 }
@@ -90,6 +118,14 @@ pub enum MempoolError {
     InvalidNonce,
     TransactionExpired,
     RbfFeeTooLow,
+    /// A duty transaction the mobile duty lane will not take (section 7.3,
+    /// item 6).
+    ///
+    /// Distinct from `FeeTooLow` and from `SenderLimitReached` because the
+    /// response differs: the lane's limit is a window, so the client waits for
+    /// the next window or replaces the batch it already sent, and paying a
+    /// higher fee or freeing a sender slot changes nothing.
+    DutyLaneRefused(DutyRefusal),
     InvalidTransaction(String),
 }
 
@@ -111,6 +147,26 @@ impl std::fmt::Display for BundleRefusal {
     }
 }
 
+/// What the pool records about a duty batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DutyBatch {
+    /// The window the batch belongs to.
+    ///
+    /// Recorded at admission rather than recomputed later: the rate limit is
+    /// "one batch per validator per window", and a batch admitted one second
+    /// before a window boundary must still hold its own window, or the same
+    /// validator could send a second one immediately after the boundary and
+    /// occupy two slots with one action.
+    window: u64,
+    /// The bytes the batch costs a block, by the block validator's measure.
+    ///
+    /// Computed once, like `charged`: the lane's byte ceiling and its block
+    /// share are both read from the pool often enough that re-serializing
+    /// every pending batch on each read would put a JSON encode on the block
+    /// production path.
+    block_bytes: usize,
+}
+
 #[derive(Debug, Clone)]
 struct PendingTx {
     tx: Transaction,
@@ -120,6 +176,8 @@ struct PendingTx {
     /// scan let one refused submission drive a protobuf encode over every
     /// cheaper entry in the pool.
     charged: usize,
+    /// The duty batch this entry is, when it is one.
+    duty: Option<DutyBatch>,
 }
 
 #[derive(Clone)]
@@ -209,7 +267,26 @@ impl Mempool {
         self.config.max_pool_bytes
     }
 
-    pub fn add_transaction(&mut self, tx: Transaction) -> Result<(), MempoolError> {
+    /// Admit a transaction into the pool at a caller-supplied time.
+    ///
+    /// [`Self::add_transaction`] is this door with the wall clock, and it is
+    /// the door every producer of transactions uses. The time is a parameter
+    /// because the duty lane's limit is a window (section 7.3, item 6): a test
+    /// that had to reach a real window boundary would wait ten minutes, and a
+    /// test that raced one would pass or fail on the second it ran.
+    ///
+    /// Convenience: [`Self::add_transaction`] calls this door with
+    /// `SystemTime::now`, so every admitted transaction already passes
+    /// through it. The time parameter is the only difference between the two,
+    /// and the wall clock is read in one place so no caller can choose a
+    /// window by choosing a door.
+    ///
+    /// # Errors
+    ///
+    /// The refusal the pool found, by the same rules as
+    /// [`Self::add_transaction`], plus `DutyLaneRefused` for a duty batch the
+    /// lane will not take.
+    pub fn admit_at(&mut self, tx: Transaction, now_ms: u128) -> Result<(), MempoolError> {
         // The cheap rejections run first. `Transaction::verify` can cost an
         // ML-DSA verification, so a duplicate or a below-floor flood must be
         // refused by a map lookup and an integer compare before it can make
@@ -218,7 +295,17 @@ impl Mempool {
             return Err(MempoolError::DuplicateTransaction);
         }
 
-        if tx.fee < self.config.min_fee {
+        // The duty lane is free (section 7.3, item 6; section 11.6). A Mobile
+        // validator's batch is admitted below the fee floor, and the lane's
+        // own limits are what bound it instead: one batch per validator per
+        // window, and a byte ceiling on the lane. Every other transaction
+        // still pays, so the floor has not moved for anyone else.
+        let duty = duty_lane::is_duty(&tx).then(|| DutyBatch {
+            window: duty_lane::window_at(now_ms),
+            block_bytes: duty_lane::block_bytes(&tx),
+        });
+
+        if duty.is_none() && tx.fee < self.config.min_fee {
             return Err(MempoolError::FeeTooLow);
         }
 
@@ -282,17 +369,72 @@ impl Mempool {
             // cheap DoS vector). Now: bump = max(1, ceil(fee * pct / 100)),
             // and the replacement fee MUST exceed the old fee. The
             // intermediate computation uses u128 against overflow.
-            let bump = (u128::from(existing.tx.fee) * u128::from(self.config.rbf_bump_percent))
-                .div_ceil(100);
-            let min_new_fee = existing
-                .tx
-                .fee
-                .saturating_add(u64::try_from(bump.max(1)).unwrap_or(u64::MAX));
-            if tx.fee < min_new_fee {
-                return Err(MempoolError::RbfFeeTooLow);
+            //
+            // A duty batch is exempt: it is free, so a bump rule would make
+            // every replacement of it impossible, and the lane's window limit
+            // is what stops churn. Replacing the pending batch is the client's
+            // repair path when a phone collected one more audit before the
+            // window closed.
+            if duty.is_none() {
+                let bump = (u128::from(existing.tx.fee) * u128::from(self.config.rbf_bump_percent))
+                    .div_ceil(100);
+                let min_new_fee = existing
+                    .tx
+                    .fee
+                    .saturating_add(u64::try_from(bump.max(1)).unwrap_or(u64::MAX));
+                if tx.fee < min_new_fee {
+                    return Err(MempoolError::RbfFeeTooLow);
+                }
             }
-        } else if sender_count >= self.config.max_per_sender {
+        } else if duty.is_none() && sender_count >= self.config.max_per_sender {
             return Err(MempoolError::SenderLimitReached);
+        }
+
+        // The duty lane's two limits. Both are refusals with no side effects,
+        // so they run before anything is evicted, for the reason the eviction
+        // comment gives above: a refusal that has already deleted somebody
+        // else's transaction is a free deletion primitive.
+        //
+        // The lane is measured over the entries in the pool, not over a
+        // counter. A counter has to be told about every path that removes an
+        // entry (eviction, replacement, expiry, drain, and the bundle rollback
+        // that puts an evicted entry back without admitting it), and one
+        // missed path turns the ceiling into a slow leak. The scan is bounded
+        // by the entry cap and runs only for a duty transaction, which the
+        // window limit already makes rare.
+        let incoming = charged_bytes(&tx);
+        if let Some(batch) = duty.as_ref() {
+            if let Some((open_nonce, _)) = self.open_duty_batch(&tx.from, batch.window) {
+                if open_nonce != tx.nonce {
+                    return Err(MempoolError::DutyLaneRefused(
+                        DutyRefusal::SecondBatchInWindow {
+                            window: batch.window,
+                            open_nonce,
+                        },
+                    ));
+                }
+            }
+            // The lane is measured over the block measure throughout, not over
+            // `incoming`: this ceiling bounds bytes that a block will have to
+            // carry, and `incoming` is the transport measure the pool-wide
+            // budget uses. Two measures on one limit is how a bound ends up
+            // enforced against a quantity nothing else looks at.
+            let replaced = existing_hash
+                .as_ref()
+                .and_then(|hash| self.transactions.get(hash))
+                .and_then(|entry| entry.duty)
+                .map_or(0, |replaced| replaced.block_bytes);
+            let lane_bytes = self
+                .duty_lane_bytes()
+                .saturating_sub(replaced)
+                .saturating_add(batch.block_bytes);
+            let cap = self.duty_lane_cap();
+            if lane_bytes > cap {
+                return Err(MempoolError::DutyLaneRefused(DutyRefusal::LaneBytesFull {
+                    lane_bytes,
+                    cap,
+                }));
+            }
         }
 
         if existing_hash.is_none()
@@ -315,7 +457,6 @@ impl Mempool {
         // Charging bytes after the removal would reintroduce exactly that: a
         // replacement large enough to exceed the budget would be refused with
         // the transaction it replaced already gone.
-        let incoming = charged_bytes(&tx);
         let freed = existing_hash
             .as_ref()
             .and_then(|h| self.transactions.get(h))
@@ -334,11 +475,6 @@ impl Mempool {
             self.remove_transaction(&existing_hash);
         }
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
-
         self.by_sender
             .entry(tx.from)
             .or_default()
@@ -353,12 +489,28 @@ impl Mempool {
             tx.hash.clone(),
             PendingTx {
                 tx,
-                added_at: now,
+                added_at: now_ms,
                 charged: incoming,
+                duty,
             },
         );
 
         Ok(())
+    }
+
+    /// Admit a transaction into the pool at the current wall-clock time.
+    ///
+    /// # Errors
+    ///
+    /// The refusal the pool found: a duplicate, a fee below the floor, a full
+    /// pool by count or by bytes, a refused replacement, a refused duty
+    /// batch, or an invalid signature.
+    pub fn add_transaction(&mut self, tx: Transaction) -> Result<(), MempoolError> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        self.admit_at(tx, now_ms)
     }
 
     pub fn remove_transaction(&mut self, hash: &str) -> Option<Transaction> {
@@ -448,17 +600,42 @@ impl Mempool {
         self.transactions.insert(pending.tx.hash.clone(), pending);
     }
 
+    /// The transactions a block should carry, by fee, honouring the duty lane's
+    /// share of the block.
+    ///
+    /// The duty lane may fill at most `duty_block_bytes` of the block
+    /// (section 7.3, item 6). A duty batch past the share is skipped, not
+    /// dropped: it waits in the pool for the next block, which is where the
+    /// producer's own byte budget would have put it. Skipping it here rather
+    /// than leaving it to the producer means the share holds even when the
+    /// block has room: without this, a window's worth of free batches would
+    /// fill a quiet block and the fee-paying transactions that arrived in the
+    /// same slot would wait behind them.
+    ///
+    /// The measure is [`duty_lane::block_bytes`], the one the block validator
+    /// uses, so the share is a fraction of the quantity that is actually
+    /// bounded.
     pub fn get_sorted_transactions(&self, limit: usize) -> Vec<Transaction> {
         let mut result = Vec::with_capacity(limit);
+        let duty_cap = self.config.duty_block_bytes;
+        let mut duty_bytes: usize = 0;
 
         for (_, hashes) in self.by_fee.iter().rev() {
             for hash in hashes {
                 if result.len() >= limit {
                     return result;
                 }
-                if let Some(pending) = self.transactions.get(hash) {
-                    result.push(pending.tx.clone());
+                let Some(pending) = self.transactions.get(hash) else {
+                    continue;
+                };
+                if let Some(batch) = pending.duty {
+                    let next = duty_bytes.saturating_add(batch.block_bytes);
+                    if next > duty_cap {
+                        continue;
+                    }
+                    duty_bytes = next;
                 }
+                result.push(pending.tx.clone());
             }
         }
         result
@@ -541,6 +718,43 @@ impl Mempool {
         self.by_sender
             .get(sender)
             .and_then(|nonces| nonces.get(&nonce).cloned())
+    }
+
+    /// The validator's pending duty batch in `window`, as `(nonce, hash)`.
+    ///
+    /// Walked over the sender's own entries rather than kept as a side index:
+    /// a validator holds a handful of transactions and at most one batch, so
+    /// the walk is short, and an index would need the same removal bookkeeping
+    /// the lane byte total avoids.
+    fn open_duty_batch(&self, operator: &Address, window: u64) -> Option<(u64, String)> {
+        let nonces = self.by_sender.get(operator)?;
+        for (nonce, hash) in nonces {
+            let batch = self.transactions.get(hash).and_then(|entry| entry.duty);
+            if batch.is_some_and(|held| held.window == window) {
+                return Some((*nonce, hash.clone()));
+            }
+        }
+        None
+    }
+
+    /// The bytes the pool's duty lane holds, over the block measure.
+    fn duty_lane_bytes(&self) -> usize {
+        self.transactions
+            .values()
+            .filter_map(|entry| entry.duty)
+            .map(|batch| batch.block_bytes)
+            .sum()
+    }
+
+    /// The bytes the lane may hold in the pool.
+    ///
+    /// Derived from the block share rather than configured beside it: the pool
+    /// holds a few blocks of what a block can carry, and a second number would
+    /// be one more quantity to keep in step with the share.
+    fn duty_lane_cap(&self) -> usize {
+        self.config
+            .duty_block_bytes
+            .saturating_mul(DUTY_LANE_POOL_BLOCKS)
     }
 
     /// Drop the lowest-fee transaction to make room, if the incoming one

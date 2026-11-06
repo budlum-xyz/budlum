@@ -1,16 +1,23 @@
-//! Validator classes and the single registration door.
+//! Validator classes and the single registration door, and the Mobile duty
+//! lane those classes feed.
 //!
-//! The duty lane tests
-//! (`mobile_duty_tx_lane_is_rate_limited`, `duty_lane_budget_is_twenty_percent`)
-//! come with the duty transactions themselves (`CustodyAck`,
-//! `CustodyProofBatch`, `PresenceSignal`), which land later.
+//! The lane's two named tests (`mobile_duty_tx_lane_is_rate_limited`,
+//! `duty_lane_budget_is_twenty_percent`) live here because the lane exists for
+//! the Mobile class: a Full validator answers audits from a machine that pays
+//! fees without noticing, and the free, rate limited lane is what makes a
+//! phone's duty work affordable.
 
 use crate::core::account::AccountState;
 use crate::core::address::Address;
 use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
-use crate::crypto::primitives::ValidatorKeys;
+use crate::crypto::primitives::{KeyPair, ValidatorKeys};
 use crate::crypto::scheme::SchemeId;
 use crate::execution::executor::Executor;
+use crate::mempool::duty_lane::{
+    block_bytes, block_share_bytes, is_duty, window_at, DutyRefusal,
+};
+use crate::mempool::pool::{Mempool, MempoolConfig, MempoolError, DEFAULT_DUTY_BLOCK_BYTES};
+use crate::storage::bud3::tx::StorageTxV3;
 use crate::validators::{
     quota_update_message, LeaderCommitment, SeatFields, ValidatorClass, ValidatorRegistration,
     ValidatorTx,
@@ -725,4 +732,145 @@ fn the_directory_answers_get_validator_list_relays_and_list_gateways() {
     assert!(directory
         .query_json(DirectoryQuery::One(Address::from([0x55; 32])))
         .is_null());
+}
+
+/// A signed custody acknowledgement: the duty batch item of section 7.3.
+fn duty_ack(keypair: &KeyPair, nonce: u64, object: [u8; 32]) -> Transaction {
+    let from = Address::from(keypair.public_key_bytes());
+    let mut tx = Transaction::new_with_chain_id(
+        from,
+        Address::zero(),
+        0,
+        0,
+        nonce,
+        Vec::new(),
+        DEFAULT_CHAIN_ID,
+        TransactionType::StorageV3(Box::new(StorageTxV3::CustodyAck { object })),
+    );
+    tx.hash = tx.calculate_hash();
+    tx.sign(keypair);
+    tx
+}
+
+/// Section 7.12: one batch per validator per window, and the lane's byte
+/// ceiling.
+///
+/// Four properties, and the third is the one that makes the limit usable: a
+/// replacement of the pending batch is admitted, because a phone that collects
+/// one more audit before the window closes must be able to say so. Refusing it
+/// would leave the validator with either a stale batch on chain or no batch at
+/// all until the next window.
+#[test]
+fn mobile_duty_tx_lane_is_rate_limited() {
+    let keypair = KeyPair::from_seed(&[21u8; 32]).unwrap();
+    let now: u128 = 4_200_005;
+    let window = window_at(now);
+
+    let mut pool = Mempool::new(MempoolConfig {
+        // A fee floor the batch must not pay: the lane is free (section 11.6).
+        min_fee: 5,
+        duty_block_bytes: 64 * 1024,
+        ..MempoolConfig::default()
+    });
+
+    let first = duty_ack(&keypair, 0, [1u8; 32]);
+    assert_eq!(first.fee, 0);
+    assert!(is_duty(&first));
+    assert!(pool.admit_at(first, now).is_ok());
+
+    // A second batch in the same window is refused, and the refusal says which
+    // window and which batch is in the way.
+    let second = duty_ack(&keypair, 1, [2u8; 32]);
+    assert_eq!(
+        pool.admit_at(second, now),
+        Err(MempoolError::DutyLaneRefused(
+            DutyRefusal::SecondBatchInWindow {
+                window,
+                open_nonce: 0,
+            }
+        ))
+    );
+
+    // A replacement of the pending batch is admitted: the rule is one batch
+    // per window, not one submission.
+    let replacement = duty_ack(&keypair, 0, [3u8; 32]);
+    assert!(pool.admit_at(replacement, now).is_ok());
+    assert_eq!(pool.len(), 1);
+
+    // The next window has its own slot, so the validator keeps sending.
+    let next_window = now + 600_000;
+    let later = duty_ack(&keypair, 1, [4u8; 32]);
+    assert!(pool.admit_at(later, next_window).is_ok());
+    assert_eq!(pool.len(), 2);
+
+    // The lane's pool ceiling is four blocks of its share. One byte of block
+    // budget is four bytes of ceiling, and no batch is that small, so the batch
+    // is refused rather than admitted and dropped later.
+    let mut tiny = Mempool::new(MempoolConfig {
+        min_fee: 1,
+        duty_block_bytes: 1,
+        ..MempoolConfig::default()
+    });
+    let refusal = tiny.admit_at(duty_ack(&keypair, 0, [5u8; 32]), now);
+    assert!(matches!(
+        refusal,
+        Err(MempoolError::DutyLaneRefused(DutyRefusal::LaneBytesFull { .. }))
+    ));
+    assert_eq!(tiny.len(), 0);
+}
+
+/// Section 7.3, item 6: the duty lane fills at most 20 percent of a block, and
+/// the batch past the share waits rather than disappearing.
+#[test]
+fn duty_lane_budget_is_twenty_percent() {
+    assert_eq!(
+        block_share_bytes(crate::consensus::MAX_BLOCK_SIZE),
+        crate::consensus::MAX_BLOCK_SIZE / 5
+    );
+    assert_eq!(DEFAULT_DUTY_BLOCK_BYTES, 200_000);
+
+    let now: u128 = 4_200_005;
+    let batches: Vec<Transaction> = (1u8..=5)
+        .map(|n| {
+            let keypair = KeyPair::from_seed(&[n; 32]).unwrap();
+            duty_ack(&keypair, 0, [n; 32])
+        })
+        .collect();
+    let per_batch = batches.iter().map(block_bytes).max().unwrap_or(0);
+    assert!(per_batch > 0);
+
+    // A block of fifteen batches carries three of them in the lane's fifth.
+    let cap = per_batch.saturating_mul(3);
+    assert_eq!(block_share_bytes(per_batch.saturating_mul(15)), cap);
+
+    let mut pool = Mempool::new(MempoolConfig {
+        min_fee: 1,
+        duty_block_bytes: cap,
+        ..MempoolConfig::default()
+    });
+    for batch in batches {
+        assert!(pool.admit_at(batch, now).is_ok());
+    }
+    assert_eq!(pool.len(), 5);
+
+    let picked = pool.get_sorted_transactions(64);
+    let mut carried = 0usize;
+    let mut carried_bytes = 0usize;
+    for tx in &picked {
+        if is_duty(tx) {
+            carried += 1;
+            carried_bytes = carried_bytes.saturating_add(block_bytes(tx));
+        }
+    }
+    assert!(carried_bytes <= cap, "the lane took {carried_bytes} of {cap}");
+    assert!(carried > 0);
+    assert!(
+        carried < 5,
+        "the share, not the fee order, is what stops the lane"
+    );
+    assert_eq!(
+        pool.len(),
+        5,
+        "a batch past the share waits for the next block, it is not dropped"
+    );
 }
