@@ -1,20 +1,19 @@
 package dev.budlum.validator.storage
 
 import java.io.File
+import java.io.FileOutputStream
+import java.nio.file.FileAlreadyExistsException
+import java.nio.file.Files
+import java.nio.file.LinkOption
 
 /**
- * Share storage. Directive 7.9.5.
+ * Local share files under `noBackupFilesDir/bud3/` (directive 7.9.5).
  *
- * - Shares live in app-private storage: `noBackupFilesDir/bud3/`. They never
- *   enter a cloud backup (allowBackup=false in the manifest as well).
- * - One file per segment; the file name is the hex form of the segment id.
- * - The quota is never exceeded: lowering the quota releases the overflow with
- *   StorageTx::ReleaseShares and triggers repair. Release is not a penalty.
- * - When free space drops below 2 GiB the store reports that shares must be
- *   released (R-34, card item 6).
- *
- * The embedded-database choice (redb vs plain file vs WAL; never sled) is
- * measured inside WP-11; this 1/N delivery uses the plain-file candidate.
+ * This is an interim store, not the mobile core's durable share database.
+ * Release methods return local segment ids; the caller must still submit and
+ * durably track the corresponding StorageTx::ReleaseShares and repair. The
+ * app has no such network binding yet, so this class alone does not implement
+ * the low-space or quota-change protocol.
  */
 class ShareStore(
     /** The app's noBackupFilesDir. */
@@ -28,63 +27,127 @@ class ShareStore(
 
     fun shareFile(segmentId: ByteArray): File = File(bud3Dir, shareFileName(segmentId))
 
-    fun storedBytes(): Long =
-        bud3Dir.listFiles()?.sumOf { it.length() } ?: 0L
-
-    /**
-     * Write one share. Returns false (and writes nothing) when the write would
-     * exceed [quotaBytes].
-     */
-    fun writeShare(segmentId: ByteArray, bytes: ByteArray, quotaBytes: Long): Boolean {
-        if (storedBytes() + bytes.size > quotaBytes) return false
-        bud3Dir.mkdirs()
-        shareFile(segmentId).writeBytes(bytes)
-        return true
+    /** A listing or arithmetic failure must not understate the space in use. */
+    fun storedBytes(): Long = synchronized(STORE_LOCK) {
+        val files = listFiles() ?: return@synchronized Long.MAX_VALUE
+        totalBytes(files) ?: Long.MAX_VALUE
     }
 
     /**
-     * Release [segmentIds]: delete the files and return the ids that were
-     * actually released. The caller turns them into a StorageTx::ReleaseShares.
+     * Admit a new share only if its id is unused, the quota will not be
+     * exceeded, and the write will leave at least 2 GiB of free space.
+     * A duplicate, including a dangling symlink, is never overwritten.
+     *
+     * A complete, synced temporary file is linked into place without replacing
+     * an existing name. This prevents a failed write from publishing a partial
+     * share. It does not replace the durable release protocol or database.
      */
-    fun releaseShares(segmentIds: Collection<ByteArray>): List<ByteArray> {
-        val released = mutableListOf<ByteArray>()
-        for (id in segmentIds) {
-            if (shareFile(id).delete()) released.add(id)
+    fun writeShare(segmentId: ByteArray, bytes: ByteArray, quotaBytes: Long): Boolean =
+        synchronized(STORE_LOCK) {
+            if (segmentId.isEmpty() || quotaBytes < 0) return@synchronized false
+
+            val target = shareFile(segmentId)
+            if (Files.exists(target.toPath(), LinkOption.NOFOLLOW_LINKS)) return@synchronized false
+
+            val files = listFiles() ?: return@synchronized false
+            val used = totalBytes(files) ?: return@synchronized false
+            val size = bytes.size.toLong()
+            if (used > quotaBytes || size > quotaBytes - used) return@synchronized false
+
+            val free = freeSpaceProvider()
+            if (free < LOW_SPACE_BYTES || size > free - LOW_SPACE_BYTES) return@synchronized false
+
+            val dir = bud3Dir
+            if (!dir.isDirectory && !dir.mkdirs()) return@synchronized false
+            val temporary = File.createTempFile(".share-", ".tmp", dir)
+            try {
+                FileOutputStream(temporary).use { output ->
+                    output.write(bytes)
+                    output.fd.sync()
+                }
+                try {
+                    // Both paths are on the same filesystem. createLink fails
+                    // atomically if any entry already occupies the target.
+                    Files.createLink(target.toPath(), temporary.toPath())
+                } catch (e: FileAlreadyExistsException) {
+                    return@synchronized false
+                }
+                true
+            } finally {
+                temporary.delete()
+            }
         }
-        return released
-    }
 
     /**
-     * Enforce the quota: release the oldest shares first until the stored bytes
-     * fit. Returns the released segment ids (hex names, oldest first).
+     * Delete explicitly selected local shares and return their segment ids.
+     * This is not a network acknowledgement or a durable release intent.
      */
-    fun enforceQuota(quotaBytes: Long): List<ByteArray> {
-        val files = bud3Dir.listFiles()?.sortedBy { it.lastModified() } ?: return emptyList()
+    fun releaseShares(segmentIds: Collection<ByteArray>): List<ByteArray> =
+        synchronized(STORE_LOCK) {
+            val released = mutableListOf<ByteArray>()
+            for (id in segmentIds) {
+                if (id.isEmpty()) continue
+                val file = shareFile(id)
+                if (file.isFile && file.delete()) released.add(id)
+            }
+            released
+        }
+
+    /**
+     * Delete the oldest local shares until they fit [quotaBytes]. Return the
+     * deleted segment ids. An unrecognized file makes the operation fail closed
+     * so metadata or a recovered temporary file is never silently deleted.
+     */
+    fun enforceQuota(quotaBytes: Long): List<ByteArray> = synchronized(STORE_LOCK) {
+        require(quotaBytes >= 0) { "quota must not be negative" }
+        val files = listFiles() ?: return@synchronized emptyList()
+        var total = totalBytes(files) ?: return@synchronized emptyList()
+        val candidates = files.map { file ->
+            val id = file.name.hexToByteArrayOrNull()
+            if (!file.isFile || id == null) return@synchronized emptyList()
+            file to id
+        }.sortedWith(compareBy<Pair<File, ByteArray>> { it.first.lastModified() }.thenBy { it.first.name })
         val released = mutableListOf<ByteArray>()
-        var total = files.sumOf { it.length() }
-        for (file in files) {
+        for ((file, id) in candidates) {
             if (total <= quotaBytes) break
-            val id = file.name.hexToByteArray()
-            // A deleted file's length is zero. Capture it before deletion or
-            // the loop will keep releasing shares after it reaches the quota.
+            // A deleted file's length is zero, so capture it first.
             val size = file.length()
             if (file.delete()) {
                 total -= size
                 released.add(id)
             }
         }
-        return released
+        released
     }
 
-    /** Free space below this triggers ReleaseShares (R-34). */
+    /** Free space below this triggers the release protocol (R-34). */
     fun needsReleaseDueToLowSpace(): Boolean = freeSpaceProvider() < LOW_SPACE_BYTES
+
+    private fun listFiles(): Array<File>? {
+        val dir = bud3Dir
+        return if (!dir.exists()) emptyArray() else dir.listFiles()
+    }
+
+    private fun totalBytes(files: Array<File>): Long? {
+        var total = 0L
+        for (file in files) {
+            val size = file.length()
+            if (size > Long.MAX_VALUE - total) return null
+            total += size
+        }
+        return total
+    }
 
     companion object {
         const val LOW_SPACE_BYTES = 2L * 1024 * 1024 * 1024 // 2 GiB
+
+        // ShareStore instances in the app process must make admission and
+        // deletion decisions against the same snapshot of the directory.
+        private val STORE_LOCK = Any()
     }
 }
 
-private fun String.hexToByteArray(): ByteArray {
-    require(length % 2 == 0) { "hex segment id must have even length" }
+private fun String.hexToByteArrayOrNull(): ByteArray? {
+    if (isEmpty() || length % 2 != 0 || any { it !in '0'..'9' && it !in 'a'..'f' }) return null
     return chunked(2).map { it.toInt(16).toByte() }.toByteArray()
 }
