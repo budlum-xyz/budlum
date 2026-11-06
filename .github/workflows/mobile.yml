@@ -34,10 +34,15 @@ jobs:
         with:
           gradle-version: '8.11.1'
 
+      # ubuntu-latest images ship the SDK but not always the API 36 platform.
+      # The install is non-fatal: when the platform is already present the build
+      # proceeds, and when it is genuinely missing Gradle reports the exact
+      # missing package instead of this step masking it.
       - name: Android SDK platform 36
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager --install 'platforms;android-36' 'build-tools;36.0.0'
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager --install 'platforms;android-36' 'build-tools;36.0.0' > /dev/null 2>&1 ||
+            echo "::warning::sdkmanager could not install the API 36 packages; relying on the runner image"
 
       - name: Build debug APK
         working-directory: mobile/android
