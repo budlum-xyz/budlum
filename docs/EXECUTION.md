@@ -109,4 +109,15 @@ STARK proving on every call (`BLG-248`).
   hexary Patricia MPT root. Consequently, `eth_getProof` deterministically returns
   JSON-RPC `-32601` (`Method not found`) and directs callers to `bud_getExecutionProof`.
 
+## 8. WASM (CosmWasm ABI) and Cosmos Compatibility Gateway (`WP-29`, `BLG-249`)
+
+- Out-of-process worker: `budlum-ee-wasm` (`execution/wasm/`, `wasmi = "=2.0.0"`),
+  floating-point instructions forbidden (`floats(false)`), 64 MiB linear-memory limit,
+  IBC entry points and `StakingMsg` / `DistributionMsg` / `GovMsg` / `IbcMsg` refused.
+- Foreign transaction lane: `Foreign::Cosmos` (`src/execution/coordinator/foreign/cosmos.rs`),
+  `cosmos.tx.v1beta1.TxRaw` under `SIGN_MODE_DIRECT` (`budlum-testnet-1`).
+- Gateways (`src/rpc/compat/cosmos/`): CometBFT JSON-RPC on `127.0.0.1:18550` and
+  Cosmos LCD REST on `127.0.0.1:18551` (`[compat.cosmos]`).
+
+
 

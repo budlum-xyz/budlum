@@ -72,3 +72,8 @@ max_filters = 1024
 max_filters_per_peer = 32
 filter_ttl_secs = 300
 max_subscriptions = 512
+
+[compat.cosmos]
+enabled = true
+listener = "127.0.0.1:18550"
+rest_listener = "127.0.0.1:18551"
