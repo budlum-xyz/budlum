@@ -1307,10 +1307,10 @@ jobs:
 
   # ============================ Standalone crates: bpqs and note-packing ============================
   standalone-crates:
-    # Both crates carry their own lock file and are not members of the root
-    # package, so `cargo test --lib` at the root never runs their tests. Without this
-    # job a break in the note packing code or in the BPQS research line stays green.
-    name: Standalone crates (bpqs, note-packing)
+    # These crates carry their own lock files. Root cargo test --lib does not
+    # cover them. Include the worker ABI so its socket regressions cannot stay
+    # invisible while the node builds successfully.
+    name: Standalone crates (bpqs, note-packing, UEL ABI)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1328,6 +1328,11 @@ jobs:
           workspaces: |
             crates/bpqs
             crates/note-packing
+            crates/uel-abi
+            crates/budscan
+      - name: Install protoc
+        if: always() && steps.rust.outcome == 'success'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Format (bpqs)
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --manifest-path crates/bpqs/Cargo.toml --all -- --check
@@ -1346,11 +1351,23 @@ jobs:
       - name: Tests (note-packing)
         if: always() && steps.rust.outcome == 'success'
         run: cargo test --manifest-path crates/note-packing/Cargo.toml
-
-  # ============================  / Bolum 4 (BNS gate) ============================
-      - name: Format
+      - name: Format (UEL ABI)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path crates/uel-abi/Cargo.toml --all -- --check
+      - name: Clippy (UEL ABI)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo clippy --manifest-path crates/uel-abi/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Tests (UEL ABI)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo test --manifest-path crates/uel-abi/Cargo.toml --locked
+      # This explorer step previously sat after a job-boundary comment and
+      # parsed as a step of standalone-crates. Keep it inside this job until
+      # the full explorer rename in #73 is reconciled.
+      - name: Format (explorer)
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --manifest-path crates/budscan/Cargo.toml --all -- --check
+
+  # ============================  / Bolum 4 (BNS gate) ============================
   bns-gate:
     #  Section 4 module separation: BNS has its own CI gate (the B.U.D. gate pattern).
     # Name canary: if a test is deleted or renamed the gate FAILs.
