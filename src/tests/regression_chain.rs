@@ -510,7 +510,7 @@ fn qc_import_is_weighted_and_proof_cache_is_content_keyed() {
 /// stops the open instead of being swallowed.
 #[test]
 fn interrupted_commit_recovery_errors_propagate() {
-    let db = production_part(include_str!("../storage/db.rs"));
+    let db = production_part(include_str!("../persistence/db.rs"));
     assert!(
         db.matches("recover_interrupted_commit()?;").count() >= 2,
         "both open paths must propagate a recovery error"
@@ -527,7 +527,7 @@ fn interrupted_commit_recovery_errors_propagate() {
 /// slice cannot go out of bounds.
 #[test]
 fn stored_chain_is_walk_checked_before_replay_slices_it() {
-    let db = production_part(include_str!("../storage/db.rs"));
+    let db = production_part(include_str!("../persistence/db.rs"));
     let load = window(db, "pub fn load_chain(", 2600);
     assert!(load.contains("Self::check_walk_step("));
 }

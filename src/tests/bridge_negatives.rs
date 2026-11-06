@@ -16,7 +16,7 @@ use crate::cross_domain::message::{CrossDomainMessage, CrossDomainMessageParams,
 use crate::domain::plugin::default_domain;
 use crate::domain::types::{DomainId, Hash32};
 use crate::domain::{ConsensusDomain, ConsensusKind};
-use crate::storage::db::Storage;
+use crate::persistence::db::Storage;
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
 

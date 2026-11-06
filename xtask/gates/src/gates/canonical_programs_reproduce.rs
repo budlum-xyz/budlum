@@ -674,7 +674,9 @@ fn is_scannable(path: &Path) -> bool {
     let s = path.to_string_lossy();
     s.ends_with(".rs")
         && !s.contains("/target/")
-        && path.file_name().is_none_or(|n| n != "regeneration.rs")
+        && path
+            .file_name()
+            .is_none_or(|n| n != "canonical_programs_reproduce.rs")
 }
 
 /// Walks the source tree and **discovers** EVERY point producing a program hash.
@@ -1327,10 +1329,12 @@ mod tests {
     #[test]
     fn only_the_gate_file_itself_is_out_of_scan() {
         assert!(!is_scannable(Path::new(
-            "xtask/gates/src/gates/regeneration.rs"
+            "xtask/gates/src/gates/canonical_programs_reproduce.rs"
         )));
-        assert!(is_scannable(Path::new("src/domain/regeneration_stage.rs")));
-        assert!(is_scannable(Path::new("src/regeneration.rs.bak.rs")));
+        assert!(is_scannable(Path::new("src/chain/state_recovery/stage.rs")));
+        assert!(is_scannable(Path::new(
+            "src/canonical_programs_reproduce.rs.bak.rs"
+        )));
     }
 
     /// The success message must keep the token the DDC workflow greps for.

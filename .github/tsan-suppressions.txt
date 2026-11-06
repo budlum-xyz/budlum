@@ -40,7 +40,7 @@
 #   application race:
 #
 #       race:sled::tree        `Tree::insert/get/update_and_fetch/...`
-#       race:sled::Db          the handle held by src/storage/db.rs
+#       race:sled::Db          the handle held by src/persistence/db.rs
 #       race:sled::context     opened and dropped through the public handle
 #
 #   KEPT - these name sled's internal machinery. Our code holds no reference

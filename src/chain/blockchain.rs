@@ -26,7 +26,7 @@ use crate::settlement::ColdWalletState;
 use crate::settlement::{merkle_root, GlobalBlockHeader};
 #[cfg(test)]
 use crate::settlement::{ProofVerificationError, VerifiedDomainEvent};
-use crate::storage::db::Storage;
+use crate::persistence::db::Storage;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -75,7 +75,7 @@ pub struct GlobalHeaderProof {
     pub state_root_body: Option<crate::domain::Hash32>,
 }
 
-/// What the regeneration tick reads about one stage and height.
+/// What the state recovery tick reads about one stage and height.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PqStageObservation {
     /// The commitment this node holds.
@@ -169,9 +169,9 @@ pub struct Blockchain {
     /// checkpoint header a committed block carries; the default is GatedOff
     /// (skip).
     pub anchor_emission: AnchorEmission,
-    /// The seals regeneration may trust: Root Seals and verified
+    /// The seals state recovery may trust: Root Seals and verified
     /// anchors from the emission pipeline, finality checkpoints with a
-    /// verified ML-DSA QC. Read by the node's regeneration health tick.
+    /// verified ML-DSA QC. Read by the node's state recovery tick.
     pub pq_source: crate::domain::PqCanonicalSource,
     /// The weakest quantum class each emitted anchor window carried, so the
     /// local recomputation of its aggregate root uses the class it was signed
@@ -639,7 +639,7 @@ impl Blockchain {
                 for (pubkey, account) in &state.accounts {
                     accounts_to_save.push((*pubkey, account.clone()));
                 }
-                let batch = crate::storage::traits::DurableCommitBatch {
+                let batch = crate::persistence::traits::DurableCommitBatch {
                     block: genesis.clone(),
                     state_root: genesis.state_root.clone(),
                     finality_cert: None,
@@ -1996,17 +1996,17 @@ impl Blockchain {
         crate::settlement::aggregate_finality_roots(&digests).ok()
     }
 
-    /// What the regeneration tick needs about one stage and height: the
+    /// What the state recovery tick needs about one stage and height: the
     /// commitment this node holds, and the canonical commitment with the seal
     /// behind it. A finalized checkpoint that is not in the source yet is
     /// taken from storage when its certificate and verified QC blob are both
     /// there (a restart empties the memory source).
     pub fn pq_stage_observation(
         &mut self,
-        stage: crate::domain::regeneration_stage::Stage,
+        stage: crate::chain::state_recovery::stage::Stage,
         height: u64,
     ) -> PqStageObservation {
-        use crate::domain::regeneration_stage::Stage;
+        use crate::chain::state_recovery::stage::Stage;
         if stage == Stage::Medusa && self.pq_source.canonical(stage, height).is_none() {
             self.rehydrate_finality(height);
         }
@@ -2069,7 +2069,7 @@ impl Blockchain {
     /// or below `live` (Ephyra).
     #[must_use]
     pub fn pq_sealed_heights(&self, live: u64) -> (Option<u64>, Option<u64>) {
-        use crate::domain::regeneration_stage::Stage;
+        use crate::chain::state_recovery::stage::Stage;
         (
             self.pq_source.latest_height(Stage::Polyp),
             self.pq_source.latest_at_or_below(Stage::Ephyra, live),
@@ -4213,7 +4213,7 @@ impl Blockchain {
             let mut archive = self.global_headers.clone();
             let global_headers =
                 Self::reconcile_global_header_archive(&mut archive, committed_state);
-            let batch = crate::storage::traits::DurableCommitBatch {
+            let batch = crate::persistence::traits::DurableCommitBatch {
                 block: block.clone(),
                 state_root: block.state_root.clone(),
                 finality_cert,
@@ -5182,7 +5182,7 @@ impl Blockchain {
         blocks: &[Block],
         certified_tip: u64,
     ) -> Result<(), String> {
-        use crate::storage::witness_retention::{may_prune, NodeKind, DEFAULT_RETENTION_BLOCKS};
+        use crate::persistence::witness_retention::{may_prune, NodeKind, DEFAULT_RETENTION_BLOCKS};
 
         let (kind, retention) = match &self.pruning_manager {
             Some(pm) if !pm.archive_mode => (
@@ -5214,7 +5214,7 @@ impl Blockchain {
     /// Returns the heights pruned now.
     /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
     pub fn prune_released_witnesses(&self, retention_blocks: u64, window: u64) -> Vec<u64> {
-        use crate::storage::witness_retention::{may_prune, NodeKind};
+        use crate::persistence::witness_retention::{may_prune, NodeKind};
         let (Some(store), Some(pm)) = (&self.storage, &self.pruning_manager) else {
             return Vec::new();
         };
@@ -6530,7 +6530,7 @@ impl Blockchain {
 
         // finality may release old witnesses (Pul-Lite).
         let pruned = self.prune_released_witnesses(
-            crate::storage::witness_retention::DEFAULT_RETENTION_BLOCKS,
+            crate::persistence::witness_retention::DEFAULT_RETENTION_BLOCKS,
             WITNESS_PRUNE_WINDOW,
         );
         if !pruned.is_empty() {
@@ -8059,7 +8059,7 @@ mod tests {
         let tx = Transaction::new(Address::from([1; 32]), Address::from([2; 32]), 1, vec![]);
         let stripped = Block::new(1, "00".repeat(32), vec![tx]);
         assert!(stripped.witness_is_stripped());
-        let retention = crate::storage::witness_retention::DEFAULT_RETENTION_BLOCKS + 10;
+        let retention = crate::persistence::witness_retention::DEFAULT_RETENTION_BLOCKS + 10;
         let finalized_tip = 1 + retention;
         // An unconfigured or archive node never accepts missing witnesses.
         assert!(chain
@@ -8817,7 +8817,7 @@ mod tests {
     }
     use crate::consensus::PoWEngine;
     use crate::crypto::primitives::KeyPair;
-    use crate::storage::db::Storage;
+    use crate::persistence::db::Storage;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tempfile::tempdir;
 
@@ -8846,7 +8846,7 @@ mod tests {
 
         fn load_state(
             &self,
-            _storage: &crate::storage::db::Storage,
+            _storage: &crate::persistence::db::Storage,
         ) -> Result<(), crate::consensus::ConsensusError> {
             self.loaded.store(true, Ordering::SeqCst);
             Ok(())

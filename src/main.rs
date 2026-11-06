@@ -16,7 +16,7 @@ use budlum_core::domain::{
 use budlum_core::network::node::Node;
 use budlum_core::network::protocol::NetworkMessage;
 use budlum_core::rpc::{RpcMode, RpcSecurityConfig, RpcServer};
-use budlum_core::storage::db::Storage;
+use budlum_core::persistence::db::Storage;
 
 use clap::Parser;
 use std::path::{Path, PathBuf};
