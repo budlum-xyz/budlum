@@ -450,6 +450,8 @@ impl AptosUpstream {
             );
         }
         base.set_path("/v1");
+        // Reqwest inherits the INV-08 hybrid-only TLS provider.
+        crate::crypto::tls::install_default_provider();
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(3))
             .timeout(Duration::from_secs(15))
