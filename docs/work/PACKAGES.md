@@ -116,7 +116,7 @@ Delivery 1/2 of the card. What is in the tree and what it proves:
 | Every refusal names a door that exists | delivered | `eth_refusals_name_an_existing_door` |
 | `debug_traceTransaction` and `debug_traceCall` are operator only | delivered | `eth_debug_methods_are_operator_only`, and the Budlum listener test `the_listener_column_matches_the_handlers` |
 | Listeners on `127.0.0.1:18547` (HTTP and WebSocket) | 2/2 | not in this delivery |
-| Bounded filters, timeouts, per-peer quota | 2/2 | `eth_subscribe` and `eth_unsubscribe` are table rows marked pending; the startup check refuses to serve them |
+| Bounded filters, timeouts, per-peer quota | delivered, 2/N | `src/rpc/compat/ethereum/filters.rs`, the `BoundedFilter` answer, `eth_filters_are_bounded` and eight unit tests |
 | Block and receipt shapes with `stateRoot = execution_root` | 2/2 | needs the `GlobalBlockHeader` v8 field of WP-27 |
 | Foundry, Hardhat, viem, ethers tool tests (nightly) | 2/2 | they cannot pass before WP-27; no green claim is made |
 
@@ -125,34 +125,89 @@ The read side is honest about the dependency: WP-28 depends on WP-27 in Section
 before it would be the `eth_getBalance`-returns-a-Budlum-balance mistake, which
 is why those answers are refusals with a named door rather than numbers.
 
+## WP-28, delivery 2/N: the bounded filter table
+
+The card's third item (a bounded number of filters, an idle timeout and a
+per-peer quota) is now on the production path:
+
+- `src/rpc/compat/ethereum/filters.rs` - the table, its error codes and eight
+  unit tests (global cap, per-connection quota, expiry, ownership, slot
+  release, oversize refusal, no invented log data, unique hex ids, connection
+  identity).
+- `src/rpc/compat/ethereum/mod.rs` - `Answer::BoundedFilter`, the five filter
+  rows, `filter_error`, and the pending package string for the subscription
+  listener. `eth_getProof` still answers `-32601`; its native door is
+  `bud_getAccountProof`, not `bud_getBalance`.
+- `src/rpc/method_class.rs` - the five filter rows move from `Refused` to
+  `LocalAdmin`, because the work is node-local and not consensus state.
+- `src/rpc/api.rs` and `src/rpc/server.rs` - `with_extensions` gives each
+  handler the connection extension; `RpcServer` owns one `FilterPool`;
+  creation, polling, reading and uninstall go through it.
+- `src/rpc/compat/ethereum/tests.rs` - the class-table test accepts the
+  `BoundedFilter` answer and a new test asserts all five rows and their class.
+
+What 2/N does **not** deliver: the dedicated `127.0.0.1:18547` listener,
+`eth_subscribe` / `eth_unsubscribe`, block and receipt shapes with
+`stateRoot = execution_root`, and the nightly Foundry / Hardhat / viem / ethers
+tests. Those need WP-27 and are still pending rows, not served methods. Log
+data is still refused with `-32004` and the `bud_subscribe` door; an empty
+change list would be a false answer.
+
+Security note carried over from PR #76 (a competing WP-28 stack): a filter id
+belongs to the server-assigned `ConnectionId` that created it. Polls, reads
+and uninstalls from another connection are refused. The socket address is a
+fallback, and a connection with neither shares one anonymous bucket, so the
+quota can only tighten.
+
+## WP-04 and WP-42 continuation: the integration audit
+
+`ops/scripts/integration_audit.py` replays twelve cross-file invariants that a
+merge can break without breaking any single file: RPC table order, gateway
+table agreement, gate and test registration, module resolution, vacuous tests,
+package registry completeness, the directive-file rule, English root scripts,
+CI wiring, filter-pool wiring and the shrinking legacy-storage ratchet. Each
+check has a canary: `--self-test` injects one real violation and requires the
+check to fail. CI runs both the canary and the plain audit.
+
+`ops/scripts/pr_coordination.py` gained `--prs-only` so the coordination report
+measures open pull request heads rather than all 84 remote branches. The
+report's earlier claim that PR #71 has no common ancestor with `main` was
+false and is corrected there. `arena_claude.py`, a root helper with 38 Turkish
+lines that `tree_is_english` does not baseline, was removed.
+
 ## WP-04: the open pull request coordination report
 
-`docs/work/PR_COORDINATION.md` measures where the 52 open pull requests collide,
+`docs/work/PR_COORDINATION.md` measures where the open pull requests collide,
 which is the question Section 15.1 and Section 15.3 assume away by allowing only
-four agents and one owner per lock path. The measurement is reproducible:
+four agents and one owner per lock path. The measurement is reproducible and now
+measures PR heads only:
 
 ```sh
-python3 ops/scripts/pr_coordination.py
+python3 ops/scripts/pr_coordination.py --prs-only --base main --remote origin
 ```
 
-It found three things worth a human decision rather than a commit:
+At the last measurement there were 63 open pull requests (the number grows
+while the queue is worked on). It found three things worth a human decision
+rather than a commit:
 
-1. **Two histories.** Three open pull requests (#8, #9, #71) have no common
-   ancestor with `main`; #8's own diff is 344 files and 94 617 deleted lines.
-   The directive's analysis base lives in that second history too. Which tree
-   is the repository of record is a decision (Section 0.3 item 2), and the
-   report names it rather than taking it.
-2. **44 new files implemented twice or more with different content**, including
-   one gate implemented four ways across five pull requests.
-3. **332 paths shared by two or more pull requests**, 12 of them among the
+1. **Two histories.** Two open pull requests (#8, #9) have no common ancestor
+   with `main`; #8's own diff is 344 files and 94 617 deleted lines. The
+   directive's analysis base lives in that second history too. Which tree is
+   the repository of record is a decision (Section 0.3 item 2), and the report
+   names it rather than taking it. PR #71 was named as a third orphan by the
+   earlier version; `git merge-base` proves `main` is its ancestor and the
+   report now says so.
+2. **57 new files implemented twice or more with different content**, including
+   one gate implemented four ways across five pull requests and two competing
+   Ethereum gateway trees (PR #24 / #76 versus PR #72).
+3. **431 paths shared by two or more pull requests**, ten of them among the
    directive's own append-only list and the rest lock collisions that are still
-   rebase work because nothing is merged.
+   rebase work because most stacks are unmerged.
 
-The report also records what was verified about `main` itself, so the queue is
-not blamed for defects the base does not have: the method-class table (218
-methods, declaration order), the operator-gate column, gate registration (142 of
-142), the required test names (241 across 14 gates) and metric writes (122) all
-pass when replayed.
+The report also records what was replayed on the integrated tree: 198 RPC
+declarations in table order, 37 gateway rows, 143 of 143 gate files, 98 of 98
+test files, all module declarations resolving, no vacuous asserts, and an
+89-line legacy-storage ratchet with no new or stale line. No compiler ran.
 
 ## WP-24 ledger (merged from PR #65)
 
@@ -175,6 +230,9 @@ because a pull request is not evidence until it has merged.
 | Package | Lane | Status | Pull requests | Last commit | CI runs | Findings closed |
 |---|---|---|---|---|---|---|
 | WP-24 - A0 codec registry and the access layer | B | `in-progress` (slice 1/3) | this PR (WP-24, 1/3) | `1ff76edd` | `queued on this PR` | none in this slice |
+| WP-28 - Ethereum JSON-RPC gateway | C | `in-progress` (delivery 2/N) | PR #72 (1/2), this branch (2/N) | `7ddfd524` | `not consulted` | none in this slice |
+| WP-04 - coordination and integration audit | D | `in-progress` | PR #72, this branch | `7ddfd524` | `not consulted` | none in this slice |
+| WP-42 - directive out of tree, read classification | D | `in-progress` | PR #63, this branch | `7ddfd524` | `not consulted` | none in this slice |
 
 ## What WP-24 slice 1 delivered: object replacement
 

@@ -79,7 +79,6 @@ that names the door is true; a plausible number is not.
 | `eth_getBlockByHash`, `eth_getBlockTransactionCountByHash` | `bud_getBlockByHash` |
 | `eth_getTransactionByHash` | `bud_getTransactionByHash` |
 | `eth_getTransactionReceipt`, `eth_getLogs`, `debug_traceTransaction` | `bud_getTransactionReceipt` |
-| `eth_newFilter`, `eth_newBlockFilter`, `eth_getFilterChanges`, `eth_getFilterLogs`, `eth_uninstallFilter` | `bud_subscribe` |
 
 The refusal carries the door in the error data as well as in the message, so a
 client can render it without parsing prose:
@@ -92,6 +91,32 @@ client can render it without parsing prose:
 (Section 8.11.2). On the public listener they answer with the operator refusal,
 the same one every other operator method uses.
 
+### Bounded filter table (delivery 2/N)
+
+The five filter methods no longer refuse at the door. They use one bounded,
+expiring, per-peer table (`src/rpc/compat/ethereum/filters.rs`) held on the
+`RpcServer`. It is node-local bookkeeping, never consensus state, so its class
+row is `LocalAdmin`. The limits are testnet defaults until WP-35 measures them:
+
+| Bound | Value |
+|---|---|
+| filters on one node | 128 |
+| filters for one connection | 8 |
+| idle lifetime before a record is dropped | 300 seconds |
+| serialized filter object | 16 KiB |
+
+The owner key is the server-assigned `jsonrpsee::ConnectionId`; the socket
+address is a fail-closed fallback, and a connection with neither shares one
+anonymous bucket. A filter id belongs to one connection: a poll, read or
+uninstall from another connection is refused as `foreign_filter`, never as a
+silent success.
+
+`eth_getFilterChanges` and `eth_getFilterLogs` still answer `-32004` with the
+`bud_subscribe` door, because the log data itself needs WP-27's execution
+environment. An empty change list would be a plausible but false answer, so no
+change list is invented. The bound is real today: a client cannot open an
+unbounded number of filters while it waits for that environment.
+
 ### `eth_getProof` answers `-32601`
 
 This is not a wait. Section 8.10.6 makes it permanent at the opening layer: the Budlum
@@ -99,24 +124,25 @@ state root is not an MPT root, so an MPT proof over it would prove nothing. The
 bud native proof is `bud_getAccountProof`. A client that asks anyway gets
 `-32601`, and no code path can turn it into a partial answer.
 
-### What waits for delivery 2/2
+### What remains for delivery 2/2
 
 * the dedicated listener on `127.0.0.1:18547` (HTTP and WebSocket) and its
   `[compat.ethereum]` configuration,
-* the bounded filter pool with a timeout and a per-peer quota, and
-  `eth_subscribe` / `eth_unsubscribe` (`newHeads`, `logs`,
-  `newPendingTransactions`),
+* `eth_subscribe` / `eth_unsubscribe` (`newHeads`, `logs`,
+  `newPendingTransactions`): the gateway table marks both rows pending and the
+  startup check refuses to serve them,
 * the block and receipt shapes, with `stateRoot` set to `execution_root` and not
   to an MPT root (Section 8.10.5),
 * the tool tests of Section 8.13 in the nightly workflow: Foundry, Hardhat,
   viem and ethers, unchanged.
 
-Until then a client that asks for a pending method gets `-32601`: the gateway
-table lists it, the startup check refuses to serve it, and no half-built filter
-table is reachable.
+A client that asks for a pending method gets `-32601`: the gateway table lists
+it, the startup check refuses to serve it, and no half-built subscription feed
+is reachable.
 
 ## Measurement
 
-This document claims no measurement. The tool tests of Section 8.13 and the
+This document claims no measurement. The four filter limits above are declared
+testnet defaults, not measured values. The tool tests of Section 8.13 and the
 gas calibration of Section 8.9 are WP-35 and WP-28 2/2 work; their numbers go
 into this file only with a CI run number beside them.
