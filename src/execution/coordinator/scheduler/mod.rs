@@ -33,8 +33,10 @@
 //! architecture produces the same waves
 //! (`parallel_scheduler_is_deterministic_across_arch`).
 
+use crate::core::account::AccountState;
 use crate::core::address::Address;
 use crate::core::transaction::{Transaction, TransactionType};
+use crate::execution::executor::Executor;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// One unit of state a transaction can touch.
@@ -85,7 +87,7 @@ impl AccessSet {
 #[must_use]
 pub fn access_set(tx: &Transaction) -> AccessSet {
     match tx.tx_type {
-        TransactionType::Transfer if tx.from != Address::zero() => {
+        TransactionType::Transfer if tx.from != Address::zero() && tx.authorization.is_none() => {
             let mut writes = BTreeSet::new();
             writes.insert(StateKey::Account(tx.from));
             writes.insert(StateKey::Account(tx.to));
@@ -169,6 +171,144 @@ pub fn plan(sets: &[AccessSet]) -> Plan {
         }
     }
     Plan { waves }
+}
+
+/// Intra-environment speculative execution flag (WP-59 Block-STM).
+///
+/// Disabled by default (`enabled = false`); may only be enabled when the
+/// sequential-root equality property suite passes.
+/// WIRING: consumed by the coordinator block executor when parallel wave dispatch is enabled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BlockStmConfig {
+    pub enabled: bool,
+}
+
+/// Deterministic execution telemetry for a scheduled block (WP-59).
+/// WIRING: reported by the coordinator block executor alongside block execution metrics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScheduleStats {
+    pub tx_count: usize,
+    pub wave_count: usize,
+    pub max_wave_width: usize,
+    pub fallback_barriers: usize,
+    pub block_stm_replays: usize,
+}
+
+type AccountVersion = (Option<(u64, u64)>, u64, bool);
+
+fn account_snapshot(state: &AccountState, addr: &Address) -> AccountVersion {
+    (
+        state
+            .accounts
+            .get(addr)
+            .map(|acct| (acct.balance, acct.nonce)),
+        state.spendable_balance(addr),
+        state.burn_reserve_address == Some(*addr),
+    )
+}
+
+fn touched_addresses(set: &AccessSet) -> BTreeSet<Address> {
+    set.reads
+        .iter()
+        .chain(set.writes.iter())
+        .map(|StateKey::Account(a)| *a)
+        .collect()
+}
+
+/// Execute `txs` against `state` using deterministic access-set waves and,
+/// when `block_stm.enabled` is set, optimistic snapshot validation with
+/// deterministic sequential fallback on any conflict (WP-59).
+///
+/// The resulting `AccountState` is byte-identical to sequential block-order
+/// execution.
+/// WIRING: entry point for the coordinator's parallel block execution path (WP-59).
+pub fn execute_planned_block(
+    state: &mut AccountState,
+    txs: &[Transaction],
+    block_stm: BlockStmConfig,
+) -> ScheduleStats {
+    let sets: Vec<AccessSet> = txs.iter().map(access_set).collect();
+    let schedule = plan(&sets);
+    let fallback_barriers = sets.iter().filter(|s| s.global).count();
+    let max_wave_width = schedule.waves.iter().map(Vec::len).max().unwrap_or(0);
+    let mut block_stm_replays = 0usize;
+
+    if !block_stm.enabled {
+        for wave in &schedule.waves {
+            for &idx in wave {
+                if let Some(tx) = txs.get(idx) {
+                    let _ = Executor::apply_transaction(state, tx);
+                }
+            }
+        }
+        return ScheduleStats {
+            tx_count: txs.len(),
+            wave_count: schedule.waves.len(),
+            max_wave_width,
+            fallback_barriers,
+            block_stm_replays: 0,
+        };
+    }
+
+    // Block-STM mode: speculatively evaluate against the pre-batch snapshot
+    // and validate read/write versions against the committed prefix; any
+    // conflict discards the speculative clone and falls back to sequential
+    // execution on `state`.
+    let base_snapshot = state.clone();
+    let mut speculative: Vec<(usize, AccountState, BTreeMap<Address, AccountVersion>)> =
+        Vec::with_capacity(txs.len());
+
+    for (idx, tx) in txs.iter().enumerate() {
+        let Some(set) = sets.get(idx) else {
+            continue;
+        };
+        if set.global {
+            continue;
+        }
+        let mut pre_versions = BTreeMap::new();
+        for addr in touched_addresses(set) {
+            pre_versions.insert(addr, account_snapshot(&base_snapshot, &addr));
+        }
+        let mut local = base_snapshot.clone();
+        let _ = Executor::apply_transaction(&mut local, tx);
+        speculative.push((idx, local, pre_versions));
+    }
+
+    let mut spec_map: BTreeMap<usize, (AccountState, BTreeMap<Address, AccountVersion>)> =
+        speculative
+            .into_iter()
+            .map(|(i, st, ver)| (i, (st, ver)))
+            .collect();
+
+    for (idx, tx) in txs.iter().enumerate() {
+        let Some((spec_state, expected_versions)) = spec_map.remove(&idx) else {
+            let _ = Executor::apply_transaction(state, tx);
+            continue;
+        };
+        let conflict = expected_versions
+            .iter()
+            .any(|(addr, &ver)| account_snapshot(state, addr) != ver);
+        if conflict {
+            block_stm_replays += 1;
+            let _ = Executor::apply_transaction(state, tx);
+        } else {
+            for (addr, _) in expected_versions {
+                if let Some(updated) = spec_state.accounts.get(&addr) {
+                    state.accounts.insert(addr, updated.clone());
+                } else {
+                    state.accounts.remove(&addr);
+                }
+            }
+        }
+    }
+
+    ScheduleStats {
+        tx_count: txs.len(),
+        wave_count: schedule.waves.len(),
+        max_wave_width,
+        fallback_barriers,
+        block_stm_replays,
+    }
 }
 
 #[cfg(test)]
