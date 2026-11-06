@@ -220,6 +220,15 @@ const GATES: &[Gate] = &[
         run_args: None,
         self_test: gates::zkvm_immune_regeneration::self_test,
     },
+    // WP-06 rename: `zkvm-refuses-untrusted-proofs` is the Section 5.4 alias.
+    Gate {
+        name: "zkvm-refuses-untrusted-proofs",
+        replaces: Some("zkvm-immune-regeneration"),
+        run: gates::zkvm_immune_regeneration::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::zkvm_immune_regeneration::self_test,
+    },
     Gate {
         name: "quantum-account",
         replaces: None,
@@ -359,6 +368,26 @@ const GATES: &[Gate] = &[
     Gate {
         name: "budscan-patchset",
         replaces: None,
+        run: gates::budscan_patchset::run,
+        run_args: None,
+        self_test: gates::budscan_patchset::self_test,
+        run_log: None,
+    },
+    // WP-40 rename: `explorer-parity` / `explorer-patchset` are the Section
+    // 5.4 aliases for the existing budscan gates. The crate rename from
+    // `budscan` to `budlum-explorer` lands in WP-40; until then the gate
+    // bodies stay in `budscan_parity` / `budscan_patchset` modules.
+    Gate {
+        name: "explorer-parity",
+        replaces: Some("budscan-name-rule-parity"),
+        run: gates::budscan_parity::run,
+        run_args: None,
+        self_test: gates::budscan_parity::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "explorer-patchset",
+        replaces: Some("budscan-patchset"),
         run: gates::budscan_patchset::run,
         run_args: None,
         self_test: gates::budscan_patchset::self_test,
@@ -712,9 +741,31 @@ const GATES: &[Gate] = &[
         run_args: None,
         self_test: gates::regeneration::self_test,
     },
+    // WP-06 rename: `canonical-programs-reproduce` is the Section 5.4 name
+    // for the same check; kept as an alias until the legacy `regeneration`
+    // module is renamed and the old gate entry is removed.
+    Gate {
+        name: "canonical-programs-reproduce",
+        replaces: Some("regeneration"),
+        run: gates::regeneration::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::regeneration::self_test,
+    },
     Gate {
         name: "regen-health-door",
         replaces: None,
+        run: gates::regen_health_door::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::regen_health_door::self_test,
+    },
+    // WP-06 rename: `state-recovery-door` is the Section 5.4 alias for the
+    // same check; mirrors the rename of `src/domain/regen_health*` to
+    // `src/chain/state_recovery/`.
+    Gate {
+        name: "state-recovery-door",
+        replaces: Some("regen-health-door"),
         run: gates::regen_health_door::run,
         run_log: None,
         run_args: None,
