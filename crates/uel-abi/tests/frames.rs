@@ -146,6 +146,22 @@ fn uel_abi_version_mismatch_refused() {
 }
 
 #[test]
+fn uel_abi_duplicate_version_cannot_override_checked_version() {
+    for wrong in [0u8, 2, 127] {
+        let body = [0x08, ABI_VERSION as u8, 0x10, 0x01, 0x08, wrong];
+        let mut wire = (body.len() as u32).to_be_bytes().to_vec();
+        wire.extend_from_slice(&body);
+        assert!(matches!(
+            decode_frame(&wire),
+            Err(FrameError::VersionMismatch { got, want })
+                if got == u32::from(wrong) && want == ABI_VERSION
+        ));
+    }
+    let valid_repeat = [0, 0, 0, 4, 0x08, 0x01, 0x08, 0x01];
+    assert_eq!(decode_frame(&valid_repeat).unwrap().0.abi_version, ABI_VERSION);
+}
+
+#[test]
 fn uel_abi_golden_messages() {
     // Hand-derived: field 1 varint (08 01), field 2 varint (10 07), field 10
     // length-delimited (52 02) holding Hello { ee = 1 } (08 01).

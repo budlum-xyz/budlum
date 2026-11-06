@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["mock", "evm", "wasm", "svm", "move", "budzero"]
+members = ["mock", "evm", "wasm", "svm", "move", "budzero", "conformance"]
 
 [workspace.package]
 version = "0.1.0"

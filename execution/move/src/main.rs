@@ -1,11 +1,11 @@
 //! Out-of-process `budlum-ee-move` worker binary (`EeId::MOVE`, sequential VM).
 
-use budlum_uel_abi::transport::{run_worker_stdio_loop, EeWorkerConfig};
 use budlum_uel_abi::{
     BlockContext, CodeInfo, EeCall, EeCallKind, EeFault, EeId, EeOutcome, EeQuery, EeRefusal,
     ExecutionEnvironment, HostApi, HostRead, Namespace, OutcomeStatus, RefusalCode,
 };
 use sha3::{Digest, Sha3_256};
+use std::process::ExitCode;
 
 const MOVE_MAGIC: [u8; 4] = [0xa1, 0x1c, 0xeb, 0x0b];
 
@@ -93,15 +93,43 @@ impl ExecutionEnvironment for MoveWorker {
     }
 }
 
-fn main() {
-    let mut ee = MoveWorker;
-    let cfg = EeWorkerConfig {
-        ee_id: EeId::MOVE,
-        version: String::from("budlum-ee-move/0.1.0"),
-        features: 0,
+#[cfg(unix)]
+fn run_unix() -> ExitCode {
+    use budlum_uel_abi::transport::{serve_connection, ServeEnd};
+    use std::os::unix::net::UnixListener;
+
+    let Some(socket_path) = std::env::args().nth(1) else {
+        eprintln!("usage: budlum-ee-move <socket-path>");
+        return ExitCode::from(2);
     };
-    if let Err(e) = run_worker_stdio_loop(&mut ee, &cfg) {
-        eprintln!("budlum-ee-move worker exited with error: {e}");
-        std::process::exit(1);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = match UnixListener::bind(&socket_path) {
+        Ok(l) => l,
+        Err(err) => {
+            eprintln!("failed to bind `{socket_path}`: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut env = MoveWorker;
+    for incoming in listener.incoming() {
+        let Ok(stream) = incoming else {
+            return ExitCode::from(1);
+        };
+        match serve_connection(stream, &mut env) {
+            Ok(ServeEnd::Closed) => {}
+            Ok(ServeEnd::Faulted) => return ExitCode::from(70),
+            Err(_) => return ExitCode::from(1),
+        }
     }
+    ExitCode::SUCCESS
+}
+
+#[cfg(not(unix))]
+fn run_unix() -> ExitCode {
+    eprintln!("budlum-ee-move requires Unix domain sockets");
+    ExitCode::from(2)
+}
+
+fn main() -> ExitCode {
+    run_unix()
 }

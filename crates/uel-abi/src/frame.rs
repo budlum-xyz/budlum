@@ -105,7 +105,11 @@ fn decode_body(body: &[u8]) -> Result<pb::Envelope, FrameError> {
         return Err(FrameError::Empty);
     }
     check_version(peek_version(body))?;
-    pb::Envelope::decode(body).map_err(|e| FrameError::Decode(e.to_string()))
+    let envelope = pb::Envelope::decode(body).map_err(|e| FrameError::Decode(e.to_string()))?;
+    // Protobuf allows repeated scalar fields where the last occurrence wins;
+    // re-check the decoded scalar so a peer cannot override `abi_version`.
+    check_version(envelope.abi_version)?;
+    Ok(envelope)
 }
 
 /// Encodes `envelope` as one frame (length header included).

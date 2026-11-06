@@ -4,6 +4,7 @@
 
 pub mod alias;
 pub mod assets;
+pub mod conformance;
 pub mod evm_ee;
 pub mod foreign;
 pub mod gas;
@@ -929,6 +930,8 @@ impl HostApi for HostBridge<'_> {
 
 #[cfg(test)]
 mod coordinator_tests;
+#[cfg(test)]
+mod conformance_tests;
 #[cfg(test)]
 mod uel_wp27_wp29_wp30_tests;
 #[cfg(test)]
