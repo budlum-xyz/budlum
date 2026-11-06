@@ -257,6 +257,7 @@ impl CustodyProof {
 /// A batch of custody proofs, the duty-lane transaction payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustodyProofBatch {
-    /// Proofs in this batch.
-    pub proofs: Vec<CustodyProof>,
+    /// `(object, proof)` pairs, matching the node's `StorageTxV3` payload.
+    /// A segment index is local to its object and cannot identify it alone.
+    pub proofs: Vec<([u8; 32], CustodyProof)>,
 }
