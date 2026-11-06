@@ -149,3 +149,32 @@ fn indexer_binary_is_registered() {
         "no explicit [[bin]] for budlum-indexer"
     );
 }
+
+/// The binding planning directive stays outside the repository tree. Its
+/// section 0.1 says the document never enters the repository, so a copy in
+/// the checkout fails this test.
+#[test]
+fn binding_directive_stays_outside_repository() {
+    let name = "THE_BUDLUM_DIREKTIF.md";
+    assert!(
+        !root().join(name).exists(),
+        "the binding directive must stay outside the repository tree: {name}"
+    );
+}
+
+/// `required_fee` is the admission fee quote that `chain_actor` answers
+/// `get_required_fee` with. The consensus-write gate must classify it as a
+/// read, so the gate does not refuse the pure quote on a clean tree.
+#[test]
+fn required_fee_is_classified_as_a_read() {
+    let gate = read("xtask/gates/src/gates/no_out_of_block_consensus_writes.rs");
+    let names = gate
+        .split("const READ_NAMES: &[&str] = &[")
+        .nth(1)
+        .and_then(|t| t.split("];").next())
+        .unwrap_or_default();
+    assert!(
+        names.contains("\"required_fee\""),
+        "required_fee must be listed in READ_NAMES"
+    );
+}
