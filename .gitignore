@@ -20,3 +20,9 @@ __pycache__/
 /contracts/out/
 /contracts/cache/
 .claude/settings.local.json
+
+# The binding planning directive is an external input, not a repository
+# document (directive 0.1 item 5 / 0.1.5). The bytes stay in git history and in
+# the workspace copy outside the tree; an upload must not reintroduce them.
+/THE_BUDLUM_DIREKTIF.md
+/arena_claude.py
