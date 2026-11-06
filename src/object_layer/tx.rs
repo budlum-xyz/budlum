@@ -18,7 +18,7 @@ use crate::object_layer::ids::AssetClassId;
 use crate::object_layer::registry::{
     Call, ClassRegistration, HomeEventProof, HomeFinality, ObjectLayerRegistry, Phase, Refusal,
 };
-use crate::object_layer::rule::{ClassSlice, Condition, Holder};
+use crate::object_layer::rule::{ClassSlice, Condition, Holder, Verb};
 use serde::{Deserialize, Serialize};
 
 /// When the object layer opens. `None`: closed on this chain.
@@ -92,9 +92,16 @@ pub enum ObjectLayerTx {
     },
     Challenge {
         class: AssetClassId,
+        /// The bond the challenger posts. Refused below
+        /// `ObjectLayerParams::min_class_bond`, because a challenge the
+        /// challenger cannot lose is a free option on somebody else's class.
+        bond: u64,
     },
     Rebut {
         class: AssetClassId,
+        /// The moves that reproduce the class's first reference sample under
+        /// its current rule. An answer, not an assertion.
+        moves: Vec<Verb>,
     },
 }
 
@@ -189,13 +196,17 @@ impl ObjectLayerTx {
             Self::ConfirmDeparture(proof) => {
                 registry.confirm_departure(proof, ctx.finality)?;
             }
+            Self::Challenge { class, bond } => {
+                registry.challenge(ctx.signer, *class, *bond, ctx.height)?;
+            }
+            Self::Rebut { class, moves } => {
+                registry.rebut(ctx.signer, *class, moves, ctx.height)?;
+            }
             Self::AuditCode { .. }
             | Self::Resolve { .. }
             | Self::SetEscapeAddress { .. }
             | Self::SetTentativeConsent { .. }
-            | Self::Adopt { .. }
-            | Self::Challenge { .. }
-            | Self::Rebut { .. } => return Err(TxRefusal::StepNotOpen),
+            | Self::Adopt { .. } => return Err(TxRefusal::StepNotOpen),
         }
         Ok(())
     }

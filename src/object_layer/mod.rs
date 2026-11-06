@@ -29,8 +29,10 @@
 //! hashes, `FungibleV1` / `UniqueV1` with reference samples, final-phase
 //! `Arrive`, `Call`, `Offer` / `Accept`, `HomeCall`, `Depart`,
 //! `ConfirmDeparture`, `AuditCustody`, escape records, and the four family
-//! profiles. Tentative phase, challenges, `RecordV1`, header V9 and the RPC
-//! reads are later steps and are refused until they land.
+//! profiles, and the two-step fidelity challenge (`Challenge`, `Rebut`) with
+//! its window and its block-end settlement. Tentative phase, `RecordV1`,
+//! header V9 and the RPC reads are later steps and are refused until they
+//! land.
 //!
 //! WIRING: the block executor reaches this module through the
 //! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door, and RPC reads it
@@ -50,7 +52,9 @@ pub mod tx;
 pub use charter::{CanonicalCodeHashes, CharterStatus, CodeProof, DataPolicy, DomainCharter};
 pub use family::{profile_for, AssetKind, FamilyProfile, HomeVmFamily};
 pub use ids::{AssetClassId, AssetId, DepartureId, DependencyId, HomeIdentity};
-pub use registry::{ObjectLayerParams, ObjectLayerRegistry, Refusal};
+pub use registry::{
+    ChallengeStatus, FidelityChallenge, ObjectLayerParams, ObjectLayerRegistry, Refusal,
+};
 pub use rule::{ClassRule, Holder, TemplateId};
 pub use tx::{ObjectLayerActivation, ObjectLayerTx, ACTIVATION};
 
@@ -59,6 +63,12 @@ pub const MAX_COMPOSITE_CALLS: u8 = 16;
 
 /// TESTNET-DEFAULT: reference samples a class registration carries.
 pub const DEFAULT_MIN_REFERENCE_SAMPLES: u32 = 3;
+
+/// TESTNET-DEFAULT: how many heights a fidelity challenge stays open before
+/// the chain settles it (Section 9.3.5 item 3). 100 is the window the AI
+/// verification layer also uses (Section 10.6, KR-27), and one number is
+/// easier to audit than two that drifted apart.
+pub const DEFAULT_CHALLENGE_WINDOW: u64 = 100;
 
 #[cfg(test)]
 mod tests;

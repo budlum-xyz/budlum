@@ -15,8 +15,9 @@ use crate::object_layer::family::{
 };
 use crate::object_layer::ids::{AssetClassId, AssetId, HomeIdentity};
 use crate::object_layer::registry::{
-    Call, ClassRegistration, ClassStatus, FreezeReason, HomeEventProof, HomeFinality, Location,
-    ObjectLayerParams, ObjectLayerRegistry, Phase, Refusal,
+    Call, ChallengeStatus, ClassRegistration, ClassStatus, FidelityChallenge, FreezeReason,
+    HomeEventProof, HomeFinality, Location, ObjectLayerParams, ObjectLayerRegistry, Phase,
+    Refusal,
 };
 use crate::object_layer::rule::{
     AssetSlice, ClassRule, ClassSlice, Condition, Holder, ReferenceSample, TemplateId,
@@ -25,6 +26,7 @@ use crate::object_layer::rule::{
 use crate::object_layer::tx::{
     ObjectLayerActivation, ObjectLayerTx, TxContext, TxRefusal, ACTIVATION,
 };
+use crate::object_layer::DEFAULT_CHALLENGE_WINDOW;
 
 const DOMAIN: DomainId = 42;
 const CANON_ENDPOINT: [u8; 32] = [0xc1; 32];
@@ -790,12 +792,24 @@ fn object_layer_is_closed_on_testnet() {
         activation: ObjectLayerActivation { height: Some(10) },
         ..ctx
     };
+    // A step that has not landed is still refused; `RecordV1` (`Adopt`) is the
+    // one this branch has not written.
     assert_eq!(
-        ObjectLayerTx::Challenge {
-            class: AssetClassId([0; 32])
+        ObjectLayerTx::Adopt {
+            home: Vec::new()
         }
         .apply(&mut reg, &open),
         Err(TxRefusal::StepNotOpen)
+    );
+    // `Challenge` has landed, so it reaches the registry and is refused there
+    // for the reason the registry gives: the class does not exist.
+    assert_eq!(
+        ObjectLayerTx::Challenge {
+            class: AssetClassId([0; 32]),
+            bond: 0,
+        }
+        .apply(&mut reg, &open),
+        Err(TxRefusal::Refused(Refusal::UnknownClass))
     );
 }
 
@@ -824,4 +838,125 @@ fn object_layer_root_changes_with_content() {
     };
     w.arrive_fungible(5, a).unwrap();
     assert_ne!(r0, w.reg.root());
+}
+
+// -------------------------------------------- fidelity challenge (card step
+// 8, Section 9.3.5 item 3). The directive names the three below.
+
+#[test]
+fn upheld_challenge_freezes_class() {
+    let mut w = World::new(HomeVmFamily::Evm);
+    let class = w.class(AssetKind::Fungible);
+    let before = w.reg.clone();
+    let opened = w
+        .reg
+        .challenge(Address([0xc0; 32]), class, 0, 500)
+        .expect("a challenge opens on an active class");
+    assert_eq!(opened.status, ChallengeStatus::Open);
+    assert_eq!(opened.closes_at, 500 + DEFAULT_CHALLENGE_WINDOW);
+    // Opening a challenge freezes nothing: an accusation is not a verdict.
+    assert_eq!(
+        w.reg.classes.get(&class).map(|c| c.status),
+        Some(ClassStatus::Active)
+    );
+    // Two windows over one class would let one lie collect two slashes.
+    assert_eq!(
+        w.reg.challenge(Address([0xc1; 32]), class, 0, 501),
+        Err(Refusal::ChallengeWindowOpen)
+    );
+    // The chain settles it only once the window has closed.
+    assert_eq!(
+        w.reg.settle_challenge(class, 500 + DEFAULT_CHALLENGE_WINDOW - 1),
+        Err(Refusal::ChallengeWindowOpen)
+    );
+    let (status, bond) = w
+        .reg
+        .settle_challenge(class, 500 + DEFAULT_CHALLENGE_WINDOW)
+        .expect("the window closed with the challenge standing");
+    assert_eq!(status, ChallengeStatus::Upheld);
+    assert_eq!(bond, 0);
+    assert_eq!(
+        w.reg.classes.get(&class).map(|c| c.status),
+        Some(ClassStatus::Frozen(FreezeReason::FidelityChallengeUpheld))
+    );
+    assert_eq!(w.reg.challenges_upheld, 1);
+    assert_ne!(w.reg.root(), before.root());
+}
+
+#[test]
+fn rebuttal_with_missing_call_rejects_challenge() {
+    let mut w = World::new(HomeVmFamily::Move);
+    let class = w.class(AssetKind::Fungible);
+    let registrant = Address([9; 32]);
+    w.reg
+        .challenge(Address([0xc0; 32]), class, 0, 500)
+        .expect("a challenge opens");
+    let before = w.reg.clone();
+    // A rebuttal from somebody other than the registrant is refused.
+    assert_eq!(
+        w.reg.rebut(Address([0xee; 32]), class, &[], 510),
+        Err(Refusal::NotAuthorized)
+    );
+    // An empty rebuttal moves nothing, so it does not reproduce the sample.
+    assert_eq!(
+        w.reg.rebut(registrant, class, &[], 510),
+        Err(Refusal::RebuttalDoesNotAnswer)
+    );
+    assert_eq!(w.reg, before, "a refused rebuttal writes nothing");
+    // The stored sample's own move list is the answer, and it is accepted.
+    let answer = FidelityChallenge::answer_from(
+        w.reg.classes.get(&class).expect("the class exists"),
+    )
+    .expect("the class kept its samples");
+    assert_eq!(
+        w.reg.rebut(registrant, class, &answer, 510),
+        Ok(ChallengeStatus::Rebutted)
+    );
+    assert_eq!(w.reg.challenges_rejected, 1);
+    assert_eq!(
+        w.reg.classes.get(&class).map(|c| c.status),
+        Some(ClassStatus::Active),
+        "a rebutted challenge leaves the class trading"
+    );
+    // A second rebuttal has no challenge to answer.
+    assert_eq!(
+        w.reg.rebut(registrant, class, &answer, 511),
+        Err(Refusal::UnknownChallenge)
+    );
+}
+
+#[test]
+fn rejected_challenge_does_not_mutate() {
+    let mut w = World::new(HomeVmFamily::Svm);
+    let class = w.class(AssetKind::Fungible);
+    let before = w.reg.clone();
+    // A class that does not exist has nothing to challenge.
+    assert_eq!(
+        w.reg.challenge(Address([0xc0; 32]), AssetClassId([0xaa; 32]), 0, 10),
+        Err(Refusal::UnknownClass)
+    );
+    // A bond below the floor is refused before the window opens.
+    w.reg.params.min_class_bond = 5;
+    assert_eq!(
+        w.reg.challenge(Address([0xc0; 32]), class, 4, 10),
+        Err(Refusal::BondTooSmall)
+    );
+    // Settling with no challenge is refused, and nothing moved.
+    assert_eq!(
+        w.reg.settle_challenge(class, u64::MAX),
+        Err(Refusal::UnknownChallenge)
+    );
+    assert_eq!(w.reg.root(), before.root());
+    assert_eq!(w.reg.challenges_upheld, 0);
+    assert_eq!(w.reg.challenges_rejected, 0);
+    // A frozen class accepts no new challenge: the freeze is the verdict.
+    w.reg.params.min_class_bond = 0;
+    w.reg.challenge(Address([0xc0; 32]), class, 0, 10).unwrap();
+    w.reg
+        .settle_challenge(class, 10 + DEFAULT_CHALLENGE_WINDOW)
+        .unwrap();
+    assert_eq!(
+        w.reg.challenge(Address([0xc2; 32]), class, 0, 10 + DEFAULT_CHALLENGE_WINDOW),
+        Err(Refusal::ClassFrozen)
+    );
 }

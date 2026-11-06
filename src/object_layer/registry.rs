@@ -30,7 +30,9 @@ use crate::object_layer::rule::{
     apply_rule, sample_commitment, verify_samples, AssetSlice, ClassRule, ClassSlice, Condition,
     Holder, ReferenceSample, RuleRefusal, Verb,
 };
-use crate::object_layer::{DEFAULT_MIN_REFERENCE_SAMPLES, MAX_COMPOSITE_CALLS};
+use crate::object_layer::{
+    DEFAULT_CHALLENGE_WINDOW, DEFAULT_MIN_REFERENCE_SAMPLES, MAX_COMPOSITE_CALLS,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -73,6 +75,9 @@ pub enum FreezeReason {
     UpgradeAuthorityChanged,
     /// Home custody fell below the object-layer record (N-4).
     CustodyDeficit,
+    /// A fidelity challenge stood unanswered past its window (Section 9.3.5
+    /// item 3).
+    FidelityChallengeUpheld,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +99,10 @@ pub struct AssetClass {
     pub registrant: Address,
     pub bond: u64,
     pub sample_commitment: Hash32,
+    /// The reference samples the class registered with, kept so a rebuttal can
+    /// be measured against them (Section 9.3.5 item 3). `sample_commitment` is
+    /// their hash; the samples themselves are what the rule executes.
+    pub reference_samples: Vec<ReferenceSample>,
 }
 
 /// Where an asset is.
@@ -163,6 +172,11 @@ pub struct ObjectLayerParams {
     pub min_reference_samples: u32,
     pub min_class_bond: u64,
     pub max_composite_calls: u8,
+    /// How many heights a fidelity challenge stays open before the chain
+    /// settles it (Section 9.3.5 item 3). TESTNET-DEFAULT: 100, the same
+    /// window the AI verification layer uses for its 1 % sampling
+    /// (Section 10.6, KR-27).
+    pub challenge_window: u64,
 }
 
 impl Default for ObjectLayerParams {
@@ -172,6 +186,7 @@ impl Default for ObjectLayerParams {
             min_reference_samples: DEFAULT_MIN_REFERENCE_SAMPLES,
             min_class_bond: 0,
             max_composite_calls: MAX_COMPOSITE_CALLS,
+            challenge_window: DEFAULT_CHALLENGE_WINDOW,
         }
     }
 }
@@ -209,6 +224,14 @@ pub enum Refusal {
     UnknownOffer,
     OfferExpired,
     WantNotMet(usize),
+    /// The class has a challenge still inside its window (Section 9.3.5).
+    ChallengeWindowOpen,
+    /// No challenge names this class.
+    UnknownChallenge,
+    /// The challenge's window has closed, so only the window's end settles it.
+    ChallengeWindowClosed,
+    /// The rebuttal did not carry the moves that answer the challenge.
+    RebuttalDoesNotAnswer,
     Overflow,
 }
 
@@ -233,6 +256,83 @@ pub struct CustodyAudit {
     pub delta: i128,
 }
 
+/// A fidelity challenge against a class's rule (Section 9.3.5 item 3,
+/// object-layer card step 8).
+///
+/// The challenge is a claim, not a proof: opening it costs the challenger a bond
+/// and freezes nothing. The class freezes only when the window closes with the
+/// challenge still standing, which is what keeps a griefer from freezing a
+/// class for the price of a transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FidelityChallenge {
+    /// The class whose rule is challenged.
+    pub class: AssetClassId,
+    /// Who opened it. Their bond is at stake if the challenge is rebutted.
+    pub challenger: Address,
+    /// The bond the challenger posted, in the chain's base unit.
+    pub bond: u64,
+    /// The height the challenge was opened at.
+    pub opened_at: u64,
+    /// The first height at which the window is closed:
+    /// `opened_at + params.challenge_window`.
+    pub closes_at: u64,
+    /// The state the challenge is in.
+    pub status: ChallengeStatus,
+}
+
+/// Where a challenge stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChallengeStatus {
+    /// Inside its window. The class keeps trading.
+    Open,
+    /// The window closed with the challenge standing: the class is frozen and
+    /// the registrant's bond is slashed.
+    Upheld,
+    /// The registrant answered: the challenge is refused, the challenger's bond
+    /// is slashed, and the class is untouched.
+    Rebutted,
+}
+
+/// Whether a rebuttal's moves answer the challenge against `class`.
+///
+/// The rebuttal is held to the same evidence a registration is: every stored
+/// reference sample must still reproduce under the class's *current* rule. A
+/// class whose rule was silently narrowed after registration reproduces its
+/// samples no longer, and a rebuttal that cannot show one sample passing is
+/// not an answer. The moves the registrant submits are checked against the
+/// first stored sample's before-state, so the answer is a demonstration rather
+/// than an assertion.
+fn rebuttal_answers(class: &AssetClass, moves: &[Verb]) -> Result<(), Refusal> {
+    let sample = match class.reference_samples.first() {
+        Some(sample) => sample,
+        None => return Err(Refusal::RebuttalDoesNotAnswer),
+    };
+    let mut slice = sample.before.clone();
+    for verb in moves {
+        let applied = apply_rule(&class.rule, &sample.class_slice, &slice, verb)
+            .map_err(|_| Refusal::RebuttalDoesNotAnswer)?;
+        slice = applied.asset_slice;
+    }
+    let got = postcard::to_allocvec(&slice).map_err(|_| Refusal::RebuttalDoesNotAnswer)?;
+    let want = postcard::to_allocvec(&sample.after).map_err(|_| Refusal::RebuttalDoesNotAnswer)?;
+    if got == want {
+        Ok(())
+    } else {
+        Err(Refusal::RebuttalDoesNotAnswer)
+    }
+}
+
+impl FidelityChallenge {
+    /// The evidence a rebuttal has to reproduce: the moves of the class's
+    /// first reference sample. Published rather than left for the registrant
+    /// to guess, because a rebuttal whose target is secret is a challenge
+    /// nobody can answer.
+    #[must_use]
+    pub fn answer_from(class: &AssetClass) -> Option<Vec<Verb>> {
+        class.reference_samples.first().map(|sample| sample.verbs.clone())
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectLayerRegistry {
     pub params: ObjectLayerParams,
@@ -253,6 +353,15 @@ pub struct ObjectLayerRegistry {
     #[serde(with = "crate::object_layer::pairs")]
     pub offers: BTreeMap<Hash32, Offer>,
     pub offer_seq: u64,
+    /// Fidelity challenges, one per class at a time.
+    #[serde(with = "crate::object_layer::pairs")]
+    pub challenges: BTreeMap<AssetClassId, FidelityChallenge>,
+    /// `challenges_upheld` in the metric table: upheld challenges.
+    #[serde(default)]
+    pub challenges_upheld: u64,
+    /// `challenges_rejected` in the metric table: rebutted challenges.
+    #[serde(default)]
+    pub challenges_rejected: u64,
 }
 
 impl ObjectLayerRegistry {
@@ -276,6 +385,7 @@ impl ObjectLayerRegistry {
             && self.departures.is_empty()
             && self.home_nonces.is_empty()
             && self.offers.is_empty()
+            && self.challenges.is_empty()
     }
 
     /// The registry root. Folded into the settlement root only when the
@@ -413,6 +523,7 @@ impl ObjectLayerRegistry {
                 contract: reg.contract,
                 rule: reg.rule,
                 sample_commitment: sample_commitment(&reg.samples),
+                reference_samples: reg.samples.clone(),
                 slice: reg.slice,
                 upgrade_authority,
                 status: ClassStatus::Active,
@@ -914,6 +1025,133 @@ impl ObjectLayerRegistry {
             .sum();
         placed + departing
     }
+
+    /// `ObjectLayerTx::Challenge`. Opens the window; freezes nothing yet.
+    ///
+    /// A class may carry one challenge at a time: two windows over one class
+    /// would let a challenger collect two slashes for one lie, and would let a
+    /// registrant rebut one challenge and still be frozen by the other.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::UnknownClass`], [`Refusal::BondTooSmall`] when the bond is
+    /// below the class-bond floor, [`Refusal::ChallengeWindowOpen`] when a
+    /// challenge is already inside its window, and [`Refusal::ClassFrozen`]
+    /// when the class has already stopped taking transitions.
+    pub fn challenge(
+        &mut self,
+        challenger: Address,
+        class: AssetClassId,
+        bond: u64,
+        now: u64,
+    ) -> Result<FidelityChallenge, Refusal> {
+        self.atomic(|r| {
+            let entry = r.classes.get(&class).ok_or(Refusal::UnknownClass)?;
+            if entry.status != ClassStatus::Active {
+                return Err(Refusal::ClassFrozen);
+            }
+            if bond < r.params.min_class_bond {
+                return Err(Refusal::BondTooSmall);
+            }
+            if let Some(existing) = r.challenges.get(&class) {
+                if existing.status == ChallengeStatus::Open && now < existing.closes_at {
+                    return Err(Refusal::ChallengeWindowOpen);
+                }
+            }
+            let closes_at = now.saturating_add(r.params.challenge_window);
+            let opened = FidelityChallenge {
+                class,
+                challenger,
+                bond,
+                opened_at: now,
+                closes_at,
+                status: ChallengeStatus::Open,
+            };
+            r.challenges.insert(class, opened.clone());
+            Ok(opened)
+        })
+    }
+
+    /// `ObjectLayerTx::Rebut`. The registrant answers the challenge.
+    ///
+    /// The answer is not a paragraph: it is a set of moves the class's own rule
+    /// executes to the same result the reference samples promised. A rebuttal
+    /// whose moves do not reproduce the sample's after-state does not answer
+    /// anything, and the challenge stays open.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::UnknownChallenge`], [`Refusal::ChallengeWindowClosed`] when
+    /// the window is already over (the clock settles it, not a late answer),
+    /// [`Refusal::NotAuthorized`] when the sender is not the registrant,
+    /// [`Refusal::ChallengeWindowClosed`] when the challenge is already over,
+    /// and [`Refusal::RebuttalDoesNotAnswer`] when the moves do not reproduce
+    /// the promised state.
+    pub fn rebut(
+        &mut self,
+        registrant: Address,
+        class: AssetClassId,
+        moves: &[Verb],
+        now: u64,
+    ) -> Result<ChallengeStatus, Refusal> {
+        self.atomic(|r| {
+            let challenge = r.challenges.get(&class).ok_or(Refusal::UnknownChallenge)?.clone();
+            if challenge.status != ChallengeStatus::Open {
+                return Err(Refusal::UnknownChallenge);
+            }
+            if now >= challenge.closes_at {
+                return Err(Refusal::ChallengeWindowClosed);
+            }
+            let entry = r.classes.get(&class).ok_or(Refusal::UnknownClass)?.clone();
+            if entry.registrant != registrant {
+                return Err(Refusal::NotAuthorized);
+            }
+            rebuttal_answers(&entry, moves)?;
+            if let Some(slot) = r.challenges.get_mut(&class) {
+                slot.status = ChallengeStatus::Rebutted;
+            }
+            r.challenges_rejected = r.challenges_rejected.saturating_add(1);
+            Ok(ChallengeStatus::Rebutted)
+        })
+    }
+
+    /// Settle a challenge whose window has closed (Section 9.3.5 item 3).
+    ///
+    /// Called by block-end maintenance, not by a transaction: nobody should be
+    /// able to choose the height at which somebody else's challenge is decided.
+    /// A standing challenge freezes the class and slashes the registrant's bond
+    /// through the existing [`crate::cross_domain::external::ChallengeReward`]
+    /// rule; the caller applies the slash, because the bond lives in the
+    /// economics layer and this registry only records the freeze.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::UnknownChallenge`], and [`Refusal::ChallengeWindowOpen`] when
+    /// the window has not closed at `now`.
+    pub fn settle_challenge(
+        &mut self,
+        class: AssetClassId,
+        now: u64,
+    ) -> Result<(ChallengeStatus, u64), Refusal> {
+        self.atomic(|r| {
+            let challenge = r.challenges.get(&class).ok_or(Refusal::UnknownChallenge)?.clone();
+            if challenge.status != ChallengeStatus::Open {
+                return Ok((challenge.status, 0));
+            }
+            if now < challenge.closes_at {
+                return Err(Refusal::ChallengeWindowOpen);
+            }
+            if let Some(slot) = r.challenges.get_mut(&class) {
+                slot.status = ChallengeStatus::Upheld;
+            }
+            if let Some(entry) = r.classes.get_mut(&class) {
+                entry.status = ClassStatus::Frozen(FreezeReason::FidelityChallengeUpheld);
+            }
+            r.challenges_upheld = r.challenges_upheld.saturating_add(1);
+            Ok((ChallengeStatus::Upheld, challenge.bond))
+        })
+    }
+
 
     /// `ObjectLayerTx::AuditCustody`: compare the proven home custody with
     /// the record. A deficit freezes the class (N-4).
