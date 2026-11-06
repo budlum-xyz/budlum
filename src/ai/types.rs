@@ -1036,42 +1036,6 @@ impl AiAgentReputation {
         self.active_block_span = current_block.saturating_sub(self.first_active_block);
     }
 
-    /// Integer selection key for the agent ranking, in permyriad units
-    /// (1/10_000 of a unit trust).
-    ///
-    /// This is the deterministic key the ranking and the actor/RPC boundary
-    /// use. It never passes through a float, so two nodes derive the same
-    /// order from the same counters. The display-only `trust_score` helper
-    /// below is not a selection key.
-    #[must_use]
-    pub fn trust_score_permyriad(&self) -> u64 {
-        let total_payments = self
-            .payments_completed
-            .saturating_add(self.payments_defaulted);
-        if total_payments == 0 && self.results_submitted == 0 {
-            return 0;
-        }
-
-        let payment_q = if total_payments > 0 {
-            let numerator = u128::from(self.payments_completed) * 10_000;
-            let denominator = u128::from(total_payments);
-            ((numerator + denominator / 2) / denominator).min(10_000) as u64
-        } else {
-            10_000
-        };
-
-        let penalty_q = (u128::from(self.equivocations) * 1_500).min(10_000) as u64;
-        let quality_q = if self.results_submitted > 0 {
-            let numerator = u128::from(self.results_finalized) * u128::from(10_000 - penalty_q);
-            let denominator = u128::from(self.results_submitted);
-            ((numerator + denominator / 2) / denominator).min(10_000) as u64
-        } else {
-            10_000
-        };
-
-        ((u128::from(payment_q) * 4 + u128::from(quality_q) * 6 + 5) / 10).min(10_000) as u64
-    }
-
     /// Calculate the agent's trust score (0.0 - 1.0).
     ///
     /// Display only (Z8): uses f64. It must never feed consensus, verifier

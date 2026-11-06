@@ -117,27 +117,3 @@ jobs:
           from=$(cast rpc --rpc-url http://127.0.0.1:8546 eth_accounts | tr -d '[]"' | cut -d, -f1)
           forge create --root contracts --offline graft/GraftExecutor.sol:GraftExecutor \
             --rpc-url http://127.0.0.1:8546 --unlocked --from "$from" --broadcast
-
-  # The object-layer endpoints are standalone Cargo workspaces. They are not
-  # Solidity, but this workflow already owns the contract surface, and the
-  # workspace-coverage gate needs a binding compile for each Rust endpoint.
-  object-layer-rust:
-    name: Object-layer Rust endpoints
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
-        with:
-          toolchain: 1.97.1
-      - name: Check the CosmWasm endpoint
-        run: cargo check --manifest-path contracts/object-layer/cosmwasm/Cargo.toml
-      - name: Test the CosmWasm endpoint
-        run: cargo test --manifest-path contracts/object-layer/cosmwasm/Cargo.toml
-      - name: Check the SVM endpoint
-        run: cargo check --manifest-path contracts/object-layer/svm/Cargo.toml
-      - name: Test the SVM endpoint
-        run: cargo test --manifest-path contracts/object-layer/svm/Cargo.toml

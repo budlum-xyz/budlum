@@ -707,6 +707,45 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-upstream-brands 2>&1 | tee -a /tmp/gate-out.log
           exit "${PIPESTATUS[0]}"
+      # `f64` is not a consensus type: the same expression may give two answers
+      # on two machines, and the disagreement looks like a fork. The paths that
+      # decide a block, a receipt or a committee seat may not use it, `BLG-240`
+      # excepted and pinned by name in the gate.
+      - name: No-float gate canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-float-in-consensus-paths --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: No floating point on the consensus path
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-float-in-consensus-paths 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      # A cargo workspace that no workflow builds is a workspace whose tests
+      # have never run: `cargo test` at the root reaches none of the seven.
+      - name: Workspace coverage gate canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- workflows-cover-every-workspace --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: Every workspace is built by a workflow
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- workflows-cover-every-workspace 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      # A nightly workflow that is missing, unscheduled or softened is not a
+      # gate. The reader checks the repository shape that makes the nightly
+      # surface required: file present, schedule live, verification unsoftened.
+      - name: Nightly workflow gate canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- nightly-workflows-are-required --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: Required nightly workflows are present and binding
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- nightly-workflows-are-required 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: Repair trigger canary
         if: always() && steps.build.outcome == 'success'
         run: |

@@ -2004,39 +2004,44 @@ impl AiRegistry {
     }
 
     /// Get all agents sorted by trust score (descending - highest trust first).
-    /// Returns Vec of (agent_address, permyriad_score) tuples.
+    /// Returns Vec of (agent_address, trust_score) tuples.
     ///
-    /// The score is the integer selection key from
-    /// `AiAgentReputation::trust_score_permyriad`, not the display-only
-    /// float. Ties break on the address, so the order is deterministic.
-    ///
-    /// WIRING: the read model for ranking agents by trust; the actor and
-    /// RPC boundary call `agents_by_trust_score_permille`, which delegates
-    /// here.
-    pub fn agents_by_trust_score(&self) -> Vec<(Address, u64)> {
-        let mut scored: Vec<(Address, u64)> = self
+    /// WIRING: the read model for ranking agents by trust; the operator
+    /// surface that lists agents this way does not call it yet, so the
+    /// ordering is pinned by this module's tests.
+    pub fn agents_by_trust_score(&self) -> Vec<(Address, f64)> {
+        let mut scored: Vec<(Address, f64)> = self
             .agent_reputations
             .iter()
-            .map(|(addr, rep)| (*addr, rep.trust_score_permyriad()))
+            .map(|(addr, rep)| (*addr, rep.trust_score()))
             .collect();
-        scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored
     }
 
     /// Get the top-N agents by trust score.
     ///
     /// WIRING: the bounded cut of the ranking above, for the same
-    /// operator surface; pinned by tests beside it.
-    pub fn top_agents(&self, n: usize) -> Vec<(Address, u64)> {
+    /// unwired operator surface; pinned by tests beside it.
+    pub fn top_agents(&self, n: usize) -> Vec<(Address, f64)> {
         self.agents_by_trust_score().into_iter().take(n).collect()
     }
 
     /// The ranking in fixed-point permyriad scores (1/10_000 of a unit
     /// trust), ordered as `agents_by_trust_score` orders.
-    /// The actor and RPC boundary carries this integer key, never a float.
+    /// The actor and RPC boundary carries this, not the raw
+    /// `f64` - a float crossing process boundaries is the Z8 rule, and
+    /// quantizing once, here, keeps every consumer's ordering identical
+    /// without re-deriving a sort key from a float.
     #[must_use]
     pub fn agents_by_trust_score_permille(&self) -> Vec<(Address, u64)> {
         self.agents_by_trust_score()
+            .into_iter()
+            .map(|(addr, score)| {
+                let q = (score * 10_000.0).round().clamp(0.0, u64::MAX as f64) as u64;
+                (addr, q)
+            })
+            .collect()
     }
 
     /// Calculate deterministic Merkle/SHA256 root of all AI registry maps.

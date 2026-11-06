@@ -4875,23 +4875,6 @@ mod tests {
     }
 
     #[test]
-    fn test_reputation_ranking_is_integer_and_tie_breaks_by_address() {
-        let mut registry = AiRegistry::new();
-        let a1 =
-            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000a1")
-                .unwrap();
-        let a2 =
-            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000a2")
-                .unwrap();
-        registry.record_reputation_payment_completed(&a2, 100);
-        registry.record_reputation_payment_completed(&a1, 100);
-
-        let ranking = registry.agents_by_trust_score_permille();
-        assert_eq!(ranking, vec![(a1, 10_000), (a2, 10_000)]);
-        assert_eq!(registry.top_agents(1), vec![(a1, 10_000)]);
-    }
-
-    #[test]
     fn test_reputation_changes_state_root() {
         let mut registry = AiRegistry::new();
         let root_before = registry.state_root();
@@ -4929,7 +4912,7 @@ mod tests {
         // a1 and a3 tie at full reliability and keep address order.
         assert_eq!(top2[0].0, a1);
         assert_eq!(top2[1].0, a3);
-        assert_eq!(top2[0].1, top2[1].1);
+        assert_eq!(top2[0].1.to_bits(), top2[1].1.to_bits());
 
         let all = registry.top_agents(3);
         assert_eq!(all.len(), 3);

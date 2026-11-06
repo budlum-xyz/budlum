@@ -18,6 +18,7 @@ const REQUIRED_NIGHTLY: &[&str] = &[
     ".github/workflows/kani-slow.yml",
     ".github/workflows/air-mutants-nightly.yml",
     ".github/workflows/miri.yml",
+    ".github/workflows/conformance-nightly.yml",
 ];
 
 const VERIFICATION_VERBS: &[&str] = &[
