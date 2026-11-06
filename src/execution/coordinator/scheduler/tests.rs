@@ -188,5 +188,63 @@ proptest! {
             })
             .collect();
         prop_assert_eq!(sequential(&txs), planned(&txs));
+
+        // Also verify multithreaded wave execution and Block-STM mode against
+        // Executor::apply_block_checked with a live block producer.
+        let valid_txs: Vec<Transaction> = txs
+            .into_iter()
+            .filter(|tx| tx.amount <= 20)
+            .take(12)
+            .collect();
+        let producer = addr(6);
+        let mut seq_state = funded();
+        let mut par_state = funded();
+        let mut stm_state = funded();
+        let seq_res = Executor::apply_block_checked(&mut seq_state, &valid_txs, Some(&producer));
+        let par_res = execute_block_checked(
+            &mut par_state,
+            &valid_txs,
+            Some(&producer),
+            &ParallelExecutionConfig::default(),
+        );
+        let stm_res = execute_block_checked(
+            &mut stm_state,
+            &valid_txs,
+            Some(&producer),
+            &ParallelExecutionConfig {
+                enabled: true,
+                block_stm_enabled: true,
+                worker_threads: 4,
+            },
+        );
+        prop_assert_eq!(seq_res.is_ok(), par_res.is_ok());
+        prop_assert_eq!(seq_res.is_ok(), stm_res.is_ok());
+        prop_assert_eq!(
+            seq_state.calculate_state_root(),
+            par_state.calculate_state_root()
+        );
+        prop_assert_eq!(
+            seq_state.calculate_state_root(),
+            stm_state.calculate_state_root()
+        );
     }
+}
+
+#[test]
+fn multithreaded_wave_rolls_back_atomically_on_later_failure() {
+    let mut state = funded();
+    let root_before = state.calculate_state_root();
+    let txs = [
+        transfer(1, 2, 10),
+        transfer(3, 4, 10),
+        transfer(5, 6, 999_999), // insufficient balance -> whole block rolls back
+    ];
+    let res = execute_block_checked(
+        &mut state,
+        &txs,
+        Some(&addr(1)),
+        &ParallelExecutionConfig::default(),
+    );
+    assert!(res.is_err());
+    assert_eq!(state.calculate_state_root(), root_before);
 }
