@@ -20,3 +20,6 @@ __pycache__/
 /contracts/out/
 /contracts/cache/
 .claude/settings.local.json
+
+# The binding directive is distributed outside the repository.
+/THE_BUDLUM_DIREKTIF.md
