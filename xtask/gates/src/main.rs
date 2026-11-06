@@ -54,7 +54,7 @@ mod gates {
     pub mod bns_names_are_safe_in_an_address_bar;
     pub mod bridge_dual_tree;
     pub mod bud3_forbidden_phrases;
-    pub mod bud_e2e;
+    pub mod bud3_e2e;
     pub mod explorer_parity;
     pub mod explorer_patchset;
     pub mod canonical_programs_reproduce;
@@ -129,7 +129,7 @@ mod gates {
     pub mod pq_ctx_is_bound;
     pub mod pq_scan;
     pub mod proof_deps_are_exactly_pinned;
-    pub mod qr_is_derivative_only;
+    pub mod bud3_qr_is_presentation;
     pub mod quantum_account;
     pub mod readme_no_deny;
     pub mod reduction_claims;
@@ -137,7 +137,7 @@ mod gates {
     pub mod rejection_tests;
     pub mod relay;
     pub mod release_profile_pins;
-    pub mod repair_fires;
+    pub mod bud3_repair_fires;
     pub mod required_tests;
     pub mod rust_literals;
     pub mod scheme_is_never_inferred;
@@ -146,12 +146,12 @@ mod gates {
     pub mod self_derived_ids_cover_every_field;
     pub mod semver;
     pub mod serialize_map_keys_are_strings;
-    pub mod shard_placement;
+    pub mod bud3_placement;
     pub mod slash_expression;
     pub mod source_reading;
     pub mod state_recovery_door;
-    pub mod storage_penalties;
-    pub mod storage_priced;
+    pub mod bud3_custody_rewards;
+    pub mod bud3_fee_uses_physical_bytes;
     pub mod suppressions_are_justified;
     pub mod tee_trust_boundary_is_structural;
     pub mod test_modules_can_see_what_they_test;
@@ -372,12 +372,12 @@ const GATES: &[Gate] = &[
         run_log: None,
     },
     Gate {
-        name: "shard-placement-is-sticky-and-staked",
+        name: "bud3-placement",
         replaces: Some("check-shard-placement-is-sticky-and-staked.sh"),
-        run: gates::shard_placement::run,
+        run: gates::bud3_placement::run,
         run_log: None,
         run_args: None,
-        self_test: gates::shard_placement::self_test,
+        self_test: gates::bud3_placement::self_test,
     },
     Gate {
         name: "suppressions-are-justified",
@@ -857,16 +857,12 @@ const GATES: &[Gate] = &[
         self_test: gates::bns_gate::self_test,
     },
     Gate {
-        name: "bud-e2e",
+        name: "bud3-e2e",
         replaces: Some("check-bud-e2e.sh"),
-        run: |_| {
-            Err(String::from(
-                "bud-e2e reads a cargo test log; pass its path as an argument",
-            ))
-        },
-        run_log: Some(gates::bud_e2e::run),
+        run: gates::bud3_e2e::run,
+        run_log: None,
         run_args: None,
-        self_test: gates::bud_e2e::self_test,
+        self_test: gates::bud3_e2e::self_test,
     },
     Gate {
         name: "wallet-core-gate",
@@ -890,12 +886,12 @@ const GATES: &[Gate] = &[
     },
 ,
     Gate {
-        name: "repair-fires-on-loss",
+        name: "bud3-repair-fires",
         replaces: Some("check-repair-fires-on-loss.sh"),
-        run: gates::repair_fires::run,
+        run: gates::bud3_repair_fires::run,
         run_log: None,
         run_args: None,
-        self_test: gates::repair_fires::self_test,
+        self_test: gates::bud3_repair_fires::self_test,
     },
 ,
     Gate {
@@ -928,21 +924,21 @@ const GATES: &[Gate] = &[
     },
 ,
     Gate {
-        name: "qr-is-derivative-only",
+        name: "bud3-qr-is-presentation",
         replaces: None,
-        run: gates::qr_is_derivative_only::run,
+        run: gates::bud3_qr_is_presentation::run,
         run_args: None,
-        self_test: gates::qr_is_derivative_only::self_test,
+        self_test: gates::bud3_qr_is_presentation::self_test,
         run_log: None,
     },
 ,
     Gate {
-        name: "storage-is-priced-by-size",
+        name: "bud3-fee-uses-physical-bytes",
         replaces: Some("check-storage-is-priced-by-size.sh"),
-        run: gates::storage_priced::run,
+        run: gates::bud3_fee_uses_physical_bytes::run,
         run_log: None,
         run_args: None,
-        self_test: gates::storage_priced::self_test,
+        self_test: gates::bud3_fee_uses_physical_bytes::self_test,
     },
     Gate {
         name: "uncheckable-proof-paths-do-not-slash",
@@ -977,12 +973,12 @@ const GATES: &[Gate] = &[
         self_test: gates::refusals_no_mutate::self_test,
     },
     Gate {
-        name: "storage-penalties-are-enforced",
+        name: "bud3-custody-rewards",
         replaces: Some("check-storage-penalties-are-enforced.sh"),
-        run: gates::storage_penalties::run,
+        run: gates::bud3_custody_rewards::run,
         run_log: None,
         run_args: None,
-        self_test: gates::storage_penalties::self_test,
+        self_test: gates::bud3_custody_rewards::self_test,
     },
     Gate {
         name: "a-derivation-cannot-outlive-its-master",

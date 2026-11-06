@@ -26,11 +26,6 @@ xtask/gates/src/gates/gates_do_not_panic.rs	1	t.contains(".unwrap()") || t.conta
 xtask/gates/src/gates/no_idle_code.rs	1	let rel = f.strip_prefix(src).expect("walked file is under src");
 xtask/gates/src/gates/no_unicode_dashes.rs	1	let rel = f.strip_prefix(src).expect("walked file is under src");
 xtask/gates/src/gates/security_parameters.rs	1	.expect("checked above");
-xtask/gates/src/gates/shard_placement.rs	1	let u = u128::from(u64::from_le_bytes(d[..8].try_into().unwrap())).max(1);\n\
-xtask/gates/src/gates/shard_placement.rs	1	let u = u64::from_le_bytes(d[..8].try_into().unwrap()) as f64 / u64::MAX as f64;\n\
-xtask/gates/src/gates/shard_placement.rs	1	u128::from(c.stake) * u128::from(u64::from_le_bytes(d[..8].try_into().unwrap()))\n\
-xtask/gates/src/gates/shard_placement.rs	1	u128::from(u64::from_le_bytes(d[..8].try_into().unwrap()))\n\
-xtask/gates/src/gates/shard_placement.rs	2	u128::from(c.stake) * u128::from(u64::from_le_bytes(d[..8].try_into().unwrap()))\n\
 xtask/gates/src/gates/tree_is_english.rs	1	.expect("writing to a String cannot fail");
 xtask/gates/src/gates/tree_is_english.rs	1	let rel = f.strip_prefix(src).expect("walked file is under src");
 xtask/gates/src/gates/tree_is_english.rs	2	.expect("writing to a String cannot fail");

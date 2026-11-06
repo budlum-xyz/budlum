@@ -23,7 +23,7 @@ use std::path::Path;
 fn registry() -> Vec<(&'static str, &'static [&'static str])> {
     vec![
         ("bns", super::bns_gate::TESTS),
-        ("bud-e2e", super::bud_e2e::TESTS),
+        ("bud3-e2e", super::bud3_e2e::TESTS),
         ("economy-invariants", super::economy_invariants::TESTS),
         ("fork-choice", super::fork_choice_gate::TESTS),
         ("governance-invariants", super::governance_invariants::TESTS),

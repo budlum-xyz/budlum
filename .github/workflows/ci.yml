@@ -580,12 +580,12 @@ jobs:
       - name: QR is derivative only canary
         if: always() && steps.build.outcome == 'success'
         run: |
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- qr-is-derivative-only --self-test 2>&1 | tee -a /tmp/gate-out.log
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-qr-is-presentation --self-test 2>&1 | tee -a /tmp/gate-out.log
           exit "${PIPESTATUS[0]}"
       - name: QR is derivative only
         if: always() && steps.build.outcome == 'success'
         run: |
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- qr-is-derivative-only 2>&1 | tee -a /tmp/gate-out.log
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-qr-is-presentation 2>&1 | tee -a /tmp/gate-out.log
           exit "${PIPESTATUS[0]}"
       - name: Unreachable gate canary
         if: always() && steps.build.outcome == 'success'
@@ -663,12 +663,12 @@ jobs:
       - name: Repair trigger canary
         if: always() && steps.build.outcome == 'success'
         run: |
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- repair-fires-on-loss --self-test 2>&1 | tee -a /tmp/gate-out.log
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-repair-fires --self-test 2>&1 | tee -a /tmp/gate-out.log
           exit "${PIPESTATUS[0]}"
       - name: Repair fires on loss
         if: always() && steps.build.outcome == 'success'
         run: |
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- repair-fires-on-loss 2>&1 | tee -a /tmp/gate-out.log
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-repair-fires 2>&1 | tee -a /tmp/gate-out.log
           exit "${PIPESTATUS[0]}"
       - name: AI inference layer detection canary
         if: always() && steps.build.outcome == 'success'
@@ -876,11 +876,11 @@ jobs:
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --all -- --check
 
-  bud-e2e-invariants:
-    # 9 module-independence invariants as a named REQUIRED
-    # job. Name canary: if an invariant is deleted or renamed the gate
-    # FAILs even if `cargo test` stays green (vacuous-gate protection, with canary).
-    name: B.U.D. E2E Invariants (9/9 isim-kilitli)
+  bud3-e2e-tests:
+    # The acceptance suite is a named REQUIRED job. Name canary: if a
+    # required acceptance test is deleted or renamed the gate FAILs even if
+    # `cargo test` stays green (vacuous-gate protection, with canary).
+    name: B.U.D. 3.0 acceptance tests (name canary)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -896,12 +896,9 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Gate canary (proof it is not vacuous)
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud-e2e --self-test
-      - name: bud_e2e - 9 invariants + 3 e2e (name canary)
-        run: |
-          set -euo pipefail
-          cargo test --lib bud_e2e 2>&1 | tee /tmp/bud-e2e.txt
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud-e2e /tmp/bud-e2e.txt
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-e2e --self-test
+      - name: bud3 acceptance tests (name canary)
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-e2e
 
   economy-invariants:
     # EIP-1559 + reward-pool + committed-supply denominator locks.
@@ -2208,8 +2205,8 @@ jobs:
       # the price was computed and simply went unread.
       - name: is storage priced by size + canary
         run: |
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- storage-is-priced-by-size --self-test
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- storage-is-priced-by-size
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-fee-uses-physical-bytes --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-fee-uses-physical-bytes
       # Two entry points take a manifest an untrusted caller built.
       # Registration (now the `StorageTx::RegisterManifest` door) ran
       # `validate_untrusted`; `open_deal` ran
@@ -2336,12 +2333,12 @@ jobs:
       # paid replica, had tests, and was never called by anything.
       - name: are storage penalties applied + canary
         run: |
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- storage-penalties-are-enforced --self-test
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- storage-penalties-are-enforced
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-custody-rewards --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-custody-rewards
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- content-encryption-bound --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- content-encryption-bound
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- shard-placement-is-sticky-and-staked --self-test
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- shard-placement-is-sticky-and-staked
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-placement --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-placement
       # The storage challenge verifier named three public inputs the AIR does
       # not produce for the program it names, so it rejected every proof
       # including a correct one, and the caller reads a rejection as a wrong

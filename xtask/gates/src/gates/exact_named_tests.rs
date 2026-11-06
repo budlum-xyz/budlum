@@ -1,4 +1,4 @@
-//! Shared machinery for the "exact named tests" gates (`bud_e2e`, `bns`).
+//! Shared machinery for the "exact named tests" gates (`bns`).
 //!
 //! A small family of gates requires each test name to appear *exactly* as
 //! `test <module>::<name> ... ok` in a cargo test log. Unlike the broader
