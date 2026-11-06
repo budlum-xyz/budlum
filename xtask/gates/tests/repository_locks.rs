@@ -132,6 +132,20 @@ fn micro_benches_do_not_clamp_to_u32_max() {
     }
 }
 
+/// The binding directive is an external planning input, not a repository
+/// document. Keep it outside the source tree so an upload cannot reintroduce
+/// untranslated planning text into the repository-wide source checks.
+#[test]
+fn binding_directive_stays_outside_repository() {
+    let path = root().join("THE_BUDLUM_DIREKTIF.md");
+    let entry = std::fs::symlink_metadata(&path);
+    assert!(
+        matches!(&entry, Err(error) if error.kind() == std::io::ErrorKind::NotFound),
+        "the binding directive must stay outside the repository tree: {}",
+        path.display()
+    );
+}
+
 /// The kani workspace carries a `Cargo.lock`, so `--locked` resolves
 /// and the lock-freshness step in CI sees it.
 #[test]

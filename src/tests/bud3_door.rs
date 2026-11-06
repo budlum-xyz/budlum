@@ -242,7 +242,11 @@ fn closed_codecs_refuse_on_testnet() {
             "id {closed} refused for the wrong reason: {err}"
         );
     }
-    assert_eq!(state.calculate_state_root(), root, "a refusal writes nothing");
+    assert_eq!(
+        state.calculate_state_root(),
+        root,
+        "a refusal writes nothing"
+    );
     assert_eq!(state.get_balance(&uploader), 1_000, "no fee, no write");
     assert_eq!(state.get_nonce(&uploader), 0);
 }
