@@ -12,6 +12,7 @@ use std::collections::BTreeSet;
 
 const ALERT_RULES: &str = include_str!("../../ops/monitoring/alerts.yml");
 const METRIC_DEFINITIONS: &str = include_str!("../core/metrics.rs");
+const DASHBOARD: &str = include_str!("../../ops/monitoring/grafana/budlum-testnet.json");
 
 /// All `budlum_*` tokens in `text`, split on anything that cannot be part of
 /// an identifier. Metrics from other exporters (`node_*`, `up`) are out of
@@ -110,4 +111,43 @@ fn every_budlum_rule_queries_a_budlum_series() {
         }
     }
     assert!(rules >= 8, "the rule scan found {rules} rules; that is vacuous");
+}
+
+/// A panel whose query names no series cannot render, and an operator reads a
+/// blank panel as "quiet" rather than "broken". The dashboard is held to the
+/// metric inventory the same way the rules are, and the eight mandatory
+/// readiness series are required to be on it: an alert nobody can see the
+/// history of is an alert nobody can explain after the fact.
+#[test]
+fn the_dashboard_queries_series_the_node_exports() {
+    let exported = budlum_metric_names(METRIC_DEFINITIONS);
+    let queried = budlum_metric_names(DASHBOARD);
+    assert!(
+        queried.len() >= 10,
+        "the dashboard scan found too few series; the scan is vacuous"
+    );
+    let missing: Vec<&str> = queried
+        .iter()
+        .filter(|name| !exported.contains(*name))
+        .map(String::as_str)
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the dashboard queries series the node does not export: {missing:?}"
+    );
+    for mandatory in [
+        "budlum_finality_stalled",
+        "budlum_finality_lag_checkpoints",
+        "budlum_bud3_segments_at_risk",
+        "budlum_bud3_repair_backlog",
+        "budlum_relay_reservations",
+        "budlum_ee_fault_total",
+        "budlum_state_root_mismatch_total",
+        "budlum_rpc_rate_limited_total",
+    ] {
+        assert!(
+            queried.contains(mandatory),
+            "mandatory readiness series {mandatory} has no dashboard panel"
+        );
+    }
 }

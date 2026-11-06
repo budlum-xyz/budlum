@@ -86,3 +86,17 @@ lists.
 | #41, #53 | WP-61 | `src/crypto/`, `src/rpc/` | No overlap: this delivery does not touch RPC or crypto. |
 | #13, #45 | WP-20 | `src/storage/bud3/` (its modules) | This delivery adds readers to `registry.rs` only, and does not change a share, a root or a rule. |
 | #11, #16, #24, #36, #40, #46, #48, #49 | various | `src/chain/blockchain.rs` for #40 only | #40 rewrites chain pages; this delivery adds one private emit method and one counter call. Rebase, do not resolve by hand. |
+
+### Delivery 2: the dashboard half of WP-41 item 6
+
+The card asks for "the dashboards and the alert rules of the new metrics".
+Delivery 1 shipped the rules; a rule without a panel is an alarm an operator
+cannot explain afterwards.
+
+`ops/monitoring/grafana/budlum-testnet.json` gains eight panels, one per
+mandatory readiness series plus the custody split by class: finality stall,
+finality lag in checkpoints, state-root mismatches, reserved relay slots, the
+two B.U.D. 3.0 health gauges, custody bytes by class, and faults by execution
+environment. `the_dashboard_queries_series_the_node_exports` holds the
+dashboard to the same inventory as the rules, so a renamed series cannot leave
+a blank panel that reads as a quiet network.
