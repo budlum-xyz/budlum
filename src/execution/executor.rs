@@ -3752,7 +3752,13 @@ impl Executor {
             // destroyed.
             let destroyed = transactions
                 .iter()
-                .fold(0u128, |acc, tx| acc.saturating_add(u128::from(tx.fee)));
+                .try_fold(0u128, |acc, tx| acc.checked_add(u128::from(tx.fee)))
+                .ok_or_else(|| {
+                    BudlumError::validation(
+                        "burned_supply_overflow",
+                        "destroyed fee total overflowed",
+                    )
+                })?;
             state.record_destroyed(destroyed);
         }
 

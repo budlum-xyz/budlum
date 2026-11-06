@@ -3710,10 +3710,16 @@ impl AccountState {
                 "slash of {taken} exceeds the {held} escrowed for this prover"
             ));
         }
-        // Credit before debiting the escrow: the credit is the only
-        // fallible step left, and taking the escrow first would leave the
-        // penalty nowhere if it refused.
+        // Check every arithmetic boundary before moving value. The block
+        // candidate rolls back a deterministic panic, but a partial slash
+        // must not exist even transiently inside this operation.
+        let burned = taken - reward;
+        let next_burned = self.checked_burned_total(burned);
         if reward > 0 {
+            let challenger_balance = self.get_balance(challenger);
+            challenger_balance
+                .checked_add(reward)
+                .ok_or_else(|| "the challenger reward would overflow its balance".to_string())?;
             self.try_add_balance(challenger, reward)?;
         }
         if held == taken {
@@ -3724,22 +3730,27 @@ impl AccountState {
         // The remainder is destroyed, and destroyed supply is recorded:
         // leaving it out of `burned_total` would reopen the same amount
         // as minting headroom under the cap.
-        let burned = taken - reward;
-        self.burned_total = self.burned_total.saturating_add(burned);
+        self.burned_total = next_burned;
         Ok(burned)
+    }
+
+    /// The exact next destroyed-supply counter, or a deterministic refusal
+    /// before any value movement. Clamping to `u64::MAX` would record less
+    /// destruction than occurred and reopen mint headroom.
+    fn checked_burned_total(&self, amount: u64) -> u64 {
+        self.burned_total
+            .checked_add(amount)
+            .expect("burned-supply counter overflowed u64")
     }
 
     /// Records destroyed BUD in `burned_total`. BUD was issued once;
     /// supply that leaves committed state without entering this counter
-    /// would reopen the same amount as mint headroom under the cap. The
-    /// counter saturates rather than wraps: an overstated burn only closes
-    /// headroom, it never opens it.
+    /// would reopen the same amount as mint headroom under the cap.
+    /// Every current caller records at most one `u64` debit per operation;
+    /// a larger amount is an invalid accounting input, not a saturated burn.
     pub fn record_destroyed(&mut self, amount: u128) {
-        // Supply path: checked arithmetic, no saturating_add (WP-17 item 5).
-        let total = u128::from(self.burned_total)
-            .checked_add(amount)
-            .expect("burned-supply arithmetic overflowed u128");
-        self.burned_total = u64::try_from(total).unwrap_or(u64::MAX);
+        let amount = u64::try_from(amount).expect("burned-supply debit overflowed u64");
+        self.burned_total = self.checked_burned_total(amount);
     }
 
     /// Records the drop in committed supply since `committed_before` as
@@ -3793,6 +3804,7 @@ impl AccountState {
         }
         let account = self.get_or_create(address);
         let burned = amount.min(account.balance);
+        let next_burned = self.checked_burned_total(burned);
         // Warn when burn is clipped - indicates a potential
         // Accounting error upstream (caller expected to burn more than available).
         if burned < amount {
@@ -3805,7 +3817,7 @@ impl AccountState {
             );
         }
         account.balance -= burned;
-        self.burned_total = self.burned_total.saturating_add(burned);
+        self.burned_total = next_burned;
         self.dirty_accounts.insert(*address);
         burned
     }
@@ -3855,8 +3867,14 @@ impl AccountState {
                 // We don't loop forever on future calls.
                 break;
             }
-            total = total.saturating_add(burned);
-            self.timed_burn.total_burned = self.timed_burn.total_burned.saturating_add(burned);
+            total = total
+                .checked_add(burned)
+                .expect("timed-burn total overflowed u64");
+            self.timed_burn.total_burned = self
+                .timed_burn
+                .total_burned
+                .checked_add(burned)
+                .expect("timed-burn counter overflowed u64");
         }
         self.timed_burn.years_burned = due;
         total
