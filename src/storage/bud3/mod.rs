@@ -16,6 +16,7 @@
 //! | [`placement`] | Stake-weighted rendezvous placement, diversity caps, the placement table |
 //! | [`registry`] | Chain state: objects, dedup, references, deletion, shares, audits |
 //! | [`tx`] | `StorageTx` v3 and its one apply door |
+//! | [`volume`] | Aggregation volumes: small objects share one placed segment |
 //! | [`custody`] | Sub-block tree, symbol root, the audit draw and custody proofs |
 //! | [`pipeline`] | Upload (content to record and symbols) and view (symbols to checked content) |
 //! | [`fountain`] | RFC 6330 per-segment encoder and decoder, and the streaming encoder |
@@ -42,6 +43,7 @@ pub mod registry;
 pub mod segment;
 pub mod tx;
 pub mod varint;
+pub mod volume;
 
 pub use bof1::{Bof1Error, Flags, Header, Object};
 pub use content_id::{ContentId, ContentKey};
@@ -51,3 +53,4 @@ pub use fountain::{
 pub use limits::{Bud3Limits, Profile, ProfileId};
 pub use meter::{Meter, MeterError};
 pub use segment::{object_commitment, segment_digest, ObjectCommitment, Segmentation};
+pub use volume::{AggregationVolume, VolumeError, VolumeMember, Visibility};
