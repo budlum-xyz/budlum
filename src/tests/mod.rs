@@ -257,3 +257,7 @@ pub mod audit_lane_b;
 // docs/audit/live/lane-c.md, not that a closing package did its work.
 #[cfg(test)]
 pub mod audit_lane_c;
+
+// Lane D live-audit regression evidence (WP-04).
+#[cfg(test)]
+pub mod audit_lane_d;
