@@ -120,16 +120,18 @@ Section 16.4 rule 1 requires a regression test named `blg_NNN_<short>` for every
 test exists in the tree: a search for a `fn` name starting `blg_` over `src/`, `crates/`, `budzero/`
 and `xtask/` returns no `blg_NNN_` name for any record. This PR writes the first four, in
 `src/tests/audit_lane_d.rs`, with the name the rule asks for: `blg_099_`, `blg_022_`, `blg_192_`
-and `bulgu_012_`. They carry the record id, so grepping a record id lands on its test. The other
-five rows are pinned by a test the record itself names, a build declaration, or a gate self-test,
-and their closing packages owe the named test.
+and `bulgu_012_`. They carry the record id, so grepping a record id lands on its test. Of the other
+six rows, two are pinned by a test the module already had, one by a build declaration, and three by
+nothing at all (BLG-012, BLG-013 and DOC-GAP-03 cite the gate and the README fix in their evidence),
+so their closing packages owe the named test.
 
 ## What this file does not claim
 
-- No record is `Closed` in the section 14.1 sense. Eight rows are `Previously fixed` (the rule 7
-  route), one is `Will close by removal` (WP-07), and three carry a narrowed reading still `Open`
-  (BLG-015, BLG-016, BLG-081, BLG-085, BLG-097: five rows, each saying what is left). No commit SHA and no CI run number is cited,
-  because no run on this repository has concluded.
+- No record is `Closed` in the section 14.1 sense. Ten rows are `Previously fixed` (the rule 7
+  route), one is `Will close by removal` (WP-07), five are narrowed readings still `Open`
+  (BLG-015, BLG-016, BLG-081, BLG-085, BLG-097: each says what is left), and three are new findings
+  from section 14.1 rule 9 (BLG-268, BLG-269, BLG-270). No commit SHA and no CI run number is
+  cited, because no run on this branch has a `success` or `failure` conclusion.
 - No build, test, clippy or gate result is claimed: the agent sandbox has no Rust toolchain.
 - The English titles are this file's renderings of the source records' own titles, because rule
   4 and card item 3 keep the repository English. They describe the defect; they are not a new

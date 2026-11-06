@@ -196,8 +196,8 @@ implied. If the directive prefers a different mapping, only that row and the tot
 - The "267 findings and 44 archive records" reading. The 267 is the `BLG-` range and the 44 is the
   archive; adding them is the counting error section 2 of this file exists to prevent.
 - The sample observation paragraph. Its claim that "206 open is not current for this branch" is
-  still true, and this lane's readings make it more true, not less: nine of its records are
-  `Previously fixed` and one closes by removal.
+  still true, and this lane's readings make it more true, not less: ten of its records are
+  `Previously fixed`, six are narrowed, and one closes by removal.
 
 ### 8.2 One more number a closing package needs
 

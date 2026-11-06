@@ -68,15 +68,16 @@ branch that carries the work is `In progress`.
   - `docs/audit/FINDINGS.md`: the 70 rows in English, one per record, with the five state words of
     section 14.1 rule 3 and the WP-04 vocabulary mapped to them.
   - `src/tests/audit_lane_d.rs`: the lane's permanent tests, wired into `src/tests/mod.rs`.
-- **State of the readings:** 9 records are `Previously fixed` (BLG-012, BLG-013, BLG-014, BLG-022,
-  BLG-099, BLG-192, BULGU-011, BULGU-012, DOC-GAP-03) and 1 is `Will close by removal` (BLG-254).
+- **State of the readings:** 10 records are `Previously fixed` (BLG-012, BLG-013, BLG-014, BLG-022,
+  BLG-099, BLG-192, BULGU-011, BULGU-012, DOC-GAP-03, DOC-GAP-07) and 1 is `Will close by removal`
+  (BLG-254).
   Four of those carry a record-named test in `src/tests/audit_lane_d.rs`
   (`blg_099_`, `blg_022_`, `blg_192_`, `bulgu_012_`). Six records are narrowed rather than decided
   (BLG-015, BLG-016, BLG-081, BLG-085, BLG-095, BLG-097): each names the clause that is still open.
   The remaining records stay `Open` because section 15.8 places the old ledger outside this
   repository and it is not in this checkout.
 - **Findings moved by this package:** BLG-012, BLG-013, BLG-014, BLG-022, BLG-099, BLG-192,
-  BULGU-011, BULGU-012 to `Previously fixed`; DOC-GAP-03 fixed in this pull request (both READMEs
+  BULGU-011, BULGU-012, DOC-GAP-03, DOC-GAP-07 to `Previously fixed`; DOC-GAP-03 fixed in this pull request (both READMEs
   named a script that `ops/scripts/` no longer holds, and `fuzz/README.md` named two more).
 - **Not delivered, with the reason:**
   - Card item 5 (one GitHub record per package) is impossible on this repository: the API reports
