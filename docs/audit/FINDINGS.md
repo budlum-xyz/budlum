@@ -53,8 +53,25 @@ completes. Self-report is not evidence (§0.3 item 5).
 
 ## New rows
 
-None. Neither package found anything the §14 ledger did not already carry, so
-the `BLG-268` new-finding counter is untouched.
+| Identity | Severity | Row | Owner | Status |
+|---|---|---|---|---|
+| BLG-279 | Medium | A second `Address` definition survives in the VM workspace: `budzero/verifier-registry/src/address.rs:9` derives `Serialize`/`Deserialize` over `pub struct Address(pub [u8; 32])`, so it encodes as a 32-element byte array, while `core::address::Address` hand-writes a bare hex string. K-4 says wallet, chain and VM call one definition. `SlashingReport` (`evidence.rs:65`) and `Registration` (`registry.rs:106`) derive serde over that field, so the two workspaces already disagree on the JSON shape of the same concept. | İP-33 (owns the crate), coordinate with İP-11 job 1 | **Open — recorded, not closed here.** |
+
+Numbering: `BLG-268` is taken by #24, #13 claims `BLG-268`–`BLG-275`, and
+`BLG-276`–`BLG-278` are claimed by #36/#50/#68, so this row takes the next free
+id, `BLG-279`.
+
+Why this PR does not fix it: nothing depends on `verifier-registry` today (it is
+a leaf member of the `budzero` workspace), so no wire crosses yet and there is
+no live bug. Swapping in the shared type would change that crate's encoded form
+from an array to a string — a wire change, which §15.5 requires to be declared
+and reviewed on its own, not smuggled into a K-4 move. The crate is also partially
+held by #24 (`params.rs`, `tests/regression.rs`).
+
+What is closed here is the drift hazard on the node side:
+`address_json_is_a_hex_string_not_a_byte_array` in `src/core/address.rs` pins the
+hex-string form and asserts the array form stays refused, so a future dedup that
+substitutes the derived encoding fails a test instead of the database.
 
 ## Package status
 
