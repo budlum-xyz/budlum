@@ -36,7 +36,7 @@ object KeyVault {
     @Synchronized
     fun keystoreWrapKey(): SecretKey {
         val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-        (ks.getEntry(AES_KEY_ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
+        findWrapKey(ks)?.let { return it }
 
         return generatePreferStrongBox(
             generate = { strongBox ->
@@ -85,5 +85,17 @@ object KeyVault {
 
     fun wrapForStorage(plaintext: ByteArray): ByteArray = wrap(keystoreWrapKey(), plaintext)
 
-    fun unwrapFromStorage(wrapped: ByteArray): ByteArray = unwrap(keystoreWrapKey(), wrapped)
+    fun unwrapFromStorage(wrapped: ByteArray): ByteArray = unwrap(existingWrapKey(), wrapped)
+
+    @Synchronized
+    private fun existingWrapKey(): SecretKey {
+        val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+        return requireExistingKey(findWrapKey(ks))
+    }
+
+    private fun findWrapKey(ks: KeyStore): SecretKey? {
+        val entry = ks.getEntry(AES_KEY_ALIAS, null)
+        val key = (entry as? KeyStore.SecretKeyEntry)?.secretKey
+        return checkedExistingKey(key, aliasOccupied = entry != null || ks.containsAlias(AES_KEY_ALIAS))
+    }
 }
