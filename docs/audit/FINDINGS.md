@@ -31,12 +31,14 @@ at that commit.
 
 **CI run: not yet available, and none is claimed.** This sandbox has no Rust
 toolchain and `static.rust-lang.org` is outside the allowed egress, so no local
-`cargo test` log exists. Per S-1, CI is the sole validator. The branch's runs
-are currently 56 `cancelled` (the workflow sets `cancel-in-progress` on non-main
-refs, so each push cancels the previous run) and 24 still pending; the
-failure-filtered list is empty. **No row above is validated by a completed green
-run yet**, and this ledger must be amended with the run number when one
-completes. Self-report is not evidence (§0.3 item 5).
+`cargo test` log exists. Per S-1, CI is the sole validator. Every run on this
+branch so far is either `cancelled` or still pending: the workflow sets
+`cancel-in-progress` on non-main refs, so each push cancels the previous run.
+The failure-filtered list (`failure`, `timed_out`, `action_required`) is empty.
+Exact counts are deliberately not recorded here — they change with every push
+and a stale count reads as evidence when it is not. **No row above is validated
+by a completed run, green or red**, and this ledger must be amended with the run
+number when one completes. Self-report is not evidence (§0.3 item 5).
 
 ## Open rows these packages touch but do not close
 
