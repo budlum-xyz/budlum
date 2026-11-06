@@ -1523,4 +1523,187 @@ pub trait BudlumApi {
         kind: String,
         address: Option<String>,
     ) -> jsonrpsee::core::SubscriptionResult;
+
+    // ---- Solana JSON-RPC compatibility gateway (WP-31, 1/N) ----
+    //
+    // Section 8.11.3 names every method of this gateway. The table in
+    // `src/rpc/compat/solana/mod.rs` says what each one answers, the class
+    // rows in `src/rpc/method_class.rs` say on which listener, and
+    // `docs/SOLANA_RPC.md` says why every SVM-state method refuses today: the
+    // node does not run the SVM execution environment (WP-31) yet, so an
+    // account read here would be a number no SVM account backs.
+
+    /// `getHealth`: this node is up.
+    #[method(name = "getHealth")]
+    async fn solana_get_health(&self) -> Result<String, ErrorObjectOwned>;
+
+    /// `getVersion`: the Budlum version in the Solana version shape.
+    #[method(name = "getVersion")]
+    async fn solana_get_version(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getGenesisHash`: refuses until WP-31 (door: `bud_getBlockByNumber`).
+    #[method(name = "getGenesisHash")]
+    async fn solana_get_genesis_hash(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getSlot`: the head height, as a Solana slot.
+    #[method(name = "getSlot")]
+    async fn solana_get_slot(&self) -> Result<u64, ErrorObjectOwned>;
+
+    /// `getBlockHeight`: the head height.
+    #[method(name = "getBlockHeight")]
+    async fn solana_get_block_height(&self) -> Result<u64, ErrorObjectOwned>;
+
+    /// `getEpochInfo`: refuses until WP-31 (door: `bud_getStatus`).
+    #[method(name = "getEpochInfo")]
+    async fn solana_get_epoch_info(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getLatestBlockhash`: refuses until WP-31 (door: `bud_getBlockByNumber`).
+    #[method(name = "getLatestBlockhash")]
+    async fn solana_get_latest_blockhash(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `isBlockhashValid`: refuses until WP-31 (door: `bud_getBlockByNumber`).
+    #[method(name = "isBlockhashValid")]
+    async fn solana_is_blockhash_valid(
+        &self,
+        blockhash: String,
+        commitment: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getBalance`: refuses until WP-31 (door: `bud_getBalance`).
+    #[method(name = "getBalance")]
+    async fn solana_get_balance(
+        &self,
+        address: String,
+        commitment: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getAccountInfo`: refuses until WP-31 (door: `bud_getAccountProof`).
+    #[method(name = "getAccountInfo")]
+    async fn solana_get_account_info(
+        &self,
+        address: String,
+        commitment: Option<String>,
+        encoding: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getMultipleAccounts`: refuses until WP-31 (door: `bud_getAccountProof`).
+    #[method(name = "getMultipleAccounts")]
+    async fn solana_get_multiple_accounts(
+        &self,
+        addresses: Vec<String>,
+        commitment: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getProgramAccounts`: refuses until WP-31 (door: `bud_getAccountProof`).
+    #[method(name = "getProgramAccounts")]
+    async fn solana_get_program_accounts(
+        &self,
+        program_id: String,
+        commitment: Option<String>,
+        filters: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getTokenAccountsByOwner`: refuses until WP-31 (door: `bud_getAccountProof`).
+    #[method(name = "getTokenAccountsByOwner")]
+    async fn solana_get_token_accounts_by_owner(
+        &self,
+        owner: String,
+        token_accounts_filter: serde_json::Value,
+        commitment: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getTokenAccountBalance`: refuses until WP-31 (door: `bud_getBalance`).
+    #[method(name = "getTokenAccountBalance")]
+    async fn solana_get_token_account_balance(
+        &self,
+        token_account: String,
+        commitment: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getTokenSupply`: refuses until WP-31 (door: `bud_getStatus`).
+    #[method(name = "getTokenSupply")]
+    async fn solana_get_token_supply(
+        &self,
+        commitment: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getMinimumBalanceForRentExemption`: refuses until WP-31 (door: `bud_getStatus`).
+    #[method(name = "getMinimumBalanceForRentExemption")]
+    async fn solana_get_minimum_balance_for_rent_exemption(
+        &self,
+        data_size: u64,
+        commitment: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getFeeForMessage`: refuses until WP-31 (door: `bud_gasPrice`).
+    #[method(name = "getFeeForMessage")]
+    async fn solana_get_fee_for_message(
+        &self,
+        message: String,
+        commitment: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getRecentPrioritizationFees`: refuses until WP-31 (door: `bud_gasPrice`).
+    #[method(name = "getRecentPrioritizationFees")]
+    async fn solana_get_recent_prioritization_fees(
+        &self,
+        addresses: Option<Vec<String>>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `sendTransaction`: refuses until WP-31 (door: `bud_sendRawTransaction`).
+    #[method(name = "sendTransaction")]
+    async fn solana_send_transaction(
+        &self,
+        transaction: String,
+        options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `simulateTransaction`: refuses until WP-31 (door: `bud_txPrecheck`).
+    #[method(name = "simulateTransaction")]
+    async fn solana_simulate_transaction(
+        &self,
+        transaction: String,
+        options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getSignatureStatuses`: refuses until WP-31 (door: `bud_getTransactionReceipt`).
+    #[method(name = "getSignatureStatuses")]
+    async fn solana_get_signature_statuses(
+        &self,
+        signatures: Vec<String>,
+        options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getSignaturesForAddress`: refuses until WP-31 (door: `bud_getTransactionByHash`).
+    #[method(name = "getSignaturesForAddress")]
+    async fn solana_get_signatures_for_address(
+        &self,
+        address: String,
+        options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getTransaction`: refuses until WP-31 (door: `bud_getTransactionByHash`).
+    #[method(name = "getTransaction")]
+    async fn solana_get_transaction(
+        &self,
+        signature: String,
+        options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getBlock`: refuses until WP-31 (door: `bud_getBlockByNumber`).
+    #[method(name = "getBlock")]
+    async fn solana_get_block(
+        &self,
+        slot: u64,
+        options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `requestAirdrop`: refuses; the testnet faucet is a separate service (WP-41).
+    #[method(name = "requestAirdrop")]
+    async fn solana_request_airdrop(
+        &self,
+        address: String,
+        lamports: u64,
+        commitment: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 }
