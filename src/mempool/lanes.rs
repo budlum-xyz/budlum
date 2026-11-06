@@ -19,6 +19,15 @@ use std::fmt;
 /// Recent blockhash window length for the Solana foreign lane (Section 8.6.2).
 pub const SOLANA_BLOCKHASH_WINDOW: usize = 150;
 
+/// The 32-byte digest the Solana lane keeps for a 64-byte signature.
+///
+/// The lane stores one digest per signature, not the signature itself, because
+/// the cache outlives the transaction and a digest is not a credential.
+fn sha256_32(bytes: &[u8]) -> [u8; 32] {
+    use sha2::{Digest as _, Sha256};
+    Sha256::digest(bytes).into()
+}
+
 /// Envelope lane classification (Section 8.6.3 item 1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LaneKind {
@@ -148,6 +157,61 @@ impl MultiLaneMempool {
             let _ = self.recent_blockhashes.pop_front();
         }
         self.recent_blockhashes.push_back(block_hash);
+    }
+
+    /// Admit a verified foreign Solana envelope into the `Solana` lane.
+    ///
+    /// The envelope door
+    /// ([`crate::execution::coordinator::foreign::solana::parse_foreign_solana`])
+    /// has already checked the signatures, the account bounds and the replay set
+    /// it was given. This method is the lane's own admission: it applies the same
+    /// window and cache to the transaction's *own* blockhash and *first*
+    /// signature, so a transaction that cleared the door cannot then jump the
+    /// lane's budget or appear twice in a produced block.
+    ///
+    /// The signature recorded is the first, which is the fee payer's: the
+    /// runtime's deduplication key for a Solana transaction.
+    ///
+    /// # Errors
+    ///
+    /// [`LaneAdmissionError::StaleOrExpired`] when the transaction's blockhash is
+    /// outside the window, and [`LaneAdmissionError::ReplayRejected`] when its
+    /// signature is already in the lane.
+    pub fn admit_foreign_solana(
+        &mut self,
+        transaction: &crate::execution::coordinator::foreign::solana::ForeignSolanaTransaction,
+        now_unix_s: u64,
+    ) -> Result<(), LaneAdmissionError> {
+        let signature = transaction.signatures.first().copied().ok_or(
+            LaneAdmissionError::ReplayRejected("a Solana transaction with no signature"),
+        )?;
+        let entry = LaneEntry {
+            // The runtime's own deduplication key for a Solana transaction is its
+            // first signature, so the lane keys on the same bytes.
+            tx_hash: signature[..32].try_into().map_err(|_| {
+                LaneAdmissionError::ReplayRejected("a Solana signature shorter than 32 bytes")
+            })?,
+            lane: LaneKind::Solana,
+            replay: LaneReplayRule::SolanaWindow {
+                recent_blockhash: transaction.recent_blockhash,
+                signature_digest: sha256_32(&signature),
+            },
+            // A Solana transaction carries a compute-unit limit and a
+            // micro-lamport priority fee, not a BGU budget. The conversion is
+            // WP-31's fee step (directive 8.9), so the lane admits the envelope
+            // without pricing it and the block producer prices it later.
+            gas_limit_bgu: 0,
+            max_fee_per_bgu_atto: 0,
+            max_priority_fee_per_bgu_atto: 0,
+            raw_bytes: Vec::new(),
+        };
+        self.admit(entry, now_unix_s)
+    }
+
+    /// The Solana blockhash window, newest last, as the door reads it.
+    #[must_use]
+    pub fn solana_blockhash_window(&self) -> Vec<[u8; 32]> {
+        self.recent_blockhashes.iter().copied().collect()
     }
 
     /// Number of queued transactions in `lane`.
@@ -383,5 +447,54 @@ mod tests {
         assert_eq!(batch[0].lane, LaneKind::Local);
         assert_eq!(batch[1].lane, LaneKind::Solana);
         assert_eq!(batch[2].lane, LaneKind::Ethereum);
+    }
+
+    #[test]
+    fn a_verified_solana_envelope_lands_in_its_own_lane_and_never_twice() {
+        use crate::execution::coordinator::foreign::solana::{
+            parse_foreign_solana, ForeignSolanaTransaction,
+        };
+        use ed25519_dalek::{Signer, SigningKey};
+
+        // A one-signer legacy transfer over a blockhash the lane window holds.
+        let key = SigningKey::from_bytes(&[21u8; 32]);
+        let blockhash = [0x7Au8; 32];
+        // Header `1, 0, 1`: one signer, and the program is a readonly non-signer
+        // so the readonly band covers it.
+        let mut message = vec![1u8, 0, 1, 2];
+        message.extend_from_slice(&key.verifying_key().to_bytes());
+        message.extend_from_slice(&[0xEEu8; 32]);
+        message.extend_from_slice(&blockhash);
+        message.push(1);
+        message.extend_from_slice(&[1, 1, 0, 1, 0]);
+        let mut wire = vec![1u8];
+        wire.extend_from_slice(&key.sign(&message).to_bytes());
+        wire.extend_from_slice(&message);
+
+        let mut pool = MultiLaneMempool::new(8, 4096);
+        pool.push_recent_blockhash(blockhash);
+        let transaction: ForeignSolanaTransaction =
+            parse_foreign_solana(&wire, &[], &pool.solana_blockhash_window(), &[]).unwrap();
+
+        // The first admission lands in the Solana lane.
+        pool.admit_foreign_solana(&transaction, 1_000).unwrap();
+        assert_eq!(pool.lane_len(LaneKind::Solana), 1);
+
+        // The same transaction again is refused by the signature cache.
+        assert_eq!(
+            pool.admit_foreign_solana(&transaction, 1_000),
+            Err(LaneAdmissionError::ReplayRejected(
+                "duplicate Solana signature"
+            ))
+        );
+
+        // An unknown blockhash is stale, and the window the door reads and the
+        // window the lane enforces are the same list.
+        let mut stale = transaction.clone();
+        stale.recent_blockhash = [0x01u8; 32];
+        assert!(matches!(
+            pool.admit_foreign_solana(&stale, 1_000),
+            Err(LaneAdmissionError::StaleOrExpired(_))
+        ));
     }
 }

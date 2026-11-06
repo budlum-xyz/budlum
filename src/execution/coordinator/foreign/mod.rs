@@ -1,8 +1,17 @@
 //! Coordinator foreign-envelope lane, `QuantumClass::Classical` custody isolation (`K-3`),
 //! EVM alias collision guards, `Adopt` one-shot sweep, quantum-alert gating, and
 //! per-namespace state-growth metering (`WP-27`, `BLG-267`).
+//!
+//! `solana` is the SVM door (`WP-31`): the raw versioned transaction, its
+//! signature check, the 150-block recent-blockhash window and the signature
+//! replay cache. The Solana JSON-RPC gateway and the mempool's `Solana` lane both
+//! read it, so a wallet that already builds a Solana transaction needs no change.
+//! Its custody isolation and alert gating are this module's, not its own: the
+//! `QuantumAlertLevel` gate and the `K-3` rule apply to every foreign envelope,
+//! so the SVM door admits an envelope only after the checks here pass.
 
 pub mod ethereum;
+pub mod solana;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

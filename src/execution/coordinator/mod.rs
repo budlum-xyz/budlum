@@ -3,6 +3,9 @@
 //! deployment policy, foreign transaction envelopes, stateful contract
 //! execution, worker supervisor, and sparse-Merkle namespace state commitment.
 //!
+//! The `foreign` door holds one module per foreign envelope format; `solana`
+//! is the SVM door (WP-31).
+//!
 //! WIRING: `bud_unit` and `commitment` (including `accounts` alias/asset
 //! derivations) are wired into [`crate::core::account::AccountState`];
 //! `stateful_contract` is wired into [`crate::execution::executor`];
