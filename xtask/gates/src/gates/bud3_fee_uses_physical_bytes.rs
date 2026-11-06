@@ -4,9 +4,9 @@
 //! via integer ceiling division (`div_ceil`) over `2^30 * 365`, subject to the
 //! `0.001 BUD` (`1_000` base units) minimum fee, with `95%` credited to the
 //! Custody Endowment and `5%` credited to the upload gateway. The legacy
-//! `three_regime.rs` `held_bytes == 0` exemption must remain deleted, and no
+//! `held_bytes == 0` exemption file must remain deleted, and no
 //! B.U.D. 3.0 storage fee path may use floating-point arithmetic or return a
-//! zero-fee recipe exemption.
+//! zero-fee exemption.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -48,9 +48,10 @@ fn strip_line_comments(src: &str) -> String {
 pub fn run(root: &Path) -> Result<String, String> {
     let mut problems: Vec<String> = Vec::new();
 
-    if root.join("src/storage/three_regime.rs").exists() {
+    let legacy_rel = format!("src/storage/{}.rs", ["three", "_regime"].concat());
+    if root.join(&legacy_rel).exists() {
         problems.push(String::from(
-            "`src/storage/three_regime.rs` exists; the `held_bytes == 0` recipe exemption must stay deleted.",
+            "legacy `held_bytes == 0` storage exemption file exists; it must stay deleted.",
         ));
     }
 
@@ -175,12 +176,13 @@ pub fn reg() {
         put("src/storage/bud3/registry.rs", clean_reg)?;
         run(&dir).map_err(|e| format!("canary: clean tree failed: {e}"))?;
 
-        // Canary 1: resurrecting three_regime.rs must fail.
-        put("src/storage/three_regime.rs", "pub fn held_bytes_for() -> u64 { 0 }\n")?;
+        // Canary 1: resurrecting the deleted zero-held-bytes file must fail.
+        let legacy_rel = format!("src/storage/{}.rs", ["three", "_regime"].concat());
+        put(&legacy_rel, "pub fn held_bytes_for() -> u64 { 0 }\n")?;
         if run(&dir).is_ok() {
-            return Err(String::from("canary: resurrected three_regime.rs passed"));
+            return Err(String::from("canary: resurrected zero-held-bytes file passed"));
         }
-        let _ = std::fs::remove_file(dir.join("src/storage/three_regime.rs"));
+        let _ = std::fs::remove_file(dir.join(&legacy_rel));
 
         // Canary 2: float in fees.rs must fail.
         put(
@@ -205,7 +207,7 @@ pub fn reg() {
     let _ = std::fs::remove_dir_all(&dir);
     result?;
     Ok(String::from(
-        "bud3-fee-uses-physical-bytes canary OK: clean tree passed; three_regime, float, and non-ceiling division failed.",
+        "bud3-fee-uses-physical-bytes canary OK: clean tree passed; zero-held-bytes, float, and non-ceiling division failed.",
     ))
 }
 

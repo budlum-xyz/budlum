@@ -1271,7 +1271,7 @@ fn bud3_e2e_replace_object_preserves_nft_binding_and_slashes_mismatch() {
     state.add_balance(&proposer, 100_000);
 
     let body = b"replaceable canonical payload".repeat(40);
-    // Initial upload with raw codec (0) vs zstd/default upload — different profile/symbol layout or second commitment.
+    // Initial upload with raw codec (0) vs zstd/default upload - different profile/symbol layout or second commitment.
     let old_up = prepare_public_upload(&body, &P, &Bud3Limits::default()).unwrap();
     let old_key = old_up.record.commitment;
     let old_shares = vec![

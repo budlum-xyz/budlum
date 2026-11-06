@@ -1,5 +1,5 @@
 //! Lazy segment repair (`f / 2`), rendezvous repairer assignment with 20-block
-//! Instant Task Handover, fresh-ESI regeneration, and 1% bad-repair slashing.
+//! Instant Task Handover, fresh-ESI synthesis, and 1% bad-repair slashing.
 //! exposed for maintenance repair sweeps, `HandoverCoordinator`, and RPC repair audit.
 //!
 //! Per Section 6.10:

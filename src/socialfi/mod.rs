@@ -9,7 +9,11 @@ use crate::storage::content_id::ContentId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub mod nft_folders;
 pub mod vault;
+pub use nft_folders::{
+    derive_bud3_nft_id, Bud3NftCommitment, NftFolder, NftFolderRegistry, SocialFiBud3Error,
+};
 pub use vault::{execute_vault_tx, VaultError, VaultRegistry, VaultTx};
 
 /// Most NFTs one owner can hold.

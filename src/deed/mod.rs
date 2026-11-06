@@ -4,7 +4,7 @@
 //! layer. This module holds the canonical manifest and the permissionless
 //! role vocabulary. The two roles bond through the `RoleBond` transaction
 //! door (`AccountState::bond_role`); an artifact's bytes are a B.U.D. content
-//! id registered through `StorageTx::RegisterManifest`. Rewards and bridge
+//! id registered through `StorageTxV3::RegisterObject`. Rewards and bridge
 //! wiring are out of scope (: DeEd inherits the
 //! account layer's cryptography and is not developed further).
 
@@ -13,6 +13,11 @@ use crate::core::hash::hash_fields_bytes;
 use crate::registry::role::RoleId;
 use crate::storage::ContentId;
 use serde::{Deserialize, Serialize};
+
+pub mod education_domain;
+pub use education_domain::{
+    EducationArtifact, EducationDomainError, EducationDomainRegistry,
+};
 
 /// Permissionless DeEd participant roles.
 ///

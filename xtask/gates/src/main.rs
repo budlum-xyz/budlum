@@ -56,6 +56,7 @@ mod gates {
     pub mod bud3_codec_and_replace;
     pub mod bud3_custody_proofs;
     pub mod bud3_custody_rewards;
+    pub mod bud3_dependent_modules;
     pub mod bud3_fee_uses_physical_bytes;
     pub mod bud3_forbidden_phrases;
     pub mod bud3_object_is_universal;
@@ -277,6 +278,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::bridge_dual_tree::self_test,
+    },
+    Gate {
+        name: "bud3-dependent-modules",
+        replaces: None,
+        run: gates::bud3_dependent_modules::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_dependent_modules::self_test,
     },
     Gate {
         name: "minting-paths-are-counted",

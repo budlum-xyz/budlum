@@ -2,7 +2,7 @@
 //! exposed for `Bud3Registry`, `Bud3RpcService`, and fee estimation tools.
 //!
 //! Every stored object is priced strictly from its placed physical bytes
-//! (`object_bytes * redundancy`), never from a recipe or zero-held-bytes
+//! (`object_bytes * redundancy`), never from a zero-held-bytes
 //! exemption. At registration (or lifetime renewal), 95% of the storage fee
 //! enters the keyless Custody Endowment and 5% credits the upload gateway.
 //! Across the paid lifetime of the object, each epoch unlocks
