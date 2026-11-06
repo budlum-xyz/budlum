@@ -4,13 +4,13 @@
 # The map moves to `absolute` mode once every line is zero.
 Anaç|0|0
 Atlas|7|55
-Budscan|33|268
+Budscan|32|268
 D-Web Passport|10|88
 DeEd|12|34
 Developer OS|6|50
 Filiz (faucet)|1|14
 Filiz (leader election)|11|225
-Fotosentez|7|19
+Fotosentez|6|15
 GT-1|0|0
 Gonca|0|0
 Graft|41|895
