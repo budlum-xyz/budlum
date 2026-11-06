@@ -131,6 +131,7 @@ impl RewardPoolSchedule {
     }
 
     /// The epoch budget of `per_epoch_budget`, split into its three shares.
+    #[must_use]
     pub fn split_epoch_budget(&self, epoch: u64, remaining_pool: u64) -> EpochSplit {
         EpochSplit::of(self.per_epoch_budget(epoch, remaining_pool))
     }
