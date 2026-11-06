@@ -6,6 +6,7 @@ import androidx.activity.compose.setContent
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.res.stringResource
 
 /**
  * Entry activity. The full onboarding/dashboard UI (directive 7.9.9) lands with
@@ -22,6 +23,6 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun App() {
     MaterialTheme {
-        Text(text = "Budlum validator")
+        Text(text = stringResource(R.string.validator_scaffold_notice))
     }
 }

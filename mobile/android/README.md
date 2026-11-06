@@ -1,25 +1,26 @@
 # Budlum Android validator (WP-36)
 
-Kotlin + Jetpack Compose app for the Android mobile validator. Directive
-section 7.9 of THE_BUDLUM_DIREKTIF. `minSdk` 29, `targetSdk` 36 (current Google
-Play target API requirement since 2026-08-31).
+This is an **unconnected scaffold**, not a working validator. Do not use this
+build to provide custody, answer audits, claim rewards, or join a testnet.
+The WP-11 Rust mobile core, UniFFI bindings, onboarding, network transport,
+foreground start flow, and durable on-chain release/repair protocol are not
+connected. A successful WorkManager policy evaluation is not a passed audit.
 
-Layout:
+The current scaffold contains:
 
-- `policy/` — working policy engine (network/power/thermal/quota/symbol).
-  Wi-Fi-only by default; the thermal pause is not user-changeable.
-- `keys/` — Android Keystore AES-256-GCM wrapping of the on-device operator
-  and BLS keys (StrongBox when available).
-- `storage/` — share store under `noBackupFilesDir/bud3/`, one file per
-  segment (hex name), quota enforcement, 2 GiB low-space release rule.
-- `service/` — `specialUse` foreground service with the persistent
-  notification (stored bytes, last audit result, connection state).
-- `work/` — 15-minute unmetered WorkManager job (audits/presence/shares while
-  the service is stopped) and the policy-driven duty log.
-- `boot/` — BOOT_COMPLETED receiver; falls back to a notification when the
-  system refuses a background foreground-service start.
-- `PLAY_DECLARATION.md` — the `specialUse` declaration text for Play Console.
+- A policy engine for network, power, thermal state, and quota.
+- Android Keystore AES-256-GCM wrapping, with StrongBox preferred when it is
+  available. Device/emulator Keystore instrumentation has not yet been run.
+- An interim local share store under `noBackupFilesDir/bud3/`. Its local delete
+  results are not signed or acknowledged by the chain. It is not the durable
+  WP-11 store and must not be used as evidence of successful release or repair.
+- A `specialUse` service shell and a periodic policy worker. Neither is wired
+  to validator duties. The boot receiver schedules work and requests a status
+  notification, but never starts the foreground service from the background.
+- A draft Play declaration. It must not be submitted until the implementation
+  actually performs the declared duties and has been reviewed on devices.
 
-The Rust mobile core (`mobile/core`, crate `budlum-mobile-core`, WP-11) is
-bound through UniFFI in a later WP-36 PR. Build: `gradle assembleDebug
-testDebugUnitTest` from this directory (CI: `.github/workflows/mobile.yml`).
+The project targets Android API 36 and requires API 29 or later. Build with
+`gradle assembleDebug testDebugUnitTest` from this directory. Instrumentation
+requires an Android device or emulator: `gradle connectedDebugAndroidTest`.
+The `mobile` GitHub workflow runs instrumentation only on manual dispatch.

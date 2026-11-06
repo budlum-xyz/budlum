@@ -1,5 +1,10 @@
 # Google Play `specialUse` declaration (WP-36, directive 7.9.3, risk R-06)
 
+**Draft only. Do not submit this declaration with the current scaffold.**
+The mobile-core binding and network duties do not exist in this app yet. The
+text below describes the intended implementation, not current behavior. Update
+and verify it against the completed app before a Play Console submission.
+
 ## Declaration subtype property
 
 The manifest carries:

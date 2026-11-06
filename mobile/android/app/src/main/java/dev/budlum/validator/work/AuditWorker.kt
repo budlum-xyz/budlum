@@ -4,21 +4,15 @@ import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import dev.budlum.validator.policy.AppPolicy
-import dev.budlum.validator.policy.DeviceState
 import dev.budlum.validator.policy.PolicyEngine
 import dev.budlum.validator.policy.RunDecision
 
 /**
- * Periodic background duty. Directive 7.9.3.6.
- *
- * Runs every 15 minutes with an unmetered network constraint while the
- * foreground service is stopped: answers storage audits, broadcasts presence
- * and accepts new share assignments.
- *
- * 1/N note: the actual network duty is bound to the Rust mobile core
- * (`budlum-mobile-core`, WP-11) through UniFFI in a later PR of this package.
- * Until the binding lands, this worker evaluates the policy and records the
- * decision, so the policy path itself is exercised on every run.
+ * Periodic policy evaluation with a 15-minute unmetered network constraint.
+ * This scaffold does not answer audits, broadcast presence, or accept shares.
+ * Those duties require the WP-11 mobile-core UniFFI binding (directive 7.9.3.6).
+ * A successful worker run only means the policy decision was recorded; it is
+ * not evidence of an audit or a connected validator.
  */
 class AuditWorker(
     context: Context,
