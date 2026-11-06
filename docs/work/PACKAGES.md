@@ -1,37 +1,36 @@
 # Work packages: what this branch lands, and what it leaves
 
-## WP-43 (İP-43): documents, README and the TLG report
+## WP-43: documents, README and the launch report
 
-Lane D. `T-Açılış`, TLG-gated, critical path. Dependency: WP-46, WP-47, WP-48,
-which have not merged, so the README rewrite (items 1, 2 and 5) and the TLG
-report (item 7) are not in reach of this branch. The two gates that pin the
-README push back against drift in the meantime, and they are the half of item 3
-and item 4 that can land without the rewrite.
+Lane D. `T-Launch`, launch-gated, critical path. Dependencies: WP-46, WP-47 and
+WP-48, none of which has merged, so the README rewrite (items 1, 2 and 5) and the
+launch report (item 7) are not in reach of this branch. The two gates that pin
+the README push back against drift in the meantime, and they are the half of
+item 3 and item 4 that can land without the rewrite.
 
 | Gate | Reads | Refuses | Finding |
 |---|---|---|---|
-| `readme-definition-block-is-verbatim` | `README.md` lines 1 to 14, `README.tr.md` lines 1 to 15, as bytes with LF endings | any change to the block against the pinned SHA-256, including a CRLF rewrite | KR-21, section 1.3 item 8: the definition is a decision, not an edit |
-| `readme-has-no-placeholders` | both READMEs, every line, fenced blocks included | a `{{...}}` slot that `.github/readme-placeholders-baseline.txt` does not record, a recorded slot that is gone, and a `TODO`, `TBD` or `FIXME` marker (never recorded) | section 1.3 item 8: an unfilled value reads as a measurement |
+| `readme-definition-block-is-verbatim` | `README.md` lines 1 to 14 and `README.tr.md` lines 1 to 15, as bytes with LF endings | any change to the block against the pinned SHA-256, a CRLF rewrite included | KR-21, section 1.3 item 8: the definition is a decision, not an edit |
+| `readme-has-no-placeholders` | both READMEs, every line, fenced blocks included | a `{{...}}` slot that `.github/readme-placeholders-baseline.txt` does not record, a recorded slot that has gone, and a `TODO`, `TBD` or `FIXME` marker (never recorded) | section 1.3 item 8: an unfilled value reads as a measurement |
 
 The digests are the directive's: `dd9be520...f063467` for `README.md` and
 `c883e001...c903fe` for `README.tr.md`. The gate computes SHA-256 in
 `xtask/gates/src/sha256.rs`, so the gate crate gains no dependency for the
 question. Both digests were measured on the live tree before the gate was
-written, and the README change in this branch is below the pinned block, so the
+written, and this branch's README change sits below the pinned block, so the
 digests still hold.
 
 `readme_claims_are_wired` (item 4, second half) is not landed. Its rule is that
 a README sentence claiming the system works names a test that exists and a
 caller or path. Measured against the live prose, the verb reader fires on a
-subjunctive ("once verified, the commitment enters the `GlobalBlockHeader`"), on
-the continuation line of a wrapped paragraph, and on file-name table rows:
-twenty findings on `README.md` and two on `README.tr.md`, none of them the
-sentence the gate exists to catch. The alternatives are to baseline them, which
-is the softening the directive forbids, or to rewrite those twenty sentences,
-which is items 1 and 2 of this same package and belongs with the Appendix A
-text. The gate ships with the rewrite.
+subjunctive ("Once verified, the commitment enters the `GlobalBlockHeader`"), on
+the continuation line of a wrapped paragraph, and on the rows of a file-name
+table: twenty findings on `README.md` and two on `README.tr.md`, none of them
+the sentence the gate exists to catch. The alternatives are to baseline them,
+which is the softening the directive forbids, or to rewrite those sentences,
+which is items 1 and 2 of this same package. The gate ships with the rewrite.
 
-## WP-42 (İP-42): CI, gates and supply chain
+## WP-42: CI, gates and supply chain
 
 `no-float-in-consensus-paths` and `workflows-cover-every-workspace` are already
 in flight on PR #24, written against a `syn` AST and wired in `ci.yml`. That is
@@ -49,6 +48,6 @@ workflow builds either. The root `cargo build`, `cargo test --workspace` and
 `.sol` files beside them. `solidity.yml` gains the `contract-crates` job, one
 matrix entry per crate: format, clippy `-D warnings`, build and test.
 
-`solidity.yml` is not a lock path of WP-42 as the card writes it (the card locks
-`.github/workflows/`, which is a superset and which no live PR holds), and the
-job is additive: it names a workspace no existing job names.
+`solidity.yml` is inside WP-42's `.github/workflows/` lock path, which no live
+pull request holds, and the job is additive: it names a workspace that no
+existing job names.
