@@ -541,21 +541,32 @@ fn uel_abi_partial_request_write_is_not_retried() {
     let worker = thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("first connection");
         let hello = read_frame(&mut stream).expect("hello");
-        write_frame(&mut stream, &pb::Envelope {
-            abi_version: ABI_VERSION,
-            request_id: hello.request_id,
-            body: Some(pb::envelope::Body::Hello(pb::Hello { ee: 1 })),
-        }).expect("hello reply");
+        write_frame(
+            &mut stream,
+            &pb::Envelope {
+                abi_version: ABI_VERSION,
+                request_id: hello.request_id,
+                body: Some(pb::envelope::Body::Hello(pb::Hello { ee: 1 })),
+            },
+        )
+        .expect("hello reply");
         let request = read_frame(&mut stream).expect("first request");
-        write_frame(&mut stream, &pb::Envelope {
-            abi_version: ABI_VERSION,
-            request_id: request.request_id,
-            body: Some(pb::envelope::Body::ValidateDeployResponse(pb::ValidateDeployResponse {
-                result: Some(pb::validate_deploy_response::Result::Info(pb::CodeInfo {
-                    code_hash: vec![0; 32], abi_tag: "mock/1".into(),
-                })),
-            })),
-        }).expect("first response");
+        write_frame(
+            &mut stream,
+            &pb::Envelope {
+                abi_version: ABI_VERSION,
+                request_id: request.request_id,
+                body: Some(pb::envelope::Body::ValidateDeployResponse(
+                    pb::ValidateDeployResponse {
+                        result: Some(pb::validate_deploy_response::Result::Info(pb::CodeInfo {
+                            code_hash: vec![0; 32],
+                            abi_tag: "mock/1".into(),
+                        })),
+                    },
+                )),
+            },
+        )
+        .expect("first response");
         // Read a prefix and close while a large frame is still being sent.
         let mut prefix = [0u8; 32];
         stream.read_exact(&mut prefix).expect("request prefix");
@@ -567,12 +578,23 @@ fn uel_abi_partial_request_write_is_not_retried() {
     });
 
     let mut client = EeClient::new(&path, EeId::EVM).with_timeout(Duration::from_millis(300));
-    client.validate_deploy(b"first").expect("transport").expect("valid");
+    client
+        .validate_deploy(b"first")
+        .expect("transport")
+        .expect("valid");
     assert!(client.validate_deploy(&vec![7; 8 * 1024 * 1024]).is_err());
     assert!(!client.is_connected());
-    assert!(connected_rx.try_recv().is_err(), "failed request was retried");
-    client.validate_deploy(b"next").expect("reconnect").expect("valid");
-    connected_rx.recv_timeout(Duration::from_secs(1)).expect("new connection");
+    assert!(
+        connected_rx.try_recv().is_err(),
+        "failed request was retried"
+    );
+    client
+        .validate_deploy(b"next")
+        .expect("reconnect")
+        .expect("valid");
+    connected_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("new connection");
     drop(client);
     worker.join().expect("worker");
     std::fs::remove_file(path).expect("remove socket");
