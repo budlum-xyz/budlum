@@ -119,6 +119,12 @@ const EXEMPT_FUNCS: &[(&str, &str, &str)] = &[
         "agents_by_trust_score_permille",
         "the one quantisation step that keeps the float off every boundary below",
     ),
+    (
+        "src/storage/bud3/placement.rs",
+        "log2_fixed_point_is_exact_on_powers_and_close_elsewhere",
+        "the card exempts the placement tool: this test measures i64 fixed point \
+         against an f64 reference, which is the measurement, not the placement",
+    ),
 ];
 
 /// A scan that walked fewer files than this is vacuous and must fail.
@@ -140,26 +146,42 @@ pub struct Finding {
     pub text: String,
 }
 
-/// Drop every `#[cfg(test)]`-gated item, by brace depth.
+/// Blank every `#[cfg(test)]`-gated item, and only those, by brace depth.
 ///
-/// The three spellings the tree uses are the same rule: `#[cfg(test)]`,
-/// `#[cfg(all(test, unix))]` and `#[cfg(any(test, feature = "x"))]`.
+/// # The two spellings that made the first version wrong
+///
+/// 1. **`#[cfg(test)]` on a `use` or a `const` hides nothing.** The attribute
+///    gates the item beneath it, and that item is one line. The first version
+///    treated `#[cfg(test)]` as "everything until the next `;`", so
+///    `#[cfg(test)] use foo::Bar;` followed by a real `pub fn` blanked the
+///    function too - a production float directly under such a `use` was
+///    invisible. The rule below distinguishes "the item ends at this `;`" from
+///    "the item is a block", which is the difference the attribute actually
+///    makes.
+/// 2. **`#[cfg(all(test, unix))]` is a test item; `#[cfg(any(test, feature))]`
+///    is not.** `all` narrows to builds where every clause holds, so
+///    `all(test, unix)` is test-only and must be blanked. `any` widens, so
+///    `any(test, feature = "x")` is built in production whenever the feature is
+///    on, and blanking it would hide production code. The first version treated
+///    `any(test` as test-only, which is a blind spot, not an exemption.
 fn strip_test_items(lines: &[String]) -> Vec<String> {
     let mut out = Vec::with_capacity(lines.len());
     let mut i = 0usize;
     while i < lines.len() {
         let t = lines[i].trim();
-        let gated = t.starts_with("#[cfg(test)]")
-            || t.starts_with("#[cfg(all(test")
-            || t.starts_with("#[cfg(any(test");
-        if !gated {
+        // `all(test, ...)` is test-only. `any(test, ...)` is not, and a bare
+        // `test` clause is not.
+        let default_off = t == "#[cfg(test)]" || t.starts_with("#[cfg(all(test");
+        let default_on = t.starts_with("#[cfg(any(");
+        if !default_off && !default_on {
             out.push(lines[i].clone());
             i += 1;
             continue;
         }
-        // The attribute counts as a line that carries no code.
         out.push(String::new());
         i += 1;
+        // The gated item: one line when it ends in `;` before any `{`, a brace
+        // block otherwise.
         let mut depth = 0i32;
         let mut started = false;
         while i < lines.len() {
@@ -171,9 +193,16 @@ fn strip_test_items(lines: &[String]) -> Vec<String> {
                     depth -= 1;
                 }
             }
-            let ends_here = started && depth <= 0;
             let single_line = !started && lines[i].trim_end().ends_with(';');
-            out.push(String::new());
+            let ends_here = started && depth <= 0;
+            if default_off || (!default_off && !default_on) {
+                // Test-only: the item is blanked whatever its shape.
+                out.push(String::new());
+            } else {
+                // Built in production: keep the text, because a float in it is
+                // a real float on the consensus path.
+                out.push(lines[i].clone());
+            }
             i += 1;
             if ends_here || single_line {
                 break;
@@ -450,6 +479,49 @@ fn staged_canaries(dir: &Path) -> Result<(), String> {
     }
     std::fs::remove_file(dir.join("src/consensus/floaty.rs")).map_err(|e| e.to_string())?;
 
+    // 1b. A `#[cfg(test)]` on a `use` hides the use, not the function under
+    //     it. The first version blanked both and lost a production float; this
+    //     stages exactly that shape.
+    std::fs::write(
+        dir.join("src/consensus/after_use.rs"),
+        "#[cfg(test)]\nuse std::f64::consts::PI;\n\
+         pub fn share(a: u64, b: u64) -> f64 {\n    a as f64 / b as f64\n}\n",
+    )
+    .map_err(|e| e.to_string())?;
+    let leaked = check(dir);
+    if !matches!(leaked, Ok((ref f, _)) if !f.is_empty()) {
+        return Err(String::from(
+            "canary: a float under `#[cfg(test)] use` was hidden",
+        ));
+    }
+    std::fs::remove_file(dir.join("src/consensus/after_use.rs")).map_err(|e| e.to_string())?;
+
+    // 1c. `all(test, unix)` is test-only and blanked; `any(test, feature)` is
+    //     built in production, so a float inside it is reported.
+    std::fs::write(
+        dir.join("src/consensus/cfg_forms.rs"),
+        "#[cfg(all(test, unix))]\nmod unix_tests {\n    fn x() -> f64 { 1.0 }\n}\n",
+    )
+    .map_err(|e| e.to_string())?;
+    let clean = check(dir).map_err(|e| format!("canary: all(test) failed: {e}"))?;
+    if !clean.0.is_empty() {
+        return Err(format!(
+            "canary: `all(test, unix)` was not blanked: {:?}",
+            clean.0
+        ));
+    }
+    std::fs::write(
+        dir.join("src/consensus/cfg_forms.rs"),
+        "#[cfg(any(test, feature = \"wide\"))]\npub fn ratio() -> f64 { 0.5 }\n",
+    )
+    .map_err(|e| e.to_string())?;
+    let flagged = check(dir);
+    if !matches!(flagged, Ok((ref f, _)) if !f.is_empty()) {
+        return Err(String::from(
+            "canary: `any(test, feature)` was blanked, hiding production code",
+        ));
+    }
+    std::fs::remove_file(dir.join("src/consensus/cfg_forms.rs")).map_err(|e| e.to_string())?;
     // 2. A float in a test module is not a finding.
     std::fs::write(
         dir.join("src/consensus/tested.rs"),
