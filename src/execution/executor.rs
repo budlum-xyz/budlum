@@ -166,6 +166,33 @@ fn is_ai_layer_transaction(tx_type: &TransactionType) -> bool {
     )
 }
 
+/// The doors that only unwind state the layer already holds.
+///
+/// Closing a layer's entry must not close its exit. Until WP-45 the AI layer
+/// had no chain-id gate at all, so bonds and escrows taken on testnet are
+/// legitimate existing state, and these six doors are the only way that value
+/// returns to its owner. Refusing them does not close a feature, it
+/// confiscates a balance - the bug `begin_unbonding` ("left the remaining bond
+/// locked for good") and the `Unstake` handler ("a 100% confiscation") already
+/// name. `AiAgentPaymentRelease` is here for the same reason: it pays the
+/// recipient for work already delivered, so blocking it strands the escrow.
+///
+/// Each door keeps its own authorisation, shape and deadline checks; this
+/// exemption only removes the chain-id refusal. New value cannot enter,
+/// because `AiOperatorBond`, `AiInferenceRequest` and `AiAgentPayment` stay
+/// closed. `a_bond_taken_before_the_closure_can_still_leave_testnet` is proof.
+fn is_ai_layer_exit(tx_type: &TransactionType) -> bool {
+    matches!(
+        tx_type,
+        TransactionType::AiOperatorUnbond
+            | TransactionType::AiOperatorWithdraw
+            | TransactionType::AiFeeReclaim(_)
+            | TransactionType::AiRequestCancel(_)
+            | TransactionType::AiAgentPaymentReclaim(_)
+            | TransactionType::AiAgentPaymentRelease(_)
+    )
+}
+
 impl Executor {
     /// Apply one transaction's state effect. Admission control is NOT here:
     /// `validate_transaction` has already run over this transaction at the
@@ -298,7 +325,12 @@ impl Executor {
         // the seventeen arms: an arm added later is closed by default, and
         // `is_ai_layer_transaction` is the single place that has to learn
         // about it.
-        if is_ai_layer_transaction(&tx.tx_type) && !ai_layer_enabled(tx.chain_id) {
+        // The exit doors are exempt: value that entered while the layer was
+        // ungated must still be able to leave (see `is_ai_layer_exit`).
+        if is_ai_layer_transaction(&tx.tx_type)
+            && !is_ai_layer_exit(&tx.tx_type)
+            && !ai_layer_enabled(tx.chain_id)
+        {
             return Err(BudlumError::validation(
                 "ai_layer_testnet_closed",
                 "the on-chain AI inference layer is closed on this chain id until BLG-059..062 are closed and the VL-1 lottery, commit-reveal and integer ranking are wired (WP-45)",
@@ -4472,6 +4504,12 @@ mod tests {
         let who = Address::from([24u8; 32]);
         for chain_id in [mainnet, testnet, 999_999] {
             for door in ai_layer_doors(who) {
+                // The exit doors are exempt on purpose: they only return value
+                // that entered while the layer was ungated. They are pinned by
+                // `a_bond_taken_before_the_closure_can_still_leave_testnet`.
+                if is_ai_layer_exit(&door) {
+                    continue;
+                }
                 let mut state = AccountState::new();
                 state.add_balance(&who, 1_000_000);
                 let tx = Transaction::new_with_chain_id(
