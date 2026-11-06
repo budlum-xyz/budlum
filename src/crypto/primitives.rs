@@ -1277,6 +1277,90 @@ fn keypair_generate_does_not_leak_public_key_via_println() {
     }
 }
 
+/// BLG-200: a BLS key pair whose secret is zero has the identity point as its
+/// public key, and that point verifies every signature and aggregates into any
+/// set without changing it. Both constructors must refuse it.
+///
+/// `from_seed` already did; `from_bytes` refused only the all-zero *bytes*,
+/// which is a weaker test than "reduces to the zero scalar". The cases below
+/// cover the seed path, the byte path and the pairing check that catches a
+/// mismatched public half.
+///
+/// Canary: drop the `sk == Scalar::zero()` guard in `from_seed` and the
+/// all-zero seed produces a key pair instead of an error.
+#[cfg(test)]
+mod blg_200_bls_integrity_tests {
+    use crate::crypto::primitives::BlsKeypair;
+
+    #[test]
+    fn blg_200_a_zero_scalar_seed_is_refused() {
+        assert!(
+            BlsKeypair::from_seed(&[0u8; 64]).is_err(),
+            "the all-zero seed reduces to the zero scalar"
+        );
+        // A seed equal to the group order is the same scalar as zero with
+        // different bytes, and `zero_seed_is_refused` covers that reduction.
+        // The point here is the seed that is zero in every byte.
+        let mut one = [0u8; 64];
+        one[0] = 1;
+        assert!(
+            BlsKeypair::from_seed(&one).is_ok(),
+            "the refusal must be about the zero scalar, not a ban on seeds"
+        );
+    }
+
+    #[test]
+    fn blg_200_a_zero_secret_key_file_is_refused() {
+        // 32 zero bytes of secret, then a well-formed public half: the old
+        // shape refused this only because the public half could not be the
+        // identity point, not because it looked at the scalar.
+        let good = BlsKeypair::generate().expect("bls key");
+        let mut bytes = good.to_bytes();
+        bytes[..32].fill(0);
+        let err = BlsKeypair::from_bytes(&bytes).expect_err("a zero secret is refused");
+        assert!(
+            format!("{err}").contains("zero"),
+            "the refusal must name the zero scalar: {err}"
+        );
+        // A short file is a different refusal, and it must not be the same one.
+        assert!(BlsKeypair::from_bytes(&bytes[..127]).is_err());
+    }
+
+    #[test]
+    fn blg_200_a_public_half_that_does_not_match_the_secret_is_refused() {
+        let a = BlsKeypair::generate().expect("bls a");
+        let b = BlsKeypair::generate().expect("bls b");
+        let mut bytes = a.to_bytes();
+        // Splice b's public half onto a's secret half.
+        bytes[32..].copy_from_slice(&b.public_key);
+        let err = BlsKeypair::from_bytes(&bytes).expect_err("a mismatched half is refused");
+        assert!(
+            format!("{err}").contains("does not match"),
+            "the refusal must name the mismatch: {err}"
+        );
+    }
+
+    /// The other half of the finding: the verifier refuses a signature that is
+    /// the identity point, so an "aggregate" of zero signatures cannot be
+    /// presented as a quorum.
+    #[test]
+    fn blg_200_an_identity_signature_is_refused_by_the_verifier() {
+        let key = BlsKeypair::generate().expect("bls key");
+        let message = b"BLG-200 identity signature probe";
+        let good = crate::chain::finality::sign_bls(&key.secret_key, message);
+        crate::chain::finality::verify_bls_sig(&key.public_key, message, &good)
+            .expect("the honest signature verifies");
+
+        // The compressed encoding of the G1 identity point: the compression
+        // flag with an all-zero x, which is how the crate spells `O`.
+        let mut identity = [0u8; 48];
+        identity[0] = 0xc0;
+        let err = crate::chain::finality::verify_bls_sig(&key.public_key, message, &identity)
+            .expect_err("an identity signature must not verify");
+        assert!(err.contains("identity"), "{err}");
+    }
+}
+
 #[test]
 fn bls_from_bytes_roundtrip_and_integrity() {
     let kp = BlsKeypair::generate().expect("generate");
@@ -1344,4 +1428,139 @@ fn test_bls_proof_of_possession() {
         &wrong_key,
         DEFAULT_CHAIN_ID
     ));
+}
+
+/// BLG-009: the ML-DSA surface carries a registered FIPS 204 context string and
+/// an explicit scheme identity.
+///
+/// Two halves, and both are load-bearing:
+///
+/// * **Context.** A signature made for one surface must not verify on another
+///   even when the payload bytes are identical. FIPS 204 section 5.2 puts the
+///   context inside the signed message, so the separation is cryptographic, not
+///   a convention. An empty context is refused outright.
+/// * **Scheme identity.** The 1952-byte ML-DSA-65 key and the 2592-byte
+///   ML-DSA-87 key must not be interchangeable: the registry names the scheme,
+///   its length and its status, and a chain reads that registry rather than
+///   trusting a length.
+///
+/// Canary: pass `ctx::BLOCK_V6` where `ctx::TX_V7` is expected, or accept an
+/// empty context, and the corresponding assertion below fails.
+#[cfg(all(test, feature = "pq-ml-dsa"))]
+mod blg_009_pq_identity_tests {
+    use crate::crypto::{ctx, pq, primitives::PqKeyPair, scheme::SchemeId};
+
+    const MESSAGE: &[u8] = b"BLG-009 identity probe";
+
+    fn keypair() -> PqKeyPair {
+        PqKeyPair::from_bytes(
+            &pq::ml_dsa_public_key(SchemeId::ML_DSA_65, &[7u8; 32]).expect("public key"),
+            &[7u8; 32],
+        )
+        .expect("a paired ML-DSA-65 key")
+    }
+
+    #[test]
+    fn blg_009_a_context_is_part_of_the_signature() {
+        let key = keypair();
+        let tx = key.sign(ctx::TX_V7, MESSAGE).expect("sign under TX_V7");
+        PqKeyPair::verify(key.public_key_bytes(), ctx::TX_V7, MESSAGE, &tx)
+            .expect("the same context verifies");
+
+        // The same signature under another registered context, over the same
+        // bytes, is a different message to FIPS 204.
+        for other in [ctx::BLOCK_V6, ctx::QC_V2, ctx::KEY_BINDING_V1] {
+            assert!(
+                PqKeyPair::verify(key.public_key_bytes(), other, MESSAGE, &tx).is_err(),
+                "a TX_V7 signature must not verify under {}",
+                String::from_utf8_lossy(other)
+            );
+        }
+        // And under a different payload in the right context, for completeness.
+        assert!(PqKeyPair::verify(key.public_key_bytes(), ctx::TX_V7, b"other", &tx).is_err());
+    }
+
+    #[test]
+    fn blg_009_an_empty_context_is_refused_on_both_sides() {
+        let key = keypair();
+        let err = key
+            .sign(b"", MESSAGE)
+            .expect_err("signing with no context is refused");
+        assert!(format!("{err}").contains("context"), "{err}");
+
+        let signed = key.sign(ctx::TX_V7, MESSAGE).expect("sign");
+        let err = PqKeyPair::verify(key.public_key_bytes(), b"", MESSAGE, &signed)
+            .expect_err("verifying with no context is refused");
+        assert!(format!("{err}").contains("context"), "{err}");
+    }
+
+    #[test]
+    fn blg_009_the_scheme_identity_names_its_length_and_status() {
+        let info = SchemeId::ML_DSA_65.info().expect("a registered scheme has an entry");
+        assert_eq!(info.public_key_len, Some(1952));
+        assert_eq!(SchemeId::ML_DSA_87.info().expect("entry").public_key_len, Some(2592));
+        assert_eq!(crate::crypto::primitives::PQ_SCHEME_ID, "ml-dsa-65");
+        assert_eq!(
+            crate::crypto::primitives::pq_public_key_len(),
+            1952,
+            "this build's key length comes from the registry, not a literal"
+        );
+
+        // A key of the other scheme's length is refused, so the two are not
+        // interchangeable by length alone.
+        let wrong = vec![0u8; 2592];
+        assert!(PqKeyPair::validate_public_key(&wrong).is_err());
+        let right = pq::ml_dsa_public_key(SchemeId::ML_DSA_65, &[1u8; 32]).expect("key");
+        PqKeyPair::validate_public_key(&right).expect("a 1952-byte key is this build's scheme");
+    }
+
+    #[test]
+    fn blg_009_the_registry_decides_whether_a_scheme_verifies() {
+        // A chain reads its own registry. A scheme whose status is not
+        // `verifiable` must be refused even with a valid signature, which is
+        // how a chain that never launched ML-DSA-65 keeps rejecting it.
+        let key = keypair();
+        let signature = key.sign(ctx::TX_V7, MESSAGE).expect("sign");
+        let genesis = crate::crypto::scheme::SchemeStatusRegistry::genesis();
+        assert!(
+            genesis.scheme_verifies(SchemeId::ML_DSA_65),
+            "the genesis registry verifies this build's scheme"
+        );
+        // A registry that has disabled the scheme refuses the same valid
+        // signature, and the refusal names the scheme rather than a length.
+        // The entry list is fixed-width and counted, so "not verifiable" is a
+        // status byte rather than a missing row.
+        let (mut schemes, suites) = genesis.entries();
+        let index = schemes
+            .iter()
+            .position(|(id, _)| *id == SchemeId::ML_DSA_65.0)
+            .expect("the genesis registry lists this build's scheme");
+        schemes[index].1 = crate::crypto::scheme::SchemeStatus::Disabled
+            .to_byte();
+        let disabled = crate::crypto::scheme::SchemeStatusRegistry::from_entries(&schemes, &suites)
+            .expect("the entry list keeps its shape");
+        let err = PqKeyPair::verify_in(
+            &disabled,
+            key.public_key_bytes(),
+            ctx::TX_V7,
+            MESSAGE,
+            &signature,
+        )
+        .expect_err("a scheme the chain disabled is refused");
+        let text = format!("{err}").to_lowercase();
+        assert!(text.contains("not verifiable") || text.contains("scheme"), "{err}");
+    }
+
+    #[test]
+    fn blg_009_every_registered_context_is_non_empty_and_within_the_cap() {
+        assert!(!ctx::TABLE.is_empty(), "the table must not be empty");
+        for entry in ctx::TABLE {
+            assert!(!entry.is_empty(), "an empty context would be refused anyway");
+            assert!(
+                entry.len() <= ctx::MAX_CONTEXT_LEN,
+                "{} exceeds the FIPS 204 cap",
+                String::from_utf8_lossy(entry)
+            );
+        }
+    }
 }

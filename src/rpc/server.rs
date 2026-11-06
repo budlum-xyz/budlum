@@ -7370,6 +7370,63 @@ mod tests {
         assert_eq!(done.priority_fee, 0);
     }
 
+    /// BLG-032: the fee a `Prepare` template is given must be one the chain
+    /// will accept, not the `fee = 0` the template struct was built with.
+    ///
+    /// The finding is that 14 `Prepare` handlers returned `Transaction::new(..)`
+    /// verbatim, so the wallet signed a transaction with nonce 0 and fee 0 and
+    /// the node refused it at admission for exactly the two fields the RPC had
+    /// left at their defaults. The canary is the fixture: the template starts at
+    /// `fee = 500, max_fee = 500, nonce = 0` and the chain reports a required
+    /// fee of 13 and a nonce of 7, so an unwired template keeps 500/0.
+    ///
+    /// This is the binding half; `prepare_templates_carry_valid_nonce_and_fee`
+    /// above is the pre-existing behavioural test.
+    #[tokio::test]
+    async fn blg_032_a_prepared_template_is_admissible_by_the_chain() {
+        use crate::chain::chain_actor::ChainCommand;
+        let (sender, mut rx) = tokio::sync::mpsc::channel(4);
+        let chain = ChainHandle::new(sender);
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    ChainCommand::GetNonce(_, reply) => {
+                        let _ = reply.send(7);
+                    }
+                    ChainCommand::GetRequiredFee(_, reply) => {
+                        let _ = reply.send(13);
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        // Every template starts with the two fields the finding names unset,
+        // plus a fee that is neither the floor nor zero: if `finish_template`
+        // is not on the path, the stale 500 survives and this fails.
+        let mut stale = crate::core::transaction::Transaction::new(
+            Address::from([1; 32]),
+            Address::zero(),
+            0,
+            Vec::new(),
+        );
+        stale.fee = 500;
+        stale.max_fee = 500;
+        stale.nonce = 0;
+
+        let prepared = finish_template(&chain, stale).await.expect("template");
+        assert_eq!(prepared.nonce, 7, "the sender's next nonce, not the default 0");
+        assert_eq!(prepared.fee, 13, "the admission floor, not the stale 500");
+        assert_eq!(
+            prepared.max_fee, prepared.fee,
+            "flat-fee mode requires max_fee == fee"
+        );
+        assert_eq!(
+            prepared.priority_fee, 0,
+            "flat-fee mode rejects any priority fee"
+        );
+    }
+
     /// A value that cannot be encoded is an explicit error, not a
     /// `null` that reads as "absent".
     #[test]
@@ -7803,6 +7860,185 @@ mod tests {
             Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)))
         );
         assert!(is_ip_allowed(&config, &req));
+    }
+}
+
+/// BLG-099: the API-key comparison must not leak key length.
+///
+/// The earlier shape compared the two buffers and, on a length mismatch,
+/// dummy-compared `b` against itself (`a_b.ct_eq(a_b)`). Those are the same
+/// pointer, so LLVM at `-C opt-level=3` can fold the whole loop away and the
+/// mismatch path becomes measurably faster than the match path; the `/t/ = 45,78`
+/// timing ratio in the finding is that gap. The rule now has a correctness
+/// half and a shape half, and the shape half is what keeps the fold away.
+#[cfg(test)]
+mod blg_099_api_key_comparison_tests {
+    use super::constant_time_eq_str;
+
+    /// Correctness: every one of these must answer exactly `<`, `==` and `>`
+    /// the way `str::eq` would, including the empty string on both sides.
+    #[test]
+    fn blg_099_the_comparison_is_a_correct_equality() {
+        for (a, b) in [
+            ("secret-value", "secret-value"),
+            ("secret-value", "secret-valuf"),
+            ("secret-value", "secret-valu"),
+            ("secret-value", "x"),
+            ("x", "secret-value"),
+            ("", ""),
+            ("", "x"),
+            ("x", ""),
+            ("0123456789abcdef", "0123456789abcdee"),
+        ] {
+            assert_eq!(
+                constant_time_eq_str(a, b),
+                a == b,
+                "a={a:?} b={b:?} must answer like `==`"
+            );
+        }
+    }
+
+    /// The work depends on the expected value's length, never on the
+    /// candidate's. A short candidate must still walk the whole expected
+    /// buffer: with the self-comparison shape the loop had no second buffer to
+    /// walk, and the assembler removed it.
+    ///
+    /// This is asserted as a shape, not a timer: the function is
+    /// `black_box`-ed on every accumulated byte, so the loop is opaque to the
+    /// optimiser, and the observable consequence is that one byte of the
+    /// candidate changes the answer while a shorter candidate is still refused.
+    #[test]
+    fn blg_099_a_length_mismatch_is_refused_without_a_self_comparison() {
+        let expected = "the-expected-api-key-of-some-length";
+        // Every truncation is refused, including the ones that agree on their
+        // whole prefix: a prefix match must not be accepted.
+        for cut in 0..expected.len() {
+            assert!(
+                !constant_time_eq_str(&expected[..cut], expected),
+                "a {cut}-byte prefix must not be accepted as the key"
+            );
+        }
+        // And an extension is refused too: length is folded into the
+        // accumulator, it is not a prefix rule.
+        let longer = format!("{expected}x");
+        assert!(!constant_time_eq_str(&longer, expected));
+        assert!(constant_time_eq_str(expected, expected));
+    }
+}
+
+/// BLG-029: the client identity behind a trusted proxy is the address the
+/// proxy itself appended, and the IP quota is keyed on that identity.
+///
+/// The finding has two halves and both were exploitable on their own:
+///
+///  * `extract_client_ip` trusted the **leftmost** `X-Forwarded-For` entry, so
+///    a client could set the header and pick its own identity, walk straight
+///    through an `allowed_ips` list and mint a fresh quota per request.
+///  * the rate table evicted FIFO, so an attacker rotating addresses could push
+///    a saturated address out of the table and buy it a fresh window.
+///
+/// A test that only checked the header parse would stay green if the quota
+/// went back to a shared bucket, so this one drives both through one config.
+#[cfg(test)]
+mod blg_029_client_identity_tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    fn request_with_remote(remote: SocketAddr) -> HttpRequest<()> {
+        let mut req = HttpRequest::builder().uri("/").body(()).unwrap();
+        req.extensions_mut().insert(remote);
+        req
+    }
+
+    #[test]
+    fn blg_029_the_quota_is_keyed_on_the_proxy_appended_address() {
+        let proxy = SocketAddr::from(([127, 0, 0, 1], 9000));
+        let config = RpcSecurityConfig {
+            rate_limit_per_minute: Some(1),
+            allowed_ips: vec!["203.0.113.7".into()],
+            trusted_proxies: vec!["127.0.0.1".into()],
+            ..Default::default()
+        };
+        let per_ip_rates = Arc::new(Mutex::new(HashMap::new()));
+
+        // The client prepends a forged address and the proxy appends the real
+        // one. The forged entry must not be the identity.
+        let mut spoofed = request_with_remote(proxy);
+        spoofed.headers_mut().insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("203.0.113.7, 198.51.100.9"),
+        );
+        assert_eq!(
+            extract_client_ip(&config, &spoofed),
+            Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9))),
+            "the rightmost entry is the one the trusted proxy appended"
+        );
+        // The forged entry would have passed the allow-list; the real one does
+        // not, which is the point of the finding.
+        assert!(!is_ip_allowed(&config, &spoofed));
+
+        // The quota is keyed on the real identity: one request is admitted and
+        // the second from the same client is refused.
+        let real = extract_client_ip(&config, &spoofed);
+        assert!(is_per_ip_rate_limited(&config, &per_ip_rates, real));
+        assert!(!is_per_ip_rate_limited(&config, &per_ip_rates, real));
+
+        // A different client behind the same proxy still has its own quota:
+        // the table is per identity, not per proxy.
+        let other = Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10)));
+        assert!(is_per_ip_rate_limited(&config, &per_ip_rates, other));
+    }
+
+    /// The other half: filling the table does not evict a client that is at its
+    /// quota, so a rotation cannot buy a saturated address a fresh window.
+    #[test]
+    fn blg_029_a_full_table_evicts_the_quietest_client_not_the_busiest() {
+        let config = RpcSecurityConfig {
+            rate_limit_per_minute: Some(2),
+            ..Default::default()
+        };
+        let per_ip_rates = Arc::new(Mutex::new(HashMap::new()));
+        let saturated = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let quiet = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let now = Instant::now();
+        {
+            let mut rates = per_ip_rates.lock().unwrap();
+            let mut saturated_window = VecDeque::new();
+            saturated_window.push_back(now - Duration::from_secs(10));
+            saturated_window.push_back(now - Duration::from_secs(5));
+            rates.insert(saturated, saturated_window);
+            let mut quiet_window = VecDeque::new();
+            quiet_window.push_back(now - Duration::from_secs(40));
+            rates.insert(quiet, quiet_window);
+            // The rest of the table, so the ceiling is reached on the next
+            // unknown address.
+            for i in 0..(MAX_TRACKED_RPC_CLIENTS - 2) {
+                let ip = IpAddr::V4(Ipv4Addr::new(
+                    11,
+                    ((i >> 8) & 0xff) as u8,
+                    (i & 0xff) as u8,
+                    1,
+                ));
+                let mut window = VecDeque::new();
+                window.push_back(now - Duration::from_secs(20) + Duration::from_millis(i as u64));
+                rates.insert(ip, window);
+            }
+        }
+
+        let newcomer = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+        assert!(
+            is_per_ip_rate_limited(&config, &per_ip_rates, Some(newcomer)),
+            "the newcomer takes the quiet client's slot"
+        );
+        let rates = per_ip_rates.lock().unwrap();
+        assert!(
+            rates.contains_key(&saturated),
+            "a client at its quota must keep its window: evicting it hands it a fresh quota"
+        );
+        assert!(
+            !rates.contains_key(&quiet),
+            "the quietest client is the one evicted"
+        );
     }
 }
 
