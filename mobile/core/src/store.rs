@@ -102,7 +102,8 @@ impl ShareStore {
     /// # Errors
     ///
     /// [`CoreError`] when the share would exceed the quota, or when the
-    /// placed leaf does not match the symbol.
+    /// placed leaf does not match the symbol, the assignment conflicts with
+    /// an already stored symbol, or the local id space is exhausted.
     pub fn accept(
         &mut self,
         assigned: AssignedShare,
@@ -133,8 +134,23 @@ impl ShareStore {
                 "the assigned position, ESI and symbol must match the placed leaf",
             ));
         }
+        if self.shares.values().any(|share| {
+            share.object == assigned.object
+                && share.segment == assigned.segment
+                && (share.position == assigned.position || share.esi == assigned.esi)
+        }) {
+            return Err(CoreError::new(
+                "mobile_share_already_stored",
+                "this object's segment already has a symbol at that position or ESI",
+            ));
+        }
         let id = self.next_id;
-        self.next_id = self.next_id.saturating_add(1);
+        let next_id = id.checked_add(1).ok_or_else(|| {
+            CoreError::new(
+                "mobile_share_id_exhausted",
+                "the local share identifier space is exhausted",
+            )
+        })?;
         let record = ShareRecord {
             id: ShareId(id),
             object: assigned.object,
@@ -145,6 +161,7 @@ impl ShareStore {
             placed: assigned.placed,
         };
         self.shares.insert(id, record.clone());
+        self.next_id = next_id;
         Ok(record)
     }
 
