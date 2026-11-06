@@ -102,7 +102,7 @@ continuing it here. No other branch is touched.
 | Source | Carried | Continuation here |
 |---|---|---|
 | #42, #63, #74 | `required_fee` as a state read; the directive-out-of-tree regression test | the narrow #74 version, with its "no widening" test, is used rather than the three overlapping copies |
-| #79 | the two `indexing-is-not-new` rewrites and the three rustfmt hunks | the one missing root cause (the clippy lint) is fixed here, so the whole quality job can go green |
+| #79 | the two `indexing-is-not-new` rewrites and the three rustfmt hunks, plus its gate-debt report | the one missing root cause (the clippy lint) is fixed here; the ten dead public functions and two unwired guards it named are wired here by the production admission door and the read-only repair plan (BLG-309) |
 | #86 | WP-55, 1/N live stream core and the stack audit | WP-55, 2/N: broadcast driver, gateway door and activation height |
 | #89 | WP-32, 1/N Aptos REST route table | WP-32, 2/N: the Move execution refusal surface and the named pending list |
 | #83 | WP-31, 1/N Solana namespace | WP-31, 2/N: subscription methods and their refusal semantics |

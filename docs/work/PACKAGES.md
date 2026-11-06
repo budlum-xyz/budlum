@@ -84,6 +84,8 @@ The `PRs` column is a live claim map, not a completion claim. Every PR in it is 
 | Slice | WP | Content | Commit |
 |---|---|---|---|
 | WP-42, 1/N | WP-42, WP-04 | directive out of the tree, single integrator ledgers, live stack audit | first commit |
+| WP-42, 2/N | WP-42 | four tree-attributable red causes on `main` retired with regression tests | second commit |
+| WP-42, 3/N, WP-21, WP-20 | WP-42, WP-21, WP-20 | the B.U.D. 3.0 production admission door and the read-only repair plan; both ratchets paid down by wiring (BLG-309) | third commit |
 
 ## Evidence boundary
 
