@@ -357,6 +357,8 @@ pub struct RpcServer {
     /// Dedicated Aptos REST bind address. Only the public node startup sets
     /// this; test and embedded servers keep the opt-in default of `None`.
     aptos_listener: Option<String>,
+    /// Optional full-node proxy target. `None` preserves local named refusals.
+    aptos_upstream: Option<String>,
 }
 
 /// One dedicated, loopback-only Aptos HTTP listener. It reuses the RPC
@@ -367,6 +369,7 @@ struct AptosListener {
     security: RpcSecurityConfig,
     metrics: Option<Arc<crate::core::metrics::Metrics>>,
     tls: Option<tokio_rustls::TlsAcceptor>,
+    body_limit: usize,
 }
 
 impl AptosListener {
@@ -387,6 +390,7 @@ impl AptosListener {
         );
         let tls = self.tls;
         let gateway = self.gateway;
+        let body_limit = self.body_limit;
         info!(
             "Aptos REST Server started on {local_addr} ({})",
             if tls.is_some() { "tls" } else { "plain" }
@@ -410,12 +414,10 @@ impl AptosListener {
                 let service = security.clone().layer(tower::service_fn(
                     move |mut req: HttpRequest<hyper::body::Incoming>| {
                         req.extensions_mut().insert::<SocketAddr>(remote_addr);
-                        let method = req.method().clone();
-                        let path = req.uri().path().to_string();
                         let gateway_for_request = gateway_for_service.clone();
                         async move {
                             Ok::<_, std::convert::Infallible>(
-                                gateway_for_request.handle(&method, &path).await,
+                                gateway_for_request.handle_request(req, body_limit).await,
                             )
                         }
                     },
@@ -464,6 +466,7 @@ impl RpcServer {
             metrics: None,
             tls: None,
             aptos_listener: None,
+            aptos_upstream: None,
         }
     }
 
@@ -481,6 +484,7 @@ impl RpcServer {
             metrics: None,
             tls: None,
             aptos_listener: None,
+            aptos_upstream: None,
         }
     }
 
@@ -499,6 +503,7 @@ impl RpcServer {
             metrics: None,
             tls: None,
             aptos_listener: None,
+            aptos_upstream: None,
         }
     }
 
@@ -520,6 +525,13 @@ impl RpcServer {
         self
     }
 
+    /// Proxy known Aptos routes to this full-node `/v1` URL. Validation and
+    /// HTTP-client construction happen before either listener starts.
+    pub fn with_aptos_upstream(mut self, url: String) -> Self {
+        self.aptos_upstream = Some(url);
+        self
+    }
+
     pub async fn run(self, addr: String) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use jsonrpsee::core::server::Methods;
         use jsonrpsee::server::BatchRequestConfig;
@@ -528,6 +540,10 @@ impl RpcServer {
         };
 
         validate_rpc_security_config(&self.security)?;
+        let aptos_body_limit = self
+            .security
+            .max_request_body_size
+            .ok_or("validated RPC body limit is missing")? as usize;
         let tls = self.tls.clone();
         // Wrap the combined REST/JSON-RPC service, not only jsonrpsee's inner
         // dispatcher. Otherwise the compatibility branch would bypass IP,
@@ -578,14 +594,23 @@ impl RpcServer {
             }
             aptos::validate_listener(aptos_addr)?;
         }
-        let serve_aptos_on_primary = self.aptos_listener.is_none();
-        let aptos_gateway = AptosGateway::new(self.chain.clone(), self.node.clone());
+        let serve_aptos_on_primary =
+            self.mode == RpcMode::Public && self.aptos_listener.is_none();
+        let mut aptos_gateway = AptosGateway::new(self.chain.clone(), self.node.clone());
+        if let Some(upstream) = self.aptos_upstream.as_deref() {
+            aptos_gateway = aptos_gateway.with_upstream(
+                aptos::AptosUpstream::parse(upstream).map_err(|problem| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, problem)
+                })?,
+            );
+        }
         let dedicated_aptos = self.aptos_listener.as_ref().map(|aptos_addr| AptosListener {
             addr: aptos_addr.clone(),
             gateway: aptos_gateway.clone(),
             security: self.security.clone(),
             metrics: self.metrics.clone(),
             tls: self.tls.clone(),
+            body_limit: aptos_body_limit,
         });
         // Every served method must be classified (`src/rpc/method_class.rs`).
         let methods: Methods = self.into_rpc().into();
@@ -628,15 +653,13 @@ impl RpcServer {
                         req.extensions_mut().insert::<SocketAddr>(remote_addr);
                         let is_aptos =
                             serve_aptos_on_primary && aptos::owns_path(req.uri().path());
-                        let method = req.method().clone();
-                        let path = req.uri().path().to_string();
                         let aptos_for_request = aptos_for_service.clone();
                         let mut svc = svc_builder_for_service
                             .clone()
                             .build(methods_for_service.clone(), stop_handle_for_service.clone());
                         async move {
                             if is_aptos {
-                                Ok(aptos_for_request.handle(&method, &path).await)
+                                Ok(aptos_for_request.handle_request(req, aptos_body_limit).await)
                             } else {
                                 svc.call(req).await
                             }

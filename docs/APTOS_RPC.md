@@ -1,16 +1,24 @@
 # Aptos REST compatibility
 
-WP-32, deliveries 1/N and 2/N, add the Aptos REST route table, production routing, and its dedicated listener. This is an early compatibility surface, not a claim that the Move execution environment or the Aptos SDK conformance suite is complete.
+WP-32, deliveries 1/N through 3/N, add the Aptos REST route table, production routing, its dedicated listener, and an optional full-node proxy. This is an early compatibility surface, not a claim that the Move execution environment or the Aptos SDK conformance suite is complete.
 
 ## Current listener and wire behavior
 
 The normal public node startup opens the dedicated `127.0.0.1:18549` listener from Section 8.11.1. It serves Aptos REST only; it has no JSON-RPC dispatcher. The bind must be a numeric loopback socket. A non-loopback bind, a shared JSON-RPC/Aptos address, or a bind failure stops startup instead of silently exposing or dropping the gateway.
 
-The dedicated listener reuses the RPC IP admission, authentication, CORS, rate, and TLS configuration. A bounded semaphore applies the configured connection limit. POST bodies are not read while Move is unavailable, so the refusal path does not allocate from an untrusted body. The public reverse-proxy address `https://aptos.<TESTNET_DOMAIN>/v1` still needs the WP-41 proxy configuration before it is ready.
+The dedicated listener reuses the RPC IP admission, authentication, CORS, rate, and TLS configuration. A bounded semaphore applies the configured connection limit. Without an upstream, POST bodies are not read while Move is unavailable, so the refusal path does not allocate from an untrusted body. The public reverse-proxy address `https://aptos.<TESTNET_DOMAIN>/v1` still needs the WP-41 proxy configuration before it is ready.
 
-An embedded or test `RpcServer` does not open a port implicitly. Without `with_aptos_listener`, its configured HTTP listener can route `/v1` to the same Aptos handler. Normal node startup sets the dedicated listener, so `/v1` stays off the JSON-RPC port.
+An embedded or test public `RpcServer` does not open a port implicitly. Without `with_aptos_listener`, its configured HTTP listener can route `/v1` to the same Aptos handler; operator mode never does. Normal node startup sets the dedicated listener, so `/v1` stays off the JSON-RPC port.
 
 The route table is `src/rpc/compat/aptos/mod.rs`. Like `method_class.rs`, it records the listener and effect of every method. `RpcServer::run` checks the table at startup and invokes the handler for every matching request. The tests check the directive's complete list, route matching, listener/effect consistency, response shapes, and native refusal doors.
+
+## Optional full-node proxy
+
+Setting `BUDLUM_APTOS_UPSTREAM_URL=https://fullnode.example.com/v1` forwards all 18 known routes, including the two node-health routes, to that explicitly selected Aptos full node. The URL must end in `/v1` and cannot contain credentials, a query, or a fragment. Remote upstreams require HTTPS; plain HTTP is accepted only for a numeric loopback address. An invalid URL stops listener startup. This mode serves the upstream chain's responses, not a fabricated Budlum Move ledger.
+
+The proxy preserves the request method, path, query, `Accept`, `Content-Type`, bounded body, and the upstream status and eligible response headers; local CORS policy remains authoritative. It never forwards the downstream `Authorization` or `x-api-key` credentials. Redirects are disabled, connection/request timeouts are bounded, and request and response bodies use the validated RPC body limit. An oversized request returns `413`; upstream transport or response-limit failures return `502`. Unknown paths and wrong methods still receive local `404`/`405` responses without a body read or upstream call.
+
+Without this environment variable, behavior is unchanged: the two local node reads below are served and the other 16 routes return their named refusals. Proxy mode does not replace the pinned Move worker and does not by itself establish Aptos SDK conformance.
 
 ## Served routes
 

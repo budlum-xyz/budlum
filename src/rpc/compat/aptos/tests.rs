@@ -2,10 +2,12 @@
 
 use super::{
     check_routes, classify, healthy_response, move_unavailable, node_info_response, owns_path,
-    validate_listener, Answer, Effect, Listener, RouteMatch, Verb, ENDPOINTS,
+    validate_listener, Answer, AptosUpstream, Effect, Listener, RouteMatch, Verb, ENDPOINTS,
 };
 use crate::core::block::Block;
+use http_body_util::BodyExt;
 use hyper::{Method, StatusCode};
+use jsonrpsee::server::{HttpBody, HttpRequest};
 
 const DIRECTIVE_ROUTES: &[(Verb, &str)] = &[
     (Verb::Get, "/v1"),
@@ -246,4 +248,117 @@ fn aptos_dedicated_listener_is_loopback_only() {
             "{invalid} must not open the dedicated public service"
         );
     }
+}
+
+#[test]
+fn aptos_upstream_url_is_explicit_and_transport_safe() {
+    for valid in [
+        "https://fullnode.example.com/v1",
+        "https://fullnode.example.com/v1/",
+        "http://127.0.0.1:8080/v1",
+        "http://[::1]:8080/v1",
+    ] {
+        AptosUpstream::parse(valid).unwrap_or_else(|error| panic!("{valid}: {error}"));
+    }
+    for invalid in [
+        "http://fullnode.example.com/v1",
+        "http://localhost:8080/v1",
+        "https://fullnode.example.com/",
+        "https://user:secret@fullnode.example.com/v1",
+        "https://fullnode.example.com/v1?key=secret",
+        "https://fullnode.example.com/v1#fragment",
+    ] {
+        assert!(AptosUpstream::parse(invalid).is_err(), "{invalid}");
+    }
+    let upstream = AptosUpstream::parse("https://fullnode.example.com/v1").expect("valid URL");
+    let uri: hyper::Uri = "/v1/transactions/wait_by_hash/0x01?timeout=10"
+        .parse()
+        .expect("request URI");
+    assert_eq!(
+        upstream.url_for(&uri).expect("upstream URL").as_str(),
+        "https://fullnode.example.com/v1/transactions/wait_by_hash/0x01?timeout=10"
+    );
+}
+
+#[tokio::test]
+async fn aptos_proxy_forwards_only_the_request_and_response_contract() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("upstream listener");
+    let addr = listener.local_addr().expect("upstream address");
+    let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("upstream request");
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 1024];
+        loop {
+            let read = socket.read(&mut buffer).await.expect("request bytes");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            let Some(head_end) = request.windows(4).position(|part| part == b"\r\n\r\n") else {
+                continue;
+            };
+            let content_length = String::from_utf8_lossy(&request[..head_end])
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if request.len() >= head_end + 4 + content_length {
+                break;
+            }
+        }
+        captured_tx.send(request).expect("capture request");
+        socket
+            .write_all(
+                b"HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nX-Aptos-Cursor: 7\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}",
+            )
+            .await
+            .expect("upstream response");
+    });
+
+    let upstream = AptosUpstream::parse(&format!("http://{addr}/v1")).expect("loopback upstream");
+    let request = HttpRequest::builder()
+        .method(Method::POST)
+        .uri("/v1/transactions?ledger_version=7")
+        .header("content-type", "application/json")
+        .header("content-length", "12")
+        .header("authorization", "Bearer downstream-secret")
+        .header("x-api-key", "downstream-secret")
+        .body(HttpBody::from("{\"raw\":true}"))
+        .expect("request");
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        upstream.forward(request, 1024),
+    )
+    .await
+    .expect("proxy response");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(response.headers()["x-aptos-cursor"], "7");
+    let body = response.into_body().collect().await.expect("body").to_bytes();
+    assert_eq!(body.as_ref(), b"{\"ok\":true}");
+
+    let captured = String::from_utf8(captured_rx.await.expect("captured request"))
+        .expect("UTF-8 request")
+        .to_lowercase();
+    assert!(captured.starts_with("post /v1/transactions?ledger_version=7 http/1.1"));
+    assert!(captured.contains("content-type: application/json"));
+    assert!(captured.ends_with("{\"raw\":true}"));
+    assert!(!captured.contains("authorization"));
+    assert!(!captured.contains("x-api-key"));
+}
+
+#[tokio::test]
+async fn aptos_proxy_enforces_the_streaming_request_limit_before_connecting() {
+    let upstream = AptosUpstream::parse("http://127.0.0.1:9/v1").expect("loopback URL");
+    let request = HttpRequest::builder()
+        .method(Method::POST)
+        .uri("/v1/view")
+        .body(HttpBody::from("12345"))
+        .expect("request");
+    let response = upstream.forward(request, 4).await;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }

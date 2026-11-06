@@ -9,14 +9,20 @@
 //! account model, Move resources, BCS transactions, events, or table state
 //! answer HTTP 503 and name the native Budlum door. They do not invent an
 //! Aptos-shaped answer from a different ledger. Delivery 2/N opens the
-//! dedicated loopback listener. The Move worker belongs to a later delivery.
+//! dedicated loopback listener. Delivery 3/N can explicitly forward the
+//! complete route table to an operator-selected full node; without that
+//! option the local named refusals remain unchanged. The Move worker belongs
+//! to a later delivery.
 
 use crate::chain::chain_actor::ChainHandle;
 use crate::core::block::Block;
 use crate::network::node::NodeClient;
+use http_body_util::BodyExt;
+use hyper::header::{HeaderName, ACCEPT, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE};
 use hyper::{Method, StatusCode};
-use jsonrpsee::server::{HttpBody, HttpResponse};
+use jsonrpsee::server::{HttpBody, HttpRequest, HttpResponse};
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 #[cfg(test)]
 mod tests;
@@ -393,6 +399,213 @@ fn healthy_response(syncing: bool) -> HttpResponse {
     }
 }
 
+fn proxy_error(status: StatusCode, code: &'static str, message: &str) -> HttpResponse {
+    error_response(RestError {
+        status,
+        error_code: code,
+        message: message.to_string(),
+        door: None,
+    })
+}
+
+/// An explicitly configured Aptos full node. Remote upstreams require HTTPS;
+/// plain HTTP is limited to a numeric loopback peer for tests and local
+/// deployments. Redirects stay disabled so an upstream cannot change origin.
+#[derive(Clone)]
+pub struct AptosUpstream {
+    base: reqwest::Url,
+    client: reqwest::Client,
+}
+
+impl AptosUpstream {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        let mut base = reqwest::Url::parse(value)
+            .map_err(|error| format!("Aptos upstream URL is invalid: {error}"))?;
+        if base.host_str().is_none()
+            || !base.username().is_empty()
+            || base.password().is_some()
+            || base.query().is_some()
+            || base.fragment().is_some()
+        {
+            return Err("Aptos upstream URL needs a host and no credentials, query, or fragment"
+                .to_string());
+        }
+        if base.path().trim_end_matches('/') != "/v1" {
+            return Err("Aptos upstream URL must end in /v1".to_string());
+        }
+        let loopback = base
+            .host_str()
+            .and_then(|host| {
+                let host = host
+                    .strip_prefix('[')
+                    .and_then(|host| host.strip_suffix(']'))
+                    .unwrap_or(host);
+                host.parse::<std::net::IpAddr>().ok()
+            })
+            .is_some_and(|host| host.is_loopback());
+        if base.scheme() != "https" && !(base.scheme() == "http" && loopback) {
+            return Err(
+                "Aptos upstream must use HTTPS, or HTTP only with a numeric loopback host"
+                    .to_string(),
+            );
+        }
+        base.set_path("/v1");
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| format!("Aptos upstream HTTP client: {error}"))?;
+        Ok(Self { base, client })
+    }
+
+    fn url_for(&self, uri: &hyper::Uri) -> Result<reqwest::Url, HttpResponse> {
+        let suffix = uri
+            .path_and_query()
+            .map(|value| value.as_str())
+            .unwrap_or("/v1");
+        reqwest::Url::parse(&format!("{}{suffix}", self.base.as_str())).map_err(|_| {
+            proxy_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_aptos_path",
+                "The Aptos request path is not a valid upstream URL",
+            )
+        })
+    }
+
+    async fn forward<B>(&self, req: HttpRequest<B>, body_limit: usize) -> HttpResponse
+    where
+        B: hyper::body::Body<Data = hyper::body::Bytes> + Send + Unpin + 'static,
+        B::Error: Send + 'static,
+    {
+        let (parts, mut incoming) = req.into_parts();
+        let url = match self.url_for(&parts.uri) {
+            Ok(url) => url,
+            Err(response) => return response,
+        };
+        if parts
+            .headers
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .is_some_and(|length| length > body_limit as u64)
+        {
+            return proxy_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "aptos_request_too_large",
+                "The Aptos request body exceeds the listener limit",
+            );
+        }
+        let mut body = Vec::new();
+        while let Some(frame) = incoming.frame().await {
+            let frame = match frame {
+                Ok(frame) => frame,
+                Err(_) => {
+                    return proxy_error(
+                        StatusCode::BAD_REQUEST,
+                        "aptos_request_body_error",
+                        "The Aptos request body could not be read",
+                    )
+                }
+            };
+            if let Some(chunk) = frame.data_ref() {
+                if body.len().saturating_add(chunk.len()) > body_limit {
+                    return proxy_error(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "aptos_request_too_large",
+                        "The Aptos request body exceeds the listener limit",
+                    );
+                }
+                body.extend_from_slice(chunk);
+            }
+        }
+
+        let mut outgoing = self.client.request(parts.method, url);
+        for name in [ACCEPT, CONTENT_TYPE] {
+            if let Some(value) = parts.headers.get(name.clone()) {
+                outgoing = outgoing.header(name, value.clone());
+            }
+        }
+        let mut upstream = match outgoing.body(body).send().await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!("Aptos upstream request failed: {error}");
+                return proxy_error(
+                    StatusCode::BAD_GATEWAY,
+                    "aptos_upstream_unavailable",
+                    "The configured Aptos full node is unavailable",
+                );
+            }
+        };
+        if upstream
+            .content_length()
+            .is_some_and(|length| length > body_limit as u64)
+        {
+            return proxy_error(
+                StatusCode::BAD_GATEWAY,
+                "aptos_upstream_response_too_large",
+                "The Aptos full node response exceeds the listener limit",
+            );
+        }
+        let status = upstream.status();
+        let headers = upstream.headers().clone();
+        let mut body = Vec::new();
+        while let Some(chunk) = match upstream.chunk().await {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                tracing::warn!("Aptos upstream response failed: {error}");
+                return proxy_error(
+                    StatusCode::BAD_GATEWAY,
+                    "aptos_upstream_response_error",
+                    "The Aptos full node response could not be read",
+                );
+            }
+        } {
+            if body.len().saturating_add(chunk.len()) > body_limit {
+                return proxy_error(
+                    StatusCode::BAD_GATEWAY,
+                    "aptos_upstream_response_too_large",
+                    "The Aptos full node response exceeds the listener limit",
+                );
+            }
+            body.extend_from_slice(&chunk);
+        }
+
+        let mut builder = HttpResponse::builder().status(status);
+        for (name, value) in &headers {
+            if forward_response_header(name) {
+                builder = builder.header(name.clone(), value.clone());
+            }
+        }
+        builder
+            .body(HttpBody::from(hyper::body::Bytes::from(body)))
+            .unwrap_or_else(|_| {
+                proxy_error(
+                    StatusCode::BAD_GATEWAY,
+                    "aptos_upstream_response_error",
+                    "The Aptos full node returned invalid response headers",
+                )
+            })
+    }
+}
+
+fn forward_response_header(name: &HeaderName) -> bool {
+    let blocked = [
+        CONNECTION,
+        CONTENT_LENGTH,
+        hyper::header::TRANSFER_ENCODING,
+        hyper::header::UPGRADE,
+        hyper::header::SET_COOKIE,
+        hyper::header::LOCATION,
+    ];
+    !blocked.iter().any(|candidate| name == candidate)
+        && !name.as_str().starts_with("access-control-")
+        && !matches!(
+            name.as_str(),
+            "keep-alive" | "proxy-authenticate" | "proxy-authorization" | "te" | "trailer"
+        )
+}
+
 /// The Aptos node-information view of one Budlum head block.
 ///
 /// Aptos ledger versions and Budlum block heights are different consensus
@@ -427,11 +640,21 @@ fn node_info_response(head: Block, has_genesis: bool) -> Result<serde_json::Valu
 pub struct AptosGateway {
     chain: ChainHandle,
     node: NodeClient,
+    upstream: Option<AptosUpstream>,
 }
 
 impl AptosGateway {
     pub fn new(chain: ChainHandle, node: NodeClient) -> Self {
-        Self { chain, node }
+        Self {
+            chain,
+            node,
+            upstream: None,
+        }
+    }
+
+    pub fn with_upstream(mut self, upstream: AptosUpstream) -> Self {
+        self.upstream = Some(upstream);
+        self
     }
 
     async fn node_info(&self) -> Result<serde_json::Value, RestError> {
@@ -445,9 +668,24 @@ impl AptosGateway {
         node_info_response(head, has_genesis)
     }
 
-    /// Answer one classified REST request. POST bodies are not read while the
-    /// Move worker is absent: a named refusal must not become a body parser or
-    /// an allocation door.
+    /// Forward only known table routes when an upstream is configured. Bad
+    /// methods and unknown paths are answered locally and never read a body.
+    pub async fn handle_request<B>(&self, req: HttpRequest<B>, body_limit: usize) -> HttpResponse
+    where
+        B: hyper::body::Body<Data = hyper::body::Bytes> + Send + Unpin + 'static,
+        B::Error: Send + 'static,
+    {
+        let method = req.method().clone();
+        let path = req.uri().path().to_string();
+        match (&self.upstream, classify(&method, &path)) {
+            (Some(upstream), RouteMatch::Found(_)) => upstream.forward(req, body_limit).await,
+            _ => self.handle(&method, &path).await,
+        }
+    }
+
+    /// Answer one classified REST request locally. POST bodies are not read
+    /// while the Move worker is absent: a named refusal must not become a body
+    /// parser or an allocation door.
     pub async fn handle(&self, method: &Method, path: &str) -> HttpResponse {
         match classify(method, path) {
             RouteMatch::NotFound => error_response(RestError {
