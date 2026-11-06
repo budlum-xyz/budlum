@@ -145,6 +145,7 @@ mod tests {
 
 // Carried from the WP-04 starter lane D locks (pr-18): the
 // helper and the five locks the larger ledger does not define.
+use crate::light_client::{LightClient, TrustedCheckpoint};
 fn anchored_at(height: u64) -> LightClient {
     LightClient::new(TrustedCheckpoint {
         height,
