@@ -180,11 +180,20 @@ groups:
         # A reservation is a result that was submitted and has not reached a
         # finalized block. A handful is normal; a table that only grows means
         # results keep being dropped before finality.
-        expr: increase(budlum_relay_reservations[30m]) > 50
+        #
+        # `increase()` is deliberately NOT used: it is defined for counters, and
+        # `budlum_relay_reservations` is a gauge - the depth of the pending
+        # table, which falls again when a result finalizes. A Prometheus
+        # counter reset inside the window makes `increase()` report a negative
+        # number, and a comparison against it would either never fire or fire
+        # on the reset. This compares the current depth and, with `for:`, the
+        # part of it that is not merely a burst being worked through.
+        expr: budlum_relay_reservations > 50
+        for: 30m
         labels:
           severity: warning
         annotations:
-          summary: "Relayer reservations growing on {{ $labels.node }}"
+          summary: "{{ $value }} relayer reservations are pending on {{ $labels.node }}"
 
       - alert: BudlumRelayReservationNeedsOperator
         # The external action was in flight when a run stopped. Only a person

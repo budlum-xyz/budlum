@@ -264,3 +264,8 @@ pub mod alert_rules_reference_existing_metrics;
 // the restore it performs refuses a target that is not empty.
 #[cfg(test)]
 pub mod backup_covers_persisted_paths;
+
+// WP-41 item 7: every alert the node raises has a first-check row in the
+// operator runbook, and no row outlives its rule.
+#[cfg(test)]
+pub mod alerts_have_runbook_entries;

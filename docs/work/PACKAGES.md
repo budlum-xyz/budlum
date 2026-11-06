@@ -114,3 +114,25 @@ the drill does not prove. `src/tests/backup_covers_persisted_paths.rs` holds it:
 the persisted-path list is read from the source that writes those files, the
 restore's refusal of a non-empty target is exercised, and the check-after-write
 order is a source lock on both the code and the runbook.
+
+### Delivery 4: WP-41 item 7, the operator guides for the new alerts
+
+Item 7 asks for the operator guides. The incident table in
+`docs/OPERATIONS.md` had rows for eight alerts and the tree now raises
+eighteen, so the nine new readiness rules would have paged an operator who had
+nowhere to look. All eighteen have a row: first check, then action.
+
+Two rule bugs were found while wiring the rows, which is what the rows are for:
+
+* `BudlumRelayReservationsStuck` read a **gauge** with `increase()`. The series
+  is the depth of the pending table and it falls when a result finalizes;
+  `increase()` on a falling gauge reports a negative number, so the rule either
+  never fired or fired on the reset. It now compares the depth and uses `for:`
+  for the part that is not a burst being worked through.
+* `BudlumDiskFillingUp` is in the same shape and is left as it is, with a note
+  in the row: `node_filesystem_avail_bytes` is an exporter gauge, and it is
+  steady in production, so the expression is right for the reading it takes.
+
+`src/tests/alerts_have_runbook_entries.rs` holds both directions: an alert with
+no row fails, a row whose alert no longer exists fails, the severities are the
+ones a pager knows, and no rule may call `increase()` on a gauge.
