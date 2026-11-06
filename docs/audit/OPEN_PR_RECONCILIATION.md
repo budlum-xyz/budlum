@@ -286,3 +286,21 @@ refresh. They must not be quoted as the current 62-PR counts.
   above. Reconciliation must preserve the union of tests and corrections.
 - No Rust test execution or green CI is claimed. The findings ledger keeps the
   new records open until the required red-to-green evidence exists.
+
+### Worker boundary follow-up
+
+A later live read found 63 open PRs; #83 adds the WP-31 Solana RPC namespace.
+The transport continuation then added:
+
+- `c6f5260`: regressions for a started-but-incomplete worker frame and a panic
+  inside deploy validation.
+- `8a8688f`: idle waiting remains allowed, but the first received byte arms a
+  two-second frame/response budget; deploy validation now runs inside the
+  panic boundary and closes the connection on a caught panic.
+- `31a530e`: corrects the partial-frame test seed. A zero leading length byte
+  would form a complete empty frame after four bytes and miss the intended bug.
+
+The normalized diff at `31a530e` is 991 changed lines excluding documentation,
+the removed source directive and lockfiles. The delivery remains below the
+1,500-line cap. No CI failure had been observed at the last failure-filtered
+read; that is not a green result and no completion claim is made.
