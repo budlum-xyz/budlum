@@ -1,4 +1,7 @@
-use prometheus::{Encoder, Histogram, HistogramOpts, IntCounter, IntGauge, Registry, TextEncoder};
+use prometheus::{
+    Encoder, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry,
+    TextEncoder,
+};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -239,6 +242,71 @@ pub struct Metrics {
     /// counter lives in the facade (it has no dependency on the node), and
     /// [`Metrics::encode`] folds it into this series before every scrape.
     pub pq_verifier_disagreement: IntCounter,
+    /// Head height minus finalized height, counted in finality checkpoints.
+    ///
+    /// `finality_lag` counts blocks, so the same one-checkpoint delay reads
+    /// as `5` on the testnet (5-block checkpoints) and `10` on mainnet. The
+    /// recovery-mode trigger in Section 7.7 is stated in checkpoints, and an
+    /// operator should not have to divide by the interval at the alert. This
+    /// gauge is that division.
+    pub finality_lag_checkpoints: IntGauge,
+    /// 1 while the node is in finality recovery mode, 0 otherwise.
+    ///
+    /// Section 7.7: eight checkpoint intervals without finality puts the node
+    /// in recovery mode and must alarm. Exported as a gauge rather than left
+    /// to an expression so the Prometheus rule and the node agree on where the
+    /// line is instead of each hard-coding a block count.
+    pub finality_stalled: IntGauge,
+    /// Times a block was refused because its state root disagreed with the
+    /// state this node computed.
+    ///
+    /// A non-zero rate is a determinism split (R-11): the same chain, two
+    /// results. Counting it is what makes the divergence visible before two
+    /// nodes have forked from each other in silence.
+    pub state_root_mismatch_total: IntCounter,
+    /// Relayer requests whose result transaction is submitted but not yet
+    /// seen in a finalized block.
+    ///
+    /// These are the entries that keep a relayer restart from repeating an
+    /// external action. One that never goes down is a result the mempool
+    /// keeps dropping; the gauge is how an operator sees that without
+    /// reading the pending file by hand.
+    pub relay_reservations: IntGauge,
+    /// Relayer reservations whose external action was in flight and whose
+    /// result was never observed.
+    ///
+    /// A subset of [`Self::relay_reservations`] that needs a person: the
+    /// external transaction has to be looked up by nonce and the entry
+    /// cleared or completed. The worker logs it once per pass; this gauge is
+    /// the count an alert can page on.
+    pub relay_inflight_reservations: IntGauge,
+    /// Live B.U.D. 3.0 objects in the rooted registry.
+    pub bud3_objects: IntGauge,
+    /// Segments with at least one lost share.
+    ///
+    /// Distinct from [`Self::bud3_repair_backlog`] on purpose: repair is lazy
+    /// and fires at `f / 2` lost shares, so a segment can be deteriorating
+    /// while no task is open. The first gauge is the warning, the second is
+    /// the work.
+    pub bud3_segments_at_risk: IntGauge,
+    /// Segments that have reached the repair threshold and have an open
+    /// repair task.
+    pub bud3_repair_backlog: IntGauge,
+    /// Live custody bytes per validator class (`class="full"` and
+    /// `class="mobile"`).
+    ///
+    /// The class split is the point: the mobile floor is a promise about how
+    /// much of the network's custody sits on phones, and a single total
+    /// hides it.
+    pub bud3_custody_bytes: IntGaugeVec,
+    /// Execution-environment faults, by environment id (`ee="evm"`).
+    ///
+    /// A fault is the deterministic panic an environment hands back instead
+    /// of an outcome (UEL `EeFault`). It is not a node crash and it is
+    /// per-call, so the total is the only honest reading of it: a series that
+    /// keeps climbing on one environment is the R-01 early warning, and the
+    /// label answers which environment to switch off.
+    pub ee_fault_total: IntCounterVec,
 }
 
 impl Metrics {
@@ -716,6 +784,54 @@ impl Metrics {
             "Total RPC requests rejected due to rate limiting",
         )?;
 
+        let finality_lag_checkpoints = IntGauge::new(
+            "budlum_finality_lag_checkpoints",
+            "Head height minus finalized height, in finality checkpoints",
+        )?;
+        let finality_stalled = IntGauge::new(
+            "budlum_finality_stalled",
+            "1 while the node is in finality recovery mode: no checkpoint \
+             finalized for eight intervals",
+        )?;
+        let state_root_mismatch_total = IntCounter::new(
+            "budlum_state_root_mismatch_total",
+            "Blocks refused because their state root disagreed with the state this node computed",
+        )?;
+        let relay_reservations = IntGauge::new(
+            "budlum_relay_reservations",
+            "Relayer results submitted but not yet seen in a finalized block",
+        )?;
+        let relay_inflight_reservations = IntGauge::new(
+            "budlum_relay_inflight_reservations",
+            "Relayer reservations whose external action is in flight and needs an operator",
+        )?;
+        let bud3_objects = IntGauge::new(
+            "budlum_bud3_objects",
+            "Live B.U.D. 3.0 objects in the rooted registry",
+        )?;
+        let bud3_segments_at_risk = IntGauge::new(
+            "budlum_bud3_segments_at_risk",
+            "B.U.D. 3.0 segments with at least one lost share",
+        )?;
+        let bud3_repair_backlog = IntGauge::new(
+            "budlum_bud3_repair_backlog",
+            "B.U.D. 3.0 segments past the repair threshold with an open repair task",
+        )?;
+        let ee_fault_total = IntCounterVec::new(
+            prometheus::Opts::new(
+                "budlum_ee_fault_total",
+                "Execution-environment faults returned instead of an outcome, per environment",
+            ),
+            &["ee"],
+        )?;
+        let bud3_custody_bytes = IntGaugeVec::new(
+            prometheus::Opts::new(
+                "budlum_bud3_custody_bytes",
+                "Live B.U.D. 3.0 custody bytes per validator class",
+            ),
+            &["class"],
+        )?;
+
         registry.register(Box::new(chain_height.clone()))?;
         registry.register(Box::new(account_rows.clone()))?;
         registry.register(Box::new(unbonding_rows.clone()))?;
@@ -838,6 +954,16 @@ impl Metrics {
         registry.register(Box::new(slashing_events_total.clone()))?;
         registry.register(Box::new(pq_verifier_disagreement.clone()))?;
         registry.register(Box::new(rpc_rate_limited_total.clone()))?;
+        registry.register(Box::new(finality_lag_checkpoints.clone()))?;
+        registry.register(Box::new(finality_stalled.clone()))?;
+        registry.register(Box::new(state_root_mismatch_total.clone()))?;
+        registry.register(Box::new(relay_reservations.clone()))?;
+        registry.register(Box::new(relay_inflight_reservations.clone()))?;
+        registry.register(Box::new(bud3_objects.clone()))?;
+        registry.register(Box::new(bud3_segments_at_risk.clone()))?;
+        registry.register(Box::new(bud3_repair_backlog.clone()))?;
+        registry.register(Box::new(bud3_custody_bytes.clone()))?;
+        registry.register(Box::new(ee_fault_total.clone()))?;
 
         Ok(Metrics {
             registry: Arc::new(registry),
@@ -963,6 +1089,16 @@ impl Metrics {
             identity_revoked_rows,
             slashing_events_total,
             pq_verifier_disagreement,
+            finality_lag_checkpoints,
+            finality_stalled,
+            state_root_mismatch_total,
+            relay_reservations,
+            relay_inflight_reservations,
+            bud3_objects,
+            bud3_segments_at_risk,
+            bud3_repair_backlog,
+            bud3_custody_bytes,
+            ee_fault_total,
         })
     }
 
@@ -973,6 +1109,13 @@ impl Metrics {
         let seen = crate::crypto::pq::verifier_disagreements();
         self.pq_verifier_disagreement
             .inc_by(seen.saturating_sub(self.pq_verifier_disagreement.get()));
+        // Execution-environment faults are counted where they are observed,
+        // with no handle to this struct in reach; fold every environment that
+        // has been seen into its labelled series before the scrape.
+        for (ee, count) in crate::execution::ee::fault_counts() {
+            let series = self.ee_fault_total.with_label_values(&[ee]);
+            series.inc_by(count.saturating_sub(series.get()));
+        }
         let encoder = TextEncoder::new();
         let metric_families = self.registry.gather();
         let mut buffer = Vec::new();
@@ -1127,6 +1270,66 @@ mod tests {
             !scrape.contains("budlum_peer_count"),
             "deleted duplicate gauge must not reappear in scrapes"
         );
+    }
+
+    /// The readiness series are registered, exported, and start at their
+    /// honest zero.
+    ///
+    /// A console that renders a missing series as "no data" looks the same as
+    /// a quiet network, so the named readiness metrics are asserted to be in
+    /// the scrape body before anything writes them. `finality_stalled` is `0`
+    /// with nothing bound and `1` once the node is eight checkpoints behind;
+    /// the second half of that is `finality_gauges_follow_the_chain`, which
+    /// drives the real emit path.
+    #[test]
+    fn readiness_series_are_exported_before_they_are_written() {
+        let metrics = Metrics::new().expect("metric names are literals");
+        let scrape = metrics.encode();
+        for name in [
+            "budlum_finality_stalled",
+            "budlum_finality_lag_checkpoints",
+            "budlum_state_root_mismatch_total",
+            "budlum_relay_reservations",
+            "budlum_relay_inflight_reservations",
+            "budlum_bud3_objects",
+            "budlum_bud3_segments_at_risk",
+            "budlum_bud3_repair_backlog",
+            "budlum_bud3_custody_bytes",
+            "budlum_ee_fault_total",
+        ] {
+            assert!(
+                scrape.contains(name),
+                "readiness series {name} missing from the scrape"
+            );
+        }
+        assert_eq!(metrics.finality_stalled.get(), 0);
+        assert_eq!(metrics.state_root_mismatch_total.get(), 0);
+    }
+
+    /// An execution-environment fault counted where it happens reaches its
+    /// labelled series and names the environment.
+    #[test]
+    fn ee_faults_are_exported_per_environment() {
+        let metrics = Metrics::new().expect("metric names are literals");
+        crate::execution::ee::record_fault(crate::execution::ee::abi::EeId::EVM);
+        crate::execution::ee::record_fault(crate::execution::ee::abi::EeId::EVM);
+        crate::execution::ee::record_fault(crate::execution::ee::abi::EeId(0x7f));
+        let scrape = metrics.encode();
+        assert!(
+            scrape.contains("budlum_ee_fault_total{ee=\"evm\"} 2"),
+            "the EVM count must reach its own label; body: {}",
+            scrape
+                .lines()
+                .find(|l| l.starts_with("budlum_ee_fault_total"))
+                .unwrap_or("<missing>")
+        );
+        assert!(
+            scrape.contains("budlum_ee_fault_total{ee=\"unknown\"} 1"),
+            "an id outside the catalog is counted, but not under its own label"
+        );
+        use crate::execution::ee::abi::EeId;
+        assert_eq!(crate::execution::ee::fault_label(EeId::WASM), "wasm");
+        assert_eq!(crate::execution::ee::fault_label(EeId(0xff)), "unknown");
     }
 
     /// A split verdict between the two ML-DSA libraries reaches the scrape.

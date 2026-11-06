@@ -669,6 +669,81 @@ impl Bud3Registry {
         n
     }
 
+    /// How many segments of this object have at least one lost share.
+    ///
+    /// This is the "deteriorating" reading, and it is deliberately not the
+    /// repair trigger: repair is lazy and fires at `f / 2` lost shares (see
+    /// [`Self::repairs_due`]). A segment counted here with no open task is a
+    /// segment the node is still tolerating, which is exactly what an
+    /// operator needs to see before the task opens.
+    #[must_use]
+    pub fn segments_at_risk(&self, key: &ObjectKey) -> usize {
+        let Some(obj) = self.objects.get(key) else {
+            return 0;
+        };
+        let mut lost: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+        for share in &obj.shares {
+            if share.lost {
+                lost.insert(share.segment);
+            }
+        }
+        lost.len()
+    }
+
+    /// Sum of [`Self::segments_at_risk`] over every live object.
+    #[must_use]
+    pub fn total_segments_at_risk(&self) -> usize {
+        self.objects
+            .keys()
+            .map(|key| self.segments_at_risk(key))
+            .sum()
+    }
+
+    /// Sum of [`Self::repairs_due`] over every live object: the open repair
+    /// tasks the registry is waiting for a Full repairer to take.
+    #[must_use]
+    pub fn repair_backlog(&self) -> usize {
+        self.objects
+            .keys()
+            .map(|key| self.repairs_due(key).len())
+            .sum()
+    }
+
+    /// Custody bytes per validator class as `(full, mobile)`.
+    ///
+    /// One share holds `symbols` symbols of `symbol_size` bytes each, so the
+    /// sum over shares is the physical byte count the class is holding, not
+    /// the logical object size. A share that is lost still counts: the bytes
+    /// are still required until repair places them somewhere else, and
+    /// dropping them would make the durability warning shrink exactly when
+    /// the object is least safe.
+    #[must_use]
+    pub fn custody_bytes_by_class(&self) -> (u64, u64) {
+        let mut full = 0u64;
+        let mut mobile = 0u64;
+        for obj in self.objects.values() {
+            let symbol_size = u64::from(obj.record.profile.symbol_size);
+            for share in &obj.shares {
+                let bytes = u64::from(share.share.symbols).saturating_mul(symbol_size);
+                match share.share.class {
+                    crate::storage::bud3::placement::Class::Full => {
+                        full = full.saturating_add(bytes);
+                    }
+                    crate::storage::bud3::placement::Class::Mobile => {
+                        mobile = mobile.saturating_add(bytes);
+                    }
+                }
+            }
+        }
+        (full, mobile)
+    }
+
+    /// The live object count.
+    #[must_use]
+    pub fn object_count(&self) -> usize {
+        self.objects.len()
+    }
+
     /// The segments of `key` that need repair. Repair is lazy: a segment is
     /// due once its lost shares reach half its tolerance `f`, where `f` is the
     /// number of its largest shares it can lose and keep `k + 2` symbols.

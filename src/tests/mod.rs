@@ -249,3 +249,13 @@ pub mod validator_classes;
 // The B.U.D. 3.0 storage door end to end.
 #[cfg(test)]
 pub mod bud3_door;
+
+// WP-41 item 6 and WP-20 item 13: the readiness and storage-health series,
+// read back out of a real Prometheus scrape.
+#[cfg(test)]
+pub mod readiness_metrics;
+
+// WP-41 item 6: the alert rules name metrics the node exports, and every
+// mandatory alert exists.
+#[cfg(test)]
+pub mod alert_rules_reference_existing_metrics;
