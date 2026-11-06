@@ -12,6 +12,8 @@ description = "The shared wire types the node and the mobile core both bind: one
 [dependencies]
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
+# The presence digest (section 7.8 item 2). Same major as the root manifest.
+sha3 = "0.12"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

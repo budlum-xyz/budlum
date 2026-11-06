@@ -647,6 +647,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "serde",
+ "sha3 0.12.0",
 ]
 
 [[package]]
