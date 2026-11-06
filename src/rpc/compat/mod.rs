@@ -228,6 +228,7 @@ impl PeerQuotaTracker {
         Ok(())
     }
 
+    /// exposed for: compatibility gateway rate-limiter window rotation (`WP-28`).
     pub fn reset_window(&mut self) {
         self.counts.clear();
     }

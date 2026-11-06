@@ -196,6 +196,7 @@ impl EthereumCompatGateway {
         &self.filters
     }
 
+    /// exposed for: Ethereum JSON-RPC gateway block-height sync (`WP-28`).
     pub fn set_block_height(&mut self, height: u64) {
         self.block_height = height;
     }

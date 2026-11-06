@@ -58,6 +58,8 @@ pub enum QuantumAlertLevel {
 
 impl QuantumAlertLevel {
     /// Returns `true` when wallets and explorers must surface the advisory banner.
+    ///
+    /// exposed for: wallet and explorer quantum-alert banners (`WP-33`, `WP-40`).
     #[must_use]
     pub const fn requires_wallet_warning(self) -> bool {
         !matches!(self, Self::Level0Open)

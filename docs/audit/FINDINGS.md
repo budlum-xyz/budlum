@@ -64,3 +64,8 @@ finding whose fix is carried or merged.
 | BLG-109 | closed (in review, PR #36) | `src/socialfi/nft_folders.rs` | `socialfi_nft_burn_needs_owner` | PR `#36` |
 | BLG-261 | closed (in review, PR #36) | `src/education_domain/mod.rs` | `education_domain_registers_object` | PR `#36` |
 | BLG-262 | closed (in review, PR #36) | `src/wallet/identity_profile.rs`, `src/explorer_evidence/mod.rs`, `src/storage/content_gateway.rs` | `gateway_tree_is_gone` | PR `#36` |
+| BLG-268 | closed (in review, PR #36) | `xtask/gates/src/gates/no_out_of_block_consensus_writes.rs` | `no-out-of-block-consensus-writes` (`required_fee` read classification) | PR `#36` |
+| BLG-269 | closed (in review, PR #36) | `src/bin/support/http.rs`, `src/storage/bud3/dedup_index.rs` | `indexing-is-not-new` | PR `#36` |
+| BLG-270 | closed (in review, PR #36) | `src/storage/bud3/view.rs`, `.github/dead-pub-api-baseline.txt` | `dead-public-api-is-ratcheted` (`165` = baseline `165`) | PR `#36` |
+| BLG-271 | closed (in review, PR #36) | `src/storage/bud3/view.rs` (`admit_lifetime`, `admit_mobile_quota`) | `guards-are-reachable` (`3` = baseline `3`) | PR `#36` |
+| BLG-272 | closed (in review, PR #36) | `crates/bud-codec/src/lib.rs`, `src/storage/bud3/bof1.rs`, `src/tests/bud3_door.rs` | `cargo fmt --all -- --check` | PR `#36` |

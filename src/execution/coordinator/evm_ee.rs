@@ -82,6 +82,8 @@ pub fn solidity_selector(sig: &str) -> [u8; 4] {
 }
 
 /// Computes an EVM `CREATE` address `keccak256(rlp([sender20, nonce]))[12..32]`.
+///
+/// exposed for: EVM contract deployment helpers and migration verification.
 #[must_use]
 pub fn compute_create_address(sender: &[u8; 20], nonce: u64) -> [u8; 20] {
     let encoded = rlp::encode(&Item::List(vec![

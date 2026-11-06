@@ -182,6 +182,8 @@ pub fn encode_precompile_call(
 }
 
 /// ABI-encodes `IBudlumUniversal.staticCall(ee, target, input, gasBgu)`.
+///
+/// exposed for: Solidity `BudlumUniversal.staticCall` SDK callers (`WP-30`).
 #[must_use]
 pub fn encode_precompile_static_call(
     target_ee: EeId,
@@ -260,6 +262,8 @@ pub fn encode_precompile_return(ok: bool, ret: &[u8]) -> Vec<u8> {
 }
 
 /// Decodes `(bool ok, bytes ret)` returned by `0x...B001`.
+///
+/// exposed for: Solidity `BudlumUniversal` return-data SDK callers (`WP-30`).
 pub fn decode_precompile_return(raw: &[u8]) -> Result<(bool, Vec<u8>), String> {
     let ok_u64 = read_u64_word(raw, 0)?;
     let ret = read_dyn_bytes(raw, 32)?;

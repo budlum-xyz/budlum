@@ -98,9 +98,7 @@ src/core/transaction.rs:fee_limit
 src/core/transaction.rs:new_contract_call
 src/core/transaction.rs:sign_v6
 src/cross_domain/evm/bud_to_eth.rs:build_bud_to_eth_claim
-src/cross_domain/evm/mpt.rs:hp_encode
 src/cross_domain/evm/rlp.rs:from_item
-src/cross_domain/evm/sync_committee.rs:rotate_period
 src/crypto/pkcs11.rs:bls_signing_available
 src/crypto/pkcs11.rs:pq_signing_available
 src/crypto/pkcs11.rs:store_bls_key
