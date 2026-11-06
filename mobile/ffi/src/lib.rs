@@ -288,6 +288,10 @@ pub trait NodeListener: Send + Sync {
 }
 
 /// A refusal from the core, with its stable machine code.
+///
+/// The text field is `reason`, not `message`: UniFFI turns error variants
+/// into Kotlin exceptions, and a field named `message` collides with
+/// `Throwable.message` in the generated class (uniffi-rs issue 1434).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
 pub enum MobileError {
     /// The core refused the call; nothing changed.
@@ -295,15 +299,15 @@ pub enum MobileError {
         /// Stable machine code, for example `mobile_quota_above_class_cap`.
         code: String,
         /// Human-readable reason.
-        message: String,
+        reason: String,
     },
 }
 
 impl MobileError {
-    fn refused(code: &str, message: &str) -> Self {
+    fn refused(code: &str, reason: &str) -> Self {
         Self::Refused {
             code: code.to_owned(),
-            message: message.to_owned(),
+            reason: reason.to_owned(),
         }
     }
 }
@@ -311,7 +315,7 @@ impl MobileError {
 impl fmt::Display for MobileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Refused { code, message } => write!(f, "{code}: {message}"),
+            Self::Refused { code, reason } => write!(f, "{code}: {reason}"),
         }
     }
 }
@@ -322,7 +326,7 @@ impl From<CoreError> for MobileError {
     fn from(error: CoreError) -> Self {
         Self::Refused {
             code: error.code.to_owned(),
-            message: error.message,
+            reason: error.message,
         }
     }
 }
