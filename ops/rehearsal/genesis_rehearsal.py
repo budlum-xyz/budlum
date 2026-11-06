@@ -334,11 +334,15 @@ def publish(output_dir, genesis_bytes):
             with tempfile.NamedTemporaryFile(
                 mode="wb", prefix=prefix, dir=output_dir, delete=False
             ) as output:
+                temporary_paths.append(Path(output.name))
                 output.write(content)
                 output.flush()
                 os.fchmod(output.fileno(), 0o644)
                 os.fsync(output.fileno())
-                temporary_paths.append(Path(output.name))
+        # A pair of independent renames is not atomic. Remove any old digest
+        # before replacing the genesis so an interrupted publish cannot leave
+        # a stale digest next to the new file. Readers must verify the digest.
+        (output_dir / "rehearsal-genesis.sha256").unlink(missing_ok=True)
         os.replace(temporary_paths[0], output_dir / "rehearsal-genesis.json")
         os.replace(temporary_paths[1], output_dir / "rehearsal-genesis.sha256")
     finally:
