@@ -249,3 +249,7 @@ pub mod validator_classes;
 // The B.U.D. 3.0 storage door end to end.
 #[cfg(test)]
 pub mod bud3_door;
+
+// WP-35: the conformance catalog and the execution limits agree with the code.
+#[cfg(test)]
+pub mod conformance_locks;
