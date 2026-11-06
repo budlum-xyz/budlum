@@ -249,3 +249,8 @@ pub mod validator_classes;
 // The B.U.D. 3.0 storage door end to end.
 #[cfg(test)]
 pub mod bud3_door;
+
+// The section 6.2 vocabulary: a frame, a share, a placement group, a reference
+// counter and a volume, each built from the parts the pipeline produces.
+#[cfg(test)]
+pub mod bud3_types;
