@@ -289,15 +289,9 @@ impl Executor {
             _ => {}
         }
 
-        // WP-45: the AI layer boundary. It sits here - after the cheap
-        // shape guards above and before `liquid_cost` / `get_or_create` -
-        // because that probe *creates* the sender row. A refusal must leave
-        // the state byte-identical (G-4), so no closed door may run after it.
-        //
-        // One guard for the whole layer rather than a check inside each of
-        // the seventeen arms: an arm added later is closed by default, and
-        // `is_ai_layer_transaction` is the single place that has to learn
-        // about it.
+// WP-45: the AI layer boundary. It sits before any sender-account
+        // probe because that probe can create the sender row. A refusal must
+        // leave the state byte-identical (G-4).
         if is_ai_layer_transaction(&tx.tx_type) && !ai_layer_enabled(tx.chain_id) {
             return Err(BudlumError::validation(
                 "ai_layer_testnet_closed",
@@ -305,22 +299,12 @@ impl Executor {
             ));
         }
 
-        let liquid_cost = match tx.tx_type {
-        let total_cost = match tx.tx_type {
-            TransactionType::Unstake
-            | TransactionType::Vote
-            | TransactionType::Undelegate { .. }
-            | TransactionType::WithdrawDelegation { .. }
-            | TransactionType::SetValidatorCommission { .. }
-            | TransactionType::Redelegate { .. }
-            | TransactionType::ClaimRewards { .. } => tx.fee,
-            _ => tx.checked_total_cost().ok_or_else(|| {
-                BudlumError::validation(
-                    "transaction_cost_overflow",
-                    "Transaction amount plus fee overflows u64",
-                )
-            })?,
-        };
+        let total_cost = tx.checked_liquid_cost().ok_or_else(|| {
+            BudlumError::validation(
+                "transaction_cost_overflow",
+                "Transaction amount plus fee overflows u64",
+            )
+        })?;
 
         {
             // Combine #66's overflow-checked debit with #67's spendable-balance
