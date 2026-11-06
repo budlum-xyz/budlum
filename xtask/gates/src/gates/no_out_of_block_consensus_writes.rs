@@ -132,8 +132,9 @@ const READ_PREFIXES: &[&str] = &[
 
 /// Read methods whose names no prefix above covers, matched exactly: an
 /// identity record and credential lookup, a protected-content lookup, and
-/// the coding-audit answer check (`&self`, it judges an answer and stores
-/// nothing).
+/// identity record and credential lookup, a protected-content lookup, the
+/// coding-audit answer check (`&self`, it judges an answer and stores
+/// nothing), and the admission-fee quote (`&self`, it only computes a fee).
 const READ_NAMES: &[&str] = &[
     "record",
     "credential",
@@ -145,8 +146,9 @@ const READ_NAMES: &[&str] = &[
     "deals_for_manifest",
     "deals_for_shard",
     "under_replicated_shards",
-    // The fee floor is a pure `&self` calculation shared by admission and
-    // `bud_estimateGas`; reading it does not change consensus state.
+    // The admission fee quote: a pure function of the parameters, the base
+    // fee and the governance proposal fee. `chain_actor` answers
+    // `get_required_fee` with it and never writes the state.
     "required_fee",
 ];
 
@@ -516,8 +518,13 @@ mod tests {
     }
 
     #[test]
-    fn required_fee_is_a_state_read() {
-        let src = "let fee = self.blockchain.state.required_fee(&tx);";
-        assert!(check_actor_state_access(src).is_ok());
+    fn required_fee_quote_is_a_read_without_widening_the_exception() {
+        assert!(
+            check_actor_state_access("let fee = self.blockchain.state.required_fee(&tx);").is_ok()
+        );
+        assert!(
+            check_actor_state_access("let fee = self.blockchain.state.required_fee_override(&tx);")
+                .is_err()
+        );
     }
 }
