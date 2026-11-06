@@ -496,6 +496,18 @@ pub enum ChainCommand {
         document: String,
         response: oneshot::Sender<Result<(), String>>,
     },
+    ObjectLayerCharter {
+        domain_id: u32,
+        response: oneshot::Sender<Option<crate::object_layer::DomainCharter>>,
+    },
+    ObjectLayerAssetClass {
+        class_id: crate::object_layer::AssetClassId,
+        response: oneshot::Sender<Option<(crate::object_layer::registry::AssetClass, u128)>>,
+    },
+    ObjectLayerAsset {
+        asset_id: crate::object_layer::AssetId,
+        response: oneshot::Sender<Option<crate::object_layer::registry::UniqueAsset>>,
+    },
     BnsCalculateCost {
         name: String,
         duration: u64,
@@ -2278,6 +2290,51 @@ impl ChainHandle {
         rx.await.map_err(|_| "chain actor closed".to_string())?
     }
 
+    pub async fn object_layer_charter(
+        &self,
+        domain_id: u32,
+    ) -> Option<crate::object_layer::DomainCharter> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::ObjectLayerCharter {
+                domain_id,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn object_layer_asset_class(
+        &self,
+        class_id: crate::object_layer::AssetClassId,
+    ) -> Option<(crate::object_layer::registry::AssetClass, u128)> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::ObjectLayerAssetClass {
+                class_id,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn object_layer_asset(
+        &self,
+        asset_id: crate::object_layer::AssetId,
+    ) -> Option<crate::object_layer::registry::UniqueAsset> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::ObjectLayerAsset {
+                asset_id,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
     pub async fn bns_calculate_cost(&self, name: String, duration: u64) -> u64 {
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -3746,6 +3803,40 @@ impl ChainActor {
                             &document,
                         )
                         .map_err(|e| e.to_string()),
+                    );
+                }
+                ChainCommand::ObjectLayerCharter {
+                    domain_id,
+                    response,
+                } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .settlement
+                            .object_layer
+                            .charters
+                            .get(&domain_id)
+                            .cloned(),
+                    );
+                }
+                ChainCommand::ObjectLayerAssetClass { class_id, response } => {
+                    let uol = &self.blockchain.state.settlement.object_layer;
+                    let out = uol
+                        .classes
+                        .get(&class_id)
+                        .cloned()
+                        .map(|cl| (cl, uol.recorded_custody(&class_id)));
+                    let _ = response.send(out);
+                }
+                ChainCommand::ObjectLayerAsset { asset_id, response } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .settlement
+                            .object_layer
+                            .unique
+                            .get(&asset_id)
+                            .cloned(),
                     );
                 }
                 ChainCommand::BnsCalculateCost {

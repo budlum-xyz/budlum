@@ -4172,6 +4172,12 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
                 put_fixed(out, sibling);
             }
         }
+        SettlementTx::ObjectLayer(uol_tx) => {
+            put_u8(out, 9);
+            let bytes = postcard::to_allocvec(uol_tx.as_ref())
+                .unwrap_or_else(|_| b"budlum/object-layer/serialize-failed".to_vec());
+            put_bytes(out, &bytes);
+        }
     }
 }
 
