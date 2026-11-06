@@ -515,6 +515,11 @@ impl<D: UniversalDispatcher> HostApi for ExecutionOverlay<'_, '_, D> {
         if next_depth > MAX_UNIVERSAL_CALL_DEPTH {
             return Err(HostError::DepthExceeded);
         }
+        // Section 8.7.3 item 6: cross-environment reentrancy into an EE already
+        // on the active call stack is forbidden in Phase 1.
+        if self.core.frames.iter().any(|f| f.active_ee == call.to_ee) {
+            return Err(HostError::Denied("ReentrancyForbidden".into()));
+        }
 
         let warm = self.core.is_target_warm(call.to_ee, &call.target.id);
         let overhead = BGU_UNIVERSAL_CALL_BASE.saturating_add(if warm {
@@ -649,9 +654,10 @@ mod tests {
                         gas_used: child_overlay.core.gas_used(),
                     })
                 }
-                // 0x03 = recurse until depth limit
+                // 0x03 = recurse across distinct environment ids until depth limit
                 3 => {
                     let mut next_call = call.clone();
+                    next_call.to_ee = EeId(call.to_ee.0.saturating_add(1));
                     next_call.value = BudAmount(0);
                     let inner = child_overlay.universal_call(next_call)?;
                     Ok(inner)
@@ -703,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn universal_call_revert_discards_child_writes_and_transfers_and_enforces_depth_8() {
+    fn coordinator_overlay_rolls_back_frame() {
         let mut state = AccountState::new();
         let alice = Address([0xA1; 32]);
         let mut acc = Account::new(alice);

@@ -112,7 +112,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn phase1_freezes_wasm_svm_move_until_cli_enables_them() {
+    fn ee_feature_flag_freezes_new_deploys() {
         let p = DeployPolicy::phase1_default();
         assert!(p.check_deploy_allowed(EeId::EVM).is_ok());
         assert!(p.check_deploy_allowed(EeId::BUDZERO).is_ok());

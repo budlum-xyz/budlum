@@ -1,10 +1,12 @@
 //! The execution coordinator, unified account/alias model, BUD unit
 //! conversions, universal gas (`BGU`), nested overlays, block read cache,
-//! deployment policy, and sparse-Merkle namespace state commitment.
+//! deployment policy, stateful contract execution, worker supervisor, and
+//! sparse-Merkle namespace state commitment.
 //!
 //! WIRING: `bud_unit` and `commitment` (including `accounts` alias/asset
 //! derivations) are wired into [`crate::core::account::AccountState`];
-//! `overlay`, `gas`, and `deploy_policy` power stateful contract execution.
+//! `stateful_contract` is wired into [`crate::execution::executor`];
+//! `worker_manager` drives [`crate::execution::ee`].
 
 pub mod accounts;
 pub mod bud_unit;
@@ -13,3 +15,5 @@ pub mod deploy_policy;
 pub mod gas;
 pub mod overlay;
 pub mod scheduler;
+pub mod stateful_contract;
+pub mod worker_manager;
