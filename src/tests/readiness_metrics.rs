@@ -27,12 +27,16 @@ fn chain_with_metrics(chain_id: u64) -> (Blockchain, Arc<Metrics>) {
 /// Register one small object under `class` and return its key and the bytes
 /// the placement holds for it, computed here from the same inputs so the test
 /// does not restate the implementation.
+///
+/// One share per segment, covering every coded symbol of it: the registry's
+/// placement rule asks for at least `k + 2` covered ESIs per segment, and the
+/// upload codes `symbols_per_segment` of them.
 fn register_object(
     state: &mut AccountState,
     owner: Address,
     class: Class,
     symbol_size: u16,
-    symbols: u32,
+    holder: Address,
 ) -> (crate::storage::bud3::registry::ObjectKey, u64) {
     use crate::storage::bud3::limits::{Bud3Limits, Profile};
     use crate::storage::bud3::pipeline::prepare_public_upload;
@@ -49,15 +53,16 @@ fn register_object(
         prepare_public_upload(&content, &profile, &Bud3Limits::default(), 12).expect("prepare");
     let key = upload.record.commitment;
     let segments = upload.segments.len() as u64;
+    let symbols = u64::from(upload.record.symbols_per_segment);
     let shares = (0..segments)
         .map(|segment| {
             (
                 segment,
                 Share {
-                    validator: [9; 32],
+                    validator: holder.0,
                     class,
                     first_esi: 0,
-                    symbols,
+                    symbols: u32::try_from(symbols).expect("symbols per segment fits u32"),
                 },
             )
         })
@@ -69,29 +74,54 @@ fn register_object(
         .bud3_registry
         .register_object(upload.record, owner, shares, 0, 100)
         .expect("register");
-    (key, segments * u64::from(symbols) * u64::from(symbol_size))
+    (key, segments * symbols * u64::from(symbol_size))
 }
 
-/// Section 7.7: the recovery trigger is stated in checkpoints, so the export
-/// is in checkpoints, and the stall gauge turns on at the threshold.
+/// Section 7.7: the recovery trigger is stated in checkpoints, so the export is
+/// in checkpoints, and the stall gauge turns on at the threshold.
 ///
-/// The same lag in blocks means different things on two networks: 40 blocks is
-/// eight checkpoints on the testnet (5-block checkpoints) and four on mainnet
-/// (10-block checkpoints). The test drives the real emit path on the testnet
-/// chain.
+/// The unit is the point. The same lag in blocks means different things on two
+/// networks: eight checkpoints is 40 blocks on the testnet and 80 on mainnet, so
+/// a rule written against blocks would be wrong on one of them.
+///
+/// This is a unit test of `emit_chain_metrics` over its own fields rather than
+/// of block production: the chain a test can build here is not a testnet one
+/// (a testnet chain has to satisfy the genesis ceremony first), so the height
+/// the emit path reads is set directly. `integration.rs` already covers the
+/// emit path over a real chain.
 #[test]
 fn finality_gauges_follow_the_chain() {
-    let (mut bc, metrics) = chain_with_metrics(45261);
-    let checkpoint = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45261);
-    assert_eq!(checkpoint, 5, "testnet checkpoints are five blocks");
-    let producer = Address::from([1u8; 32]);
+    use crate::core::chain_config::finality_checkpoint_interval_for_chain_id;
+    assert_eq!(
+        finality_checkpoint_interval_for_chain_id(45260),
+        10,
+        "mainnet checkpoints are ten blocks"
+    );
+    assert_eq!(
+        finality_checkpoint_interval_for_chain_id(45261),
+        5,
+        "testnet checkpoints are five blocks"
+    );
+
+    let (mut bc, metrics) = chain_with_metrics(45262);
+    let checkpoint = finality_checkpoint_interval_for_chain_id(45262);
+    assert_eq!(checkpoint, 2, "devnet checkpoints are two blocks");
+    assert_eq!(
+        finality_checkpoint_interval_for_chain_id(9999),
+        10,
+        "a chain id with no network falls back to the mainnet interval"
+    );
+
+    // The genesis block is block 0 and is final; the emit path reads the height
+    // as the chain length, so a finalized height of 1 makes the lag the number
+    // of blocks after genesis.
+    let genesis = bc.chain[0].clone();
+    bc.finalized_height = 1;
 
     // Under eight intervals this is a lag, not a stall.
-    while bc.chain.len() as u64 <= checkpoint * 4 {
-        bc.produce_block(producer).expect("block");
-    }
+    bc.chain = vec![genesis.clone(); 1 + (checkpoint * 4) as usize];
     bc.emit_chain_metrics();
-    assert_eq!(metrics.finality_lag.get(), bc.chain.len() as i64);
+    assert_eq!(metrics.finality_lag.get(), bc.chain.len() as i64 - 1);
     assert_eq!(metrics.finality_lag_checkpoints.get(), 4);
     assert_eq!(
         metrics.finality_stalled.get(),
@@ -99,9 +129,7 @@ fn finality_gauges_follow_the_chain() {
         "four checkpoint intervals is under the recovery trigger"
     );
 
-    while bc.chain.len() as u64 <= checkpoint * 8 {
-        bc.produce_block(producer).expect("block");
-    }
+    bc.chain = vec![genesis.clone(); 1 + (checkpoint * 8) as usize];
     bc.emit_chain_metrics();
     assert_eq!(metrics.finality_lag_checkpoints.get(), 8);
     assert_eq!(
@@ -109,11 +137,15 @@ fn finality_gauges_follow_the_chain() {
         1,
         "eight checkpoint intervals without finality is the recovery trigger"
     );
+    // The block reading of the same moment is the checkpoint reading times the
+    // interval, which is exactly why the alert uses the second.
+    assert_eq!(metrics.finality_lag.get(), 8 * checkpoint as i64);
 
     // Finality catching up clears it again: the gauge describes the gap, not a
     // latch, or a node that recovered would alarm forever.
     bc.finalized_height = bc.chain.len() as u64;
     bc.emit_chain_metrics();
+    assert_eq!(metrics.finality_lag.get(), 0);
     assert_eq!(metrics.finality_lag_checkpoints.get(), 0);
     assert_eq!(metrics.finality_stalled.get(), 0);
 }
@@ -127,8 +159,6 @@ fn finality_gauges_follow_the_chain() {
 #[test]
 fn state_root_mismatch_is_counted_at_the_refusal() {
     let (mut bc, metrics) = chain_with_metrics(45262);
-    let producer = Address::from([1u8; 32]);
-    bc.produce_block(producer).expect("block 1");
     let good = bc.chain.clone();
     assert!(
         bc.is_valid_chain(&good),
@@ -143,7 +173,7 @@ fn state_root_mismatch_is_counted_at_the_refusal() {
     // Same blocks, one committed root replaced: this node re-executes them and
     // computes a different root, which is the determinism split.
     let mut tampered = good.clone();
-    tampered[1].state_root = "ab".repeat(32);
+    tampered[0].state_root = "ab".repeat(32);
     assert!(!bc.is_valid_chain(&tampered), "the candidate is refused");
     assert_eq!(
         metrics.state_root_mismatch_total.get(),
@@ -168,9 +198,12 @@ fn state_root_mismatch_is_counted_at_the_refusal() {
 fn bud3_health_gauges_read_the_rooted_registry() {
     let (mut bc, metrics) = chain_with_metrics(45262);
     let owner = Address::from([4u8; 32]);
-    let (_full_key, full_bytes) = register_object(&mut bc.state, owner, Class::Full, 128, 6);
+    let full_holder = Address::from([9; 32]);
+    let mobile_holder = Address::from([10; 32]);
+    let (_full_key, full_bytes) =
+        register_object(&mut bc.state, owner, Class::Full, 128, full_holder);
     let (_mobile_key, mobile_bytes) =
-        register_object(&mut bc.state, owner, Class::Mobile, 64, 3);
+        register_object(&mut bc.state, owner, Class::Mobile, 64, mobile_holder);
     bc.emit_chain_metrics();
 
     assert_eq!(metrics.bud3_objects.get(), 2);
@@ -198,8 +231,8 @@ fn bud3_health_gauges_read_the_rooted_registry() {
     // The one holder of both objects never comes back: every segment of both
     // is at risk, and still no repair task is open, because the lazy
     // threshold is measured in lost shares of a segment, not in a lost share.
-    let holder = Address::from([9; 32]);
-    bc.state.bud3_registry.mark_unseen(&holder);
+    bc.state.bud3_registry.mark_unseen(&full_holder);
+    bc.state.bud3_registry.mark_unseen(&mobile_holder);
     bc.emit_chain_metrics();
     let registry = &bc.state.bud3_registry;
     assert!(
@@ -229,17 +262,18 @@ fn bud3_health_gauges_read_the_rooted_registry() {
 fn bud3_custody_bytes_count_symbols_times_symbol_size() {
     let (mut bc, _metrics) = chain_with_metrics(45262);
     let owner = Address::from([5u8; 32]);
-    let (_key, expected) = register_object(&mut bc.state, owner, Class::Full, 128, 6);
+    let (_key, expected) = register_object(
+        &mut bc.state,
+        owner,
+        Class::Full,
+        128,
+        Address::from([9; 32]),
+    );
     let (full, mobile) = bc.state.bud3_registry.custody_bytes_by_class();
     assert_eq!(full, expected);
     assert_eq!(mobile, 0);
-    assert_enough_for_one_share(&bc, expected);
-}
-
-/// A guard against the helper and the registry agreeing on zero: the count has
-/// to be a positive number of bytes for a non-empty object.
-fn assert_enough_for_one_share(bc: &Blockchain, bytes: u64) {
-    assert!(bytes > 0, "a registered object holds bytes");
+    // The helper and the registry must not both be counting zero.
+    assert!(expected > 0, "a registered object holds bytes");
     assert_eq!(
         bc.state.bud3_registry.object_count(),
         1,
