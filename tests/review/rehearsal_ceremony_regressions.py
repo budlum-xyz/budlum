@@ -4,6 +4,10 @@
 Run explicitly, not as part of main's test suite:
     python3 tests/review/rehearsal_ceremony_regressions.py /path/to/checkout
 
+To check the reviewed variant in this repository instead of another PR:
+    PATH="$PWD/tests/review/fixtures/bin:$PATH" \
+        python3 tests/review/rehearsal_ceremony_regressions.py tests/review/fixtures
+
 The checkout must contain ops/rehearsal/genesis_rehearsal.sh and its template.
 Inputs are deliberately invalid public records. A successful ceremony must never
 be produced from them, even when eight files claim to be Full validators.
@@ -20,10 +24,16 @@ from pathlib import Path
 if len(sys.argv) != 2:
     raise SystemExit(f"usage: {sys.argv[0]} CHECKOUT")
 CHECKOUT = Path(sys.argv.pop()).resolve()
-SCRIPT = CHECKOUT / "ops/rehearsal/genesis_rehearsal.sh"
+# A review fixture may place the script elsewhere; `config/rehearsal-genesis.json`
+# is only used when the script under test reads it.
+SCRIPT = (
+    CHECKOUT / "ops/rehearsal/genesis_rehearsal.sh"
+    if (CHECKOUT / "ops/rehearsal/genesis_rehearsal.sh").is_file()
+    else CHECKOUT / "genesis_rehearsal.reviewed.sh"
+)
 TEMPLATE = CHECKOUT / "config/rehearsal-genesis.json"
-if not SCRIPT.is_file() or not TEMPLATE.is_file():
-    raise SystemExit("checkout lacks the WP-46 ceremony script or template")
+if not SCRIPT.is_file():
+    raise SystemExit(f"{CHECKOUT} lacks a WP-46 ceremony script")
 
 
 class RehearsalCeremonySafety(unittest.TestCase):
@@ -32,7 +42,8 @@ class RehearsalCeremonySafety(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         (self.root / "config").mkdir()
-        shutil.copyfile(TEMPLATE, self.root / "config/rehearsal-genesis.json")
+        if TEMPLATE.is_file():
+            shutil.copyfile(TEMPLATE, self.root / "config/rehearsal-genesis.json")
         self.records = self.root / "records"
         self.records.mkdir()
         self.output = self.root / "output"

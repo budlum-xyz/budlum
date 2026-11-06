@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# test stub of `bud genesis assemble --network testnet --operators DIR --out FILE`
+out=""; dir=""
+while [ $# -gt 0 ]; do case "$1" in --out) out="$2"; shift 2;; --operators) dir="$2"; shift 2;; *) shift;; esac; done
+[ -n "$out" ] || { echo "stub bud: no --out" >&2; exit 2; }
+python3 - "$dir" "$out" <<'PY'
+import json,sys
+from pathlib import Path
+d=Path(sys.argv[1]); print(json.dumps({"validators":[p.stem for p in sorted(d.glob("*.json"))]}), file=open(sys.argv[2],"w"))
+PY
