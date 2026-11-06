@@ -447,20 +447,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bud-codec"
+version = "0.1.0"
+dependencies = [
+ "ruzstd",
+ "zstd",
+]
+
+[[package]]
 name = "bud-compiler"
 version = "0.1.0"
 dependencies = [
  "bud-isa",
  "logos",
  "tracing",
-]
-
-[[package]]
-name = "bud-codec"
-version = "0.1.0"
-dependencies = [
- "ruzstd",
- "zstd",
 ]
 
 [[package]]
