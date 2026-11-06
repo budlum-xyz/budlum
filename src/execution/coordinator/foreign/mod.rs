@@ -590,7 +590,11 @@ mod tests {
         let sk = [0x17; 32];
         let sender_evm = eth_address_of_secret(&sk);
         let foreign_bud = derive_foreign_account(ForeignScheme::EvmSecp256k1, &sender_evm).unwrap();
-        add_attos_to_account(state.get_or_create(&foreign_bud), 10_000_000_000_000_000_000).unwrap();
+        add_attos_to_account(
+            state.get_or_create(&foreign_bud),
+            10_000_000_000_000_000_000,
+        )
+        .unwrap();
 
         let raw0 = build_signed_eip1559(
             &sk,
