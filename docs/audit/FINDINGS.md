@@ -123,3 +123,10 @@ other PR was closed, merged, retargeted or edited.
 | BLG-315 | **closed in code here**: the WP-46 ceremony is fail-closed. Red: PR #94's harness fails 4/4 against #92 head `9d532a8a`; Green: the extended 10-test harness passes 10/10 on this branch. Exact outputs in `docs/audit/CEREMONY_DEFECT_REPAIR_2026-11-06.md`. CI run number owed; the harness is wired by `.github/workflows/ceremony.yml`. |
 | BLG-321 | High. PR #92's `mobile.yml` used four unpinned action tags, against directive 16.2 item 4, and shipped the WP-37 log-analyzer workspace without a CI job. **Fixed here** by SHA pins (peeled commits for annotated tags) and a `device-log-analyzer` job. |
 | BLG-319 | additionally corrected: WP-36/37/46 are `partial` (PR #92), not `undone`. |
+
+### Slice 4/N updates (PR #96)
+
+| ID | State after the slice |
+|---|---|
+| BLG-294 | WP-55 now has a 2/N owner. The ten remaining T-Expansion packages (WP-49..54, 56..60, 62..64) stay unowned. |
+| BLG-320 | still open here: WP-28/WP-31/WP-32 subscriptions and the Move surface are owed to slice 5/N. |

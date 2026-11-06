@@ -102,7 +102,7 @@ branch cannot host several open PRs, so each row is a commit boundary.
 | 1/N | WP-42, WP-04 | live stack | mechanical compatibility audit over all open PR heads; conflict matrix; duplicate implementations; wire drift | delivered |
 | 2/N | WP-42 | BLG-299 | `rust_syntax_is_parseable` gate with canaries, wired into the gate registry | delivered |
 | 3/N | WP-36, WP-37, WP-46 | #92, #94 | Android/rehearsal scaffolding carried over; ceremony defects repaired with a green black-box harness | delivered |
-| 4/N | WP-55 | #86 | live stream core carried over; 2/N broadcast driver, gateway door and activation height | owed |
+| 4/N | WP-55 | #86 | live stream core carried over; 2/N broadcast driver, gateway door and activation height | delivered |
 | 5/N | WP-28, WP-31, WP-32 | #72, #83, #89 | compatibility namespaces carried over; subscriptions and the Move refusal surface | owed |
 | 6/N | WP-11, WP-13, WP-42 | #91, #79 | mobile core/types carried over; one canonical presence wire shape; gate-debt wiring | owed |
 
