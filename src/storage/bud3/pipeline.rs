@@ -560,10 +560,7 @@ mod tests {
             prepare_volume_upload(&objects, Visibility::Public, &SMALL, &limits, 12).unwrap();
         assert_eq!(prepared.volume.members().len(), 2);
         assert_eq!(prepared.record.members, prepared.volume.members());
-        assert_eq!(
-            prepared.record.bytes_len,
-            (first.len() + second.len()) as u64
-        );
+        assert_eq!(prepared.record.bytes_len, (first.len() + second.len()) as u64);
         // The volume is coded as one segment. Lose a third of its symbols and
         // every member still comes back byte for byte, found by its position
         // and its proof.
