@@ -113,6 +113,7 @@ jobs:
             --lockfile=fuzz/Cargo.lock \
             --lockfile=kani/Cargo.lock \
             --lockfile=crates/wallet-core/Cargo.lock \
+            --lockfile=mobile/core/Cargo.lock \
             --lockfile=crates/note-packing/Cargo.lock \
             --lockfile=crates/bpqs/Cargo.lock \
             --lockfile=crates/bud-codec/Cargo.lock \

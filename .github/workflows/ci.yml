@@ -1533,6 +1533,8 @@ jobs:
           - { name: wallet-core, manifest: "crates/wallet-core/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: xtask-gates, manifest: "xtask/gates/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: xtask-tools, manifest: "xtask/tools/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: budlum-types, manifest: "crates/budlum-types/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: mobile-core, manifest: "mobile/core/Cargo.toml", config: "--config .quality/deny.toml" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1572,6 +1574,8 @@ jobs:
           - { name: wallet-core, manifest: "crates/wallet-core/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: xtask-gates, manifest: "xtask/gates/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: xtask-tools, manifest: "xtask/tools/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: budlum-types, manifest: "crates/budlum-types/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: mobile-core, manifest: "mobile/core/Cargo.toml", config: "--config .quality/deny.toml" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2678,3 +2682,89 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- genesis-schema --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- genesis-schema
+
+  budlum-types:
+    name: Shared types (budlum-types)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-types
+          workspaces: crates/budlum-types
+      - name: Format
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path crates/budlum-types/Cargo.toml --all -- --check
+      - name: Clippy
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo clippy --manifest-path crates/budlum-types/Cargo.toml --all-targets -- -D warnings
+      - name: Tests
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo test --manifest-path crates/budlum-types/Cargo.toml
+
+  mobile-core:
+    name: Mobile core (WP-11)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: mobile-core
+          workspaces: mobile/core
+      - name: Format
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path mobile/core/Cargo.toml --all -- --check
+      - name: Clippy
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo clippy --manifest-path mobile/core/Cargo.toml --all-targets -- -D warnings
+      - name: Tests
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo test --manifest-path mobile/core/Cargo.toml
+
+  mobile-core-targets:
+    name: mobile_core_builds_for_all_targets (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-linux-android
+          - armv7-linux-androideabi
+          - x86_64-linux-android
+          - aarch64-apple-ios
+          - aarch64-apple-ios-sim
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: mobile-core-${{ matrix.target }}
+          workspaces: mobile/core
+      - name: Build the library for the target
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --manifest-path mobile/core/Cargo.toml --locked --lib --target "$TARGET"

@@ -103,6 +103,10 @@ updates:
   - package-ecosystem: "cargo"
     directories:
       - "/bud"
+      - "/crates/bud-codec"
+      - "/crates/budlum-types"
+      - "/crates/uel-abi"
+      - "/mobile/core"
       - "/crates/ai-inference"
       - "/crates/bpqs"
       - "/crates/budscan"
