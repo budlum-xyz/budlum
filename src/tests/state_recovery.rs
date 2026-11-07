@@ -1,4 +1,4 @@
-//! Chaos acceptance for the regeneration layer (decision record 2026-09-17,
+//! Chaos acceptance for the state recovery layer (decision record 2026-09-17,
 //! item 12): a node that suffers damage must re-enter serving from a
 //! canonical stage within N blocks, never from a state it invented.
 //!
@@ -17,9 +17,9 @@
 //!    cold-committee channel, not to this layer. This file pins the property
 //!    so the boundary stays visible in code rather than in tribal memory.
 
-use crate::domain::regen_health::{assess, HealthPolicy, HealthVerdict};
-use crate::domain::regeneration_stage::{
-    RegenerationLedger, Reversion, Stage, StageSnapshot, Stress, Transdifferentiated,
+use crate::chain::state_recovery::health::{assess, HealthPolicy, HealthVerdict};
+use crate::chain::state_recovery::stage::{
+    RecoveryLedger, Reversion, Stage, StageSnapshot, Stress, Transdifferentiated,
 };
 
 /// Acceptance window: recovered serving must emerge no later than this many
@@ -65,7 +65,7 @@ fn stage_height(stage: Stage) -> Option<u64> {
 #[test]
 fn chaos_corrupt_view_recovers_within_n_blocks_via_canonical_reversion() {
     let policy = HealthPolicy::default();
-    let ledger = RegenerationLedger::at(DAMAGE_HEIGHT, C_MEDUSA);
+    let ledger = RecoveryLedger::at(DAMAGE_HEIGHT, C_MEDUSA);
 
     // Chaos: derived state is corrupted in place (bitrot, racing GC, a bad
     // patch - the health layer cannot and does not care which).
@@ -125,7 +125,7 @@ fn chaos_corrupt_view_recovers_within_n_blocks_via_canonical_reversion() {
 #[test]
 fn chaos_forged_audit_trail_recovers_by_full_reversion_within_n_blocks() {
     let policy = HealthPolicy::default();
-    let mut forged = RegenerationLedger::at(DAMAGE_HEIGHT, C_MEDUSA);
+    let mut forged = RecoveryLedger::at(DAMAGE_HEIGHT, C_MEDUSA);
     forged.stage = Stage::Ephyra;
     forged.height = EPHYRA_HEIGHT;
     forged.commitment = C_EPHYRA;
@@ -218,7 +218,7 @@ fn chaos_compromised_anchor_reversion_follows_the_canonical_source_by_design() {
         Some([0xAD; 32]) // one line: attacker's canonical everything
     };
     let policy = HealthPolicy::default();
-    let mut ledger = RegenerationLedger::at(DAMAGE_HEIGHT, C_MEDUSA);
+    let mut ledger = RecoveryLedger::at(DAMAGE_HEIGHT, C_MEDUSA);
 
     // The honest node's view mismatches the (compromised) canonical source.
     let verdict = assess(
@@ -250,7 +250,7 @@ fn chaos_compromised_anchor_reversion_follows_the_canonical_source_by_design() {
 fn chaos_no_canonical_source_alarms_and_never_reverts_blind() {
     let policy = HealthPolicy::default();
     let empty_canonical = |_stage: Stage, _height: u64| -> Option<[u8; 32]> { None };
-    let mut ledger = RegenerationLedger::at(DAMAGE_HEIGHT, C_MEDUSA);
+    let mut ledger = RecoveryLedger::at(DAMAGE_HEIGHT, C_MEDUSA);
     ledger.commitment = [0xEE; 32];
     let before = ledger.clone();
     match assess(

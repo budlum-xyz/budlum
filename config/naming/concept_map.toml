@@ -5,6 +5,8 @@ global_allow_paths = [
   "docs/NAMING.md",
   "docs/audit/",
   ".github/concept-names-baseline.txt",
+  "xtask/gates/src/gates/bud3_forbidden_phrases.rs",
+  "xtask/gates/src/gates/geiger.rs",
 ]
 
 [[concept]]
@@ -156,6 +158,7 @@ term_en = "signature aggregation proof"
 term_tr = "İmza toplama kanıtı"
 area = "budzero"
 reason = "The name states the function."
+allow_paths = ["budzero/Cargo.lock"]
 
 [[concept]]
 old = ["Tarif", "Recipe", "TARIF-3", "VideoRecipe"]

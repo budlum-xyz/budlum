@@ -104,7 +104,7 @@ pub mod private_transfer_fee_market;
 #[cfg(test)]
 pub mod prover;
 #[cfg(test)]
-pub mod regeneration_recovery;
+pub mod state_recovery;
 #[cfg(test)]
 pub mod relayer_liveness;
 // chain relayer proof cryptographic verification + M5 budlumxyz fee + M4 BNS fee
@@ -255,3 +255,11 @@ pub mod bud3_door;
 // WP-35: the conformance catalog and the execution limits agree with the code.
 #[cfg(test)]
 pub mod conformance_locks;
+
+// The persistence move is behaviour-neutral.
+#[cfg(test)]
+pub mod persistence_move;
+
+// WP-14 Instant Duty Handover and Disaster Recovery Mode suite.
+#[cfg(test)]
+pub mod wp14_handover_recovery;

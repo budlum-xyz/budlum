@@ -1008,7 +1008,7 @@ impl RpcServer {
     }
 
     fn account_proof_to_json(
-        bundle: &crate::storage::merkle_trie::AccountProofBundle,
+        bundle: &crate::persistence::state_trie::AccountProofBundle,
     ) -> serde_json::Value {
         serde_json::json!({
             // Named `proofRoot`, not `stateRoot`: this commits to the same

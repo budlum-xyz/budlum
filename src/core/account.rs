@@ -14,7 +14,7 @@ use crate::cross_domain::message_registry::CrossDomainMessageRegistry;
 use crate::cross_domain::BridgeState;
 use crate::domain::storage_deal::StorageRegistry;
 use crate::registry::role::{roles, RoleId};
-use crate::storage::db::Storage;
+use crate::persistence::db::Storage;
 #[cfg(not(miri))]
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -1525,15 +1525,15 @@ impl AccountState {
     }
 
     /// Run one epoch's liveness check on the state-level
-    /// `LivenessTracker`. Returns the canonical `SlashingReport`s produced
-    /// This epoch. `participated` is the set of validators that showed the
-    /// Expected participation; everyone else in `validators` is treated as
-    /// An absentee.
+    /// `LivenessTracker`. Returns the validators newly **suspended** this
+    /// Epoch (V-4: absence suspends, it never slashes). `participated` is
+    /// The set of validators that showed the expected participation;
+    /// Everyone else in `validators` is treated as an absentee.
     pub fn record_liveness_epoch(
         &mut self,
         epoch: u64,
         participated: &std::collections::HashSet<Address>,
-    ) -> Vec<crate::registry::evidence::SlashingReport> {
+    ) -> Vec<Address> {
         let params = *self.registry.params();
         // Only members the registry still considers active. A slashed or
         // Jailed validator remains in `self.validators` - that map holds
@@ -2639,7 +2639,7 @@ impl AccountState {
                     )?;
                 }
             }
-            ValidatorTx::ChangeClass { .. } | ValidatorTx::RotateOperatorKey { .. } => {
+            ValidatorTx::ChangeClass { .. } | ValidatorTx::RotateOperatorKey { .. } | ValidatorTx::Resume => {
                 if tx.amount != 0 {
                     return Err(refuse(
                         "validator_tx_shape",
@@ -2869,6 +2869,17 @@ impl AccountState {
         // Validator directory changes requested an epoch ago take effect here.
         self.activate_validator_changes(chain_id);
         self.advance_bud3_epoch();
+
+        // ResumeValidator requests whose epoch has come lift the suspension
+        // (section 7.8.7); the validator re-enters the active set. Absence
+        // itself never slashed (V-4).
+        for resumed in self.liveness.activate_due_resumes(self.epoch_index) {
+            if let Some(v) = self.validators.get_mut(&resumed) {
+                if !v.slashed {
+                    v.active = true;
+                }
+            }
+        }
 
         // Mikoriza weights move only here, at the boundary.
         let shared_security = crate::core::chain_config::shared_security_for_chain_id(chain_id);

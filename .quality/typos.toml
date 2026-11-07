@@ -27,6 +27,10 @@ extend-exclude = [
                           # hand-edited here. A typo inside it is fixed upstream in
                           # the crate, never by editing the mirror and calling it
                           # an export.
+  "config/naming/concept_map.toml",
+  ".github/concept-names-baseline.txt",
+  "docs/NAMING.md",
+  "xtask/gates/src/gates/bud3_forbidden_phrases.rs",
 ]
 
 [default]

@@ -2308,7 +2308,7 @@ state?* Leaves are ordered by the account map's iteration order, the tree is
 cached and updated incrementally over dirty accounts. Block production and
 validation read this. This root does not change; changing it forks the chain.
 
-**The proving root** (`storage::merkle_trie`) asks: *how do you prove it?* The
+**The proving root** (`persistence::state_trie`) asks: *how do you prove it?* The
 consensus root cannot answer that question, and the reason is not an omission but
 its structure:
 

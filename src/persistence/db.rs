@@ -6,7 +6,7 @@ use crate::cross_domain::message::CrossDomainMessage;
 use crate::cross_domain::BridgeState;
 use crate::domain::{ConsensusDomain, DomainCommitment};
 use crate::settlement::GlobalBlockHeader;
-use crate::storage::traits::{BlockchainStorage, DurableCommitBatch, SeenBlockMap};
+use crate::persistence::traits::{BlockchainStorage, DurableCommitBatch, SeenBlockMap};
 use serde::{de::DeserializeOwned, Serialize};
 use sled::Db;
 use std::str::from_utf8;

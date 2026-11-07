@@ -29,6 +29,7 @@ src/gateway/service.rs
 src/main.rs
 src/network/node.rs
 src/network/proto_conversions.rs
+src/persistence/db.rs
 src/pollen/content_gate.rs
 src/registry/role.rs
 src/rpc/api.rs
@@ -38,7 +39,6 @@ src/rpc/tests.rs
 src/storage/README.md
 src/storage/assignment.rs
 src/storage/content_id.rs
-src/storage/db.rs
 src/storage/dictionary.rs
 src/storage/emit.rs
 src/storage/erasure.rs
