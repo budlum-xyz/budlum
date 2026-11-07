@@ -11,6 +11,11 @@ pub enum Network {
     Devnet,
 }
 
+/// The legacy privacy path lacks ownership and value-conservation proofs.
+pub(crate) fn privacy_transfers_enabled(chain_id: u64) -> bool {
+    chain_id == Network::Devnet.chain_id().value()
+}
+
 impl Network {
     /// EIP-155 chain id.
     ///

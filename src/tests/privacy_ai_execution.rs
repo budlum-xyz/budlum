@@ -286,9 +286,13 @@ fn signed_tx(kp: &KeyPair, chain_id: u64, tx_type: TransactionType) -> Transacti
 }
 
 #[test]
-fn private_transfer_is_refused_on_mainnet_and_unknown_chain_ids() {
+fn private_transfer_is_refused_on_testnet_mainnet_and_unknown_chain_ids() {
     use crate::core::chain_config::Network;
-    for chain_id in [Network::Mainnet.chain_id().value(), 999_999] {
+    for chain_id in [
+        Network::Mainnet.chain_id().value(),
+        Network::Testnet.chain_id().value(),
+        999_999,
+    ] {
         let kp = KeyPair::generate().unwrap();
         let from = Address::from(kp.public_key_bytes());
         let mut state = funded_state(from, 1_000_000);
@@ -296,16 +300,20 @@ fn private_transfer_is_refused_on_mainnet_and_unknown_chain_ids() {
         let tx = signed_tx(&kp, chain_id, TransactionType::PrivateTransferSubmit(sub));
         let err = Executor::apply_transaction(&mut state, &tx)
             .expect_err("the privacy gate must refuse this chain id");
-        assert!(err.contains("disabled on mainnet"), "got: {err}");
+        assert!(err.contains("disabled on this network"), "got: {err}");
         assert!(state.note_registry.contains_commitment(&c_in));
         assert!(!state.note_registry.contains_commitment(&c_out));
     }
 }
 
 #[test]
-fn privacy_note_insert_is_refused_on_mainnet_and_unknown_chain_ids() {
+fn privacy_note_insert_is_refused_on_testnet_mainnet_and_unknown_chain_ids() {
     use crate::core::chain_config::Network;
-    for chain_id in [Network::Mainnet.chain_id().value(), 999_999] {
+    for chain_id in [
+        Network::Mainnet.chain_id().value(),
+        Network::Testnet.chain_id().value(),
+        999_999,
+    ] {
         let kp = KeyPair::generate().unwrap();
         let from = Address::from(kp.public_key_bytes());
         let mut state = funded_state(from, 1_000_000);
@@ -313,7 +321,7 @@ fn privacy_note_insert_is_refused_on_mainnet_and_unknown_chain_ids() {
         let tx = signed_tx(&kp, chain_id, TransactionType::PrivacyNoteInsert(c));
         let err = Executor::apply_transaction(&mut state, &tx)
             .expect_err("the privacy gate must refuse this chain id");
-        assert!(err.contains("disabled on mainnet"), "got: {err}");
+        assert!(err.contains("disabled on this network"), "got: {err}");
         assert!(!state.note_registry.contains_commitment(&c));
     }
 }
