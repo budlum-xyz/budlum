@@ -2775,6 +2775,13 @@ mod tests {
             .file_type()
             .is_symlink());
         assert_eq!(std::fs::read_dir(&actual_target).unwrap().count(), 0);
+
+        std::fs::remove_file(&symlink_target).unwrap();
+        let dangling_target = root.path().join("dangling-target");
+        std::os::unix::fs::symlink(&dangling_target, &symlink_target).unwrap();
+        let error = Storage::restore_snapshot(&backup, &symlink_target).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(!dangling_target.exists());
     }
 
     #[test]
