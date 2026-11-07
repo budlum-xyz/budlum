@@ -507,6 +507,66 @@ const BUDGETS: &[Budget] = &[
         count: 1,
         reason: "the cfg-gated reader exists for the on-disk format migration and no other cfg reaches it; removing it would strand rows written by the previous format",
     },
+    Budget {
+        file: "crates/uel-abi/tests/frames.rs",
+        lint: "clippy::unwrap_used",
+        count: 1,
+        reason: "an integration test whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` in clippy.toml does not reach them; a panic here fails the test run, which is the reporting channel a test is supposed to use",
+    },
+    Budget {
+        file: "crates/uel-abi/tests/frames.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "an integration test whose helpers sit outside a `#[test]` body, so `allow-expect-in-tests` in clippy.toml does not reach them; a panic here fails the test run, which is the reporting channel a test is supposed to use",
+    },
+    Budget {
+        file: "crates/uel-abi/tests/transport.rs",
+        lint: "clippy::unwrap_used",
+        count: 1,
+        reason: "an integration test whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` in clippy.toml does not reach them; a panic here fails the test run, which is the reporting channel a test is supposed to use",
+    },
+    Budget {
+        file: "crates/uel-abi/tests/transport.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "an integration test whose helpers sit outside a `#[test]` body, so `allow-expect-in-tests` in clippy.toml does not reach them; a panic here fails the test run, which is the reporting channel a test is supposed to use",
+    },
+    Budget {
+        file: "crates/uel-abi/tests/transport_deadlines.rs",
+        lint: "clippy::unwrap_used",
+        count: 1,
+        reason: "an integration test whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` in clippy.toml does not reach them; a panic here fails the test run, which is the reporting channel a test is supposed to use",
+    },
+    Budget {
+        file: "crates/uel-abi/tests/transport_deadlines.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "an integration test whose helpers sit outside a `#[test]` body, so `allow-expect-in-tests` in clippy.toml does not reach them; a panic here fails the test run, which is the reporting channel a test is supposed to use",
+    },
+    Budget {
+        file: "crates/uel-abi/tests/transport_host_guards.rs",
+        lint: "clippy::unwrap_used",
+        count: 1,
+        reason: "an integration test whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` in clippy.toml does not reach them; a panic here fails the test run, which is the reporting channel a test is supposed to use",
+    },
+    Budget {
+        file: "crates/uel-abi/tests/transport_host_guards.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "an integration test whose helpers sit outside a `#[test]` body, so `allow-expect-in-tests` in clippy.toml does not reach them; a panic here fails the test run, which is the reporting channel a test is supposed to use",
+    },
+    Budget {
+        file: "crates/uel-abi/tests/transport_worker_frames.rs",
+        lint: "clippy::unwrap_used",
+        count: 1,
+        reason: "an integration test whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` in clippy.toml does not reach them; a panic here fails the test run, which is the reporting channel a test is supposed to use",
+    },
+    Budget {
+        file: "crates/uel-abi/tests/transport_worker_frames.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "an integration test whose helpers sit outside a `#[test]` body, so `allow-expect-in-tests` in clippy.toml does not reach them; a panic here fails the test run, which is the reporting channel a test is supposed to use",
+    },
 ];
 
 /// Lints that may never be suppressed anywhere.
