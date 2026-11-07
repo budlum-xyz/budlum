@@ -19,3 +19,7 @@ __pycache__/
 # Foundry build output of the Ethereum-side contracts.
 /contracts/out/
 /contracts/cache/
+
+# Binding directive must never be tracked inside the English repository tree.
+/THE_BUDLUM_DIREKTIF.md
+
