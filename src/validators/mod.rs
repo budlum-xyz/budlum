@@ -14,6 +14,8 @@
 //! (the consensus set); a Mobile validator holds no seat, so its bond lives in
 //! the directory record itself and never enters a quorum.
 
+pub mod handover;
+
 use crate::core::address::Address;
 use crate::crypto::scheme::SchemeId;
 use serde::{Deserialize, Serialize};
