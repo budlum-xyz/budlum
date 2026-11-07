@@ -242,6 +242,38 @@ mod rpc_tests {
             .expect("a good presentation is an answer, not an error");
         assert_eq!(ok["valid"], true);
 
+        // A real subject signature does not make a zero-disclosure receipt
+        // credential evidence. This traverses the public RPC -> chain actor ->
+        // registry verifier path, not only the helper's unit test.
+        let empty_subject_key = crate::crypto::primitives::KeyPair::from_seed(&[41; 32])
+            .expect("deterministic empty-receipt subject key");
+        let empty_document = "No identity fields";
+        let mut empty_receipt = crate::registry::PresentationReceipt {
+            requester,
+            subject: Address::from(empty_subject_key.public_key_bytes()),
+            document_digest: crate::registry::document_digest_of(empty_document),
+            epoch: 0,
+            entries: Vec::new(),
+            subject_public_key: Vec::new(),
+            signature: Vec::new(),
+        };
+        empty_receipt.sign(&empty_subject_key);
+        let empty = server
+            .identity_verify_presentation(
+                empty_receipt,
+                requester_hex.clone(),
+                empty_document.to_string(),
+            )
+            .await
+            .expect("an empty receipt is a validity=false answer, not an RPC error");
+        assert_eq!(empty["valid"], false);
+        assert!(
+            empty["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("opens no credential fields")),
+            "the API must refuse a signed receipt without disclosure entries: {empty}"
+        );
+
         let repurposed = server
             .identity_verify_presentation(
                 receipt.clone(),
