@@ -2,7 +2,9 @@ use crate::crypto::primitives::{BlsKeypair, CryptoError, PqKeyPair};
 use crate::crypto::signer::ConsensusSigner;
 use std::sync::Mutex;
 
-const BLS_DATA_LABEL: &str = "BUD_BLS_KEY";
+/// The compiled-in BLS data label, used when the operator sets none.
+pub const DEFAULT_BLS_KEY_LABEL: &str = "BUD_BLS_KEY";
+const BLS_DATA_LABEL: &str = DEFAULT_BLS_KEY_LABEL;
 const PQ_DATA_LABEL: &str = "BUD_PQ_KEY";
 
 /// The fixed test message used at startup to prove that the private key held in the
@@ -55,6 +57,14 @@ pub struct Pkcs11Signer {
     /// mechanism. When present it is the PQ path and the vendor
     /// mechanism and the software fallback are not consulted.
     standard_pq_key: Option<Pkcs11PqKey>,
+    /// BLG-010: the operator's key label, bound to the Ed25519 search and to
+    /// the mechanism that signs. `None` means the slot must have offered
+    /// exactly one labelled key and the compiled-in data labels are used.
+    standard_pq_label: Option<String>,
+    /// BLG-010: the label of the vendor BLS key object. Defaults to
+    /// [`BLS_DATA_LABEL`], but an operator who set a label is not silently
+    /// signing with a different object.
+    bls_key_label: Option<String>,
 }
 
 struct Pkcs11Inner {
@@ -185,6 +195,8 @@ impl Pkcs11Signer {
             expected_bls_public_key: None,
             expected_pq_public_key: None,
             standard_pq_key: None,
+            standard_pq_label: None,
+            bls_key_label: None,
         })
     }
 
@@ -272,6 +284,10 @@ impl Pkcs11Signer {
     /// [`CryptoError::KeyGeneration`] when the token has no such key pair, the
     /// pairing proof fails or the key is not the configured one.
     pub fn with_standard_pq_key(mut self, label: &str) -> Result<Self, CryptoError> {
+        // BLG-010: the label that opened the key is the label the binding test
+        // reports and the one the mechanism signs through. A second label
+        // negotiated later (in `with_vendor_mechanisms`, say) would be a
+        // different object with the same mechanism.
         let token = Pkcs11PqToken::open(&self.module_path, self.slot_id, &self.token_pin_env)?;
         let key = token.open_key(label, HsmPqAlgorithm::MlDsa65)?;
         if let Some(expected) = &self.expected_pq_public_key {
@@ -282,7 +298,43 @@ impl Pkcs11Signer {
             }
         }
         self.standard_pq_key = Some(key);
+        self.standard_pq_label = Some(label.to_string());
         Ok(self)
+    }
+
+    /// BLG-010: bind the vendor BLS signing mechanism to a named token object.
+    ///
+    /// The vendor BLS path used to sign through the compiled-in
+    /// [`BLS_DATA_LABEL`] whatever the operator's `pkcs11_key_label` said, so
+    /// the startup binding test could prove a pairing between the announced key
+    /// and one object while the node signed with another. Setting the label here
+    /// makes the object the operator selected the object that signs.
+    ///
+    /// Without this call the compiled-in label is used, which is what every
+    /// existing deployment does; the difference is that the choice is now
+    /// recorded on the signer and can be read back
+    /// ([`Self::bls_key_label`]) and tested.
+    #[must_use]
+    pub fn with_bls_key_label(mut self, label: impl Into<String>) -> Self {
+        let label = label.into();
+        match Self::bls_label_after_setting(Some(&label)) {
+            Some(kept) => self.bls_key_label = Some(kept),
+            None => tracing::warn!(
+                "PKCS#11: an empty BLS key label was given; keeping the compiled-in `{BLS_DATA_LABEL}`"
+            ),
+        }
+        self
+    }
+
+    /// The label the vendor BLS mechanism signs through, and the label that
+    /// opened the standard PQ key, as recorded on this signer. `None` means the
+    /// compiled-in default is in force.
+    #[must_use]
+    pub(crate) fn key_labels(&self) -> (Option<&str>, Option<&str>) {
+        (
+            self.bls_key_label.as_deref(),
+            self.standard_pq_label.as_deref(),
+        )
     }
 
     /// Set vendor-native BLS/PQ mechanism IDs.
@@ -330,6 +382,23 @@ impl Pkcs11Signer {
     /// fixed message instead of at the first checkpoint.
     pub fn verify_consensus_key_bindings(&self) -> Result<(), CryptoError> {
         const BINDING_MSG: &[u8] = b"BUDLUM_HSM_CONSENSUS_KEY_BINDING_V1";
+        // BLG-010, the second half: a vendor mechanism signs through whichever
+        // object carries the label the signer names. When the operator set a
+        // key label and the mechanism is configured, the two must be the same
+        // binding or the startup test below would prove a pairing between the
+        // announced key and an object nobody selected. That is exactly the
+        // finding: the label was applied after the constructor had already
+        // bound a key, so the proof covered a different key than the one the
+        // node would sign with. Fail closed, and say which side is missing.
+        // The label that opened the standard PQ key is recorded by
+        // `with_standard_pq_key`, so this can only fire if a future path opens
+        // the key without going through it. Checked here rather than trusted,
+        // because "no label" is exactly the state the finding describes.
+        Self::check_standard_key_is_labelled(
+            self.standard_pq_key.is_some(),
+            self.standard_pq_label.as_deref(),
+        )
+        .map_err(CryptoError::KeyGeneration)?;
         if self.bls_mechanism.is_some() {
             let pk = Self::binding_key("BLS", self.announced_bls_public_key())
                 .map_err(CryptoError::KeyGeneration)?;
@@ -356,6 +425,39 @@ impl Pkcs11Signer {
         announced.ok_or_else(|| {
             format!("{which} vendor mechanism is configured but no {which} public key is known to bind it against")
         })
+    }
+
+    /// The label a vendor BLS mechanism would sign through after the operator
+    /// sets `label`, or `None` for the compiled-in default.
+    ///
+    /// Split out as a pure function so the rule is testable without a token:
+    /// an empty label is refused (it would match by class alone), and any other
+    /// label is kept verbatim because the token's labels are case-sensitive.
+    fn bls_label_after_setting(label: Option<&str>) -> Option<String> {
+        match label {
+            Some(label) if !label.is_empty() => Some(label.to_string()),
+            _ => None,
+        }
+    }
+
+    /// BLG-010: a standard PQ key must carry the label that opened it.
+    ///
+    /// # Errors
+    ///
+    /// A message naming the invariant when a key is open and no label was
+    /// recorded. Kept separate from the signer so the refusal is testable
+    /// without a token.
+    fn check_standard_key_is_labelled(
+        standard_key_open: bool,
+        label: Option<&str>,
+    ) -> Result<(), String> {
+        if standard_key_open && label.is_none() {
+            return Err(
+                "a standard PQ key is open without the label that opened it; refusing to bind an announced key to an object nobody selected"
+                    .to_string(),
+            );
+        }
+        Ok(())
     }
 
     /// Require vendor-native BLS/PQ signing and fail closed on any fallback.
@@ -516,7 +618,7 @@ impl Pkcs11Signer {
 
         // More than one key is never guessed: announcing one identity and signing with a
         // different key is a consensus fault.
-        Self::require_single_key("public", objects.len())?;
+        Self::require_exactly_one("public", objects.len(), key_label)?;
 
         let attr = session
             .get_attributes(objects[0], &[cryptoki::object::AttributeType::Value])
@@ -541,11 +643,28 @@ impl Pkcs11Signer {
     /// `objects[0]`, so with several keys the identity a node announced and the key it
     /// signed with could differ.
     fn require_single_key(kind: &str, count: usize) -> Result<(), String> {
+        Self::require_exactly_one(kind, count, None)
+    }
+
+    /// The same rule, with the label in the refusal when one was given.
+    ///
+    /// BLG-010: the label was read by every search but never named in the
+    /// message, so an operator who set `pkcs11_key_label` to an object that
+    /// does not exist (a typo, or a label created after the node started) was
+    /// told "No Ed25519 private key found in HSM" - true of the *label* and
+    /// false of the slot, and there was no way to tell the two apart from the
+    /// log. The label is now part of the refusal, and an unlabelled refusal
+    /// says that no label was given.
+    fn require_exactly_one(kind: &str, count: usize, label: Option<&str>) -> Result<(), String> {
+        let what = match label {
+            Some(label) => format!("Ed25519 {kind} key with label `{label}`"),
+            None => format!("Ed25519 {kind} key (no key label set)"),
+        };
         match count {
-            0 => Err(format!("No Ed25519 {kind} key found in HSM")),
+            0 => Err(format!("No {what} found in HSM")),
             1 => Ok(()),
             n => Err(format!(
-                "{n} Ed25519 {kind} keys found in HSM slot; refusing to guess, set an explicit key label"
+                "{n} {what} objects found in HSM slot; refusing to guess, set an explicit key label"
             )),
         }
     }
@@ -567,7 +686,7 @@ impl Pkcs11Signer {
             .find_objects(&template)
             .map_err(|e| format!("Ed25519 key search: {e}"))?;
 
-        Self::require_single_key("private", objects.len())?;
+        Self::require_exactly_one("private", objects.len(), key_label)?;
         Ok(objects[0])
     }
 
@@ -757,7 +876,8 @@ impl ConsensusSigner for Pkcs11Signer {
                 .map_err(|_| CryptoError::Signing("HSM mutex".into()))?;
             if let Some(inner) = guard.as_ref() {
                 let check = Self::check_bls_signature_len;
-                match self.try_vendor_sign(&inner.session, mech_id, BLS_DATA_LABEL, msg, check) {
+                let label = self.bls_key_label.as_deref().unwrap_or(BLS_DATA_LABEL);
+                match self.try_vendor_sign(&inner.session, mech_id, label, msg, check) {
                     Ok(sig) => return Ok(sig),
                     Err(e) => {
                         if self.strict_vendor_native {
@@ -1279,6 +1399,86 @@ mod vendor_tests {
     fn an_ambiguous_ed25519_key_selection_is_refused() {
         let err = Pkcs11Signer::require_single_key("public", 2).unwrap_err();
         assert!(err.contains("refusing to guess"), "{err}");
+    }
+
+    /// BLG-010: the operator's label must be part of every refusal, so a typo
+    /// in `pkcs11_key_label` reads as "that label is not here" instead of as
+    /// "this slot holds no key".
+    #[test]
+    fn blg_010_a_labelled_search_names_the_label_in_its_refusal() {
+        let missing = Pkcs11Signer::require_exactly_one("private", 0, Some("consensus-a"))
+            .expect_err("no object may not pass");
+        assert!(missing.contains("consensus-a"), "{missing}");
+        assert!(
+            !missing.contains("(no key label set)"),
+            "a labelled search must not report an unlabelled one: {missing}"
+        );
+
+        let ambiguous = Pkcs11Signer::require_exactly_one("public", 2, Some("consensus-a"))
+            .expect_err("two objects may not pass");
+        assert!(ambiguous.contains("consensus-a"), "{ambiguous}");
+        assert!(ambiguous.contains("2"), "{ambiguous}");
+
+        assert!(Pkcs11Signer::require_exactly_one("public", 1, Some("consensus-a")).is_ok());
+    }
+
+    /// BLG-010, the binding half: the label the operator sets is the label the
+    /// vendor BLS mechanism signs through, and the signer records it so the
+    /// startup binding test covers the object it will actually use.
+    ///
+    /// Canary: return `BLS_DATA_LABEL` unconditionally in `bls_sign` (the
+    /// pre-fix shape) and `key_labels().0` below is `None` while the operator
+    /// asked for `consensus-bls-a`.
+    #[test]
+    fn blg_010_the_operator_label_binds_the_vendor_mechanism() {
+        // A signer built without a label keeps the compiled-in default, and
+        // says so rather than pretending it has one.
+        assert_eq!(DEFAULT_BLS_KEY_LABEL, "BUD_BLS_KEY");
+
+        // An empty label is refused rather than recorded: an empty Label in a
+        // PKCS#11 template matches by class alone, which is the guess the whole
+        // label mechanism exists to remove.
+        let empty = Pkcs11Signer::bls_label_after_setting(Some(""));
+        assert_eq!(
+            empty,
+            None,
+            "an empty label must not replace the compiled-in default"
+        );
+
+        // A real label is recorded verbatim, including one that differs from
+        // the default only in case: the token is case-sensitive.
+        for label in ["consensus-bls-a", "BUD_BLS_KEY", "bud_bls_key"] {
+            assert_eq!(
+                Pkcs11Signer::bls_label_after_setting(Some(label)),
+                Some(label.to_string()),
+                "the label the operator set must be the label that is kept"
+            );
+        }
+        // No label at all is the same as the compiled-in default.
+        assert_eq!(Pkcs11Signer::bls_label_after_setting(None), None);
+    }
+
+    /// BLG-010: the binding test fails closed when a standard PQ key is open
+    /// without the label that opened it. That state cannot be reached through
+    /// `with_standard_pq_key`, which is the point: the check is on the
+    /// invariant, not on the one code path that happens to hold it today.
+    #[test]
+    fn blg_010_an_unlabelled_standard_key_cannot_be_bound() {
+        assert!(Pkcs11Signer::check_standard_key_is_labelled(true, None).is_err());
+        assert!(Pkcs11Signer::check_standard_key_is_labelled(false, None).is_ok());
+        assert!(Pkcs11Signer::check_standard_key_is_labelled(true, Some("pq-a")).is_ok());
+        let err = Pkcs11Signer::check_standard_key_is_labelled(true, None).unwrap_err();
+        assert!(err.contains("nobody selected"), "{err}");
+    }
+
+    /// BLG-010: an unlabelled search says so explicitly. The previous message
+    /// was identical with and without a label, which is what made the two
+    /// cases indistinguishable to an operator.
+    #[test]
+    fn blg_010_an_unlabelled_search_says_no_label_was_set() {
+        let err = Pkcs11Signer::require_exactly_one("private", 0, None).unwrap_err();
+        assert!(err.contains("(no key label set)"), "{err}");
+        assert!(err.contains("No Ed25519 private key"), "{err}");
     }
 }
 

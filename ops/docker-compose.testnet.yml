@@ -1,0 +1,128 @@
+# Testnet compose profiles (WP-41 job 4).
+#
+#   docker compose -f ops/docker-compose.testnet.yml --profile single up -d
+#   docker compose -f ops/docker-compose.testnet.yml --profile four-node up -d
+#   docker compose -f ops/docker-compose.testnet.yml --profile rehearsal up -d
+#
+# `single` is one validator for API work. `four-node` is the launch shape:
+# one seed, one relay, one upload gateway and one RPC node. `rehearsal` adds
+# the monitoring stack to `four-node` so the alert rules are loaded before a
+# public launch. Every service binds to loopback; ops/Caddyfile.testnet is the
+# only public edge. No secret value is stored in this file: the HSM PIN comes
+# from /etc/budlum/hsm.env and the RPC key from /etc/budlum/rpc.env.
+#
+# Container networking: config/testnet.toml binds every RPC and metrics
+# listener to loopback. The published ports below are reachable only when the
+# service is started with host networking or its listeners are overridden to
+# 0.0.0.0. Run `docker compose ... config` and check the listener flags
+# before a rehearsal; the runbooks describe the host-network variant.
+name: budlum-testnet
+
+x-node-common: &node-common
+  image: budlum-core:local
+  build:
+    context: ..
+    dockerfile: ops/Dockerfile
+  restart: unless-stopped
+  user: budlum
+  working_dir: /var/lib/budlum
+  env_file:
+    - /etc/budlum/hsm.env
+    - /etc/budlum/rpc.env
+  environment:
+    SOFTHSM2_CONF: /etc/budlum/softhsm2.conf
+    BUDLUM_RPC_API_KEY_ENV: BUDLUM_RPC_API_KEY
+    RUST_LOG: info
+  volumes:
+    - ./data:/var/lib/budlum/data
+    - ./secrets:/var/lib/budlum/secrets:ro
+    - ./softhsm:/var/lib/budlum/softhsm
+    - ../config/testnet.toml:/etc/budlum/testnet.toml:ro
+  command: ["--config", "/etc/budlum/testnet.toml"]
+
+services:
+  node:
+    <<: *node-common
+    profiles: ["single"]
+    ports:
+      - "127.0.0.1:18545:18545"
+      - "127.0.0.1:19090:19090"
+
+  seed:
+    <<: *node-common
+    profiles: ["four-node", "rehearsal"]
+    command: ["--config", "/etc/budlum/testnet.toml", "--role", "seed"]
+    ports:
+      - "127.0.0.1:14001:5001"
+
+  relay:
+    <<: *node-common
+    profiles: ["four-node", "rehearsal"]
+    command: ["--config", "/etc/budlum/testnet.toml", "--role", "relayer"]
+    volumes:
+      - ./data-relay:/var/lib/budlum/data
+      - ./secrets-relay:/var/lib/budlum/secrets:ro
+      - ./softhsm-relay:/var/lib/budlum/softhsm
+      - ../config/testnet.toml:/etc/budlum/testnet.toml:ro
+
+  gateway:
+    <<: *node-common
+    profiles: ["four-node", "rehearsal"]
+    # The upload gateway is an API front end, not a distinct node role.
+    command: ["--config", "/etc/budlum/testnet.toml"]
+    ports:
+      - "127.0.0.1:18700:18700"
+
+  rpc:
+    <<: *node-common
+    profiles: ["four-node", "rehearsal"]
+    command: ["--config", "/etc/budlum/testnet.toml", "--role", "rpc"]
+    ports:
+      - "127.0.0.1:18545:18545"
+      - "127.0.0.1:18547:18547"
+      - "127.0.0.1:18548:18548"
+      - "127.0.0.1:18549:18549"
+      - "127.0.0.1:18550:18550"
+      - "127.0.0.1:18551:18551"
+      - "127.0.0.1:19090:19090"
+
+  faucet:
+    image: budlum-core:local
+    profiles: ["four-node", "rehearsal"]
+    restart: unless-stopped
+    env_file:
+      - /etc/budlum/rpc.env
+    volumes:
+      - ./secrets:/var/lib/budlum/secrets:ro
+    command:
+      - budlum-faucet
+      - serve
+      - --rpc-url
+      - http://127.0.0.1:18545
+      - --key-file
+      - /var/lib/budlum/secrets/faucet.seed
+      - --listen
+      - 127.0.0.1:18600
+      - --trusted-proxy
+      - 127.0.0.1
+    ports:
+      - "127.0.0.1:18600:18600"
+
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: ["rehearsal"]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports:
+      - "127.0.0.1:9090:9090"
+
+  grafana:
+    image: grafana/grafana:latest
+    profiles: ["rehearsal"]
+    volumes:
+      - ./monitoring/grafana:/var/lib/grafana/dashboards:ro
+    environment:
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/budlum-launch-boundary.json
+    ports:
+      - "127.0.0.1:3000:3000"

@@ -293,6 +293,10 @@ pub struct NodeConfig {
     #[arg(long, default_value = "./data/hsm/socket.sock")]
     pub hsm_socket_path: String,
 
+    /// Label of the token object the vendor-native BLS mechanism signs
+    /// through (BLG-010). Defaults to the compiled-in `BUD_BLS_KEY`.
+    #[arg(long)]
+    pub pkcs11_bls_key_label: Option<String>,
     /// Vendor-native BLS mechanism ID for PKCS#11.
     #[arg(long)]
     pub pkcs11_bls_mechanism: Option<String>,
@@ -435,6 +439,7 @@ impl Default for NodeConfig {
             pkcs11_slot_id: None,
             pkcs11_token_pin_env: None,
             pkcs11_key_label: None,
+            pkcs11_bls_key_label: None,
             hsm_socket_path: "./data/hsm/socket.sock".to_string(),
             pkcs11_bls_mechanism: None,
             pkcs11_pq_mechanism: None,
@@ -654,6 +659,10 @@ pub struct Pkcs11Section {
     pub pq_public_key: Option<String>,
     /// Label of the ML-DSA-65 key pair signed with through PKCS#11 3.2.
     pub pq_key_label: Option<String>,
+    /// Label of the token object the vendor-native BLS mechanism signs
+    /// through (BLG-010). Absent means the compiled-in `BUD_BLS_KEY`, which is
+    /// what every existing deployment uses.
+    pub bls_key_label: Option<String>,
     /// Vendor-native PQ/Dilithium mechanism ID.
     pub pq_mechanism: Option<String>,
 }
@@ -995,6 +1004,9 @@ impl NodeConfig {
                     }
                     if self.pkcs11_pq_key_label.is_none() {
                         self.pkcs11_pq_key_label = pkcs11.pq_key_label;
+                    }
+                    if self.pkcs11_bls_key_label.is_none() {
+                        self.pkcs11_bls_key_label = pkcs11.bls_key_label;
                     }
                 }
                 if let Some(socket) = signer.hsm_socket_path {

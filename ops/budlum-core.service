@@ -8,7 +8,7 @@
 
 [Unit]
 Description=Budlum Core Node
-Documentation=https://github.com/lubothebook/budlum
+Documentation=file:///usr/share/doc/budlum/OPERATIONS.md
 After=network-online.target
 Wants=network-online.target
 
@@ -59,6 +59,12 @@ Environment=RUST_LOG=info
 # line: BUDLUM_RPC_API_KEY=<key>. Make it readable by root only (mode 0600).
 Environment=BUDLUM_RPC_API_KEY_ENV=BUDLUM_RPC_API_KEY
 EnvironmentFile=/etc/budlum/rpc.env
+# DOC-GAP-04: the HSM context. ops/softhsm2.conf names the token directory and
+# /etc/budlum/hsm.env holds only BUDLUM_HSM_PIN. On the testnet signer path
+# add --pkcs11-module-path and --pkcs11-token-pin-env to ExecStart; see
+# ops/TESTNET_FIRST_RUN.md. Neither file is committed.
+Environment=SOFTHSM2_CONF=/etc/budlum/softhsm2.conf
+EnvironmentFile=/etc/budlum/hsm.env
 
 [Install]
 WantedBy=multi-user.target

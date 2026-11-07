@@ -869,6 +869,14 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
+            // BLG-010: the label the vendor BLS mechanism signs through is
+            // the operator's, not the compiled-in default, so the object the
+            // startup binding test proves a pairing for is the object that
+            // signs.
+            let s = match config.pkcs11_bls_key_label.clone() {
+                Some(label) => s.with_bls_key_label(label),
+                None => s,
+            };
             let signer = s.with_vendor_mechanisms(
                 config.pkcs11_bls_mechanism.clone(),
                 config.pkcs11_pq_mechanism.clone(),
@@ -1886,7 +1894,11 @@ async fn main() {
         // Production.
         let cursor_path = std::path::Path::new(&config.db_path).join("relayer-cursor");
         let relayer = budlum_core::relayer::RelayerWorker::new(chain.clone(), relayer_addr)
-            .with_cursor_path(Some(cursor_path));
+            .with_cursor_path(Some(cursor_path))
+            // The reservation gauges are the only live view of the pending
+            // store: without them an operator learns that results are piling
+            // up one file read at a time, on the node they happen to be on.
+            .with_metrics(metrics.clone());
 
         // The `--evm-bridge-address`
         // registration is removed. The EVM bridge leg has no live end-to-end

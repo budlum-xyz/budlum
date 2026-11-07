@@ -240,13 +240,46 @@ pub mod validator_classes;
 // The B.U.D. 3.0 storage door end to end.
 #[cfg(test)]
 pub mod bud3_door;
-pub mod bud3_types;
-pub mod audit_lane_d;
-
-// WP-14 Instant Duty Handover and Disaster Recovery Mode suite.
 #[cfg(test)]
-pub mod alert_rules_reference_existing_metrics;
+pub mod bud3_types;
+#[cfg(test)]
+pub mod audit_lane_d;
 
 // WP-17 state transition, vesting, staking, governance, sharding, and V2 snapshot suite.
 #[cfg(test)]
 pub mod wp17_state_hardening;
+
+// WP-41 item 6 and WP-20 item 13: the readiness and storage-health series,
+// read back out of a real Prometheus scrape.
+#[cfg(test)]
+pub mod readiness_metrics;
+
+// WP-41 item 6: the alert rules name metrics the node exports, and every
+// mandatory alert exists.
+#[cfg(test)]
+pub mod alert_rules_reference_existing_metrics;
+
+// WP-41 item 8: the backup drill covers the paths the node persists now, and
+// the restore it performs refuses a target that is not empty.
+#[cfg(test)]
+pub mod backup_covers_persisted_paths;
+
+// WP-41 item 7: every alert the node raises has a first-check row in the
+// operator runbook, and no row outlives its rule.
+#[cfg(test)]
+pub mod alerts_have_runbook_entries;
+
+// WP-41 item 5: the public TLS edge fronts the ports the services bind, and
+// never an unauthenticated listener.
+#[cfg(test)]
+pub mod caddy_edges_match_the_services;
+
+// WP-41 item 6: the scrape topology reaches every exporter the alert rules
+// read, and the rule file is mounted where the config expects it.
+#[cfg(test)]
+pub mod scrape_topology_covers_the_rules;
+
+// WP-41 item 4: the compose stacks name the services and ports the launch
+// runs, and both scrape with the same pinned Prometheus.
+#[cfg(test)]
+pub mod compose_topology_matches_services;

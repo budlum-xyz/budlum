@@ -1,0 +1,52 @@
+{
+  "uid": "budlum-launch-boundary",
+  "title": "Budlum testnet launch boundary",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "tags": ["budlum", "testnet", "launch"],
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Finalized height",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [{ "expr": "budlum_finalized_height", "refId": "A" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Finality lag (blocks)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [{ "expr": "budlum_finality_lag", "refId": "A" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Open storage challenges and results",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        { "expr": "budlum_storage_challenge_rows", "refId": "A" },
+        { "expr": "budlum_storage_result_rows", "refId": "B" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Reallocations and pending relay rows",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        { "expr": "budlum_storage_reallocation_rows", "refId": "A" },
+        { "expr": "budlum_relayer_pending_rows", "refId": "B" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "RPC rate limiting",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [{ "expr": "rate(budlum_rpc_rate_limited_total[5m])", "refId": "A" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Faucet grants",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [{ "expr": "rate(budlum_faucet_grants_total[5m])", "refId": "A" }]
+    }
+  ]
+}

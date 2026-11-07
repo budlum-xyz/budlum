@@ -1,0 +1,184 @@
+# rpc-method-coverage: RPC methods without both a `<method>_ok` and a
+# `<method>_refused` test.
+#
+# The rule lives in `src/rpc/method_coverage.rs` (directive WP-61 item 5,
+# TEST-GAP-07): every row of the RPC surface carries one test named
+# `<stem>_ok` and one named `<stem>_refused`, where `<stem>` is the method name
+# without the `bud_` prefix, lowercased and snake_cased (`bud_getBlockByHash`
+# -> `get_block_by_hash`). A suffix is a whole word: `_okay` is not `_ok`.
+#
+# This file is an exception list, not a permission, and it only shrinks.
+#
+# Two forms:
+#
+#   <method>
+#   <method> | no-refusal: <why this method cannot refuse>
+#
+#  * A bare line is placeholder debt: both tests are missing.
+#  * A `no-refusal` line is a method with a success test and no refusal arm.
+#    The reason is required and must follow the `no-refusal:` prefix; a
+#    success test with no refusal test and no reason fails the gate, so a
+#    refusal cannot go missing behind a stale line.
+#
+#  * A method not listed here without both tests fails the gate.
+#  * A listed method that is covered now fails until its line is deleted.
+#  * A listed name that is not a method in `api.rs` fails.
+#
+# Delete a line in the same pull request that adds the pair.
+bud_chainId | no-refusal: a compile-time constant read, no argument and no I/O
+bud_blockNumber | no-refusal: a height read from the chain handle, no argument and no I/O
+bud_getAccountProof
+bud_sendTxBundle
+bud_getTransactionByHash
+bud_getTransactionReceipt
+bud_gasPrice | no-refusal: a base-fee read from the chain handle, no argument and no I/O
+bud_txPrecheck
+bud_syncing
+bud_netVersion | no-refusal: a chain-id read rendered as a decimal string, no argument
+bud_netListening | no-refusal: a listener flag; this process answers only while it is serving, so there is no arm that can refuse
+bud_netPeerCount | no-refusal: an atomic counter read, no argument and no I/O
+bud_getSettlementInfo
+bud_getGlobalHeader
+bud_getGlobalHeaderProof
+bud_getDomainCommitments
+bud_getConsensusDomains
+bud_getGraftApplication
+bud_getRestakedValidators
+bud_graftPaymentProof
+bud_registerExternalDomain
+bud_submitExternalEvidence
+bud_getExternalDomainProfile
+bud_getExternalDomains
+bud_getExternalIntakeDigest
+bud_readmitExternalDomain
+bud_scheduleExternalFork
+bud_slashExternalProver
+bud_bondExternalProver
+bud_setExternalQuorumPolicy
+bud_getExternalQuorumRound
+bud_getExternalQuorumRounds
+bud_encodeExternalEvidence
+bud_getExternalDomainStatus
+bud_replayExternalProbes
+bud_inspectEthereumUpdate
+bud_planEvmVerification
+bud_registerConsensusDomain
+bud_registerSovereignTemplate
+bud_getSovereignTemplate
+bud_validateSovereignAuditExport
+bud_submitDomainCommitment
+bud_submitVerifiedDomainCommitment
+bud_submitCrossDomainMessage
+bud_getCrossDomainMessage
+bud_getBridgeTransfer
+bud_getRelayerStatus
+bud_getRelayerIntent
+bud_registerBridgeAsset
+bud_mintBridgeTransfer
+bud_burnBridgeTransfer
+bud_burnBridgeTransferWithEvent
+bud_unlockBridgeTransfer
+bud_unlockBridgeTransferVerified
+bud_submitRelayProof
+bud_sealGlobalHeader
+bud_registryRegister
+bud_registryBondRelayer
+bud_registryBondProver
+bud_registryBeginRoleBondUnbonding
+bud_registryWithdrawRoleBond
+bud_submitZkProof
+bud_registryQuery
+bud_registryActiveMembers
+bud_validatorProfile
+bud_validatorList
+bud_getValidatorDelegations
+bud_submitSlashingReport
+bud_submitQcFaultProof
+bud_health | no-refusal: a readiness report that always answers; its content, not its status, carries the state
+bud_nodeInfo | no-refusal: a node identity report assembled from chain reads, no argument
+bud_adminBanPeer
+bud_adminUnbanPeer
+bud_adminListBannedPeers
+bud_storageIssueViewGrant
+bud_storageRevokeViewGrant
+bud_storageSocialDelete
+bud_storageListViewGrants
+bud_storageMayView
+bud_storageOpenReveal
+bud_storageRevealFrames
+bud_storageCloseReveal
+bud_bnsResolve
+bud_bnsResolveFull
+bud_bnsResolveContent
+bud_bnsResolveSubdomain
+bud_bnsPrepareRegister
+bud_bnsPrepareRegisterSubdomain
+bud_bnsPrepareSetContent
+bud_bnsPrepareRenew
+bud_bnsPrepareTransfer
+bud_socialGetPost
+bud_socialGetProfile
+bud_socialGetFeed
+bud_socialPreparePost
+bud_gatewayFetchContent
+bud_gatewayRenderContent
+bud_passportGetProfile
+bud_passportGetProofBundle
+bud_atlasGetWalletContext
+bud_socialPrepareBurn
+bud_socialPrepareBoost
+bud_marketGetOffers
+bud_marketPrepareOffer
+bud_marketPreparePurchase
+bud_dataMarketGetDataAssets
+bud_dataMarketGetAccessGrants
+bud_dataMarketGetSaleAuthorizations
+bud_dataMarketGetPurchaseReceipts
+bud_dataMarketBuildAiInputRef
+bud_dataMarketPrepareSaleAuthorization
+bud_dataMarketPreparePurchase
+bud_hubGetApps
+bud_hubGetGraftApps
+bud_hubPrepareRegister
+bud_relayerPrepareExternalTx
+bud_pruneStatus
+bud_getStateSnapshot
+bud_requestPrune
+bud_aiGetModel
+bud_aiRegisterModel
+bud_aiSubmitRequest
+bud_aiSubmitResult
+bud_aiOpenRequests
+bud_aiGetOutcome
+bud_aiGetActiveVerifiers
+bud_aiReclaimFee
+bud_aiEquivocationStatus
+bud_aiCancelStatus
+bud_aiDisputeSlash
+bud_aiSlashingStatus
+bud_aiVerifierStake
+bud_aiCallbackQueue
+bud_aiExecutionProof
+bud_aiVerifierQos
+bud_aiVerifierRanking
+bud_aiAgentPayment
+bud_aiAgentPayments
+bud_aiVerifierWhitelist
+bud_aiAgentReputation
+bud_aiAgentRanking
+bud_getStatus
+bud_getValidatorSet
+bud_getValidator
+bud_storageGetObject
+bud_storageGetCustody
+bud_listRelays
+bud_listGateways
+bud_getDomainInfo
+bud_getQuantumAlarm
+bud_getSlashingHistory
+bud_aiInferenceStats
+bud_identityResolve
+bud_identityCredential
+bud_identityVerifyPresentation
+bud_subscribe
+bud_unsubscribe
