@@ -1,11 +1,6 @@
-# Legacy storage files still carrying removed-system identifiers, plus banned paths.
-# Ratchet: a file outside this list fails; a listed file that no longer offends
-# also fails until its line is removed. The list only shrinks.
+# Shrinking legacy-storage baseline (WP-07 ratchet)
 bud/
 budzero/bud-node/
-src/domain/storage_deal.rs
-src/domain/deal_open.rs
-src/chain/storage_maintenance.rs
 budzero/bud-node/src/bitswap.rs
 budzero/bud-node/src/discovery.rs
 budzero/bud-node/src/lib.rs
@@ -15,7 +10,6 @@ crates/ai-inference/crates/ai-knowledge/src/context.rs
 docs/ARCHITECTURE.md
 docs/BUD_CONTENT_ENCRYPTION.md
 docs/BUD_STORAGE_ROADMAP.md
-docs/NAMING.md
 src/account_abstraction/quantum_account.rs
 src/chain/blockchain.rs
 src/chain/chain_actor.rs
@@ -34,6 +28,7 @@ src/gateway/service.rs
 src/main.rs
 src/network/node.rs
 src/network/proto_conversions.rs
+src/persistence/db.rs
 src/pollen/content_gate.rs
 src/registry/role.rs
 src/rpc/api.rs
@@ -43,7 +38,6 @@ src/rpc/tests.rs
 src/storage/README.md
 src/storage/assignment.rs
 src/storage/content_id.rs
-src/storage/db.rs
 src/storage/dictionary.rs
 src/storage/emit.rs
 src/storage/erasure.rs
