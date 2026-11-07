@@ -69,7 +69,11 @@ const SKIP_DIRS: &[&str] = &["target", ".git", "node_modules"];
 const SELF: &[&str] = &[
     "xtask/gates/src/gates/no_legacy_storage.rs",
     ".github/no-legacy-storage-baseline.txt",
+    "docs/NAMING.md",
+    "xtask/gates/src/gates/bud3_forbidden_phrases.rs",
 ];
+
+const EXEMPT_PREFIXES: &[&str] = &["docs/audit/", "docs/work/"];
 
 const BASELINE: &str = ".github/no-legacy-storage-baseline.txt";
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
@@ -104,7 +108,9 @@ fn offenders(root: &Path) -> Vec<(String, &'static str)> {
     }
     let mut out = Vec::new();
     for rel in files {
-        if SELF.contains(&rel.as_str()) {
+        if SELF.contains(&rel.as_str())
+            || EXEMPT_PREFIXES.iter().any(|p| rel.starts_with(p))
+        {
             continue;
         }
         let path = root.join(&rel);

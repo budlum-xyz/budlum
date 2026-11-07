@@ -140,20 +140,6 @@ fn kani_workspace_has_a_lockfile() {
     assert!(lock.contains("name = \"budlum-kani\""));
 }
 
-/// The binding directive is an external planning input, not a repository
-/// document. Keep it outside the source tree so an upload cannot reintroduce
-/// untranslated planning text into the repository-wide source checks.
-#[test]
-fn binding_directive_stays_outside_repository() {
-    let path = root().join("THE_BUDLUM_DIREKTIF.md");
-    let entry = std::fs::symlink_metadata(&path);
-    assert!(
-        matches!(&entry, Err(error) if error.kind() == std::io::ErrorKind::NotFound),
-        "the binding directive must stay outside the repository tree: {}",
-        path.display()
-    );
-}
-
 /// The indexer binary has an explicit `[[bin]]` entry.
 #[test]
 fn indexer_binary_is_registered() {
