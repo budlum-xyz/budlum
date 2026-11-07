@@ -28,9 +28,9 @@ OUT = os.path.join(ROOT, "docs", "audit", "LIVE_STATUS.md")
 
 SEVERITY = {
     "Kritik": "Critical",
-    "Yüksek": "High",
+    "Y\u00fcksek": "High",
     "Orta": "Medium",
-    "Düşük": "Low",
+    "D\u00fc\u015f\u00fck": "Low",
 }
 EXCLUDED_CORPUS = {
     "THE_BUDLUM_DIREKTIF.md",
@@ -121,10 +121,10 @@ def scan(rows, files, corpus):
         ident = cells[0]
         severity = next((SEVERITY[c] for c in cells if c in SEVERITY), "Unrated")
         closing = cells[-1]
-        packages = sorted(set(re.findall(r"İP-(\d+)", closing)), key=int)
+        packages = sorted(set(re.findall(r"\u0130P-(\d+)", closing)), key=int)
         wp = ", ".join(f"WP-{p}" for p in packages) if packages else "TBD"
         full = " | ".join(cells)
-        fix_trace = "Directive notes a fix trace" if "Düzeltme izi" in full else ""
+        fix_trace = "Directive notes a fix trace" if "D\u00fczeltme izi" in full else ""
         tokens = re.findall(r"`([^`]+)`", full)
         checks = []
         seen = set()
