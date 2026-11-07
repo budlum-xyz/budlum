@@ -38,9 +38,11 @@
 pub mod admission;
 pub mod bof1;
 pub mod content_id;
+pub mod content_ref;
 pub mod custody;
 pub mod dedup_index;
 pub mod fountain;
+pub mod grants;
 pub mod limits;
 pub mod live;
 pub mod live_broadcast;
@@ -54,6 +56,7 @@ pub mod tx;
 pub mod types;
 pub mod varint;
 pub mod volume;
+pub mod view;
 
 pub use bof1::{Bof1Error, Flags, Header, Object};
 pub use content_id::{ContentId, ContentKey};
