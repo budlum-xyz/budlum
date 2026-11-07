@@ -15,6 +15,7 @@
 //! scattered, transient misses (e.g. brief restarts).
 
 use crate::core::address::Address;
+use crate::registry::evidence::SlashingReport;
 use crate::registry::params::RegistryParams;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -92,7 +93,24 @@ impl LivenessTracker {
     /// Returns every validator whose consecutive-miss count reached the
     /// threshold this epoch and that was not already suspended (V-4: absence
     /// suspends, it never produces a slashing report).
+    /// Compatibility wrapper: absence suspends and never produces a
+    /// slashing report (V-4); returns an empty report vector.
     pub fn record_epoch<F>(
+        &mut self,
+        epoch: u64,
+        expected: &[Address],
+        participated: F,
+        params: &RegistryParams,
+    ) -> Vec<SlashingReport>
+    where
+        F: FnMut(&Address) -> bool,
+    {
+        let _ = self.record_suspension_epoch(epoch, expected, participated, params);
+        Vec::new()
+    }
+
+    /// Record one epoch's participation and return newly suspended validators (V-4).
+    pub fn record_suspension_epoch<F>(
         &mut self,
         epoch: u64,
         expected: &[Address],
@@ -244,7 +262,7 @@ mod tests {
         assert!(t.record_epoch(1, &[v], |_| false, &p).is_empty());
         assert!(t.record_epoch(2, &[v], |_| false, &p).is_empty());
         // Third consecutive miss crosses the threshold: suspension.
-        let suspended = t.record_epoch(3, &[v], |_| false, &p);
+        let suspended = t.record_suspension_epoch(3, &[v], |_| false, &p);
         assert_eq!(suspended, vec![v]);
         assert!(t.is_suspended(&v));
     }
@@ -263,7 +281,7 @@ mod tests {
         // Fresh streak needs the full threshold again.
         assert!(t.record_epoch(4, &[v], |_| false, &p).is_empty());
         assert!(t.record_epoch(5, &[v], |_| false, &p).is_empty());
-        assert_eq!(t.record_epoch(6, &[v], |_| false, &p).len(), 1);
+        assert_eq!(t.record_suspension_epoch(6, &[v], |_| false, &p).len(), 1);
     }
 
     #[test]
@@ -272,9 +290,9 @@ mod tests {
         let p = params(2);
         let v = addr(1);
         t.record_epoch(1, &[v], |_| false, &p);
-        assert_eq!(t.record_epoch(2, &[v], |_| false, &p).len(), 1);
+        assert_eq!(t.record_suspension_epoch(2, &[v], |_| false, &p).len(), 1);
         // Still down at epoch 3 - no duplicate suspension.
-        assert!(t.record_epoch(3, &[v], |_| false, &p).is_empty());
+        assert!(t.record_suspension_epoch(3, &[v], |_| false, &p).is_empty());
     }
 
     /// A resume requested at epoch `e` lifts the suspension at `e + 1`.
@@ -283,7 +301,7 @@ mod tests {
         let mut t = LivenessTracker::new();
         let p = params(1);
         let v = addr(1);
-        assert_eq!(t.record_epoch(1, &[v], |_| false, &p), vec![v]);
+        assert_eq!(t.record_suspension_epoch(1, &[v], |_| false, &p), vec![v]);
         assert!(t.is_suspended(&v));
         t.request_resume(&v, 5);
         assert!(t.activate_due_resumes(5).is_empty());

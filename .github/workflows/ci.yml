@@ -617,6 +617,16 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- offline-never-slashes 2>&1 | tee -a /tmp/gate-out.log
           exit "${PIPESTATUS[0]}"
+      - name: Offline never slashes canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- offline-never-slashes --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: Offline never slashes
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- offline-never-slashes 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: QR is derivative only canary
         if: always() && steps.build.outcome == 'success'
         run: |

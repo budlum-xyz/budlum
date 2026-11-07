@@ -2642,15 +2642,20 @@ impl Blockchain {
             })
             .copied()
             .collect();
-        let suspended = self.state.liveness.record_epoch(
+        let suspended = self.state.liveness.record_suspension_epoch(
             epoch,
             &expected,
             |addr| participated.contains(addr),
             &params,
         );
-        // V-4 / WP-13: absence suspends, it never slashes. The tracker
-        // records the suspension; `apply_epoch_close_liveness` is the path
-        // that also removes the validator from the active set.
+        // V-4 / WP-13: absence suspends (`active = false`), never slashes or jails.
+        for offender in &suspended {
+            if let Some(v) = self.state.validators.get_mut(offender) {
+                if !v.slashed {
+                    v.active = false;
+                }
+            }
+        }
         suspended.len()
     }
 
@@ -4107,7 +4112,7 @@ impl Blockchain {
             })
             .copied()
             .collect();
-        let suspended = state.liveness.record_epoch(
+        let suspended = state.liveness.record_suspension_epoch(
             closed_epoch,
             &expected,
             |addr| participated.contains(addr),

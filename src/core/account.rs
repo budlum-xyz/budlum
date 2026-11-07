@@ -1533,14 +1533,18 @@ impl AccountState {
         &mut self,
         epoch: u64,
         participated: &std::collections::HashSet<Address>,
+    ) -> Vec<crate::registry::evidence::SlashingReport> {
+        let _ = self.record_suspension_epoch(epoch, participated);
+        Vec::new()
+    }
+
+    /// Convenience: record one epoch's participation and return newly suspended validators (V-4).
+    pub fn record_suspension_epoch(
+        &mut self,
+        epoch: u64,
+        participated: &std::collections::HashSet<Address>,
     ) -> Vec<Address> {
         let params = *self.registry.params();
-        // Only members the registry still considers active. A slashed or
-        // Jailed validator remains in `self.validators` - that map holds
-        // `jail_until` - while `registry.is_active` has already gone false.
-        // Counting it absent accrues downtime for blocks it is barred from
-        // Signing (Cosmos SDK #1867). `Blockchain::apply_epoch_close_liveness`
-        // Has always filtered this way; the other two paths did not.
         let expected: Vec<Address> = self
             .validators
             .keys()
@@ -1550,7 +1554,7 @@ impl AccountState {
             })
             .copied()
             .collect();
-        self.liveness.record_epoch(
+        self.liveness.record_suspension_epoch(
             epoch,
             &expected,
             |addr| participated.contains(addr),
@@ -2640,7 +2644,7 @@ impl AccountState {
                     )?;
                 }
             }
-            ValidatorTx::ChangeClass { .. } | ValidatorTx::RotateOperatorKey { .. } | ValidatorTx::Resume => {
+            ValidatorTx::ChangeClass { .. } | ValidatorTx::RotateOperatorKey { .. } => {
                 if tx.amount != 0 {
                     return Err(refuse(
                         "validator_tx_shape",
@@ -2651,6 +2655,22 @@ impl AccountState {
                     return Err(refuse(
                         "validator_not_registered",
                         "only the owner account of a validator may send this",
+                    ));
+                }
+            }
+            ValidatorTx::Resume => {
+                if tx.amount != 0 {
+                    return Err(refuse(
+                        "validator_tx_shape",
+                        "this validator transaction moves no value",
+                    ));
+                }
+                if self.validator_directory.get(&tx.from).is_none()
+                    && !self.validators.contains_key(&tx.from)
+                {
+                    return Err(refuse(
+                        "validator_not_registered",
+                        "only a registered validator may request resume",
                     ));
                 }
             }
@@ -2869,6 +2889,7 @@ impl AccountState {
 
         // Validator directory changes requested an epoch ago take effect here.
         self.activate_validator_changes(chain_id);
+        self.validator_directory.presence_epoch_step(chain_id, self.epoch_index);
         self.advance_bud3_epoch();
 
         // ResumeValidator requests whose epoch has come lift the suspension

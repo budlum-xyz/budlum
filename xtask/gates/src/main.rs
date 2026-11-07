@@ -125,6 +125,7 @@ mod gates {
     pub mod no_pairing_snark_in_verification_path;
     pub mod no_unicode_dashes;
     pub mod offline_never_slashes;
+    pub mod offline_never_slashes;
     pub mod no_upstream_brands;
     pub mod node_classification_gate;
     pub mod one_house_guards;
@@ -568,6 +569,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::bud3_proto_is_total::self_test,
+    },
+    Gate {
+        name: "offline-never-slashes",
+        replaces: None,
+        run: gates::offline_never_slashes::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::offline_never_slashes::self_test,
     },
     Gate {
         name: "offline-never-slashes",

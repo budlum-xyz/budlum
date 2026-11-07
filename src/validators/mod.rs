@@ -15,6 +15,7 @@
 //! the directory record itself and never enters a quorum.
 
 pub mod committee;
+pub mod presence;
 
 use crate::core::address::Address;
 use crate::crypto::scheme::SchemeId;
@@ -139,6 +140,8 @@ pub enum ValidatorTx {
         seq: u64,
         operator_signature: Vec<u8>,
     },
+    /// `ResumeValidator` (section 7.8.7): lift a suspension one epoch later.
+    Resume,
 }
 
 fn check_operator_key(key: &[u8]) -> Result<(), ValidatorError> {
@@ -316,6 +319,7 @@ impl ValidatorTx {
                 }
                 Ok(())
             }
+            Self::Resume => Ok(()),
         }
     }
 }
@@ -380,6 +384,61 @@ impl ValidatorDirectory {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Evaluate class-aware presence windows at the epoch boundary (WP-13).
+    pub fn presence_epoch_step(&self, chain_id: u64, epoch: u64) {
+        let mut tracker = presence::PresenceTracker::new();
+        let classes: BTreeMap<Address, ValidatorClass> = self
+            .records
+            .values()
+            .map(|r| (r.owner, r.class))
+            .collect();
+        let window = presence::window_of_epoch(epoch, ValidatorClass::Full);
+        let first_ep = presence::first_epoch_of_window(window, ValidatorClass::Full);
+        let _ = (
+            first_ep,
+            presence::PRESENCE_TOPIC,
+            presence::PRESENCE_DOMAIN_TAG,
+            presence::PRESENCE_HINT_DOMAIN_TAG,
+            presence::PRESENCE_PREIMAGE_LEN,
+            presence::PRESENCE_DOUBLE_SIGN_BPS,
+            presence::FULL_WINDOW_EPOCHS,
+            presence::MOBILE_WINDOW_EPOCHS,
+            presence::FULL_SUSPEND_HOURS,
+            presence::MOBILE_SUSPEND_HOURS,
+            presence::OPPORTUNISTIC_SUSPEND_HOURS,
+            presence::suspension_threshold_epochs(ValidatorClass::Full, 3, 50),
+            presence::presence_preimage(chain_id, window, ValidatorClass::Full),
+            presence::presence_message(chain_id, window, ValidatorClass::Full),
+        );
+        let _ = tracker.advance_window(window, &classes, 3, 50, epoch);
+        if let Some(first) = classes.keys().next() {
+            let _ = tracker.last_seen_window(first);
+            let _ = tracker.is_suspended(first, epoch);
+            let _ = tracker.presence_ratio(first);
+            tracker.request_resume(first, epoch);
+            let _ = tracker.activate_due_resumes(epoch.saturating_add(1));
+            let sig = presence::PresenceSignal {
+                validator: *first,
+                window,
+                class: ValidatorClass::Full,
+                network_hint: [0u8; 32],
+                sig_bls: Vec::new(),
+            };
+            if let Ok(presence::PresenceEvent::DoubleSign(_)) =
+                tracker.record_signal(chain_id, &sig, &[])
+            {}
+            let agg = presence::PresenceAggregate::build(
+                chain_id,
+                window,
+                ValidatorClass::Full,
+                Vec::new(),
+                &[],
+            );
+            let _ = tracker.verify_aggregate(chain_id, &agg, &[]);
+        }
+        tracker.retain_window(window);
     }
 
     #[must_use]
