@@ -414,6 +414,41 @@ mod tests {
     }
 
     #[test]
+    fn blg_065_cross_shard_transfer_enforces_unlocked_balance_boundary() {
+        let sender = addr(0);
+        let recipient = addr(1);
+        let mut state = AccountState::new();
+        state.get_or_create(&sender).balance = 100;
+        state.team_vesting = Some((
+            sender,
+            crate::tokenomics::VestingSchedule {
+                total: 80,
+                start_epoch: 0,
+                cliff_epochs: 100,
+                duration_epochs: 200,
+            },
+        ));
+        assert_eq!(state.spendable_balance(&sender), 20);
+        let before = shards_commitment(&state, 2);
+
+        let overdraft = transfer(sender, recipient, 20, 1);
+        let error = apply_cross_shard_transfer(&mut state, &overdraft, 2)
+            .expect_err("one unit above the spendable balance must be refused");
+        assert!(error.contains("insufficient spendable balance"));
+        assert_eq!(shards_commitment(&state, 2), before);
+        assert_eq!(state.get_balance(&sender), 100);
+        assert_eq!(state.get_nonce(&sender), 0);
+        assert!(!state.accounts.contains_key(&recipient));
+
+        let exact = transfer(sender, recipient, 19, 1);
+        apply_cross_shard_transfer(&mut state, &exact, 2)
+            .expect("the exact unlocked amount must cover amount plus fee");
+        assert_eq!(state.get_balance(&sender), 80);
+        assert_eq!(state.get_balance(&recipient), 19);
+        assert_eq!(state.get_nonce(&sender), 1);
+    }
+
+    #[test]
     fn blg_104_cross_shard_transfer_rejects_stale_nonce() {
         let mut state = AccountState::new();
         state.get_or_create(&addr(0)).balance = 100;
