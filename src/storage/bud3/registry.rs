@@ -186,6 +186,9 @@ pub enum Bud3Query {
     Object(ObjectKey),
     /// The shares one validator holds.
     Custody(Address),
+    /// A read-only what-if: the repairs due if this holder went unseen.
+    /// The transition is computed on a clone, so a query never writes state.
+    RepairPlan(Address),
 }
 
 /// What a registration did.
@@ -820,7 +823,8 @@ impl Bud3Registry {
         dropped
     }
 
-    /// The RPC read: one object, or one validator's shares.
+    /// The RPC read: one object, one validator's shares, or a what-if
+    /// repair plan for an unseen holder.
     #[must_use]
     pub fn query_json(&self, query: &Bud3Query) -> serde_json::Value {
         match query {
@@ -857,6 +861,30 @@ impl Bud3Registry {
                 } else {
                     serde_json::Value::Null
                 }
+            }
+            Bud3Query::RepairPlan(holder) => {
+                // A dry run on a clone: `mark_unseen` is a state transition,
+                // and a read must never perform one on the live registry.
+                let mut probe = self.clone();
+                let lost = probe.mark_unseen(holder);
+                let due: Vec<serde_json::Value> = probe
+                    .objects
+                    .keys()
+                    .filter_map(|key| {
+                        let segments = probe.repairs_due(key);
+                        (!segments.is_empty()).then(|| {
+                            serde_json::json!({
+                                "commitment": hex::encode(key),
+                                "segments": segments,
+                            })
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "holder": hex::encode(holder),
+                    "shares_marked_lost": lost,
+                    "objects_needing_repair": due,
+                })
             }
             Bud3Query::Custody(validator) => {
                 let shares: Vec<serde_json::Value> = self
