@@ -28,7 +28,8 @@ pub struct PrivateTransferSubmit {
     /// registry refuses a transfer without them.
     #[serde(default)]
     pub nullifier_proofs: Vec<NoteHash>,
-    /// Wallet authorization over public digest (ed25519, 64 bytes).
+    /// Wallet authorization over the public digest; verified using the
+    /// transaction's signature version.
     pub authorization_sig: Vec<u8>,
     /// Echo of wallet `public_digest` for audit / light clients.
     pub public_digest: [u8; 32],
@@ -76,13 +77,7 @@ impl PrivateTransferSubmit {
         // Ed25519 (64 bytes) or ML-DSA-87 (4627 bytes). The length is only a
         // **shape** check; which one is actually valid is decided in the
         // `Executor`, from the signature version of the transaction.
-        //
-        // Previously only 64 was accepted. That made a private transfer
-        // authorization **impossible** for an account holding an ML-DSA-87 key
-        // (V5): even when it produced the correct signature, the transaction
-        // fell at the shape gate with "must be 64 bytes". Since ML-DSA-87 is
-        // the default wallet of the chain, this meant the feature did not work
-        // at all in the default configuration.
+
         if self.authorization_sig.len() != ED25519_AUTH_SIG_LEN
             && self.authorization_sig.len() != ML_DSA_87_AUTH_SIG_LEN
         {
@@ -166,10 +161,6 @@ mod tests {
     }
 
     /// An ML-DSA-87 authorization has to be accepted too.
-    ///
-    /// ML-DSA-87 is the default wallet of the chain. As long as the shape gate
-    /// allowed only 64 bytes, a V5 account could not make a private transfer
-    /// even when it produced the correct signature.
     #[test]
     fn an_ml_dsa_87_authorization_is_accepted() {
         assert!(submit_with_sig(ML_DSA_87_AUTH_SIG_LEN)
