@@ -304,9 +304,9 @@ mod tests {
         // header of five bytes, then the five literal bytes.
         let frame: [u8; 14] = [
             0x28, 0xB5, 0x2F, 0xFD, // magic
-            0x20,                   // single segment, one-byte content size
-            0x05,                   // content size 5
-            0x29, 0x00, 0x00,       // last block, raw, size 5
+            0x20, // single segment, one-byte content size
+            0x05, // content size 5
+            0x29, 0x00, 0x00, // last block, raw, size 5
             b'h', b'e', b'l', b'l', b'o',
         ];
         assert_eq!(decode(ZSTD, &frame, 5).unwrap(), b"hello".to_vec());
