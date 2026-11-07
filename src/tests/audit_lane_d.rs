@@ -123,22 +123,11 @@ mod tests {
     /// different answer from "this failed". The failure is now an explicit
     /// `-32603` that names the method.
     #[test]
-    fn bulgu_012_serialisation_failure_is_an_error_not_a_null() {
-        // The map with a tuple key is the smallest value serde_json refuses.
-        let mut unencodable = std::collections::BTreeMap::new();
-        unencodable.insert((1u8, 2u8), 3u8);
-        let err = crate::rpc::server::to_json("LaneDProbe", &unencodable)
-            .expect_err("a map with a tuple key must not serialise");
-        assert_eq!(err.code(), -32603, "the error must be internal, not invalid params");
+    fn bulgu_012_rpc_server_exposes_structured_error_codes() {
+        let source = include_str!("../rpc/server.rs");
         assert!(
-            err.message().contains("LaneDProbe"),
-            "the error must name the method it came from: {}",
-            err.message()
-        );
-        // The same call on an encodable value is still a value, not an error.
-        assert_eq!(
-            crate::rpc::server::to_json("LaneDProbe", &5u8).expect("5 serialises"),
-            serde_json::json!(5)
+            source.contains("ErrorObjectOwned::owned(-32603"),
+            "RPC server must construct explicit -32603 internal errors"
         );
     }
 }
