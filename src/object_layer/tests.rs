@@ -795,8 +795,196 @@ fn object_layer_is_closed_on_testnet() {
             class: AssetClassId([0; 32])
         }
         .apply(&mut reg, &open),
-        Err(TxRefusal::StepNotOpen)
+        Err(TxRefusal::Refused(Refusal::UnknownClass))
     );
+}
+
+#[test]
+fn settlement_door_refuses_object_layer_on_testnet() {
+    let mut state = crate::core::account::AccountState::new();
+    let sender = Address([0x41; 32]);
+    let ctx = crate::settlement::domains::SettlementTxContext {
+        sender,
+        chain_id: crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value(),
+        fee: 0,
+        bls: || Box::new(crate::crypto::primitives::MockBlsVerifier),
+    };
+    let tx = crate::settlement::domains::SettlementTx::ObjectLayer(Box::new(
+        ObjectLayerTx::SetTentativeConsent { consent: true },
+    ));
+    let err = crate::settlement::domains::execute_settlement_tx(&mut state, &ctx, &tx)
+        .expect_err("object layer door must stay closed on testnet 45261");
+    assert!(err.to_string().contains("object_layer_closed"));
+    assert!(state.settlement.object_layer.is_empty());
+}
+
+#[test]
+fn tentative_single_dependency_consent_resolve_and_depart_guard() {
+    let mut w = World::new(HomeVmFamily::Evm);
+    let Holder::Account(alice_addr) = alice() else {
+        unreachable!()
+    };
+    let class = w.class(AssetKind::Fungible);
+    let contract = w.fx.address(0x21);
+
+    // Without consent, tentative arrival is refused.
+    let mut p1 = w.proof(
+        10,
+        1,
+        w.fx.arrive(ArriveSpec {
+            kind: AssetKind::Fungible,
+            contract: &contract,
+            native_id: &[],
+            amount: 5,
+            depositor: &w.fx.address(0x31),
+            recipient: Some(alice_addr),
+        }),
+    );
+    p1.phase = Phase::Tentative;
+    assert_eq!(w.reg.arrive(&p1, &YES), Err(Refusal::TentativeClosed));
+
+    // Opt in: first tentative arrival succeeds and records one dependency.
+    w.reg.set_tentative_consent(alice_addr, true);
+    w.reg.arrive(&p1, &YES).unwrap();
+    assert_eq!(w.reg.dependencies.len(), 1);
+
+    // Single-dependency rule: a second tentative arrival before resolve is refused.
+    let mut p2 = w.proof(
+        11,
+        2,
+        w.fx.arrive(ArriveSpec {
+            kind: AssetKind::Fungible,
+            contract: &contract,
+            native_id: &[],
+            amount: 3,
+            depositor: &w.fx.address(0x31),
+            recipient: Some(alice_addr),
+        }),
+    );
+    p2.phase = Phase::Tentative;
+    assert_eq!(
+        w.reg.arrive(&p2, &YES),
+        Err(Refusal::PendingTentativeDependency)
+    );
+
+    // Unresolved tentative balance cannot depart to home prematurely.
+    assert_eq!(
+        w.reg
+            .depart(alice(), class, &[], 5, w.fx.address(0x41), 12),
+        Err(Refusal::PendingTentativeDependency)
+    );
+
+    // Resolve clears the dependency and enables both departure and future tentative arrivals.
+    let dep_id = *w.reg.dependencies.keys().next().unwrap();
+    w.reg.resolve(dep_id).unwrap();
+    assert!(w.reg.dependencies.is_empty());
+    w.reg
+        .depart(alice(), class, &[], 5, w.fx.address(0x41), 13)
+        .unwrap();
+}
+
+#[test]
+fn adopt_escape_record_v1_and_challenge_rebut_forgery_paths() {
+    let mut w = World::new(HomeVmFamily::CosmWasm);
+    let Holder::Account(alice_addr) = alice() else {
+        unreachable!()
+    };
+    let Holder::Account(bob_addr) = bob() else {
+        unreachable!()
+    };
+
+    // RecordV1 class registration and transfer.
+    let record_contract = w.fx.address(0x55);
+    let record_rule = ClassRule::Template {
+        id: crate::object_layer::rule::TemplateId::RecordV1,
+        params: Default::default(),
+    };
+    assert!(record_rule.is_open());
+    let record_samples = vec![
+        ReferenceSample {
+            class_slice: ClassSlice::new(),
+            before: AssetSlice::Unique { holder: alice() },
+            verbs: vec![Verb::Transfer {
+                from: alice(),
+                to: bob(),
+                amount: 1,
+            }],
+            after: AssetSlice::Unique { holder: bob() },
+        };
+        3
+    ];
+    let record_class = w
+        .reg
+        .register_class(
+            alice_addr,
+            ClassRegistration {
+                home_domain: w.domain,
+                kind: AssetKind::Unique,
+                contract: record_contract,
+                rule: record_rule,
+                slice: ClassSlice::new(),
+                slice_source: SliceSource::EndpointEvent,
+                samples: record_samples,
+                bond: 100,
+            },
+        )
+        .unwrap();
+
+    // Challenge & Rebut: non-registrant rebuttal is refused; timely registrant rebuttal clears;
+    // un-rebutted challenge past window freezes class.
+    assert_eq!(
+        w.reg.challenge(bob_addr, record_class, 50).unwrap(),
+        ClassStatus::Active
+    );
+    assert_eq!(
+        w.reg.challenge(bob_addr, record_class, 60),
+        Err(Refusal::ChallengeAlreadyOpen)
+    );
+    assert_eq!(
+        w.reg.rebut(bob_addr, record_class, 60),
+        Err(Refusal::NotAuthorized)
+    );
+    w.reg.rebut(alice_addr, record_class, 60).unwrap();
+
+    w.reg.challenge(bob_addr, record_class, 100).unwrap();
+    assert_eq!(
+        w.reg.challenge(
+            bob_addr,
+            record_class,
+            100 + crate::object_layer::DEFAULT_CHALLENGE_WINDOW_BLOCKS
+        ),
+        Ok(ClassStatus::Frozen(FreezeReason::UnrebuttedChallenge))
+    );
+
+    // Adopt: arrival without recipient lands under Holder::Home; unlinked Bob cannot steal it;
+    // Alice binds escape address (`domain_le || raw_home`) and adopts.
+    let depositor = w.fx.address(0x66);
+    let fungible_contract = w.fx.address(0x21);
+    let arrive_home = w.proof(
+        20,
+        9,
+        w.fx.arrive(ArriveSpec {
+            kind: AssetKind::Fungible,
+            contract: &fungible_contract,
+            native_id: &[],
+            amount: 9,
+            depositor: &depositor,
+            recipient: None,
+        }),
+    );
+    w.reg.arrive(&arrive_home, &YES).unwrap();
+
+    let mut binding = w.domain.to_le_bytes().to_vec();
+    binding.extend_from_slice(&depositor);
+    assert_eq!(w.reg.adopt(bob_addr, &binding), Err(Refusal::NotAuthorized));
+
+    w.reg
+        .set_escape_address(alice_addr, binding.clone())
+        .unwrap();
+    assert_eq!(w.reg.adopt(alice_addr, &binding), Ok(1));
+    assert_eq!(w.reg.balance(&w.class(AssetKind::Fungible), &alice()), 9);
 }
 
 #[test]

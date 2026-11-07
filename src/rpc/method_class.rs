@@ -281,6 +281,9 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_identityResolve", Public, Read),
     row("bud_identityCredential", Public, Read),
     row("bud_identityVerifyPresentation", Public, Read),
+    row("bud_getCharter", Public, Read),
+    row("bud_getAssetClass", Public, Read),
+    row("bud_getAsset", Public, Read),
     // WebSocket subscriptions: read-only feeds (src/rpc/subscriptions.rs).
     row("bud_subscribe", Public, Read),
     row("bud_unsubscribe", Public, Read),

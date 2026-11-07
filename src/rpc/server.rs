@@ -5005,6 +5005,51 @@ impl BudlumApiServer for RpcServer {
         }
     }
 
+    async fn get_charter(&self, domain_id: u32) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let Some(charter) = self.chain.object_layer_charter(domain_id).await else {
+            return Ok(serde_json::Value::Null);
+        };
+        serde_json::to_value(charter)
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
+    }
+
+    async fn get_asset_class(
+        &self,
+        class_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean = class_id.strip_prefix("0x").unwrap_or(&class_id);
+        let raw = hex::decode(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid class_id hex: {e}"), None::<()>)
+        })?;
+        let bytes: [u8; 32] = raw.try_into().map_err(|_| {
+            ErrorObjectOwned::owned(-32602, "class_id must be 32 bytes", None::<()>)
+        })?;
+        let id = crate::object_layer::AssetClassId(bytes);
+        let Some((class, recorded_custody)) = self.chain.object_layer_asset_class(id).await else {
+            return Ok(serde_json::Value::Null);
+        };
+        Ok(serde_json::json!({
+            "class": class,
+            "recordedCustody": recorded_custody.to_string(),
+        }))
+    }
+
+    async fn get_asset(&self, asset_id: String) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean = asset_id.strip_prefix("0x").unwrap_or(&asset_id);
+        let raw = hex::decode(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid asset_id hex: {e}"), None::<()>)
+        })?;
+        let bytes: [u8; 32] = raw.try_into().map_err(|_| {
+            ErrorObjectOwned::owned(-32602, "asset_id must be 32 bytes", None::<()>)
+        })?;
+        let id = crate::object_layer::AssetId(bytes);
+        let Some(asset) = self.chain.object_layer_asset(id).await else {
+            return Ok(serde_json::Value::Null);
+        };
+        serde_json::to_value(asset)
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
+    }
+
     async fn subscribe(
         &self,
         pending: jsonrpsee::PendingSubscriptionSink,

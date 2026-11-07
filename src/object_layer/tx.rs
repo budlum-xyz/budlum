@@ -14,7 +14,7 @@
 use crate::core::address::Address;
 use crate::domain::types::{DomainId, Hash32};
 use crate::object_layer::charter::{CodeProof, DomainCharter};
-use crate::object_layer::ids::AssetClassId;
+use crate::object_layer::ids::{AssetClassId, DependencyId};
 use crate::object_layer::registry::{
     Call, ClassRegistration, HomeEventProof, HomeFinality, ObjectLayerRegistry, Phase, Refusal,
 };
@@ -189,13 +189,27 @@ impl ObjectLayerTx {
             Self::ConfirmDeparture(proof) => {
                 registry.confirm_departure(proof, ctx.finality)?;
             }
-            Self::AuditCode { .. }
-            | Self::Resolve { .. }
-            | Self::SetEscapeAddress { .. }
-            | Self::SetTentativeConsent { .. }
-            | Self::Adopt { .. }
-            | Self::Challenge { .. }
-            | Self::Rebut { .. } => return Err(TxRefusal::StepNotOpen),
+            Self::AuditCode { class } => {
+                registry.audit_code(*class)?;
+            }
+            Self::Resolve { dependency } => {
+                registry.resolve(DependencyId(*dependency))?;
+            }
+            Self::SetEscapeAddress { home } => {
+                registry.set_escape_address(ctx.signer, home.clone())?;
+            }
+            Self::SetTentativeConsent { consent } => {
+                registry.set_tentative_consent(ctx.signer, *consent);
+            }
+            Self::Adopt { home } => {
+                registry.adopt(ctx.signer, home)?;
+            }
+            Self::Challenge { class } => {
+                registry.challenge(ctx.signer, *class, ctx.height)?;
+            }
+            Self::Rebut { class } => {
+                registry.rebut(ctx.signer, *class, ctx.height)?;
+            }
         }
         Ok(())
     }
