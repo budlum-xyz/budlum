@@ -71,9 +71,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         }
     }
     if problems.is_empty() {
-        Ok(format!(
-            "OK: no placeholder token in either README ({lines} line(s) read).",
-        ))
+        Ok(format!("OK: no placeholder token in either README ({lines} line(s) read)."))
     } else {
         Err(format!(
             "FAIL: a placeholder survived into a page a reader sees. Fill it from its source, or write what is true while the source does not exist:\n{problems}",

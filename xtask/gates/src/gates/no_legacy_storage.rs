@@ -123,7 +123,9 @@ fn collect_files(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) {
             continue;
         }
         if ft.is_dir() {
-            if SKIP_DIRS.iter().any(|d| entry.file_name().to_str() == Some(d)) {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if SKIP_DIRS.contains(&name_str.as_ref()) {
                 continue;
             }
             collect_files(&path, root, out);
@@ -164,7 +166,7 @@ fn measure(root: &Path) -> BTreeMap<String, usize> {
         counts.insert((*id).to_string(), 0);
     }
     for p in FORBIDDEN_PATHS {
-        counts.insert(format!("path:{p}"), count_path(root, p));
+        counts.insert(format!("path:{p}"), count_path(root, *p));
     }
     let mut files = Vec::new();
     for r in SCAN_ROOTS {
@@ -177,7 +179,7 @@ fn measure(root: &Path) -> BTreeMap<String, usize> {
         }
         let Ok(text) = fs::read_to_string(&path) else { continue };
         for id in IDENTIFIERS {
-            let n = count_word(&text, id);
+            let n = count_word(&text, *id);
             if n > 0 {
                 if let Some(slot) = counts.get_mut(*id) {
                     *slot += n;
@@ -196,10 +198,7 @@ fn parse_baseline(text: &str) -> Result<BTreeMap<String, usize>, String> {
             continue;
         }
         let Some((name, value)) = t.split_once('|') else {
-            return Err(format!(
-                "{BASELINE_PATH}:{}: expected `name|count`",
-                i + 1,
-            ));
+            return Err(format!("{BASELINE_PATH}:{}: expected `name|count`", i + 1));
         };
         let n = value
             .trim()
@@ -245,9 +244,7 @@ fn check(root: &Path, write: bool) -> Result<String, String> {
         }
         fs::write(&base_path, render_baseline(&counts))
             .map_err(|e| format!("cannot write {BASELINE_PATH}: {e}"))?;
-        return Ok(format!(
-            "wrote {BASELINE_PATH}: {total} legacy occurrence(s) in total.",
-        ));
+        return Ok(format!("wrote {BASELINE_PATH}: {total} legacy occurrence(s) in total."));
     }
 
     let mut bad = String::new();
@@ -347,9 +344,7 @@ pub fn self_test() -> Result<String, String> {
     .map_err(|e| format!("cannot write legacy.rs: {e}"))?;
     if check(&dirty, false).is_ok() {
         let _ = fs::remove_dir_all(&tmp);
-        return Err(String::from(
-            "canary: an added legacy identifier was not detected",
-        ));
+        return Err(String::from("canary: an added legacy identifier was not detected"));
     }
 
     // A forbidden path must be caught even when no identifier is written in it:
@@ -367,9 +362,7 @@ pub fn self_test() -> Result<String, String> {
         .map_err(|e| format!("cannot write storage_deal.rs: {e}"))?;
     if check(&path_case, false).is_ok() {
         let _ = fs::remove_dir_all(&tmp);
-        return Err(String::from(
-            "canary: a forbidden path was not detected",
-        ));
+        return Err(String::from("canary: a forbidden path was not detected"));
     }
 
     // A fall that the baseline has not followed must fail too, or the baseline

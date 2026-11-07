@@ -152,9 +152,7 @@ pub fn self_test() -> Result<String, String> {
         .map_err(|e| format!("cannot write broken README.md: {e}"))?;
     if run(&tmp).is_ok() {
         let _ = std::fs::remove_dir_all(&tmp);
-        return Err(String::from(
-            "canary: a rewritten definition block was accepted",
-        ));
+        return Err(String::from("canary: a rewritten definition block was accepted"));
     }
 
     // A truncated file must be caught rather than compared against nothing.
