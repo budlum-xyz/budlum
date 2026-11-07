@@ -19,3 +19,12 @@ __pycache__/
 # Foundry build output of the Ethereum-side contracts.
 /contracts/out/
 /contracts/cache/
+
+# The binding directive is a working document handed to the agents that build
+# this tree; it is not part of the tree. It is written in Turkish for a
+# repository that is written in English, so `tree-is-english` reports it (3,840
+# Turkish lines against a baseline that does not carry it) and `typos` and
+# `concept-names` scan it as if it were prose. Keeping it here also put a
+# 6,044-line document in front of every reader with nothing that kept it
+# current. It travels with the team; the tree carries the code it asks for.
+THE_BUDLUM_DIREKTIF.md
