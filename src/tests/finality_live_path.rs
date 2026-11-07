@@ -99,7 +99,7 @@ fn sign_prevote(sk: &Scalar, epoch: u64, height: u64, hash: &str, voter: Address
 #[test]
 fn live_path_epoch_change_isolates_votes() {
     let (snap1, sks1) = make_snapshot(4, 1, 1000);
-    let mut agg1 = FinalityAggregator::new(1, 10, "H".into(), snap1.clone());
+    let mut agg1 = FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "H".into(), snap1.clone());
     // 3 of 4 prevote, so the epoch 1 window takes 3 votes.
     for (sk, v) in sks1.iter().zip(snap1.validators.iter()).take(3) {
         let pv = sign_prevote(sk, 1, 10, "H", v.address);
@@ -113,7 +113,7 @@ fn live_path_epoch_change_isolates_votes() {
 
     // Produce a NEW aggregator and a NEW snapshot for epoch 2.
     let (snap2, sks2) = make_snapshot(4, 2, 1000);
-    let mut agg2 = FinalityAggregator::new(2, 20, "H2".into(), snap2.clone());
+    let mut agg2 = FinalityAggregator::new(DEFAULT_CHAIN_ID, 2, 20, "H2".into(), snap2.clone());
 
     // One validator votes in epoch 2 and is counted in its own window.
     let pv2 = sign_prevote(&sks2[0], 2, 20, "H2", snap2.validators[0].address);
@@ -140,7 +140,7 @@ fn live_path_epoch_change_isolates_votes() {
 #[test]
 fn live_path_prevote_with_wrong_height_rejected() {
     let (snap, sks) = make_snapshot(4, 1, 1000);
-    let mut agg = FinalityAggregator::new(1, 10, "H".into(), snap.clone());
+    let mut agg = FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "H".into(), snap.clone());
 
     // The right height=10 and the right hash.
     let pv_ok = sign_prevote(&sks[0], 1, 10, "H", snap.validators[0].address);
@@ -169,7 +169,7 @@ fn live_path_prevote_with_wrong_height_rejected() {
 #[test]
 fn live_path_double_sign_window_is_tight() {
     let (snap, sks) = make_snapshot(3, 1, 1000);
-    let mut agg = FinalityAggregator::new(1, 10, "H".into(), snap.clone());
+    let mut agg = FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "H".into(), snap.clone());
 
     // 1st vote (canonical) - accepted.
     let pv1 = sign_prevote(&sks[0], 1, 10, "H", snap.validators[0].address);
@@ -272,7 +272,7 @@ fn node_prevote_epoch_reaches_the_aggregator() {
         // Drive a real prevote through a real aggregator built the way
         // start_prevote_task builds it.
         let (snap, sks) = make_snapshot(1, node_epoch, 1000);
-        let mut agg = FinalityAggregator::new(
+        let mut agg = FinalityAggregator::new(DEFAULT_CHAIN_ID,
             node_epoch,
             checkpoint_height,
             "cp_hash".into(),

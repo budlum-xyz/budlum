@@ -41,7 +41,7 @@ pub const FILIZ_DEV_CHAIN_LENGTH: u64 = 1 << 12;
 /// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
 pub const FILIZ_DEV_CHECKPOINT_INTERVAL: u64 = 1 << 6;
 
-const LINK_TAG: &[u8] = b"BDLM_FILIZ_LINK_V1";
+const LINK_TAG: &[u8] = b"BDLM_HCLE_LINK_V1";
 const ELIG_TAG: &[u8] = b"BDLM_FILIZ_ELIG_V1";
 const EPOCH_TAG: &[u8] = b"BDLM_FILIZ_EPOCH_V1";
 
