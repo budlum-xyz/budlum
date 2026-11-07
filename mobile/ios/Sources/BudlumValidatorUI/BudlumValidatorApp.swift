@@ -107,13 +107,13 @@ public struct BudlumValidatorApp: App {
     public var body: some Scene {
         WindowGroup {
             RootView(model: ValidatorModel(core: ProductionCore.shared))
-        }
-        .onAppear {
-            // The task is registered as early as the scene allows. In the
-            // Xcode app target this moves into the app delegate, which is the
-            // only place `BGTaskScheduler` accepts a registration before the
-            // first scene; both call the same `register` below.
-            ProductionCore.shared.registerBackgroundDuty()
+                .onAppear {
+                    // The task is registered as early as the scene allows. In the
+                    // Xcode app target this moves into the app delegate, which is the
+                    // only place `BGTaskScheduler` accepts a registration before the
+                    // first scene; both call the same `register` below.
+                    ProductionCore.shared.registerBackgroundDuty()
+                }
         }
     }
 }

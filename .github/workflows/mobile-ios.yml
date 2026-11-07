@@ -50,7 +50,9 @@ jobs:
 
       - name: Unit tests
         working-directory: mobile/ios
-        run: swift test --verbose --xunit-output /tmp/ios-xunit.xml 2>&1 | tee /tmp/ios-tests.log
+        run: |
+          set -euo pipefail
+          swift test --verbose --xunit-output /tmp/ios-xunit.xml 2>&1 | tee /tmp/ios-tests.log
 
       # A `swift test` that runs zero tests exits 0 and looks identical to a
       # pass, and the three names below are the acceptance tests of the WP-38
