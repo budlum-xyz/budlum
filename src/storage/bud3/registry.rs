@@ -1047,17 +1047,17 @@ impl Bud3Registry {
         let due: Vec<ObjectKey> = self
             .objects
             .iter()
-            .filter(|(_, o)| o.expires_at < epoch)
+            .filter(|(k, o)| {
+                o.expires_at < epoch
+                    && !self.replacements.get(k).is_some_and(|r| !r.finalized)
+            })
             .map(|(k, _)| *k)
             .collect();
+        // Expiry is not an acknowledgement barrier: pending old objects were
+        // excluded from `due`. If their new object is due, `delete(new)`
+        // removes both sides and the redirect; otherwise the old shares stay
+        // until every new share is acknowledged.
         for k in &due {
-            if self.replacements.get(k).is_some_and(|r| !r.finalized) {
-                // Expiry is not an acknowledgement barrier. If the new object
-                // is also due, `delete(new)` removes both sides and the
-                // redirect; otherwise the old shares stay until every new
-                // share is acknowledged.
-                continue;
-            }
             self.delete(k, epoch);
         }
         due
