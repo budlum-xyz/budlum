@@ -548,6 +548,7 @@ pub const BUDLUM_PREFIXED_DOMAIN_TAGS: &[&str] = &[
 /// the distinction between the two classes lives here, in the document, not in
 /// the code.
 pub const BUDLUM_PREFIXED_NON_DOMAIN_LITERALS: &[&str] = &[
+    "BUDLUM_APTOS_UPSTREAM_URL",
     "BUDLUM_CHAIN_ID",
     "BUDLUM_DB_PATH",
     "BUDLUM_METRICS_API_KEY",

@@ -1770,7 +1770,16 @@ async fn main() {
             rpc_security.clone(),
             RpcMode::Public,
         )
-        .with_metrics(metrics.clone());
+        .with_metrics(metrics.clone())
+        .with_aptos_listener("127.0.0.1:18549".to_string());
+        let pub_server = match std::env::var("BUDLUM_APTOS_UPSTREAM_URL") {
+            Ok(upstream) => pub_server.with_aptos_upstream(upstream),
+            Err(std::env::VarError::NotPresent) => pub_server,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                eprintln!("BUDLUM_APTOS_UPSTREAM_URL must be valid UTF-8");
+                std::process::exit(1);
+            }
+        };
         // In-process TLS: TLS 1.3 with X25519MLKEM768 only. A
         // certificate without its key, or an unusable pair, stops the node
         // here instead of falling back to plain HTTP.

@@ -4,6 +4,7 @@ use crate::core::address::Address;
 use crate::core::block::Block;
 use crate::core::transaction::Transaction;
 use crate::network::node::NodeClient;
+use crate::rpc::compat::aptos::{self, AptosGateway};
 use crate::rpc::compat::ethereum::opening as ethereum;
 use crate::storage::content_id::ContentId;
 use crate::storage::{emit_hook, NopThreeHook, ThreeEventHook, ThreeHookEvent, ThreeHookKind};
@@ -22,7 +23,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
-use tower::{Layer, Service, ServiceBuilder};
+use tower::{Layer, Service};
 use tracing::info;
 
 /// Hard ceiling for the per-IP sliding-window map. Without a bound, an attacker
@@ -177,6 +178,7 @@ struct RpcSecurityLayer {
     per_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
     metrics: Option<Arc<crate::core::metrics::Metrics>>,
     mode: RpcMode,
+    remote_addr: Option<SocketAddr>,
 }
 
 impl RpcSecurityLayer {
@@ -190,7 +192,13 @@ impl RpcSecurityLayer {
             per_ip_rates: Arc::new(Mutex::new(HashMap::new())),
             metrics,
             mode,
+            remote_addr: None,
         }
+    }
+
+    fn for_remote_addr(mut self, remote_addr: SocketAddr) -> Self {
+        self.remote_addr = Some(remote_addr);
+        self
     }
 }
 
@@ -204,6 +212,7 @@ impl<S> Layer<S> for RpcSecurityLayer {
             per_ip_rates: self.per_ip_rates.clone(),
             metrics: self.metrics.clone(),
             mode: self.mode.clone(),
+            remote_addr: self.remote_addr,
         }
     }
 }
@@ -215,6 +224,7 @@ struct RpcSecurityService<S> {
     per_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
     metrics: Option<Arc<crate::core::metrics::Metrics>>,
     mode: RpcMode,
+    remote_addr: Option<SocketAddr>,
 }
 
 impl<S, B> Service<HttpRequest<B>> for RpcSecurityService<S>
@@ -232,7 +242,10 @@ where
         self.inner.poll_ready(cx)
     }
 
-    fn call(&mut self, req: HttpRequest<B>) -> Self::Future {
+    fn call(&mut self, mut req: HttpRequest<B>) -> Self::Future {
+        if let Some(remote_addr) = self.remote_addr {
+            req.extensions_mut().insert::<SocketAddr>(remote_addr);
+        }
         if !is_ip_allowed(&self.config, &req) {
             return Box::pin(async { Ok(text_response(StatusCode::FORBIDDEN, "Forbidden")) });
         }
@@ -356,6 +369,104 @@ pub struct RpcServer {
     /// In-process TLS acceptor. `None` serves plain HTTP, which the
     /// mainnet config check allows on loopback only.
     tls: Option<tokio_rustls::TlsAcceptor>,
+    /// Dedicated Aptos REST bind address. Only the public node startup sets
+    /// this; test and embedded servers keep the opt-in default of `None`.
+    aptos_listener: Option<String>,
+    /// Optional full-node proxy target. `None` preserves local named refusals.
+    aptos_upstream: Option<String>,
+}
+
+/// One dedicated, loopback-only Aptos HTTP listener. It reuses the RPC
+/// admission layer and TLS acceptor, but it has no JSON-RPC dispatcher.
+struct AptosListener {
+    addr: String,
+    gateway: AptosGateway,
+    security: RpcSecurityConfig,
+    metrics: Option<Arc<crate::core::metrics::Metrics>>,
+    tls: Option<tokio_rustls::TlsAcceptor>,
+    body_limit: usize,
+}
+
+impl AptosListener {
+    async fn start(self) -> Result<SocketAddr, Box<dyn std::error::Error + Send + Sync>> {
+        use jsonrpsee::server::serve_with_graceful_shutdown;
+
+        let listener = tokio::net::TcpListener::bind(self.addr.clone()).await?;
+        let local_addr = listener.local_addr()?;
+        let connection_limit = self
+            .security
+            .max_connections
+            .unwrap_or(RPC_CONNECTION_LIMIT_CEILING) as usize;
+        let connections = Arc::new(tokio::sync::Semaphore::new(connection_limit));
+        let security = RpcSecurityLayer::new(
+            self.security,
+            self.metrics,
+            RpcMode::Public,
+        );
+        let tls = self.tls;
+        let gateway = self.gateway;
+        let body_limit = self.body_limit;
+        info!(
+            "Aptos REST Server started on {local_addr} ({})",
+            if tls.is_some() { "tls" } else { "plain" }
+        );
+
+        tokio::spawn(async move {
+            loop {
+                let (socket, remote_addr) = match listener.accept().await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::error!("Aptos REST accept failed: {error}");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                };
+                let permit = match connections.clone().acquire_owned().await {
+                    Ok(permit) => permit,
+                    Err(_) => break,
+                };
+                let gateway_for_service = gateway.clone();
+                let service = security.clone().for_remote_addr(remote_addr).layer(
+                    tower::service_fn(move |req: HttpRequest<hyper::body::Incoming>| {
+                        let gateway_for_request = gateway_for_service.clone();
+                        async move {
+                            Ok::<_, std::convert::Infallible>(
+                                gateway_for_request.handle_request(req, body_limit).await,
+                            )
+                        }
+                    },
+                ));
+                match tls.clone() {
+                    Some(acceptor) => {
+                        tokio::spawn(async move {
+                            let _permit = permit;
+                            serve_tls_connection(
+                                acceptor,
+                                socket,
+                                remote_addr,
+                                service,
+                                std::future::pending::<()>(),
+                            )
+                            .await;
+                        });
+                    }
+                    None => {
+                        tokio::spawn(async move {
+                            let _permit = permit;
+                            let _ = serve_with_graceful_shutdown(
+                                socket,
+                                service,
+                                std::future::pending::<()>(),
+                            )
+                            .await;
+                        });
+                    }
+                }
+            }
+        });
+
+        Ok(local_addr)
+    }
 }
 
 impl RpcServer {
@@ -369,6 +480,8 @@ impl RpcServer {
             eth_filters: Arc::new(Mutex::new(ethereum::filters::FilterPool::new())),
             metrics: None,
             tls: None,
+            aptos_listener: None,
+            aptos_upstream: None,
         }
     }
 
@@ -386,6 +499,8 @@ impl RpcServer {
             eth_filters: Arc::new(Mutex::new(ethereum::filters::FilterPool::new())),
             metrics: None,
             tls: None,
+            aptos_listener: None,
+            aptos_upstream: None,
         }
     }
 
@@ -404,6 +519,8 @@ impl RpcServer {
             eth_filters: Arc::new(Mutex::new(ethereum::filters::FilterPool::new())),
             metrics: None,
             tls: None,
+            aptos_listener: None,
+            aptos_upstream: None,
         }
     }
 
@@ -418,6 +535,20 @@ impl RpcServer {
         self
     }
 
+    /// Open the dedicated Aptos REST listener when this public server runs.
+    /// The address is validated before either listener starts.
+    pub fn with_aptos_listener(mut self, addr: String) -> Self {
+        self.aptos_listener = Some(addr);
+        self
+    }
+
+    /// Proxy known Aptos routes to this full-node `/v1` URL. Validation and
+    /// HTTP-client construction happen before either listener starts.
+    pub fn with_aptos_upstream(mut self, url: String) -> Self {
+        self.aptos_upstream = Some(url);
+        self
+    }
+
     pub async fn run(self, addr: String) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use jsonrpsee::core::server::Methods;
         use jsonrpsee::server::BatchRequestConfig;
@@ -426,12 +557,19 @@ impl RpcServer {
         };
 
         validate_rpc_security_config(&self.security)?;
+        let aptos_body_limit = self
+            .security
+            .max_request_body_size
+            .ok_or("validated RPC body limit is missing")? as usize;
         let tls = self.tls.clone();
-        let http_middleware = ServiceBuilder::new().layer(RpcSecurityLayer::new(
+        // Wrap the combined REST/JSON-RPC service, not only jsonrpsee's inner
+        // dispatcher. Otherwise the compatibility branch would bypass IP,
+        // origin, rate and authentication admission on the shared listener.
+        let security = RpcSecurityLayer::new(
             self.security.clone(),
             self.metrics.clone(),
             self.mode.clone(),
-        ));
+        );
 
         // jsonrpsee 0.26 moved the transport limits off the server builder and
         // onto `ServerConfig`; the defaults are unchanged, so only the values
@@ -451,15 +589,46 @@ impl RpcServer {
         // oversized batches are rejected wholesale instead of partially
         // executed (jsonrpsee drops the whole batch at `Limit`).
         config = config.set_batch_request_config(BatchRequestConfig::Limit(100));
-        let builder = ServerBuilder::default()
-            .set_config(config.build())
-            .set_http_middleware(http_middleware);
+        let builder = ServerBuilder::default().set_config(config.build());
 
         let mode_label = match self.mode {
             RpcMode::Public => "public",
             RpcMode::Operator => "operator",
         };
         validate_operator_bind_address(&self.mode, &addr)?;
+        aptos::check_routes().map_err(|problem| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Aptos REST route classification refused this listener: {problem}"),
+            )
+        })?;
+        if self.mode != RpcMode::Public && self.aptos_listener.is_some() {
+            return Err("the dedicated Aptos listener belongs to the public RPC server".into());
+        }
+        if let Some(aptos_addr) = self.aptos_listener.as_ref() {
+            if aptos_addr == &addr {
+                return Err("Aptos REST and JSON-RPC listeners need distinct addresses".into());
+            }
+            aptos::validate_listener(aptos_addr)?;
+        }
+        let serve_aptos_on_primary =
+            self.mode == RpcMode::Public && self.aptos_listener.is_none();
+        let mut aptos_gateway = AptosGateway::new(self.chain.clone(), self.node.clone());
+        if let Some(upstream) = self.aptos_upstream.as_deref() {
+            aptos_gateway = aptos_gateway.with_upstream(
+                aptos::AptosUpstream::parse(upstream).map_err(|problem| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, problem)
+                })?,
+            );
+        }
+        let dedicated_aptos = self.aptos_listener.as_ref().map(|aptos_addr| AptosListener {
+            addr: aptos_addr.clone(),
+            gateway: aptos_gateway.clone(),
+            security: self.security.clone(),
+            metrics: self.metrics.clone(),
+            tls: self.tls.clone(),
+            body_limit: aptos_body_limit,
+        });
         // Every served method must be classified (`src/rpc/method_class.rs`).
         let methods: Methods = self.into_rpc().into();
         crate::rpc::method_class::check_served_methods(methods.method_names()).map_err(|e| {
@@ -495,13 +664,24 @@ impl RpcServer {
                 let stop_handle_for_service = stop_handle.clone();
                 let svc_builder_for_service = svc_builder.clone();
                 let methods_for_service = methods.clone();
-                let svc = tower::service_fn(move |mut req: HttpRequest<hyper::body::Incoming>| {
-                    req.extensions_mut().insert::<SocketAddr>(remote_addr);
-                    let mut svc = svc_builder_for_service
-                        .clone()
-                        .build(methods_for_service.clone(), stop_handle_for_service.clone());
-                    async move { svc.call(req).await }
-                });
+                let aptos_for_service = aptos_gateway.clone();
+                let svc = security.clone().for_remote_addr(remote_addr).layer(
+                    tower::service_fn(move |req: HttpRequest<hyper::body::Incoming>| {
+                        let is_aptos =
+                            serve_aptos_on_primary && aptos::owns_path(req.uri().path());
+                        let aptos_for_request = aptos_for_service.clone();
+                        let mut svc = svc_builder_for_service
+                            .clone()
+                            .build(methods_for_service.clone(), stop_handle_for_service.clone());
+                        async move {
+                            if is_aptos {
+                                Ok(aptos_for_request.handle_request(req, aptos_body_limit).await)
+                            } else {
+                                svc.call(req).await
+                            }
+                        }
+                    },
+                ));
 
                 let shutdown = stop_handle.clone().shutdown();
                 match tls.clone() {
@@ -520,6 +700,10 @@ impl RpcServer {
                 }
             }
         });
+
+        if let Some(dedicated_aptos) = dedicated_aptos {
+            dedicated_aptos.start().await?;
+        }
 
         Ok(())
     }
