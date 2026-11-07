@@ -116,6 +116,7 @@ jobs:
             --lockfile=crates/bpqs/Cargo.lock \
             --lockfile=crates/budlum-types/Cargo.lock \
             --lockfile=crates/bud-codec/Cargo.lock \
+            --lockfile=crates/uel-abi/Cargo.lock \
             --lockfile=xtask/gates/Cargo.lock \
             --lockfile=xtask/tools/Cargo.lock \
             --lockfile=crates/ai-inference/Cargo.lock \
