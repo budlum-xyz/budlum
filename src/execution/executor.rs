@@ -468,7 +468,7 @@ impl Executor {
                         "Claiming rewards requires zero amount, recipient, and data",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the reward claim fee",
@@ -885,10 +885,18 @@ impl Executor {
                     // this balance. Checking the escrow alone let the escrow
                     // be deducted and the fee debit then fail, leaving a
                     // half-applied transaction in the callers' state.
-                    if sender_balance < max_fee.saturating_add(tx.fee) {
+                    let required_balance = max_fee.checked_add(tx.fee).ok_or_else(|| {
+                        BudlumError::validation(
+                            "ai_escrow_cost_overflow",
+                            "AI max_fee escrow plus transaction fee overflowed u64",
+                        )
+                    })?;
+                    if sender_balance < required_balance {
                         return Err(BudlumError::validation(
                             "ai_insufficient_balance_for_escrow",
-                            format!("Insufficient balance for max_fee escrow: have {sender_balance}, need {max_fee}"),
+                            format!(
+                                "Insufficient balance for max_fee escrow plus fee: have {sender_balance}, need {required_balance}"
+                            ),
                         ));
                     }
                     // Previously the error was silently swallowed
@@ -3044,7 +3052,7 @@ impl Executor {
                         "a relayed cross-domain message requires zero amount, zero recipient and empty data",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the cross-domain relay fee",
@@ -3087,7 +3095,7 @@ impl Executor {
                         "a role unbond requires zero amount, zero recipient and empty data",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the role unbond fee",
@@ -3112,7 +3120,7 @@ impl Executor {
                         "a role withdraw requires zero amount, zero recipient and empty data",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the role withdraw fee",
@@ -3140,7 +3148,7 @@ impl Executor {
                         "a bridge burn takes its amount from the transfer row; it cannot carry one",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the bridge burn fee",
@@ -3219,7 +3227,7 @@ impl Executor {
                         "registering a cross-domain message moves no value",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the cross-domain message fee",
@@ -3254,7 +3262,7 @@ impl Executor {
                         "a storage transaction records commitments; it cannot carry value",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the storage transaction fee",
@@ -3288,7 +3296,7 @@ impl Executor {
                         "an external-domain transaction requires zero amount, zero recipient and empty data",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the external-domain transaction fee",
@@ -3321,7 +3329,7 @@ impl Executor {
                         "a settlement transaction requires zero amount, zero recipient and empty data",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the settlement transaction fee",
@@ -3352,7 +3360,7 @@ impl Executor {
                         "a bridge transaction requires zero amount, zero recipient and empty data",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the bridge transaction fee",
@@ -3381,7 +3389,7 @@ impl Executor {
                         "a canary commit requires zero amount, zero recipient and empty data",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the canary commit fee",
@@ -3410,7 +3418,7 @@ impl Executor {
                         "a Filiz registration requires zero amount, zero recipient and empty data",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the Filiz registration fee",
@@ -3446,7 +3454,7 @@ impl Executor {
                         "a canary reveal requires zero amount, zero recipient and empty data",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the canary reveal fee",
@@ -3941,6 +3949,47 @@ mod tests {
             .expect("a vote spends its fee, not its vote-weight amount");
         assert_eq!(state.get_balance(&sender), 0);
         assert_eq!(state.get_nonce(&sender), 1);
+    }
+
+    #[test]
+    fn blg_100_fee_only_execution_gate_rejects_vesting_locked_balance() {
+        use crate::core::account::AccountState;
+        use crate::core::address::Address;
+        use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
+        use crate::execution::executor::Executor;
+
+        let sender = Address::from([0x61; 32]);
+        let validator = Address::from([0x62; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&sender, 100);
+        state.team_vesting = Some((
+            sender,
+            crate::tokenomics::VestingSchedule {
+                total: 100,
+                start_epoch: 0,
+                cliff_epochs: 10,
+                duration_epochs: 100,
+            },
+        ));
+        assert_eq!(state.spendable_balance(&sender), 0);
+        let root_before = state.calculate_state_root();
+        let mut tx = Transaction::new_with_chain_id(
+            sender,
+            Address::zero(),
+            0,
+            1,
+            0,
+            vec![],
+            DEFAULT_CHAIN_ID,
+            TransactionType::ClaimRewards { validator },
+        );
+        tx.hash = tx.calculate_hash();
+
+        let error = Executor::apply_transaction_checked(&mut state, &tx).unwrap_err();
+        assert_eq!(error.code(), "insufficient_balance_for_fee");
+        assert_eq!(state.calculate_state_root(), root_before);
+        assert_eq!(state.get_balance(&sender), 100);
+        assert_eq!(state.get_nonce(&sender), 0);
     }
 
     /// A refused governance vote leaves the sender untouched. The
