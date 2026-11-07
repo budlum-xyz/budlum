@@ -733,6 +733,19 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- workflows-cover-every-workspace 2>&1 | tee -a /tmp/gate-out.log
           exit "${PIPESTATUS[0]}"
+      # A nightly workflow that is missing, unscheduled or softened is not a
+      # gate. The reader checks the repository shape that makes the nightly
+      # surface required: file present, schedule live, verification unsoftened.
+      - name: Nightly workflow gate canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- nightly-workflows-are-required --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: Required nightly workflows are present and binding
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- nightly-workflows-are-required 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: Repair trigger canary
         if: always() && steps.build.outcome == 'success'
         run: |

@@ -1,520 +1,413 @@
-//! Every cargo workspace in the tree is built by some workflow.
+//! Every Cargo workspace is compiled by at least one workflow.
 //!
-//! # The failure this closes
-//!
-//! A workspace that no workflow builds is a workspace whose tests have never
-//! run. It is not "untested by accident": it is untested in a way that looks
-//! covered, because the repository has a CI badge, the badge is green, and the
-//! directory has unit tests in it.
-//!
-//! This tree has five workspaces beside the root package: `budzero`,
-//! the AI inference crate, the explorer crate, `fuzz`, `kani`, and the two
-//! endpoint contracts under `contracts/object-layer/`. Each is its own cargo
-//! workspace by necessity (a different target, a different toolchain, a
-//! different edition pin), so a `cargo test` at the repository root reaches
-//! none of them. The coverage has to be written out job by job, which is
-//! exactly the kind of thing that is true one year and false the next.
-//!
-//! # What counts as covered
-//!
-//! A workflow builds a workspace when one of its `run:` lines reaches that
-//! workspace's manifest:
-//!
-//!   * `--manifest-path <dir>/Cargo.toml` (with or without `./`), or
-//!   * `working-directory: <dir>` on the same step, or
-//!   * `cd <dir>` as a whole word in the command, or
-//!   * for the repository root, a `cargo` command with no `--manifest-path`:
-//!     a bare `cargo test` at the root builds the root package.
-//!
-//! Only executable `run:` content counts. A workspace named in a comment, in a
-//! job name or in a cache key is not a workspace that was built. Two of those
-//! three have already been true in this repository: `extra-tooling.yml` named
-//! tools in `name:` fields that no step installed, and a corpus cache key
-//! named `fuzz` while nothing compiled the fuzz targets.
-//!
-//! `cargo fuzz <target>` at the repository root is the one command that reaches
-//! a workspace without naming its manifest: cargo-fuzz always resolves
-//! `fuzz/Cargo.toml` from the root, and it takes no `--manifest-path`. That is
-//! recorded as an implicit cover rather than as a special case in the parser,
-//! so a future tool with the same shape is one line here instead of a hole in
-//! the check.
-//!
-//! # What this gate does not do
-//!
-//! It does not run anything, so it cannot tell whether a job that names
-//! `budzero` also passed. That is what the job is for. This gate answers the
-//! earlier question: is there a job at all.
+//! A standalone workspace that no workflow builds is a blind spot: its
+//! tests, lints and dependency graph can drift without a red check. This
+//! gate discovers workspace roots from the manifests, then reads the
+//! executable `run:` blocks of every workflow and asks whether a cargo
+//! command compiles each root. A comment, a softened step, `cargo fmt`
+//! and `cargo metadata` do not count. A non-optional path dependency of a
+//! compiled manifest counts, because cargo compiles it with that manifest.
 
-use std::fmt::Write as _;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-/// Directory names the walk does not enter.
-const SKIPPED_DIRS: &[&str] = &["target", "node_modules", "vendor"];
+use crate::gates::ci_workflow_guards::run_blocks;
 
-/// Depth limit for the manifest walk.
-///
-/// Four covers `crates/ai-inference/crates/ai-core/Cargo.toml`; a manifest
-/// deeper than that is not a workspace root this repository builds.
-const MAX_DEPTH: usize = 5;
+const COMPILE_VERBS: &[&str] = &[
+    "build", "test", "check", "clippy", "run", "fuzz", "bench", "kani", "mutants", "miri", "doc",
+];
 
-/// One workspace the gate requires a workflow to build.
-struct Workspace {
-    /// Repository relative directory, `""` for the root package.
-    dir: String,
-    /// Why the gate expects it to be built somewhere.
-    why: &'static str,
-}
-
-/// A command that reaches a workspace without naming its manifest.
-struct ImplicitCover {
-    dir: &'static str,
-    /// The command prefix that builds it. Matched at the start of a command.
-    prefix: &'static str,
-    why: &'static str,
-}
-
-/// Commands that reach a workspace implicitly.
-const IMPLICIT: &[ImplicitCover] = &[ImplicitCover {
-    dir: "fuzz",
-    prefix: "cargo fuzz ",
-    why: "cargo-fuzz resolves fuzz/Cargo.toml from the repository root and takes no --manifest-path",
-}];
-
-/// Is this line a comment, in whole or after its first token?
-fn is_comment(line: &str) -> bool {
-    line.trim_start().starts_with('#')
-}
-
-/// Drop an inline `# comment` from a YAML scalar.
-///
-/// A `#` starts a comment only after whitespace, so `a#b` keeps its hash while
-/// `a #b` does not. The distinction matters for the shell: `sed -e 's/#.*//'`
-/// inside a `run:` line is not a comment, and reading it as one would cut a
-/// command in half.
-fn drop_inline_comment(line: &str) -> &str {
-    let bytes = line.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i] == b'#' && (i == 0 || bytes[i - 1].is_ascii_whitespace()) {
-            return &line[..i];
-        }
-        i += 1;
-    }
-    line
-}
-
-/// Indentation of a line, in bytes.
-fn indent_of(line: &str) -> usize {
-    line.len() - line.trim_start().len()
-}
-
-/// Every executable line of every `run:` block in one workflow.
-///
-/// A `run:` block is either an inline command (`run: cargo test`) or a folded
-/// or literal block (`run: |`, `run: >`) whose body is the following lines that
-/// are indented further than the key. Anything else, including a `run:` that
-/// appears in a comment, is data.
-fn run_lines(src: &str) -> Vec<String> {
-    let lines: Vec<&str> = src.lines().collect();
-    let mut out: Vec<String> = Vec::new();
-    let mut i = 0usize;
-    while i < lines.len() {
-        let raw = lines[i];
-        let indent = indent_of(raw);
-        let trimmed = raw.trim_start();
-        let after_dash = trimmed
-            .strip_prefix('-')
-            .map(str::trim_start)
-            .unwrap_or(trimmed);
-        let Some(rest) = after_dash.strip_prefix("run:") else {
-            i += 1;
-            continue;
-        };
-        let rest = rest.trim();
-        if rest.starts_with('|') || rest.starts_with('>') {
-            let mut j = i + 1;
-            while j < lines.len() {
-                let body = lines[j];
-                if body.trim().is_empty() {
-                    j += 1;
-                    continue;
+fn normalize(relative: &str) -> String {
+    let trimmed = relative.trim().trim_matches(['"', '\'']);
+    let mut parts: Vec<&str> = Vec::new();
+    for part in trimmed.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.last().is_some_and(|last| *last != "..") {
+                    parts.pop();
+                } else {
+                    parts.push("..");
                 }
-                if indent_of(body) <= indent {
-                    break;
-                }
-                if !is_comment(body) {
-                    out.push(drop_inline_comment(body).trim().to_string());
-                }
-                j += 1;
             }
-            i = j;
-            continue;
+            _ => parts.push(part),
         }
-        if !rest.is_empty() && !is_comment(rest) {
-            out.push(drop_inline_comment(rest).trim().to_string());
-        }
-        i += 1;
     }
-    out
+    if parts.is_empty() {
+        String::from(".")
+    } else {
+        parts.join("/")
+    }
 }
 
-/// Every workflow file GitHub reads.
-fn workflow_files(root: &Path) -> Vec<PathBuf> {
-    let dir = root.join(".github/workflows");
-    let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return out;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let is_yaml = path
-            .extension()
-            .is_some_and(|x| x.eq_ignore_ascii_case("yml") || x.eq_ignore_ascii_case("yaml"));
-        if is_yaml {
-            out.push(path);
-        }
+fn join_relative(base: &str, child: &str) -> String {
+    let child = normalize(child);
+    if base == "." {
+        child
+    } else if child == "." {
+        base.to_string()
+    } else {
+        format!("{base}/{child}")
     }
-    out.sort();
-    out
 }
 
-/// Does `line` name `dir` as a command's own argument?
-///
-/// The `cd` form needs a word boundary after the directory: `cd budzero` covers
-/// `budzero`, while `cd budzero-old` does not.
-fn mentions_dir(line: &str, dir: &str) -> bool {
-    if line.contains(&format!("--manifest-path {dir}/Cargo.toml"))
-        || line.contains(&format!("--manifest-path ./{dir}/Cargo.toml"))
-    {
-        return true;
-    }
-    if line.contains(&format!("working-directory: {dir}")) {
-        return true;
-    }
-    let needle = format!("cd {dir}");
-    let mut from = 0usize;
-    while let Some(at) = line[from..].find(&needle) {
-        let end = from + at + needle.len();
-        let next = line.as_bytes().get(end).copied();
-        let boundary = match next {
-            None => true,
-            Some(b) => b.is_ascii_whitespace() || b == b'&' || b == b';' || b == b')' || b == b'|',
-        };
-        if boundary {
-            return true;
-        }
-        from = end;
-    }
-    false
-}
-
-/// Is this workspace built by the run lines collected from every workflow?
-fn covered(runs: &[String], workspace: &Workspace) -> bool {
-    if workspace.dir.is_empty() {
-        // The root package: a cargo command that names no manifest runs here.
-        return runs.iter().any(|line| {
-            let starts = line.starts_with("cargo ") || line.starts_with("cargo\t");
-            starts && !line.contains("--manifest-path")
-        });
-    }
-    for cover in IMPLICIT {
-        if cover.dir == workspace.dir.as_str()
-            && runs
-                .iter()
-                .any(|line| line.starts_with(cover.prefix) || line.contains(&format!("&& {}", cover.prefix)))
-        {
-            return true;
+fn component_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let mut star: Option<usize> = None;
+    let mut mark = 0usize;
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
         }
     }
-    runs.iter().any(|line| mentions_dir(line, &workspace.dir))
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
 }
 
-/// Does this manifest declare a workspace?
-fn declares_workspace(text: &str) -> bool {
-    text.lines()
-        .any(|line| line.trim().eq_ignore_ascii_case("[workspace]"))
-}
-
-/// Walk the tree for workspace manifests, plus the root package.
-fn workspaces(root: &Path) -> Vec<Workspace> {
-    fn walk(dir: &Path, depth: usize, out: &mut Vec<Workspace>) {
-        if depth > MAX_DEPTH {
-            return;
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<&str> = pattern.split('/').collect();
+    let t: Vec<&str> = text.split('/').collect();
+    fn go(p: &[&str], t: &[&str]) -> bool {
+        match p.first() {
+            None => t.is_empty(),
+            Some(&"**") => (0..=t.len()).any(|i| go(&p[1..], &t[i..])),
+            Some(component) => {
+                !t.is_empty() && component_match(component, t[0]) && go(&p[1..], &t[1..])
+            }
         }
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
-        paths.sort();
-        for path in paths {
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            if path.is_dir() {
-                if SKIPPED_DIRS.contains(&name.as_str()) || name.starts_with('.') {
-                    continue;
-                }
-                walk(&path, depth + 1, out);
+    }
+    go(&p, &t)
+}
+
+fn collect_manifests(root: &Path) -> Result<BTreeMap<String, toml::Value>, String> {
+    fn walk(dir: &Path, root: &Path, out: &mut BTreeMap<String, toml::Value>) -> Result<(), String> {
+        let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if matches!(name.as_ref(), ".git" | "target" | "node_modules") {
                 continue;
             }
-            if name != "Cargo.toml" {
-                continue;
-            }
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            if declares_workspace(&text) {
-                let dir = path
+            let kind = entry.file_type().map_err(|e| e.to_string())?;
+            if kind.is_dir() {
+                walk(&path, root, out)?;
+            } else if name == "Cargo.toml" {
+                let text = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                let value: toml::Value = toml::from_str(&text)
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                let relative = path
                     .parent()
-                    .map(|p| {
-                        let rel = p.strip_prefix(root).unwrap_or(p);
-                        rel.components()
-                            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                            .collect::<Vec<String>>()
-                            .join("/")
-                    })
-                    .unwrap_or_default();
-                out.push(Workspace {
-                    dir,
-                    why: "declares a [workspace]",
-                });
+                    .and_then(|p| p.strip_prefix(root).ok())
+                    .map_or_else(|| String::from("."), |p| normalize(&p.to_string_lossy()));
+                out.insert(relative, value);
+            }
+        }
+        Ok(())
+    }
+    let mut out = BTreeMap::new();
+    walk(root, root, &mut out)?;
+    Ok(out)
+}
+
+fn workspace_members(value: &toml::Value) -> Vec<String> {
+    value
+        .get("workspace")
+        .and_then(|w| w.get("members"))
+        .and_then(toml::Value::as_array)
+        .map(|members| {
+            members
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(normalize)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn is_member(manifests: &BTreeMap<String, toml::Value>, workspace: &str, dir: &str) -> bool {
+    let Some(value) = manifests.get(workspace) else {
+        return false;
+    };
+    let relative = if workspace == "." {
+        dir.to_string()
+    } else {
+        dir.strip_prefix(&format!("{workspace}/"))
+            .unwrap_or(dir)
+            .to_string()
+    };
+    workspace_members(value)
+        .iter()
+        .any(|pattern| glob_match(pattern, &relative))
+}
+
+fn workspace_roots(manifests: &BTreeMap<String, toml::Value>) -> BTreeSet<String> {
+    let mut roots = BTreeSet::new();
+    for (dir, value) in manifests {
+        if value.get("workspace").is_some() {
+            roots.insert(dir.clone());
+            continue;
+        }
+        if value.get("package").is_none() {
+            continue;
+        }
+        let mut parent = Path::new(dir).parent();
+        let mut owned = false;
+        while let Some(ancestor) = parent {
+            let ancestor_dir = normalize(&ancestor.to_string_lossy());
+            if ancestor_dir != *dir
+                && manifests
+                    .get(&ancestor_dir)
+                    .is_some_and(|v| v.get("workspace").is_some())
+                && is_member(manifests, &ancestor_dir, dir)
+            {
+                owned = true;
+                break;
+            }
+            parent = ancestor.parent();
+        }
+        if !owned {
+            roots.insert(dir.clone());
+        }
+    }
+    roots
+}
+
+fn workspace_for_dir<'a>(dir: &str, roots: &'a BTreeSet<String>) -> Option<&'a str> {
+    let dir = normalize(dir);
+    roots
+        .iter()
+        .map(String::as_str)
+        .filter(|root| *root == "." || dir == *root || dir.starts_with(&format!("{root}/")))
+        .max_by_key(|root| root.len())
+}
+
+struct CargoCommand {
+    verb: String,
+    manifest: Option<String>,
+}
+
+fn cargo_command(line: &str) -> Option<CargoCommand> {
+    if line.trim_start().starts_with('#') {
+        return None;
+    }
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    let cargo = tokens.iter().position(|t| *t == "cargo")?;
+    let mut rest = tokens[cargo + 1..].iter().copied().peekable();
+    while rest.peek().is_some_and(|t| t.starts_with('+')) {
+        rest.next();
+    }
+    let verb = rest.next()?.to_string();
+    if !COMPILE_VERBS.contains(&verb.as_str()) && !verb.starts_with("build-") {
+        return None;
+    }
+    let mut manifest = None;
+    let args: Vec<&str> = rest.collect();
+    for (i, token) in args.iter().enumerate() {
+        if *token == "--manifest-path" {
+            manifest = args.get(i + 1).map(|s| normalize(s));
+        } else if let Some(value) = token.strip_prefix("--manifest-path=") {
+            manifest = Some(normalize(value));
+        }
+    }
+    Some(CargoCommand { verb, manifest })
+}
+
+fn path_dependencies(dir: &str, value: &toml::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    for table in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        let Some(deps) = value.get(table).and_then(toml::Value::as_table) else {
+            continue;
+        };
+        for dep in deps.values() {
+            if dep.get("optional").and_then(toml::Value::as_bool) == Some(true) {
+                continue;
+            }
+            if let Some(path) = dep.get("path").and_then(toml::Value::as_str) {
+                out.push(join_relative(dir, path));
             }
         }
     }
-    let mut out = Vec::new();
-    walk(root, 0, &mut out);
-    // The root package is not a workspace by declaration, but it is the binary
-    // this repository ships and every workflow that runs a bare cargo command
-    // builds it. Leaving it out would let the one build everything depends on
-    // go uncovered without a finding.
-    if !out.iter().any(|w| w.dir.is_empty()) {
-        out.push(Workspace {
-            dir: String::new(),
-            why: "the root package",
-        });
-    }
-    out.sort_by(|a, b| a.dir.cmp(&b.dir));
     out
 }
 
-/// Run the gate.
-///
+fn covered_workspaces(
+    root: &Path,
+    roots: &BTreeSet<String>,
+    manifests: &BTreeMap<String, toml::Value>,
+) -> Result<BTreeSet<String>, String> {
+    let workflows = root.join(".github/workflows");
+    let entries = std::fs::read_dir(&workflows)
+        .map_err(|e| format!("cannot read {}: {e}", workflows.display()))?;
+    let mut covered = BTreeSet::new();
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|ext| ext == "yml" || ext == "yaml")
+        })
+        .collect();
+    paths.sort();
+    for path in paths {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        for block in run_blocks(&text) {
+            if block.softened.is_some() {
+                continue;
+            }
+            let working_directory = block
+                .working_directory
+                .as_deref()
+                .unwrap_or(".");
+            for line in &block.lines {
+                let Some(command) = cargo_command(line) else {
+                    continue;
+                };
+                if let Some(manifest) = command.manifest {
+                    let manifest_dir = Path::new(&manifest)
+                        .parent()
+                        .map_or_else(|| String::from("."), |p| normalize(&p.to_string_lossy()));
+                    if let Some(workspace) = workspace_for_dir(&manifest_dir, roots) {
+                        covered.insert(workspace.to_string());
+                    }
+                } else if command.verb == "fuzz" {
+                    let fuzz_dir = join_relative(working_directory, "fuzz");
+                    if roots.contains(&fuzz_dir) {
+                        covered.insert(fuzz_dir);
+                    } else if let Some(workspace) = workspace_for_dir(working_directory, roots) {
+                        covered.insert(workspace.to_string());
+                    }
+                } else if let Some(workspace) = workspace_for_dir(working_directory, roots) {
+                    covered.insert(workspace.to_string());
+                }
+            }
+        }
+    }
+
+    loop {
+        let before = covered.len();
+        let snapshot = covered.clone();
+        for workspace in snapshot {
+            for (dir, value) in manifests {
+                if workspace_for_dir(dir, roots) != Some(workspace.as_str()) {
+                    continue;
+                }
+                for dep in path_dependencies(dir, value) {
+                    if let Some(dependency_workspace) = workspace_for_dir(&dep, roots) {
+                        covered.insert(dependency_workspace.to_string());
+                    }
+                }
+            }
+        }
+        if covered.len() == before {
+            break;
+        }
+    }
+    Ok(covered)
+}
+
 /// # Errors
 ///
-/// A workspace that no workflow's `run:` content builds, or a tree with no
-/// workflows to read.
+/// Returns the workspace roots no workflow compiles.
 pub fn run(root: &Path) -> Result<String, String> {
-    let files = workflow_files(root);
-    if files.is_empty() {
-        return Err(String::from(
-            "no workflow files under .github/workflows; the gate cannot prove coverage from nothing",
-        ));
+    let manifests = collect_manifests(root)?;
+    let roots = workspace_roots(&manifests);
+    if roots.is_empty() {
+        return Err(String::from("no Cargo workspace was discovered"));
     }
-
-    let mut runs: Vec<String> = Vec::new();
-    for file in &files {
-        let Ok(text) = std::fs::read_to_string(file) else {
-            continue;
-        };
-        runs.extend(run_lines(&text));
-    }
-    if runs.is_empty() {
-        return Err(format!(
-            "{} workflow file(s) but no executable run: content; nothing could be built",
-            files.len()
-        ));
-    }
-
-    let spaces = workspaces(root);
-    let mut uncovered: Vec<&Workspace> = Vec::new();
-    for space in &spaces {
-        if !covered(&runs, space) {
-            uncovered.push(space);
-        }
-    }
-
-    if !uncovered.is_empty() {
-        let mut msg = String::new();
-        let _ = writeln!(
-            msg,
-            "{} workspace(s) that no workflow builds. Add a job that reaches each manifest \
-             (--manifest-path, working-directory or cd), or the workspace has no test running anywhere:",
-            uncovered.len()
-        );
-        for space in &uncovered {
-            let shown = if space.dir.is_empty() {
-                String::from("<repository root>")
-            } else {
-                space.dir.clone()
-            };
-            let _ = writeln!(msg, "  {shown} ({})", space.why);
-        }
-        return Err(msg);
-    }
-
-    let implicit_note: String = IMPLICIT
+    let covered = covered_workspaces(root, &roots, &manifests)?;
+    let missing: Vec<&str> = roots
         .iter()
-        .filter(|cover| spaces.iter().any(|w| w.dir == cover.dir))
-        .map(|cover| format!("; `{}` is covered implicitly: {}", cover.dir, cover.why))
+        .filter(|root| !covered.contains(*root))
+        .map(String::as_str)
         .collect();
-
+    if !missing.is_empty() {
+        return Err(format!(
+            "workflows do not compile these Cargo workspaces: {}",
+            missing.join(", ")
+        ));
+    }
     Ok(format!(
-        "Workspace coverage OK: {} workspace(s) covered by {} run line(s) from {} workflow(s){}.",
-        spaces.len(),
-        runs.len(),
-        files.len(),
-        implicit_note
+        "workflows_cover_every_workspace OK: {} workspace(s) compiled by a workflow",
+        roots.len()
     ))
 }
 
-/// Canaries for the parser and the coverage rule.
+fn fixture(root: &Path, workflow: &str) -> Result<(), String> {
+    std::fs::create_dir_all(root.join(".github/workflows")).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(root.join("crates/a")).map_err(|e| e.to_string())?;
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\na = { path = \"crates/a\" }\n",
+    )
+    .map_err(|e| e.to_string())?;
+    std::fs::write(
+        root.join("crates/a/Cargo.toml"),
+        "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .map_err(|e| e.to_string())?;
+    std::fs::write(root.join(".github/workflows/ci.yml"), workflow).map_err(|e| e.to_string())
+}
+
+/// # Errors
+///
+/// Returns a finding when a canary does not behave as the gate promises.
 pub fn self_test() -> Result<String, String> {
-    let mut problems: Vec<String> = Vec::new();
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-workspace-cover")?;
+    let result = (|| {
+        let good = "name: ci\non: [push]\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo test --workspace\n";
+        fixture(&dir, good)?;
+        run(&dir)?;
 
-    // A manifest reached by each of the three accepted forms is covered.
-    let by_manifest = vec![String::from("cargo test --manifest-path budzero/Cargo.toml")];
-    let by_relative = vec![String::from(
-        "cargo clippy --manifest-path ./crates/wallet-core/Cargo.toml",
-    )];
-    let by_directory = vec![String::from("working-directory: kani")];
-    let by_cd = vec![String::from("cd fuzz && cargo build")];
-    for (case, lines, dir) in [
-        ("--manifest-path", by_manifest, "budzero"),
-        ("--manifest-path ./", by_relative, "crates/wallet-core"),
-        ("working-directory", by_directory, "kani"),
-        ("cd", by_cd, "fuzz"),
-    ] {
-        let workspace = Workspace { dir: dir.to_string(), why: "canary" };
-        if !covered(&lines, &workspace) {
-            problems.push(format!(
-                "VACUOUS: `{dir}` was not covered by its own `{case}` line: {lines:?}"
-            ));
+        fixture(&dir, "name: ci\non: [push]\njobs:\n  build:\n    steps:\n      - run: echo nothing\n")?;
+        if run(&dir).is_ok() {
+            return Err(String::from("canary: an uncovered workspace passed"));
         }
-    }
 
-    // A directory that merely starts with the workspace's name is not the
-    // workspace.
-    let near_miss = vec![
-        String::from("cd budzero-old && cargo build"),
-        String::from("cargo test --manifest-path budzero-old/Cargo.toml"),
-    ];
-    let workspace = Workspace { dir: String::from("budzero"), why: "canary" };
-    if covered(&near_miss, &workspace) {
-        problems.push(String::from(
-            "BROKEN: `budzero-old` covered `budzero`. A prefix match makes this gate pass on the wrong directory.",
-        ));
-    }
+        fixture(&dir, "name: ci\njobs:\n  build:\n    steps:\n      # cargo test --workspace\n      - run: echo comment\n")?;
+        if run(&dir).is_ok() {
+            return Err(String::from("canary: a commented cargo command counted"));
+        }
 
-    // The root package is covered by a bare cargo command and not by one that
-    // names another manifest.
-    let root = Workspace { dir: String::new(), why: "canary" };
-    if !covered(&[String::from("cargo test --all-targets")], &root) {
-        problems.push(String::from(
-            "VACUOUS: a bare `cargo test` did not cover the root package",
-        ));
-    }
-    if covered(
-        &[String::from("cargo test --manifest-path budzero/Cargo.toml")],
-        &root,
-    ) {
-        problems.push(String::from(
-            "BROKEN: a command naming another manifest counted as the root package",
-        ));
-    }
+        fixture(&dir, "name: ci\njobs:\n  build:\n    steps:\n      - continue-on-error: true\n        run: cargo test --workspace\n")?;
+        if run(&dir).is_ok() {
+            return Err(String::from("canary: a softened build counted"));
+        }
 
-    // `cargo fuzz` covers the fuzz workspace, and nothing else claims to.
-    let fuzz = Workspace { dir: String::from("fuzz"), why: "canary" };
-    if !covered(&[String::from("cargo fuzz run fuzz_blockchain_serialize -- -runs=1")], &fuzz) {
-        problems.push(String::from(
-            "VACUOUS: `cargo fuzz run` did not cover the fuzz workspace",
-        ));
-    }
+        fixture(&dir, "name: ci\njobs:\n  build:\n    steps:\n      - run: cargo fmt --all\n")?;
+        if run(&dir).is_ok() {
+            return Err(String::from("canary: cargo fmt counted as a compile"));
+        }
+        Ok(String::from(
+            "workflows_cover_every_workspace canary OK: path dependency coverage passes, missing/commented/softened/fmt-only coverage fails",
+        ))
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
 
-    // Only run: content counts. A comment, a name and a cache key are data.
-    let workflow = "\
-name: Test
-on: push
-jobs:
-  build:
-    name: budzero tests
-    runs-on: ubuntu-latest
-    steps:
-      # cd budzero is in this comment
-      - name: Cache budzero
-        uses: Swatinem/rust-cache@0000000000000000000000000000000000000000
-        with:
-          workspaces: budzero
-      - name: Real step
-        run: cargo test
-";
-    let runs = run_lines(workflow);
-    if runs.iter().any(|line| line.contains("budzero")) {
-        problems.push(format!(
-            "BROKEN: a comment, a job name or a cache key was read as a command: {runs:?}"
-        ));
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn workflows_cover_every_workspace_catches_injected_uncovered_workspace() {
+        super::self_test().expect("workspace coverage canary");
     }
-
-    // An inline command inside a block, and a folded block, are both executable.
-    let block = "\
-jobs:
-  a:
-    steps:
-      - run: |
-          set -euo pipefail
-          cargo test --manifest-path budzero/Cargo.toml  # the workspace
-      - run: >
-          cargo test --manifest-path crates/ai-inference/Cargo.toml
-";
-    let runs = run_lines(block);
-    if !runs.iter().any(|line| mentions_dir(line, "budzero")) {
-        problems.push(format!(
-            "VACUOUS: a command inside a `run: |` block was not read: {runs:?}"
-        ));
-    }
-    if !runs.iter().any(|line| mentions_dir(line, "crates/ai-inference")) {
-        problems.push(format!(
-            "VACUOUS: a command inside a `run: >` block was not read: {runs:?}"
-        ));
-    }
-
-    // An inline comment after a command does not stop it from matching.
-    if !mentions_dir(
-        &drop_inline_comment("cargo test --manifest-path kani/Cargo.toml  # the kani workspace"),
-        "kani",
-    ) {
-        problems.push(String::from(
-            "BROKEN: an inline comment hid the manifest path before it",
-        ));
-    }
-    // A `#` that is not preceded by whitespace is not a comment.
-    if !drop_inline_comment("sed -e 's/#.*//' file").contains("#") {
-        problems.push(String::from(
-            "BROKEN: a `#` inside a shell expression was treated as a comment",
-        ));
-    }
-
-    // The manifest reader.
-    if !declares_workspace("[workspace]\nmembers = []\n") {
-        problems.push(String::from(
-            "BROKEN: a `[workspace]` manifest was not recognised",
-        ));
-    }
-    if declares_workspace("[package]\nname = \"x\"\n") {
-        problems.push(String::from(
-            "BROKEN: a plain package manifest was read as a workspace",
-        ));
-    }
-
-    if !problems.is_empty() {
-        return Err(problems.join("\n  "));
-    }
-    Ok(String::from(
-        "workspace coverage gate self-test OK: --manifest-path (plain and ./-prefixed), \
-         working-directory, cd and cargo fuzz all cover their workspace; a name-prefix near miss does \
-         not; a bare cargo command covers the root package and a manifest-naming one does not; a \
-         comment, a job name and a cache key are not commands; commands inside `run: |` and `run: >` \
-         are; an inline comment does not hide a manifest path and a shell `#` is not an inline \
-         comment; `[workspace]` is recognised and `[package]` is not.",
-    ))
 }

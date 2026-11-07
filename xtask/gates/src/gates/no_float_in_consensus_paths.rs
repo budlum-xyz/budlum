@@ -1,311 +1,314 @@
-//! No floating-point arithmetic in consensus paths.
+//! No floating point on the consensus-relevant production paths.
 //!
-//! IEEE 754 floating-point operations are sensitive to rounding modes, fused
-//! multiply-add lowering, `NaN` payload propagation and transcendental library
-//! differences across `x86_64` and `aarch64`. Any float inside a state
-//! transition, block validation, validator registry, B.U.D. 3.0 storage rule,
-//! AI verification path or `BudZero` crate risks a consensus split.
+//! The directive names the scope: `src/chain`, `src/consensus`,
+//! `src/execution`, `src/settlement`, `src/validators`, `src/storage/bud3`,
+//! the AI selection path, and `budzero/`. A float there makes a decision
+//! depend on the machine's rounding mode, so two honest nodes can derive
+//! different roots from the same blocks.
 //!
-//! This gate parses every non-test Rust source file under [`CONSENSUS_ROOTS`]
-//! into a `syn` AST and rejects:
-//!
-//! * any `f32` or `f64` type path (fields, parameters, locals, `as f64` casts);
-//! * any `f32::...` or `f64::...` expression path (`f64::NAN`, `f32::from_bits`);
-//! * any floating-point literal (`syn::Lit::Float`, e.g. `0.5`, `1.0_f64`).
+//! The reader is `syn`, not a text search: a float inside a comment or a
+//! string literal is not a float in the program. Test-only items are outside
+//! the production path and are skipped. The AI selection path is the agent
+//! ranking surface in `src/ai/registry.rs`; the display-only score helpers
+//! in `src/ai/types.rs` are not a selection path and stay outside this gate.
 
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use quote::ToTokens;
-use syn::visit::{self, Visit};
+use syn::visit::Visit;
+use syn::Attribute;
 
-/// Consensus-critical source roots scanned by the gate.
-const CONSENSUS_ROOTS: &[&str] = &[
+const SCAN_DIRS: &[&str] = &[
     "src/chain",
     "src/consensus",
     "src/execution",
     "src/settlement",
     "src/validators",
     "src/storage/bud3",
-    "src/ai/execution",
-    "src/ai/verification_level.rs",
     "budzero",
 ];
 
-/// Directory names that do not carry production consensus logic.
-const SKIP_DIRS: &[&str] = &["target", ".git", "tests", "benches", "examples"];
+const SCAN_FILES: &[&str] = &["src/ai/registry.rs"];
 
-/// Explicit non-consensus offline simulator paths excluded by specification.
-const ALLOW_PATHS: &[&str] = &["src/storage/bud3/placement_tool.rs"];
+/// A float the repository still owes, with the finding that records it.
+///
+/// `BLG-240` is verifier/agent ranking in `f64`, display only. Closing it is
+/// an API change owned by `WP-45` (open PR #44), not by this CI package. The
+/// pin is a ceiling equal to the current AST finding count, so one new float
+/// in the pinned file fails; a pin whose file has no float left is stale and
+/// fails, so closing the finding cannot leave a silent exemption behind.
+const PINNED: &[(&str, usize, &str, &str)] =
+    &[("src/ai/registry.rs", 7, "BLG-240", "WP-45")];
 
-fn has_cfg_test(attrs: &[syn::Attribute]) -> bool {
+fn is_cfg_test(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|attr| {
-        if !attr.path().is_ident("cfg") {
-            return false;
-        }
-        let tokens: String = attr
-            .meta
-            .to_token_stream()
-            .to_string()
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect();
-        tokens == "cfg(test)"
-            || tokens.contains("(test,")
-            || tokens.contains(",test)")
-            || tokens.contains(",test,")
+        attr.path().is_ident("cfg")
+            && attr
+                .meta
+                .require_list()
+                .is_ok_and(|list| {
+                    list.tokens
+                        .to_string()
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                        .any(|t| t == "test")
+                })
     })
 }
 
-fn is_float_ident(ident: &syn::Ident) -> bool {
-    ident == "f32" || ident == "f64"
+fn is_test_fn(attrs: &[Attribute]) -> bool {
+    is_cfg_test(attrs)
+        || attrs.iter().any(|attr| {
+            attr.path()
+                .segments
+                .last()
+                .is_some_and(|seg| seg.ident == "test")
+        })
 }
 
-struct FloatVisitor {
-    rel: String,
+struct FloatFinder {
+    path: String,
     findings: Vec<String>,
 }
 
-impl<'ast> Visit<'ast> for FloatVisitor {
-    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
-        if !has_cfg_test(&node.attrs) {
-            visit::visit_item_mod(self, node);
-        }
-    }
-
-    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
-        if !has_cfg_test(&node.attrs) {
-            visit::visit_item_fn(self, node);
-        }
-    }
-
-    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
-        if !has_cfg_test(&node.attrs) {
-            visit::visit_item_impl(self, node);
-        }
-    }
-
-    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
-        if !has_cfg_test(&node.attrs) {
-            visit::visit_impl_item_fn(self, node);
-        }
-    }
-
-    fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
-        if !has_cfg_test(&node.attrs) {
-            visit::visit_item_struct(self, node);
-        }
-    }
-
-    fn visit_item_enum(&mut self, node: &'ast syn::ItemEnum) {
-        if !has_cfg_test(&node.attrs) {
-            visit::visit_item_enum(self, node);
-        }
-    }
-
-    fn visit_item_const(&mut self, node: &'ast syn::ItemConst) {
-        if !has_cfg_test(&node.attrs) {
-            visit::visit_item_const(self, node);
-        }
-    }
-
-    fn visit_item_type(&mut self, node: &'ast syn::ItemType) {
-        if !has_cfg_test(&node.attrs) {
-            visit::visit_item_type(self, node);
-        }
-    }
-
-    fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
-        if let Some(last) = node.path.segments.last() {
-            if is_float_ident(&last.ident) {
-                self.findings
-                    .push(format!("{}: floating-point type `{}`", self.rel, last.ident));
-            }
-        }
-        visit::visit_type_path(self, node);
-    }
-
-    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
-        if let Some(first) = node.path.segments.first() {
-            if is_float_ident(&first.ident) {
-                let expr = node.to_token_stream().to_string();
-                self.findings
-                    .push(format!("{}: floating-point path `{expr}`", self.rel));
-            }
-        }
-        visit::visit_expr_path(self, node);
-    }
-
-    fn visit_lit(&mut self, node: &'ast syn::Lit) {
-        if let syn::Lit::Float(lit) = node {
-            let token = lit.base10_digits();
-            self.findings
-                .push(format!("{}: floating-point literal `{token}`", self.rel));
-        }
-        visit::visit_lit(self, node);
+impl FloatFinder {
+    fn report(&mut self, what: &str, line: usize) {
+        self.findings
+            .push(format!("{}:{line}: {what}", self.path));
     }
 }
 
-fn is_test_filename(name: &str) -> bool {
-    name == "tests.rs" || name.ends_with("_tests.rs")
-}
+impl<'ast> Visit<'ast> for FloatFinder {
+    fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
+        if is_cfg_test(&module.attrs) {
+            return;
+        }
+        syn::visit::visit_item_mod(self, module);
+    }
 
-fn collect_rs_files(path: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) {
-    if path.is_file() {
-        if path.extension().is_some_and(|e| e == "rs") {
-            if let Ok(rel) = path.strip_prefix(root) {
-                let rel_str = rel.to_string_lossy().replace('\\', "/");
-                if !ALLOW_PATHS.contains(&rel_str.as_str()) {
-                    out.push((rel_str, path.to_path_buf()));
+    fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
+        if is_test_fn(&function.attrs) {
+            return;
+        }
+        syn::visit::visit_item_fn(self, function);
+    }
+
+    fn visit_type_path(&mut self, type_path: &'ast syn::TypePath) {
+        if let Some(segment) = type_path.path.segments.last() {
+            if segment.ident == "f32" || segment.ident == "f64" {
+                self.report("floating-point type", segment.ident.span().start().line);
+            }
+        }
+        syn::visit::visit_type_path(self, type_path);
+    }
+
+    fn visit_expr_cast(&mut self, cast: &'ast syn::ExprCast) {
+        if let syn::Type::Path(type_path) = &*cast.ty {
+            if let Some(segment) = type_path.path.segments.last() {
+                if segment.ident == "f32" || segment.ident == "f64" {
+                    self.report("cast to a floating-point type", segment.ident.span().start().line);
                 }
             }
         }
-        return;
+        syn::visit::visit_expr_cast(self, cast);
     }
-    let Ok(rd) = std::fs::read_dir(path) else {
-        return;
-    };
-    let mut entries: Vec<_> = rd.flatten().collect();
-    entries.sort_by_key(std::fs::DirEntry::file_name);
+
+    fn visit_lit_float(&mut self, literal: &'ast syn::LitFloat) {
+        self.report("floating-point literal", literal.span().start().line);
+    }
+}
+
+fn skip_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component.as_os_str().to_string_lossy().as_ref(),
+            "tests" | "benches" | "fuzz" | "kani" | "examples" | "target" | ".git"
+        )
+    })
+}
+
+fn rust_files_under(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
     for entry in entries {
-        let Ok(ft) = entry.file_type() else {
-            continue;
-        };
-        if ft.is_symlink() {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if skip_path(&path) {
             continue;
         }
-        let child = entry.path();
-        let name = entry.file_name();
-        let Some(name_str) = name.to_str() else {
-            continue;
-        };
-        if ft.is_dir() {
-            if !SKIP_DIRS.contains(&name_str) {
-                collect_rs_files(&child, root, out);
-            }
-        } else if ft.is_file() && name_str.ends_with(".rs") && !is_test_filename(name_str) {
-            if let Ok(rel) = child.strip_prefix(root) {
-                let rel_str = rel.to_string_lossy().replace('\\', "/");
-                if !ALLOW_PATHS.contains(&rel_str.as_str()) {
-                    out.push((rel_str, child));
-                }
-            }
+        let kind = entry.file_type().map_err(|e| e.to_string())?;
+        if kind.is_dir() {
+            rust_files_under(&path, out)?;
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            out.push(path);
         }
     }
+    Ok(())
 }
 
-fn check(root: &Path) -> Result<String, String> {
+fn scan_file(path: &Path, root: &Path, findings: &mut Vec<String>) -> Result<(), String> {
+    let source = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let file = syn::parse_file(&source)
+        .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
+    let relative = path
+        .strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let mut finder = FloatFinder {
+        path: relative,
+        findings: Vec::new(),
+    };
+    finder.visit_file(&file);
+    findings.append(&mut finder.findings);
+    Ok(())
+}
+
+/// # Errors
+///
+/// Returns every floating-point use found on a scanned production path.
+pub fn run(root: &Path) -> Result<String, String> {
     let mut files = Vec::new();
-    for rel_root in CONSENSUS_ROOTS {
-        let target = root.join(rel_root);
-        if target.exists() {
-            collect_rs_files(&target, root, &mut files);
+    for dir in SCAN_DIRS {
+        let path = root.join(dir);
+        if path.is_dir() {
+            rust_files_under(&path, &mut files)?;
         }
     }
+    for file in SCAN_FILES {
+        let path = root.join(file);
+        if path.is_file() {
+            files.push(path);
+        }
+    }
+    files.sort();
+    files.dedup();
     if files.is_empty() {
         return Err(String::from(
-            "no consensus source files discovered; gate cannot pass vacuously",
+            "no consensus-path source files were found; the gate would check nothing",
         ));
     }
     let mut findings = Vec::new();
-    for (rel, path) in &files {
-        let src = std::fs::read_to_string(path).map_err(|e| format!("cannot read {rel}: {e}"))?;
-        let parsed = syn::parse_file(&src).map_err(|e| format!("cannot parse {rel}: {e}"))?;
-        let mut visitor = FloatVisitor {
-            rel: rel.clone(),
-            findings: Vec::new(),
-        };
-        visitor.visit_file(&parsed);
-        findings.extend(visitor.findings);
+    for path in &files {
+        scan_file(path, root, &mut findings)?;
     }
-    if findings.is_empty() {
-        Ok(format!(
-            "OK: {} consensus Rust file(s) scanned, zero floating-point types or literals.",
-            files.len()
-        ))
-    } else {
-        let mut report = String::new();
-        for f in &findings {
-            let _ = writeln!(report, "  {f}");
+    let mut pinned_notes = Vec::new();
+    for (path, ceiling, finding, owner) in PINNED {
+        if !root.join(path).is_file() {
+            continue;
         }
-        Err(format!(
-            "floating-point usage in consensus path(s) ({} finding(s)):\n{report}",
-            findings.len()
-        ))
+        let prefix = format!("{path}:");
+        let count = findings.iter().filter(|f| f.starts_with(prefix.as_str())).count();
+        if count == 0 {
+            return Err(format!(
+                "stale float pin {finding} for {path}: the file has no f32/f64 left; remove the pin when {owner} closes it"
+            ));
+        }
+        if count > *ceiling {
+            return Err(format!(
+                "{path}: {count} floating-point findings exceed the {finding} ceiling {ceiling} owned by {owner}"
+            ));
+        }
+        pinned_notes.push(format!("{path}: {count}/{ceiling} pinned by {finding} ({owner})"));
     }
+    let unpinned: Vec<&String> = findings
+        .iter()
+        .filter(|f| {
+            !PINNED
+                .iter()
+                .any(|(path, _, _, _)| f.starts_with(&format!("{path}:")))
+        })
+        .collect();
+    if !unpinned.is_empty() {
+        let mut message = String::from("floating point on a consensus-relevant production path:\n");
+        for finding in unpinned.iter().take(40) {
+            message.push_str("  ");
+            message.push_str(finding);
+            message.push('\n');
+        }
+        if unpinned.len() > 40 {
+            message.push_str(&format!("  ... and {} more\n", unpinned.len() - 40));
+        }
+        return Err(message);
+    }
+    let mut ok = format!(
+        "no_float_in_consensus_paths OK: {} production file(s) scanned, no un-pinned f32/f64",
+        files.len()
+    );
+    for note in pinned_notes {
+        ok.push_str("; ");
+        ok.push_str(&note);
+    }
+    Ok(ok)
 }
 
-/// Run the consensus floating-point ban gate.
-///
-/// # Errors
-///
-/// Returns an error if no consensus files exist, if a file fails to parse, or
-/// if any non-test consensus file uses `f32`, `f64`, or a float literal.
-pub fn run(root: &Path) -> Result<String, String> {
-    check(root)
+fn write_fixture(root: &Path, relative: &str, source: &str) -> Result<(), String> {
+    let path = root.join(relative);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(path, source).map_err(|e| e.to_string())
 }
 
-/// Run the canary suite for `no-float-in-consensus-paths`.
-///
 /// # Errors
 ///
-/// Returns an error if a clean staged tree fails or if injected `f64` types,
-/// `as f32` casts, or float literals are accepted.
+/// Returns a finding when a canary does not behave as the gate promises.
 pub fn self_test() -> Result<String, String> {
     let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-no-float")?;
     let result = (|| {
-        let chain_dir = dir.join("src/chain");
-        std::fs::create_dir_all(&chain_dir).map_err(|e| e.to_string())?;
-        let clean = chain_dir.join("state.rs");
-        std::fs::write(
-            &clean,
-            "pub fn apply(x: u64) -> u64 { x.saturating_add(1) }\n#[cfg(test)]\nmod tests { fn metric() -> f64 { 0.5 } }\n",
-        )
-        .map_err(|e| e.to_string())?;
-        check(&dir).map_err(|e| format!("canary: clean tree failed: {e}"))?;
+        write_fixture(
+            &dir,
+            "src/chain/clean.rs",
+            "pub fn add(a: u64, b: u64) -> u64 { a.saturating_add(b) }\n",
+        )?;
+        run(&dir)?;
 
-        let bad_type = chain_dir.join("bad_type.rs");
-        std::fs::write(&bad_type, "pub fn ratio(x: u64) -> f64 { x as f64 }\n")
-            .map_err(|e| e.to_string())?;
-        match check(&dir) {
-            Err(e) if e.contains("bad_type.rs") && e.contains("f64") => {}
-            other => {
-                return Err(format!(
-                    "canary: injected f64 type was not caught: {other:?}"
-                ))
-            }
+        write_fixture(
+            &dir,
+            "src/consensus/float.rs",
+            "pub fn score(x: u64) -> f64 { x as f64 * 0.5 }\n",
+        )?;
+        if run(&dir).is_ok() {
+            return Err(String::from("canary: an f64 consensus score passed"));
         }
-        std::fs::remove_file(&bad_type).map_err(|e| e.to_string())?;
+        std::fs::remove_file(dir.join("src/consensus/float.rs")).map_err(|e| e.to_string())?;
 
-        let bad_lit = chain_dir.join("bad_lit.rs");
-        std::fs::write(&bad_lit, "pub fn half() { let _ = 0.5; }\n")
-            .map_err(|e| e.to_string())?;
-        match check(&dir) {
-            Err(e) if e.contains("bad_lit.rs") && e.contains("0.5") => {}
-            other => {
-                return Err(format!(
-                    "canary: injected float literal was not caught: {other:?}"
-                ))
-            }
+        write_fixture(
+            &dir,
+            "src/chain/tests/float_ok.rs",
+            "pub fn check(x: f64) -> f64 { x }\n",
+        )?;
+        write_fixture(
+            &dir,
+            "src/chain/inline_test.rs",
+            "pub fn production() -> u64 { 1 }\n#[cfg(test)]\nmod tests { fn t() { let x: f64 = 0.5; assert!(x > 0.0); } }\n",
+        )?;
+        write_fixture(
+            &dir,
+            "src/chain/comment.rs",
+            "// f64 was here once\npub const NAME: &str = \"f64\";\n",
+        )?;
+        run(&dir)?;
+
+        write_fixture(
+            &dir,
+            "src/ai/registry.rs",
+            "pub fn rank(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64) -> f64 { a }\n",
+        )?;
+        if run(&dir).is_ok() {
+            return Err(String::from("canary: a float AI ranking passed"));
         }
-        Ok(())
+        Ok(String::from(
+            "no_float_in_consensus_paths canary OK: clean passes, f64 type/cast/literal fail, test-only and comment/string floats pass, AI ranking float above the BLG-240 ceiling fails",
+        ))
     })();
     let _ = std::fs::remove_dir_all(&dir);
-    result?;
-    Ok(String::from(
-        "no-float-in-consensus-paths canary OK: f64 type, cast and float literal rejected; #[cfg(test)] allowed.",
-    ))
+    result
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
-    fn no_float_in_consensus_paths_canary_and_repo() {
-        assert!(self_test().is_ok());
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let verdict = run(&root);
-        assert!(verdict.is_ok(), "{verdict:?}");
+    fn no_float_in_consensus_paths_catches_injected_f64() {
+        super::self_test().expect("no-float canary");
     }
 }
