@@ -146,7 +146,8 @@ const READ_NAMES: &[&str] = &[
     "deals_for_shard",
     "under_replicated_shards",
     // The fee floor is a pure `&self` calculation shared by admission and
-    // `bud_estimateGas`; reading it does not change consensus state.
+    // `bud_estimateGas`. `chain_actor` answers `get_required_fee` with it;
+    // reading the quote never writes consensus state.
     "required_fee",
 ];
 
