@@ -1,0 +1,39 @@
+# Cross-PR compatibility audits. Both tools are stdlib-only and need no
+# toolchain beyond the runner's python3. The Rust gates themselves run in
+# ci.yml through `--all --self-test`.
+name: compatibility
+
+on:
+  push:
+    branches: [main, 'arena/**']
+    paths:
+      - 'src/rpc/**'
+      - 'src/execution/coordinator/**'
+      - 'ops/scripts/rpc_surface_audit.py'
+      - 'ops/scripts/tree_compatibility_audit.py'
+      - 'docs/audit/RPC_SURFACE_DATA_2026-11-06.json'
+      - 'docs/audit/TREE_COMPATIBILITY_DATA_2026-11-06.json'
+      - '.github/workflows/compatibility.yml'
+  pull_request:
+    paths:
+      - 'src/rpc/**'
+      - 'src/execution/coordinator/**'
+      - 'ops/scripts/rpc_surface_audit.py'
+      - 'ops/scripts/tree_compatibility_audit.py'
+      - '.github/workflows/compatibility.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compatibility-audits:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: RPC method tables agree
+        run: python3 ops/scripts/rpc_surface_audit.py --out-json /tmp/rpc-surface.json
+      - name: Whole-tree compatibility audit
+        run: python3 ops/scripts/tree_compatibility_audit.py --out-json /tmp/tree-compatibility.json

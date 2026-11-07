@@ -121,6 +121,8 @@ jobs:
             --lockfile=crates/wallet-core/Cargo.lock \
             --lockfile=fuzz/Cargo.lock \
             --lockfile=kani/Cargo.lock \
+            --lockfile=mobile/core/Cargo.lock \
+            --lockfile=mobile/ffi/Cargo.lock \
             --lockfile=xtask/gates/Cargo.lock \
             --lockfile=xtask/release/Cargo.lock \
             --lockfile=xtask/tools/Cargo.lock

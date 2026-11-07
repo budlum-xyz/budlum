@@ -7,7 +7,7 @@ on:
     # Run on the normal protected bases and on stacked continuation bases.
     # `arena/**` covers this repository's generated continuation branches;
     # `consensus-of-consensuses` keeps upstream stack covered.
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, 'arena/**']
+    branches: [main, consensus-of-consensuses, 'arena/**']
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -182,6 +182,17 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --lib --verbose 2>&1 | tee /tmp/libtests.log
+      - name: Database backup retention tests
+        if: always() && steps.rust.outcome == 'success'
+        run: |
+          set -euo pipefail
+          cargo test --bin budlum-core 2>&1 | tee /tmp/node-tests.log
+          for name in zero_retention_refuses_backup_without_deleting_existing_files retention_uses_numeric_timestamps_and_preserves_current_and_unknown_files backup_refuses_concurrent_writer_without_pruning backup_returns_a_verified_existing_snapshot; do
+            grep -Eq "${name} \.\.\. ok" /tmp/node-tests.log || {
+              echo "::error::backup regression $name did not pass"
+              exit 1
+            }
+          done
       - name: Public service admission tests
         if: always() && steps.rust.outcome == 'success'
         run: |
@@ -706,6 +717,56 @@ jobs:
         if: always() && steps.build.outcome == 'success'
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-upstream-brands 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: Rust syntax gate canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- rust-syntax-is-parseable --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: Every Rust file parses cleanly
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- rust-syntax-is-parseable 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: No-float gate canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-float-in-consensus-paths --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: No floating point on the consensus path
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-float-in-consensus-paths 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: Workspace coverage gate canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- workflows-cover-every-workspace --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: Every workspace is built by a workflow
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- workflows-cover-every-workspace 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: Nightly workflow gate canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- nightly-workflows-are-required --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: Required nightly workflows are present and binding
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- nightly-workflows-are-required 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: No-legacy-storage gate canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-legacy-storage --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: No unbaselined legacy storage identifiers remain
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-legacy-storage 2>&1 | tee -a /tmp/gate-out.log
           exit "${PIPESTATUS[0]}"
       - name: Repair trigger canary
         if: always() && steps.build.outcome == 'success'
@@ -1258,6 +1319,132 @@ jobs:
           cargo build --manifest-path crates/wallet-core/Cargo.toml --lib --release \
             --target wasm32-unknown-unknown --features wasm
 
+  # ============================ Mobile core (WP-11) ============================
+  mobile-core:
+    # The mobile validator core is its own crate so a phone does not link
+    # budlum-core. Root `cargo test --lib` never runs it. Without this job a
+    # break in custody proofs, presence, quota or relay switch stays green.
+    name: Mobile core (WP-11)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: mobile-core
+          workspaces: mobile/core
+      - name: Format
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path mobile/core/Cargo.toml --all -- --check
+      - name: Clippy
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo clippy --manifest-path mobile/core/Cargo.toml --all-targets -- -D warnings
+      - name: Tests
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo test --manifest-path mobile/core/Cargo.toml
+
+  mobile-core-targets:
+    # WP-11 job 2 names five phone targets and the card's test
+    # `mobile_core_builds_for_all_targets` is this job. A host-only build hides
+    # a target break (a pointer-width assumption on armv7, a dependency with no
+    # Android or iOS support) until somebody tries a phone build. The library
+    # is built as an rlib, so no NDK or Xcode linker is involved; linking is
+    # the bindings' job. armv7 is a compile check only, as the card says.
+    name: mobile_core_builds_for_all_targets (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-linux-android
+          - armv7-linux-androideabi
+          - x86_64-linux-android
+          - aarch64-apple-ios
+          - aarch64-apple-ios-sim
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: mobile-core-${{ matrix.target }}
+          workspaces: mobile/core
+      - name: Build the library for the target
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --manifest-path mobile/core/Cargo.toml --locked --lib --target "$TARGET"
+
+  mobile-ffi:
+    # WP-11 job 2: the Kotlin and Swift bindings of the mobile core come from
+    # mobile/ffi. Besides format, clippy and tests, the job builds the shared
+    # library and generates both bindings from it with the pinned generator,
+    # so a type UniFFI cannot express fails here and not in the app builds.
+    # The phone targets are type-checked only: linking the cdylib needs the
+    # NDK and Xcode, which belong to the app jobs (WP-36, WP-38).
+    name: Mobile FFI bindings (WP-11)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+          components: clippy, rustfmt
+          targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android, aarch64-apple-ios, aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: mobile-ffi
+          workspaces: mobile/ffi
+      - name: Format
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path mobile/ffi/Cargo.toml --all -- --check
+      - name: Clippy
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo clippy --manifest-path mobile/ffi/Cargo.toml --locked --all-targets --all-features -- -D warnings
+      - name: Tests
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo test --manifest-path mobile/ffi/Cargo.toml --locked
+      - name: Generate the Kotlin and Swift bindings
+        if: always() && steps.rust.outcome == 'success'
+        working-directory: mobile/ffi
+        run: |
+          set -euo pipefail
+          cargo build --locked --lib
+          lib=target/debug/libbudlum_mobile_ffi.so
+          for language in kotlin swift; do
+            cargo run --locked --features cli --bin uniffi-bindgen -- \
+              generate --library "$lib" --language "$language" \
+              --out-dir "target/bindings/$language"
+          done
+          grep -rq "class MobileNode" target/bindings/kotlin
+          grep -rq "class MobileNode" target/bindings/swift
+      - name: Type-check the phone targets
+        if: always() && steps.rust.outcome == 'success'
+        run: |
+          set -euo pipefail
+          for target in aarch64-linux-android armv7-linux-androideabi x86_64-linux-android \
+            aarch64-apple-ios aarch64-apple-ios-sim; do
+            cargo check --manifest-path mobile/ffi/Cargo.toml --locked --lib --target "$target"
+          done
+
   # ============================ Budscan (web3 tarayici cekirdegi) ============================
   budscan:
     # Budscan does not link against `budlum-core` and duplicates two definitions: the name rule
@@ -1473,6 +1660,9 @@ jobs:
           - { name: wallet-core, manifest: "crates/wallet-core/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: xtask-gates, manifest: "xtask/gates/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: xtask-tools, manifest: "xtask/tools/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: budlum-types, manifest: "crates/budlum-types/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: mobile-core, manifest: "mobile/core/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: mobile-ffi, manifest: "mobile/ffi/Cargo.toml", config: "--config .quality/deny.toml" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1512,6 +1702,9 @@ jobs:
           - { name: wallet-core, manifest: "crates/wallet-core/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: xtask-gates, manifest: "xtask/gates/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: xtask-tools, manifest: "xtask/tools/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: budlum-types, manifest: "crates/budlum-types/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: mobile-core, manifest: "mobile/core/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: mobile-ffi, manifest: "mobile/ffi/Cargo.toml", config: "--config .quality/deny.toml" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2037,6 +2230,8 @@ jobs:
         run: cargo clippy --release --manifest-path xtask/gates/Cargo.toml --all-targets -- -D warnings
       - name: Rust gates rustfmt
         run: cargo fmt --manifest-path xtask/gates/Cargo.toml --check
+      - name: Rust gates unit tests (concept-names canary and ratchet tests included)
+        run: cargo test --release --manifest-path xtask/gates/Cargo.toml
       # xtask/tools is its own workspace and runs five CI tools (audit-guard,
       # step-reachability, audit-deps, generate-sbom, the smoke tools). Its
       # lints are pedantic-deny and its unit tests (the committed FSF document
@@ -2616,3 +2811,48 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- genesis-schema --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- genesis-schema
+
+  budlum-types:
+    # The shared wire types carry their own lock file and are not a member of the
+    # root package, so `cargo test --lib` at the root never runs their tests. The
+    # node re-exports `budlum_types::Address`, which means a break here is a break
+    # in the address every account is named by. Same reason as standalone-crates.
+    name: Shared types (budlum-types)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-types
+          workspaces: |
+            crates/budlum-types
+      - name: Format
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path crates/budlum-types/Cargo.toml --all -- --check
+      - name: Clippy
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo clippy --manifest-path crates/budlum-types/Cargo.toml --all-targets -- -D warnings
+      - name: Tests
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo test --manifest-path crates/budlum-types/Cargo.toml
+
+  rehearsal-ceremony-preflight:
+    name: Rehearsal ceremony input and output checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the rehearsal shell script
+        run: bash -n ops/rehearsal/genesis_rehearsal.sh
+      - name: Test public operator records and genesis output
+        run: python3 -m unittest discover -s ops/rehearsal/tests -p 'test_*.py' -v
