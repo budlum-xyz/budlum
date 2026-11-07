@@ -92,6 +92,7 @@ fn mobile_failed_admission_does_not_release_existing_shares(
     let mut core = core(FREE_SPACE_FLOOR_BYTES + 128);
     core.accept_share(assigned(1, 10))?;
     core.set_available_bytes(FREE_SPACE_FLOOR_BYTES - 1);
+    core.drain_duties();
     let before = core.status();
     let available = core.available_bytes();
     let mut bad = assigned(2, 20);
@@ -109,8 +110,8 @@ fn mobile_floor_release_keeps_a_valid_user_quota() -> Result<(), Box<dyn std::er
     core.accept_share(assigned(1, 10))?;
     core.set_available_bytes(FREE_SPACE_FLOOR_BYTES - 1);
     assert!(matches!(
-        core.release_for_floor(),
-        Some(DutyTx::ReleaseShares { .. })
+        core.drain_duties().as_slice(),
+        [DutyTx::ReleaseShares { .. }]
     ));
     assert_eq!(core.status().stored_bytes, 0);
     assert!(core.available_bytes() >= FREE_SPACE_FLOOR_BYTES);
@@ -119,16 +120,20 @@ fn mobile_floor_release_keeps_a_valid_user_quota() -> Result<(), Box<dyn std::er
 }
 
 #[test]
-fn mobile_unscoped_audit_refuses_multiple_objects() -> Result<(), Box<dyn std::error::Error>> {
+fn mobile_unknown_object_audit_does_not_fall_back_to_another_object(
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut core = core(FREE_SPACE_FLOOR_BYTES + 128);
     core.accept_share(assigned(1, 10))?;
     core.accept_share(assigned(2, 20))?;
-    let error = refusal(core.answer_audit(Audit {
-        segment: 0,
-        position: 0,
-        sub_block: 0,
-    }));
-    assert_eq!(error.code, "mobile_audit_ambiguous_share");
+    let error = refusal(core.answer_audit(
+        [3; 32],
+        Audit {
+            segment: 0,
+            position: 0,
+            sub_block: 0,
+        },
+    ));
+    assert_eq!(error.code, "mobile_audit_unknown_share");
     assert_eq!(core.status().last_audit, LastAudit::Missed);
     Ok(())
 }

@@ -162,7 +162,8 @@ impl MobileCore {
         let released = self.release_until_quota(next.quota_bytes);
         self.policy = next;
         if !released.is_empty() {
-            self.pending.push(DutyTx::ReleaseShares { shares: released });
+            self.pending
+                .push(DutyTx::ReleaseShares { shares: released });
         }
         Ok(())
     }
@@ -214,14 +215,12 @@ impl MobileCore {
         match self.store.answer(&object, &audit) {
             Ok(proof) => {
                 if let Some(share) = self.store.matching_audit(&object, &audit) {
-                    proof
-                        .verify(&audit, &share.proof_context())
-                        .map_err(|_| {
-                            CoreError::new(
-                                "mobile_audit_self_check",
-                                "a proof this core built did not verify",
-                            )
-                        })?;
+                    proof.verify(&audit, &share.proof_context()).map_err(|_| {
+                        CoreError::new(
+                            "mobile_audit_self_check",
+                            "a proof this core built did not verify",
+                        )
+                    })?;
                 }
                 self.last_audit = LastAudit::Passed;
                 Ok(DutyTx::CustodyProofBatch(CustodyProofBatch {

@@ -36,16 +36,14 @@ pub use presence::{
     presence_message, presence_preimage, PresenceSignal, ResumeValidator, ValidatorClass,
     PRESENCE_DOMAIN_TAG, PRESENCE_TOPIC,
 };
-pub use quota::{
-    FREE_SPACE_FLOOR_BYTES, QUOTA_DEFAULT_BYTES, QUOTA_MAX_BYTES, QUOTA_MIN_BYTES,
-};
+pub use quota::{FREE_SPACE_FLOOR_BYTES, QUOTA_DEFAULT_BYTES, QUOTA_MAX_BYTES, QUOTA_MIN_BYTES};
 pub use relay::{RelayOffer, RelayPool};
 pub use store::{AssignedShare, ShareId, ShareRecord, ShareStore};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::custody::{prove, symbol_leaf, symbol_root, sub_block_count};
+    use crate::custody::{prove, sub_block_count, symbol_leaf, symbol_root};
     use crate::hash::sha256;
 
     const OWNER: [u8; 32] = [9u8; 32];
@@ -58,7 +56,7 @@ mod tests {
     }
 
     fn mock_verify(public: &[u8], preimage: &[u8; 32], sig: &[u8]) -> bool {
-        public == OWNER.as_slice() && sig.as_slice() == mock_sign(preimage).as_slice()
+        public == OWNER.as_slice() && sig == mock_sign(preimage).as_slice()
     }
 
     fn placed_symbol(symbol: &[u8], esi: u32) -> (AssignedShare, Audit) {
@@ -149,14 +147,18 @@ mod tests {
         let mut wrong_position = assigned.clone();
         wrong_position.placed.insert(0, (3, symbol_leaf(b"other")));
         assert_eq!(
-            core.accept_share(wrong_position).expect_err("wrong entry").code,
+            core.accept_share(wrong_position)
+                .expect_err("wrong entry")
+                .code,
             "mobile_share_leaf_mismatch"
         );
 
         let mut duplicate = assigned.clone();
         duplicate.placed.push(duplicate.placed[0]);
         assert_eq!(
-            core.accept_share(duplicate).expect_err("duplicate ESI").code,
+            core.accept_share(duplicate)
+                .expect_err("duplicate ESI")
+                .code,
             "mobile_share_placement_order"
         );
 
@@ -167,8 +169,10 @@ mod tests {
             "mobile_share_placement_order"
         );
         assert_eq!(core.status().stored_bytes, 0);
-        core.accept_share(assigned.clone()).expect("valid placement");
-        core.answer_audit(assigned.object, audit).expect("valid proof");
+        core.accept_share(assigned.clone())
+            .expect("valid placement");
+        core.answer_audit(assigned.object, audit)
+            .expect("valid proof");
     }
 
     #[test]
@@ -195,7 +199,9 @@ mod tests {
         assert_eq!(*object, second.object);
         proof.verify(&audit, &context).expect("proof");
         assert_eq!(
-            core.answer_audit([5; 32], audit).expect_err("unknown object").code,
+            core.answer_audit([5; 32], audit)
+                .expect_err("unknown object")
+                .code,
             "mobile_audit_unknown_share"
         );
     }
@@ -256,7 +262,10 @@ mod tests {
         // Free space below 2 GB: the core releases shares.
         core.set_available_bytes(FREE_SPACE_FLOOR_BYTES - 1);
         let released = core.drain_duties();
-        assert!(matches!(released.as_slice(), [DutyTx::ReleaseShares { .. }]));
+        assert!(matches!(
+            released.as_slice(),
+            [DutyTx::ReleaseShares { .. }]
+        ));
         assert_eq!(core.status().stored_bytes, 0);
         assert_eq!(core.policy().quota_bytes, QUOTA_MIN_BYTES);
         assert!(core.available_bytes() >= FREE_SPACE_FLOOR_BYTES);

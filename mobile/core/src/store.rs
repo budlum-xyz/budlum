@@ -2,7 +2,7 @@
 //!
 //! WIRING: [`crate::duty::MobileCore`] is the only caller.
 
-use crate::custody::{symbol_leaf, symbol_root, Audit, CustodyProof, ProofContext, prove};
+use crate::custody::{prove, symbol_leaf, symbol_root, Audit, CustodyProof, ProofContext};
 use crate::error::CoreError;
 use crate::quota::fits;
 use std::collections::BTreeMap;
@@ -119,7 +119,11 @@ impl ShareStore {
         // The position used by audit proofs must identify this exact ESI and
         // leaf, not merely some matching entry elsewhere in the placement.
         // Strict ordering also rules out ambiguous duplicate ESIs.
-        if assigned.placed.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+        if assigned
+            .placed
+            .windows(2)
+            .any(|pair| pair[0].0 >= pair[1].0)
+        {
             return Err(CoreError::new(
                 "mobile_share_placement_order",
                 "the placement must contain unique ESIs in ascending order",
@@ -179,10 +183,7 @@ impl ShareStore {
     /// Id of the largest share, if any.
     #[must_use]
     pub fn largest_id(&self) -> Option<ShareId> {
-        self.shares
-            .values()
-            .max_by_key(|s| s.size())
-            .map(|s| s.id)
+        self.shares.values().max_by_key(|s| s.size()).map(|s| s.id)
     }
 
     /// The share that matches `audit`, if any.
@@ -209,10 +210,7 @@ impl ShareStore {
             CoreError::new("mobile_audit_position", "the share position does not fit")
         })?;
         let sub = usize::try_from(audit.sub_block).map_err(|_| {
-            CoreError::new(
-                "mobile_audit_sub_block",
-                "the sub-block index does not fit",
-            )
+            CoreError::new("mobile_audit_sub_block", "the sub-block index does not fit")
         })?;
         prove(share.segment, &share.placed, position, &share.symbol, sub).ok_or_else(|| {
             CoreError::new(
