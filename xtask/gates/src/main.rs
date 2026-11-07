@@ -324,7 +324,8 @@ const GATES: &[Gate] = &[
         run_args: None,
         self_test: gates::capability_modules_are_wired::self_test,
         run_log: None,
-    },    Gate {
+    },
+    Gate {
         name: "content-encryption-bound",
         replaces: Some("check-content-encryption-is-declared-and-bound.sh"),
         run: gates::content_encryption_is_declared_and_bound::run,
@@ -649,7 +650,8 @@ const GATES: &[Gate] = &[
         run_log: Some(gates::poa_compliance_gate::run),
         run_args: None,
         self_test: gates::poa_compliance_gate::self_test,
-    },    Gate {
+    },
+    Gate {
         name: "network-hardening",
         replaces: Some("check-network-hardening-gate.sh"),
         run: |_| {
@@ -932,14 +934,16 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::derived_content::self_test,
-    },    Gate {
+    },
+    Gate {
         name: "repair-fires-on-loss",
         replaces: Some("check-repair-fires-on-loss.sh"),
         run: gates::repair_fires::run,
         run_log: None,
         run_args: None,
         self_test: gates::repair_fires::self_test,
-    },    Gate {
+    },
+    Gate {
         name: "badges-are-current",
         replaces: Some("check-badges-are-current.sh"),
         run: |_| {
@@ -966,14 +970,16 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::containment_defaults::self_test,
-    },    Gate {
+    },
+    Gate {
         name: "qr-is-derivative-only",
         replaces: None,
         run: gates::qr_is_derivative_only::run,
         run_args: None,
         self_test: gates::qr_is_derivative_only::self_test,
         run_log: None,
-    },    Gate {
+    },
+    Gate {
         name: "storage-is-priced-by-size",
         replaces: Some("check-storage-is-priced-by-size.sh"),
         run: gates::storage_priced::run,
@@ -1044,7 +1050,8 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::pinned_downloads::self_test,
-    },    Gate {
+    },
+    Gate {
         name: "reduction-claims-state-both-units",
         replaces: Some("check-reduction-claims-state-both-units.sh"),
         run: gates::reduction_claims::run,
