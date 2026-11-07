@@ -190,7 +190,8 @@ fn build_bft(
         let bls = budlum_core::crypto::primitives::BlsKeypair::from_seed(&seed::<64>(
             &keys.bls_seeds[index],
             "a BLS seed",
-        )?);
+        )?)
+        .map_err(|e| format!("a BLS seed: {e}"))?;
         let pq = match keys.pq_seeds.get(index) {
             Some(text) => {
                 let pq_seed = seed::<32>(text, "an ML-DSA-65 seed")?;

@@ -309,9 +309,9 @@ struct V5Signer {
     /// A file holding the wallet password; else `BUD_WALLET_PASSWORD`.
     #[arg(long)]
     password_file: Option<std::path::PathBuf>,
-    /// Fee (base units).
-    #[arg(long, default_value_t = 1_000)]
-    fee: u64,
+    /// Fee (base units). When omitted, the node's current base fee is used.
+    #[arg(long)]
+    fee: Option<u64>,
 }
 
 #[derive(Subcommand)]
@@ -631,9 +631,9 @@ enum TxAction {
         /// variable must supply it.
         #[arg(long)]
         priv_key_file: Option<std::path::PathBuf>,
-        /// Transaction fee (base units).
-        #[arg(long, default_value_t = 0)]
-        fee: u64,
+        /// Transaction fee (base units). Defaults to the node's base fee.
+        #[arg(long)]
+        fee: Option<u64>,
         /// Transaction nonce (fetched from the node with `bud_getNonce` if omitted).
         #[arg(long)]
         nonce: Option<u64>,
@@ -884,6 +884,17 @@ fn node_chain_id(rpc_url: &str) -> Result<u64, String> {
     chain_id_binding(node, requested)
 }
 
+/// Read the fee floor from the node. The server exposes the same value through
+/// `eth_gas_price`; no hard-coded wallet default can drift from consensus.
+fn network_base_fee(rpc_url: &str) -> Result<u64, String> {
+    let value = rpc_call(rpc_url, "eth_gasPrice", serde_json::json!([]))?;
+    parse_rpc_u64(&value, "eth_gasPrice")
+}
+
+fn fee_or_network_base(requested: Option<u64>, base_fee: u64) -> u64 {
+    requested.unwrap_or(base_fee)
+}
+
 /// Build an unsigned transfer bound to `chain_id`.
 fn build_transfer(
     from: Address,
@@ -911,7 +922,7 @@ fn run_tx_send(
     to: &str,
     amount: u64,
     priv_key_file: Option<&std::path::Path>,
-    fee: u64,
+    fee: Option<u64>,
     nonce: Option<u64>,
 ) -> Result<(), String> {
     let seed = parse_seed(&load_priv_key(priv_key_file)?)?;
@@ -948,7 +959,13 @@ fn run_tx_send(
         );
     }
 
-    // Build and sign the transaction.
+    // Build and sign the transaction. An omitted fee follows the live floor.
+    let base_fee = if fee.is_none() {
+        network_base_fee(rpc_url)?
+    } else {
+        0
+    };
+    let fee = fee_or_network_base(fee, base_fee);
     let mut tx = build_transfer(from, to_addr, amount, fee, nonce, chain_id);
     tx.sign(&keypair);
 
@@ -1965,6 +1982,9 @@ fn send_v5(
     mut tx: Transaction,
     nonce: Option<u64>,
 ) -> Result<(), String> {
+    if tx.fee == 0 {
+        tx.fee = fee_or_network_base(None, network_base_fee(rpc_url)?);
+    }
     let from = key.address();
     // Checked before anything is signed, so a wallet transfer is valid on the
     // network the operator named and nowhere else.
@@ -2006,12 +2026,12 @@ fn send_v5(
 }
 
 /// A header-only transaction of `tx_type` for `send_v5` to complete.
-fn v5_template(tx_type: TransactionType, amount: u64, fee: u64) -> Transaction {
+fn v5_template(tx_type: TransactionType, amount: u64, fee: Option<u64>) -> Transaction {
     Transaction::new_with_chain_id(
         Address::zero(),
         Address::zero(),
         amount,
-        fee,
+        fee.unwrap_or(0),
         0,
         Vec::new(),
         0,
@@ -2155,7 +2175,14 @@ fn main() {
                 key_file: Some(key_file),
                 password_file,
             } => open_wallet_file(key_file, password_file.as_deref()).and_then(|key| {
-                let tx = build_transfer(Address::zero(), parse_address(to)?, *amount, *fee, 0, 0);
+                let tx = build_transfer(
+                    Address::zero(),
+                    parse_address(to)?,
+                    *amount,
+                    fee.unwrap_or(0),
+                    0,
+                    0,
+                );
                 send_v5(&cli.rpc_url, &key, tx, *nonce)
             }),
             TxAction::Send {
@@ -2491,6 +2518,12 @@ mod tests {
                 "subcommand help uses the banned term: {sub_help}"
             );
         }
+    }
+
+    #[test]
+    fn cli_fee_default_reads_network_base_fee() {
+        assert_eq!(fee_or_network_base(None, 37), 37);
+        assert_eq!(fee_or_network_base(Some(91), 37), 91);
     }
 
     #[test]
