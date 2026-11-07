@@ -226,6 +226,48 @@ impl Blockchain {
         self
     }
 
+    /// Record that a block was refused for a state-root disagreement and
+    /// export the counter at once.
+    ///
+    /// The refusal returns an error and unwinds out of the validation path, so
+    /// this cannot wait for the next successful commit to reach
+    /// `emit_chain_metrics`: on a node that is failing every candidate that
+    /// commit never comes, and the one series that would explain the outage
+    /// would stay at zero.
+    ///
+    /// This doc lives on a private method, so the public [`Self::is_valid`]
+    /// above describes the effect rather than linking to it.
+    fn record_state_root_mismatch(&self) {
+        if let Some(ref m) = self.metrics {
+            m.state_root_mismatch_total.inc();
+        }
+    }
+
+    /// B.U.D. 3.0 storage health for the scrape: objects, segments at risk,
+    /// the repair backlog and custody bytes per validator class.
+    ///
+    /// Every value is read from the rooted registry through its own readers,
+    /// not from a process-local side table, so a restart shows the same
+    /// numbers the chain says and the metrics pass cannot drift from the
+    /// registry's rules. `class` is `full` or `mobile`: a mobile share is the
+    /// one whose loss the durability warning is really about.
+    fn emit_bud3_metrics(&self, m: &crate::core::metrics::Metrics) {
+        let registry = &self.state.bud3_registry;
+        let (full_bytes, mobile_bytes) = registry.custody_bytes_by_class();
+        m.bud3_objects
+            .set(i64::try_from(registry.object_count()).unwrap_or(i64::MAX));
+        m.bud3_segments_at_risk
+            .set(i64::try_from(registry.total_segments_at_risk()).unwrap_or(i64::MAX));
+        m.bud3_repair_backlog
+            .set(i64::try_from(registry.repair_backlog()).unwrap_or(i64::MAX));
+        m.bud3_custody_bytes
+            .with_label_values(&["full"])
+            .set(i64::try_from(full_bytes).unwrap_or(i64::MAX));
+        m.bud3_custody_bytes
+            .with_label_values(&["mobile"])
+            .set(i64::try_from(mobile_bytes).unwrap_or(i64::MAX));
+    }
+
     pub(crate) fn emit_chain_metrics(&self) {
         if let Some(ref m) = self.metrics {
             let height = self.chain.len() as i64;
@@ -282,8 +324,26 @@ impl Blockchain {
             m.pending_bud_boost_atoms
                 .set(i64::try_from(self.state.pending_bud_boost_share).unwrap_or(i64::MAX));
             m.blocks_produced.inc();
-            m.finality_lag
-                .set((height as u64).saturating_sub(self.finalized_height) as i64);
+            let lag = (height as u64).saturating_sub(self.finalized_height);
+            m.finality_lag.set(lag as i64);
+            // The same lag in the unit the recovery rule is written in. The
+            // checkpoints are fixed per network (5 on the testnet, 10 on
+            // mainnet), so the block reading of one missed checkpoint is not a
+            // constant, and an alert written against blocks would be wrong on
+            // one of the two chains.
+            let checkpoint = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(
+                self.chain_id,
+            )
+            .max(1);
+            m.finality_lag_checkpoints
+                .set(i64::try_from(lag / checkpoint).unwrap_or(i64::MAX));
+            // Section 7.7: eight checkpoint intervals without finality puts the
+            // node in recovery mode. Exported rather than left to an alert
+            // expression so the node and the rule cannot disagree about the
+            // threshold.
+            m.finality_stalled
+                .set(i64::from(lag >= checkpoint.saturating_mul(8)));
+            self.emit_bud3_metrics(m);
             m.mempool_size.set(self.mempool.len() as i64);
             // Exported alongside the count because the count does not bound
             // memory. See `mempool::pool::DEFAULT_MAX_POOL_BYTES`.
@@ -2945,7 +3005,7 @@ impl Blockchain {
             if fee > 0 {
                 // The fee gate looks at the spendable balance, not the raw
                 // balance: vesting-locked funds must not pay consensus fees
-                // (BULGU-020 class, WP-17 item 4).
+                // (BLG-020 class, WP-17 item 4).
                 let spendable = self.state.spendable_balance(&reporter);
                 if spendable < fee {
                     return Err(format!(
@@ -5510,10 +5570,18 @@ impl Blockchain {
         Ok(nft_burn_cids.iter().map(|(cid, _)| cid.0).collect())
     }
 
+    /// Validate the chain this node holds.
+    ///
+    /// A refusal for a state-root disagreement also increments
+    /// `budlum_state_root_mismatch_total` on the bound metrics; every other
+    /// refusal is silent, because a malformed candidate is ordinary peer
+    /// traffic and a mismatch is a determinism split.
     pub fn is_valid(&self) -> bool {
         self.validate_candidate_chain(&self.chain).is_ok()
     }
 
+    /// Validate a candidate chain without adopting it. Counted like
+    /// [`Self::is_valid`].
     pub fn is_valid_chain(&self, chain: &[Block]) -> bool {
         self.validate_candidate_chain(chain).is_ok()
     }
@@ -5598,6 +5666,13 @@ impl Blockchain {
             // The roots are derived from the chain prefix, as on the live path.
             Self::apply_block_end_roots(&mut next_state, block, &chain[..index], self.chain_id);
             if next_state.calculate_state_root() != block.state_root {
+                // A determinism split (R-11), not a bad candidate: this node
+                // executed the same blocks and got a different root than the
+                // ones a peer committed. Counted before the error unwinds,
+                // because on a node that refuses every candidate the next
+                // successful commit that would have exported the series never
+                // arrives.
+                self.record_state_root_mismatch();
                 return Err(format!(
                     "Candidate state root mismatch at block {}",
                     block.index
@@ -6001,6 +6076,10 @@ impl Blockchain {
                 self.chain_id,
             );
             if current_state.calculate_state_root() != block.state_root {
+                // Same class as the candidate refusal above: a root this node
+                // cannot reproduce. Counted here too, or a node whose reorgs
+                // all fail on the root would report a healthy scrape.
+                self.record_state_root_mismatch();
                 return Err(format!(
                     "Reorg persistence state root mismatch at block {}",
                     block.index
