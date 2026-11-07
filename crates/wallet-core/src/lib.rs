@@ -1833,6 +1833,18 @@ mod tests {
         );
     }
 
+    /// The word count follows the entropy size, and only 256 bits is accepted:
+    /// 128 bits (a 12-word phrase) is refused rather than silently widened.
+    #[test]
+    fn entropy_size_preserves_mnemonic_word_count() {
+        assert!(matches!(
+            Wallet::from_entropy(&[0u8; 16]),
+            Err(WalletError::InvalidEntropy(16))
+        ));
+        let long = Wallet::from_entropy(&[0u8; 32]).unwrap();
+        assert_eq!(long.mnemonic().split_whitespace().count(), 24);
+    }
+
     #[test]
     fn from_entropy_requires_256_bits() {
         assert!(matches!(
