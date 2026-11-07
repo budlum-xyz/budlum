@@ -32,7 +32,7 @@ reconciled against the live pull-request stack on 2026-11-07.
 |---|---|---|---|---|---|---|---|---|
 | WP-01 | Live validation: core | A | T-Launch | Yes | None | M0 | #129 (slice 1/N) | in progress |
 | WP-02 | Live validation: storage | B | T-Launch | Yes | None | M0 | #117 (draft) | in progress |
-| WP-03 | Live validation: execution, BudZero, domains, privacy, AI | C | T-Launch | Yes | None | M0 | - | not started |
+| WP-03 | Live validation: execution, BudZero, domains, privacy, AI | C | T-Launch | Yes | None | M0 | #129 (slice 1/N) | in progress |
 | WP-04 | Live validation: clients, operations, CI, docs and the combined state | D | T-Launch | Yes | None | M0 | #75, #77, #96, #118 | in progress |
 | WP-05 | Concept name map and counter gate | D | T-Launch | Yes | WP-04 | M1 | #24, #120, #122 | in progress |
 | WP-06 | Persistence and state-recovery migration | B | T-Launch | Yes | WP-02 | M1 | #60, #84 | in progress |
@@ -187,9 +187,12 @@ them is closed by this pull request.
    (`docs/audit/live/lane-d.md`, PR #118), so the file is missing from
    `main` and the finding ledger in `docs/audit/FINDINGS.md` therefore
    records closures only.
-3. **`docs/audit/live/lane-a.md` is added by this slice** (WP-01, 54 records in
-   scope, 3 revalidated, one stop report). `lane-b.md` and `lane-c.md` still do
-   not exist; they are the lock paths of WP-02 and WP-03.
+3. **Two of the three lane documents are added by this slice.**
+   `docs/audit/live/lane-a.md` (WP-01: 54 records in scope, 6 revalidated, one
+   stop report) and `docs/audit/live/lane-c.md` (WP-03: 48 records in scope, 1
+   revalidated) plus `docs/audit/live/engine-inventory.md`. `lane-b.md` still
+   does not exist; it is the lock path of WP-02, and PR #117 is the only lane B
+   work in the stack.
 4. **31 registered gates never run in a workflow.** `xtask/gates` exposes
    them and `ci.yml` invokes neither each one nor `--all`, so they are
    registered protection that proves nothing on a commit. This slice wired two
