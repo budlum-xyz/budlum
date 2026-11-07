@@ -116,6 +116,7 @@ jobs:
             --lockfile=crates/bud-codec/Cargo.lock \
             --lockfile=crates/budscan/Cargo.lock \
             --lockfile=crates/note-packing/Cargo.lock \
+            --lockfile=crates/uel-abi/Cargo.lock \
             --lockfile=crates/wallet-core/Cargo.lock \
             --lockfile=fuzz/Cargo.lock \
             --lockfile=kani/Cargo.lock \
