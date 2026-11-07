@@ -40,12 +40,11 @@ fn tokens(text: &str) -> Vec<(usize, String)> {
 
 fn check_page(root: &Path, name: &str) -> Result<usize, String> {
     let path = root.join(name);
-    let text =
-        std::fs::read_to_string(&path).map_err(|e| format!("cannot read {name}: {e}"))?;
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {name}: {e}"))?;
     let lines = text.lines().count();
     if lines < MIN_LINES {
         return Err(format!(
-            "{name} has {lines} line(s), below the {MIN_LINES} this gate needs before an absence means anything"
+            "{name} has {lines} line(s), below the {MIN_LINES} this gate needs before an absence means anything",
         ));
     }
     let found = tokens(&text);
@@ -73,11 +72,11 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
     if problems.is_empty() {
         Ok(format!(
-            "OK: no placeholder token in either README ({lines} line(s) read)."
+            "OK: no placeholder token in either README ({lines} line(s) read).",
         ))
     } else {
         Err(format!(
-            "FAIL: a placeholder survived into a page a reader sees. Fill it from its source, or write what is true while the source does not exist:\n{problems}"
+            "FAIL: a placeholder survived into a page a reader sees. Fill it from its source, or write what is true while the source does not exist:\n{problems}",
         ))
     }
 }
@@ -86,7 +85,7 @@ fn scratch_dir() -> Result<std::path::PathBuf, String> {
     let dir = std::env::temp_dir().join(format!(
         "budlum-readme-placeholders-{}-{:?}",
         std::process::id(),
-        std::thread::current().id()
+        std::thread::current().id(),
     ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create scratch dir: {e}"))?;

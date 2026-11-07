@@ -113,9 +113,7 @@ fn count_word(text: &str, needle: &str) -> usize {
 }
 
 fn collect_files(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) {
-    let Ok(rd) = fs::read_dir(dir) else {
-        return;
-    };
+    let Ok(rd) = fs::read_dir(dir) else { return };
     let mut entries: Vec<_> = rd.flatten().collect();
     entries.sort_by_key(fs::DirEntry::file_name);
     for entry in entries {
@@ -125,10 +123,7 @@ fn collect_files(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) {
             continue;
         }
         if ft.is_dir() {
-            if SKIP_DIRS
-                .iter()
-                .any(|d| entry.file_name().to_str() == Some(d))
-            {
+            if SKIP_DIRS.iter().any(|d| entry.file_name().to_str() == Some(d)) {
                 continue;
             }
             collect_files(&path, root, out);
@@ -180,9 +175,7 @@ fn measure(root: &Path) -> BTreeMap<String, usize> {
         if meta.len() > MAX_FILE_BYTES {
             continue;
         }
-        let Ok(text) = fs::read_to_string(&path) else {
-            continue;
-        };
+        let Ok(text) = fs::read_to_string(&path) else { continue };
         for id in IDENTIFIERS {
             let n = count_word(&text, id);
             if n > 0 {
@@ -205,7 +198,7 @@ fn parse_baseline(text: &str) -> Result<BTreeMap<String, usize>, String> {
         let Some((name, value)) = t.split_once('|') else {
             return Err(format!(
                 "{BASELINE_PATH}:{}: expected `name|count`",
-                i + 1
+                i + 1,
             ));
         };
         let n = value
@@ -245,7 +238,7 @@ fn check(root: &Path, write: bool) -> Result<String, String> {
             if let Some(b) = baseline.get(name) {
                 if n > b {
                     return Err(format!(
-                        "refusing to write: {name} rose to {n}, above the baseline {b}"
+                        "refusing to write: {name} rose to {n}, above the baseline {b}",
                     ));
                 }
             }
@@ -253,7 +246,7 @@ fn check(root: &Path, write: bool) -> Result<String, String> {
         fs::write(&base_path, render_baseline(&counts))
             .map_err(|e| format!("cannot write {BASELINE_PATH}: {e}"))?;
         return Ok(format!(
-            "wrote {BASELINE_PATH}: {total} legacy occurrence(s) in total."
+            "wrote {BASELINE_PATH}: {total} legacy occurrence(s) in total.",
         ));
     }
 
@@ -267,12 +260,12 @@ fn check(root: &Path, write: bool) -> Result<String, String> {
                 if n > b {
                     let _ = writeln!(
                         bad,
-                        "  {name}: {n}, above the baseline {b}. A legacy storage name was added."
+                        "  {name}: {n}, above the baseline {b}. A legacy storage name was added.",
                     );
                 } else if n < b {
                     let _ = writeln!(
                         bad,
-                        "  {name}: {n}, below the baseline {b}. Lower {BASELINE_PATH} (run with {WRITE_ENV}=1)."
+                        "  {name}: {n}, below the baseline {b}. Lower {BASELINE_PATH} (run with {WRITE_ENV}=1).",
                     );
                 }
             }
@@ -282,13 +275,13 @@ fn check(root: &Path, write: bool) -> Result<String, String> {
         if !counts.contains_key(name) {
             let _ = writeln!(
                 bad,
-                "  {name}: baseline line for an entry section 5.5 no longer lists"
+                "  {name}: baseline line for an entry section 5.5 no longer lists",
             );
         }
     }
     if bad.is_empty() {
         Ok(format!(
-            "OK: no legacy storage entry above its baseline, {total} occurrence(s) left in total."
+            "OK: no legacy storage entry above its baseline, {total} occurrence(s) left in total.",
         ))
     } else {
         Err(format!("FAIL: legacy storage entries:\n{bad}"))
@@ -299,7 +292,7 @@ fn scratch_dir() -> Result<PathBuf, String> {
     let dir = std::env::temp_dir().join(format!(
         "budlum-no-legacy-storage-{}-{:?}",
         std::process::id(),
-        std::thread::current().id()
+        std::thread::current().id(),
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create scratch dir: {e}"))?;

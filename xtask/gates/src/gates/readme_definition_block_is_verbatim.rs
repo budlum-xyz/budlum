@@ -69,7 +69,7 @@ fn compare(root: &Path, name: &str, expected: &[&str]) -> Result<(), String> {
         return Err(format!(
             "{name} has {} line(s); the definition block alone is {} lines. The file was truncated.",
             lines.len(),
-            expected.len()
+            expected.len(),
         ));
     }
     let mut problems = String::new();
@@ -79,7 +79,7 @@ fn compare(root: &Path, name: &str, expected: &[&str]) -> Result<(), String> {
             let _ = writeln!(
                 problems,
                 "  {name}:{}: the line moved.\n    expected: {want}\n    found:    {got}",
-                i + 1
+                i + 1,
             );
         }
     }
@@ -106,7 +106,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         ))
     } else {
         Err(format!(
-            "FAIL: a README definition block changed. Section 1.1 of the directive freezes it:\n{problems}"
+            "FAIL: a README definition block changed. Section 1.1 of the directive freezes it:\n{problems}",
         ))
     }
 }
@@ -115,7 +115,7 @@ fn scratch_dir() -> Result<std::path::PathBuf, String> {
     let dir = std::env::temp_dir().join(format!(
         "budlum-readme-definition-{}-{:?}",
         std::process::id(),
-        std::thread::current().id()
+        std::thread::current().id(),
     ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create scratch dir: {e}"))?;
