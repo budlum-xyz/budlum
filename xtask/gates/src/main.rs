@@ -53,6 +53,8 @@ mod gates {
     pub mod bns_gate;
     pub mod bns_names_are_safe_in_an_address_bar;
     pub mod bridge_dual_tree;
+    pub mod bud3_forbidden_phrases;
+    pub mod bud3_proto_is_total;
     pub mod budscan_parity;
     pub mod budscan_patchset;
     pub mod canonical_programs_reproduce;
@@ -476,6 +478,30 @@ const GATES: &[Gate] = &[
         run: gates::tree_is_english::run,
         run_args: None,
         self_test: gates::tree_is_english::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "no-legacy-storage",
+        replaces: None,
+        run: gates::no_legacy_storage::run,
+        run_args: None,
+        self_test: gates::no_legacy_storage::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "bud3-forbidden-phrases",
+        replaces: None,
+        run: gates::bud3_forbidden_phrases::run,
+        run_args: None,
+        self_test: gates::bud3_forbidden_phrases::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "bud3-proto-is-total",
+        replaces: None,
+        run: gates::bud3_proto_is_total::run,
+        run_args: None,
+        self_test: gates::bud3_proto_is_total::self_test,
         run_log: None,
     },
     Gate {

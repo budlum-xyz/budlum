@@ -19,13 +19,13 @@ Kiragi|6|16
 Liquid storage|0|0
 Living Threshold|2|2
 Mikoriza|23|78
-Mobile Self|1|3
+Mobile Self|0|0
 PUL|14|100
 Pollen|67|688
 Regeneration|37|242
 Sera|0|0
-Tarif|14|157
+Tarif|14|154
 Universal Gateway|1|1
 Vault (SocialFi)|7|152
 budlumxyz|25|203
-three_* modules|1|1
+three_* modules|0|0

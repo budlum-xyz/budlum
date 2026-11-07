@@ -2165,7 +2165,7 @@ Adding a field must not change old identities.
 
 ### What it does not provide
 
-- **It does not zero storage for organic content.** For content not born from a
+- **It does not eliminate storage for organic content.** For content not born from a
   recipe, someone holding the bytes is information-theoretically required. This
   section only makes copy counts honest in the recipe-bearing class; a design
   claiming "storage 0 for all content" is lying.
@@ -2242,7 +2242,7 @@ wrong guess stays on the screen.
 - **It does not guarantee the channel is deterministic.** Frame production is
   deterministic; the channel is not. Round-trip under a lossy re-encode cannot be
   assumed without measuring it on the target channel.
-- **It does not zero storage for organic content.** Changing representation does
+- **It does not eliminate storage for organic content.** Changing representation does
   not change information theory.
 
 ## 61. Identity limits who, transport limits what it costs: two questions before listening

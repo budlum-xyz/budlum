@@ -4,6 +4,9 @@ global_allow_paths = [
   "config/naming/",
   "docs/NAMING.md",
   "docs/audit/",
+  "docs/work/",
+  "xtask/gates/src/gates/bud3_forbidden_phrases.rs",
+  "xtask/gates/src/gates/no_legacy_storage.rs",
   ".github/concept-names-baseline.txt",
 ]
 

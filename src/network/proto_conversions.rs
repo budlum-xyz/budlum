@@ -217,7 +217,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 pb::ProtoTransactionType::AiOfferData as i32,
                 Some(pb::proto_transaction::TypePayload::AiOfferData(
                     pb::ProtoAiOfferData {
-                        cid: cid.0.to_vec(),
+                        cid: cid.digest.to_vec(),
                         price: *price,
                     },
                 )),

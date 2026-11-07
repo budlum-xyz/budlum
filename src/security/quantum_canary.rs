@@ -874,7 +874,7 @@ impl CanaryBook {
         }
     }
 
-    /// Whether the book holds nothing: no pending commit and no solved canary.
+    /// Whether the book is empty: no pending commit and no solved canary.
     /// An empty book stays out of the state root, so a chain that never saw a
     /// canary transaction keeps its pinned roots.
     #[must_use]

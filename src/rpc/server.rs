@@ -3254,7 +3254,7 @@ impl BudlumApiServer for RpcServer {
                 "address": resolved.address.map(|a| Self::to_0x_hash(a.to_hex())),
                 "storage_root": resolved.storage_root.map(|r| format!("0x{}", hex::encode(r))),
                 "storage_domain_id": resolved.storage_domain_id,
-                "content_id": resolved.content_id.map(|c| format!("0x{}", hex::encode(c.0))),
+                "content_id": resolved.content_id.map(|c| format!("0x{}", hex::encode(c.digest))),
                 "is_expired": resolved.is_expired,
             }))
         } else {
@@ -3264,7 +3264,7 @@ impl BudlumApiServer for RpcServer {
 
     async fn bns_resolve_content(&self, name: String) -> Result<Option<String>, ErrorObjectOwned> {
         let cid = self.chain.bns_resolve_content(name).await;
-        Ok(cid.map(|c| format!("0x{}", hex::encode(c.0))))
+        Ok(cid.map(|c| format!("0x{}", hex::encode(c.digest))))
     }
 
     async fn identity_resolve(&self, did: String) -> Result<serde_json::Value, ErrorObjectOwned> {

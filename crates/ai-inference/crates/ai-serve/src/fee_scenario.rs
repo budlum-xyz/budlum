@@ -110,7 +110,7 @@ pub enum BudVersion {
 impl BudVersion {
     /// Monthly storage fee for `tb` terabytes, in dollars.
     ///
-    /// 1.0 holds nothing (the bytes are the user's own), 2.0 bills the
+    /// 1.0 retains zero bytes (the bytes are the user's own), 2.0 bills the
     /// measured per-terabyte rate, and 3.0 bills nothing monthly: its
     /// custody was paid once, at upload, on top of the base fee.
     #[must_use]
@@ -166,7 +166,7 @@ pub fn bud_extension_fee_usd_per_tb(
 /// quotes in).
 pub const BYTES_PER_TB: u64 = 1_000_000_000_000;
 
-/// How many fixed-size recipes cover `content_bytes` of 3.0 content when the
+/// How many bounded descriptors cover `content_bytes` of 3.0 content when the
 /// average item is `item_bytes`. The network object of 3.0 is the recipe, so
 /// this count - not the terabytes - is what the network holds. Zero item size
 /// addresses nothing and returns zero rather than dividing by it.
@@ -389,7 +389,7 @@ mod fee_scenario_tests {
         use crate::validator_cost::{
             market_pricelist, nvme_custody_usd, ten_year_storage_cost_usd_per_tb,
         };
-        // The 3.0 held unit is the fixed-size recipe, not the terabytes.
+        // The scenario unit is the bounded descriptor, not raw terabytes.
         let recipe = nvme_custody_usd(BUD_RECIPE_PUBLIC_BYTES, market_pricelist());
         let body = ten_year_storage_cost_usd_per_tb(market_pricelist());
         assert!(

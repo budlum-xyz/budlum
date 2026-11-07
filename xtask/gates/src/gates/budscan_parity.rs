@@ -136,7 +136,7 @@ fn check_name_rule(root: &Path, problems: &mut Vec<String>) -> Result<(), String
 }
 
 /// The core copy hashes the tag and the chunk through the length-prefixed field hash.
-const CORE_CONTENT_CALL: &str = "Sha256::digest(bytes)";
+const CORE_CONTENT_CALL: &str = "self.hasher.update(bytes)";
 
 /// Do the two `ContentId` definitions produce the same identity?
 fn check_content_id(root: &Path, problems: &mut Vec<String>) -> Result<(), String> {

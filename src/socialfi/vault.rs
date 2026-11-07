@@ -113,7 +113,7 @@ impl VaultRegistry {
         Self::default()
     }
 
-    /// A folder that exists and holds nothing is still a folder.
+    /// A folder that exists with zero entries is still a folder.
     pub fn register_folder(&mut self, folder: u64) -> Result<(), VaultError> {
         if self.folders.len() >= Self::MAX_FOLDERS && !self.folders.contains(&folder) {
             return Err(VaultError::TooManyFolders);

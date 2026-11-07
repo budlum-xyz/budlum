@@ -256,7 +256,7 @@ impl BudlumxyzRegistry {
             match app.manifest_id {
                 Some(manifest_id) => {
                     hasher.update([1u8]);
-                    hasher.update(manifest_id.0);
+                    hasher.update(manifest_id.digest);
                 }
                 None => hasher.update([0u8]),
             }

@@ -259,6 +259,11 @@ fn state_chain(src: &str, at: usize) -> (Option<String>, bool) {
     (None, assigned)
 }
 
+/// Mutable accessors take precedence over `get`, `iter` and `values` reads.
+fn grants_mutable_state(method: &str) -> bool {
+    method == "get_or_create" || method.ends_with("_mut")
+}
+
 /// Check 1: the actor never writes the state directly.
 fn check_actor_state_access(actor: &str) -> Result<(), String> {
     if actor.contains("&mut self.blockchain.state") {
@@ -281,8 +286,9 @@ fn check_actor_state_access(actor: &str) -> Result<(), String> {
             );
         }
         if let Some(method) = method {
-            if !READ_PREFIXES.iter().any(|p| method.starts_with(p))
-                && !READ_NAMES.contains(&method.as_str())
+            if grants_mutable_state(&method)
+                || (!READ_PREFIXES.iter().any(|p| method.starts_with(p))
+                    && !READ_NAMES.contains(&method.as_str()))
             {
                 return Err(format!(
                     "chain_actor.rs calls `{method}` on `self.blockchain.state`, which is not a \
@@ -358,9 +364,10 @@ fn check_body_writes(bc: &str, name: &str) -> Result<(), String> {
             ));
         }
         if let Some(method) = method {
-            if STATE_WRITERS
-                .iter()
-                .any(|w| format!("{method}(").starts_with(w))
+            if grants_mutable_state(&method)
+                || STATE_WRITERS
+                    .iter()
+                    .any(|w| format!("{method}(").starts_with(w))
             {
                 return Err(format!(
                     "`Blockchain::{name}` is classified read or node-local and calls the state \
@@ -466,6 +473,16 @@ pub fn self_test() -> Result<String, String> {
         ),
         (
             "src/chain/chain_actor.rs",
+            format!("{anchor}                    let _ = self.blockchain.state.get_or_create(&addr);\n"),
+            "an actor arm that creates an account through a getter passed",
+        ),
+        (
+            "src/chain/chain_actor.rs",
+            format!("{anchor}                    let _ = self.blockchain.state.accounts.get_mut(&addr);\n"),
+            "an actor arm that borrows mutable account state through a getter passed",
+        ),
+        (
+            "src/chain/chain_actor.rs",
             format!("{anchor}                    self.blockchain.state.epoch_index = 0;\n"),
             "an actor arm that assigns into the state passed",
         ),
@@ -508,6 +525,8 @@ mod tests {
     fn a_read_passes_and_a_write_fails() {
         assert!(check_actor_state_access("let b = self.blockchain.state.get_balance(&a);").is_ok());
         assert!(check_actor_state_access("self.blockchain.state.add_balance(&a, 1);").is_err());
+        assert!(check_actor_state_access("self.blockchain.state.get_or_create(&a);").is_err());
+        assert!(check_actor_state_access("self.blockchain.state.accounts.get_mut(&a);").is_err());
         assert!(check_actor_state_access("self.blockchain.state.epoch_index = 3;").is_err());
         assert!(check_actor_state_access("if self.blockchain.state.epoch_index == 3 {}").is_ok());
     }

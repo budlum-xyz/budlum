@@ -3209,7 +3209,7 @@ fn encode_credential_commitment(
 fn encode_pollen_asset(asset: &crate::pollen::DataAsset, out: &mut Vec<u8>) {
     put_fixed(out, &asset.asset_id.0);
     put_fixed(out, asset.owner.as_bytes());
-    put_fixed(out, &asset.manifest_id.0);
+    put_fixed(out, &asset.manifest_id.digest);
     put_fixed(out, &asset.metadata_commitment);
     put_u8(out, u8::from(asset.encrypted));
     put_u8(
@@ -3399,7 +3399,7 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
             put_fixed(out, &res.external_state_root);
         }
         TransactionType::AiOfferData { cid, price } => {
-            put_fixed(out, &cid.0);
+            put_fixed(out, &cid.digest);
             put_u64(out, *price);
         }
         TransactionType::AiPurchaseData { offer_id } => put_u64(out, *offer_id),

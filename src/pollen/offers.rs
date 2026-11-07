@@ -945,7 +945,7 @@ impl MarketplaceRegistry {
             hasher.update(b"offer");
             hasher.update(id.to_le_bytes());
             hasher.update(offer.seller.0);
-            hasher.update(offer.cid.0);
+            hasher.update(offer.cid.digest);
             hasher.update(offer.price.to_le_bytes());
             hasher.update([u8::from(offer.active)]);
         }

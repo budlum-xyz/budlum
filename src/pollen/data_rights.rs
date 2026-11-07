@@ -408,7 +408,7 @@ impl DataAsset {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_POLLEN_DATA_ASSET_V1");
         hasher.update(owner.as_bytes());
-        hasher.update(manifest_id.0);
+        hasher.update(manifest_id.digest);
         hasher.update(metadata_commitment);
         AssetId(hasher.finalize().into())
     }
@@ -436,7 +436,7 @@ impl DataAsset {
         hasher.update(b"BDLM_POLLEN_DATA_ASSET_LEAF_V1");
         hasher.update(self.asset_id.0);
         hasher.update(self.owner.as_bytes());
-        hasher.update(self.manifest_id.0);
+        hasher.update(self.manifest_id.digest);
         hasher.update(self.metadata_commitment);
         hasher.update([u8::from(self.encrypted)]);
         hasher.update([match self.status {
