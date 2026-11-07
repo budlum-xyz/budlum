@@ -64,27 +64,9 @@ fn check_ai_exec_dims(dims: &[u16]) -> Result<(), String> {
 }
 
 fn privacy_transfers_enabled(chain_id: u64) -> bool {
-    // Allowlist, not a denylist, and devnet is its only member.
-    //
-    // `PrivateTransferSubmit` reaches `note_registry.apply_transfer`, which
-    // takes the nullifier the submitter hands it: the binding check
-    // `nullifier == derive_nullifier(commitment, proof)` only runs when
-    // `apply_transfer_with_proofs` is called with proofs, and nothing in the
-    // tree calls it that way. So today a transfer proves who signed the
-    // transaction, never that the signer owns the note; value conservation and
-    // membership are unwired too. That is survivable only where the
-    // notes are worth nothing, and a public testnet is not that place: it is
-    // the network people are asked to trust before mainnet, and an unbacked
-    // mint there is a real loss.
-    //
-    // The testnet id used to sit in this list.  removes it: the surface
-    // stays closed on testnet until PTP-1 wires ownership, value conservation
-    // and membership (directive 10.4 item 7). The proof code is kept, not
-    // deleted - only the door is shut (G-7).
-    //
-    // The older `chain_id != Mainnet` test answered "is this not the one
-    // network we care about" instead of "is this a network where losing the
-    // notes costs nothing", so every unclaimed id came back enabled too.
+    // This is an allowlist, not a denylist. Note ownership, value-conservation
+    // and membership proofs are not all wired, so only valueless devnet notes
+    // may move. Testnet, mainnet and unknown chain ids stay closed by default.
     chain_id
         == crate::core::chain_config::Network::Devnet
             .chain_id()
@@ -105,7 +87,7 @@ fn privacy_closed_refusal(chain_id: u64, mainnet_message: &'static str) -> Budlu
     {
         BudlumError::validation(
             "privacy_testnet_closed",
-            "privacy transfers and note insertion are closed on testnet until ownership, value-conservation and membership proofs are wired ()",
+            "privacy transfers and note insertion are closed on testnet until ownership, value-conservation and membership proofs are wired",
         )
     } else {
         BudlumError::validation("privacy_mainnet_disabled", mainnet_message)
@@ -114,20 +96,11 @@ fn privacy_closed_refusal(chain_id: u64, mainnet_message: &'static str) -> Budlu
 
 /// Whether the on-chain AI inference layer may execute on this chain.
 ///
-///  job 5 is a decision, and this is it: **closed on testnet**.
-///
-/// The directive (1.5, 10.6) lets the layer open at VL-1 only once ,
-/// ,  and  are closed *and* both VL-1 conditions are
-/// built: a per-request lottery with commit-reveal  and integer
-/// ranking. Integer ranking lands in this package; the lottery and
-/// commit-reveal do not exist in the tree, and the four findings above are
-/// still open. One missing condition is enough to keep the layer shut, so the
-/// whole surface refuses on testnet rather than opening at a level nobody can
-/// verify. `ai_layer_is_closed_on_testnet` is the proof.
-///
-/// Devnet stays open: that is where the layer is developed, and its tokens
-/// carry no value. The allowlist shape is deliberate - a new chain id is
-/// closed by default instead of inheriting the last network's decision.
+/// Proof binding, escrow accounting, verifier authority, registry-root checks,
+/// the per-request lottery and commit-reveal must all be present before the
+/// layer can open on a public network. Only devnet is open; unknown chain ids
+/// fail closed rather than inheriting another network's policy.
+
 fn ai_layer_enabled(chain_id: u64) -> bool {
     chain_id
         == crate::core::chain_config::Network::Devnet
@@ -135,20 +108,15 @@ fn ai_layer_enabled(chain_id: u64) -> bool {
             .value()
 }
 
-/// Every transaction door that belongs to the on-chain AI layer.
+/// Every transaction door that belongs to the on-chain AI inference layer.
 ///
-/// Kept beside [`ai_layer_enabled`] so the guard and the decision cannot drift
-/// apart. The two marketplace doors (`AiOfferData`, `AiPurchaseData`) are in
-/// the list on purpose: they are the AI-to-data-market leg of the closed loop
-///  describes, where an inference request reads a paid asset without a
-/// grant. Leaving them open would keep that loop reachable on testnet through
-/// the market side while the inference side was shut.
+/// The Data Market (`AiOfferData` and `AiPurchaseData`) is an open application
+/// surface with its own grant, replay and payment rules; it is not gated here.
+
 fn is_ai_layer_transaction(tx_type: &TransactionType) -> bool {
     matches!(
         tx_type,
-        TransactionType::AiOfferData { .. }
-            | TransactionType::AiPurchaseData { .. }
-            | TransactionType::AiModelRegister(_)
+        TransactionType::AiModelRegister(_)
             | TransactionType::AiInferenceRequest(_)
             | TransactionType::AiInferenceResult(_)
             | TransactionType::AiFeeReclaim(_)
@@ -168,9 +136,9 @@ fn is_ai_layer_transaction(tx_type: &TransactionType) -> bool {
 
 /// The doors that only settle state the layer already holds.
 ///
-/// Closing a layer's entry must not close its exit. Until  the AI layer
-/// had no chain-id gate at all, so bonds and escrows taken on testnet are
-/// legitimate existing state, and these seven doors are the only way that
+/// Closing a layer's entry must not close its exit. Bonds and escrows taken
+/// before this boundary was installed are legitimate existing state, and these
+/// seven doors are the only way that
 /// state is settled. Refusing them does not close a feature, it
 /// confiscates a balance - the bug `begin_unbonding` ("left the remaining bond
 /// locked for good") and the `Unstake` handler ("a 100% confiscation") already
@@ -337,7 +305,7 @@ impl Executor {
         {
             return Err(BudlumError::validation(
                 "ai_layer_testnet_closed",
-                "the on-chain AI inference layer is closed on this chain id until ..062 are closed and the VL-1 lottery, commit-reveal and integer ranking are wired ()",
+                "the on-chain AI inference layer is closed on this chain until proof binding, escrow accounting, verifier authority and registry-root checks are complete and the VL-1 lottery, commit-reveal and integer ranking are wired",
             ));
         }
 
@@ -4457,11 +4425,6 @@ mod tests {
                     public_inputs: None,
                 },
             },
-            TransactionType::AiOfferData {
-                cid: crate::storage::content_id::ContentId::of(b"ai-data"),
-                price: 1,
-            },
-            TransactionType::AiPurchaseData { offer_id: 1 },
         ]
     }
 
@@ -4626,6 +4589,36 @@ mod tests {
                 );
                 assert_eq!(state.get_balance(&who), 1_000_000, "G-4");
                 assert_eq!(state.ai_registry.state_root(), [0u8; 32], "G-4");
+            }
+        }
+    }
+
+    #[test]
+    fn data_market_is_not_closed_by_the_ai_layer_gate() {
+        let (_, testnet, _) = boundary_chain_ids();
+        let who = Address::from([26u8; 32]);
+        for door in [
+            TransactionType::AiOfferData {
+                cid: crate::storage::content_id::ContentId::of(b"ai-data"),
+                price: 1,
+            },
+            TransactionType::AiPurchaseData { offer_id: 1 },
+        ] {
+            assert!(!is_ai_layer_transaction(&door));
+            let mut state = AccountState::new();
+            state.add_balance(&who, 1_000_000);
+            let tx = Transaction::new_with_chain_id(
+                who,
+                Address::zero(),
+                1_000,
+                100,
+                0,
+                vec![],
+                testnet,
+                door,
+            );
+            if let Err(err) = Executor::apply_transaction_checked(&mut state, &tx) {
+                assert_ne!(err.code(), "ai_layer_testnet_closed");
             }
         }
     }
