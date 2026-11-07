@@ -106,6 +106,7 @@ impl Pkcs11Signer {
         token_pin_env: String,
         key_label: Option<String>,
     ) -> Result<Self, CryptoError> {
+        let key_label = Self::validate_key_label(key_label)?;
         let pin = std::env::var(&token_pin_env).map_err(|e| {
             CryptoError::KeyGeneration(format!(
                 "PKCS#11 PIN env '{token_pin_env}' not accessible: {e}"
@@ -272,6 +273,11 @@ impl Pkcs11Signer {
     /// [`CryptoError::KeyGeneration`] when the token has no such key pair, the
     /// pairing proof fails or the key is not the configured one.
     pub fn with_standard_pq_key(mut self, label: &str) -> Result<Self, CryptoError> {
+        if label.trim().is_empty() {
+            return Err(CryptoError::KeyGeneration(
+                "PKCS#11 PQ key label must not be empty or whitespace".into(),
+            ));
+        }
         let token = Pkcs11PqToken::open(&self.module_path, self.slot_id, &self.token_pin_env)?;
         let key = token.open_key(label, HsmPqAlgorithm::MlDsa65)?;
         if let Some(expected) = &self.expected_pq_public_key {
@@ -547,6 +553,16 @@ impl Pkcs11Signer {
             n => Err(format!(
                 "{n} Ed25519 {kind} keys found in HSM slot; refusing to guess, set an explicit key label"
             )),
+        }
+    }
+
+    fn validate_key_label(key_label: Option<String>) -> Result<Option<String>, CryptoError> {
+        match key_label {
+            None => Ok(None),
+            Some(label) if label.trim().is_empty() => Err(CryptoError::KeyGeneration(
+                "PKCS#11 key label must not be empty or whitespace".into(),
+            )),
+            Some(label) => Ok(Some(label)),
         }
     }
 
@@ -1279,6 +1295,24 @@ mod vendor_tests {
     fn an_ambiguous_ed25519_key_selection_is_refused() {
         let err = Pkcs11Signer::require_single_key("public", 2).unwrap_err();
         assert!(err.contains("refusing to guess"), "{err}");
+    }
+
+    #[test]
+    fn blg_010_pkcs11_label_rejects_blank_and_selects_before_binding() {
+        assert_eq!(Pkcs11Signer::validate_key_label(None), Ok(None));
+        assert_eq!(
+            Pkcs11Signer::validate_key_label(Some("validator-ed25519".to_string())),
+            Ok(Some("validator-ed25519".to_string()))
+        );
+        assert!(Pkcs11Signer::validate_key_label(Some(String::new())).is_err());
+        assert!(Pkcs11Signer::validate_key_label(Some("   ".to_string())).is_err());
+        assert!(Pkcs11Signer::new(
+            "/nonexistent/pkcs11.so".to_string(),
+            0,
+            "BUDLUM_UNUSED_PIN_ENV".to_string(),
+            Some(" \t ".to_string()),
+        )
+        .is_err());
     }
 }
 
