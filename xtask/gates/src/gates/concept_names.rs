@@ -286,8 +286,15 @@ fn parse_baseline(text: &str) -> Result<BTreeMap<String, Count>, String> {
                 .parse::<usize>()
                 .map_err(|e| format!("{BASELINE_PATH}:{}: {e}", i + 1))
         };
+        let key = (*name).to_string();
+        if out.contains_key(&key) {
+            return Err(format!(
+                "{BASELINE_PATH}:{}: duplicate concept `{key}`",
+                i + 1
+            ));
+        }
         out.insert(
-            (*name).to_string(),
+            key,
             Count {
                 files: num(files)?,
                 matches: num(matches)?,
@@ -341,20 +348,27 @@ fn check(root: &Path, write: bool) -> Result<String, String> {
     }
 
     let base_path = root.join(BASELINE_PATH);
-    let baseline = match std::fs::read_to_string(&base_path) {
-        Ok(t) => parse_baseline(&t)?,
-        Err(_) if write => BTreeMap::new(),
-        Err(e) => return Err(format!("cannot read {BASELINE_PATH}: {e}")),
-    };
+    let baseline_text = std::fs::read_to_string(&base_path)
+        .map_err(|e| format!("cannot read {BASELINE_PATH}: {e}"))?;
+    let baseline = parse_baseline(&baseline_text)?;
     if write {
+        if baseline.len() != counts.len()
+            || baseline.keys().any(|name| !counts.contains_key(name))
+            || counts.keys().any(|name| !baseline.contains_key(name))
+        {
+            return Err(format!(
+                "refusing to write: {BASELINE_PATH} must contain exactly one row for every current concept"
+            ));
+        }
         for (name, c) in &counts {
-            if let Some(b) = baseline.get(name) {
-                if c.files > b.files || c.matches > b.matches {
-                    return Err(format!(
-                        "refusing to write: {name} rose to {} / {} above the baseline {} / {}",
-                        c.files, c.matches, b.files, b.matches
-                    ));
-                }
+            let Some(b) = baseline.get(name) else {
+                return Err(format!("refusing to write: {name} has no existing baseline"));
+            };
+            if c.files > b.files || c.matches > b.matches {
+                return Err(format!(
+                    "refusing to write: {name} rose to {} / {} above the baseline {} / {}",
+                    c.files, c.matches, b.files, b.matches
+                ));
             }
         }
         std::fs::write(&base_path, render_baseline(&counts))
@@ -489,6 +503,35 @@ mod tests {
             self_test().is_ok_and(|m| m.contains("injected")),
             "canary must prove the injected name turns the gate red"
         );
+    }
+
+    #[test]
+    fn concept_names_baseline_rejects_duplicate_rows() {
+        let duplicate = "Canaryname|0|0\nCanaryname|0|0\n";
+        assert!(parse_baseline(duplicate)
+            .is_err_and(|e| e.contains("duplicate concept")));
+    }
+
+    #[test]
+    fn concept_names_writer_requires_an_exact_existing_baseline() {
+        let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-concepts-writer")
+            .expect("create isolated scratch directory");
+        let result = (|| {
+            stage(&dir, CANARY_MAP, "Canaryname|0|0\n")?;
+            std::fs::remove_file(dir.join(BASELINE_PATH)).map_err(|e| e.to_string())?;
+            if check(&dir, true).is_ok() {
+                return Err(String::from("writer created a missing baseline"));
+            }
+            stage(&dir, CANARY_MAP, "Canaryname|0|0\nExtra|0|0\n")?;
+            if check(&dir, true).is_ok() {
+                return Err(String::from("writer discarded an unmapped baseline row"));
+            }
+            stage(&dir, CANARY_MAP, "Canaryname|0|0\n")?;
+            check(&dir, true).map_err(|e| format!("valid existing baseline rejected: {e}"))?;
+            Ok(())
+        })();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(result.is_ok(), "{}", result.unwrap_err());
     }
 
     #[test]
