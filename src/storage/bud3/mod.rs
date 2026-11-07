@@ -23,6 +23,7 @@
 //! | [`fountain`] | RFC 6330 per-segment encoder and decoder, and the streaming encoder |
 //! | [`live`] | Live stream T-Expansion: time segments, the `prev_object` chain, the ratioless send order |
 //! | [`live_broadcast`] | WP-55 2/N: the broadcast driver, the gateway door and the activation height |
+//! | [`types`] | The section 6.2 vocabulary as values: `Frame`, `QrVideo`, `CustodyShare`, `PlacementGroup`, `RefCount`, `AggregationVolume`, the logical and optical paths |
 //!
 //! The commitment is fixed-size (32 bytes). The object is not fixed-size: it
 //! is the header plus the payload, and it is at most the header larger than
@@ -49,6 +50,7 @@ pub mod registry;
 pub mod repair;
 pub mod segment;
 pub mod tx;
+pub mod types;
 pub mod varint;
 
 pub use bof1::{Bof1Error, Flags, Header, Object};
@@ -68,3 +70,7 @@ pub use live_broadcast::{
 };
 pub use meter::{Meter, MeterError};
 pub use segment::{object_commitment, segment_digest, ObjectCommitment, Segmentation};
+pub use types::{
+    AggregationVolume, CustodyShare, Frame, LogicalPath, OpticalPath, Path, Payload,
+    PlacementGroup, QrVideo, RefCount, RepairSymbol, SourceSymbol,
+};

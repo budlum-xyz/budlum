@@ -267,3 +267,6 @@ pub mod alert_rules_reference_existing_metrics;
 // WP-17 state transition, vesting, staking, governance, sharding, and V2 snapshot suite.
 #[cfg(test)]
 pub mod wp17_state_hardening;
+// Section 6.2 shared B.U.D. 3.0 vocabulary.
+#[cfg(test)]
+pub mod bud3_types;
