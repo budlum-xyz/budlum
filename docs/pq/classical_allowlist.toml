@@ -127,3 +127,9 @@ path = "src/execution/coordinator/foreign/aptos.rs"
 function = "*"
 pq_companion = "none: UEL Compatibility Lane Aptos Ed25519 envelope; K-3 classical-only account isolation and quantum alert closure"
 category = "f"
+
+[[entry]]
+path = "src/registry/presence.rs"
+function = "*"
+pq_companion = "ML-DSA-65 proposer block signature and validator key-set preimage binding BLS beside ML-DSA-65 (crypto/key_set_preimage.rs)"
+category = "b"

@@ -67,6 +67,8 @@ pub struct Metrics {
     pub peer_connection_quality: IntGauge,
     pub consensus_round_seconds: Histogram,
     pub finality_lag: IntGauge,
+    /// 1 when finality has stalled for at least 40 blocks and recovery mode is active (Section 7.7).
+    pub finality_stalled: IntGauge,
     pub storage_db_size_bytes: IntGauge,
     /// Content chunks retained by the durable B.U.D. content store.
     pub content_store_chunks: IntGauge,
@@ -307,6 +309,10 @@ impl Metrics {
         let liveness_tracked_validators = IntGauge::new(
             "budlum_liveness_tracked_validators",
             "Validators with retained liveness-tracker state",
+        )?;
+        let finality_stalled = IntGauge::new(
+            "budlum_finality_stalled",
+            "1 when finality has stalled for at least 40 blocks and disaster recovery mode is active",
         )?;
         let invalid_vote_tracked_validators = IntGauge::new(
             "budlum_invalid_vote_tracked_validators",
@@ -747,6 +753,7 @@ impl Metrics {
         registry.register(Box::new(peer_connection_quality.clone()))?;
         registry.register(Box::new(consensus_round_seconds.clone()))?;
         registry.register(Box::new(finality_lag.clone()))?;
+        registry.register(Box::new(finality_stalled.clone()))?;
         registry.register(Box::new(storage_db_size_bytes.clone()))?;
         registry.register(Box::new(content_store_chunks.clone()))?;
         registry.register(Box::new(content_store_bytes.clone()))?;
@@ -872,6 +879,7 @@ impl Metrics {
             peer_connection_quality,
             consensus_round_seconds,
             finality_lag,
+            finality_stalled,
             storage_db_size_bytes,
             content_store_chunks,
             content_store_bytes,
@@ -1026,6 +1034,7 @@ mod tests {
             "budlum_bridge_relayer_fee_ppm",
             "budlum_active_validators",
             "budlum_pending_finality_certificates",
+            "budlum_finality_stalled",
             "budlum_liveness_tracked_validators",
             "budlum_invalid_vote_tracked_validators",
             "budlum_poa_onboarding_audit_rows",

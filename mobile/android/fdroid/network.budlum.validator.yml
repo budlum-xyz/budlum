@@ -5,8 +5,8 @@ Categories:
 License: Apache-2.0
 AuthorName: Budlum Contributors
 WebSite: https://budlum.network
-SourceCode: https://budlum.network/source
-IssueTracker: https://budlum.network/issues
+SourceCode: https://github.com/lubothebook/budlum
+IssueTracker: https://github.com/lubothebook/budlum/issues
 Changelog: https://budlum.network/releases
 
 AutoName: Budlum Validator
@@ -21,7 +21,7 @@ Description: |-
   * Zero third-party analytics, crash-reporting, or advertising SDKs.
 
 RepoType: git
-Repo: https://budlum.network/budlum.git
+Repo: https://github.com/lubothebook/budlum.git
 
 Builds:
   - versionName: 0.1.0-testnet

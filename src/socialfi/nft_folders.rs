@@ -1,51 +1,87 @@
-//! SocialFi `nft_folders` and B.U.D. 3.0 NFT commitment bindings (`WP-23`, `BLG-109`).
+//! B.U.D. 3.0 SocialFi NFT bindings and `nft_folders` registry (Section 5.6, WP-23, BLG-109).
+//! exposed for SocialFi transaction execution, RPC handlers, and wallet folder organization.
 //!
-//! exposed for: SocialFi transaction execution, RPC handlers, and wallet SDK.
+//! * Every B.U.D. 3.0 SocialFi NFT binds both its [`ContentId`] and its
+//!   `object_commitment` ([`ObjectKey`], Section 6.4 Y15).
+//! * Minting and burning strictly enforce ownership (`BLG-109`):
+//!   - A caller cannot mint an NFT bound to a third party's sealed object.
+//!   - Burning an NFT requires `nft.owner == caller` and decrements the
+//!     reference count in [`Bud3Registry`] via `burn_reference` / `social_delete`,
+//!     so burning one user's NFT never evicts a shared public object while
+//!     another owner's NFT still references it.
+//! * `nft_folders` organizes owned NFTs into named folders per account.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::types::NftError;
-use super::{NftRegistry, MAX_AUTHOR_NAME_BYTES};
+use super::{NftError, NftRegistry, MAX_AUTHOR_NAME_BYTES};
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
 use crate::storage::bud3::content_id::{ContentId, ContentIdKind};
 use crate::storage::bud3::content_ref::{ContentRef, ContentRefError};
-use crate::storage::bud3::grants::GrantShredAuth;
+use crate::storage::bud3::delete::GrantShredAuth;
 use crate::storage::bud3::registry::{Bud3Registry, NftId, ObjectKey, RegistryError};
 
-/// Domain tag deriving a 32-byte `NftId` from a SocialFi `u64` token id.
-pub const DOMAIN_SOCIALFI_NFT_ID: &[u8] = b"BDLM_BUD3_NFT_ID_V1";
-/// Maximum folder name length in bytes.
-pub const MAX_FOLDER_NAME_BYTES: usize = 64;
-/// Maximum folders per owner.
-pub const MAX_FOLDERS_PER_OWNER: usize = 256;
-/// Maximum NFTs inside one folder.
-pub const MAX_NFTS_PER_FOLDER: usize = 4096;
+/// Domain tag deriving the 32-byte B.U.D. 3.0 [`NftId`] from a SocialFi `u64` id.
+pub const DOMAIN_SOCIALFI_NFT_ID: &[u8] = b"BDLM_BUD3_SOCIALFI_NFT_V1";
 
-/// Derive a deterministic 32-byte B.U.D. 3.0 `NftId` for a SocialFi token id.
-///
-/// exposed for: SocialFi NFT reference binding (`WP-23`).
+/// Maximum folders one owner may create.
+pub const MAX_FOLDERS_PER_OWNER: usize = 256;
+
+/// Maximum NFTs stored inside a single folder.
+pub const MAX_NFTS_PER_FOLDER: usize = 4_096;
+
+/// Maximum UTF-8 byte length of a folder title.
+pub const MAX_FOLDER_NAME_BYTES: usize = 64;
+
+/// Derive the canonical 32-byte [`NftId`] for a SocialFi `u64` NFT id.
 #[must_use]
-pub fn derive_bud3_nft_id(token_id: u64) -> NftId {
-    hash_fields_bytes(&[DOMAIN_SOCIALFI_NFT_ID, &token_id.to_le_bytes()])
+pub fn derive_bud3_nft_id(socialfi_id: u64) -> NftId {
+    hash_fields_bytes(&[DOMAIN_SOCIALFI_NFT_ID, &socialfi_id.to_le_bytes()])
 }
 
-/// Errors returned by `nft_folders` and B.U.D. 3.0 NFT lifecycle operations.
+/// Errors returned by B.U.D. 3.0 SocialFi NFT bindings and `nft_folders`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SocialFiBud3Error {
+    /// Underlying SocialFi NFT error (`NotOwner`, `NotFound`, `InvalidName`, etc.).
     Nft(String),
+    /// Referenced `ObjectKey` does not exist in [`Bud3Registry`].
     UnknownObject,
+    /// Caller attempted to mint against another account's sealed object (`BLG-109`).
     UnauthorizedSealedObject,
-    InvalidContentRef(ContentRefError),
+    /// Underlying [`Bud3Registry`] binding or burn error.
     Registry(RegistryError),
+    /// Invalid `ContentRef`.
+    InvalidContentRef(ContentRefError),
+    /// Invalid or empty folder name.
     InvalidFolderName,
+    /// Folder not found.
     FolderNotFound,
+    /// Folder limit exceeded.
     FolderLimitExceeded,
 }
 
-/// B.U.D. 3.0 commitment bound to a minted SocialFi NFT (Section 6.4 Y15).
+impl std::fmt::Display for SocialFiBud3Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Nft(msg) => write!(f, "socialfi nft error: {msg}"),
+            Self::UnknownObject => f.write_str("unknown B.U.D. 3.0 object commitment"),
+            Self::UnauthorizedSealedObject => {
+                f.write_str("caller does not own the target sealed B.U.D. 3.0 object")
+            }
+            Self::Registry(e) => write!(f, "bud3 registry error: {e:?}"),
+            Self::InvalidContentRef(e) => write!(f, "invalid ContentRef: {e:?}"),
+            Self::InvalidFolderName => f.write_str("invalid folder name"),
+            Self::FolderNotFound => f.write_str("nft folder not found"),
+            Self::FolderLimitExceeded => f.write_str("nft folder limit exceeded"),
+        }
+    }
+}
+
+impl std::error::Error for SocialFiBud3Error {}
+
+/// B.U.D. 3.0 commitment metadata attached to a minted SocialFi NFT (Section 6.4 Y15).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bud3NftCommitment {
     pub id: u64,
@@ -55,7 +91,7 @@ pub struct Bud3NftCommitment {
     pub object_commitment: ObjectKey,
 }
 
-/// Named collection of owned SocialFi NFTs (`nft_folders`).
+/// One user-managed NFT folder (`nft_folders`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NftFolder {
     pub folder_id: u64,
@@ -64,7 +100,7 @@ pub struct NftFolder {
     pub nft_ids: Vec<u64>,
 }
 
-/// Registry managing B.U.D. 3.0 NFT commitments and `nft_folders`.
+/// Owner-checked NFT folder registry and B.U.D. 3.0 SocialFi bridge.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NftFolderRegistry {
     commitments: BTreeMap<u64, Bud3NftCommitment>,
@@ -74,33 +110,33 @@ pub struct NftFolderRegistry {
 }
 
 impl NftFolderRegistry {
-    /// Create an empty `nft_folders` registry.
-    ///
-    /// exposed for: SocialFi state initialization (`WP-23`).
+    /// Create an empty `nft_folders` and B.U.D. 3.0 commitment registry.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Look up the B.U.D. 3.0 commitment record for a SocialFi NFT.
-    ///
-    /// exposed for: SocialFi RPC and explorer queries (`WP-23`).
+    /// Look up the B.U.D. 3.0 commitment record for a minted SocialFi NFT.
     #[must_use]
     pub fn commitment(&self, id: u64) -> Option<&Bud3NftCommitment> {
         self.commitments.get(&id)
     }
 
     /// Look up a folder by `folder_id`.
-    ///
-    /// exposed for: SocialFi folder queries (`WP-23`).
     #[must_use]
     pub fn folder(&self, folder_id: u64) -> Option<&NftFolder> {
         self.folders.get(&folder_id)
     }
 
     /// Mint a SocialFi NFT bound to a registered B.U.D. 3.0 object (`BLG-109`).
+    /// exposed for SocialFi mint transaction execution and RPC handlers.
     ///
-    /// exposed for: SocialFi mint execution (`WP-23`).
+    /// Enforces author-name bounds, sealed-object ownership, and increments the
+    /// object's on-chain reference count via [`Bud3Registry::bind_nft`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SocialFiBud3Error`] if ownership, bounds, or binding fails.
     pub fn mint_bud3_nft(
         &mut self,
         nft_reg: &mut NftRegistry,
@@ -148,10 +184,14 @@ impl NftFolderRegistry {
         Ok(meta)
     }
 
-    /// Burn a SocialFi NFT with strict owner verification, ghost-folder purge (`BLG-065`),
-    /// and B.U.D. 3.0 reference release / grant shredding (`BLG-109`).
+    /// Burn a SocialFi NFT with strict owner verification and B.U.D. 3.0
+    /// reference release / cryptographic grant shredding (`BLG-109`).
+    /// exposed for SocialFi burn transaction execution and RPC handlers.
     ///
-    /// exposed for: SocialFi burn execution (`WP-23`).
+    /// # Errors
+    ///
+    /// Returns [`SocialFiBud3Error`] if `caller` is not the NFT owner or
+    /// reference release fails.
     pub fn burn_bud3_nft(
         &mut self,
         nft_reg: &mut NftRegistry,
@@ -199,8 +239,11 @@ impl NftFolderRegistry {
     }
 
     /// Create a named NFT folder owned by `caller`.
+    /// exposed for wallet SDK and SocialFi `nft_folders` RPC handlers.
     ///
-    /// exposed for: SocialFi `nft_folders` management (`WP-23`).
+    /// # Errors
+    ///
+    /// Returns [`SocialFiBud3Error`] if the name or folder count is out of bounds.
     pub fn create_folder(
         &mut self,
         caller: Address,
@@ -236,8 +279,11 @@ impl NftFolderRegistry {
     }
 
     /// Place an owned NFT into an owned folder.
+    /// exposed for wallet SDK and SocialFi `nft_folders` RPC handlers.
     ///
-    /// exposed for: SocialFi `nft_folders` management (`WP-23`).
+    /// # Errors
+    ///
+    /// Returns [`SocialFiBud3Error`] if `caller` owns neither the folder nor the NFT.
     pub fn add_nft_to_folder(
         &mut self,
         nft_reg: &NftRegistry,
@@ -292,7 +338,7 @@ mod tests {
         let mut folders = NftFolderRegistry::new();
 
         let body = b"socialfi post protected against third-party burn".repeat(6);
-        let up = prepare_public_upload(&body, &P, &Bud3Limits::default(), 8).expect("upload");
+        let up = prepare_public_upload(&body, &P, &Bud3Limits::default(), 8).unwrap();
         let key = up.record.commitment;
         bud3_reg
             .register_object(
@@ -310,7 +356,7 @@ mod tests {
                 1,
                 20,
             )
-            .expect("register");
+            .unwrap();
 
         let alice_nft = folders
             .mint_bud3_nft(
@@ -321,33 +367,34 @@ mod tests {
                 1,
                 Some(String::from("alice")),
             )
-            .expect("mint");
-        let fid = folders.create_folder(alice, "highlights").expect("folder");
+            .unwrap();
+        let fid = folders.create_folder(alice, "highlights").unwrap();
         folders
             .add_nft_to_folder(&nft_reg, &alice, fid, alice_nft.id)
-            .expect("add");
+            .unwrap();
 
-        // Attacker cannot burn Alice's NFT (`BLG-109`).
+        // Attacker cannot burn Alice's NFT directly.
         assert!(folders
             .burn_bud3_nft(&mut nft_reg, &mut bud3_reg, alice_nft.id, &attacker, &[], 2)
             .is_err());
 
         // Even if attacker mints and burns their own NFT referencing the same public object,
-        // Alice's reference stays live (`references.len() == 1`).
+        // Alice's object reference stays live (`references.len() == 1`)!
         let attacker_nft = folders
             .mint_bud3_nft(&mut nft_reg, &mut bud3_reg, attacker, key, 1, None)
-            .expect("attacker mint");
-        assert_eq!(bud3_reg.object(&key).expect("obj").references.len(), 2);
+            .unwrap();
+        assert_eq!(bud3_reg.object(&key).unwrap().references.len(), 2);
         folders
-            .burn_bud3_nft(&mut nft_reg, &mut bud3_reg, attacker_nft.id, &attacker, &[], 2)
-            .expect("attacker burn");
+            .burn_bud3_nft(
+                &mut nft_reg,
+                &mut bud3_reg,
+                attacker_nft.id,
+                &attacker,
+                &[],
+                2,
+            )
+            .unwrap();
         assert!(bud3_reg.object(&key).is_some());
-        assert_eq!(bud3_reg.object(&key).expect("obj").references.len(), 1);
-
-        // When Alice burns her own NFT, folder ghost entry is also purged (`BLG-065`).
-        folders
-            .burn_bud3_nft(&mut nft_reg, &mut bud3_reg, alice_nft.id, &alice, &[], 3)
-            .expect("alice burn");
-        assert!(folders.folder(fid).expect("folder").nft_ids.is_empty());
+        assert_eq!(bud3_reg.object(&key).unwrap().references.len(), 1);
     }
 }

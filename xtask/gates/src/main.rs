@@ -53,12 +53,18 @@ mod gates {
     pub mod bns_gate;
     pub mod bns_names_are_safe_in_an_address_bar;
     pub mod bridge_dual_tree;
+    pub mod bud3_codec_and_replace;
     pub mod bud3_custody_proofs;
     pub mod bud3_custody_rewards;
+    pub mod bud3_dependent_modules;
     pub mod bud3_fee_uses_physical_bytes;
     pub mod bud3_forbidden_phrases;
+    pub mod bud3_object_is_universal;
+    pub mod bud3_paid_view;
     pub mod bud3_placement;
+    pub mod bud3_qr_is_presentation;
     pub mod bud3_repair_fires;
+    pub mod bud3_sealed_and_deletion;
     pub mod bud_e2e;
     pub mod budscan_parity;
     pub mod budscan_patchset;
@@ -102,6 +108,7 @@ mod gates {
     pub mod gov_slash_evidence_is_validator_only;
     pub mod governance_invariants;
     pub mod guards_reachable;
+    pub mod handover_and_recovery;
     pub mod hash_inputs_are_length_prefixed;
     pub mod indexing_is_not_new;
     pub mod kani;
@@ -113,6 +120,7 @@ mod gates {
     pub mod mermaid;
     pub mod metrics_are_written;
     pub mod minting_paths_are_counted;
+    pub mod mobile_validator_apps;
     pub mod module_coverage;
     pub mod multi_ratio_consensus;
     pub mod named_tests;
@@ -129,6 +137,7 @@ mod gates {
     pub mod no_unicode_dashes;
     pub mod no_upstream_brands;
     pub mod node_classification_gate;
+    pub mod offline_never_slashes;
     pub mod one_house_guards;
     pub mod ownerless_dependencies;
     pub mod paid_content;
@@ -147,6 +156,7 @@ mod gates {
     pub mod refusals_no_mutate;
     pub mod regen_health_door;
     pub mod regeneration;
+    pub mod rehearsal_and_field_matrix;
     pub mod rejection_tests;
     pub mod relay;
     pub mod release_profile_pins;
@@ -274,6 +284,22 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::bridge_dual_tree::self_test,
+    },
+    Gate {
+        name: "bud3-dependent-modules",
+        replaces: None,
+        run: gates::bud3_dependent_modules::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_dependent_modules::self_test,
+    },
+    Gate {
+        name: "rehearsal-and-field-matrix",
+        replaces: None,
+        run: gates::rehearsal_and_field_matrix::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::rehearsal_and_field_matrix::self_test,
     },
     Gate {
         name: "minting-paths-are-counted",
@@ -561,36 +587,6 @@ const GATES: &[Gate] = &[
         run: gates::bud3_forbidden_phrases::run,
         run_args: None,
         self_test: gates::bud3_forbidden_phrases::self_test,
-        run_log: None,
-    },
-    // The rewritten form of `shard-placement-is-sticky-and-staked`: same
-    // properties, read from the B.U.D. 3.0 placement instead of the legacy
-    // assignment module. The old gate stays until that module is removed.
-    Gate {
-        name: "bud3-placement",
-        replaces: None,
-        run: gates::bud3_placement::run,
-        run_args: None,
-        self_test: gates::bud3_placement::self_test,
-        run_log: None,
-    },
-    Gate {
-        name: "bud3-custody-proofs",
-        replaces: None,
-        run: gates::bud3_custody_proofs::run,
-        run_args: None,
-        self_test: gates::bud3_custody_proofs::self_test,
-        run_log: None,
-    },
-    // The rewritten form of `repair-fires-on-loss`: the trigger and the repair
-    // are read from the B.U.D. 3.0 registry instead of the legacy maintenance
-    // sweep. The old gate stays until that sweep is removed.
-    Gate {
-        name: "bud3-repair-fires",
-        replaces: None,
-        run: gates::bud3_repair_fires::run,
-        run_args: None,
-        self_test: gates::bud3_repair_fires::self_test,
         run_log: None,
     },
     Gate {
@@ -1038,22 +1034,6 @@ const GATES: &[Gate] = &[
         run_log: None,
     },
     Gate {
-        name: "bud3-fee-uses-physical-bytes",
-        replaces: None,
-        run: gates::bud3_fee_uses_physical_bytes::run,
-        run_log: None,
-        run_args: None,
-        self_test: gates::bud3_fee_uses_physical_bytes::self_test,
-    },
-    Gate {
-        name: "bud3-custody-rewards",
-        replaces: None,
-        run: gates::bud3_custody_rewards::run,
-        run_log: None,
-        run_args: None,
-        self_test: gates::bud3_custody_rewards::self_test,
-    },
-    Gate {
         name: "storage-is-priced-by-size",
         replaces: Some("check-storage-is-priced-by-size.sh"),
         run: gates::storage_priced::run,
@@ -1452,20 +1432,108 @@ const GATES: &[Gate] = &[
         self_test: gates::pq_core_gate::self_test,
     },
     Gate {
-        name: "no-float-in-consensus-paths",
+        name: "bud3-fee-uses-physical-bytes",
         replaces: None,
-        run: gates::no_float_in_consensus_paths::run,
+        run: gates::bud3_fee_uses_physical_bytes::run,
         run_log: None,
         run_args: None,
-        self_test: gates::no_float_in_consensus_paths::self_test,
+        self_test: gates::bud3_fee_uses_physical_bytes::self_test,
     },
     Gate {
-        name: "workflows-cover-every-workspace",
+        name: "bud3-custody-rewards",
         replaces: None,
-        run: gates::workflows_cover_every_workspace::run,
+        run: gates::bud3_custody_rewards::run,
         run_log: None,
         run_args: None,
-        self_test: gates::workflows_cover_every_workspace::self_test,
+        self_test: gates::bud3_custody_rewards::self_test,
+    },
+    Gate {
+        name: "bud3-object-is-universal",
+        replaces: None,
+        run: gates::bud3_object_is_universal::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_object_is_universal::self_test,
+    },
+    Gate {
+        name: "bud3-qr-is-presentation",
+        replaces: None,
+        run: gates::bud3_qr_is_presentation::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_qr_is_presentation::self_test,
+    },
+    Gate {
+        name: "bud3-sealed-and-deletion",
+        replaces: None,
+        run: gates::bud3_sealed_and_deletion::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_sealed_and_deletion::self_test,
+    },
+    Gate {
+        name: "bud3-placement",
+        replaces: None,
+        run: gates::bud3_placement::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_placement::self_test,
+    },
+    Gate {
+        name: "bud3-repair-fires",
+        replaces: None,
+        run: gates::bud3_repair_fires::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_repair_fires::self_test,
+    },
+    Gate {
+        name: "bud3-custody-proofs",
+        replaces: None,
+        run: gates::bud3_custody_proofs::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_custody_proofs::self_test,
+    },
+    Gate {
+        name: "bud3-paid-view",
+        replaces: None,
+        run: gates::bud3_paid_view::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_paid_view::self_test,
+    },
+    Gate {
+        name: "offline-never-slashes",
+        replaces: None,
+        run: gates::offline_never_slashes::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::offline_never_slashes::self_test,
+    },
+    Gate {
+        name: "handover-and-recovery",
+        replaces: None,
+        run: gates::handover_and_recovery::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::handover_and_recovery::self_test,
+    },
+    Gate {
+        name: "bud3-codec-and-replace",
+        replaces: None,
+        run: gates::bud3_codec_and_replace::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_codec_and_replace::self_test,
+    },
+    Gate {
+        name: "mobile-validator-apps",
+        replaces: None,
+        run: gates::mobile_validator_apps::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::mobile_validator_apps::self_test,
     },
     Gate {
         name: "ee-workers-build-with-unwind",
@@ -1482,6 +1550,22 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::nightly_workflows_are_required::self_test,
+    },
+    Gate {
+        name: "no-float-in-consensus-paths",
+        replaces: None,
+        run: gates::no_float_in_consensus_paths::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::no_float_in_consensus_paths::self_test,
+    },
+    Gate {
+        name: "workflows-cover-every-workspace",
+        replaces: None,
+        run: gates::workflows_cover_every_workspace::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::workflows_cover_every_workspace::self_test,
     },
 ];
 

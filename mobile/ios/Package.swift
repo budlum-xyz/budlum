@@ -3,24 +3,25 @@ import PackageDescription
 
 let package = Package(
     name: "BudlumValidator",
+    defaultLocalization: "en",
     platforms: [
         .iOS(.v16),
         .macOS(.v13),
     ],
     products: [
         .library(
-            name: "BudlumValidatorCore",
-            targets: ["BudlumValidatorCore"]
+            name: "BudlumValidator",
+            targets: ["BudlumValidator"]
         ),
     ],
     targets: [
         .target(
-            name: "BudlumValidatorCore",
-            path: "BudlumValidator"
+            name: "BudlumValidator",
+            path: "Sources/BudlumValidator"
         ),
         .testTarget(
             name: "BudlumValidatorTests",
-            dependencies: ["BudlumValidatorCore"],
+            dependencies: ["BudlumValidator"],
             path: "Tests/BudlumValidatorTests"
         ),
     ]

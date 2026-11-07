@@ -4,16 +4,16 @@
 # The map moves to `absolute` mode once every line is zero.
 Anaç|0|0
 Atlas|6|48
-Budscan|32|268
+Budscan|31|264
 D-Web Passport|9|80
 DeEd|12|31
 Developer OS|6|50
 Filiz (faucet)|1|14
 Filiz (leader election)|11|225
-Fotosentez|6|15
+Fotosentez|6|14
 GT-1|0|0
 Gonca|0|0
-Graft|41|895
+Graft|43|898
 Gövde|1|1
 Kiragi|6|16
 Liquid storage|0|0
@@ -21,11 +21,11 @@ Living Threshold|5|15
 Mikoriza|23|78
 Mobile Self|13|117
 PUL|13|99
-Pollen|69|737
+Pollen|70|746
 Regeneration|43|316
 Sera|0|0
-Tarif|51|1442
+Tarif|51|1421
 Universal Gateway|4|7
 Vault (SocialFi)|7|152
-budlumxyz|25|203
-three_* modules|31|201
+budlumxyz|26|205
+three_* modules|30|195

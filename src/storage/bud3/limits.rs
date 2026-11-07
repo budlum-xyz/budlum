@@ -66,6 +66,56 @@ impl Profile {
     }
 }
 
+/// P1, the derived optical presentation profile for screen-to-camera transfer
+/// and live display: QR version `25..=30`, ECC L, symbol `550..=900` bytes,
+/// `10..=30` fps. P1 is derived on demand and never written inside BOF-1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpticalProfile {
+    /// ISO QR version (`25..=30`).
+    pub qr_version: u8,
+    /// Symbol payload bytes per optical QR frame (`550..=900`).
+    pub symbol_size: u16,
+    /// Display cadence in frames per second (`10..=30`).
+    pub fps: u16,
+    /// Maximum source symbols per segment (`<= RFC6330_MAX_SOURCE_SYMBOLS`).
+    pub k_max: u32,
+}
+
+impl OpticalProfile {
+    /// Default P1 screen-to-camera profile: QR v28, 768-byte symbols, 15 fps.
+    pub const P1_DEFAULT: Self = Self {
+        qr_version: 28,
+        symbol_size: 768,
+        fps: 15,
+        k_max: 4096,
+    };
+
+    /// Validate that all parameters sit inside the P1 optical envelope.
+    #[must_use]
+    pub const fn is_valid(&self) -> bool {
+        self.qr_version >= 25
+            && self.qr_version <= 30
+            && self.symbol_size >= 550
+            && self.symbol_size <= 900
+            && self.fps >= 10
+            && self.fps <= 30
+            && self.k_max > 0
+            && self.k_max <= RFC6330_MAX_SOURCE_SYMBOLS
+    }
+
+    /// Convenience: project P1 into an ephemeral coding `Profile` for optical framing.
+    #[must_use]
+    pub const fn as_ephemeral_profile(&self) -> Profile {
+        Profile {
+            id: 1,
+            qr_version: self.qr_version,
+            symbol_size: self.symbol_size,
+            fps: self.fps,
+            k_max: self.k_max,
+        }
+    }
+}
+
 /// The B.U.D. 3.0 limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bud3Limits {

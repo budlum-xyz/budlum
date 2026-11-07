@@ -18,9 +18,7 @@
 //!   without one marks a miss. A miss withholds the window's reward; it never
 //!   slashes.
 //!
-//! WIRING: unwired - the `StorageTx` v3 transaction door and the block
-//! executor call these methods when the legacy storage registry is removed;
-//! until then the state machine is exercised by its tests.
+//! exposed for `Executor::apply_transaction`, `Bud3RpcService`, and maintenance sweeps.
 
 use super::content_id::{ContentId, ContentIdKind};
 use super::custody::{
@@ -28,7 +26,13 @@ use super::custody::{
     MOBILE_AUDIT_PPM,
 };
 use super::dedup_index::DedupIndex;
-use super::grants::{GrantBud3Error, GrantRow, GrantShredAuth};
+use super::delete::{check_same_owner_dependency, GrantShredAuth, ShredOutcome};
+use super::fees::{
+    distribute_object_endowment_epoch, renewal_fee_epochs, split_storage_fee,
+    storage_fee_for_epochs, FeeParams, FeeRecord, ObjectEndowment, ShareRewardInput,
+    PRESENCE_PPM_SCALE,
+};
+use super::grants::{GrantBud3Error, GrantRow};
 use super::pipeline::ObjectRecord;
 use super::placement::{Class, Share};
 use super::segment::Segmentation;
@@ -115,6 +119,9 @@ pub struct ObjectEntry {
     /// Per segment, the next ESI never yet used. Repair takes new ESIs from
     /// here, so a lost ESI is never produced twice.
     pub next_esi: Vec<u32>,
+    /// Custody Endowment accounting for this object.
+    #[serde(default)]
+    pub endowment: ObjectEndowment,
 }
 
 /// Audit windows and probabilities, in epochs and ppm.
@@ -178,8 +185,22 @@ pub enum RegistryError {
     /// The codec is not open: an object carrying it could never produce its
     /// content again on the viewer's device.
     CodecNotOpen(u16),
-    /// View-grant issuance, lookup, or revocation failed.
-    BadGrant(GrantBud3Error),
+    /// View-grant issuance or revocation failed validation.
+    Grant(GrantBud3Error),
+    /// A dependent delta or derived object attempted cross-owner base binding.
+    CrossOwnerDependency,
+    /// A base object still has live dependent objects and must be detached first.
+    HasDependents,
+    /// Object replacement failed `ContentId` or placement-group attestation checks.
+    BadReplacement(super::replace::ReplaceError),
+    /// Mobile custody quota outside `[mobile_quota_min_bytes, mobile_quota_max_bytes]`.
+    BadQuota(super::limits::LimitError),
+}
+
+impl From<GrantBud3Error> for RegistryError {
+    fn from(e: GrantBud3Error) -> Self {
+        Self::Grant(e)
+    }
 }
 
 /// An RPC read of the registry.
@@ -189,6 +210,8 @@ pub enum Bud3Query {
     Object(ObjectKey),
     /// The shares one validator holds.
     Custody(Address),
+    /// One unlinkable view grant by `grant_tag`.
+    Grant([u8; 32]),
 }
 
 /// What a registration did.
@@ -212,8 +235,13 @@ pub struct Bud3Registry {
     nfts: BTreeMap<NftId, (ObjectKey, Address)>,
     tombstones: BTreeMap<ObjectKey, u64>,
     declines: BTreeSet<([u8; 32], Address)>,
+    custody_credits: BTreeMap<Address, u64>,
+    presence_ppm: BTreeMap<Address, u32>,
+    forfeited_pool_total: u64,
     grants: BTreeMap<[u8; 32], GrantRow>,
-    revoked_grant_tags: BTreeSet<[u8; 32]>,
+    revoked_grants: BTreeSet<[u8; 32]>,
+    base_deps: BTreeMap<ObjectKey, BTreeSet<ObjectKey>>,
+    validator_quotas: BTreeMap<Address, u64>,
 }
 
 /// The serialized form of [`Bud3Registry`].
@@ -225,9 +253,19 @@ struct FlatRegistry {
     tombstones: Vec<(ObjectKey, u64)>,
     declines: Vec<([u8; 32], Address)>,
     #[serde(default)]
+    custody_credits: Vec<(Address, u64)>,
+    #[serde(default)]
+    presence_ppm: Vec<(Address, u32)>,
+    #[serde(default)]
+    forfeited_pool_total: u64,
+    #[serde(default)]
     grants: Vec<([u8; 32], GrantRow)>,
     #[serde(default)]
-    revoked_grant_tags: Vec<[u8; 32]>,
+    revoked_grants: Vec<[u8; 32]>,
+    #[serde(default)]
+    base_deps: Vec<(ObjectKey, Vec<ObjectKey>)>,
+    #[serde(default)]
+    validator_quotas: Vec<(Address, u64)>,
 }
 
 impl From<Bud3Registry> for FlatRegistry {
@@ -238,8 +276,17 @@ impl From<Bud3Registry> for FlatRegistry {
             nfts: r.nfts.into_iter().collect(),
             tombstones: r.tombstones.into_iter().collect(),
             declines: r.declines.into_iter().collect(),
+            custody_credits: r.custody_credits.into_iter().collect(),
+            presence_ppm: r.presence_ppm.into_iter().collect(),
+            forfeited_pool_total: r.forfeited_pool_total,
             grants: r.grants.into_iter().collect(),
-            revoked_grant_tags: r.revoked_grant_tags.into_iter().collect(),
+            revoked_grants: r.revoked_grants.into_iter().collect(),
+            base_deps: r
+                .base_deps
+                .into_iter()
+                .map(|(k, set)| (k, set.into_iter().collect()))
+                .collect(),
+            validator_quotas: r.validator_quotas.into_iter().collect(),
         }
     }
 }
@@ -252,8 +299,17 @@ impl From<FlatRegistry> for Bud3Registry {
             nfts: f.nfts.into_iter().collect(),
             tombstones: f.tombstones.into_iter().collect(),
             declines: f.declines.into_iter().collect(),
+            custody_credits: f.custody_credits.into_iter().collect(),
+            presence_ppm: f.presence_ppm.into_iter().collect(),
+            forfeited_pool_total: f.forfeited_pool_total,
             grants: f.grants.into_iter().collect(),
-            revoked_grant_tags: f.revoked_grant_tags.into_iter().collect(),
+            revoked_grants: f.revoked_grants.into_iter().collect(),
+            base_deps: f
+                .base_deps
+                .into_iter()
+                .map(|(k, v)| (k, v.into_iter().collect()))
+                .collect(),
+            validator_quotas: f.validator_quotas.into_iter().collect(),
         }
     }
 }
@@ -366,6 +422,14 @@ impl Bud3Registry {
         {
             return Err(RegistryError::Declined);
         }
+        let fee_record = FeeRecord::from_placed_shares(&record, &shares);
+        let initial_fee = storage_fee_for_epochs(
+            fee_record.user_physical_bytes,
+            lifetime_epochs,
+            &FeeParams::TESTNET_DEFAULT,
+        )
+        .map_err(|_| RegistryError::BadLifetime)?;
+        let endowment = ObjectEndowment::new(fee_record, split_storage_fee(initial_fee));
         let shares = shares
             .into_iter()
             .map(|(segment, share)| ShareState {
@@ -405,6 +469,7 @@ impl Bud3Registry {
                 shares,
                 roots,
                 next_esi,
+                endowment,
             },
         );
         Ok(Registered::New(key))
@@ -437,22 +502,36 @@ impl Bud3Registry {
         Ok(())
     }
 
-    /// The reference count of an object.
+    /// The reference count of an object (bound NFTs plus same-owner dependent objects).
     #[must_use]
     pub fn refcount(&self, key: &ObjectKey) -> u64 {
-        self.objects
+        let nft_refs = self
+            .objects
             .get(key)
-            .map_or(0, |o| o.references.len() as u64)
+            .map_or(0, |o| o.references.len() as u64);
+        let dep_refs = self
+            .base_deps
+            .get(key)
+            .map_or(0, |d| d.len() as u64);
+        nft_refs.saturating_add(dep_refs)
     }
 
     fn delete(&mut self, key: &ObjectKey, epoch: u64) {
         if let Some(obj) = self.objects.remove(key) {
+            // Early burn or replacement never refunds prior storage fees; any
+            // undistributed balance enters the Network Security Pool.
+            if obj.endowment.remaining_balance > 0 {
+                self.forfeited_pool_total = self
+                    .forfeited_pool_total
+                    .saturating_add(obj.endowment.remaining_balance);
+            }
             if obj.record.content_id.kind == ContentIdKind::Public {
                 self.public_index.remove(&obj.record.content_id.digest);
             }
             for nft in obj.references {
                 self.nfts.remove(&nft);
             }
+            self.base_deps.remove(key);
             self.tombstones.insert(*key, epoch);
         }
     }
@@ -462,7 +541,9 @@ impl Bud3Registry {
     ///
     /// # Errors
     ///
-    /// [`RegistryError::UnknownNft`] or [`RegistryError::NotAuthorized`].
+    /// [`RegistryError::UnknownNft`], [`RegistryError::NotAuthorized`], or
+    /// [`RegistryError::HasDependents`] when burning the last NFT of a base
+    /// object that still has dependent delta/derived objects.
     pub fn burn_reference(
         &mut self,
         nft: &NftId,
@@ -473,15 +554,190 @@ impl Bud3Registry {
         if holder != *signer {
             return Err(RegistryError::NotAuthorized);
         }
+        let has_deps = self.base_deps.get(&key).is_some_and(|d| !d.is_empty());
+        let nft_count = self.objects.get(&key).map_or(0, |o| o.references.len());
+        if nft_count <= 1 && has_deps {
+            return Err(RegistryError::HasDependents);
+        }
         self.nfts.remove(nft);
-        let empty = self.objects.get_mut(&key).is_some_and(|o| {
+        let no_nfts = self.objects.get_mut(&key).is_some_and(|o| {
             o.references.remove(nft);
             o.references.is_empty()
         });
-        if empty {
+        let deleted = no_nfts && !has_deps;
+        if deleted {
             self.delete(&key, epoch);
         }
-        Ok(empty)
+        Ok(deleted)
+    }
+
+    /// Register a same-owner dependency (`dependent` relies on `base` via delta or crop).
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::UnknownObject`] or [`RegistryError::CrossOwnerDependency`].
+    pub fn register_dependency(
+        &mut self,
+        dependent: ObjectKey,
+        base: ObjectKey,
+    ) -> Result<(), RegistryError> {
+        if dependent == base {
+            return Err(RegistryError::BadRecord("self dependency"));
+        }
+        let dep_owner = self
+            .objects
+            .get(&dependent)
+            .ok_or(RegistryError::UnknownObject)?
+            .owner;
+        let base_owner = self
+            .objects
+            .get(&base)
+            .ok_or(RegistryError::UnknownObject)?
+            .owner;
+        if !check_same_owner_dependency(&dep_owner, &base_owner) {
+            return Err(RegistryError::CrossOwnerDependency);
+        }
+        self.base_deps.entry(base).or_default().insert(dependent);
+        Ok(())
+    }
+
+    /// Convenience: detach `dependent` from `base` after standalone rehydration.
+    pub fn detach_dependency(&mut self, dependent: &ObjectKey, base: &ObjectKey, epoch: u64) {
+        let mut remove_entry = false;
+        if let Some(set) = self.base_deps.get_mut(base) {
+            set.remove(dependent);
+            remove_entry = set.is_empty();
+        }
+        if remove_entry {
+            self.base_deps.remove(base);
+            if self
+                .objects
+                .get(base)
+                .is_some_and(|o| o.references.is_empty())
+            {
+                self.delete(base, epoch);
+            }
+        }
+    }
+
+    /// `IssueViewGrant`: record an unlinkable [`GrantRow`] carrying no `content_id`,
+    /// `issuer`, or `grantee`.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::Grant`] if the tag is duplicate/revoked, expired, or has
+    /// an invalid ML-DSA-65 one-time key or HPKE X-Wing (`0x647a`) package.
+    pub fn issue_view_grant(&mut self, row: GrantRow, epoch: u64) -> Result<(), RegistryError> {
+        if self.grants.contains_key(&row.grant_tag)
+            || self.revoked_grants.contains(&row.grant_tag)
+        {
+            return Err(RegistryError::Grant(GrantBud3Error::DuplicateOrRevokedTag));
+        }
+        row.validate_for_issue(epoch)?;
+        self.grants.insert(row.grant_tag, row);
+        Ok(())
+    }
+
+    /// Issue a view grant through the canonical issuance path.
+    pub fn issue_grant(&mut self, row: GrantRow, epoch: u64) -> Result<(), RegistryError> {
+        self.issue_view_grant(row, epoch)
+    }
+
+    /// Return a grant only while it is live at `current_epoch`.
+    #[must_use]
+    pub fn active_grant(&self, grant_tag: &[u8; 32], current_epoch: u64) -> Option<&GrantRow> {
+        self.grant_row(grant_tag)
+            .filter(|row| row.expires_at_epoch > current_epoch)
+    }
+
+    /// `RevokeViewGrant`: verify the owner's one-time ML-DSA-65 signature and
+    /// permanently delete the grant row and its HPKE key package.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::Grant`] if the grant is unknown or the signature fails.
+    pub fn revoke_view_grant(
+        &mut self,
+        grant_tag: &[u8; 32],
+        one_time_signature: &[u8],
+    ) -> Result<(), RegistryError> {
+        let row = self
+            .grants
+            .get(grant_tag)
+            .ok_or(RegistryError::Grant(GrantBud3Error::UnknownGrant))?;
+        row.verify_revocation(one_time_signature)?;
+        self.grants.remove(grant_tag);
+        self.revoked_grants.insert(*grant_tag);
+        Ok(())
+    }
+
+    /// Convenience: read a live grant row by `grant_tag`; returns `None` once
+    /// revoked, expired, or shredded so revoked key packages are never served.
+    #[must_use]
+    pub fn grant_row(&self, grant_tag: &[u8; 32]) -> Option<&GrantRow> {
+        self.grants.get(grant_tag)
+    }
+
+    /// `SocialDelete`: atomically verify and shred every listed view-grant
+    /// capsule (`grant_shreds`), then burn `nft`'s reference and tombstone the
+    /// object if zero references remain. All checks run before any state write.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError`] if `signer` does not own `nft`, a base dependency blocks
+    /// deletion, or any grant shred authorization fails verification.
+    pub fn social_delete(
+        &mut self,
+        nft: &NftId,
+        signer: &Address,
+        grant_shreds: &[GrantShredAuth],
+        epoch: u64,
+    ) -> Result<ShredOutcome, RegistryError> {
+        let (key, holder) = *self.nfts.get(nft).ok_or(RegistryError::UnknownNft)?;
+        if holder != *signer {
+            return Err(RegistryError::NotAuthorized);
+        }
+        let has_deps = self.base_deps.get(&key).is_some_and(|d| !d.is_empty());
+        let nft_count = self.objects.get(&key).map_or(0, |o| o.references.len());
+        if nft_count <= 1 && has_deps {
+            return Err(RegistryError::HasDependents);
+        }
+
+        let mut seen = BTreeSet::new();
+        for auth in grant_shreds {
+            if !seen.insert(auth.grant_tag) {
+                return Err(RegistryError::Grant(GrantBud3Error::DuplicateOrRevokedTag));
+            }
+            let row = self
+                .grants
+                .get(&auth.grant_tag)
+                .ok_or(RegistryError::Grant(GrantBud3Error::UnknownGrant))?;
+            row.verify_revocation(&auth.one_time_signature)?;
+        }
+
+        for auth in grant_shreds {
+            self.grants.remove(&auth.grant_tag);
+            self.revoked_grants.insert(auth.grant_tag);
+        }
+        let object_deleted = self.burn_reference(nft, signer, epoch)?;
+        Ok(ShredOutcome {
+            object: key,
+            grants_shredded: grant_shreds.len(),
+            object_deleted,
+        })
+    }
+
+    /// Convenience: DAO governance takedown targeting a public content digest
+    /// (Section 6.8.3.5 & 6.21.6.2). Sealed content never enters `public_index`
+    /// and cannot be targeted here.
+    pub fn dao_delete_public_content(
+        &mut self,
+        public_digest: &[u8; 32],
+        epoch: u64,
+    ) -> Option<ObjectKey> {
+        let key = *self.public_index.get(public_digest)?;
+        self.delete(&key, epoch);
+        Some(key)
     }
 
     /// `RenewObject`: anyone may extend the paid lifetime.
@@ -497,16 +753,163 @@ impl Bud3Registry {
             .objects
             .get_mut(key)
             .ok_or(RegistryError::UnknownObject)?;
-        obj.expires_at = obj
+        let new_expires = obj
             .expires_at
             .checked_add(extra_epochs)
             .ok_or(RegistryError::BadLifetime)?;
+        if obj.endowment.fee_record.user_physical_bytes > 0 {
+            let fee = renewal_fee_epochs(
+                obj.endowment.fee_record.user_physical_bytes,
+                extra_epochs,
+                &FeeParams::TESTNET_DEFAULT,
+            )
+            .map_err(|_| RegistryError::BadLifetime)?;
+            obj.endowment.deposit(split_storage_fee(fee));
+        }
+        obj.expires_at = new_expires;
         Ok(obj.expires_at)
     }
 
-    /// Expire every object past its paid lifetime; expiry is handled as a
-    /// burn of every reference. Returns the deleted keys.
+    /// Admit and record a Mobile validator's declared custody quota under `limits`.
+    /// Convenience: exposed for Mobile validator quota updates and RPC admission.
+    pub fn set_mobile_custody_quota(
+        &mut self,
+        validator: Address,
+        quota_bytes: u64,
+        limits: &super::limits::Bud3Limits,
+    ) -> Result<(), RegistryError> {
+        limits
+            .admit_mobile_quota(quota_bytes)
+            .map_err(RegistryError::BadQuota)?;
+        self.validator_quotas.insert(validator, quota_bytes);
+        Ok(())
+    }
+
+    /// `ReplaceObject` (Section 6.14): atomically replace `old_key` with `new_record`
+    /// carrying the identical `ContentId`, verified by `>= 3` Full validators from
+    /// `old_key`'s placement group. Bound NFTs re-point to `new_record.commitment`;
+    /// prior fees are never refunded (`no_refund_on_replace`).
+    pub fn replace_object(
+        &mut self,
+        proposer: (Address, u64),
+        old_key: &ObjectKey,
+        new_record: ObjectRecord,
+        new_shares: Vec<(u64, Share)>,
+        attestations: &[super::replace::ReplaceAttestation],
+        epoch: u64,
+    ) -> Result<ObjectKey, RegistryError> {
+        let (sender, proposer_stake) = proposer;
+        let old_entry = self.objects.get(old_key).ok_or(RegistryError::UnknownObject)?;
+        let pg_full: BTreeSet<Address> = old_entry
+            .shares
+            .iter()
+            .filter(|s| s.share.class == Class::Full)
+            .map(|s| s.share.validator)
+            .collect();
+        super::replace::admit_object_replacement(
+            &sender,
+            &old_entry.owner,
+            proposer_stake,
+            &old_entry.record,
+            &new_record,
+            &pg_full,
+            attestations,
+        )
+        .map_err(RegistryError::BadReplacement)?;
+
+        let new_key = new_record.commitment;
+        if self.tombstones.contains_key(&new_key) {
+            return Err(RegistryError::Tombstoned);
+        }
+        check_placement(&new_record, &new_shares)?;
+
+        let owner = old_entry.owner;
+        let expires_at = old_entry.expires_at.max(epoch.saturating_add(1));
+        let remaining_epochs = expires_at.saturating_sub(epoch).max(1);
+        let refs = old_entry.references.clone();
+        let digest = new_record.content_id.digest;
+        let is_public = new_record.content_id.kind == ContentIdKind::Public;
+
+        let fee_record = FeeRecord::from_placed_shares(&new_record, &new_shares);
+        let new_fee = storage_fee_for_epochs(
+            fee_record.user_physical_bytes,
+            remaining_epochs,
+            &FeeParams::TESTNET_DEFAULT,
+        )
+        .map_err(|_| RegistryError::BadLifetime)?;
+        let endowment = ObjectEndowment::new(fee_record, split_storage_fee(new_fee));
+
+        let shares = new_shares
+            .into_iter()
+            .map(|(segment, share)| ShareState {
+                segment,
+                share,
+                status: ShareStatus::Pending,
+                open_audit: None,
+                passes: 0,
+                misses: 0,
+                consecutive_misses: 0,
+                lost: false,
+                root: usize::try_from(segment).unwrap_or(usize::MAX),
+            })
+            .collect();
+        let roots = new_record
+            .symbol_roots
+            .iter()
+            .enumerate()
+            .map(|(i, r)| SymbolRoot {
+                segment: i as u64,
+                root: *r,
+                first_esi: 0,
+                count: new_record.symbols_per_segment,
+            })
+            .collect();
+        let next_esi = vec![new_record.symbols_per_segment; new_record.symbol_roots.len()];
+
+        // Forfeit any remaining endowment on the replaced object to the security pool
+        // (never refunded) and rebind every NFT reference atomically to `new_key`.
+        if let Some(removed) = self.objects.remove(old_key) {
+            let forfeited = removed.endowment.remaining_balance;
+            self.forfeited_pool_total = self.forfeited_pool_total.saturating_add(forfeited);
+        }
+        for nft in &refs {
+            if let Some((bound_obj, _)) = self.nfts.get_mut(nft) {
+                *bound_obj = new_key;
+            }
+        }
+        if is_public {
+            self.public_index.insert(digest, new_key);
+        }
+        self.tombstones.insert(*old_key, epoch);
+        self.objects.insert(
+            new_key,
+            ObjectEntry {
+                record: new_record,
+                owner,
+                references: refs,
+                expires_at,
+                shares,
+                roots,
+                next_esi,
+                endowment,
+            },
+        );
+        Ok(new_key)
+    }
+
+    /// Expire every object and unlinkable view grant past its paid lifetime.
+    /// Returns the deleted object keys.
     pub fn expire(&mut self, epoch: u64) -> Vec<ObjectKey> {
+        let expired_grants: Vec<[u8; 32]> = self
+            .grants
+            .iter()
+            .filter(|(_, g)| g.expires_at_epoch < epoch)
+            .map(|(tag, _)| *tag)
+            .collect();
+        for tag in expired_grants {
+            self.grants.remove(&tag);
+            self.revoked_grants.insert(tag);
+        }
         let due: Vec<ObjectKey> = self
             .objects
             .iter()
@@ -519,9 +922,84 @@ impl Bud3Registry {
         due
     }
 
-    /// `DeclineContent`: a validator refuses future shares of a content id.
+    /// `DeclineContent`: a validator refuses shares of `content`. Any existing
+    /// share held by `validator` on an object with `content` enters share-loss
+    /// reassignment without penalty (WP-20 item 10).
     pub fn decline(&mut self, validator: Address, content: &ContentId) {
         self.declines.insert((content.digest, validator));
+        for obj in self.objects.values_mut() {
+            if obj.record.content_id.digest == content.digest {
+                for s in obj
+                    .shares
+                    .iter_mut()
+                    .filter(|s| s.share.validator == validator && !s.lost)
+                {
+                    s.lost = true;
+                    s.open_audit = None;
+                }
+            }
+        }
+    }
+
+    /// Convenience: set `validator`'s declared custody quota in bytes.
+    pub fn set_validator_quota(&mut self, validator: Address, quota_bytes: u64) {
+        self.validator_quotas.insert(validator, quota_bytes);
+    }
+
+    /// Convenience: read `validator`'s declared custody quota in bytes.
+    #[must_use]
+    pub fn validator_quota(&self, validator: &Address) -> u64 {
+        self.validator_quotas.get(validator).copied().unwrap_or(0)
+    }
+
+    /// Look up the live `ObjectKey` indexed under a public content digest.
+    /// Convenience: exposed for upload-session deduplication and RPC lookup.
+    #[must_use]
+    pub fn public_object(&self, public_digest: &[u8; 32]) -> Option<ObjectKey> {
+        self.public_index.get(public_digest).copied()
+    }
+
+    /// Whether `key` has been deleted and recorded in the tombstone map.
+    /// Convenience: exposed for deletion verification and RPC inspection.
+    #[must_use]
+    pub fn is_tombstoned(&self, key: &ObjectKey) -> bool {
+        self.tombstones.contains_key(key)
+    }
+
+    /// `ReleaseShares`: `holder` voluntarily releases its share(s) of `key`
+    /// (on `segment`, or across all segments when `None`) and lowers its
+    /// declared quota by `lower_quota_bytes` without any slash or penalty
+    /// (WP-20 item 11). Released shares enter the share-loss reassignment path.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::UnknownObject`].
+    pub fn release_shares(
+        &mut self,
+        holder: &Address,
+        key: &ObjectKey,
+        segment: Option<u64>,
+        lower_quota_bytes: u64,
+    ) -> Result<usize, RegistryError> {
+        let obj = self
+            .objects
+            .get_mut(key)
+            .ok_or(RegistryError::UnknownObject)?;
+        let mut released = 0usize;
+        for s in &mut obj.shares {
+            let seg_matches = segment.is_none_or(|want| s.segment == want);
+            if s.share.validator == *holder && seg_matches && !s.lost {
+                s.lost = true;
+                s.open_audit = None;
+                released += 1;
+            }
+        }
+        if lower_quota_bytes > 0 {
+            let current = self.validator_quotas.get(holder).copied().unwrap_or(0);
+            self.validator_quotas
+                .insert(*holder, current.saturating_sub(lower_quota_bytes));
+        }
+        Ok(released)
     }
 
     /// `CustodyAck`: the holder confirms its shares of `key`. Returns how many
@@ -581,6 +1059,26 @@ impl Bud3Registry {
         opened
     }
 
+    /// Convenience: list every currently open `(object, audit, deadline_epoch)`
+    /// assigned to `holder`.
+    #[must_use]
+    pub fn open_audits_for(
+        &self,
+        holder: &Address,
+    ) -> Vec<(ObjectKey, super::custody::Audit, u64)> {
+        let mut out = Vec::new();
+        for (key, obj) in &self.objects {
+            for s in &obj.shares {
+                if s.share.validator == *holder && !s.lost {
+                    if let Some((audit, deadline)) = s.open_audit {
+                        out.push((*key, audit, deadline));
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// `CustodyProofBatch`: check each proof of `holder` against its open
     /// audit. Valid proofs mark a pass; the batch refuses as a whole if any
     /// proof is invalid, so a refused batch changes nothing.
@@ -638,8 +1136,10 @@ impl Bud3Registry {
         Ok(hits.len())
     }
 
-    /// Close every audit window that ended before `epoch`: each is a miss.
-    /// Returns the number of misses.
+    /// Close every audit window that ended before `epoch`: each is a miss,
+    /// then settle this epoch's Custody Endowment rewards across live objects.
+    /// Missed windows withhold that window's reward and route it to the Network
+    /// Security Pool without slashing stake. Returns the number of misses.
     pub fn close_windows(&mut self, epoch: u64) -> usize {
         let mut missed = 0;
         for obj in self.objects.values_mut() {
@@ -659,7 +1159,72 @@ impl Bud3Registry {
                 }
             }
         }
+        self.tick_endowments_at_epoch(epoch);
         missed
+    }
+
+    fn tick_endowments_at_epoch(&mut self, epoch: u64) {
+        let declines = &self.declines;
+        let presence = &self.presence_ppm;
+        let credits = &mut self.custody_credits;
+        let forfeited_total = &mut self.forfeited_pool_total;
+        for obj in self.objects.values_mut() {
+            if obj.endowment.remaining_balance == 0 {
+                continue;
+            }
+            let remaining_epochs = obj.expires_at.saturating_sub(epoch).saturating_add(1);
+            let symbol_size = u64::from(obj.record.profile.symbol_size);
+            let digest = obj.record.content_id.digest;
+            let inputs: Vec<ShareRewardInput> = obj
+                .shares
+                .iter()
+                .map(|s| {
+                    let declined = declines.contains(&(digest, s.share.validator));
+                    let eligible = s.status == ShareStatus::Confirmed
+                        && !s.lost
+                        && !declined
+                        && s.consecutive_misses == 0;
+                    let presence_ppm = presence
+                        .get(&s.share.validator)
+                        .copied()
+                        .unwrap_or(PRESENCE_PPM_SCALE);
+                    ShareRewardInput {
+                        validator: s.share.validator,
+                        symbol_bytes: u64::from(s.share.symbols).saturating_mul(symbol_size),
+                        eligible,
+                        presence_ppm,
+                    }
+                })
+                .collect();
+            let settlement =
+                distribute_object_endowment_epoch(&mut obj.endowment, remaining_epochs, &inputs, 0);
+            for (validator, amount) in settlement.holder_payouts {
+                let entry = credits.entry(validator).or_insert(0);
+                *entry = entry.saturating_add(amount);
+            }
+            *forfeited_total =
+                forfeited_total.saturating_add(settlement.forfeited_to_security_pool);
+        }
+    }
+
+    /// Convenience: record a validator's observed presence ratio in parts per
+    /// million (`0..=1_000_000`) for subsequent Custody Endowment ticks.
+    pub fn set_validator_presence_ppm(&mut self, validator: Address, ppm: u32) {
+        self.presence_ppm
+            .insert(validator, ppm.min(PRESENCE_PPM_SCALE));
+    }
+
+    /// Convenience: read cumulative Custody Endowment rewards earned by `validator`.
+    #[must_use]
+    pub fn validator_custody_credit(&self, validator: &Address) -> u64 {
+        self.custody_credits.get(validator).copied().unwrap_or(0)
+    }
+
+    /// Convenience: read cumulative Custody Endowment amounts forfeited to the
+    /// Network Security Pool by missed audits, declined shares, or early burns.
+    #[must_use]
+    pub const fn forfeited_security_pool_total(&self) -> u64 {
+        self.forfeited_pool_total
     }
 
     /// Mark every share of `holder` lost: the holder was unseen for its
@@ -860,6 +1425,14 @@ impl Bud3Registry {
                         "references": o.references.len(),
                         "expires_at_epoch": o.expires_at,
                         "repairs_due": self.repairs_due(key),
+                        "endowment": {
+                            "user_physical_bytes": o.endowment.fee_record.user_physical_bytes,
+                            "decentralization_physical_bytes": o.endowment.fee_record.decentralization_physical_bytes,
+                            "total_deposited": o.endowment.total_deposited,
+                            "remaining_balance": o.endowment.remaining_balance,
+                            "gateway_paid": o.endowment.gateway_paid,
+                            "forfeited_to_security_pool": o.endowment.forfeited_to_security_pool,
+                        },
                     })
                 } else if let Some(epoch) = self.tombstones.get(key) {
                     serde_json::json!({
@@ -901,96 +1474,44 @@ impl Bud3Registry {
                 serde_json::json!({
                     "validator": hex::encode(validator),
                     "count": shares.len(),
+                    "earned_custody_rewards": self.validator_custody_credit(validator),
                     "shares": shares,
                 })
+            }
+            Bud3Query::Grant(tag) => {
+                if let Some(row) = self.grants.get(tag) {
+                    serde_json::json!({
+                        "grant_tag": hex::encode(row.grant_tag),
+                        "status": "active",
+                        "one_time_pk": hex::encode(&row.one_time_pk),
+                        "sealed_key_package": hex::encode(&row.sealed_key_package),
+                        "expires_at_epoch": row.expires_at_epoch,
+                    })
+                } else if self.revoked_grants.contains(tag) {
+                    serde_json::json!({
+                        "grant_tag": hex::encode(tag),
+                        "status": "revoked",
+                    })
+                } else {
+                    serde_json::Value::Null
+                }
             }
         }
     }
 
-    /// Whether the registry holds nothing.
+    /// Whether the registry is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.objects.is_empty()
             && self.tombstones.is_empty()
             && self.declines.is_empty()
+            && self.custody_credits.is_empty()
+            && self.presence_ppm.is_empty()
+            && self.forfeited_pool_total == 0
             && self.grants.is_empty()
-            && self.revoked_grant_tags.is_empty()
-    }
-
-    /// Look up a live, non-expired view grant by `grant_tag`.
-    ///
-    /// exposed for: `bud3::view` and Data Market access verification (`WP-23`).
-    #[must_use]
-    pub fn active_grant(&self, grant_tag: &[u8; 32], current_epoch: u64) -> Option<&GrantRow> {
-        let row = self.grants.get(grant_tag)?;
-        if row.expires_at_epoch <= current_epoch {
-            return None;
-        }
-        Some(row)
-    }
-
-    /// Issue an unlinkable B.U.D. 3.0 view grant (`WP-22`/`WP-23`).
-    ///
-    /// exposed for: Data Market `settle_purchase_with_grant` and CLI `bud storage grant`.
-    pub fn issue_grant(
-        &mut self,
-        row: GrantRow,
-        current_epoch: u64,
-    ) -> Result<(), RegistryError> {
-        if self.grants.contains_key(&row.grant_tag)
-            || self.revoked_grant_tags.contains(&row.grant_tag)
-        {
-            return Err(RegistryError::BadGrant(GrantBud3Error::DuplicateOrRevokedTag));
-        }
-        row.validate_for_issue(current_epoch)
-            .map_err(RegistryError::BadGrant)?;
-        self.grants.insert(row.grant_tag, row);
-        Ok(())
-    }
-
-    /// Revoke an active view grant with a signature under its one-time ML-DSA-65 key.
-    ///
-    /// exposed for: Data Market grant revocation and SocialFi burn shredding (`WP-23`).
-    pub fn revoke_grant(
-        &mut self,
-        grant_tag: &[u8; 32],
-        one_time_signature: &[u8],
-    ) -> Result<(), RegistryError> {
-        let row = self
-            .grants
-            .get(grant_tag)
-            .ok_or(RegistryError::BadGrant(GrantBud3Error::UnknownGrant))?;
-        row.verify_revocation(one_time_signature)
-            .map_err(RegistryError::BadGrant)?;
-        self.grants.remove(grant_tag);
-        self.revoked_grant_tags.insert(*grant_tag);
-        Ok(())
-    }
-
-    /// Atomically shred listed grants and release an NFT reference (`BLG-109`).
-    ///
-    /// exposed for: SocialFi `burn_bud3_nft` (`WP-23`).
-    pub fn social_delete(
-        &mut self,
-        nft: &NftId,
-        owner: &Address,
-        shreds: &[GrantShredAuth],
-        current_epoch: u64,
-    ) -> Result<bool, RegistryError> {
-        for s in shreds {
-            let row = self
-                .grants
-                .get(&s.grant_tag)
-                .ok_or(RegistryError::BadGrant(GrantBud3Error::UnknownGrant))?;
-            row.verify_revocation(&s.one_time_signature)
-                .map_err(RegistryError::BadGrant)?;
-        }
-        let deleted = self.burn_reference(nft, owner, current_epoch)?;
-        for s in shreds {
-            self.grants.remove(&s.grant_tag);
-            self.revoked_grant_tags.insert(s.grant_tag);
-        }
-        Ok(deleted)
+            && self.revoked_grants.is_empty()
+            && self.base_deps.is_empty()
+            && self.validator_quotas.is_empty()
     }
 
     /// The registry state root over every map, in order.
@@ -1011,6 +1532,15 @@ impl Bud3Registry {
                 &o.record.object_len.to_le_bytes(),
                 &o.expires_at.to_le_bytes(),
                 &(o.references.len() as u64).to_le_bytes(),
+                &o.endowment.fee_record.user_physical_bytes.to_le_bytes(),
+                &o.endowment
+                    .fee_record
+                    .decentralization_physical_bytes
+                    .to_le_bytes(),
+                &o.endowment.total_deposited.to_le_bytes(),
+                &o.endowment.remaining_balance.to_le_bytes(),
+                &o.endowment.gateway_paid.to_le_bytes(),
+                &o.endowment.forfeited_to_security_pool.to_le_bytes(),
             ]);
             for r in &o.roots {
                 fold(&[
@@ -1064,17 +1594,34 @@ impl Bud3Registry {
         for (d, v) in &self.declines {
             fold(&[b"decline", d, v]);
         }
-        for (tag, g) in &self.grants {
+        for (v, amt) in &self.custody_credits {
+            fold(&[b"credit", v, &amt.to_le_bytes()]);
+        }
+        for (v, ppm) in &self.presence_ppm {
+            fold(&[b"presence", v, &ppm.to_le_bytes()]);
+        }
+        if self.forfeited_pool_total > 0 {
+            fold(&[b"forfeited", &self.forfeited_pool_total.to_le_bytes()]);
+        }
+        for (tag, row) in &self.grants {
             fold(&[
                 b"grant",
                 tag,
-                &g.one_time_pk,
-                &g.sealed_key_package,
-                &g.expires_at_epoch.to_le_bytes(),
+                &row.one_time_pk,
+                &row.sealed_key_package,
+                &row.expires_at_epoch.to_le_bytes(),
             ]);
         }
-        for tag in &self.revoked_grant_tags {
+        for tag in &self.revoked_grants {
             fold(&[b"revoked_grant", tag]);
+        }
+        for (base, deps) in &self.base_deps {
+            for dep in deps {
+                fold(&[b"base_dep", base, dep]);
+            }
+        }
+        for (validator, quota) in &self.validator_quotas {
+            fold(&[b"quota", validator, &quota.to_le_bytes()]);
         }
         acc
     }

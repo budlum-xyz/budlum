@@ -91,6 +91,19 @@ impl Segmentation {
         })
     }
 
+    /// Byte range `offset..offset + len` of segment `index` in the object.
+    /// Convenience: exposed for `.bof1` text rendering and optical frame slicing.
+    #[must_use]
+    pub const fn byte_range(&self, index: u64) -> Option<std::ops::Range<u64>> {
+        let Some(start) = self.offset(index) else {
+            return None;
+        };
+        let Some(len) = self.len(index) else {
+            return None;
+        };
+        Some(start..(start + len))
+    }
+
     /// Source symbols of segment `index` (`k`). At least one, so an empty
     /// segment still codes to a padded symbol.
     #[must_use]

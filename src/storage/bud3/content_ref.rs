@@ -1,6 +1,10 @@
-//! Permanent B.U.D. 3.0 content reference (`ContentRef`, WP-23 & Section 5.7).
+//! Permanent B.U.D. 3.0 content reference (`ContentRef`, WP-21 item 7).
+//! exposed for BNS, SocialFi, DataMarket, EducationDomain, and gateway callers.
 //!
-//! exposed for: BNS, SocialFi, Data Market, Education Domain, and App Registry.
+//! Replaces transitional pre-B.U.D.-3.0 content pointers without any
+//! `Bud3NotReady` rejection: every dependent domain (BNS, SocialFi, Data Market,
+//! Education Domain, App Registry) binds a [`ContentId`] and its verified
+//! [`ObjectKey`] commitment, plus an optional [`NftId`] ownership handle.
 
 use super::content_id::ContentId;
 use super::registry::{NftId, ObjectKey};
@@ -29,7 +33,9 @@ pub enum ContentRefError {
 impl ContentRef {
     /// Construct and validate a [`ContentRef`].
     ///
-    /// exposed for: B.U.D. 3.0 dependent modules (`WP-23`).
+    /// # Errors
+    ///
+    /// [`ContentRefError`] if the commitment or content digest is all-zero.
     pub fn new(
         content_id: ContentId,
         object_commitment: ObjectKey,
@@ -48,10 +54,12 @@ impl ContentRef {
         })
     }
 
-    /// Update the underlying object commitment on `ReplaceObject` while preserving
-    /// `content_id` and `nft_id`.
+    /// Convenience: atomically update the underlying object commitment on
+    /// `ReplaceObject` while preserving `content_id` and `nft_id` unchanged.
     ///
-    /// exposed for: B.U.D. 3.0 `ReplaceObject` flows (`WP-24`).
+    /// # Errors
+    ///
+    /// [`ContentRefError::ZeroObjectCommitment`] if `new_commitment` is zero.
     pub fn with_replaced_commitment(
         self,
         new_commitment: ObjectKey,
@@ -77,8 +85,8 @@ mod tests {
             ContentRef::new(cid, [0u8; 32], None),
             Err(ContentRefError::ZeroObjectCommitment)
         );
-        let r = ContentRef::new(cid, [0x11; 32], Some([0x22; 32])).expect("ref");
-        let replaced = r.with_replaced_commitment([0x33; 32]).expect("replace");
+        let r = ContentRef::new(cid, [0x11; 32], Some([0x22; 32])).unwrap();
+        let replaced = r.with_replaced_commitment([0x33; 32]).unwrap();
         assert_eq!(replaced.content_id, cid);
         assert_eq!(replaced.nft_id, Some([0x22; 32]));
         assert_eq!(replaced.object_commitment, [0x33; 32]);

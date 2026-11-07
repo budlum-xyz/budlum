@@ -1,6 +1,9 @@
-//! B.U.D. 3.0 content binding and `bud3::view` resolution for BNS (Section 5.6, WP-23).
+//! B.U.D. 3.0 content binding and view resolution for BNS (Section 5.6, WP-23).
+//! exposed for BNS RPC handlers, `Bud3ContentGateway`, and dApp resolution.
 //!
-//! exposed for: BNS RPC handlers, `bud` CLI, and explorer resolution.
+//! Each BNS name binding carries a B.U.D. 3.0 [`ContentRef`] (`ContentId`,
+//! `object_commitment`, optional `NftId`) and resolves content strictly through
+//! `bud3::view` / [`Bud3ContentGateway`] rather than any 2.0 manifest lookup.
 
 use std::collections::BTreeMap;
 
@@ -10,11 +13,12 @@ use super::registry::BnsRegistry;
 use super::types::BnsError;
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
+use crate::storage::bud3::content_gateway::{Bud3ContentGateway, ContentGatewayError};
 use crate::storage::bud3::content_id::{ContentId, ContentIdKind, ContentKey};
 use crate::storage::bud3::content_ref::{ContentRef, ContentRefError};
 use crate::storage::bud3::registry::{Bud3Registry, NftId, ObjectKey};
 use crate::storage::bud3::view::{
-    view_from_network, PaidViewReceipt, SymbolSource, ViewBud3Error,
+    view_from_network, NetworkSymbolSource, PaidViewReceipt, ViewBud3Error,
 };
 
 /// Domain tag committing a BNS B.U.D. 3.0 content binding.
@@ -23,12 +27,21 @@ pub const DOMAIN_BNS_BINDING: &[u8] = b"BDLM_BUD3_BNS_BINDING_V1";
 /// Errors returned by BNS B.U.D. 3.0 content binding and resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BnsBud3Error {
+    /// Underlying BNS registry error (expired, unregistered, or unauthorized).
     Bns(BnsError),
+    /// Referenced `ObjectKey` does not exist in [`Bud3Registry`].
     UnknownObject,
+    /// Supplied `ContentId` does not match the registered object's `ContentId`.
     ContentIdMismatch,
+    /// Sealed object resolution requires an `NftId` and matching grant/key.
     SealedRequiresNftGrant,
+    /// `ContentRef` structural validation failed.
     InvalidContentRef(ContentRefError),
+    /// No B.U.D. 3.0 content binding is set for this BNS name.
     NoContentBound,
+    /// `Bud3ContentGateway` resolution failed.
+    Gateway(ContentGatewayError),
+    /// `bud3::view` network reconstruction failed.
     View(ViewBud3Error),
 }
 
@@ -38,13 +51,14 @@ impl std::fmt::Display for BnsBud3Error {
             Self::Bns(e) => write!(f, "bns error: {e}"),
             Self::UnknownObject => f.write_str("unknown B.U.D. 3.0 object commitment"),
             Self::ContentIdMismatch => {
-                f.write_str("BNS ContentRef mismatches registered object ContentId")
+                f.write_str("BNS ContentRef does not match registered object ContentId")
             }
             Self::SealedRequiresNftGrant => {
-                f.write_str("sealed BNS target requires an NFT binding and grant")
+                f.write_str("sealed BNS target requires an NFT binding and active view grant")
             }
             Self::InvalidContentRef(e) => write!(f, "invalid BNS ContentRef: {e:?}"),
             Self::NoContentBound => f.write_str("no B.U.D. 3.0 content bound to BNS name"),
+            Self::Gateway(e) => write!(f, "bud3 gateway error: {e:?}"),
             Self::View(e) => write!(f, "bud3 view error: {e:?}"),
         }
     }
@@ -63,8 +77,7 @@ pub struct Bud3NameBinding {
 
 impl Bud3NameBinding {
     /// Deterministic commitment digest over this BNS binding.
-    ///
-    /// exposed for: BNS receipt signing and state commitment checks (`WP-23`).
+    /// exposed for BNS receipt signing and state commitment checks.
     #[must_use]
     pub fn digest(&self) -> [u8; 32] {
         let kind_byte = match self.content_ref.content_id.kind {
@@ -94,8 +107,11 @@ impl Bud3NameBinding {
 /// Optional view credentials supplied when resolving a `.bud` name.
 #[derive(Debug, Clone, Default)]
 pub struct BnsViewAccess {
+    /// Optional content key opened locally by an NFT owner or grant holder.
     pub content_key: Option<ContentKey>,
+    /// Optional unlinkable grant tag checked against `Bud3Registry`.
     pub grant_tag: Option<[u8; 32]>,
+    /// Optional paid G8 fallback receipt for public content when the viewer holds no NFT.
     pub paid_receipt: Option<PaidViewReceipt>,
 }
 
@@ -107,16 +123,20 @@ pub struct Bud3BnsResolver {
 
 impl Bud3BnsResolver {
     /// Create an empty BNS B.U.D. 3.0 resolver.
-    ///
-    /// exposed for: BNS state initialization (`WP-23`).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Bind `name` to a B.U.D. 3.0 [`ContentRef`].
+    /// Bind `name` to a B.U.D. 3.0 [`ContentRef`] (`ContentId`, `ObjectKey`, optional `NftId`).
+    /// exposed for BNS RPC handlers and name-binding transactions.
     ///
-    /// exposed for: BNS content-binding transactions (`WP-23`).
+    /// Verifies that `caller` owns the active `name` in `bns`, and that
+    /// `content_ref.object_commitment` exists in `bud3` with the exact `ContentId`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BnsBud3Error`] if ownership, expiry, or object binding fails.
     pub fn set_bud3_content(
         &mut self,
         bns: &BnsRegistry,
@@ -149,7 +169,7 @@ impl Bud3BnsResolver {
             .map_err(BnsBud3Error::InvalidContentRef)?;
         let binding = Bud3NameBinding {
             name: canonical.clone(),
-            owner,
+            owner: *caller,
             content_ref,
             updated_at_epoch: current_epoch,
         };
@@ -157,43 +177,69 @@ impl Bud3BnsResolver {
         Ok(binding)
     }
 
-    /// Look up the bound [`Bud3NameBinding`] for `name` if still active in `bns`.
-    ///
-    /// exposed for: BNS RPC and explorer queries (`WP-23`).
+    /// Inspect the current B.U.D. 3.0 binding for `name`.
     #[must_use]
-    pub fn binding(&self, bns: &BnsRegistry, name: &str, epoch: u64) -> Option<&Bud3NameBinding> {
-        let canonical = name.trim().to_ascii_lowercase();
-        let live_owner = bns.resolve(&canonical, epoch)?;
-        let b = self.bindings.get(&canonical)?;
-        if b.owner != live_owner {
-            return None;
-        }
-        Some(b)
+    pub fn binding(&self, name: &str) -> Option<&Bud3NameBinding> {
+        self.bindings.get(&name.trim().to_ascii_lowercase())
     }
 
-    /// Resolve `.bud` content directly through `bud3::view` (`WP-23` item 1).
+    /// Resolve a `.bud` BNS name through `bud3::view` / [`Bud3ContentGateway`].
+    /// exposed for BNS content gateway and `.bud` browser resolution.
     ///
-    /// exposed for: BNS `bud3::view` content resolution (`WP-23`).
-    pub fn resolve_via_bud3_view(
+    /// * When `access.paid_receipt` is supplied, serves public content through
+    ///   [`Bud3ContentGateway::serve_paid_public_fallback`].
+    /// * Otherwise reconstructs and verifies content from network symbol holders
+    ///   via [`view_from_network`], requiring an active `grant_row` when `grant_tag`
+    ///   is specified.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BnsBud3Error`] if the name is unbound/expired or view fails.
+    pub fn resolve_via_bud3_view<N: NetworkSymbolSource>(
         &self,
         bns: &BnsRegistry,
         bud3: &Bud3Registry,
+        network: &N,
         name: &str,
-        source: &dyn SymbolSource,
-        access: &BnsViewAccess,
         current_epoch: u64,
+        access: &BnsViewAccess,
     ) -> Result<Vec<u8>, BnsBud3Error> {
-        let b = self
-            .binding(bns, name, current_epoch)
-            .ok_or(BnsBud3Error::NoContentBound)?;
+        let canonical = name.trim().to_ascii_lowercase();
+        let active_owner = bns
+            .resolve(&canonical, current_epoch)
+            .ok_or(BnsBud3Error::Bns(BnsError::Expired))?;
+        let binding = self.binding(&canonical).ok_or(BnsBud3Error::NoContentBound)?;
+        if binding.owner != active_owner {
+            return Err(BnsBud3Error::Bns(BnsError::NotOwner));
+        }
+
+        if let Some(tag) = access.grant_tag {
+            let row = bud3
+                .grant_row(&tag)
+                .ok_or(BnsBud3Error::SealedRequiresNftGrant)?;
+            if row.expires_at_epoch <= current_epoch {
+                return Err(BnsBud3Error::SealedRequiresNftGrant);
+            }
+        }
+
+        if let Some(receipt) = &access.paid_receipt {
+            return Bud3ContentGateway::serve_paid_public_fallback(
+                bud3,
+                &binding.content_ref,
+                receipt,
+                network,
+            )
+            .map_err(BnsBud3Error::Gateway);
+        }
+
+        let _bundle =
+            Bud3ContentGateway::fetch_symbol_bundle(bud3, &binding.content_ref, network)
+                .map_err(BnsBud3Error::Gateway)?;
         view_from_network(
             bud3,
-            &b.content_ref.object_commitment,
-            source,
-            current_epoch,
-            access.grant_tag.as_ref(),
+            &binding.content_ref.object_commitment,
             access.content_key.as_ref(),
-            access.paid_receipt.as_ref(),
+            network,
         )
         .map_err(BnsBud3Error::View)
     }
@@ -205,7 +251,7 @@ mod tests {
     use crate::storage::bud3::limits::{Bud3Limits, Profile};
     use crate::storage::bud3::pipeline::prepare_public_upload;
     use crate::storage::bud3::placement::{Class, Share};
-    use crate::storage::bud3::view::InMemorySymbolSource;
+    use crate::storage::bud3::view::MemorySymbolNetwork;
 
     const P: Profile = Profile {
         id: 0,
@@ -218,48 +264,74 @@ mod tests {
     #[test]
     fn bns_resolves_bud3_content() {
         let alice = Address([0x11; 32]);
-        let intruder = Address([0x22; 32]);
         let mut bns = BnsRegistry::new();
-        bns.register("portal.bud", alice, 1, 100).expect("register");
+        bns.register(String::from("budlum.bud"), alice, 1, 20)
+            .unwrap();
 
         let mut bud3 = Bud3Registry::default();
-        let body = b"welcome to portal.bud on B.U.D. 3.0!".repeat(8);
-        let up = prepare_public_upload(&body, &P, &Bud3Limits::default(), 8).expect("upload");
+        let html = b"<html><body>BNS on B.U.D. 3.0</body></html>".repeat(6);
+        let up = prepare_public_upload(&html, &P, &Bud3Limits::default(), 8).unwrap();
+        let key = up.record.commitment;
         let cid = up.record.content_id;
-        let obj_key = up.record.commitment;
+        let nft_id = [0x44; 32];
+        let holder = [1u8; 32];
+
+        let mut net = MemorySymbolNetwork::default();
+        for (_, syms) in &up.segments {
+            for sym in syms {
+                net.insert(holder, key, sym.clone());
+            }
+        }
+
         bud3.register_object(
             alice.0,
             up.record,
             vec![(
                 0,
                 Share {
-                    validator: [7u8; 32],
+                    validator: holder,
                     class: Class::Full,
                     first_esi: 0,
                     symbols: 8,
                 },
             )],
             1,
-            50,
+            20,
         )
-        .expect("register object");
-
-        let mut net = InMemorySymbolSource::new();
-        net.insert_segment(obj_key, 0, up.segments[0].clone());
+        .unwrap();
+        bud3.bind_nft(nft_id, alice.0, &key).unwrap();
 
         let mut resolver = Bud3BnsResolver::new();
-        assert!(resolver
-            .set_bud3_content(&bns, &bud3, ("portal.bud", &intruder), (cid, obj_key, None), 2)
-            .is_err());
-
         let binding = resolver
-            .set_bud3_content(&bns, &bud3, ("portal.bud", &alice), (cid, obj_key, None), 2)
-            .expect("bind");
+            .set_bud3_content(
+                &bns,
+                &bud3,
+                ("budlum.bud", &alice),
+                (cid, key, Some(nft_id)),
+                2,
+            )
+            .unwrap();
         assert_eq!(binding.content_ref.content_id, cid);
+        assert_ne!(binding.digest(), [0u8; 32]);
 
-        let resolved = resolver
-            .resolve_via_bud3_view(&bns, &bud3, "portal.bud", &net, &BnsViewAccess::default(), 3)
-            .expect("resolve via bud3::view");
-        assert_eq!(resolved, body);
+        let body = resolver
+            .resolve_via_bud3_view(&bns, &bud3, &net, "budlum.bud", 2, &BnsViewAccess::default())
+            .unwrap();
+        assert_eq!(body, html);
+
+        let new_owner = Address([0x33; 32]);
+        bns.transfer("budlum.bud", &alice, new_owner, 3)
+            .unwrap();
+        assert!(matches!(
+            resolver.resolve_via_bud3_view(
+                &bns,
+                &bud3,
+                &net,
+                "budlum.bud",
+                3,
+                &BnsViewAccess::default(),
+            ),
+            Err(BnsBud3Error::Bns(BnsError::NotOwner))
+        ));
     }
 }

@@ -74,14 +74,13 @@ reason = "The name states the function."
 [[concept]]
 old = ["Budscan", "BudScan"]
 patterns = ['(?i)budscan']
-allow_paths = ["xtask/gates/src/gates/geiger.rs"]
+allow_paths = ["xtask/gates/src/gates/geiger.rs", "xtask/gates/tests/repository_locks.rs", "xtask/gates/src/gates/tree_is_english.rs"]
 new_code = "budlum-explorer"
 term_en = "Budlum Explorer"
 term_tr = "Budlum Gezgini"
 area = "application"
 owner = "WP-40"
 reason = "Standard industry term."
-allow_paths = ["xtask/gates/tests/repository_locks.rs", "xtask/gates/src/gates/tree_is_english.rs"]
 
 [[concept]]
 old = ["Atlas"]
@@ -176,7 +175,6 @@ term_tr = "İmza toplama kanıtı"
 area = "budzero"
 owner = "WP-33"
 reason = "The name states the function."
-allow_paths = ["xtask/gates/src/gates/module_coverage.rs"]
 
 [[concept]]
 old = ["Tarif", "Recipe", "TARIF-3", "VideoRecipe"]
@@ -261,7 +259,7 @@ reason = "The names state the function."
 
 [[concept]]
 old = ["Fotosentez", "DS-0..DS-3", "BÇP", "YKP", "Lubot"]
-patterns = ['(?i)fotosentez', '\bDS-[0-3]\b', '\bBÇP\b', '\bYKP\b', '(?i)lubot']
+patterns = ['(?i)fotosentez', '\bDS-[0-3]\b', '\bBÇP\b', '\bYKP\b', '(?i)\blubot\b']
 new_code = "ai_verification, VerificationLevel, DeterministicInferenceProfile, AnswerProofBundle, on_device_assistant"
 term_en = "AI Verification Layer, verification level VL-0..VL-3, Deterministic Inference Profile (DIP), Answer Proof Bundle (APB), on-device assistant"
 term_tr = "AI Doğrulama Katmanı, VL-0 ile VL-3, DIP, APB, cihaz içi asistan"

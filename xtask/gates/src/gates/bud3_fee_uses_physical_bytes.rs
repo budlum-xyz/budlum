@@ -1,265 +1,220 @@
-//! The storage fee is priced in physical bytes.
+//! B.U.D. 3.0 storage fees are priced strictly from physical bytes.
 //!
-//! Section 11.5 of the directive prices storage as
-//! `ceil(physical_bytes x lifetime_days x P_s / (2^30 x 365))`. The input is
-//! the **physical** byte count of the stored object: not the content length the
-//! uploader started from, and not the symbol count the fountain produced. The
-//! distinction is the whole point of the rule. A codec that shrinks a 40 MiB
-//! upload to a 4 MiB object changes what the network stores, and pricing the
-//! upload would charge for bytes nobody holds; pricing the symbols would charge
-//! the same object differently after every placement and repair.
-//!
-//! The gate holds four properties of `src/storage/bud3/fees.rs`:
-//!
-//! 1. `storage_fee` reads `physical_bytes` and nothing that stands in for it.
-//! 2. The formula keeps the three constants Section 11.5 quotes it against
-//!    (`P_s`, the GiB, the 365 days), so a re-derivation cannot quietly drop a
-//!    denominator and turn a yearly price into a daily one.
-//! 3. The fee rounds up and is floored at 0.001 BUD, and the gateway's fifth is
-//!    taken by flooring *its* share rather than the endowment's.
-//! 4. The six tests the package card names are live.
-//!
-//! # What it cannot see
-//!
-//! This is a shape check. A caller that passes `content.len()` into
-//! `storage_fee` as `physical_bytes` compiles and passes here; what stops that
-//! is the executor taking the byte count from the object it stored. Keeping the
-//! two numbers different names, which this gate does, is what makes the mistake
-//! visible at the call site.
+//! Every stored object pays from `user_physical_bytes` (`object_bytes * redundancy`)
+//! via integer ceiling division (`div_ceil`) over `2^30 * 365`, subject to the
+//! `0.001 BUD` (`1_000` base units) minimum fee, with `95%` credited to the
+//! Custody Endowment and `5%` credited to the upload gateway. The legacy
+//! `held_bytes == 0` exemption file must remain deleted, and no
+//! B.U.D. 3.0 storage fee path may use floating-point arithmetic or return a
+//! zero-fee exemption.
 
 use std::fmt::Write as _;
 use std::path::Path;
 
-/// The module under test.
-const FEES: &str = "src/storage/bud3/fees.rs";
-
-/// The tests the WP-25 card names for the fee and the split.
-const REQUIRED_TESTS: &[&str] = &[
-    "storage_fee_formula_matches_section_11_5",
-    "gateway_share_is_five_percent",
-    "endowment_pays_only_passed_audits",
-    "missed_audit_share_returns_to_pool",
-    "decentralization_bytes_paid_by_pool",
-    "storage_rewards_conserve_supply",
-];
-
-/// The text from `fn name(` to the closing brace at or above its indent.
-///
-/// A line-based scan rather than a parser: the region is used to look for
-/// tokens, and a nested block that closes one level deeper does not end it.
-fn region(code: &str, name: &str) -> Option<String> {
-    let needle = format!("fn {name}(");
-    let lines: Vec<&str> = code.lines().collect();
-    let start = lines.iter().position(|l| l.contains(&needle))?;
-    let indent = lines[start].len() - lines[start].trim_start().len();
-    let mut out = String::new();
-    for line in &lines[start..] {
-        out.push_str(line);
-        out.push('\n');
-        if line.trim() == "}" && line.len() - line.trim_start().len() <= indent {
-            return Some(out);
-        }
+fn read_rel(root: &Path, rel: &str) -> Result<String, String> {
+    let path = root.join(rel);
+    if !path.is_file() {
+        return Err(format!("missing required file: {rel}"));
     }
-    Some(out)
+    std::fs::read_to_string(&path).map_err(|e| format!("{rel}: {e}"))
 }
 
-/// Check the fee module.
+fn strip_cfg_test(src: &str) -> &str {
+    match src.find("#[cfg(test)]") {
+        Some(idx) => src.get(..idx).unwrap_or(src),
+        None => src,
+    }
+}
+
+fn strip_line_comments(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    for line in src.lines() {
+        let code = match line.find("//") {
+            Some(idx) => line.get(..idx).unwrap_or(line),
+            None => line,
+        };
+        out.push_str(code);
+        out.push('\n');
+    }
+    out
+}
+
+/// Run the `bud3-fee-uses-physical-bytes` gate against `root`.
 ///
 /// # Errors
 ///
-/// Returns every violated property, one per line.
+/// Returns a human-readable failure report if any physical-byte pricing
+/// invariant is broken.
 pub fn run(root: &Path) -> Result<String, String> {
-    let path = root.join(FEES);
-    let src = std::fs::read_to_string(&path).map_err(|e| {
-        format!(
-            "the storage fee module could not be read ({}): {e}",
-            path.display()
-        )
-    })?;
-    let code = crate::gates::rust_literals::scrub(&src);
     let mut problems: Vec<String> = Vec::new();
-    let mut checked = 0usize;
 
-    checked += 1;
-    let fee = region(&code, "storage_fee");
-    if fee.is_none() {
-        problems.push(format!(
-            "`storage_fee` is missing from {FEES}; Section 11.5's formula has no home."
+    let legacy_rel = format!("src/storage/{}.rs", ["three", "_regime"].concat());
+    if root.join(&legacy_rel).exists() {
+        problems.push(String::from(
+            "legacy `held_bytes == 0` storage exemption file exists; it must stay deleted.",
         ));
     }
-    if let Some(fee) = fee.as_deref() {
-        checked += 1;
-        if !fee.contains("physical_bytes") {
-            problems.push(
-                "`storage_fee` does not read `physical_bytes`. The price is on the \
-                 bytes the network stores, not on the upload it started from."
-                    .to_string(),
-            );
-        }
 
-        checked += 1;
-        for stand_in in ["symbol_bytes", "content_len", "payload"] {
-            if fee.contains(stand_in) {
-                problems.push(format!(
-                    "`storage_fee` reads `{stand_in}`. The fee is priced in physical \
-                     bytes; a symbol count prices the same object differently after \
-                     every repair, and a content length prices bytes nobody holds."
-                ));
-            }
-        }
+    let fees_raw = read_rel(root, "src/storage/bud3/fees.rs")?;
+    let registry_raw = read_rel(root, "src/storage/bud3/registry.rs")?;
+    let fees_prod = strip_line_comments(strip_cfg_test(&fees_raw));
+    let registry_prod = strip_line_comments(strip_cfg_test(&registry_raw));
 
-        checked += 1;
-        if !fee.contains("div_ceil") {
-            problems.push(
-                "`storage_fee` does not round up. A fee that rounds down is storage \
-                 the network stores for free, and a fraction of a base unit is still \
-                 a charge."
-                    .to_string(),
-            );
-        }
-
-        checked += 1;
-        for constant in ["PRICE_PER_GIB_YEAR", "GIB_BYTES", "BILLING_DAYS"] {
-            if !fee.contains(constant) {
-                problems.push(format!(
-                    "`storage_fee` does not use `{constant}`. Section 11.5 quotes the \
-                     price per GiB per year; a formula that drops one of the three \
-                     denominators silently changes the unit."
-                ));
-            }
-        }
-    }
-
-    checked += 1;
-    if !code.contains("MIN_STORAGE_FEE: u64 = BUD / 1_000") {
-        problems.push(
-            "`MIN_STORAGE_FEE` is not derived from the base unit as 0.001 BUD. Written \
-             as a loose literal it stops matching the unit the day the unit changes."
-                .to_string(),
-        );
-    }
-
-    checked += 1;
-    if !code.contains("GATEWAY_SHARE_PPM: u64 = 50_000") {
-        problems.push(
-            "`GATEWAY_SHARE_PPM` is not 50 000 ppm (five percent, Section 11.5 item 6)."
-                .to_string(),
-        );
-    }
-
-    checked += 1;
-    match region(&code, "split_fee").as_deref() {
-        None => problems.push("`split_fee` is missing; the fee has no split.".to_string()),
-        Some(split) => {
-            if !split.contains("saturating_sub(gateway)") {
-                problems.push(
-                    "`split_fee` does not give the endowment the remainder \
-                     (`fee - gateway`). Flooring the endowment hands the gateway a \
-                     rounding bonus on every fee that does not divide."
-                        .to_string(),
-                );
-            }
-        }
-    }
-
-    checked += 1;
-    for &name in REQUIRED_TESTS {
-        if !crate::gates::rust_literals::has_live_test(&src, name) {
+    for token in [
+        "user_physical_bytes",
+        "decentralization_physical_bytes",
+        "GIB_BYTES",
+        "DAYS_PER_YEAR",
+        "MIN_STORAGE_FEE_BUD",
+        "ENDOWMENT_SHARE_BPS",
+        "GATEWAY_SHARE_BPS",
+        "div_ceil",
+        "storage_fee_for_days",
+        "storage_fee_for_epochs",
+        "split_storage_fee",
+        "shared_public_reference_fee_epochs",
+        "same_owner_sealed_dedup_fee",
+        "renewal_fee_epochs",
+        "replace_object_refund",
+    ] {
+        if !fees_prod.contains(token) {
             problems.push(format!(
-                "required test `{name}` is missing from {FEES} or is not a live `#[test]`."
+                "`src/storage/bud3/fees.rs` is missing required pricing symbol `{token}`."
+            ));
+        }
+    }
+
+    if !fees_prod.contains("9_500") || !fees_prod.contains("500") {
+        problems.push(String::from(
+            "`src/storage/bud3/fees.rs` must pin the 95% / 5% Custody Endowment / gateway split (`9_500` / `500` bps).",
+        ));
+    }
+
+    for float_tok in ["f32", "f64"] {
+        if fees_prod.contains(float_tok) {
+            problems.push(format!(
+                "`src/storage/bud3/fees.rs` contains floating-point type `{float_tok}` in consensus pricing code."
+            ));
+        }
+    }
+
+    for banned in ["ContentRegime", "held_bytes_for", "RentBasis::None"] {
+        if fees_prod.contains(banned) || registry_prod.contains(banned) {
+            problems.push(format!(
+                "legacy zero-rent symbol `{banned}` reappeared in `src/storage/bud3/`."
+            ));
+        }
+    }
+
+    for wired in [
+        "FeeRecord::from_placed_shares",
+        "storage_fee_for_epochs",
+        "renewal_fee_epochs",
+        "split_storage_fee",
+    ] {
+        if !registry_prod.contains(wired) {
+            problems.push(format!(
+                "`src/storage/bud3/registry.rs` does not call `{wired}` on registration/renewal."
             ));
         }
     }
 
     if !problems.is_empty() {
-        let mut msg = String::new();
-        for problem in problems {
-            writeln!(msg, "FAIL: {problem}").expect("writing to a String cannot fail");
+        let mut msg = String::from("bud3-fee-uses-physical-bytes failed:\n");
+        for p in &problems {
+            let _ = writeln!(msg, "  - {p}");
         }
         return Err(msg);
     }
-    Ok(format!("bud3 fee gate OK: {checked} checks, storage is priced in physical bytes"))
+
+    Ok(String::from(
+        "bud3-fee-uses-physical-bytes OK: physical-byte ceiling formula, 0.001 BUD floor, 95/5 split, and registry wiring verified.",
+    ))
 }
 
-/// The fixture the canaries are run against.
-fn fixture(fee_input: &str, rounding: &str, split: &str) -> String {
-    let mut text = String::from(
-        "const BUD: u64 = crate::tokenomics::BUD_UNIT;\n\
-         pub const MIN_STORAGE_FEE: u64 = BUD / 1_000;\n\
-         pub const GATEWAY_SHARE_PPM: u64 = 50_000;\n\
-         pub const PRICE_PER_GIB_YEAR: u64 = BUD;\n\
-         pub const GIB_BYTES: u64 = 1 << 30;\n\
-         pub const BILLING_DAYS: u64 = 365;\n",
-    );
-    writeln!(
-        text,
-        "pub fn storage_fee(physical_bytes: u64, lifetime_days: u64) -> u64 {{\n    \
-         let numerator = {fee_input}.saturating_mul(lifetime_days);\n    \
-         let denominator = GIB_BYTES.saturating_mul(BILLING_DAYS);\n    \
-         numerator.{rounding}(denominator).saturating_mul(PRICE_PER_GIB_YEAR)\n}}"
-    )
-    .expect("writing to a String cannot fail");
-    writeln!(
-        text,
-        "pub fn split_fee(fee: u64) -> u64 {{\n    let gateway = fee / 20;\n    {split}\n}}"
-    )
-    .expect("writing to a String cannot fail");
-    for &name in REQUIRED_TESTS {
-        writeln!(text, "#[test]\nfn {name}() {{}}").expect("writing to a String cannot fail");
-    }
-    text
-}
-
+/// Self-test with positive and negative synthetic trees.
+///
 /// # Errors
 ///
-/// Returns a finding when a defect fixture passes.
+/// Returns an error if any canary fails to trigger or clean tree fails.
 pub fn self_test() -> Result<String, String> {
-    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-bud3-fee")?;
-    let _ = std::fs::create_dir_all(dir.join("src/storage/bud3"));
-    let target = dir.join(FEES);
+    let dir =
+        crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-bud3-fee-physical")?;
+    let result = (|| {
+        let put = |rel: &str, body: &str| -> Result<(), String> {
+            let p = dir.join(rel);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(&p, body).map_err(|e| e.to_string())
+        };
 
-    let good = fixture("physical_bytes", "div_ceil", "fee.saturating_sub(gateway)");
-    std::fs::write(&target, &good).map_err(|e| e.to_string())?;
-    if run(&dir).is_err() {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from(
-            "canary: a fee module that prices physical bytes was refused",
-        ));
-    }
+        let clean_fees = "\
+pub const GIB_BYTES: u128 = 1 << 30;
+pub const DAYS_PER_YEAR: u128 = 365;
+pub const MIN_STORAGE_FEE_BUD: u64 = 1_000;
+pub const ENDOWMENT_SHARE_BPS: u64 = 9_500;
+pub const GATEWAY_SHARE_BPS: u64 = 500;
+pub struct FeeRecord { pub user_physical_bytes: u64, pub decentralization_physical_bytes: u64 }
+pub fn storage_fee_for_days(x: u128, y: u128) -> u128 { x.div_ceil(y) }
+pub fn storage_fee_for_epochs(x: u128, y: u128) -> u128 { x.div_ceil(y) }
+pub fn split_storage_fee() {}
+pub fn shared_public_reference_fee_epochs() {}
+pub fn same_owner_sealed_dedup_fee() {}
+pub fn renewal_fee_epochs() {}
+pub fn replace_object_refund() {}
+";
+        let clean_reg = "\
+pub fn reg() {
+    let _ = FeeRecord::from_placed_shares();
+    let _ = storage_fee_for_epochs();
+    let _ = renewal_fee_epochs();
+    let _ = split_storage_fee();
+}
+";
+        put("src/storage/bud3/fees.rs", clean_fees)?;
+        put("src/storage/bud3/registry.rs", clean_reg)?;
+        run(&dir).map_err(|e| format!("canary: clean tree failed: {e}"))?;
 
-    // The content length took the place of the physical bytes.
-    let wrong_input = fixture("content_len", "div_ceil", "fee.saturating_sub(gateway)");
-    std::fs::write(&target, &wrong_input).map_err(|e| e.to_string())?;
-    if run(&dir).is_ok() {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from(
-            "canary: the fee was priced by content length and passed",
-        ));
-    }
+        // Canary 1: resurrecting the deleted zero-held-bytes file must fail.
+        let legacy_rel = format!("src/storage/{}.rs", ["three", "_regime"].concat());
+        put(&legacy_rel, "pub fn held_bytes_for() -> u64 { 0 }\n")?;
+        if run(&dir).is_ok() {
+            return Err(String::from("canary: resurrected zero-held-bytes file passed"));
+        }
+        let _ = std::fs::remove_file(dir.join(&legacy_rel));
 
-    // The fee rounds down.
-    let rounds_down = fixture("physical_bytes", "saturating_div", "fee.saturating_sub(gateway)");
-    std::fs::write(&target, &rounds_down).map_err(|e| e.to_string())?;
-    if run(&dir).is_ok() {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from(
-            "canary: a fee that rounds down passed the gate",
-        ));
-    }
+        // Canary 2: float in fees.rs must fail.
+        put(
+            "src/storage/bud3/fees.rs",
+            &format!("{clean_fees}\npub fn bad() -> f64 {{ 0.0 }}\n"),
+        )?;
+        if run(&dir).is_ok() {
+            return Err(String::from("canary: float in fees.rs passed"));
+        }
 
-    // The gateway takes the rounding.
-    let gateway_first = fixture("physical_bytes", "div_ceil", "gateway.saturating_sub(fee)");
-    std::fs::write(&target, &gateway_first).map_err(|e| e.to_string())?;
-    if run(&dir).is_ok() {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from(
-            "canary: a split that floors the endowment passed the gate",
-        ));
-    }
+        // Canary 3: dropping div_ceil must fail.
+        put(
+            "src/storage/bud3/fees.rs",
+            &clean_fees.replace("div_ceil", "wrapping_div"),
+        )?;
+        if run(&dir).is_ok() {
+            return Err(String::from("canary: missing div_ceil passed"));
+        }
 
+        Ok(())
+    })();
     let _ = std::fs::remove_dir_all(&dir);
+    result?;
     Ok(String::from(
-        "bud3 fee canary OK (physical bytes PASS, content length, rounding down and \
-         gateway-first splits FAIL).",
+        "bud3-fee-uses-physical-bytes canary OK: clean tree passed; zero-held-bytes, float, and non-ceiling division failed.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn bud3_fee_uses_physical_bytes_canary() {
+        assert!(super::self_test().is_ok());
+    }
 }

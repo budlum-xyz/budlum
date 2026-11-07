@@ -6,12 +6,16 @@ on:
     paths:
       - "mobile/android/**"
       - "mobile/tools/**"
+      - "src/registry/mobile_runtime.rs"
+      - "xtask/gates/src/gates/mobile_validator_apps.rs"
       - ".github/workflows/mobile.yml"
   push:
     branches: [main]
     paths:
       - "mobile/android/**"
       - "mobile/tools/**"
+      - "src/registry/mobile_runtime.rs"
+      - "xtask/gates/src/gates/mobile_validator_apps.rs"
       - ".github/workflows/mobile.yml"
   workflow_dispatch:
 
@@ -46,6 +50,18 @@ jobs:
           cargo fmt --manifest-path mobile/tools/log-analyzer/Cargo.toml --all -- --check
           cargo clippy --locked --manifest-path mobile/tools/log-analyzer/Cargo.toml --all-targets -- -D warnings
           cargo test --locked --manifest-path mobile/tools/log-analyzer/Cargo.toml
+
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+
+      - name: Test shared mobile runtime
+        run: cargo test --lib registry::mobile_runtime::tests --locked -- --nocapture
+
+      - name: Verify mobile application invariants
+        run: |
+          set -euo pipefail
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- --self-test mobile-validator-apps
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- mobile-validator-apps
 
       - name: Verify Android manifest & Play policy invariants (WP-36)
         run: |

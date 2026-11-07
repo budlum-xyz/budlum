@@ -11,6 +11,11 @@ use crate::registry::role::RoleId;
 use crate::storage::ContentId;
 use serde::{Deserialize, Serialize};
 
+pub mod education_domain;
+pub use education_domain::{
+    EducationArtifact, EducationDomainError, EducationDomainRegistry,
+};
+
 /// Permissionless DeEd participant roles.
 ///
 /// These IDs extend the open registry without changing the registry's policy:

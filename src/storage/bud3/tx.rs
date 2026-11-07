@@ -4,13 +4,11 @@
 //! signer from the transaction envelope and refuses a variant signed by
 //! anyone else. Apply is all-or-nothing: a refused transaction leaves the
 //! registry state root unchanged.
-//!
-//! WIRING: unwired - the transaction envelope reaches this door once the
-//! legacy `StorageTx` is removed from `TransactionType`; until then the door
-//! is exercised by its tests.
 
 use super::content_id::ContentId;
 use super::custody::CustodyProof;
+use super::delete::{GrantShredAuth, ShredOutcome};
+use super::grants::GrantRow;
 use super::pipeline::ObjectRecord;
 use super::placement::Share;
 use super::registry::{Address, Bud3Registry, NftId, ObjectKey, Registered, RegistryError};
@@ -72,6 +70,48 @@ pub enum StorageTxV3 {
         /// The content.
         content: ContentId,
     },
+    /// Issue an unlinkable view grant for a sealed object (`IssueViewGrant`).
+    IssueViewGrant {
+        /// The unlinkable grant row (contains zero `content_id`, `issuer`, or `grantee`).
+        row: GrantRow,
+    },
+    /// Revoke a view grant using its one-time ML-DSA-65 authorization (`RevokeViewGrant`).
+    RevokeViewGrant {
+        /// Unlinkable grant tag.
+        grant_tag: [u8; 32],
+        /// One-time ML-DSA-65 signature over `BDLM_BUD3_GRANT_REVOKE_V1 || grant_tag`.
+        one_time_signature: Vec<u8>,
+    },
+    /// Atomically shred listed view-grant capsules and burn an NFT reference (`SocialDelete`).
+    SocialDelete {
+        /// NFT reference to burn.
+        nft: NftId,
+        /// One-time ML-DSA-65 shred authorizations for active view grants.
+        grant_shreds: Vec<GrantShredAuth>,
+    },
+    /// Voluntarily release shares and lower declared custody quota without penalty (`ReleaseShares`).
+    ReleaseShares {
+        /// Object holding the share(s) to release.
+        object: ObjectKey,
+        /// Specific segment index, or `None` for all segments of `object`.
+        segment: Option<u64>,
+        /// Bytes by which to lower the holder's declared custody quota.
+        lower_quota_bytes: u64,
+    },
+    /// Atomically replace an object with a new codec representation verified to
+    /// decode to the identical `ContentId` (`ReplaceObject`, Section 6.14).
+    ReplaceObject {
+        /// Existing object commitment being replaced.
+        old_object: ObjectKey,
+        /// New object record carrying the identical `ContentId`.
+        new_record: ObjectRecord,
+        /// Placement shares for `new_record`.
+        new_shares: Vec<(u64, Share)>,
+        /// Independent Full-validator attestations (`>= 3`).
+        attestations: Vec<super::replace::ReplaceAttestation>,
+        /// Proposer stake subject to 1% slash on `ContentId` mismatch.
+        proposer_stake: u64,
+    },
 }
 
 /// What an applied transaction did.
@@ -93,6 +133,16 @@ pub enum Applied {
     Renewed(u64),
     /// Decline recorded.
     Declined,
+    /// Unlinkable view grant recorded.
+    GrantIssued,
+    /// View grant revoked and HPKE key package deleted.
+    GrantRevoked,
+    /// Social delete shredded grant capsules and burned the NFT reference.
+    SociallyDeleted(ShredOutcome),
+    /// Shares voluntarily released for reassignment without penalty.
+    Released(usize),
+    /// Object atomically replaced with a new commitment for the same `ContentId`.
+    Replaced(ObjectKey),
 }
 
 /// Apply one transaction signed by `signer` at `epoch`.
@@ -149,6 +199,41 @@ pub fn apply(
             registry.decline(signer, &content);
             Ok(Applied::Declined)
         }
+        StorageTxV3::IssueViewGrant { row } => registry
+            .issue_view_grant(row, epoch)
+            .map(|()| Applied::GrantIssued),
+        StorageTxV3::RevokeViewGrant {
+            grant_tag,
+            one_time_signature,
+        } => registry
+            .revoke_view_grant(&grant_tag, &one_time_signature)
+            .map(|()| Applied::GrantRevoked),
+        StorageTxV3::SocialDelete { nft, grant_shreds } => registry
+            .social_delete(&nft, &signer, &grant_shreds, epoch)
+            .map(Applied::SociallyDeleted),
+        StorageTxV3::ReleaseShares {
+            object,
+            segment,
+            lower_quota_bytes,
+        } => registry
+            .release_shares(&signer, &object, segment, lower_quota_bytes)
+            .map(Applied::Released),
+        StorageTxV3::ReplaceObject {
+            old_object,
+            new_record,
+            new_shares,
+            attestations,
+            proposer_stake,
+        } => registry
+            .replace_object(
+                (signer, proposer_stake),
+                &old_object,
+                new_record,
+                new_shares,
+                &attestations,
+                epoch,
+            )
+            .map(Applied::Replaced),
     }
 }
 

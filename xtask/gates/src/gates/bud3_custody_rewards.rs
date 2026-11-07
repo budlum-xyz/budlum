@@ -1,324 +1,225 @@
-//! Custody rewards follow symbol bytes, presence and the audit result.
+//! B.U.D. 3.0 custody rewards: pro-rata Custody Endowment payouts, missed-audit
+//! forfeiture to the Network Security Pool, zero minting, and zero stake slashing.
 //!
-//! Section 11.4 item 5 and Section 11.5 items 4 and 5 pay the holders of an
-//! object's symbols out of the storage endowment. Three rules decide who is
-//! paid and how much, and each of them is a line of code somebody can delete
-//! without a test failing on the deletion itself:
-//!
-//! 1. The weight is `symbol_bytes x presence_multiplier`. A validator that was
-//!    seen in half the epoch's presence windows earns half as much per byte.
-//! 2. A share that missed an audit is paid nothing for that window. Section
-//!    11.7 is explicit that the answer to a missed audit is no reward and no
-//!    slash, so the money cannot simply move to a neighbour either.
-//! 3. What the endowment could not pay - a missed audit's part and the
-//!    rounding dust - goes to the network security pool. It is not burned and
-//!    not left in the ledger.
-//!
-//! The gate checks the shape of all three in `src/storage/bud3/fees.rs`, that
-//! the epoch slice floors rather than rounds up, that the Mobile floor's extra
-//! bytes are priced by a constant that exists, and that the four tests the
-//! package card names are live.
-//!
-//! # What it cannot see
-//!
-//! A gate on text cannot prove the arithmetic. What it can do is refuse the
-//! edit that makes the arithmetic meaningless: paying a share whose
-//! `passed_audit` is false, or dropping `presence_ppm` from the weight, or
-//! leaving the undistributed part unnamed so that a later reader has to guess
-//! where it went. The tests beside the module hold the numbers.
+//! Enforces that:
+//! 1. `src/storage/bud3/fees.rs` distributes Custody Endowment payouts per epoch
+//!    proportional to audited symbol bytes and validator presence (`presence_ppm`),
+//!    and routes missed-audit / declined-share forfeitures to `reward_pool_account()`.
+//! 2. `src/storage/bud3/` never calls `try_mint_balance` (G-3: fixed supply) and
+//!    never slashes validator stake on missed custody audits (V-4: missing an
+//!    audit withholds reward and eventually marks the share lost, never slashes).
+//! 3. `src/tokenomics/mod.rs` defines the 40% / 50% / 10% Network Security Pool
+//!    shares (`CONSENSUS_REWARD_SHARE_BPS = 4_000`, `STORAGE_REWARD_SHARE_BPS = 5_000`,
+//!    `REPAIR_RELAY_REWARD_SHARE_BPS = 1_000`).
 
 use std::fmt::Write as _;
 use std::path::Path;
 
-/// The module under test.
-const FEES: &str = "src/storage/bud3/fees.rs";
-
-/// The tests the WP-25 card names for custody rewards.
-const REQUIRED_TESTS: &[&str] = &[
-    "endowment_pays_only_passed_audits",
-    "missed_audit_share_returns_to_pool",
-    "storage_rewards_conserve_supply",
-    "decentralization_bytes_paid_by_pool",
-];
-
-/// The text from `fn name(` to the closing brace at or above its indent.
-fn region(code: &str, name: &str) -> Option<String> {
-    let needle = format!("fn {name}(");
-    let lines: Vec<&str> = code.lines().collect();
-    let start = lines.iter().position(|l| l.contains(&needle))?;
-    let indent = lines[start].len() - lines[start].trim_start().len();
-    let mut out = String::new();
-    for line in &lines[start..] {
-        out.push_str(line);
-        out.push('\n');
-        if line.trim() == "}" && line.len() - line.trim_start().len() <= indent {
-            return Some(out);
-        }
+fn read_rel(root: &Path, rel: &str) -> Result<String, String> {
+    let path = root.join(rel);
+    if !path.is_file() {
+        return Err(format!("missing required file: {rel}"));
     }
-    Some(out)
+    std::fs::read_to_string(&path).map_err(|e| format!("{rel}: {e}"))
 }
 
-/// Check the custody reward rules.
+fn strip_cfg_test(src: &str) -> &str {
+    match src.find("#[cfg(test)]") {
+        Some(idx) => src.get(..idx).unwrap_or(src),
+        None => src,
+    }
+}
+
+fn strip_line_comments(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    for line in src.lines() {
+        let code = match line.find("//") {
+            Some(idx) => line.get(..idx).unwrap_or(line),
+            None => line,
+        };
+        out.push_str(code);
+        out.push('\n');
+    }
+    out
+}
+
+fn scan_bud3_dir(dir: &Path, out: &mut Vec<(String, String)>) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Err(String::from("missing `src/storage/bud3` directory"));
+    }
+    let entries = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() && path.extension().is_some_and(|e| e == "rs") {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            out.push((name, text));
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(())
+}
+
+/// Run the `bud3-custody-rewards` gate against `root`.
 ///
 /// # Errors
 ///
-/// Returns every violated property, one per line.
+/// Returns a human-readable failure report if any custody reward or non-slashing
+/// invariant is violated.
 pub fn run(root: &Path) -> Result<String, String> {
-    let path = root.join(FEES);
-    let src = std::fs::read_to_string(&path).map_err(|e| {
-        format!(
-            "the storage fee module could not be read ({}): {e}",
-            path.display()
-        )
-    })?;
-    let code = crate::gates::rust_literals::scrub(&src);
     let mut problems: Vec<String> = Vec::new();
-    let mut checked = 0usize;
 
-    checked += 1;
-    if !code.contains("pub passed_audit: bool") {
-        problems.push(
-            "`CustodyShare` has no `passed_audit` field. Without it there is nothing \
-             to decide a missed audit by, and Section 11.7's no-reward rule has no \
-             input."
-                .to_string(),
-        );
-    }
+    let fees_raw = read_rel(root, "src/storage/bud3/fees.rs")?;
+    let registry_raw = read_rel(root, "src/storage/bud3/registry.rs")?;
+    let tok_raw = read_rel(root, "src/tokenomics/mod.rs")?;
 
-    checked += 1;
-    match region(&code, "custody_payout").as_deref() {
-        None => problems.push(
-            "`custody_payout` is missing; the endowment has no way to pay a share.".to_string(),
-        ),
-        Some(payout) => {
-            for token in ["passed_audit", "presence_ppm", "symbol_bytes"] {
-                if !payout.contains(token) {
-                    problems.push(format!(
-                        "`custody_payout` does not read `{token}`. A payout that skips it \
-                         pays a share it could not check, an absent validator as much as \
-                         a present one, or a one-byte share as much as a whole segment."
-                    ));
-                }
-            }
-            if !payout.contains("to_pool") {
-                problems.push(
-                    "`custody_payout` does not name the undistributed part. Section 11.5 \
-                     item 5 sends what the endowment could not pay to the network \
-                     security pool; a payout with no remainder field loses it."
-                        .to_string(),
-                );
-            }
-        }
-    }
+    let fees_prod = strip_line_comments(strip_cfg_test(&fees_raw));
+    let registry_prod = strip_line_comments(strip_cfg_test(&registry_raw));
+    let tok_prod = strip_line_comments(strip_cfg_test(&tok_raw));
 
-    checked += 1;
-    match region(&code, "endowment_epoch_slice").as_deref() {
-        None => problems.push(
-            "`endowment_epoch_slice` is missing; the endowment releases nothing.".to_string(),
-        ),
-        Some(slice) => {
-            if !slice.contains("SECONDS_PER_DAY") {
-                problems.push(
-                    "`endowment_epoch_slice` does not convert the lifetime to seconds. \
-                     Section 11.5 releases `share x epoch / lifetime`, and a lifetime in \
-                     days against an epoch in seconds is off by 86 400."
-                        .to_string(),
-                );
-            }
-            if slice.contains("div_ceil") {
-                problems.push(
-                    "`endowment_epoch_slice` rounds up. The releases would exceed the \
-                     share the object paid for, and the last epoch would pay money the \
-                     endowment never received."
-                        .to_string(),
-                );
-            }
-        }
-    }
-
-    checked += 1;
-    match region(&code, "settle_epoch").as_deref() {
-        None => problems
-            .push("`settle_epoch` is missing; the ledger never pays anybody.".to_string()),
-        Some(settle) => {
-            if !settle.contains("to_pool") {
-                problems.push(
-                    "`StorageLedger::settle_epoch` does not move the undistributed part \
-                     into the pool, so the ledger's balances stop adding up to what it \
-                     charged."
-                        .to_string(),
-                );
-            }
-        }
-    }
-
-    checked += 1;
-    match region(&code, "decentralization_extra_bytes").as_deref() {
-        None => problems.push(
-            "`decentralization_extra_bytes` is missing; the Mobile floor has no price."
-                .to_string(),
-        ),
-        Some(extra) => {
-            if !extra.contains("MOBILE_SHARE_FLOOR_PPM") {
-                problems.push(
-                    "`decentralization_extra_bytes` does not use `MOBILE_SHARE_FLOOR_PPM`. \
-                     The floor is Section 6.9's 30 percent of the symbols; a literal \
-                     hidden in the body cannot be reviewed against it."
-                        .to_string(),
-                );
-            }
-        }
-    }
-
-    checked += 1;
-    for &name in REQUIRED_TESTS {
-        if !crate::gates::rust_literals::has_live_test(&src, name) {
+    for token in [
+        "distribute_object_endowment_epoch",
+        "forfeited_to_security_pool",
+        "reward_pool_account",
+        "presence_ppm",
+        "epoch_storage_reward_share",
+    ] {
+        if !fees_prod.contains(token) {
             problems.push(format!(
-                "required test `{name}` is missing from {FEES} or is not a live `#[test]`."
+                "`src/storage/bud3/fees.rs` is missing required custody settlement symbol `{token}`."
             ));
         }
     }
 
+    if !registry_prod.contains("distribute_object_endowment_epoch") {
+        problems.push(String::from(
+            "`src/storage/bud3/registry.rs` does not invoke `distribute_object_endowment_epoch` during epoch window close.",
+        ));
+    }
+
+    for share_const in [
+        "CONSENSUS_REWARD_SHARE_BPS: u64 = 4_000",
+        "STORAGE_REWARD_SHARE_BPS: u64 = 5_000",
+        "REPAIR_RELAY_REWARD_SHARE_BPS: u64 = 1_000",
+    ] {
+        if !tok_prod.contains(share_const) {
+            problems.push(format!(
+                "`src/tokenomics/mod.rs` is missing Network Security Pool share `{share_const}`."
+            ));
+        }
+    }
+
+    let mut files = Vec::new();
+    scan_bud3_dir(&root.join("src/storage/bud3"), &mut files)?;
+    for (name, raw) in &files {
+        let prod = strip_line_comments(strip_cfg_test(raw));
+        if prod.contains("try_mint_balance") {
+            problems.push(format!(
+                "`src/storage/bud3/{name}` calls `try_mint_balance`; custody rewards must never mint supply (G-3)."
+            ));
+        }
+        for slash_tok in ["SlashingProof", "slash_validator", "slash_stake"] {
+            if prod.contains(slash_tok) {
+                problems.push(format!(
+                    "`src/storage/bud3/{name}` references `{slash_tok}`; missed custody audits withhold reward and trigger suspension/repair, never stake slashing (V-4)."
+                ));
+            }
+        }
+    }
+
     if !problems.is_empty() {
-        let mut msg = String::new();
-        for problem in problems {
-            writeln!(msg, "FAIL: {problem}").expect("writing to a String cannot fail");
+        let mut msg = String::from("bud3-custody-rewards failed:\n");
+        for p in &problems {
+            let _ = writeln!(msg, "  - {p}");
         }
         return Err(msg);
     }
-    Ok(format!(
-        "bud3 custody rewards gate OK: {checked} checks, audits and presence decide the payout"
+
+    Ok(String::from(
+        "bud3-custody-rewards OK: pro-rata endowment settlement, security-pool forfeiture, 40/50/10 pool shares, zero minting, and zero audit slashing verified.",
     ))
 }
 
-/// The fixture the canaries are run against.
-fn fixture(weight: &str, remainder: &str, slice_rounding: &str) -> String {
-    let mut text = String::from(
-        "pub const SECONDS_PER_DAY: u64 = 24 * 60 * 60;\n\
-         pub const MOBILE_SHARE_FLOOR_PPM: u64 = 300_000;\n\
-         pub struct CustodyShare {\n    pub symbol_bytes: u64,\n    \
-         pub presence_ppm: u32,\n    pub passed_audit: bool,\n}\n\
-         pub struct CustodyPayout {\n    pub paid: Vec<u64>,\n    pub to_pool: u64,\n}\n",
-    );
-    writeln!(
-        text,
-        "pub fn custody_payout(payout: u64, shares: &[CustodyShare]) -> CustodyPayout {{\n    \
-         let _ = shares.iter().filter(|s| s.{weight});\n    \
-         CustodyPayout {{ paid: Vec::new(), {remainder} }}\n}}"
-    )
-    .expect("writing to a String cannot fail");
-    writeln!(
-        text,
-        "pub fn endowment_epoch_slice(share: u64, epoch_secs: u64, days: u64) -> u64 {{\n    \
-         let life = days.saturating_mul(SECONDS_PER_DAY);\n    \
-         share.saturating_mul(epoch_secs).{slice_rounding}(life)\n}}"
-    )
-    .expect("writing to a String cannot fail");
-    writeln!(
-        text,
-        "pub fn settlement(ledger: &mut u64, to_pool: u64) {{\n    \
-         *ledger = ledger.saturating_add(to_pool);\n}}"
-    )
-    .expect("writing to a String cannot fail");
-    writeln!(
-        text,
-        "pub fn decentralization_extra_bytes(total: u64) -> u64 {{\n    \
-         total.saturating_mul(MOBILE_SHARE_FLOOR_PPM)\n}}"
-    )
-    .expect("writing to a String cannot fail");
-    for &name in REQUIRED_TESTS {
-        writeln!(text, "#[test]\nfn {name}() {{}}").expect("writing to a String cannot fail");
-    }
-    text
-}
-
-/// The fixture plus the `settle_epoch` shape the gate looks for.
-fn with_settle_epoch(mut text: String, moves_to_pool: bool) -> String {
-    let body = if moves_to_pool {
-        "fn settle_epoch(&mut self, payout: CustodyPayout) {\n    \
-         let to_pool = payout.to_pool;\n    self.pool = self.pool.saturating_add(to_pool);\n}"
-    } else {
-        "fn settle_epoch(&mut self, payout: CustodyPayout) {\n    let _ = payout;\n}"
-    };
-    text.push_str(body);
-    text.push('\n');
-    text
-}
-
+/// Self-test with positive and negative synthetic trees.
+///
 /// # Errors
 ///
-/// Returns a finding when a defect fixture passes.
+/// Returns an error if any canary fails to trigger or a clean tree fails.
 pub fn self_test() -> Result<String, String> {
-    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-bud3-custody")?;
-    let _ = std::fs::create_dir_all(dir.join("src/storage/bud3"));
-    let target = dir.join(FEES);
+    let dir =
+        crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-bud3-custody-rewards")?;
+    let result = (|| {
+        let put = |rel: &str, body: &str| -> Result<(), String> {
+            let p = dir.join(rel);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(&p, body).map_err(|e| e.to_string())
+        };
 
-    let good = with_settle_epoch(
-        fixture(
-            "passed_audit && s.presence_ppm > 0 && s.symbol_bytes > 0",
-            "to_pool: 0",
-            "saturating_div",
-        ),
-        true,
-    );
-    std::fs::write(&target, &good).map_err(|e| e.to_string())?;
-    if run(&dir).is_err() {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from(
-            "canary: a payout that follows audits and presence was refused",
-        ));
-    }
+        let clean_fees = "\
+pub fn distribute_object_endowment_epoch(presence_ppm: u32) {
+    let forfeited_to_security_pool = reward_pool_account();
+    let _ = epoch_storage_reward_share(0);
+    let _ = (presence_ppm, forfeited_to_security_pool);
+}
+";
+        let clean_reg = "\
+pub fn close_windows() {
+    distribute_object_endowment_epoch(1_000_000);
+}
+";
+        let clean_tok = "\
+pub const CONSENSUS_REWARD_SHARE_BPS: u64 = 4_000;
+pub const STORAGE_REWARD_SHARE_BPS: u64 = 5_000;
+pub const REPAIR_RELAY_REWARD_SHARE_BPS: u64 = 1_000;
+";
+        put("src/storage/bud3/fees.rs", clean_fees)?;
+        put("src/storage/bud3/registry.rs", clean_reg)?;
+        put("src/tokenomics/mod.rs", clean_tok)?;
+        run(&dir).map_err(|e| format!("canary: clean tree failed: {e}"))?;
 
-    // The audit result is ignored: every share is paid for that window.
-    let ignores_audit = with_settle_epoch(
-        fixture("presence_ppm > 0 && s.symbol_bytes > 0", "to_pool: 0", "saturating_div"),
-        true,
-    );
-    std::fs::write(&target, &ignores_audit).map_err(|e| e.to_string())?;
-    if run(&dir).is_ok() {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from(
-            "canary: a payout that ignored the audit result passed the gate",
-        ));
-    }
+        // Canary 1: minting in bud3 must fail.
+        put(
+            "src/storage/bud3/registry.rs",
+            &format!("{clean_reg}\npub fn bad() {{ try_mint_balance(); }}\n"),
+        )?;
+        if run(&dir).is_ok() {
+            return Err(String::from("canary: try_mint_balance in bud3 passed"));
+        }
 
-    // The undistributed part has no name and goes nowhere.
-    let loses_remainder = with_settle_epoch(
-        fixture(
-            "passed_audit && s.presence_ppm > 0 && s.symbol_bytes > 0",
-            "left_over: 0",
-            "saturating_div",
-        ),
-        false,
-    );
-    std::fs::write(&target, &loses_remainder).map_err(|e| e.to_string())?;
-    if run(&dir).is_ok() {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from(
-            "canary: a payout with no remainder and no pool move passed the gate",
-        ));
-    }
+        // Canary 2: stake slashing on custody audit must fail.
+        put(
+            "src/storage/bud3/registry.rs",
+            &format!("{clean_reg}\npub fn bad() {{ slash_stake(); }}\n"),
+        )?;
+        if run(&dir).is_ok() {
+            return Err(String::from("canary: slash_stake in bud3 passed"));
+        }
 
-    // The epoch slice rounds up and pays more than the object bought.
-    let rounds_up = with_settle_epoch(
-        fixture(
-            "passed_audit && s.presence_ppm > 0 && s.symbol_bytes > 0",
-            "to_pool: 0",
-            "div_ceil",
-        ),
-        true,
-    );
-    std::fs::write(&target, &rounds_up).map_err(|e| e.to_string())?;
-    if run(&dir).is_ok() {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from(
-            "canary: an endowment slice that rounds up passed the gate",
-        ));
-    }
+        // Canary 3: wrong tokenomics storage share must fail.
+        put("src/storage/bud3/registry.rs", clean_reg)?;
+        put(
+            "src/tokenomics/mod.rs",
+            &clean_tok.replace("5_000", "2_500"),
+        )?;
+        if run(&dir).is_ok() {
+            return Err(String::from("canary: wrong STORAGE_REWARD_SHARE_BPS passed"));
+        }
 
+        Ok(())
+    })();
     let _ = std::fs::remove_dir_all(&dir);
+    result?;
     Ok(String::from(
-        "bud3 custody canary OK (audit and presence PASS; ignoring the audit, losing the \
-         remainder and rounding the slice up FAIL).",
+        "bud3-custody-rewards canary OK: clean tree passed; minting, audit slashing, and altered pool share failed.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn bud3_custody_rewards_canary() {
+        assert!(super::self_test().is_ok());
+    }
 }

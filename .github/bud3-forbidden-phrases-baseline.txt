@@ -13,4 +13,3 @@ src/storage/server_admission.rs
 src/storage/three_nft.rs
 src/storage/three_pipe.rs
 src/storage/three_recipe.rs
-src/storage/three_regime.rs
