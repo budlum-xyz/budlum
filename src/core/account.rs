@@ -2013,31 +2013,13 @@ impl AccountState {
                 tx.fee, required_fee, self.base_fee, tx.amount
             ));
         }
-        // Overflow guard (security): reject amount+fee > u64::MAX explicitly
-        // for transaction types that actually debit the signed amount. An
-        // unstake/undelegation/withdrawal moves already-locked value and only
-        // debits its fee, so its amount must not be treated as liquid cost.
-        let debits_amount = !matches!(
-            &tx.tx_type,
-            TransactionType::Unstake
-                | TransactionType::Vote
-                | TransactionType::Undelegate { .. }
-                | TransactionType::WithdrawDelegation { .. }
-                | TransactionType::SetValidatorCommission { .. }
-                | TransactionType::Redelegate { .. }
-                | TransactionType::ClaimRewards { .. }
-                | TransactionType::AiOperatorWithdraw
-        );
-        if debits_amount && tx.checked_total_cost().is_none() {
-            return Err("Transaction amount + fee overflows u64".into());
-        }
-        let total_cost = if matches!(&tx.tx_type, TransactionType::AiOperatorWithdraw) {
-            0
-        } else if debits_amount {
-            tx.total_cost()
-        } else {
-            tx.fee
-        };
+        // One cost classification for admission, pending-balance projection
+        // and execution. Fee-only doors do not debit their signed amount a
+        // second time; amount-bearing doors reject overflow rather than
+        // charging a saturated estimate.
+        let total_cost = tx
+            .checked_liquid_cost()
+            .ok_or_else(|| "Transaction amount + fee overflows u64".to_string())?;
         if spendable_balance < total_cost {
             return Err(format!(
                 "Insufficient balance: {} < {} (amount: {}, fee: {})",
@@ -4147,10 +4129,15 @@ impl AccountState {
                 "slash of {taken} exceeds the {held} escrowed for this prover"
             ));
         }
-        // Credit before debiting the escrow: the credit is the only
-        // fallible step left, and taking the escrow first would leave the
-        // penalty nowhere if it refused.
+        // Check every arithmetic boundary before moving value. A candidate
+        // rollback is not an excuse for a transient partial slash inside this
+        // operation, and clamping the burn counter would reopen mint headroom.
+        let burned = taken - reward;
+        let next_burned = self.checked_burned_total(burned);
         if reward > 0 {
+            self.get_balance(challenger)
+                .checked_add(reward)
+                .ok_or_else(|| "the challenger reward would overflow its balance".to_string())?;
             self.try_add_balance(challenger, reward)?;
         }
         if held == taken {
@@ -4161,9 +4148,18 @@ impl AccountState {
         // The remainder is destroyed, and destroyed supply is recorded:
         // leaving it out of `burned_total` would reopen the same amount
         // as minting headroom under the cap.
-        let burned = taken - reward;
-        self.burned_total = self.burned_total.saturating_add(burned);
+        self.burned_total = next_burned;
         Ok(burned)
+    }
+
+    /// The exact next destroyed-supply counter, or a deterministic refusal
+    /// before any value movement. Saturating would record less destruction
+    /// than occurred and reopen issuance headroom.
+    fn checked_burned_total(&self, amount: u64) -> u64 {
+        match self.burned_total.checked_add(amount) {
+            Some(total) => total,
+            None => panic!("burned-supply counter overflowed u64"),
+        }
     }
 
     /// Records destroyed BUD in `burned_total`. BUD was issued once;
@@ -4172,14 +4168,11 @@ impl AccountState {
     /// counter is checked: corrupt arithmetic halts loudly rather than
     /// wrapping or silently clamping the supply ledger.
     pub fn record_destroyed(&mut self, amount: u128) {
-        let total = match u128::from(self.burned_total).checked_add(amount) {
-            Some(total) => total,
-            None => panic!("burned-supply arithmetic overflowed u128"),
+        let amount = match u64::try_from(amount) {
+            Ok(amount) => amount,
+            Err(_) => panic!("burned-supply debit overflowed u64"),
         };
-        self.burned_total = match u64::try_from(total) {
-            Ok(total) => total,
-            Err(_) => panic!("burned supply no longer fits its u64 ledger"),
-        };
+        self.burned_total = self.checked_burned_total(amount);
     }
 
     /// Records the drop in committed supply since `committed_before` as
@@ -4231,8 +4224,10 @@ impl AccountState {
         if amount == 0 {
             return 0;
         }
-        let account = self.get_or_create(address);
-        let burned = amount.min(account.balance);
+        // Compute the clip and counter boundary before taking a mutable account
+        // borrow or moving value.
+        let burned = amount.min(self.get_balance(address));
+        let next_burned = self.checked_burned_total(burned);
         // Warn when burn is clipped - indicates a potential
         // Accounting error upstream (caller expected to burn more than available).
         if burned < amount {
@@ -4244,8 +4239,9 @@ impl AccountState {
                 amount - burned,
             );
         }
+        let account = self.get_or_create(address);
         account.balance -= burned;
-        self.burned_total = self.burned_total.saturating_add(burned);
+        self.burned_total = next_burned;
         self.dirty_accounts.insert(*address);
         burned
     }
@@ -4289,14 +4285,27 @@ impl AccountState {
         // Burn one increment per outstanding year (bounded by remaining reserve).
         let outstanding = due - self.timed_burn.years_burned;
         for _ in 0..outstanding {
+            // Preflight all three counters before this increment moves value.
+            // `burn_from` independently checks the global destroyed-supply
+            // counter against the same clipped amount.
+            let expected_burn = per_year.min(self.get_balance(reserve_addr));
+            let next_total = match total.checked_add(expected_burn) {
+                Some(next) => next,
+                None => panic!("timed-burn total overflowed u64"),
+            };
+            let next_timed_total = match self.timed_burn.total_burned.checked_add(expected_burn) {
+                Some(next) => next,
+                None => panic!("timed-burn counter overflowed u64"),
+            };
             let burned = self.burn_from(reserve_addr, per_year);
             if burned == 0 {
                 // Reserve exhausted; stop but still advance the year counter so
                 // We don't loop forever on future calls.
                 break;
             }
-            total = total.saturating_add(burned);
-            self.timed_burn.total_burned = self.timed_burn.total_burned.saturating_add(burned);
+            debug_assert_eq!(burned, expected_burn);
+            total = next_total;
+            self.timed_burn.total_burned = next_timed_total;
         }
         self.timed_burn.years_burned = due;
         total
@@ -5639,6 +5648,67 @@ mod tests {
         assert_eq!(state.burn_from(&a, 400), 400);
         assert_eq!(state.supply_capacity_remaining(), before);
         assert_eq!(state.burned_total, 400);
+    }
+
+    #[test]
+    fn destroyed_supply_never_clamps_to_a_smaller_counter() {
+        let mut state = AccountState::new();
+        state.burned_total = u64::MAX;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state.record_destroyed(1);
+        }));
+        assert!(result.is_err());
+        assert_eq!(state.burned_total, u64::MAX);
+    }
+
+    #[test]
+    fn balance_burn_does_not_move_value_when_its_counter_overflows() {
+        let address = test_addr_from_byte(21u8);
+        let mut state = AccountState::new();
+        state.add_balance(&address, 10);
+        state.burned_total = u64::MAX;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state.burn_from(&address, 1);
+        }));
+        assert!(result.is_err());
+        assert_eq!(state.get_balance(&address), 10);
+        assert_eq!(state.burned_total, u64::MAX);
+    }
+
+    #[test]
+    fn external_slash_checks_its_burn_counter_before_moving_value() {
+        let poster = test_addr_from_byte(21u8);
+        let challenger = test_addr_from_byte(22u8);
+        let mut state = AccountState::new();
+        state.add_balance(&poster, 100);
+        state.lock_external_bond(&poster, 80).expect("bond");
+        state.burned_total = u64::MAX;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state.slash_external_bond(&poster, 50, 20, &challenger)
+        }));
+        assert!(result.is_err());
+        assert_eq!(state.get_balance(&poster), 20);
+        assert_eq!(state.get_balance(&challenger), 0);
+        assert_eq!(state.external_bond_escrow.get(&poster), Some(&80));
+        assert_eq!(state.burned_total, u64::MAX);
+    }
+
+    #[test]
+    fn external_slash_checks_challenger_overflow_before_moving_value() {
+        let poster = test_addr_from_byte(21u8);
+        let challenger = test_addr_from_byte(22u8);
+        let mut state = AccountState::new();
+        state.add_balance(&poster, 100);
+        state.add_balance(&challenger, u64::MAX);
+        state.lock_external_bond(&poster, 80).expect("bond");
+        let error = state
+            .slash_external_bond(&poster, 50, 20, &challenger)
+            .expect_err("the challenger cannot receive another atom");
+        assert!(error.contains("overflow"), "{error}");
+        assert_eq!(state.get_balance(&poster), 20);
+        assert_eq!(state.get_balance(&challenger), u64::MAX);
+        assert_eq!(state.external_bond_escrow.get(&poster), Some(&80));
+        assert_eq!(state.burned_total, 0);
     }
 
     #[test]

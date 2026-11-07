@@ -2355,10 +2355,32 @@ impl Transaction {
         self.fee
     }
 
+    /// The liquid debit this transaction actually charges.
+    ///
+    /// Fee-only doors move bonded, delegated or reward value inside the state
+    /// machine; their signed `amount` is not a second debit from the sender's
+    /// liquid balance. The AI-operator withdrawal exit preserves its existing
+    /// zero liquid cost. Admission, pending-balance projection and execution
+    /// share this classification; `None` is a refusal, never a saturated cost.
+    #[must_use]
+    pub fn checked_liquid_cost(&self) -> Option<u64> {
+        match self.tx_type {
+            TransactionType::AiOperatorWithdraw => Some(0),
+            TransactionType::Unstake
+            | TransactionType::Vote
+            | TransactionType::Undelegate { .. }
+            | TransactionType::WithdrawDelegation { .. }
+            | TransactionType::SetValidatorCommission { .. }
+            | TransactionType::Redelegate { .. }
+            | TransactionType::ClaimRewards { .. } => Some(self.fee),
+            _ => self.checked_total_cost(),
+        }
+    }
+
     /// Return a compatibility estimate of the transaction debit.
     ///
     /// Do not use this helper for admission or state transitions. Those paths
-    /// must use `checked_total_cost` and reject overflow.
+    /// must use `checked_liquid_cost` and reject overflow.
     pub fn total_cost(&self) -> u64 {
         self.checked_total_cost().unwrap_or(u64::MAX)
     }
@@ -2680,6 +2702,53 @@ mod tests {
         let tx = Transaction::new_with_fee(Address::zero(), recipient, u64::MAX, 1, 1, vec![]);
         assert_eq!(tx.checked_total_cost(), None);
         assert_eq!(tx.total_cost(), u64::MAX);
+    }
+
+    #[test]
+    fn checked_liquid_cost_matches_fee_only_and_amount_bearing_doors() {
+        let validator = test_addr_from_byte(2u8);
+        let fee_only = [
+            TransactionType::Unstake,
+            TransactionType::Vote,
+            TransactionType::Undelegate { validator },
+            TransactionType::WithdrawDelegation { validator },
+            TransactionType::SetValidatorCommission { commission: 10 },
+            TransactionType::Redelegate {
+                from_validator: validator,
+                to_validator: test_addr_from_byte(3u8),
+            },
+            TransactionType::ClaimRewards { validator },
+        ];
+        for tx_type in fee_only {
+            let mut tx = Transaction::new_with_fee(
+                test_addr_from_byte(1u8),
+                Address::zero(),
+                100,
+                5,
+                1,
+                vec![],
+            );
+            tx.tx_type = tx_type;
+            assert_eq!(tx.checked_liquid_cost(), Some(5));
+            // A signed amount that is not a liquid debit cannot overflow the fee.
+            tx.amount = u64::MAX;
+            assert_eq!(tx.checked_liquid_cost(), Some(5));
+        }
+
+        let mut transfer = Transaction::new_with_fee(
+            test_addr_from_byte(1u8),
+            validator,
+            u64::MAX,
+            1,
+            1,
+            vec![],
+        );
+        transfer.tx_type = TransactionType::Transfer;
+        assert_eq!(transfer.checked_liquid_cost(), None);
+
+        let mut withdrawal = transfer;
+        withdrawal.tx_type = TransactionType::AiOperatorWithdraw;
+        assert_eq!(withdrawal.checked_liquid_cost(), Some(0));
     }
 
     #[test]

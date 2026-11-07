@@ -280,7 +280,7 @@ impl Executor {
         }
 
         // The AI layer boundary sits here - after the cheap
-        // shape guards above and before `liquid_cost` / `get_or_create` -
+        // shape guards above and before `total_cost` / `get_or_create` -
         // because that probe *creates* the sender row. A refusal must leave
         // the state byte-identical (G-4), so no closed door may run after it.
         //
@@ -300,52 +300,28 @@ impl Executor {
             ));
         }
 
-        let debits_amount = !matches!(
-            tx.tx_type,
-            TransactionType::Unstake
-                | TransactionType::Vote
-                | TransactionType::Undelegate { .. }
-                | TransactionType::WithdrawDelegation { .. }
-                | TransactionType::SetValidatorCommission { .. }
-                | TransactionType::Redelegate { .. }
-                | TransactionType::ClaimRewards { .. }
-                | TransactionType::AiOperatorWithdraw
-        );
-        let total_cost = if debits_amount {
-            tx.checked_total_cost().ok_or_else(|| {
-                BudlumError::validation(
-                    "amount_fee_overflow",
-                    "Transaction amount + fee overflows u64",
-                )
-            })?
-        } else {
-            tx.fee
-        };
+        let total_cost = tx.checked_liquid_cost().ok_or_else(|| {
+            BudlumError::validation(
+                "amount_fee_overflow",
+                "Transaction amount + fee overflows u64",
+            )
+        })?;
 
-        let liquid_cost = if matches!(tx.tx_type, TransactionType::AiOperatorWithdraw) {
-            0
-        } else {
-            total_cost
-        };
-
-        if state.get_balance(&tx.from) < liquid_cost {
-            return Err(BudlumError::validation(
-                "insufficient_balance",
-                "Insufficient balance",
-            ));
-        }
+        // Transfer, stake and delegation retain their more specific arm-level
+        // error codes below. Every other sender pays from spendable balance;
+        // no raw-balance gate may admit vesting-locked funds.
         if !matches!(
             &tx.tx_type,
             TransactionType::Transfer
                 | TransactionType::Stake
                 | TransactionType::Delegate { .. }
                 | TransactionType::AiOperatorWithdraw
-        ) && state.spendable_balance(&tx.from) < liquid_cost
+        ) && state.spendable_balance(&tx.from) < total_cost
         {
             return Err(BudlumError::validation(
                 "vesting_locked",
                 format!(
-                    "Transaction cost exceeds spendable balance (vesting-locked funds cannot be spent): need {liquid_cost}"
+                    "Transaction cost exceeds spendable balance (vesting-locked funds cannot be spent): need {total_cost}"
                 ),
             ));
         }
@@ -3848,7 +3824,13 @@ impl Executor {
             // destroyed.
             let destroyed = transactions
                 .iter()
-                .fold(0u128, |acc, tx| acc.saturating_add(u128::from(tx.fee)));
+                .try_fold(0u128, |acc, tx| acc.checked_add(u128::from(tx.fee)))
+                .ok_or_else(|| {
+                    BudlumError::validation(
+                        "burned_supply_overflow",
+                        "destroyed fee total overflowed",
+                    )
+                })?;
             state.record_destroyed(destroyed);
         }
 
@@ -4337,8 +4319,8 @@ mod tests {
             .expect_err("a locked fee must be refused");
         assert_eq!(
             err.code(),
-            "insufficient_balance_for_fee",
-            "unexpected error: {err}"
+            "vesting_locked",
+            "the shared spendable-balance gate refuses before the arm: {err}"
         );
         assert_eq!(state.get_balance(&team), 5_000);
     }
