@@ -1,0 +1,204 @@
+# TEST-GAP-07: the RPC method coverage ratchet, read by
+# `rpc_every_method_has_success_and_refusal_test` in `src/rpc/method_class.rs`.
+#
+# One line per gap: `<method> missing=success` or `<method> missing=refusal`.
+# A row of `METHOD_CLASSES` is covered when a test function in `src/rpc/tests.rs`
+# or `src/tests/*.rs` names the method (its JSON-RPC name in quotes, or a call to
+# its handler) and the statement that names it unwraps an answer (success) or
+# reads the error (refusal). The mark must sit on the same statement as the name,
+# on purpose: coverage is claimed where a reader can see it, and a helper or a
+# loop that visits every method buys nothing until its own call site names the
+# method it covers.
+#
+# Two kinds of row carry a smaller demand, and the rule encodes both, so every
+# line here is work a later change can finish:
+#   * a `Refused` row is not asked for a success test, because it refuses every
+#     call by design and its refusal must name the transaction door;
+#   * a method `src/rpc/api.rs` declares with the receiver alone is not asked for
+#     a refusal test, because it has no invalid call at that layer and an error
+#     case written to satisfy the gate would be an invention.
+#
+# The file only shrinks. A line whose test exists must be deleted in the same
+# change, and a method that loses its test must be recorded here with a reason in
+# the pull request that does it. The gate's own behaviour is locked by
+# `rpc_method_coverage_catches_an_injected_gap`.
+#
+# Measured against the tree on 2026-11-06: 183 rows, 73 rows covered
+# on both sides the rule asks for, 110 rows carrying 177 gap lines.
+bud_adminBanPeer missing=success
+bud_adminListBannedPeers missing=success
+bud_adminUnbanPeer missing=refusal
+bud_adminUnbanPeer missing=success
+bud_aiAgentPayment missing=refusal
+bud_aiAgentPayment missing=success
+bud_aiAgentPayments missing=refusal
+bud_aiAgentPayments missing=success
+bud_aiAgentReputation missing=refusal
+bud_aiAgentReputation missing=success
+bud_aiCallbackQueue missing=refusal
+bud_aiCallbackQueue missing=success
+bud_aiCancelStatus missing=refusal
+bud_aiCancelStatus missing=success
+bud_aiDisputeSlash missing=refusal
+bud_aiDisputeSlash missing=success
+bud_aiEquivocationStatus missing=refusal
+bud_aiEquivocationStatus missing=success
+bud_aiExecutionProof missing=refusal
+bud_aiExecutionProof missing=success
+bud_aiGetModel missing=refusal
+bud_aiGetModel missing=success
+bud_aiGetOutcome missing=refusal
+bud_aiGetOutcome missing=success
+bud_aiInferenceStats missing=success
+bud_aiReclaimFee missing=refusal
+bud_aiReclaimFee missing=success
+bud_aiRegisterModel missing=refusal
+bud_aiRegisterModel missing=success
+bud_aiSlashingStatus missing=refusal
+bud_aiSlashingStatus missing=success
+bud_aiSubmitRequest missing=refusal
+bud_aiSubmitRequest missing=success
+bud_aiSubmitResult missing=refusal
+bud_aiSubmitResult missing=success
+bud_aiVerifierQos missing=refusal
+bud_aiVerifierQos missing=success
+bud_aiVerifierStake missing=refusal
+bud_aiVerifierStake missing=success
+bud_atlasGetWalletContext missing=refusal
+bud_atlasGetWalletContext missing=success
+bud_bnsPrepareRegisterSubdomain missing=refusal
+bud_bnsPrepareRegisterSubdomain missing=success
+bud_bnsPrepareRenew missing=refusal
+bud_bnsPrepareRenew missing=success
+bud_bnsPrepareSetContent missing=refusal
+bud_bnsPrepareSetContent missing=success
+bud_bnsPrepareTransfer missing=refusal
+bud_bnsPrepareTransfer missing=success
+bud_bnsResolve missing=refusal
+bud_bnsResolveContent missing=refusal
+bud_bnsResolveFull missing=refusal
+bud_bnsResolveSubdomain missing=refusal
+bud_burnBridgeTransfer missing=refusal
+bud_burnBridgeTransferWithEvent missing=refusal
+bud_encodeExternalEvidence missing=refusal
+bud_encodeExternalEvidence missing=success
+bud_estimateGas missing=refusal
+bud_gatewayFetchContent missing=refusal
+bud_gatewayFetchContent missing=success
+bud_gatewayRenderContent missing=refusal
+bud_gatewayRenderContent missing=success
+bud_getAccountProof missing=success
+bud_getBalance missing=refusal
+bud_getBlockByHash missing=refusal
+bud_getBlockByNumber missing=refusal
+bud_getCrossDomainMessage missing=refusal
+bud_getDomainInfo missing=refusal
+bud_getDomainInfo missing=success
+bud_getExternalDomainProfile missing=refusal
+bud_getExternalDomainProfile missing=success
+bud_getExternalDomainStatus missing=refusal
+bud_getExternalDomainStatus missing=success
+bud_getExternalQuorumRound missing=refusal
+bud_getExternalQuorumRound missing=success
+bud_getExternalQuorumRounds missing=refusal
+bud_getExternalQuorumRounds missing=success
+bud_getGlobalHeader missing=refusal
+bud_getGlobalHeaderProof missing=refusal
+bud_getGlobalHeaderProof missing=success
+bud_getGraftApplication missing=refusal
+bud_getGraftApplication missing=success
+bud_getRelayerIntent missing=refusal
+bud_getRelayerIntent missing=success
+bud_getSovereignTemplate missing=refusal
+bud_getSovereignTemplate missing=success
+bud_getStateSnapshot missing=refusal
+bud_getStateSnapshot missing=success
+bud_getTransactionByHash missing=refusal
+bud_getTransactionReceipt missing=refusal
+bud_getValidatorDelegations missing=refusal
+bud_graftPaymentProof missing=refusal
+bud_graftPaymentProof missing=success
+bud_hubGetApps missing=success
+bud_hubGetGraftApps missing=success
+bud_hubPrepareRegister missing=refusal
+bud_hubPrepareRegister missing=success
+bud_identityCredential missing=refusal
+bud_identityVerifyPresentation missing=refusal
+bud_inspectEthereumUpdate missing=refusal
+bud_inspectEthereumUpdate missing=success
+bud_marketPrepareOffer missing=refusal
+bud_marketPrepareOffer missing=success
+bud_marketPreparePurchase missing=refusal
+bud_marketPreparePurchase missing=success
+bud_mintBridgeTransfer missing=refusal
+bud_passportGetProfile missing=refusal
+bud_passportGetProfile missing=success
+bud_passportGetProofBundle missing=refusal
+bud_passportGetProofBundle missing=success
+bud_planEvmVerification missing=refusal
+bud_planEvmVerification missing=success
+bud_pollenBuildAiInputRef missing=refusal
+bud_pollenBuildAiInputRef missing=success
+bud_pollenPreparePurchase missing=refusal
+bud_pollenPreparePurchase missing=success
+bud_pollenPrepareSaleAuthorization missing=refusal
+bud_pollenPrepareSaleAuthorization missing=success
+bud_pruneStatus missing=success
+bud_registryActiveMembers missing=refusal
+bud_registryBeginRoleBondUnbonding missing=refusal
+bud_registryRegister missing=refusal
+bud_registryRegister missing=success
+bud_registryWithdrawRoleBond missing=refusal
+bud_relayerPrepareExternalTx missing=refusal
+bud_relayerPrepareExternalTx missing=success
+bud_replayExternalProbes missing=refusal
+bud_replayExternalProbes missing=success
+bud_requestPrune missing=success
+bud_sendRawTransaction missing=refusal
+bud_sendTxBundle missing=refusal
+bud_sendTxBundle missing=success
+bud_socialGetFeed missing=refusal
+bud_socialGetFeed missing=success
+bud_socialGetPost missing=refusal
+bud_socialGetPost missing=success
+bud_socialGetProfile missing=refusal
+bud_socialGetProfile missing=success
+bud_socialPrepareBoost missing=refusal
+bud_socialPrepareBoost missing=success
+bud_socialPrepareBurn missing=refusal
+bud_socialPrepareBurn missing=success
+bud_socialPreparePost missing=refusal
+bud_socialPreparePost missing=success
+bud_storageAcceptReallocation missing=refusal
+bud_storageCloseReveal missing=refusal
+bud_storageCloseReveal missing=success
+bud_storageGetChallenges missing=refusal
+bud_storageGetChallenges missing=success
+bud_storageGetConfidentialCommit missing=refusal
+bud_storageGetConfidentialCommit missing=success
+bud_storageGetManifest missing=refusal
+bud_storageGetObject missing=refusal
+bud_storageGetObject missing=success
+bud_storageGetOperatorEconomics missing=refusal
+bud_storageGetOutcome missing=refusal
+bud_storageGetOutcome missing=success
+bud_storageOpenChallenge missing=refusal
+bud_storageOpenDeal missing=refusal
+bud_storageOpenReveal missing=refusal
+bud_storageOpenReveal missing=success
+bud_storageQrFeedFrames missing=refusal
+bud_storageRepairBand missing=refusal
+bud_storageRevealFrames missing=refusal
+bud_storageRevealFrames missing=success
+bud_storageVerifyEncoding missing=refusal
+bud_storageVerifyEncoding missing=success
+bud_submitQcFaultProof missing=refusal
+bud_submitSlashingReport missing=refusal
+bud_subscribe missing=refusal
+bud_subscribe missing=success
+bud_txPrecheck missing=refusal
+bud_unlockBridgeTransfer missing=refusal
+bud_unlockBridgeTransferVerified missing=refusal
+bud_unsubscribe missing=refusal
+bud_unsubscribe missing=success
+bud_validatorProfile missing=refusal

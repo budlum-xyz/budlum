@@ -1122,6 +1122,60 @@ mod tests {
         assert_eq!(names.len(), 1, "no temp file may remain");
     }
 
+    /// BLG-004 lock: rewriting a key file must not keep the wide mode of the
+    /// file it replaced. The lock covers the validator key file too, not only
+    /// the account key pair: it carries the BLS and PQ secrets as well, and one
+    /// saver that kept the old mode would leave the whole suite group readable.
+    #[cfg(unix)]
+    #[test]
+    fn blg_004_validator_key_save_resets_a_wide_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("validator_key.bin");
+        std::fs::write(&path, b"world readable before").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let keys = super::ValidatorKeys::generate().unwrap();
+        keys.save(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "a rewrite kept the mode of the file it replaced"
+        );
+        let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert_eq!(left.len(), 1, "a temp key file was left behind");
+        assert!(
+            super::ValidatorKeys::load(&path).is_ok(),
+            "the rewritten file must still load"
+        );
+    }
+
+    /// BLG-200 lock, key material half. A BLS pair is refused when its secret
+    /// half is the zero scalar, when its public half is the identity point, and
+    /// when the two halves do not belong together. The identity point is a real
+    /// encoding (`0xc0`), so the refusal cannot rest on a failed decode.
+    #[test]
+    fn blg_200_zero_and_identity_bls_material_is_refused() {
+        let identity = *bls12_381::G2Affine::identity().to_compressed();
+        // A file holding a zero secret and the identity point: both halves are
+        // bad on their own, and the pairing check is the second net.
+        let mut zero_pair = vec![0u8; 32];
+        zero_pair.extend_from_slice(&identity);
+        assert!(super::BlsKeypair::from_bytes(&zero_pair).is_err());
+        // A real secret paired with the identity point: the encoding decodes,
+        // so only the pairing check can refuse it.
+        let kp = super::BlsKeypair::generate().expect("bls key");
+        let mut forged = kp.secret_key.to_bytes().to_vec();
+        forged.extend_from_slice(&identity);
+        assert!(
+            super::BlsKeypair::from_bytes(&forged).is_err(),
+            "an identity public key must not pass the pairing check"
+        );
+        // A genuine pair survives the round trip, so the refusals above are
+        // not a broken reader.
+        let round = super::BlsKeypair::from_bytes(&kp.to_bytes()).expect("round trip");
+        assert_eq!(round.public_key, kp.public_key);
+    }
+
     #[test]
     fn a_stale_temp_file_does_not_block_save() {
         let dir = tempfile::tempdir().unwrap();

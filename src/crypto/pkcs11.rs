@@ -873,6 +873,24 @@ impl ConsensusSigner for Pkcs11Signer {
 mod tests {
     use super::*;
 
+    /// BLG-010 lock: the token label is bound when the key is searched, so a
+    /// slot holding more than one Ed25519 key is refused instead of guessed. The
+    /// refusal names the remedy. A constructor that took the label after binding
+    /// an unlabeled key would announce one identity and sign with another.
+    #[test]
+    fn blg_010_a_slot_with_more_than_one_key_is_refused_not_guessed() {
+        assert!(Pkcs11Signer::require_single_key("private", 1).is_ok());
+        let none = Pkcs11Signer::require_single_key("private", 0).unwrap_err();
+        assert!(none.contains("No Ed25519 private key found"), "{none}");
+        let many = Pkcs11Signer::require_single_key("public", 3).unwrap_err();
+        assert!(
+            many.starts_with("3 Ed25519 public keys found in HSM slot")
+                && many.contains("refusing to guess")
+                && many.contains("key label"),
+            "the refusal must count the keys and name the remedy, got: {many}"
+        );
+    }
+
     #[test]
     fn test_pkcs11_parse_mechanism_hex_and_dec() {
         assert_eq!(Pkcs11Signer::parse_mechanism("0x1234"), Some(0x1234));
