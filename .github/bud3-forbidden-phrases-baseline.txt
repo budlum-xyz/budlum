@@ -7,6 +7,7 @@ docs/ARCHITECTURE.md
 src/domain/storage_deal.rs
 src/security/quantum_canary.rs
 src/socialfi/vault.rs
+src/storage/bud3/registry.rs
 src/storage/generated.rs
 src/storage/server_admission.rs
 src/storage/three_nft.rs

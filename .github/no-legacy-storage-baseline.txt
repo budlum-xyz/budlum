@@ -79,6 +79,7 @@ src/tests/manifest_commitment_locks.rs
 src/tests/operator_kill_chaos.rs
 src/tests/pollen_ai_data_rights.rs
 src/tests/priority_findings.rs
+src/tests/regression_ai_storage.rs
 src/tests/socialfi.rs
 src/tests/storage_tx_door.rs
 xtask/gates/src/gates/capability_modules_are_wired.rs

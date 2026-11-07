@@ -68,6 +68,8 @@ pub enum ChainCommand {
     TxPrecheck(Transaction, oneshot::Sender<serde_json::Value>),
     GetChainId(oneshot::Sender<u64>),
     GetBaseFee(oneshot::Sender<u64>),
+    /// The fee floor one transaction must clear.
+    GetRequiredFee(Box<Transaction>, oneshot::Sender<u64>),
     GetValidatorSetHash(oneshot::Sender<String>),
     GetMempoolSize(oneshot::Sender<usize>),
     /// Whether the mempool still holds the transaction with this hash.
@@ -137,6 +139,14 @@ pub enum ChainCommand {
     ),
     GetPqSealedHeights(u64, oneshot::Sender<(Option<u64>, Option<u64>)>),
     GetQuantumView(oneshot::Sender<serde_json::Value>),
+    GetValidatorDirectory(
+        crate::validators::DirectoryQuery,
+        oneshot::Sender<serde_json::Value>,
+    ),
+    GetBud3(
+        crate::storage::bud3::registry::Bud3Query,
+        oneshot::Sender<serde_json::Value>,
+    ),
     GetValidatorAddress(oneshot::Sender<Option<Address>>),
     GetAggregatorState(oneshot::Sender<crate::chain::finality::AggregatorState>),
     GetStateRoot(u64, oneshot::Sender<Option<String>>),
@@ -727,6 +737,17 @@ impl ChainHandle {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetBaseFee(tx)).await;
         rx.await.unwrap_or(1)
+    }
+
+    /// The fee floor `candidate` must clear under the current state. `None`
+    /// when the chain actor did not answer.
+    pub async fn get_required_fee(&self, candidate: Transaction) -> Option<u64> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetRequiredFee(Box::new(candidate), tx))
+            .await;
+        rx.await.ok()
     }
 
     pub async fn get_validator_set_hash(&self) -> String {
@@ -1333,6 +1354,30 @@ impl ChainHandle {
                 canonical: None,
                 seal: None,
             })
+    }
+
+    /// A read of the validator directory: one validator, the relays or the
+    /// gateways.
+    pub async fn validator_directory(
+        &self,
+        query: crate::validators::DirectoryQuery,
+    ) -> serde_json::Value {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetValidatorDirectory(query, tx))
+            .await;
+        rx.await.unwrap_or(serde_json::Value::Null)
+    }
+
+    /// A read of the B.U.D. 3.0 registry: one object or one validator's shares.
+    pub async fn bud3(
+        &self,
+        query: crate::storage::bud3::registry::Bud3Query,
+    ) -> serde_json::Value {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetBud3(query, tx)).await;
+        rx.await.unwrap_or(serde_json::Value::Null)
     }
 
     /// The quantum alarm and the observed crypto facts of the native domains.
@@ -2602,6 +2647,9 @@ impl ChainActor {
                 ChainCommand::GetBaseFee(tx) => {
                     let _ = tx.send(self.blockchain.state.base_fee);
                 }
+                ChainCommand::GetRequiredFee(candidate, tx) => {
+                    let _ = tx.send(self.blockchain.state.required_fee(&candidate));
+                }
                 ChainCommand::GetValidatorSetHash(tx) => {
                     let _ = tx.send(self.blockchain.get_validator_set_hash());
                 }
@@ -2807,6 +2855,12 @@ impl ChainActor {
                 }
                 ChainCommand::GetQuantumView(tx) => {
                     let _ = tx.send(self.blockchain.quantum_view());
+                }
+                ChainCommand::GetBud3(query, tx) => {
+                    let _ = tx.send(self.blockchain.state.bud3_registry.query_json(&query));
+                }
+                ChainCommand::GetValidatorDirectory(query, tx) => {
+                    let _ = tx.send(self.blockchain.state.validator_directory.query_json(query));
                 }
                 ChainCommand::GetPqSealedHeights(live, tx) => {
                     let res = self.blockchain.pq_sealed_heights(live);

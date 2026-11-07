@@ -48,6 +48,16 @@ jobs:
 # the part of the bridge fed from outside.
           #
           - evm_rlp_decode
+          # The worker-socket frame codec reads bytes from a peer process.
+          - uel_abi_frame
+          # B.U.D. 3.0 parsers: the BOF-1 object and the RFC 6330 symbol
+          # decoder both read bytes from untrusted holders.
+          - bud3_bof1_decode
+          - bud3_symbol_decode
+          # The optical frame is the third parser on that path and the only
+          # one a camera feeds: a declared drop length, a digest and a nested
+          # decoder, all over untrusted bytes.
+          - bud3_qr_frame_decode
           # BPQS WOTS chain-walk refusal safety (crates/bpqs). Runs the
           # quick gate too; here it gets the deep budget.
           - bpqs_wots_reject
