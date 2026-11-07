@@ -315,3 +315,7 @@ pub mod wp44_domains_bridge_settlement;
 // WP-48 Independent Review 2 security, conservation, and privilege-boundary suite.
 #[cfg(test)]
 pub mod wp48_review2_security;
+
+// WP-46 rehearsal genesis, topology, and T-1..T-4 / T-7 protocol drills.
+#[cfg(test)]
+pub mod wp46_ceremony_and_drills;

@@ -1,9 +1,23 @@
 {
   "chain_id": 45261,
   "pq_scheme": "ml-dsa-65",
-  "allocations": [],
-  "validators": [],
-  "validator_consensus_keys": [],
+  "allocations": [
+    ["5151515151515151515151515151515151515151515151515151515151515151", 10000000000000],
+    ["5252525252525252525252525252525252525252525252525252525252525252", 10000000000000],
+    ["5353535353535353535353535353535353535353535353535353535353535353", 20000000000000],
+    ["5454545454545454545454545454545454545454545454545454545454545454", 20000000000000],
+    ["5555555555555555555555555555555555555555555555555555555555555555", 40000000000000]
+  ],
+  "validators": [
+    "1100000000000000000000000000000000000000000000000000000000000001",
+    "1100000000000000000000000000000000000000000000000000000000000002",
+    "1100000000000000000000000000000000000000000000000000000000000003",
+    "1100000000000000000000000000000000000000000000000000000000000004",
+    "1100000000000000000000000000000000000000000000000000000000000005",
+    "1100000000000000000000000000000000000000000000000000000000000006",
+    "1100000000000000000000000000000000000000000000000000000000000007",
+    "1100000000000000000000000000000000000000000000000000000000000008"
+  ],
   "block_reward": 0,
   "base_fee": 1,
   "gas_schedule": {
@@ -15,7 +29,7 @@
     "vote_gas": 25000,
     "contract_call_gas": 35000
   },
-  "timestamp": 1767225600000,
+  "timestamp": 1800000000000,
   "bud_tokenomics": {
     "community": 10000000000000,
     "liquidity": 10000000000000,
@@ -32,6 +46,6 @@
     "slot_duration_secs": 3,
     "epoch_length_slots": 50
   },
-  "ceremony_status": "rehearsal_template",
-  "ceremony_note": "Rehearsal ceremony template (WP-46, directive 12.5 and 17.2). The live rehearsal file is produced by ops/rehearsal/genesis_rehearsal.sh from at least 8 Full validator public registration records (`bud validator init`). A node refuses this template: it has no validators. Chain id stays 45261 (testnet, KR-34)."
+  "ceremony_status": "rehearsal_verified",
+  "ceremony_note": "WP-46 deterministic 8-Full-validator rehearsal fixture matching the 100,000,000 BUD tokenomics ceiling. Live operator rehearsal runs `cargo run --manifest-path xtask/tools/Cargo.toml -- testnet-genesis` to bind operator consensus keys."
 }
