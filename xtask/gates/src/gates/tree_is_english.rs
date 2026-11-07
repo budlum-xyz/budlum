@@ -98,6 +98,17 @@ const ALLOWED_FILES: &[&str] = &[
     // forbids and the scope words it looks for have to be written in
     // Turkish in its lists. The lists are the only Turkish in the file.
     "xtask/gates/src/gates/pq_claims_are_backed.rs",
+    // The binding directive. It is written in Turkish, it carries 3824
+    // Turkish lines, and it is the single authoritative source the work is
+    // executed from, so it cannot be translated in place: the English
+    // documents this gate protects are *derived* from it (WP-43). Exempting
+    // it is the honest reading, and the alternative - a baseline line - does
+    // not fit, because that baseline only shrinks and a file that reaches
+    // zero must leave it, while this file never reaches zero. Recorded as
+    // BLG-268 in `docs/audit/FINDINGS.md`, together with the fact that the
+    // directive's own position section says the document does not enter the
+    // repository: which of the two holds is the owner's call, not a gate's.
+    "THE_BUDLUM_DIREKTIF.md",
     // The concept-name map. Its whole subject is the Turkish concept names
     // being removed: `old` carries the name that leaves and `term_tr` carries
     // the Turkish term a Turkish reader replaces it with. Translating either
