@@ -2901,6 +2901,7 @@ impl Node {
                                                     scheme_id:
                                                         crate::chain::finality::BLS_SCHEME_RFC9380_V1
                                                             .to_string(),
+                                                    seat_table_version: cert.seat_table_version,
                                                 }
                                                 .to_bytes(),
                                             );
@@ -3013,6 +3014,7 @@ impl Node {
                                                 scheme_id:
                                                     crate::chain::finality::BLS_SCHEME_RFC9380_V1
                                                         .to_string(),
+                                                seat_table_version: cert.seat_table_version,
                                             }
                                             .to_bytes(),
                                         );
@@ -4430,6 +4432,7 @@ impl Node {
                                                         scheme_id:
                                                             crate::chain::finality::BLS_SCHEME_RFC9380_V1
                                                                 .to_string(),
+                                                        seat_table_version: cert.seat_table_version,
                                                     }
                                                     .to_bytes(),
                                                 );
@@ -4475,6 +4478,7 @@ impl Node {
                                         bitmap,
                                         set_hash,
                                         scheme_id,
+                                        seat_table_version,
                                     } => {
                                         let rate_limit_ok = self.peer_manager_lock().check_vote_rate_limit(&peer_id);
                                         if !rate_limit_ok {
@@ -4509,6 +4513,7 @@ impl Node {
                                             agg_sig_bls,
                                             bitmap,
                                             set_hash,
+                                            seat_table_version,
                                         };
 
                                         let qc_checkpoint_hash = cert.checkpoint_hash.clone();

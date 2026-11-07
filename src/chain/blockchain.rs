@@ -156,6 +156,12 @@ pub struct Blockchain {
     pub pending_registry_slashing_reports: Vec<crate::registry::evidence::SlashingReport>,
     pub local_invalid_votes: crate::registry::InvalidVoteTracker,
     pub finality_aggregator: Option<FinalityAggregator>,
+    /// The participation record of the last round this node concluded, kept for
+    /// the next checkpoint block it produces (section 7.5.1). A producer hint,
+    /// not consensus state: the live seat table is derived from the canonical
+    /// finalized prefix, never from this field, so losing it on restart only
+    /// costs one record and the handover skips that pair.
+    last_seat_participation: Option<crate::validators::committee::SeatParticipation>,
     /// Votes that reached this node before it had a round - or a prevote
     /// quorum - to put them in. A peer votes the moment it holds the
     /// checkpoint, which can be earlier than this node's own aggregator
@@ -1125,6 +1131,7 @@ impl Blockchain {
             pending_registry_slashing_reports: Vec::new(),
             local_invalid_votes: crate::registry::InvalidVoteTracker::new(),
             finality_aggregator: None,
+            last_seat_participation: None,
             early_finality_votes: EarlyFinalityVotes::default(),
             metrics: None,
             anchor_emission: AnchorEmission::default(),
@@ -4882,6 +4889,12 @@ impl Blockchain {
                 }
             }
         }
+        // A checkpoint block carries the participation record for the previous
+        // checkpoint (section 7.5.1): the seats whose precommits this proposer
+        // collected. An honest proposer records every vote it saw. It is set
+        // before the roots and the hash, because the next seat table is derived
+        // from it and the block hash must seal it.
+        block.seat_participation = self.collect_seat_participation(block.index);
         Self::apply_block_end_roots(&mut committed_state, &block, &self.chain, self.chain_id);
         block.state_root = committed_state.calculate_state_root();
         if self.sharding.is_active_at(block.index) {
@@ -5214,7 +5227,15 @@ impl Blockchain {
         }
         self.require_checkpoint_epoch(cert.epoch, cert.checkpoint_height, "Segment certificate")?;
         let snapshot = self.require_validator_snapshot(cert.epoch)?;
-        cert.verify(&snapshot)?;
+        // Count under the table the round used, so a certificate produced after
+        // an Instant Seat Handover verifies (section 7.5).
+        let committee = self.derive_seat_table_for_checkpoint(
+            cert.epoch,
+            cert.checkpoint_height,
+            &snapshot,
+            Some(blocks.as_slice()),
+        )?;
+        cert.verify_with_committee(&snapshot, &committee)?;
         Self::ensure_blob_matches_checkpoint(qc, &cert.checkpoint_hash)?;
         crate::domain::finality_adapter::verify_pq_quorum(
             &self.state.scheme_registry,
@@ -6568,12 +6589,18 @@ impl Blockchain {
         // /: finality is the BLS certificate AND the ML-DSA QC of the
         // same signers. At Isolate (Zemheri) the BLS half drops out: its curve
         // fell, so a certificate it signed proves nothing. The QC alone
-        // decides, and it must carry the same stake and signer count quorum.
+        // decides, against the same seat table and seat quorum.
         let bls_required = crate::security::alarm_effects::bls_required_for_finality(
             self.state.settlement.quantum.alarm(),
         );
         if bls_required {
-            cert.verify(&snapshot)?;
+            let committee = self.derive_seat_table_for_checkpoint(
+                cert.epoch,
+                cert.checkpoint_height,
+                &snapshot,
+                None,
+            )?;
+            cert.verify_with_committee(&snapshot, &committee)?;
         } else {
             if cert.set_hash != snapshot.set_hash {
                 return Err("Validator set hash mismatch".into());
@@ -6606,15 +6633,30 @@ impl Blockchain {
             Some(self.state.epoch_index),
         )?;
         if !bls_required {
-            let stake: u128 = verified_signers
+            // Under the quantum alarm the BLS half drops out and the ML-DSA QC
+            // alone decides, against the same seat quorum (section 7.4.3).
+            let committee = self.derive_seat_table_for_checkpoint(
+                cert.epoch,
+                cert.checkpoint_height,
+                &snapshot,
+                None,
+            )?;
+            if cert.seat_table_version != committee.version {
+                return Err(format!(
+                    "Certificate names seat table version {}, the verifier holds {}",
+                    cert.seat_table_version, committee.version
+                ));
+            }
+            let signer_addresses: Vec<crate::core::address::Address> = verified_signers
                 .iter()
                 .filter_map(|idx| snapshot.validators.get(*idx))
-                .map(|validator| u128::from(validator.stake))
-                .sum();
-            if stake < snapshot.quorum_stake() || verified_signers.len() < snapshot.quorum_count() {
+                .map(|validator| validator.address)
+                .collect();
+            let covered = committee.covered_seats(signer_addresses.iter());
+            if covered < committee.quorum_seats() {
                 return Err(format!(
-                    "ML-DSA QC quorum not met under the quantum alarm: {} signers, stake {stake}",
-                    verified_signers.len()
+                    "ML-DSA QC seat quorum not met under the quantum alarm: {covered} < {} seats",
+                    committee.quorum_seats()
                 ));
             }
         }
@@ -7251,6 +7293,17 @@ impl Blockchain {
             "FinalityCert produced: epoch={}, height={}",
             cert.epoch, cert.checkpoint_height
         );
+        // Keep the concluded round's participation for the next checkpoint
+        // block. Only a round that reached precommit quorum is evidence of
+        // absence: below quorum the votes may simply not have arrived yet, and
+        // an empty record would mark every honest seat departed.
+        self.last_seat_participation = self.finality_aggregator.as_ref().map(|agg| {
+            crate::validators::committee::SeatParticipation::collect(
+                &agg.committee,
+                agg.checkpoint_height,
+                agg.precommits.keys(),
+            )
+        });
         self.finality_aggregator = None;
 
         // The QC blob this round's own precommits attested, imported through
@@ -7283,6 +7336,22 @@ impl Blockchain {
         Ok(Some(cert))
     }
 
+    /// Sequential finality (section 7.4.5): a validator votes for `h_{j+1}`
+    /// only after `h_j` is final. The seat table is derived from finalized
+    /// participation records (7.5.1), so a vote cast ahead of the finalized
+    /// prefix would be weighed against a table this node cannot derive yet -
+    /// and would attest a checkpoint a reorg can still replace.
+    fn refuse_vote_ahead(&self, checkpoint_height: u64) -> Result<(), String> {
+        let next = self.next_finality_checkpoint();
+        if checkpoint_height > next {
+            return Err(format!(
+                "Sequential finality: checkpoint {checkpoint_height} is ahead of \
+                 the lowest unfinalized {next}"
+            ));
+        }
+        Ok(())
+    }
+
     pub fn sign_prevote(
         &self,
         epoch: u64,
@@ -7290,6 +7359,7 @@ impl Blockchain {
         checkpoint_hash: &str,
         voter_id: &Address,
     ) -> Result<Prevote, String> {
+        self.refuse_vote_ahead(checkpoint_height)?;
         let msg = {
             let dummy = Prevote {
                 epoch,
@@ -7348,6 +7418,7 @@ impl Blockchain {
         checkpoint_hash: &str,
         voter_id: &Address,
     ) -> Result<Precommit, String> {
+        self.refuse_vote_ahead(checkpoint_height)?;
         let msg = crate::chain::finality::checkpoint_signing_message(
             self.chain_id,
             epoch,
@@ -7604,11 +7675,196 @@ impl Blockchain {
         // The round's own hash, kept for the replay below: the aggregator
         // takes ownership of the one it is built with.
         let round_hash = checkpoint_hash.clone();
-        let aggregator =
-            FinalityAggregator::new(epoch, checkpoint_height, checkpoint_hash, snapshot);
+        // The table carries Instant Seat Handover: seats missing from the two
+        // previous finalized participation records have already moved to their
+        // standbys, so this round counts the votes of the validators that
+        // actually hold the seats now (section 7.5.1).
+        let committee = match self.seat_table_for_checkpoint(
+            epoch,
+            checkpoint_height,
+            &snapshot,
+            None,
+        ) {
+            Ok(committee) => committee,
+            Err(error) => {
+                warn!(
+                    "Refusing to start finality checkpoint {checkpoint_height} without a derivable seat table: {error}"
+                );
+                return;
+            }
+        };
+        let aggregator = FinalityAggregator::with_committee(
+            epoch,
+            checkpoint_height,
+            checkpoint_hash,
+            snapshot,
+            committee,
+        );
         self.finality_aggregator = Some(aggregator);
         info!("Started prevote task for checkpoint height={checkpoint_height} (epoch={epoch})");
         self.replay_early_prevotes(epoch, checkpoint_height, &round_hash);
+    }
+
+    /// The participation record a block at `height` carries (section 7.5.1).
+    ///
+    /// A checkpoint block reports the seats whose precommits for the PREVIOUS
+    /// checkpoint this node collected. `None` on a non-checkpoint height, and
+    /// on a checkpoint whose previous height is not one (the first checkpoint
+    /// of the chain has no earlier one to report).
+    fn collect_seat_participation(
+        &self,
+        height: u64,
+    ) -> Option<crate::validators::committee::SeatParticipation> {
+        let interval =
+            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(self.chain_id);
+        if height == 0 || !height.is_multiple_of(interval) {
+            return None;
+        }
+        let previous = height.checked_sub(interval).filter(|h| *h > 0)?;
+        // The record of the round this node concluded for that checkpoint. It
+        // is kept when the certificate is produced, because the aggregator is
+        // cleared then and the next block is produced afterwards.
+        self.last_seat_participation
+            .as_ref()
+            .filter(|record| record.checkpoint == previous)
+            .cloned()
+    }
+
+    /// The live round-start door for a checkpoint's seat table (section 7.5.1).
+    /// The checkpoint must be the lowest unfinalized one before the pure archive
+    /// replay runs. A future round is refused even when a peer has already sent
+    /// its block; a missing checkpoint archive is refused as well.
+    fn seat_table_for_checkpoint(
+        &self,
+        epoch: u64,
+        checkpoint_height: u64,
+        snapshot: &ValidatorSetSnapshot,
+        segment: Option<&[crate::core::block::Block]>,
+    ) -> Result<crate::validators::committee::CommitteeTable, String> {
+        let next = self.next_finality_checkpoint();
+        if checkpoint_height != next {
+            return Err(format!(
+                "Sequential finality: checkpoint {checkpoint_height} is not the lowest unfinalized {next}"
+            ));
+        }
+        self.derive_seat_table_for_checkpoint(epoch, checkpoint_height, snapshot, segment)
+    }
+
+    /// Pure archive replay shared by certificate verification and the live
+    /// round-start guard above. The base table comes from the epoch's eligible
+    /// set; two consecutive records move missing seats, at most `ceil(S / 10)`
+    /// per checkpoint. Replaying from the epoch start keeps earlier handovers
+    /// in force. This function deliberately does not inspect or enforce
+    /// `finalized_height`; pruned sync and certificate checks supply their own
+    /// canonical archive and must not make finality an input to its own
+    /// verification. This is the sequential-finality exception for an
+    /// already-signed certificate; only the live round-start wrapper above
+    /// requires the predecessor to be locally final.
+    fn derive_seat_table_for_checkpoint(
+        &self,
+        epoch: u64,
+        checkpoint_height: u64,
+        snapshot: &ValidatorSetSnapshot,
+        segment: Option<&[crate::core::block::Block]>,
+    ) -> Result<crate::validators::committee::CommitteeTable, String> {
+        use crate::validators::committee::CommitteeTable;
+        let interval =
+            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(self.chain_id);
+        if checkpoint_height == 0 || !checkpoint_height.is_multiple_of(interval) {
+            return Err(format!(
+                "Seat-table height {checkpoint_height} is not a nonzero checkpoint"
+            ));
+        }
+        self.require_checkpoint_epoch(epoch, checkpoint_height, "Seat table")?;
+        if snapshot.epoch != epoch {
+            return Err(format!(
+                "Seat-table snapshot epoch {} does not match {epoch}",
+                snapshot.epoch
+            ));
+        }
+        // Read the canonical chain and, during pruned import, the candidate
+        // segment not installed yet. No blocks are cloned or mutated.
+        let block_at = |height: u64| {
+            let index = usize::try_from(height).ok()?;
+            self.chain
+                .get(index)
+                .or_else(|| {
+                    let offset = index.checked_sub(self.chain.len())?;
+                    segment.and_then(|blocks| blocks.get(offset))
+                })
+                .filter(|block| block.index == height)
+        };
+        // The live round starts after the checkpoint block itself exists.
+        // Require that anchor, not merely a prefix that can be present while
+        // the next checkpoint is still missing. The replay then reads only
+        // records below this block and never consults the finality output.
+        if block_at(checkpoint_height).is_none() {
+            return Err(format!(
+                "Seat table lacks canonical checkpoint block {checkpoint_height}"
+            ));
+        }
+        let epoch_len = crate::core::chain_config::epoch_len_for_chain_id(self.chain_id);
+        let epoch_start = epoch.saturating_mul(epoch_len);
+        // Version zero is the epoch's base table. Only an actual handover may
+        // advance the version; otherwise a legacy/base certificate could be
+        // reinterpreted under a later set of seat owners.
+        let mut table = CommitteeTable::for_snapshot(snapshot, 0, self.chain_id);
+        let mut lost = std::collections::BTreeSet::new();
+        let record_at = |height: u64| {
+            block_at(height).and_then(|block| block.seat_participation.clone())
+        };
+        // A pair is (block at h-I, block at h): their records report the two
+        // checkpoints before h. Both are canonical, below the target and in
+        // this epoch; the live round starts only after that prefix is final.
+        let mut height = epoch_start.saturating_add(interval.saturating_mul(2));
+        // The table is a pure function of the checkpoint's canonical
+        // predecessors. Never cap this replay by `finalized_height`: finality
+        // verification itself calls this function, so doing so would make the
+        // certificate an input to its own seat-table derivation. Both record
+        // heights are strictly below `checkpoint_height` by construction.
+        let stop = checkpoint_height;
+        while height <= stop {
+            let Some(current_height) = height.checked_sub(interval) else {
+                break;
+            };
+            let Some(previous_height) = current_height.checked_sub(interval) else {
+                break;
+            };
+            // The older block's record reports the checkpoint one interval
+            // before it. That reported checkpoint must also sit in this epoch:
+            // at the epoch's first checkpoints the older block still carries a
+            // record for the PREVIOUS epoch, whose seat indices name a table
+            // that no longer applies.
+            if previous_height.saturating_sub(interval) < epoch_start {
+                let Some(next_height) = height.checked_add(interval) else {
+                    break;
+                };
+                height = next_height;
+                continue;
+            }
+            if let (Some(previous), Some(current)) =
+                (record_at(previous_height), record_at(current_height))
+            {
+                // A record must name the checkpoint it reports for; a misplaced
+                // one is ignored rather than trusted to move a seat.
+                if previous.checkpoint == previous_height.saturating_sub(interval)
+                    && current.checkpoint == previous_height
+                {
+                    let (next, next_lost) =
+                        table.hand_over(&previous, &current, current_height, &lost);
+                    table = next;
+                    lost = next_lost;
+                }
+            }
+            let Some(next_height) = height.checked_add(interval) else {
+                break;
+            };
+            height = next_height;
+        }
+        // `hand_over` advances the version only when seats actually moved, so an
+        // epoch with no handover keeps the base version and its certificates
+        // verify against the base table a snapshot-only verifier can derive.
+        Ok(table)
     }
 
     pub fn get_aggregator_state(&self) -> crate::chain::finality::AggregatorState {
@@ -8153,6 +8409,7 @@ impl Clone for Blockchain {
             pending_registry_slashing_reports: self.pending_registry_slashing_reports.clone(),
             local_invalid_votes: self.local_invalid_votes.clone(),
             finality_aggregator: None,
+            last_seat_participation: None,
             early_finality_votes: EarlyFinalityVotes::default(),
             metrics: self.metrics.clone(),
             anchor_emission: self.anchor_emission.clone(),
@@ -9234,6 +9491,7 @@ mod tests {
             agg_sig_bls: vec![1],
             bitmap: vec![1],
             set_hash: "set".to_string(),
+            seat_table_version: 0,
         };
 
         let duplicate = make_cert("hash-0");
@@ -10061,12 +10319,123 @@ mod tests {
         assert_eq!(bc.next_finality_checkpoint(), interval * 2);
     }
 
+    /// Sequential finality (section 7.4.5): a validator signs for `h_{j+1}`
+    /// only once `h_j` is final. The guard sits in the signing path, so no
+    /// caller can produce a vote ahead of the finalized prefix even if it
+    /// names a height the chain has not reached.
+    #[test]
+    fn sequential_finality_refuses_vote_ahead() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
+        let interval = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
+        let voter = Address::from([1u8; 32]);
+        bc.finalized_height = interval;
+        let next = interval * 2;
+        // The round the chain is on is refused for the missing BLS key, not for
+        // being ahead: that is how the two refusals are told apart.
+        let at_round = bc.sign_prevote(0, next, "h", &voter).expect_err("no BLS key");
+        assert!(at_round.contains("No BLS signing capability"), "{at_round}");
+        // One checkpoint further is refused before any signing is attempted.
+        let ahead = next + interval;
+        let pv = bc.sign_prevote(0, ahead, "h", &voter).expect_err("ahead of finality");
+        assert!(pv.contains("Sequential finality"), "{pv}");
+        let pc = bc.sign_precommit(0, ahead, "h", &voter).expect_err("ahead of finality");
+        assert!(pc.contains("Sequential finality"), "{pc}");
+        // Finalizing the intervening checkpoint makes that height voteable.
+        bc.finalized_height = next;
+        let now = bc.sign_prevote(0, ahead, "h", &voter).expect_err("no BLS key");
+        assert!(now.contains("No BLS signing capability"), "{now}");
+    }
+
+    /// Seat-table replay is an input to certificate verification, not an
+    /// output of the local finalized marker. The same canonical records must
+    /// produce the same handed-over table before and after finality advances.
+    #[test]
+    fn seat_table_replay_does_not_depend_on_finalized_height() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let chain_id = crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value();
+        let mut bc = Blockchain::new(consensus, None, chain_id, None);
+        let interval =
+            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(chain_id);
+        let epoch_len = crate::core::chain_config::epoch_len_for_chain_id(chain_id);
+        assert!(interval >= 4 && epoch_len >= interval * 4);
+
+        let validators = (1u8..=8)
+            .map(|byte| crate::chain::finality::ValidatorEntry {
+                address: Address::from([byte; 32]),
+                stake: 1000,
+                bls_public_key: Vec::new(),
+                pop_signature: Vec::new(),
+                pq_public_key: Vec::new(),
+            })
+            .collect();
+        let snapshot = ValidatorSetSnapshot::new(0, validators);
+        let empty = crate::validators::committee::SeatBitmap::new(32);
+        for height in 1..=interval * 4 {
+            let mut block = crate::core::block::Block::new_with_chain_id(
+                height,
+                "0".repeat(64),
+                Vec::new(),
+                chain_id,
+            );
+            block.epoch = 0;
+            if height == interval * 2 || height == interval * 3 {
+                block.seat_participation = Some(
+                    crate::validators::committee::SeatParticipation {
+                        checkpoint: height - interval,
+                        seats: empty.clone(),
+                    },
+                );
+            }
+            bc.chain.push(block);
+        }
+
+        bc.finalized_height = 0;
+        let before = bc
+            .derive_seat_table_for_checkpoint(0, interval * 4, &snapshot, None)
+            .expect("the canonical predecessor archive is present");
+        assert_eq!(before.version, interval * 3);
+        bc.finalized_height = interval * 4;
+        let after = bc
+            .derive_seat_table_for_checkpoint(0, interval * 4, &snapshot, None)
+            .expect("advancing finality cannot change the table inputs");
+        assert_eq!(before, after);
+
+        let error = bc
+            .seat_table_for_checkpoint(0, interval * 5, &snapshot, None)
+            .expect_err("a future round without its canonical archive must not start");
+        assert!(error.contains("lacks canonical checkpoint block"), "{error}");
+
+        bc.chain.push(crate::core::block::Block::new_with_chain_id(
+            interval * 5,
+            "0".repeat(64),
+            Vec::new(),
+            chain_id,
+        ));
+        bc.finalized_height = 0;
+        let error = bc
+            .seat_table_for_checkpoint(0, interval * 5, &snapshot, None)
+            .expect_err("an archived future round still needs its finalized prefix");
+        assert!(error.contains("Sequential finality"), "{error}");
+    }
+
     #[test]
     fn test_start_prevote_task_creates_aggregator() {
         let consensus = Arc::new(PoWEngine::new(0));
         let mut bc = Blockchain::new(consensus, None, 45262, None);
-        let cp_height = crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
+        let cp_height =
+            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
         let cp_hash = "a".repeat(64);
+        for height in 1..=cp_height {
+            bc.chain.push(crate::core::block::Block::new_with_chain_id(
+                height,
+                "0".repeat(64),
+                Vec::new(),
+                45262,
+            ));
+        }
 
         bc.start_prevote_task(cp_height, cp_hash.clone());
 

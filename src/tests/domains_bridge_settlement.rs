@@ -198,7 +198,7 @@ fn zk_domain_refuses_empty_halt_proof() {
     }
     .encode()
     .expect("encode evidence");
-    let raw = RawConsensusEvidence {
+    let raw_evidence = RawConsensusEvidence {
         adapter: adapter.descriptor().id,
         evidence_version: 1,
         network: "testnet".to_string(),
@@ -208,7 +208,7 @@ fn zk_domain_refuses_empty_halt_proof() {
         submitter: sender,
     };
     let ext_err = adapter
-        .verify(&raw, &VerificationPolicy::proven(10))
+        .verify(&raw_evidence, &VerificationPolicy::proven(10))
         .expect_err("ZkVmFinalityAdapter must refuse bare Halt evidence");
     assert!(
         ext_err.to_string().contains("Halt"),
@@ -756,6 +756,7 @@ fn finality_adapters_reject_cross_domain_commitment_and_empty_authorities() {
         agg_sig_bls: vec![0u8; 48],
         bitmap: Vec::new(),
         set_hash: empty_snap.set_hash.clone(),
+        seat_table_version: 0,
     };
     let pos_res = PoSFinalityAdapter::default()
         .verify_finality(

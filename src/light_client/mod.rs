@@ -29,6 +29,7 @@ use std::fmt;
 use crate::chain::finality::{FinalityCert, ValidatorSetSnapshot};
 use crate::consensus::qc::QcBlob;
 use crate::core::block::BlockHeader;
+use crate::core::transaction::DEFAULT_CHAIN_ID;
 use crate::network::protocol::is_canonical_hash;
 
 /// The single trust anchor a light client is bootstrapped from.
@@ -400,8 +401,10 @@ impl LightClient {
     /// The same binding chain as [`Self::verify_checkpoint`], with the BLS
     /// aggregate replaced by the PQ quorum: every signature verifies against
     /// the snapshot's PQ public keys, no validator signs twice, and the
-    /// unique signers must carry the same stake and count quorum the BLS path
-    /// enforces.
+    /// unique signers must clear the legacy stake/count threshold. This
+    /// snapshot-only fallback cannot replay Instant Seat Handover without
+    /// finalized block records. The chain's PQ-alarm path uses the seat table;
+    /// migrating this light client requires that history and remains WP-12 work.
     ///
     /// # Errors
     ///
@@ -801,6 +804,7 @@ mod tests {
     ) -> FinalityCert {
         let checkpoint_hash = header.hash.clone();
         let mut agg = FinalityAggregator::new(
+            crate::core::transaction::DEFAULT_CHAIN_ID,
             snapshot.epoch,
             header.index,
             checkpoint_hash.clone(),
@@ -871,6 +875,7 @@ mod tests {
             agg_sig_bls: Vec::new(),
             bitmap: vec![1],
             set_hash: snapshot.set_hash.clone(),
+            seat_table_version: 0,
         };
         let err = client
             .verify_checkpoint(&header, &cert, &snapshot)
