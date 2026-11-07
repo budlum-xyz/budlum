@@ -5,6 +5,14 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Section 16.2 puts this workflow on a pull request *and* on a nightly run.
+  # The nightly half was missing: the file ran only on a push or a pull
+  # request, so a drift that appears with no commit in front of it (a runner
+  # image change, a toolchain resolution) was never seen.
+  schedule:
+    # 01:23 UTC, before the conformance run at 02:41 and the fuzz run at
+    # 03:17, so the cheap determinism check is not queued behind them.
+    - cron: "23 1 * * *"
 
 concurrency:
   group: determinism-${{ github.ref }}

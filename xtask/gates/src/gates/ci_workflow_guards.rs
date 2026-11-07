@@ -33,14 +33,16 @@ const WORKFLOWS: &[&str] = &[
 ];
 
 /// One `run:` block of a workflow step.
-struct RunBlock {
+pub(crate) struct RunBlock {
     /// The step's `name:` (or `run` when it has none).
-    step: String,
+    pub(crate) step: String,
     /// The block's command lines, YAML comment lines dropped.
-    lines: Vec<String>,
+    pub(crate) lines: Vec<String>,
     /// Why the step cannot be counted as a live gate run (`continue-on-error`,
     /// a constant-false or failure-only `if:`), or `None`.
-    softened: Option<String>,
+    pub(crate) softened: Option<String>,
+    /// The step's `working-directory:`, when it declares one.
+    pub(crate) working_directory: Option<String>,
 }
 
 /// Why a step-level `key: value` pair makes the step non-binding, if it does.
@@ -95,17 +97,19 @@ fn is_step_key(body: &str) -> bool {
 /// that starts with `- run:` is recognised, comment lines inside a block are
 /// dropped, and the step's `continue-on-error` / `if:` keys are read so a
 /// softened step is not counted as a live run.
-fn run_blocks(text: &str) -> Vec<RunBlock> {
+pub(crate) fn run_blocks(text: &str) -> Vec<RunBlock> {
     struct Raw {
         step: String,
         lines: Vec<String>,
         step_idx: usize,
+        working_directory: Option<String>,
     }
     let mut raws: Vec<Raw> = Vec::new();
     let mut soft: Vec<Option<String>> = Vec::new();
     let mut step_idx = 0usize;
     let mut step_item_indent: Option<usize> = None;
     let mut current_step = String::new();
+    let mut current_working_directory: Option<String> = None;
     let mut in_run_block = false;
     let mut block: Vec<String> = Vec::new();
     let mut run_indent = 0usize;
@@ -128,6 +132,7 @@ fn run_blocks(text: &str) -> Vec<RunBlock> {
                     step: current_step.clone(),
                     lines: std::mem::take(&mut block),
                     step_idx,
+                    working_directory: current_working_directory.clone(),
                 });
                 in_run_block = false;
                 continue;
@@ -149,6 +154,7 @@ fn run_blocks(text: &str) -> Vec<RunBlock> {
             step_idx = soft.len() - 1;
             step_item_indent = Some(indent);
             current_step = String::from("run");
+            current_working_directory = None;
         }
         let at_step_key = step_item_indent.is_some_and(|s| key_indent == s + 2);
         if at_step_key {
@@ -165,8 +171,11 @@ fn run_blocks(text: &str) -> Vec<RunBlock> {
                         step: current_step.clone(),
                         lines: vec![rest.to_string()],
                         step_idx,
+                        working_directory: current_working_directory.clone(),
                     });
                 }
+            } else if let Some(dir) = body.strip_prefix("working-directory:") {
+                current_working_directory = Some(dir.trim().trim_matches(['"', '\'']).to_string());
             } else if let Some((key, value)) = body.split_once(':') {
                 if let Some(why) = softening(key.trim(), value) {
                     soft[step_idx] = Some(why);
@@ -180,6 +189,7 @@ fn run_blocks(text: &str) -> Vec<RunBlock> {
             step: current_step,
             lines: block,
             step_idx,
+            working_directory: current_working_directory,
         });
     }
     raws.into_iter()
@@ -187,6 +197,7 @@ fn run_blocks(text: &str) -> Vec<RunBlock> {
             step: r.step,
             lines: r.lines,
             softened: soft.get(r.step_idx).cloned().flatten(),
+            working_directory: r.working_directory,
         })
         .collect()
 }

@@ -54,6 +54,10 @@ jobs:
           # decoder both read bytes from untrusted holders.
           - bud3_bof1_decode
           - bud3_symbol_decode
+          # The optical frame is the third parser on that path and the only
+          # one a camera feeds: a declared drop length, a digest and a nested
+          # decoder, all over untrusted bytes.
+          - bud3_qr_frame_decode
           # BPQS WOTS chain-walk refusal safety (crates/bpqs). Runs the
           # quick gate too; here it gets the deep budget.
           - bpqs_wots_reject
