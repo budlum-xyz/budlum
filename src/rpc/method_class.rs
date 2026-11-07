@@ -366,7 +366,7 @@ pub fn check_served_methods<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{check_served_methods, Listener, METHOD_CLASSES};
+    use super::{check_served_methods, Effect, Listener, METHOD_CLASSES};
     use std::collections::BTreeSet;
 
     /// The method names `api.rs` declares, read from its source: each
@@ -453,6 +453,84 @@ mod tests {
             gated, marked,
             "a handler calls require_operator without an Operator row, or the reverse"
         );
+    }
+
+    /// BLG-030: no method may change consensus state outside block execution.
+    ///
+    /// The finding is that the public listener could change consensus state:
+    /// an RPC call wrote a registry row, a finality view or a state root that
+    /// the node's peers did not share, and the two nodes then disagreed about
+    /// the tip without either of them having produced a block. The class table
+    /// is the fix - `Effect` has no variant for such a write, and every writer
+    /// that remains is either a signed transaction handed to the mempool
+    /// (`TxSubmit`), a node-local action (`LocalAdmin`), a read (`Read`) or a
+    /// refusal that names a transaction door (`Refused`).
+    ///
+    /// Canary: add an `Effect` variant that mutates consensus state directly,
+    /// or classify a `bud_lockBridgeTransfer`-shaped name as `Read`, and the
+    /// assertions here fail.
+    #[test]
+    fn blg_030_no_effect_can_change_consensus_state_outside_a_block() {
+        // The whole variant set, spelled out. A new variant is added here
+        // first, and the comment on it must say which of the four legitimate
+        // effects it is. There is deliberately no `StateWrite` to add.
+        let legitimate_effects = [Effect::Read, Effect::TxSubmit, Effect::Refused, Effect::LocalAdmin];
+        for effect in legitimate_effects {
+            match effect {
+                // Reads change nothing.
+                Effect::Read => {}
+                // A write reaches consensus only by being executed in a block.
+                Effect::TxSubmit => {}
+                // The call is refused and names the door that does the write.
+                Effect::Refused => {}
+                // Node-local state no peer has to agree on.
+                Effect::LocalAdmin => {}
+            }
+        }
+        // Every row's effect must be one the match above knows. The comparison
+        // is by `Debug` name so the test names the offending class instead of
+        // pointing at a line number.
+        let known: Vec<String> = legitimate_effects
+            .iter()
+            .map(|effect| format!("{effect:?}"))
+            .collect();
+        for row in METHOD_CLASSES {
+            let used = format!("{:?}", row.effect);
+            assert!(
+                known.contains(&used),
+                "{} uses the effect {used}, which is outside the four legitimate ones",
+                row.name
+            );
+        }
+        // And each of the four is actually used, so the table is not
+        // degenerate: a surface with no TxSubmit row would mean the mempool is
+        // unreachable, and one with no Refused row would mean no writer was
+        // moved to a door.
+        for effect in legitimate_effects {
+            let name = format!("{effect:?}");
+            assert!(
+                METHOD_CLASSES.iter().any(|row| format!("{:?}", row.effect) == name),
+                "no row is classified as {name}"
+            );
+        }
+
+        // Rows whose name says they write are `Refused`, `TxSubmit` or
+        // `LocalAdmin` - never `Read`: a handler named `bud_lock*` that reads
+        // would be a name that lies about its effect.
+        const WRITE_VERBS: &[&str] = &[
+            "bud_lock", "bud_mint", "bud_burn", "bud_unlock", "bud_register", "bud_submit",
+            "bud_bond", "bud_slash", "bud_set", "bud_schedule",
+        ];
+        for row in METHOD_CLASSES {
+            if WRITE_VERBS.iter().any(|verb| row.name.starts_with(verb)) {
+                assert_ne!(
+                    row.effect,
+                    Effect::Read,
+                    "{} names a write but is classified as a read",
+                    row.name
+                );
+            }
+        }
     }
 
     #[test]

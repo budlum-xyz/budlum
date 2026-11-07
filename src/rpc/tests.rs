@@ -372,7 +372,7 @@ mod rpc_tests {
     /// Own fee back - that is what will be charged, since the flat-fee protocol
     /// Takes `tx.fee` verbatim once it clears `base_fee`.
     #[tokio::test]
-    async fn estimate_gas_reflects_a_fee_the_caller_already_set() {
+    async fn estimate_gas_ok_reflects_a_fee_the_caller_already_set() {
         let (server, chain) = setup().await;
         let base_fee = chain.get_base_fee().await;
         let chosen = base_fee + 500;
@@ -435,7 +435,7 @@ mod rpc_tests {
     /// The two numbers a wallet combines, and they were sourced from different
     /// Places - one from the live chain, one from a constant.
     #[tokio::test]
-    async fn gas_price_and_estimate_gas_agree_on_the_floor() {
+    async fn gas_price_ok_agrees_with_estimate_gas() {
         let (server, _) = setup().await;
 
         let price = server.gas_price().await.unwrap();
@@ -1548,5 +1548,379 @@ mod rpc_tests {
         .await;
         assert!(accepted.starts_with("HTTP/1.1 200"), "{accepted}");
         assert!(accepted.ends_with("aptos-node:ok"), "{accepted}");
+    /// BLG-192: the estimate is the fee the chain will actually enforce for
+    /// this transaction, not the base fee. The finding is that
+    /// `bud_estimateGas` quoted `base_fee` while admission charged
+    /// `required_fee`, which bills the proportional cut on a transfer
+    /// (`transfer_fee_ppm` of the amount, on top of the base fee) and a
+    /// multiplied base fee for a governance proposal. A wallet sized its
+    /// transaction from the quote and was then refused for the fee the RPC had
+    /// just suggested.
+    ///
+    /// Canary: restore `Ok(Self::to_hex(base_fee))` in `estimate_gas` and this
+    /// fails: the proportional cut alone is 1% of the amount.
+    #[tokio::test]
+    async fn blg_192_estimate_gas_quotes_the_proportional_transfer_fee() {
+        use crate::chain::fee_market::PPM_DENOMINATOR;
+        use crate::registry::RegistryParams;
+
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
+        let mut params = *blockchain.state.registry.params();
+        params.transfer_fee_ppm = 10_000; // 1% of the amount
+        blockchain.state.registry.set_params(params);
+        let base_fee = blockchain.state.base_fee;
+        let (server, _chain) = setup_with_blockchain(blockchain).await;
+
+        let amount = 1_000_000u64;
+        let mut tx = Transaction::new_with_chain_id(
+            Address::from([1u8; 32]),
+            Address::from([2u8; 32]),
+            amount,
+            0, // the caller is asking what to pay
+            0,
+            vec![],
+            45262,
+            crate::core::transaction::TransactionType::Transfer,
+        );
+        tx.hash = tx.calculate_hash();
+
+        let estimate = server.estimate_gas(tx).await.expect("estimate");
+        let estimate = u64::from_str_radix(estimate.trim_start_matches("0x"), 16).expect("hex");
+
+        // The charge the admission rule computes: `required_transfer_fee` is
+        // the function `bud_estimateGas` must agree with.
+        let proportional = amount * params.transfer_fee_ppm / PPM_DENOMINATOR;
+        assert!(proportional > 0, "the fixture must charge a proportional cut");
+        let charged = params.required_transfer_fee(amount, base_fee);
+        assert_eq!(charged, base_fee + proportional);
+        assert_eq!(
+            estimate, charged,
+            "the estimate must be what the chain charges, not the base fee alone"
+        );
+        assert_ne!(
+            estimate, base_fee,
+            "quoting only the base fee is the finding"
+        );
     }
+
+    // ---------------------------------------------------------------------
+    // Method coverage (directive WP-61 item 5, TEST-GAP-07).
+    //
+    // Each pair below is one row of the `bud_*` surface: `<stem>_ok` observes an
+    // answer, `<stem>_refused` observes the refusal the handler names. The
+    // completeness rule over the whole surface lives in
+    // `src/rpc/method_coverage.rs`, so a method added without its pair fails
+    // there rather than going untested quietly.
+    //
+    // A method with no arm that can refuse is not paired here; it carries a
+    // `no-refusal:` line in `.github/rpc-method-coverage-baseline.txt` with the
+    // reason, and that is the only way to avoid the refusal half.
+    // ---------------------------------------------------------------------
+
+    /// A well-formed 32-byte address whose bytes are readable in a failure:
+    /// `test_address(7)` is `0x0707..07`.
+    fn test_address(seed: u8) -> String {
+        let byte = format!("{seed:02x}");
+        format!("0x{}", byte.repeat(32))
+    }
+
+    #[tokio::test]
+    async fn chain_id_ok_reports_the_configured_chain() {
+        let (server, _chain) = setup().await;
+        let answer = server.chain_id().await.expect("chain id");
+        assert_eq!(
+            answer,
+            format!("0x{:x}", crate::core::transaction::DEFAULT_CHAIN_ID)
+        );
+    }
+
+    #[tokio::test]
+    async fn block_number_ok_is_the_chain_height() {
+        let (server, chain) = setup().await;
+        let answer = server.block_number().await.expect("block number");
+        let height = u64::from_str_radix(answer.trim_start_matches("0x"), 16).expect("hex");
+        assert_eq!(height, chain.get_height().await);
+    }
+
+    #[tokio::test]
+    async fn get_block_by_number_ok_answers_genesis() {
+        let (server, _chain) = setup().await;
+        let block = server.get_block_by_number(0).await.expect("genesis");
+        assert!(!block.is_null(), "height 0 is the genesis block");
+        assert_eq!(block["number"], serde_json::json!("0x0"));
+    }
+
+    /// A height this node does not hold is `null`, not an error: absence is a
+    /// positive answer and the client must be able to tell it from a failure.
+    #[tokio::test]
+    async fn get_block_by_number_refused_to_invent_a_block_it_does_not_hold() {
+        let (server, _chain) = setup().await;
+        let answer = server
+            .get_block_by_number(u64::MAX)
+            .await
+            .expect("an absent block is not an error");
+        assert!(answer.is_null());
+    }
+
+    #[tokio::test]
+    async fn get_block_by_hash_ok_looks_up_the_genesis_hash() {
+        let (server, chain) = setup().await;
+        let genesis = chain.get_block(0).await.expect("genesis");
+        // The chain stores the hash without the `0x` prefix and the handler
+        // strips one if it is there, so both spellings must find the block.
+        let bare = genesis.hash.clone();
+        let prefixed = format!("0x{bare}");
+        assert!(!bare.is_empty(), "the genesis block must carry a hash");
+        for hash in [prefixed, bare] {
+            let block = server.get_block_by_hash(hash).await.expect("lookup");
+            assert_eq!(block["number"], serde_json::json!("0x0"));
+        }
+    }
+
+    #[tokio::test]
+    async fn get_block_by_hash_refused_to_invent_a_block_for_an_unknown_hash() {
+        let (server, _chain) = setup().await;
+        let answer = server
+            .get_block_by_hash(format!("0x{}", "ab".repeat(32)))
+            .await
+            .expect("absent hash is a null answer");
+        assert!(answer.is_null());
+    }
+
+    #[tokio::test]
+    async fn get_balance_ok_reports_a_hex_amount() {
+        let (server, _chain) = setup().await;
+        let balance = server
+            .get_balance(test_address(7))
+            .await
+            .expect("balance read");
+        assert!(balance.starts_with("0x"));
+        u64::from_str_radix(balance.trim_start_matches("0x"), 16).expect("hex amount");
+    }
+
+    #[tokio::test]
+    async fn get_balance_refused_for_a_malformed_address() {
+        let (server, _chain) = setup().await;
+        let refused = server
+            .get_balance("0xnot-an-address".into())
+            .await
+            .expect_err("a malformed address must be refused");
+        assert_eq!(refused.code(), -32602);
+        assert!(refused.message().contains("Invalid address"));
+    }
+
+    #[tokio::test]
+    async fn get_nonce_ok_reports_a_hex_nonce() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
+        let holder = Address::from([8u8; 32]);
+        blockchain.state.get_or_create(&holder).nonce = 5;
+        let (server, _chain) = setup_with_blockchain(blockchain).await;
+
+        let nonce = server
+            .get_nonce(format!("0x{}", "08".repeat(32)))
+            .await
+            .expect("nonce read");
+        assert_eq!(
+            u64::from_str_radix(nonce.trim_start_matches("0x"), 16).expect("hex nonce"),
+            5,
+            "the answer must be the account's nonce, not a constant"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_nonce_refused_for_a_short_address() {
+        let (server, _chain) = setup().await;
+        let refused = server
+            .get_nonce("0x1234".into())
+            .await
+            .expect_err("a short address must be refused");
+        assert_eq!(refused.code(), -32602);
+    }
+
+    #[tokio::test]
+    async fn gas_price_ok_reports_the_base_fee() {
+        let (server, chain) = setup().await;
+        let price = server.gas_price().await.expect("gas price");
+        assert_eq!(
+            u64::from_str_radix(price.trim_start_matches("0x"), 16).expect("hex"),
+            chain.get_base_fee().await
+        );
+    }
+
+    /// A transaction whose wire encoding exceeds the transport ceiling is
+    /// refused before any fee arithmetic happens.
+    #[tokio::test]
+    async fn estimate_gas_refused_for_an_oversized_transaction() {
+        let (server, _chain) = setup().await;
+        let mut tx = Transaction::new_with_chain_id(
+            Address::from([1u8; 32]),
+            Address::zero(),
+            1,
+            0,
+            0,
+            vec![0u8; crate::consensus::budget::MAX_TX_BYTES + 1],
+            45262,
+            crate::core::transaction::TransactionType::Transfer,
+        );
+        tx.hash = tx.calculate_hash();
+        let refused = server
+            .estimate_gas(tx)
+            .await
+            .expect_err("an oversized transaction must be refused");
+        assert_eq!(refused.code(), -32602);
+        assert!(refused.message().contains("Transaction too large"));
+    }
+
+    /// The success arm: a funded sender signs a V4 transfer over the chain id
+    /// and the pool admits it, answering with the hash it was admitted under.
+    #[tokio::test]
+    async fn send_raw_transaction_ok_returns_the_admitted_hash() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
+        let keypair = crate::crypto::primitives::KeyPair::generate().expect("ed25519 key");
+        let sender = Address::from(keypair.public_key_bytes());
+        blockchain.state.add_balance(&sender, 1_000);
+        let (server, _chain) = setup_with_blockchain(blockchain).await;
+
+        let mut tx = Transaction::new_with_chain_id(
+            sender,
+            Address::from([9u8; 32]),
+            1,
+            1,
+            0,
+            vec![],
+            crate::core::transaction::DEFAULT_CHAIN_ID,
+            crate::core::transaction::TransactionType::Transfer,
+        );
+        tx.sign(&keypair);
+        let hash = server
+            .send_raw_transaction(tx)
+            .await
+            .expect("a funded, signed transfer is admitted");
+        assert!(hash.starts_with("0x"));
+        assert_eq!(hash.trim_start_matches("0x").len(), 64);
+    }
+
+    /// A signed, well-formed transaction from an account with no funds is
+    /// refused by the pool, and the refusal names the pool's reason rather than
+    /// a generic failure.
+    #[tokio::test]
+    async fn send_raw_transaction_refused_for_an_unfunded_sender() {
+        let (server, _chain) = setup().await;
+        let keypair = crate::crypto::primitives::KeyPair::generate().expect("ed25519 key");
+        let mut tx = Transaction::new_with_chain_id(
+            Address::from(keypair.public_key_bytes()),
+            Address::from([9u8; 32]),
+            1,
+            1,
+            0,
+            vec![],
+            crate::core::transaction::DEFAULT_CHAIN_ID,
+            crate::core::transaction::TransactionType::Transfer,
+        );
+        tx.sign(&keypair);
+        let refused = server
+            .send_raw_transaction(tx)
+            .await
+            .expect_err("an unfunded sender cannot pay the amount and the fee");
+        assert_eq!(refused.code(), -32602);
+        let message = refused.message();
+        assert!(
+            message.contains("Invalid params") || message.contains("Mempool error"),
+            "the refusal must name the pool's reason, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_raw_transaction_refused_without_a_signature() {
+        let (server, _chain) = setup().await;
+        let mut tx = Transaction::new_with_chain_id(
+            Address::from([2u8; 32]),
+            Address::from([3u8; 32]),
+            10,
+            10,
+            0,
+            vec![],
+            45262,
+            crate::core::transaction::TransactionType::Transfer,
+        );
+        tx.hash = tx.calculate_hash();
+        let refused = server
+            .send_raw_transaction(tx)
+            .await
+            .expect_err("an unsigned transaction must be refused");
+        assert_eq!(refused.code(), -32602);
+        assert!(refused.message().contains("Invalid transaction signature"));
+    }
+
+    #[tokio::test]
+    async fn send_raw_transaction_refused_for_an_oversized_transaction() {
+        let (server, _chain) = setup().await;
+        let mut tx = Transaction::new_with_chain_id(
+            Address::from([2u8; 32]),
+            Address::from([3u8; 32]),
+            10,
+            10,
+            0,
+            vec![0u8; crate::consensus::budget::MAX_TX_BYTES + 1],
+            45262,
+            crate::core::transaction::TransactionType::Transfer,
+        );
+        tx.hash = tx.calculate_hash();
+        let refused = server
+            .send_raw_transaction(tx)
+            .await
+            .expect_err("oversized transaction must be refused");
+        assert!(refused.message().contains("Transaction too large"));
+    }
+
+    #[tokio::test]
+    async fn net_version_ok_is_the_chain_id_in_decimal() {
+        let (server, chain) = setup().await;
+        let version = server.net_version().await.expect("net version");
+        assert_eq!(version, chain.get_chain_id().await.to_string());
+    }
+
+    /// `net_listening` answers for a listener that is serving. The server
+    /// object here is built but not bound to a socket, so the honest assertion
+    /// is that the flag is a decision this process makes and not a constant
+    /// copied from a comment: it is `true` only while the node handle is alive.
+    #[tokio::test]
+    async fn net_listening_ok_is_true_for_a_live_node_handle() {
+        let (server, _chain) = setup().await;
+        assert!(server.net_listening().await.expect("listening"));
+    }
+
+    #[tokio::test]
+    async fn net_peer_count_ok_is_a_hex_count() {
+        let (server, _chain) = setup().await;
+        let count = server.net_peer_count().await.expect("peer count");
+        assert_eq!(count, "0x0", "a fresh test node has no peers");
+    }
+
+    #[tokio::test]
+    async fn health_ok_reports_a_status_and_height() {
+        let (server, _chain) = setup().await;
+        let health = server.health().await.expect("health");
+        assert!(health["status"].is_string());
+        assert!(health["blockHeight"]
+            .as_str()
+            .is_some_and(|h| h.starts_with("0x")));
+    }
+
+    #[tokio::test]
+    async fn node_info_ok_reports_the_listener_and_chain() {
+        let (server, chain) = setup().await;
+        let info = server.node_info().await.expect("node info");
+        assert_eq!(
+            info["chainId"],
+            serde_json::json!(format!("0x{:x}", chain.get_chain_id().await))
+        );
+        // The listener column is part of the answer: a client must be able to
+        // tell an operator surface from a public one.
+        assert_eq!(info["rpcMode"], serde_json::json!("operator"));
+    }
+}
 }

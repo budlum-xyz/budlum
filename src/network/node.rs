@@ -682,31 +682,29 @@ pub const MAX_PEERS: usize = 50;
 pub const DHT_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Writes the identity key file. On unix the file is created with mode 0600,
-/// so it is never readable by other users, not even briefly.
+/// so it is never readable by other users, not even briefly, and the write is
+/// atomic: a crash mid-write cannot leave a truncated identity that the next
+/// boot would then replace with a fresh peer id (BLG-004, the key-file rule).
 fn write_identity_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        file.write_all(bytes)
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(path, bytes)
-    }
+    crate::crypto::key_file::write_atomic_owner_only(path, bytes)
 }
 
 pub fn load_or_generate_identity_key(path: Option<&str>) -> identity::Keypair {
     if let Some(p) = path {
         let file_path = std::path::Path::new(p);
         if file_path.exists() {
-            match std::fs::read(file_path) {
+            // BLG-004: the identity file is a key file, so the reader holds the
+            // same rule as the writer. A wide one is refused loudly and a fresh
+            // identity is generated rather than read, because reading it would
+            // be using a secret that anyone on the host can already copy.
+            let narrow = crate::crypto::key_file::require_owner_only(file_path);
+            if let Err(e) = &narrow {
+                warn!("Identity file {p} is not owner-only, not using it: {e}");
+            }
+            let read = narrow
+                .map_err(|e| e.to_string())
+                .and_then(|()| std::fs::read(file_path).map_err(|e| e.to_string()));
+            match read {
                 Ok(bytes) => {
                     if let Ok(keypair) = identity::Keypair::from_protobuf_encoding(&bytes) {
                         info!("Loaded persistent P2P identity from {p}");
@@ -728,12 +726,6 @@ pub fn load_or_generate_identity_key(path: Option<&str>) -> identity::Keypair {
                 } else {
                     info!("Saved new P2P identity key to {p}");
                 }
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ =
-                        std::fs::set_permissions(file_path, std::fs::Permissions::from_mode(0o600));
-                }
             }
             Err(e) => warn!("Failed to encode identity key: {e}"),
         }
@@ -742,6 +734,54 @@ pub fn load_or_generate_identity_key(path: Option<&str>) -> identity::Keypair {
         let key = identity::Keypair::generate_ed25519();
         info!("Generated ephemeral P2P identity (no identity file configured)");
         key
+    }
+}
+
+#[cfg(test)]
+mod identity_file_tests {
+    use super::*;
+
+    /// BLG-004: the same identity is loaded twice, so the file the writer made
+    /// is a file the reader accepts.
+    #[test]
+    fn a_written_identity_is_loaded_back_as_the_same_peer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("identity.key");
+        let first = load_or_generate_identity_key(Some(path.to_str().expect("utf8")));
+        assert!(path.exists(), "the first call must write the identity file");
+        let again = load_or_generate_identity_key(Some(path.to_str().expect("utf8")));
+        assert_eq!(
+            first.public().to_peer_id(),
+            again.public().to_peer_id(),
+            "a restart must keep the peer id"
+        );
+    }
+
+    /// BLG-004: an identity file that group or others can read is not used.
+    /// The node starts on a fresh identity instead and says why, which is the
+    /// only safe answer: a wide file may already be copied.
+    #[cfg(unix)]
+    #[test]
+    fn a_world_readable_identity_file_is_not_used() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("identity.key");
+        let original = load_or_generate_identity_key(Some(path.to_str().expect("utf8")));
+        let original_peer = original.public().to_peer_id();
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod wide");
+        let replaced = load_or_generate_identity_key(Some(path.to_str().expect("utf8")));
+        assert_ne!(
+            replaced.public().to_peer_id(),
+            original_peer,
+            "a wide identity file must not be trusted as this node's identity"
+        );
+        // The replacement is written narrow, so the next boot reads it.
+        crate::crypto::key_file::require_owner_only(&path)
+            .expect("the file left behind is owner-only");
+        let next = load_or_generate_identity_key(Some(path.to_str().expect("utf8")));
+        assert_eq!(next.public().to_peer_id(), replaced.public().to_peer_id());
     }
 }
 

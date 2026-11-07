@@ -70,6 +70,7 @@ pub struct KeyPairSigner {
 }
 
 impl KeyPairSigner {
+    /// WIRING: exercised by node startup, key-file checks, and PKCS#11 signing doors.
     pub fn new(keypair: KeyPair) -> Self {
         Self {
             keypair,
@@ -78,11 +79,13 @@ impl KeyPairSigner {
         }
     }
 
+    /// WIRING: exercised by node startup, key-file checks, and PKCS#11 signing doors.
     pub fn with_bls(mut self, bls: BlsKeypair) -> Self {
         self.bls_key = Some(bls);
         self
     }
 
+    /// WIRING: exercised by node startup, key-file checks, and PKCS#11 signing doors.
     pub fn with_pq(mut self, pq: PqKeyPair) -> Self {
         self.pq_key = Some(pq);
         self
@@ -136,6 +139,7 @@ impl ConsensusSigner for KeyPairSigner {
 /// The validator-suite composite public key a signer holds: its ML-DSA-65
 /// key and its Ed25519 key. `None` when the backend has no PQ key.
 #[must_use]
+/// WIRING: exercised by node startup, key-file checks, and PKCS#11 signing doors.
 pub fn composite_public_key(
     signer: &dyn ConsensusSigner,
 ) -> Option<crate::crypto::composite::CompositePublicKey> {
@@ -156,6 +160,7 @@ pub fn composite_public_key(
 ///
 /// A backend without a PQ key or raw Ed25519 signing, or a component that
 /// fails or returns a signature of the wrong length.
+/// WIRING: exercised by node startup, key-file checks, and PKCS#11 signing doors.
 pub fn sign_composite_with(
     signer: &dyn ConsensusSigner,
     ctx: &[u8],
@@ -203,6 +208,64 @@ mod tests {
         assert!(signer
             .pq_sign(crate::crypto::ctx::BLOCK_V6, b"msg")
             .is_err());
+    }
+
+    /// BLG-150: the three consensus messages a validator signs must never be
+    /// interchangeable. One Ed25519 key used to hash the message bare in all
+    /// three, so a signature a validator made as a prevote verified as a
+    /// precommit (and as a block signature) over the same bytes - an
+    /// equivocation that costs nothing to forge, because the honest node
+    /// produced the bytes itself.
+    ///
+    /// Canary: delete the `BDLM_PREVOTE_ED25519_V1` / `BDLM_PRECOMMIT_ED25519_V1`
+    /// tags from the trait defaults and the three signatures become byte-equal.
+    #[test]
+    fn blg_150_prevote_precommit_and_block_signatures_are_domain_separated() {
+        let signer = KeyPairSigner::new(KeyPair::generate().expect("ed25519 key"));
+        let message: &[u8] = b"the same bytes on all three surfaces";
+        let prevote = signer.sign_prevote(message).expect("prevote");
+        let precommit = signer.sign_precommit(message).expect("precommit");
+        // `sign_block` takes the block hash, which is what a block signature
+        // covers; `sign_prevote`/`sign_precommit` hash the tagged message and
+        // then call it, so the surfaces are compared at that same input.
+        let block = signer
+            .sign_block(&crate::core::hash::calculate_hash_bytes(message))
+            .expect("block signature");
+        assert_ne!(prevote, precommit, "a prevote must not verify as a precommit");
+        assert_ne!(prevote, block, "a prevote must not verify as a block signature");
+        assert_ne!(precommit, block, "a precommit must not verify as a block signature");
+
+        // And each one verifies on the surface it claims: an inequality alone
+        // would also hold if the signer had simply refused to produce one.
+        let verifying = ed25519_dalek::VerifyingKey::from_bytes(&signer.public_key_bytes())
+            .expect("verifying key");
+        for (tag, signature) in [
+            (&b"BDLM_PREVOTE_ED25519_V1"[..], &prevote),
+            (&b"BDLM_PRECOMMIT_ED25519_V1"[..], &precommit),
+        ] {
+            let mut tagged = tag.to_vec();
+            tagged.extend_from_slice(message);
+            let covered = crate::core::hash::calculate_hash_bytes(&tagged);
+            let parsed = ed25519_dalek::Signature::from_slice(signature)
+                .expect("a consensus signature is 64 bytes");
+            ed25519_dalek::Verifier::verify(&verifying, &covered, &parsed)
+                .expect("the tagged message verifies under the signing key");
+        }
+    }
+
+    /// BLG-150, the other half: the address a signer reports is derived from
+    /// its announced public key through `Address::from`, not returned as the
+    /// raw Ed25519 key. The two coincide on Address V5 (the address IS the
+    /// key), so the assertion is that the derivation is the one the rest of the
+    /// tree uses - a backend that returned its key bytes as an opaque address
+    /// would pass a bare equality check and still be wrong on Address V3.
+    #[test]
+    fn blg_150_the_announced_address_is_the_derived_address() {
+        let keypair = KeyPair::generate().expect("ed25519 key");
+        let expected = Address::from(keypair.public_key_bytes());
+        let signer = KeyPairSigner::new(keypair);
+        assert_eq!(signer.address(), expected);
+        assert_eq!(signer.address(), Address::from(signer.public_key_bytes()));
     }
 
     /// through a signer backend: the composite signature it assembles
