@@ -14,31 +14,34 @@ hangi kesinlik kanıtının geçerli olduğunu sorar. Böylece değer, bir arac�
 alanlar arasında hareket eder.
 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
-[![Tests](https://img.shields.io/badge/tests-5077%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
+[![Tests](https://img.shields.io/badge/tests-5081%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![Rust](https://img.shields.io/badge/rust-1.97.1-orange?logo=rust)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-PolyForm%20Shield%201.0.0-blue)](LICENSE.md)
 
-[Mimari](docs/ARCHITECTURE.md) · [Belirtim](docs/SPECIFICATION.md) · [Güvenlik](docs/SECURITY.md) · [Katkı](docs/CONTRIBUTING.md) · [Web sitesi](https://github.com/budlum-xyz/budlum.com) · [English](README.md)
+[Testnet](docs/TESTNET.md) · [Mimari](docs/ARCHITECTURE.md) · [Belirtim](docs/SPECIFICATION.md) · [Güvenlik](docs/SECURITY.md) · [Katkı](docs/CONTRIBUTING.md) · [Web sitesi](https://github.com/budlum-xyz/budlum.com) · [English](README.md)
 
 ---
 
 > [!WARNING]
-> **Budlum bir ana ağ başlatmadı ve denetimden geçmedi.** Bu depo araştırma
-> düzeyinde, kontrollü devnet yazılımıdır. Gerçek değer taşıyan trafik için kullanmayın.
-> Neyin uygulandığını, neyin bilerek yarım bırakıldığını ve neyin iddia edilmediğini
-> [Proje durumu](#proje-durumu) bölümünde tam olarak görebilirsiniz.
+> **Budlum testneti herkese açıktır. Budlum bir ana ağ başlatmadı ve dış denetimden geçmedi.**
+> Testnet BUD'unun parasal değeri yoktur. Kritik bir olaydan sonra testnet yeni bir genesis ile
+> yeniden başlayabilir. Neyin çalıştığını, neyin testnette bilerek kapalı olduğunu ve neyin
+> iddia edilmediğini [Proje durumu](#proje-durumu) bölümünde görebilirsiniz.
 
 ---
 
 ## İçindekiler
 
-- [Budlum neden var](#budlum-neden-var)
-- [Uzlaşma nasıl çalışır](#uzlaşma-nasıl-çalışır)
-- [Operatör senaryoları](#operatör-senaryoları-ölçülmüş)
+- [Budlum nedir](#budlum-nedir)
+- [Bir bakışta testnet](#bir-bakışta-testnet)
+- [Testnete katılın](#testnete-katılın)
+- [Nasıl çalışır](#nasıl-çalışır)
+- [Doğrulayıcı sınıfları](#doğrulayıcı-sınıfları)
+- [Testnette özelliklerin durumu](#testnette-özelliklerin-durumu)
+- [Testnet provasında ölçülenler](#testnet-provasında-ölçülenler)
 - [Depo yerleşimi](#depo-yerleşimi)
-- [Başlarken](#başlarken)
-- [Düğüm çalıştırma](#düğüm-çalıştırma)
-- [JSON-RPC](#json-rpc)
+- [Kaynaktan derleme](#kaynaktan-derleme)
+- [JSON-RPC ve uyumluluk ağ geçitleri](#json-rpc-ve-uyumluluk-ağ-geçitleri)
 - [Mühendislik standartları](#mühendislik-standartları)
 - [Güvenlik](#güvenlik)
 - [Proje durumu](#proje-durumu)
@@ -48,454 +51,390 @@ alanlar arasında hareket eder.
 
 ---
 
-## Budlum neden var
+## Budlum nedir
 
-| Sorun | Budlum'un yanıtı |
-| --- | --- |
-| **Parçalanma.** Binlerce yalıtılmış zincir; her birinin kendi kesinliği var, hiçbiri diğerininkini doğrulayamıyor. | *Herhangi* bir alanın kesinlik kanıtını doğrulayan ve sonucu tek bir küresel başlığa kaydeden bir uzlaşma katmanı. |
-| **Köprü riski.** Emanetçi ve çoklu imza köprüleri milyarlarca dolar kaybettirdi; arızalar neredeyse her zaman eksik doğrulamadan kaynaklandı, kırık kriptografiden değil. | Her mint işleminin sınırlı bir kanıtı yeniden hesapladığı ve alacak yazmadan önce yük özetini `(asset_id, amount)` değerlerinden yeniden türettiği bir `lock -> mint -> burn -> unlock` yaşam döngüsü. |
-| **Kuantum ufku.** Ed25519 ve ECDSA'nın, bugün başlatılan bir zincirin ömrü içinde kırılabilir olması bekleniyor. | Melez kesinlik: BLS12-381 toplu imzaların yanında kuantum sonrası bir şema (varsayılan ML-DSA-65 - FIPS 204 NIST nihai; eski Dilithium5 yalnızca göç için mevcut). <!-- claim:L-FINALITY-01 --> |
-| **Kullanıcı verisinin operatör emanetinde olması.** Depolaması, RPC'si ve çıkarımı tek bir şirkette sonlanan "merkeziyetsiz" ağlar. | Yönetici anahtarı yok, duraklatma kancası yok, beyaz liste yok. Depolama, RPC ve yapay zeka uç noktaları herhangi bir düğümde çalışır; katılım izinle değil, teminatla kapılanır. |
-| **Doğrulanamayan zincir dışı hesaplama.** Arkasında hiçbir şey olmadan olgu diye sunulan yapay zeka çıktısı. | Yürütmenin STARK kanıtlarını üreten, ağaç içi bir zkVM (BudZero). Çıkarım kanıtı *doğrulaması* henüz etkin değildir; işlem yolu doğrulanmamış bir sonuca güvenmek yerine [kapalı biçimde başarısız olur](docs/AI_VERIFICATION_STATUS.md). |
+Budlum, birçok ağ için tek bir uzlaşma katmanıdır. Budlum, zincirler arasında sarılı kopya
+taşıyan bir köprü değildir. Budlum dört şeyi tek yerde birleştirir:
 
-**Veri egemenliği değişmezi.** Ağdaki hiçbir kritik işlev, Budlum ekibinin işlettiği bir
-servise bağlı değildir. Bu bir değer beyanı değil, test paketinin ve CI kapılarının
-zorladığı bir özelliktir; yönetici yolu ekleyen bir pull request bu kapılardan geçemez.
+| Katman | Neyi birleştirir | Nasıl |
+| --- | --- | --- |
+| **Konsensüs** | PoW, PoS, PoA, BFT ve ZK alanları | Her alan kendi konsensüsünü korur. Budlum alanın kesinlik kanıtını doğrular ve olguyu tek bir `GlobalBlockHeader` üzerine yazar. |
+| **Yürütme** | EVM, CosmWasm, SVM, Move ve BudZero için yazılmış programlar | Her program kendi özgün bayt koduyla kendi yürütme ortamında çalışır. Bütün ortamlar tek bir durumu paylaşır ve tek bir işlemde birbirini atomik olarak çağırır. |
+| **Varlıklar** | Her ortamın tokenları ve NFT'leri | Bir varlık yalnızca kendi ev ortamında yaşar. Diğer ortamlar ona bakiye tutmayan işaretçilerle ulaşır. Bu nedenle sarılı kopya yoktur. BUD her ortamda yereldir. |
+| **Depolama** | Ağın bütün içeriği | B.U.D. 3.0 tek depolama sistemidir. İçeriği doğrulayıcıların kendisi saklar. Android telefonda çalışan doğrulayıcılar da saklar. |
+
+**Veri egemenliği değişmezi.** Ağın hiçbir kritik işlevi Budlum ekibinin işlettiği bir hizmete
+bağlı değildir. Test paketi ve CI kapıları bu özelliği zorlar. Yönetici yolu açan bir PR bu
+kapılardan geçemez.
 
 ---
 
-## Uzlaşma nasıl çalışır
+## Bir bakışta testnet
+
+| Öğe | Değer |
+| --- | --- |
+| Zincir kimliği | `45261` |
+| Ağ kimliği | `BDLT` |
+| Slot / dönem / denetim noktası | 3 sn / 50 slot / her 5 blok |
+| Kesinlik | En fazla 128 koltuklu kurul, BLS12-381 toplam imza ve ML-DSA-65 |
+| Genesis | `sha256:7296b76f95c036b9`, `2027-01-15T08:00:00Z (prova yapılandırması)` |
+| Sürüm | `v0.1.0-testnet` |
+| Budlum RPC | `https://rpc.testnet.budlum.network` |
+| Ethereum JSON-RPC | `https://evm.testnet.budlum.network` (zincir kimliği `45261`) |
+| Solana JSON-RPC | `https://solana.testnet.budlum.network` |
+| Aptos REST | `https://aptos.testnet.budlum.network/v1` (zincir kimliği `205`) |
+| Cosmos RPC / REST | `https://cosmos-rpc.testnet.budlum.network`, `https://cosmos-rest.testnet.budlum.network` (zincir kimliği `budlum-testnet-1`, önek `bud`, birim `ubud`) |
+| Musluk | `https://faucet.testnet.budlum.network` (adres başına günde 100 BUD) |
+| Gezgin | `https://explorer.testnet.budlum.network` |
+
+---
+
+## Testnete katılın
+
+### 1. Cüzdan oluşturun ve testnet BUD'u alın
+
+```bash
+bud wallet create --key-file ./secrets/wallet.json        # ML-DSA-87, 24 kelime
+bud faucet request --address <adresiniz>                 # musluğun hesap işini çözer
+```
+
+Android uygulaması bu iki adımı kendi arayüzünde yapar.
+
+### 2. Android telefonda doğrulayıcı olun
+
+Gereksinimler: Android 10 veya üstü, arm64, en az 4 GB RAM, seçtiğiniz saklama kotası ve
+ek olarak 2 GB boş alan.
+
+1. Uygulamayı kurun: [GitHub sürüm APK'si](https://github.com/budlum-xyz/budlum/releases/tag/v0.1.0-testnet) veya [Google Play test kanalı](https://github.com/budlum-xyz/budlum/blob/main/docs/MOBILE_STORE_DISTRIBUTION.md).
+2. Cüzdanınızı oluşturun veya içe aktarın. Uygulama içinden musluktan BUD isteyin.
+3. Bir saklama kotası (1 GiB ile 64 GiB, varsayılan 4 GiB) ve bir politika seçin (varsayılan:
+   yalnız Wi-Fi, şarjda veya pil yüzde 50 üstü).
+4. Kaydı onaylayın. Stake 10 BUD'dur.
+5. Uygulama içerik parçaları saklar, saklama denetimlerine cevap verir, parçaları okuyuculara
+   sunar, varlık sinyali imzalar ve zinciri hafif istemci olarak doğrular. Saklama ödülü alır.
+
+Telefonunuz içerik parçaları saklar. Tek bir parça hiçbir içeriği açmaz. Genel içerik herkese
+açıktır. Mühürlü içerik şifrelidir ve telefonunuz onun anahtarını hiç tutmaz. Her an
+ayrılabilirsiniz: ağ görevlerinizi kayıpsız olarak sıradaki doğrulayıcıya geçirir. Uygulamadaki
+"Ayrıl" seçeneği parçalarınızı bırakır ve stake çözmeyi başlatır. Ayrıntı:
+[docs/MOBILE_VALIDATOR.md](docs/MOBILE_VALIDATOR.md).
+
+### 3. Tam doğrulayıcı çalıştırın
+
+Gereksinimler (testnet varsayılanı): 8 çekirdek, 32 GB RAM, 1 TB NVMe, 100 Mbit/s simetrik.
+
+```bash
+budlum-core --config config/testnet.toml                  # düğümü eşitleyin
+bud validator register --class full --stake 1000 --signing-chain-id 45261
+bud validator status
+```
+
+Tam doğrulayıcı blok önerir, bütün yürütme ortamlarını çalıştırır, kesinlik koltuğu tutar,
+içerik saklar, içerik onarır ve isteğe bağlı olarak röle ve yükleme ağ geçidi hizmeti verir.
+Anahtar yönetimi, HSM kurulumu ve işletmeci kontrol listesi:
+[docs/VALIDATOR_GUIDE.md](docs/VALIDATOR_GUIDE.md).
+
+İmza atan her komut `--signing-chain-id` alır (testnet için `45261`). Varsayılan değeri yoktur.
+Düğümün `bud_chainId` cevabı yalnızca bu değerle karşılaştırılır. Çünkü bir tohum her ağda
+aynı adresi kontrol eder.
+
+### 4. Zaten kullandığınız araçları kullanın
+
+| Ekosistem | Bağlantı | Değişmeden çalışan |
+| --- | --- | --- |
+| EVM | MetaMask'e ağ ekleyin: RPC `https://evm.testnet.budlum.network`, zincir kimliği `45261`, simge `BUD` | Solidity ve Vyper bayt kodu, Foundry, Hardhat, viem, ethers, MetaMask |
+| CosmWasm | CosmJS `SigningCosmWasmClient`, adres `https://cosmos-rpc.testnet.budlum.network` | Kayan nokta kullanmayan CosmWasm bayt kodu, cw-plus sözleşmeleri, CosmJS |
+| SVM | `solana config set --url https://solana.testnet.budlum.network` | Program bayt kodu, Anchor, `@solana/web3.js`, solana CLI |
+| Move | `aptos init --network custom --rest-url https://aptos.testnet.budlum.network/v1` | Move modülleri, aptos CLI, Aptos TypeScript SDK |
+| BudZero | `bud exec budzero deploy` | BudL programları, `bud-cli` |
+
+```bash
+forge create --rpc-url https://evm.testnet.budlum.network --private-key $KEY src/Token.sol:Token
+```
+
+Değişen tek şey RPC adresi ve zincir kimliğidir. Ağ değiştirmek zaten budur. "Değişmeden"
+iddiasının tam sınırları [docs/EXECUTION_LIMITS.md](docs/EXECUTION_LIMITS.md) dosyasındadır.
+Bir EVM sözleşmesi aynı işlemde bir CosmWasm sözleşmesini çağırabilir ve sonuç atomiktir.
+Bakınız [docs/EXECUTION.md](docs/EXECUTION.md). Var olan bir EVM sözleşmesi Göç Kiti (beta) ile
+aynı adres, kod ve depolamayla Budlum'a taşınabilir: [docs/MIGRATION.md](docs/MIGRATION.md).
+
+secp256k1 veya Ed25519 anahtarıyla imzalanan hesaplar *klasik* olarak etiketlenir. Bu hesaplar
+yalnızca kendi varlıklarını hareket ettirir ve kuantum güvenli bir hesaba hiç dokunamaz.
+`bud adopt` komutu bu varlıkları tek adımda kuantum güvenli bir hesaba taşır.
+
+### 5. B.U.D. 3.0 üzerinde içerik saklayın
+
+```bash
+bud storage upload ./makale.pdf --lifetime 365d           # genel içerik
+bud storage upload ./gunluk.txt --sealed --lifetime 365d  # mühürlü: cihazınızda şifrelenir
+bud storage view <içerik-kimliği> --out ./makale.pdf
+bud storage grant <nft-kimliği> --to <adres>              # mühürlü içerik için okuma izni
+```
+
+Ücret yalnızca fiziksel bayta bağlıdır: testnet varsayılanında yılda GiB başına 1 BUD.
+Bakınız [docs/STORAGE.md](docs/STORAGE.md).
+
+---
+
+## Nasıl çalışır
 
 ```mermaid
 flowchart TB
-  subgraph Domains["Egemen alanlar, her biri kendi konsensüsünü korur"]
-    PoW["PoW alanı"]
-    PoS["PoS alanı"]
-    BFT["BFT alanı"]
-    ZKD["ZK alanı"]
-    PoA["Yalıtılmış PoA / KYC alanı"]
+  subgraph Clients["Uygulamalar ve araçlar"]
+    W["Cüzdan, CLI, Android doğrulayıcı uygulaması"]
+    T["MetaMask, Foundry, CosmJS, Anchor, aptos CLI"]
   end
-
-  subgraph Adapters["Kesinlik adaptörleri, kanıt doğrulama, güven yok"]
-    FA["Alan kesinlik adaptörleri<br/><code>src/domain/</code>"]
-    PA["PoA adaptörü<br/>(yalıtılmış, izinsiz kümeye sahtecilik yapamaz)"]
+  subgraph Gateways["RPC ağ geçitleri (yalnız okuma ve gönderme)"]
+    G["bud_*, Ethereum, Solana, Aptos, Cosmos"]
   end
-
+  subgraph UEL["Evrensel Yürütme Katmanı"]
+    C["Yürütme Koordinatörü: tek sıra, tek durum, Evrensel Çağrı"]
+    E["EE işçileri: BudZero, EVM, WASM, SVM, Move"]
+  end
   subgraph USL["Evrensel Uzlaşma Katmanı"]
-    CONS["Heterojen konsensüs motorları<br/><code>src/consensus/</code>"]
-    FIN["BLS + PQ kesinlik, kontrol noktaları<br/><code>src/chain/</code>"]
-    EXEC["Yürütücü + BudZKVM ana makinesi<br/><code>src/execution/</code>"]
-    REG["İzinsiz kayıt defteri<br/>teminat · kesinti · çözülme"]
+    F["Kurul tabanlı kesinlik, Anında Görev Devri, varlık sinyali"]
+    D["Domain kaydı ve kesinlik bağdaştırıcıları"]
+    H["GlobalBlockHeader"]
   end
-
-  PoW --> FA
-  PoS --> FA
-  BFT --> FA
-  ZKD --> FA
-  PoA --> PA
-  FA --> CONS
-  PA --> CONS
-  CONS --> FIN
-  FIN --> EXEC
-  EXEC --> REG
-
-  FIN --> GBH["GlobalBlockHeader<br/>tek uzlaşma kaydı"]
-  GBH --> BR["Alanlar arası köprü<br/>lock · mint · burn · unlock"]
-  GBH --> ST["B.U.D. depolama<br/>içerik adresleme · anlaşmalar · meydan okumalar"]
-  GBH --> ZK["BudZero zkVM<br/>STARK yürütme kanıtları"]
-  GBH --> AI["AI inference layer yapay zeka katmanı<br/>model kaydı · hesaplama teminatı"]
+  subgraph Base["Temeller"]
+    B["B.U.D. 3.0: tek nesne, RFC 6330 sembolleri, doğrulayıcılar saklar"]
+    Z["BudZero: ISA, VM, kanıtlayıcı, doğrulayıcı"]
+  end
+  Clients --> Gateways --> C --> E
+  C --> F
+  D --> F --> H
+  H --> B
+  H --> Z
 ```
 
-Bir alan kesinlik kanıtı sunar. Eşleşen adaptör bu kanıtı o alanın kendi kurallarına göre
-doğrular; bir PoA alanının kanıtının izinsiz kümede geçerli olması yapısal olarak
-engellenmiştir ve KYC'li bir alanı açık bir alanın yanında barındırmayı güvenli kılan
-sınır tam olarak budur. Doğrulandıktan sonra taahhüt `GlobalBlockHeader` içine girer ve
-alt sistemlerin her biri (köprü, depolama, zkVM, yapay zeka) uzlaşmayı bir alana doğrudan
-güvenerek değil, o tek kayıttan okur.
+### Evrensel Uzlaşma Katmanı
 
-### Diyagramlar nerede
+Bloklar PoS lider turlarıyla üretilir. Kesinlik, Tam doğrulayıcıların tuttuğu en fazla 128
+koltuklu bir kuruldan gelir. Etkin koltukların üçte ikisinden fazlası imzalayınca denetim
+noktası kesinleşir. Hiçbir doğrulayıcı koltukların dörtte birinden fazlasını tutmaz. Bir Tam
+doğrulayıcı durursa koltukları üç denetim noktası aralığı içinde sıralı yedeklere geçer. Koltuk
+tablosu yalnızca kesinleşmiş bloklardan türetilir. Bu nedenle iki çatal farklı tablo kuramaz.
 
-[**ARCHITECTURE.md**](docs/ARCHITECTURE.md) bu ağacın başvuru atlasıdır: yürütücü boru
-hattını, köprü doğrulamasını, EVM makbuz ve MPT yolunu, anlık görüntü güven sınırını, STARK
-kanıt yaşam döngüsünü, yönetişim ve tokenomi durum makinelerini kapsayan 80 Mermaid
-diyagramı içerir. [budzero/ARCHITECTURE.md](budzero/ARCHITECTURE.md) ise BudZKVM ISA'sını,
-sanal makinesini, kanıtlayıcısını ve doğrulayıcısını ayrıca ele alır, çünkü BudZero kendi
-çalışma alanıdır.
+**Anında Görev Devri.** Her görevin bir tetiği, bir halefi ve bir zaman sınırı vardır: kaçırılan
+slot sonraki turun liderine geçer, sessiz koltuk yedeğine geçer, sessiz pay sahibinin yerini
+okuma için hemen başka bir pay sahibi, dayanıklılık için onarım alır, 20 blokta başlamayan
+onarım görevi sıradaki adaya geçer. Hiçbir görev bir insanı veya bir oylamayı beklemez.
+Çevrimdışı olmak hiçbir zaman kesinti sebebi değildir. Uzun görünmeme yalnızca askıya alma
+üretir.
 
-İkisi de önce kod haritası, sonra tasarım belgesidir. Bir diyagram ile kod çelişirse
-olgu koddur, diyagram ise hatadır.
+### B.U.D. 3.0
+
+B.U.D. 3.0 tek depolama sistemidir. Bir yükleme tek bir B.U.D. 3.0 nesnesine dönüşür: içeriğin
+en kısa tam temsili. Nesne segmentlere bölünür. Her segment RFC 6330 (RaptorQ) ile sembollere
+kodlanır. Herhangi `k + 2` sembol bir segmenti yeniden kurar. Semboller sınıf duyarlı geniş
+şeritli yerleşimle Tam ve Mobil doğrulayıcılara dağılır. Sembollerin en az yüzde 30'u Mobil
+doğrulayıcılardadır. Hiçbir doğrulayıcı bir nesnenin tamamını tutmaz. Pay sahipleri saklama
+denetimlerine alt blok kanıtlarıyla cevap verir. Kaçırılan denetim ödül kaybettirir. Onarım,
+kaybolan payları tembel olarak yeniden kurar. Mühürlü içerik sahibin cihazında şifrelenir ve
+doldurulur. Boyu, kimliği ve okuyucuları zincirde görünmez. Aynı nesne bir QR video olarak
+gösterilebilir ve kamerayla geri okunabilir. QR video bir gösterimdir, hiçbir zaman saklanan
+bir kayıt değildir.
+
+### Evrensel Yürütme Katmanı
+
+Her yürütme ortamı kendi işçi sürecinde çalışır. Bu nedenle bir motor paniği zinciri
+durdurmaz, bir hata makbuzu üretir. Tek bir koordinatör işlemleri sıralar, gazı tek birimle
+(BGU) ölçer, tek bir durum ve tek bir BUD defteri tutar ve her Evrensel Çağrı için bir çerçeve
+açar. Bir işlem ortamlar arasında çağrı yapabilir: ya bütün çağrılar uygulanır ya hiçbiri.
+Varlıklar yalnızca ev ortamında yaşar. İşaretçi sözleşmeleri onları başka ortamlarda kendi
+bakiyesi olmadan sunar.
+
+### BudZero
+
+BudZero, Budlum'un sıfır bilgi sanal makinesidir: belirlenimci bir ISA, gaz ölçümlü bir VM,
+bir derleyici ve Plonky3 STARK kanıtlayıcı ve doğrulayıcı. Testnette BudZero programları
+yürütme kipinde çalıştırır. Her Tam doğrulayıcı programları yeniden yürütür. Kanıta dayanan
+özellikler, sağlamlık işleri bitene kadar testnette kapalıdır. Bakınız
+[budzero/ARCHITECTURE.md](budzero/ARCHITECTURE.md).
 
 ---
 
-## Operatör senaryoları (ölçülmüş)
+## Doğrulayıcı sınıfları
 
-Üç üretim yolu CI'da uç uca çalışır. Aşağıdaki her sayı bir CI günlüğünden
-okunmuştur; hiçbiri yerel ölçüm değildir.
+| | Tam doğrulayıcı | Mobil doğrulayıcı (Android) | Mobil doğrulayıcı (iOS, fırsatçı) |
+| --- | --- | --- | --- |
+| Donanım | Sunucu veya masaüstü | Android 10+, arm64, 4 GB RAM | iPhone, iOS 17+ |
+| Stake | 1.000 BUD | 10 BUD | 10 BUD |
+| Blok önerir, bütün ortamları çalıştırır | Evet | Hayır | Hayır |
+| Kesinlik koltuğu | Evet | Hayır | Hayır |
+| B.U.D. 3.0 payı saklar | Evet | Evet (kullanıcı kotası) | Evet (en fazla 8 GiB) |
+| Denetim cevap penceresi | 2 dönem | 24 saat | 48 saat |
+| Onarım, röle, yükleme ağ geçidi | Evet (röle ve ağ geçidi isteğe bağlı) | Hayır | Hayır |
+| Askıya alma | 1 gün çevrimdışı | 72 saat çevrimdışı | 7 gün çevrimdışı |
+| Kesinti sebebi | Çift imza, kanıtlı hatalı onarım | Varlık sinyalinde çift imza | Varlık sinyalinde çift imza |
+| Testnette durum | Açık | Açık | Beta |
 
-1. **Kanonik kanıt rölesi.** `bud-cli relay` önce iki kanonik kontrol programını
-   (private-transfer, syscall-context) sabitlenmiş işlenen değerlerden satır
-   satır yeniden türetir ve hesaplanan Keccak-256'yı pin tablosuyla
-   karşılaştırır: kaymış bir derleyici, kanıta dokunmadan önce koşumu reddeder.
-   İmzalı `relay_report.json` sonra diskten okunarak doğrulanır: JSON'un
-   biçimli hâli ayrıştırılmış kopyadan yeniden üretilip bayt bayt
-   karşılaştırılır, kanıt parmak izi yüklenen zarftan yeniden türetilir ve
-   `--payload-out` imzanın kapsadığı baytların tamını yazar; izleyici düzeni
-   yeniden yazmadan onları yeniden hash'leyebilir. `--verified-at <unix>` saati
-   sabitler ve yeniden koşum imzayı bayt-bayt üretir.
-2. **AI inference layer derecelendirme döngüsü.** `ai-ops tune data.jsonl` veri seti
-   etiketini (hedef model, örnek sayısı) doğrular, müfredatın derecelendirme
-   seti özetini plana iliştirip bağı kontrol eder; `ai-ops eval data.jsonl
-   responses.jsonl [MIN_SCORE]` altın kuralları boş yanıtta geçen bir
-   müfredatı reddeder, üretilen yanıtları altın kurallarla derecelendirir ve
-   rapor eşiği geçmezse sıfır olmayan çıkışla döner. Cihaz tarafında
-   `ai-serve`, yerleşim planı operatörün `disk_budget_bytes` payından
-   fazlasını diskten akıtan köprüyü, akış politikası bir şeye karar
-   vermeden önce reddeder.
-3. **Depolama verimi.** `cargo bench --bench ratio_rayon`, QR yük paketleyicisini
-   96 x 65536 B'lik bir gövde üzerinde ölçer (6291456 B giriş, 7 tekrar, en
-   hızlısı bildirilir): seri 39.7 MB/s (158352 us), rayon havuzu 97.5 MB/s
-   (64539 us), hızlanma 2.45x. İki yolun paketli çıktıları bayt bayt
-   karşılaştırılır; uyuşmazlık sıfır olmayan çıkışla biter. CI'da
-   `usl@967acce4c` head'inde ölçüldü (`Timing-Safe Regression` işi,
-   `Ratio rayon vs serial throughput` adımı, 2026-08-30T06:18:49Z).
+Mobil doğrulayıcılar kesinlik oyu vermez. Bu nedenle hepsi aynı anda ayrılsa da kesinlik
+durmaz. Mobil doğrulayıcılar içerik saklar ve saklama ödülü alır.
+
+---
+
+## Testnette özelliklerin durumu
+
+| Özellik | Testnet |
+| --- | --- |
+| PoS blok üretimi, kurul tabanlı kesinlik, Anında Görev Devri | Açık |
+| Tam doğrulayıcılar, Android Mobil doğrulayıcılar | Açık |
+| iOS fırsatçı doğrulayıcılar | Beta |
+| B.U.D. 3.0 genel ve mühürlü içerik | Açık |
+| EVM, WASM (CosmWasm ABI), SVM, Move (Aptos lehçesi), BudZero ortamları | Açık |
+| Ortamlar arası Evrensel Çağrı, EVM ve WASM işaretçileriyle varlık kaydı | Açık |
+| Ethereum, Solana, Aptos ve Cosmos uyumlu RPC | Açık |
+| EVM sözleşmeleri için Göç Kiti | Beta |
+| Konsensüs domain kaydı (PoW, PoS, PoA, BFT, ZK) | Açık |
+| Kilitle, bas, yak, aç aktarımları | Açık |
+| Zincir üstü AI çıkarım katmanı | Kapalı |
+| BNS adları, SocialFi, Veri Pazarı, gezgin, musluk | Açık |
+| Gizli transferler, AI yürütme kanıtları, sahipler arası gizli tekilleştirme, canlı yayın, paylaşılan güvenlik, Uzak Uygulama Bağı, Evrensel Nesne Katmanı | Testnette kapalı |
+
+Kapalı bir özellik kodda vardır ve `45261` zincir kimliğinde reddedilir. Bir test bu reddi
+kanıtlar. Her kapalı özellik daha sonra duyurulan bir etkinleşme yüksekliğinde açılır.
+
+---
+
+## Testnet provasında ölçülenler
+
+Aşağıdaki her sayı [docs/rehearsal/RESULTS.md](docs/rehearsal/RESULTS.md) dosyasından veya bir
+CI işinden gelir. Hiçbiri yerel bir tahmin değildir.
+
+| Ölçüm | Değer |
+| --- | --- |
+| Prova | 8 (prova yapılandırması) Tam doğrulayıcı, >= 20 hedef (saha koşusu bekliyor) Android telefon, 1.000 (koşum hedefi) benzetimli Mobil doğrulayıcı, 72 (hedef) saat |
+| Kesinlik gecikmesi, ortanca ve p95 | docs/rehearsal/RESULTS.md kaydında, docs/rehearsal/RESULTS.md kaydında |
+| Bütün Mobil doğrulayıcılar aynı anda durdu | Kesinlik gecikmesi değişimi: 0 ek denetim noktası (T-1 koşumunda doğrulandı); kaybolan nesne: 0 (T-1 koşumunda doğrulandı) |
+| Tam doğrulayıcıların yüzde 10'u aynı anda durdu | Ek kesinlik gecikmesi: <= 2 (T-2 koşumunda doğrulandı) denetim noktası |
+| Android telefon, varsayılan politika | Günlük pil: <= %5 şarjsız bütçe (24 saat saha koşusu bekliyor); günlük veri: ilke tavanlı (bkz. docs/MOBILE_DEVICE_MATRIX.md) |
+| Mobil bağlantı | Doğrudan saha NAT koşusu bekliyor, delik açma saha NAT koşusu bekliyor, röle saha NAT koşusu bekliyor |
+| Depolama fazlalığı | RFC 6330 RaptorQ sembol genişletmesi (bkz. docs/STORAGE_MEASUREMENTS.md) |
+| Tam doğrulayıcı kaynakları | CPU çok bölgeli prova bekliyor (docs/rehearsal/RESULTS.md), RAM çok bölgeli prova bekliyor (docs/rehearsal/RESULTS.md), günlük disk büyümesi çok bölgeli prova bekliyor (docs/rehearsal/RESULTS.md) |
+
+---
 
 ## Depo yerleşimi
 
-Bu depo yığının tamamıdır. Aşağıdaki katmanlar ayrı bağımlılıklar değil, **ağaç içidir**;
-dolayısıyla sistemin tamamı tek bir ağaç olarak derlenir, test edilir ve dağıtılır.
-
-### Evrensel Uzlaşma Katmanı çekirdeği: [`src/`](src)
-
-| Yol | Rol |
+| Yol | Görev |
 | --- | --- |
-| [`src/consensus/`](src/consensus) | PoW · PoS · PoA · BFT motorları, blok boyutu ve reorg derinliği sınırları |
-| [`src/chain/`](src/chain) | Blok zinciri, BLS/QC kesinliği, kontrol noktaları, anlık görüntüler |
-| [`src/domain/`](src/domain) | Alan kayıt defteri ve alan başına kesinlik adaptörleri |
-| [`src/cross_domain/`](src/cross_domain) | Köprü yaşam döngüsü, alanlar arası mesajlar, tekrar koruması |
-| [`src/execution/`](src/execution) | İşlem yürütücüsü ve BudZKVM ana makinesi |
-| [`src/registry/`](src/registry) | İzinsiz teminat kayıt defteri (doğrulayıcı · denetleyici · aktarıcı · depolama) ve kesinti |
-| [`src/core/`](src/core) | Hesaplar, bloklar, işlemler, zincir yapılandırması, genesis |
-| [`src/mempool/`](src/mempool) | Kabul denetimi ve imza öncesi ucuz reddetme |
-| [`src/network/`](src/network) | libp2p yığını, tel protokolü, eş puanlama ve yasaklar |
-| [`src/crypto/`](src/crypto) | Ed25519, BLS12-381, Dilithium / ML-DSA, PKCS#11 |
-| [`src/rpc/`](src/rpc) | JSON-RPC: ayrık genel/operatör dinleyicileri, kimlik doğrulama, IP başına kota, CORS |
-| [`src/tokenomics/`](src/tokenomics) | `$BUD` arzı, yakım takvimi, hak ediş, doğrulayıcı ödülleri |
-
-### Birleştirilebilir katmanlar
-
-| Katman | Bu depoda | Ne olduğu |
-| --- | --- | --- |
-| **BudZero** | [`budzero/`](budzero), [README](budzero/README.md) | ZK yerlisi sanal makine: belirlenimli ISA, gaz ölçümlü VM, derleyici ve bir Plonky3 STARK kanıtlayıcı/doğrulayıcı |
-| **B.U.D.** | [`bud/`](bud) · [`src/storage/`](src/storage) | Broad Universal Database: `bud/` 1.0/2.0/3.0 uygulamasıdır (tarif / QR / makbuz / uzlaşma modülleri, [bud README](bud/README.md)); `src/storage/` uzlaşma katmanının depolama motorudur (içerik adresleme, anlaşmalar, meydan okuma/yanıt kanıtları) |
-| **AI inference layer** | [`src/ai_inference/`](src/ai_inference) | Kapalı devre yapay zeka katmanı: model kayıt defteri, operatör hesaplama teminatı, çaba kademeleri, Pollen ile kapılanan veri erişimi, algı beyanları (V3), SocialFi çıktı köprüsü. Zincir dışı çalışma alanı: [`crates/ai-inference/`](crates/ai-inference) |
-| **Pollen** | [`src/pollen/`](src/pollen) | Rıza ile kapılanan veri pazarı, izinler, şifreleme ve yapay zeka katmanının geçmek zorunda olduğu kapı |
-| **BNS** | [`src/bns/`](src/bns) | `.bud` adlandırması: kayıt, alt alanlar, içerik ve depolama kayıtları |
-| **Wallet Core** | [`crates/wallet-core/`](crates/wallet-core), [README](crates/wallet-core/README.md) | BIP39 + SLIP-0010 Ed25519 türetimi ve işlem imzalama. Bir cüzdandır, aktarıcı değildir |
-
-### Destek ağaçları
-
-| Yol | İçerik |
-| --- | --- |
-| [`crates/`](crates) | Bağımsız çalışma alanları: wallet-core, budlum-explorer, ai_inference, note-packing |
-| [`bud/`](bud) | B.U.D. 1.0/2.0/3.0 uygulaması (kendi çalışma alanı) |
-| [`docs/`](docs) | Başvuru belgeleri: ARCHITECTURE, SPECIFICATION, SECURITY, CONTRIBUTING, PROVENANCE_NOTES |
-| [`config/`](config) | Devnet / testnet / mainnet profilleri ve genesis şablonları |
-| [`xtask/gates/`](xtask/gates) | CI kapıları; her biri kendi kendini sınar ([Mühendislik standartları](#mühendislik-standartları)) |
-| [`kani/`](kani) · [`fuzz/`](fuzz) | Model denetleme koşum takımları ve fuzz hedefleri ([fuzz README](fuzz/README.md)) |
-| [`benches/`](benches) | İmza doğrulama, Merkle ve tek düğüm verim ölçümleri |
-| [`ops/`](ops) | systemd birimi, Prometheus yapılandırması, yedekleme/geri yükleme tatbikatı |
-| [`proto/`](proto) | Protobuf tel şemaları |
-| [`supply-chain/`](supply-chain) | `cargo-vet` denetim kayıtları |
-
-### Kökte kalan dosyalar
-
-| Dosya | Neden kökte kalıyor |
-| --- | --- |
-| `Cargo.toml` · `Cargo.lock` · `build.rs` | Cargo paket kökü: çekirdek crate, ölçümleri ve yol bağımlılıkları (`budzero/*`, `crates/*`) buradan çözülür |
-| `rust-toolchain.toml` | rustup çalışma dizininden yukarı yürür ve dosyayı burada bulmak zorundadır |
-| `buf.yaml` | Protobuf çalışma alanı kökü, `proto/` ile eşleşir (Repo Lint kapısı `buf`u kökten çalıştırır) |
-| `flake.nix` · `flake.lock` | Nix flake keşfi yalnızca kökte olur |
-| `README.md` | GitHub depo ana sayfasını kökteki README'den oluşturur |
-| `LICENSE.md` | GitHub lisans tespiti, `cargo-deny` ve `license-consistency` kapısı dosyayı kökten okur |
-| `.gitignore` · `.gitleaks.toml` | Git ve gitleaks yapılandırmaları kökten çözer |
-
-Konteyner ve lisans bildirim dosyaları ağaç içine taşındı: `ops/Dockerfile`,
-`ops/docker-compose*.yml` (derleme bağlamı kökte kalır), `docs/NOTICE`.
-
-### İlgili depolar
-
-| Depo | Amaç |
-| --- | --- |
-| [budlum-xyz/budlum.com](https://github.com/budlum-xyz/budlum.com) | Proje web sitesi |
-| [budlum-xyz/budlum.xyz](https://github.com/budlum-xyz/budlum.xyz) | Marka ve tasarım sistemi |
+| [`src/consensus/`](src/consensus) | PoS, PoW, PoA, BFT motorları, kurul, lider seçimi |
+| [`src/validators/`](src/validators) | Doğrulayıcı sınıfları, görevler, varlık sinyali, Anında Görev Devri |
+| [`src/chain/`](src/chain) | Blok zinciri, kesinlik, genesis, anlık görüntüler, durum kurtarma |
+| [`src/storage/bud3/`](src/storage/bud3) | B.U.D. 3.0 |
+| [`src/execution/`](src/execution) | Yürütme Koordinatörü ve BudZero ortam bağdaştırıcısı |
+| [`execution/`](execution) | Yürütme ortamı işçileri (EVM, WASM, SVM, Move) ve uygunluk paketleri |
+| [`src/rpc/`](src/rpc) | `bud_*` RPC ve uyumluluk ağ geçitleri |
+| [`src/domain/`](src/domain), [`src/cross_domain/`](src/cross_domain), [`src/settlement/`](src/settlement) | Domain kaydı, kesinlik bağdaştırıcıları, alanlar arası iletiler, `GlobalBlockHeader` |
+| [`src/network/`](src/network) | Röle, delik açma ve AutoNAT ile libp2p yığını |
+| [`src/persistence/`](src/persistence) | Düğümün anahtar-değer deposu ve durum ağacı |
+| [`mobile/`](mobile) | Mobil çekirdek (Rust, UniFFI), Android uygulaması, iOS uygulaması |
+| [`budzero/`](budzero) | BudZero çalışma alanı: ISA, VM, derleyici, kanıtlayıcı, doğrulayıcı |
+| [`crates/`](crates) | `bud-codec`, `uel-abi`, `budlum-types`, `wallet-core`, `budlum-explorer` ve diğerleri |
+| [`contracts/`](contracts) | Solidity sözleşmeleri: dış domain doğrulayıcısı, Evrensel Çağrı kütüphanesi |
+| [`xtask/`](xtask), [`fuzz/`](fuzz), [`kani/`](kani), [`benches/`](benches) | CI kapıları, fuzz hedefleri, model denetimi, karşılaştırma testleri |
+| [`config/`](config), [`ops/`](ops), [`proto/`](proto), [`docs/`](docs) | Profiller ve genesis, işletim, tel şemaları, belgeler |
 
 ---
 
-## Başlarken
+## Kaynaktan derleme
 
-### Ön koşullar
-
-- **Rust 1.97.1**: [`rust-toolchain.toml`](rust-toolchain.toml) içinde sabitlenmiştir; `rustup` bunu kendiliğinden seçer
-- **protoc** (Protocol Buffers derleyicisi): `apt install protobuf-compiler` veya `brew install protobuf`
-- İsteğe bağlı: [Nix](https://nixos.org), `nix develop` tüm araç zincirini [`flake.nix`](flake.nix) dosyasından kurar
-
-### Derleme ve test
+Ön koşullar: Rust 1.97.1 ([`rust-toolchain.toml`](rust-toolchain.toml) içinde
+sabitlenir), `protoc`. İsteğe bağlı: Nix (`nix develop`).
 
 ```bash
 git clone https://github.com/budlum-xyz/budlum.git
 cd budlum
-
-cargo build --release              # cekirdek dugum
-cargo test --lib                   # cekirdek test paketi
-
-# BudZero / BudZKVM kendi çalışma alanıdır
+cargo build --release                                   # düğüm
+cargo test --lib                                        # çekirdek testleri
 cargo test --manifest-path budzero/Cargo.toml --workspace
+cargo run --manifest-path xtask/tools/Cargo.toml -- pre-push   # CI'ın çalıştırdığı denetimler
 ```
 
-Bir pull request açmadan önce CI'ın çalıştırdığı denetimlerin aynısını çalıştırın:
+Yürütme işçileri `execution/` altında ayrı çalışma alanlarıdır. Düğüm, ikilisinin yanında
+bulduğu işçileri başlatır. Sürüm derlemeleri hepsini içerir.
+
+Yerel ağlar:
 
 ```bash
-cargo run --manifest-path xtask/tools/Cargo.toml -- pre-push   # fmt + clippy, sabitlenmis arac zinciri
+cargo run --release -- --network devnet                 # tek düğüm
+docker compose -f ops/docker-compose.yml up             # Prometheus ile dört düğüm
 ```
-
-### Derleme özellikleri
-
-| Özellik | Varsayılan | Etki |
-| --- | --- | --- |
-| `pq-ml-dsa` | Açık | FIPS 204 ML-DSA (NIST nihai) - ML-DSA-65 doğrulayıcı imzaları (`ml-dsa`). Şema genesis içine yazılır; derlemesi zincirle çelişen bir düğüm başlamayı reddeder |
-| `p2p-mdns` | - | Yalnızca devnet için yerel eş keşfi. mDNS uyarıları erişilemez kalsın diye sürüm derlemelerinden bilerek çıkarılmıştır |
-
-`cargo build --all-features` komutunun **başarısız olması beklenir**: PQ arka uçları
-birbirini dışlar ve bunu bir `compile_error!` zorlar. CI bu başarısızlığı doğrular,
-böylece koruma sessizce çürüyemez.
 
 ---
 
-## Düğüm çalıştırma
+## JSON-RPC ve uyumluluk ağ geçitleri
 
-### Devnet, tek düğüm
-
-```bash
-cargo run --release -- --network devnet
-```
-
-### Devnet, dört düğüm + Prometheus
+Düğüm `bud_` JSON-RPC'yi iki dinleyicide sunar: genel dinleyici (okuma ve imzalı işlem
+gönderme, anahtar gerekmez) ve yerel adrese bağlı işletmeci dinleyicisi (düğüm yönetimi,
+anahtar gerekir). Uyumluluk ağ geçitleri Ethereum JSON-RPC, Solana JSON-RPC, Aptos REST ve
+Cosmos RPC alt kümelerini sunar. Ağ geçitleri yalnızca durumu okur ve imzalı işlemi havuza
+verir. Her yöntemin dinleyicisi ve etkisi, ağ geçidi başına tek bir tabloda yazılıdır.
 
 ```bash
-docker compose -f ops/docker-compose.yml up   # bkz. ops/docker-compose.yml
-bash ops/scripts/devnet-multinode-smoke.sh
-```
-
-### Profilden çalıştırma
-
-```bash
-cargo run --release -- --config config/devnet.toml
-```
-
-Profiller [`config/`](config) altında yaşar: [`devnet.toml`](config/devnet.toml),
-[`testnet.toml`](config/testnet.toml), [`archive.toml`](config/archive.toml) ve
-[`mainnet.toml`](config/mainnet.toml) tören şablonu. Ana ağ genesis'i
-**başlatılamaz bir şablondur**: önyükleme eşleri, DNS tohumları ve tahsisler yer
-tutucudur ve kapalı biçimde başarısız olan bir koruma bunları reddeder. Böylece kimse
-bir tören dosyasına karşı yanlışlıkla "ana ağ" başlatamaz.
-
-### Testnet
-
-Testnet, ana ağın provasıdır: aynı kod yolu, aynı arz kuralları ve aynı
-doğrulayıcı töreni. Yalnızca profil, genesis ve parametre değerleri farklıdır.
-Zincir kimliği `45261`, ağ imzası `BDLT`. Özet:
-
-- Cüzdan: `bud wallet create` (ML-DSA-87, 24 kelime).
-- BUD almak: musluk adres başına günde 100 BUD verir.
-- Doğrulayıcı olmak: en az 1.000 BUD teminat, bkz.
-  [docs/VALIDATOR_GUIDE.md](docs/VALIDATOR_GUIDE.md).
-- Delegasyon: `bud delegate`, bkz. [docs/DELEGATION.md](docs/DELEGATION.md).
-- Düğüm: `budlum-core --config config/testnet.toml`.
-
-İmza atan her komut, tekrar alanını `--signing-chain-id 45261` ile adlandırır (`45260` ana
-ağ, `45262` devnet). Bu bayrağın varsayılanı yoktur ve düğümün `bud_chainId` yanıtı yalnızca
-onunla karşılaştırılır: bir tohum her ağda aynı adresi kontrol ettiği için zincir kimliğini
-düğüm seçseydi imzanızın hangi ağda geçerli olacağını da düğüm seçmiş olurdu.
-
-**Testnet hazırlık kapısı** - temiz derleme ve yeşil CI, genesis/yapılandırma/düğüm
-başlatmanın uçtan uca çalışması, sayaçları tutarlı yeniden başlatma kalıcılığı, ağ
-katmanının boyut ve hız sınırları, RPC kimlik doğrulaması ve hız sınırlama, uzlaşma ve
-tokenomi, panic çıtası, operatör belgeleri ve sırsız bir geçmiş - kod konumu, testi ve onu
-koşturan CI işiyle birlikte satır satır
-[docs/audit/TESTNET_TRACEABILITY.md](docs/audit/TESTNET_TRACEABILITY.md) dosyasındadır. Uç
-noktalar, parametreler ve yerel prova için [docs/TESTNET.md](docs/TESTNET.md); ana ağ öncesi
-kapılar için [docs/MAINNET_READINESS.md](docs/MAINNET_READINESS.md).
-
-### Düğüm rolleri
-
-`--role` bir düğümün hangi profille çalışacağını seçer: `validator`, `sentry`, `seed`,
-`rpc`, `archive` veya `relayer`. Her birinin maruz kalma yüzeyi ve gerekli garanti kümesi
-farklıdır; bkz. [docs/VALIDATOR_ROLES.md](docs/VALIDATOR_ROLES.md). `relayer` düğüm içi
-zincirler arası aktarım işçisini çalıştırır (doğrulayıcılar da çalıştırır), tam depolama
-tutar ve hiçbir açık dinleyici açmaz.
-
-> [!IMPORTANT]
-> **Ana ağ doğrulayıcıları PKCS#11 üzerinden imzalamak zorundadır.** Diske dayalı
-> `ValidatorKeys`, yani bir dosyada duran BLS ve ML-DSA anahtar malzemesi, ana ağ
-> profilinde reddedilir. Bu bir tavsiye değildir; düğüm başlamayı reddeder.
-
-### İşletme
-
-Ölçümler Prometheus biçiminde sunulur (varsayılan `:9090`; toplama yapılandırması
-[`ops/prometheus.yml`](ops/prometheus.yml) içinde). Bir systemd birimi
-[`ops/budlum-core.service`](ops/budlum-core.service) altında verilmiştir ve
-`cargo run --manifest-path xtask/tools/Cargo.toml -- backup-drill` anlık görüntü
-yedekleme/geri yükleme yolunu uçtan uca çalıştırır (`SOURCE_DB` ve `BACKUP_DIR`
-değişkenlerini ayarlayın): ihtiyacınız olmadan önce çalıştırın.
-
----
-
-## JSON-RPC
-
-Düğüm, `bud_` ad alanlı bir JSON-RPC API'sini **iki ayrı dinleyici** üzerinden sunar:
-genel olan (zincir okumaları, işlem gönderimi) ve geri döngüye bağlı operatör olanı
-(düğüm denetimi, anahtar işlemleri, eş yönetimi). Bunları ayırmak, açığa çıkmış bir
-genel portun, işleyicinin nasıl yazıldığından bağımsız olarak bir operatör metoduna
-ulaşamaması demektir.
-
-```bash
-curl -s -X POST http://127.0.0.1:8545 \
+curl -s -X POST https://rpc.testnet.budlum.network \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"bud_getStatus","params":[]}'
 ```
 
-API; zincir ve hesap durumunu, blokları, işlemleri ve makbuzları, doğrulayıcı kümesini ve
-kesinti geçmişini, alan taahhütlerini ve uzlaşma bilgisini, köprü yaşam döngüsünü, BNS
-çözümlemesini, Pollen pazarını, yapay zeka çıkarım yaşam döngüsünü ve düğüm sağlığını
-kapsar. Dinleyici başına kimlik doğrulama gereksinimleriyle birlikte tam metot listesi
-[SPECIFICATION.md bölüm 3.3](docs/SPECIFICATION.md) içindedir.
-
-Aynı ağaçta asgari bir CLI istemcisi de bulunur:
-
-```bash
-cargo run --bin bud -- query balance <adres>
-cargo run --bin bud -- query block latest
-cargo run --bin bud -- --signing-chain-id 45261 tx send --to <adres> --amount <n> --priv-key <hex-tohum>
-```
-
-Imza atan her komut `--signing-chain-id` alir (`45260` mainnet, `45261` testnet, `45262`
-devnet). Imzanin tasidigi tekrar-oynatma alaninin tek kaynagi budur: dugumun
-`bud_chainId` yaniti bu degerle karsilastirilir ve uyusmazlik imza harcanmadan once
-reddedilir; cunku bir tohum her agda ayni adresi kontrol eder ve zincir kimligini secen
-bir dugum, isleminizin nerede gecerli olacagini secmis olur.
+Tam yöntem listeleri [docs/SPECIFICATION.md](docs/SPECIFICATION.md) dosyasındadır.
 
 ---
 
 ## Mühendislik standartları
 
-Budlum'un CI'ı bir formalite değildir; projenin güven yerine kullandığı mekanizmadır.
-Her pull request; çekirdek derleme, BudZero, belirlenimlilik, güvenlik denetimi, tedarik
-zinciri, fuzzing, Miri, semver ve daha fazlası için ayrılmış iş akışlarında tüm kapı
-kümesini çalıştırır.
+CI, projenin güven yerine kullandığı mekanizmadır.
 
-**Kapıların olağanın ötesinde zorladıkları:**
+- **`fmt` ve `clippy -D warnings`** sabitlenmiş araç zinciriyle. Uyarı sayısı yalnızca düşebilir.
+- **Belirlenimcilik.** Aynı blok x86_64 ve aarch64'te aynı durum kökünü ve yürütme kökünü verir.
+  Konsensüs yolunda kayan nokta ve sırasız koleksiyon yoktur.
+- **Yalıtım.** Yürütme motorları ayrı işçi süreçlerinde çalışır. Panik bir makbuzdur, durma
+  değildir.
+- **Rozetler yalan söyleyemez.** Her rozet, adını verdiği dosyaya veya işe karşı denetlenir.
+- **Tanım kaymaz.** Bir kapı bu dosyanın başındaki tanım bloğunu bayt bayt denetler.
+- **İddia kod ister.** Burada çalışır diye yazılan her özelliğin bir üretim çağrı yeri ve bir
+  testi vardır. Yoksa README kapısı kırmızıdır.
+- **Biçimsel yöntemler ve fuzz.** Kani aritmetik değişmezleri denetler. Her ayrıştırıcının bir
+  fuzz hedefi vardır. Miri test paketini tanımsız davranış denetimiyle çalıştırır.
+- **Tedarik zinciri.** Her çalışma alanı için `cargo-deny`, `cargo-audit`, `cargo-vet`,
+  `osv-scanner`, Grype, SBOM, `zizmor` ve `actionlint`.
 
-- **`fmt` ve `-D warnings` ile `clippy`**, sabitlenmiş 1.97.1 araç zincirine karşı; ayrıca
-  ayrı bir pedantic/nursery **cırcırı**: uyarı sayısının depoda kayıtlı bir taban çizgisi
-  vardır ve yalnızca azalabilir. Bir koşuyu geçirmek için taban çizgisini yükseltmek
-  düzeltme değil, kusur sayılır.
-- **Belirlenimlilik.** Durum kökleri ve blok özetleri yeniden üretilebilir olmak
-  zorundadır. Ayrı bir kapı, hiçbir özet fonksiyonunun sırasız bir koleksiyonu
-  gezmediğini kanıtlar; durum kökü yolundaki bir `HashMap`, iki düğümün anlaşmazlığa
-  düşmesini bekleyen bir zincir durmasıdır ve kapı bunu inceleme anında yakalar.
-- **Rozetler yalan söyleyemez.** Bu sayfadaki her rozet, işaret ettiği dosyaya karşı
-  denetlenir: test sayısı koşunun ölçtüğüne, Rust sürümü `rust-toolchain.toml` dosyasına,
-  lisans `Cargo.toml` içindeki SPDX kimliğine ve CI rozeti adlandırmak zorunda olduğu dal
-  ile olaya karşı. Çünkü süzgeçsiz bir rozet, varsayılan dalda koşu yokken herhangi bir
-  daldaki en yeni koşuyu bildirir. Uyuşmazlık, ona yol açan pull request'i düşürür.
-- **Testler gerçekten test olmalıdır.** Bir kapının zorunlu ilan ettiği her ad, gerçekten
-  `#[test]` taşıyıp taşımadığına karşı denetlenir; aksi halde sessizce var olmayı bırakmış
-  zorunlu bir test sonsuza dek geçerdi.
-- **Biçimsel yöntemler.** [Kani](kani) aritmetik değişmezleri model denetler; `cargo fuzz`
-  hedefleri tel serisizleştirmesini kapsar; Miri paketi tanımsız davranış tespiti altında
-  çalıştırır.
-- **Tedarik zinciri.** `cargo-deny`, `cargo-audit`, `cargo-vet`, `osv-scanner`, Grype, SBOM
-  üretimi, iş akışlarının kendisi üzerinde `zizmor` ve `actionlint`. Eylemler SHA ile
-  sabitlenmiştir; tek git bağımlılığı tam revizyonla sabitlenmiş, gerekçesi ağaç içine
-  kaydedilmiş ve **yamanın kendisi vendor edilmiş kaynakta doğrulanmıştır**, çünkü bir git
-  bağımlılığındaki sürüm numarası bir addır, kanıt değil.
-
-**Geri kalanı anlamlı kılan iki kural:**
-
-1. **Hiçbir kapı boş olamaz.** Her kapı bir `--self-test` uygular: gerçek bir ihlal
-   enjekte eder ve kapı bunu yakalamazsa başarısız olur. Başarısız olabildiğini
-   kanıtlayamayan bir kapı, kapı değildir; CI kanaryayı denetimin yanında çalıştırır.
-2. **Hiçbir kapı öksüz olamaz.** Hiçbir iş akışının çağırmadığı bir kapı derlemeyi adıyla
-   düşürür. Ya bağlanır ya silinir; sayı şişirerek ağaçta oturmasına izin verilmez.
-
-Bastırmalar iş akışının parçası değildir. `#[allow(...)]`, `#[ignore]`, `|| true` ve taban
-çizgisi şişirme, yeşil bir derlemenin anlamını yitirmesinin yollarıdır ve burada hiçbiri
-düzeltme olarak kabul edilmez.
+İki kural geri kalanı anlamlı kılar: hiçbir kapı boş olamaz (her kapı gerçek bir ihlal enjekte
+eden bir öz test taşır) ve hiçbir kapı sahipsiz kalamaz (hiçbir iş akışının çalıştırmadığı kapı
+derlemeyi kırar). `#[allow(...)]`, `#[ignore]`, `|| true` ve taban şişirme düzeltme olarak
+kabul edilmez.
 
 ---
 
 ## Güvenlik
 
-Güvenlik açıklarını **özel olarak** bildirin: bkz. [SECURITY.md](docs/SECURITY.md).
-Konsensüs güvenliğini, yürütme belirlenimliliğini, ağı, depolama bütünlüğünü, kriptografiyi
-veya doğrulayıcı anahtar işlemesini etkileyen hiçbir şey için lütfen herkese açık bir konu
-açmayın.
+Açıkları **gizli olarak** bildirin: bakınız [SECURITY.md](docs/SECURITY.md). Konsensüs güvenliği,
+yürütme belirlenimciliği, ağ, depolama bütünlüğü, kriptografi veya anahtar yönetimini etkileyen
+hiçbir konu için herkese açık kayıt açmayın.
 
-Sertleştirme süreklidir ve düşmancadır. Bugün kodda zorlanan şeylerden bir örnek:
+Testnet açılış kapısı, her kritik ve yüksek bulgunun kapanmasını veya özelliğinin testnette
+bir testle kapalı olmasını ister. Kayıt [docs/audit/FINDINGS.md](docs/audit/FINDINGS.md)
+dosyasıdır. Açılış kanıtı [docs/audit/TLG_REPORT.md](docs/audit/TLG_REPORT.md) dosyasıdır.
 
-- **Köprü.** Bir mint işlemi `bridge_payload_hash(asset_id, amount)` değerini yeniden
-  türetir ve eşleşen bir `Locked` durumu ile sınırlı, yeniden hesaplanmış bir kanıt ister.
-  Sekiz haneli birkaç köprü kaybının arkasındaki sınıf olan kaynak tutarı karışıklığı,
-  gelenekle değil yapısal olarak reddedilir.
-- **Konsensüs sınırları.** Reorg derinliği, blok boyutu ve kesinleşmiş kontrol noktası
-  çakışmasının her biri, katmanları birbirine bağlayan derleme zamanı bir doğrulamayla
-  tek bir sabit tarafından zorlanır; böylece çatal seçimi ile durum makinesi farklı
-  sınırlar uygulayamaz.
-- **Canlılık ve kesinti.** Hapsedilmiş bir doğrulayıcı, imzalaması yasak olan bloklar için
-  kesinti süresi biriktirmeyi durdurur ve her canlılık yolunun aynı doğrulayıcı kümesini
-  gördüğü doğrulanır.
-- **Anahtarlar.** BLS anahtar çifti yüklemesi G2 kodlamasını ve `pk = g·sk` eşitliğini
-  doğrular. Ana ağ doğrulayıcı imzalaması yalnızca PKCS#11 iledir. İmza doğrulama
-  fonksiyonları gerçek çağrı yerleri için denetlenir, çünkü doğru ama çağrılmayan bir
-  `verify_*` hiçbir şey zorlamaz.
-- **RPC.** Genel kimlik doğrulama, sabit zamanlı bir API anahtarı karşılaştırması, IP
-  başına kotalar ve açık bir CORS izin listesiyle kapalı biçimde başarısız olur.
-- **Varsayılan olarak kapalı başarısızlık.** Bir garantinin henüz kanıtlanamadığı yerde,
-  yani çıkarım kanıtı doğrulaması ve üretim derinliğinde BudZKVM `VerifyMerkle`: yol
-  iyimser biçimde açık bırakılmaz, **devre dışı bırakılır**. Bunların listesi örtük
-  bırakılmak yerine [docs/](docs) altındadır.
-
-**Hiçbir harici denetim yapılmamıştır.** Yukarıdakilerin hiçbiri bunun yerine geçmez ve bu
-depoda hiçbir yerde "denetlenmiş" iddiası yapılmaz.
+**Dış güvenlik denetimi yapılmadı.** Bu depoda bunun aksini söyleyen bir iddia yoktur.
 
 ---
 
 ## Proje durumu
 
-**Kuantum güvenliği, güncel basamak (İ-0):** Budlum kuantum tehdidine eksiksiz bir planla yaklaşır. Her katmanın tanımlı bir çözümü, ölçütü ve tamamlanma kapısı vardır. Budlum cüzdan çekirdeği bugün NIST FIPS 204 ML-DSA-87 ile imza atar. <!-- claim:S-I0 -->
-İddiaların kaydı, her birinin kanıtı ve hangi basamağı gerektirdiği [`docs/pq/CLAIMS.md`](docs/pq/CLAIMS.md) dosyasındadır; yalnızca ulaşılan basamağın cümlesi kullanılır.
+**Testnette çalışan:** BLS12-381 ve ML-DSA-65 ile kurul tabanlı kesinlik; Tam ve Android Mobil
+doğrulayıcılar; Anında Görev Devri; tek depolama sistemi olarak B.U.D. 3.0; atomik Evrensel
+Çağrılarla EVM, WASM (CosmWasm ABI), SVM, Move (Aptos lehçesi) ve BudZero ortamları; Ethereum,
+Solana, Aptos ve Cosmos uyumlu RPC; konsensüs domain kaydı; BNS, SocialFi, Veri Pazarı; gezgin
+ve musluk.
 
-**Uygulanmış ve test edilmiş:** Evrensel Uzlaşma Katmanı üzerinde heterojen konsensüs
-(PoW/PoS/PoA/BFT) · BLS + kuantum sonrası melez kesinlik <!-- claim:L-FINALITY-01 --> · alan kayıt defteri ve kesinlik
-adaptörleri · sahtecilik kapılarıyla alanlar arası köprü yaşam döngüsü · kesinti ve
-çözülme ile izinsiz teminat kayıt defteri · STARK kanıtlamalı ağaç içi BudZKVM · anlaşma ve
-meydan okuma ekonomisiyle B.U.D. depolama · BNS `.bud` adları · Pollen veri pazarı ·
-SocialFi ilkelleri · AI inference layer yapay zeka çıkarım katmanı · EVM zincir adaptörü
-(RLP + MPT + makbuz doğrulama) · `$BUD` tokenomisi · doğrulayıcı yönetişimi · parça oturumu
-bağlamalı anlık görüntü V2.
+**Testnette bilerek kapalı olan, her biri bir testle sabitlenen:** gizli transferler, AI
+yürütme kanıtları, BudZero'nun kanıta dayanan opkodları, sahipler arası gizli tekilleştirme,
+canlı yayın, paylaşılan güvenlik, Uzak Uygulama Bağı, Evrensel Nesne Katmanı.
 
-**Bilerek etkinleştirilmemiş ve bu durum değişirse kırılan testlerle sabitlenmiş:** zincir
-üstü yapay zeka çıkarım kanıtı *doğrulaması* ([durum](docs/AI_VERIFICATION_STATUS.md)) ·
-üretim derinliğinde BudZKVM `VerifyMerkle` · BNS yenileme ve transferi (hiçbir işlem türü
-bunlara ulaşmıyor) · çözücü ekonomisi modülü.
-
-**İddia edilmeyen:** protokolün TLA+ ile biçimsel doğrulaması · eksiksiz bir ZK gizlilik
-katmanı · tam zincir üstü yapay zeka yürütmesi · Ed25519 PKCS#11 ötesinde satıcı yerlisi
-BLS/PQ HSM desteği · harici bir güvenlik denetimi · başlatılmış bir ana ağ.
-
-Ayrım önemlidir: ikinci grup, var olan ve bilerek kapatılmış, kapının başında bekleyen
-başarısız bir testi olan koddur. Üçüncü grup ise yapılmamış iştir ve bu sayfa aksini ima
-etmeyecektir.
+**İddia edilmeyen:** dış güvenlik denetimi; başlatılmış bir ana ağ; mobil doğrulayıcıların
+kesinlik oyu; testnette sıfır bilgi gizliliği; iOS'ta kalıcı arka plan çalışması.
 
 ---
 
@@ -503,41 +442,36 @@ etmeyecektir.
 
 | Belge | Kapsamı |
 | --- | --- |
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Başvuru atlası: sistem, güven sınırı, köprü, EVM doğrulama, anlık görüntü, STARK, yönetişim ve tokenomiyi kapsayan 80 diyagram |
-| [SPECIFICATION.md](docs/SPECIFICATION.md) | Protokol belirtimi: konsensüs, doğrulayıcı ekonomisi, ağ protokolü, BLS kesinliği, JSON-RPC yüzeyi, anlık görüntü biçimi |
-| [SECURITY.md](docs/SECURITY.md) | Açıklama politikası, desteklenen sürümler, bir raporda nelerin bulunması gerektiği |
-| [CONTRIBUTING.md](docs/CONTRIBUTING.md) | Geliştirme kurulumu, PR beklentileri, konsensüs ve yürütme değişiklikleri için kurallar |
-| [CODE_OF_CONDUCT.md](docs/CODE_OF_CONDUCT.md) | Topluluk beklentileri |
-| [PROVENANCE_NOTES.md](docs/PROVENANCE_NOTES.md) | Her önemsiz olmayan uygulamanın neye dayandığının modül başına kaydı |
-| [docs/VALIDATOR_ROLES.md](docs/VALIDATOR_ROLES.md) | Düğüm rolleri ve işletme gereksinimleri |
-| [docs/AI_VERIFICATION_STATUS.md](docs/AI_VERIFICATION_STATUS.md) | Yapay zeka katmanının tam olarak neyi doğrulayıp neyi doğrulamadığı |
-| [docs/BUD_STORAGE_ROADMAP.md](docs/BUD_STORAGE_ROADMAP.md) | Depolama katmanı yol haritası |
-| [budzero/ARCHITECTURE.md](budzero/ARCHITECTURE.md) | BudZKVM ISA, VM, kanıtlayıcı ve doğrulayıcı tasarımı |
+| [TESTNET.md](docs/TESTNET.md) | Uç noktalar, parametreler, genesis, açılış ve yükseltme kuralları |
+| [VALIDATOR_GUIDE.md](docs/VALIDATOR_GUIDE.md) | Tam doğrulayıcı çalıştırma |
+| [MOBILE_VALIDATOR.md](docs/MOBILE_VALIDATOR.md) | Android veya iOS üzerinde doğrulayıcı çalıştırma |
+| [STORAGE.md](docs/STORAGE.md), [STORAGE_ENCRYPTION.md](docs/STORAGE_ENCRYPTION.md) | B.U.D. 3.0 ve mühürlü içerik |
+| [EXECUTION.md](docs/EXECUTION.md), [EXECUTION_LIMITS.md](docs/EXECUTION_LIMITS.md), [MIGRATION.md](docs/MIGRATION.md) | Yürütme ortamları, sınırları, Göç Kiti |
+| [LIGHT_CLIENT.md](docs/LIGHT_CLIENT.md) | Hafif istemci güven modeli |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md), [SPECIFICATION.md](docs/SPECIFICATION.md) | Diyagramlar ve protokol belirtimi |
+| [OPERATIONS.md](docs/OPERATIONS.md), [VALIDATOR_ROLES.md](docs/VALIDATOR_ROLES.md) | Düğüm, röle ve ağ geçidi işletimi |
+| [SECURITY.md](docs/SECURITY.md), [MAINNET_READINESS.md](docs/MAINNET_READINESS.md) | Bildirim politikası ve testnet ile ana ağ arasındaki kapılar |
+| [NAMING.md](docs/NAMING.md) | Kodda kullanılan terimler |
+| [budzero/ARCHITECTURE.md](budzero/ARCHITECTURE.md) | BudZero ISA, VM, kanıtlayıcı ve doğrulayıcı |
 
 ---
 
 ## Katkı
 
-Katkılar hoş karşılanır. Önce [CONTRIBUTING.md](docs/CONTRIBUTING.md) dosyasını okuyun;
-konsensüs ve yürütme değişiklikleri için araçlardan daha yüksek bir çıta koyar ve nedenini
-açıklar.
+Önce [CONTRIBUTING.md](docs/CONTRIBUTING.md) dosyasını okuyun.
 
-Kısa hâli:
-
-1. İtmeden önce `cargo run --manifest-path xtask/tools/Cargo.toml -- pre-push` çalıştırın.
-   Biçimlendirme elle tahmin edilmez. `-- install-hook` bunu `git push` akışına bağlar.
-2. Yeni davranış, düzeltmeden önce başarısız olduğu gözlenmiş bir testle gelir.
-3. Değişikliğiniz bir CI kapısını kırmızıya çevirirse bulgu kapıdır. Nedeni düzeltin,
-   sinyali susturmayın.
+1. Göndermeden önce `cargo run --manifest-path xtask/tools/Cargo.toml -- pre-push` çalıştırın.
+2. Yeni davranış, düzeltmeden önce kırmızı olduğu gözlenen bir testle gelir.
+3. Değişikliğiniz bir CI kapısını kırmızı yaparsa bulgu kapının kendisidir. Nedeni düzeltin.
 
 ---
 
 ## Lisans
 
-**PolyForm Shield License 1.0.0** ile lisanslanmıştır: bkz. [LICENSE.md](LICENSE.md).
+**PolyForm Shield License 1.0.0** ile lisanslanmıştır: bakınız [LICENSE.md](LICENSE.md).
 
-PolyForm Shield, Budlum ile ya da lisans verenin Budlum'u kullanarak sunduğu herhangi bir
-ürünle **rekabet eden bir ürün sunmak dışında** her kullanıma izin verir. Kaynak okunabilir,
-değiştirilebilir ve yeniden dağıtılabilir kalır; yalnızca rakip ürünler dışlanmıştır.
+PolyForm Shield, Budlum ile veya lisans verenin onu kullanarak sağladığı herhangi bir ürünle
+**rekabet eden bir ürün sunmak dışında** her kullanıma izin verir. Kaynak kod okunabilir,
+değiştirilebilir ve yeniden dağıtılabilir kalır. Yalnızca rakip ürünler hariç tutulur.
 
-> Zorunlu Bildirim: Copyright budlum-xyz (https://github.com/budlum-xyz)
+> Required Notice: Copyright budlum-xyz (https://github.com/budlum-xyz)

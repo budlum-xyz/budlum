@@ -13,31 +13,34 @@ the layer asks which finality proof holds for a fact, never which consensus prod
 value moves between domains without trusting an intermediary.
 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
-[![Tests](https://img.shields.io/badge/tests-5077%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
+[![Tests](https://img.shields.io/badge/tests-5081%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![Rust](https://img.shields.io/badge/rust-1.97.1-orange?logo=rust)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-PolyForm%20Shield%201.0.0-blue)](LICENSE.md)
 
-[Architecture](docs/ARCHITECTURE.md) · [Specification](docs/SPECIFICATION.md) · [Security](docs/SECURITY.md) · [Contributing](docs/CONTRIBUTING.md) · [Website](https://github.com/budlum-xyz/budlum.com) · [Türkçe](README.tr.md)
+[Testnet](docs/TESTNET.md) · [Architecture](docs/ARCHITECTURE.md) · [Specification](docs/SPECIFICATION.md) · [Security](docs/SECURITY.md) · [Contributing](docs/CONTRIBUTING.md) · [Website](https://github.com/budlum-xyz/budlum.com) · [Türkçe](README.tr.md)
 
 ---
 
 > [!WARNING]
-> **Budlum has not launched a mainnet and has not been audited.** This repository is
-> research-grade, controlled-devnet software. Do not use it for real-value traffic.
-> See [Project status](#project-status) for exactly what is implemented, what is
-> deliberately unfinished, and what is not claimed.
+> **The Budlum testnet is public. Budlum has not launched a mainnet and has not been audited
+> externally.** Testnet BUD has no monetary value. The testnet can restart from a new genesis
+> after a critical incident. See [Project status](#project-status) for what runs, what is
+> deliberately closed on testnet, and what is not claimed.
 
 ---
 
 ## Contents
 
-- [Why Budlum](#why-budlum)
-- [How settlement works](#how-settlement-works)
-- [Operator scenarios](#operator-scenarios-measured)
+- [What Budlum is](#what-budlum-is)
+- [Testnet at a glance](#testnet-at-a-glance)
+- [Join the testnet](#join-the-testnet)
+- [How it works](#how-it-works)
+- [Validator classes](#validator-classes)
+- [Testnet feature status](#testnet-feature-status)
+- [Measured on the testnet rehearsal](#measured-on-the-testnet-rehearsal)
 - [Repository layout](#repository-layout)
-- [Getting started](#getting-started)
-- [Running a node](#running-a-node)
-- [JSON-RPC](#json-rpc)
+- [Build from source](#build-from-source)
+- [JSON-RPC and compatibility gateways](#json-rpc-and-compatibility-gateways)
 - [Engineering standards](#engineering-standards)
 - [Security](#security)
 - [Project status](#project-status)
@@ -47,447 +50,386 @@ value moves between domains without trusting an intermediary.
 
 ---
 
-## Why Budlum
+## What Budlum is
 
-| Problem | Budlum's answer |
-| --- | --- |
-| **Fragmentation.** Thousands of isolated chains, each with its own finality, none of which the others can verify. | A settlement layer that verifies *any* domain's finality proof and records the result in one global header. |
-| **Bridge risk.** Custodial and multisig bridges have lost billions; the failures are almost always missing verification, not broken cryptography. | A `lock → mint → burn → unlock` lifecycle where every mint recomputes a bounded proof and re-derives the payload hash from `(asset_id, amount)` before crediting anything. |
-| **The quantum horizon.** Ed25519 and ECDSA are expected to be breakable within the lifetime of a chain launched today. | Hybrid finality: BLS12-381 aggregate signatures alongside a post-quantum scheme (ML-DSA-65 by default - FIPS 204 NIST final; legacy Dilithium5 available only for migration). <!-- claim:L-FINALITY-01 --> |
-| **Operator custody of user data.** "Decentralized" networks whose storage, RPC and inference all terminate at one company. | No admin key, no pause hook, no whitelist. Storage, RPC and AI endpoints run on any node; participation is stake-gated, not permission-gated. |
-| **Unverifiable off-chain compute.** AI output presented as fact with nothing behind it. | An in-tree zkVM (BudZero) that produces STARK proofs of execution. Inference proof *verification* is not yet enabled, the transaction path [fails closed](docs/AI_VERIFICATION_STATUS.md) rather than trusting an unverified result. |
+Budlum is one settlement layer for many networks. It is not a bridge that moves wrapped
+copies between chains. Budlum brings four things into one place:
 
-**The data-sovereignty invariant.** No critical function in the network depends on a service
-operated by the Budlum team. This is not a value statement, it is a property the test suite
-and CI gates enforce, and a pull request that introduces an admin path fails them.
+| Layer | What it unifies | How |
+| --- | --- | --- |
+| **Consensus** | PoW, PoS, PoA, BFT and ZK domains | Each domain keeps its own consensus. Budlum verifies its finality proof and records the fact on one `GlobalBlockHeader`. |
+| **Execution** | Programs written for EVM, CosmWasm, SVM, Move and BudZero | Each program runs with its original bytecode in its own execution environment. All environments share one state and call each other atomically in one transaction. |
+| **Assets** | Tokens and NFTs of every environment | An asset lives only in its home environment. Other environments reach it through pointers that hold no balance, so no wrapped copy exists. BUD is native in every environment. |
+| **Storage** | All content of the network | B.U.D. 3.0 is the only storage system. The validators themselves store the content, including validators running on Android phones. |
+
+**The data sovereignty invariant.** No critical function of the network depends on a service
+operated by the Budlum team. The test suite and the CI gates enforce this property. A pull
+request that introduces an admin path fails them.
 
 ---
 
-## How settlement works
+## Testnet at a glance
+
+| Item | Value |
+| --- | --- |
+| Chain id | `45261` |
+| Network id | `BDLT` |
+| Slot / epoch / checkpoint | 3 s / 50 slots / every 5 blocks |
+| Finality | Committee of up to 128 seats, BLS12-381 aggregate with ML-DSA-65 |
+| Genesis | `sha256:7296b76f95c036b9`, `2027-01-15T08:00:00Z (rehearsal config)` |
+| Release | `v0.1.0-testnet` |
+| Budlum RPC | `https://rpc.testnet.budlum.network` |
+| Ethereum JSON-RPC | `https://evm.testnet.budlum.network` (chain id `45261`) |
+| Solana JSON-RPC | `https://solana.testnet.budlum.network` |
+| Aptos REST | `https://aptos.testnet.budlum.network/v1` (chain id `205`) |
+| Cosmos RPC / REST | `https://cosmos-rpc.testnet.budlum.network`, `https://cosmos-rest.testnet.budlum.network` (chain id `budlum-testnet-1`, prefix `bud`, denom `ubud`) |
+| Faucet | `https://faucet.testnet.budlum.network` (100 BUD per address per day) |
+| Explorer | `https://explorer.testnet.budlum.network` |
+
+---
+
+## Join the testnet
+
+### 1. Create a wallet and get testnet BUD
+
+```bash
+bud wallet create --key-file ./secrets/wallet.json        # ML-DSA-87, 24 words
+bud faucet request --address <your address>              # solves the faucet work challenge
+```
+
+The Android app does both steps in its own interface.
+
+### 2. Become a validator on an Android phone
+
+Requirements: Android 10 or later, arm64, at least 4 GB RAM, the storage quota you choose plus
+2 GB free space.
+
+1. Install the app: [GitHub release APK](https://github.com/budlum-xyz/budlum/releases/tag/v0.1.0-testnet) or [Google Play testing](https://github.com/budlum-xyz/budlum/blob/main/docs/MOBILE_STORE_DISTRIBUTION.md).
+2. Create or import your wallet. Request BUD from the faucet in the app.
+3. Choose a storage quota (1 GiB to 64 GiB, default 4 GiB) and a policy (default: Wi-Fi only,
+   charging or battery above 50 %).
+4. Confirm the registration. The stake is 10 BUD.
+5. The app stores pieces of content, answers storage audits, serves pieces to readers, signs
+   presence and verifies the chain as a light client. It earns storage rewards.
+
+Your phone stores pieces of content. A piece alone does not open any content. Public content
+is public. Sealed content is encrypted, and your phone never holds its key. You can leave at
+any second: the network moves your duties to the next validator without loss. "Leave" in the
+app releases your pieces and starts unbonding. Details: [docs/MOBILE_VALIDATOR.md](docs/MOBILE_VALIDATOR.md).
+
+### 3. Run a Full validator
+
+Requirements (testnet default): 8 cores, 32 GB RAM, 1 TB NVMe, 100 Mbit/s symmetric.
+
+```bash
+budlum-core --config config/testnet.toml                  # sync the node
+bud validator register --class full --stake 1000 --signing-chain-id 45261
+bud validator status
+```
+
+A Full validator proposes blocks, runs every execution environment, holds finality seats,
+stores content, repairs content and can offer relay and upload gateway service. Key handling,
+HSM setup and the operator checklist: [docs/VALIDATOR_GUIDE.md](docs/VALIDATOR_GUIDE.md).
+
+Every command that signs takes `--signing-chain-id` (`45261` testnet). It has no default. The
+node's `bud_chainId` answer is only compared against it, because a seed controls the same
+address on every network.
+
+### 4. Use the tools you already use
+
+| Ecosystem | Connect | Works unchanged |
+| --- | --- | --- |
+| EVM | Add a network in MetaMask: RPC `https://evm.testnet.budlum.network`, chain id `45261`, symbol `BUD` | Solidity and Vyper bytecode, Foundry, Hardhat, viem, ethers, MetaMask |
+| CosmWasm | CosmJS `SigningCosmWasmClient` at `https://cosmos-rpc.testnet.budlum.network` | CosmWasm bytecode without floats, cw-plus contracts, CosmJS |
+| SVM | `solana config set --url https://solana.testnet.budlum.network` | Program bytecode, Anchor, `@solana/web3.js`, solana CLI |
+| Move | `aptos init --network custom --rest-url https://aptos.testnet.budlum.network/v1` | Move modules, aptos CLI, Aptos TypeScript SDK |
+| BudZero | `bud exec budzero deploy` | BudL programs, `bud-cli` |
+
+```bash
+forge create --rpc-url https://evm.testnet.budlum.network --private-key $KEY src/Token.sol:Token
+```
+
+What changes is the RPC address and the chain id, which is what moving to a network means.
+The exact limits of "unchanged" are listed in [docs/EXECUTION_LIMITS.md](docs/EXECUTION_LIMITS.md).
+An EVM contract can call a CosmWasm contract in the same transaction; the result is atomic.
+See [docs/EXECUTION.md](docs/EXECUTION.md). An existing EVM contract can move to Budlum with the
+same address, code and storage through the Migration Kit (beta): [docs/MIGRATION.md](docs/MIGRATION.md).
+
+Accounts signed with secp256k1 or Ed25519 keys are labelled *classical*. They move only their
+own assets and can never touch a post-quantum account. `bud adopt` moves their holdings to a
+post-quantum account in one step.
+
+### 5. Store content on B.U.D. 3.0
+
+```bash
+bud storage upload ./paper.pdf --lifetime 365d            # public content
+bud storage upload ./diary.txt --sealed --lifetime 365d   # sealed: encrypted on your device
+bud storage view <content-id> --out ./paper.pdf
+bud storage grant <nft-id> --to <address>                 # give a reader access to sealed content
+```
+
+The fee depends only on physical bytes: 1 BUD per GiB per year at the testnet default. See
+[docs/STORAGE.md](docs/STORAGE.md).
+
+---
+
+## How it works
 
 ```mermaid
 flowchart TB
-  subgraph Domains["Sovereign domains, each keeps its own consensus"]
-    PoW["PoW domain"]
-    PoS["PoS domain"]
-    BFT["BFT domain"]
-    ZKD["ZK domain"]
-    PoA["Isolated PoA / KYC domain"]
+  subgraph Clients["Apps and tools"]
+    W["Wallet, CLI, Android validator app"]
+    T["MetaMask, Foundry, CosmJS, Anchor, aptos CLI"]
   end
-
-  subgraph Adapters["Finality adapters, proof verification, no trust"]
-    FA["Domain finality adapters<br/><code>src/domain/</code>"]
-    PA["PoA adapter<br/>(isolated, cannot forge into the permissionless set)"]
+  subgraph Gateways["RPC gateways (read and submit only)"]
+    G["bud_*, Ethereum, Solana, Aptos, Cosmos"]
   end
-
+  subgraph UEL["Universal Execution Layer"]
+    C["Execution Coordinator: one order, one state, Universal Call"]
+    E["EE workers: BudZero, EVM, WASM, SVM, Move"]
+  end
   subgraph USL["Universal Settlement Layer"]
-    CONS["Heterogeneous Consensus engines<br/><code>src/consensus/</code>"]
-    FIN["BLS + PQ finality, checkpoints<br/><code>src/chain/</code>"]
-    EXEC["Executor + BudZKVM host<br/><code>src/execution/</code>"]
-    REG["Permissionless registry<br/>stake · slashing · unbonding"]
+    F["Committee finality, Instant Task Handover, presence"]
+    D["Domain registry and finality adapters"]
+    H["GlobalBlockHeader"]
   end
-
-  PoW --> FA
-  PoS --> FA
-  BFT --> FA
-  ZKD --> FA
-  PoA --> PA
-  FA --> CONS
-  PA --> CONS
-  CONS --> FIN
-  FIN --> EXEC
-  EXEC --> REG
-
-  FIN --> GBH["GlobalBlockHeader<br/>single settlement record"]
-  GBH --> BR["Cross-domain bridge<br/>lock · mint · burn · unlock"]
-  GBH --> ST["B.U.D. storage<br/>content addressing · deals · challenges"]
-  GBH --> ZK["BudZero zkVM<br/>STARK execution proofs"]
-  GBH --> AI["AI inference layer<br/>model registry · compute bond"]
+  subgraph Base["Foundations"]
+    B["B.U.D. 3.0: one object, RFC 6330 symbols, stored by validators"]
+    Z["BudZero: ISA, VM, prover, verifier"]
+  end
+  Clients --> Gateways --> C --> E
+  C --> F
+  D --> F --> H
+  H --> B
+  H --> Z
 ```
 
-A domain submits a finality proof. The matching adapter verifies it against that domain's own
-rules, a PoA domain's proof is structurally prevented from being valid in the permissionless
-set, which is the boundary that makes a KYC'd domain safe to host next to an open one. Once
-verified, the commitment enters the `GlobalBlockHeader`, and every downstream subsystem
-(bridge, storage, zkVM, AI) reads settlement from that one record rather than trusting a
-domain directly.
+### Universal Settlement Layer
 
-### Where the diagrams live
+Blocks are produced by PoS leader rounds. Finality comes from a committee of up to 128 seats
+held by Full validators. A checkpoint is final when more than two thirds of the active seats
+sign. No validator holds more than a quarter of the seats. If a Full validator stops, its seats
+pass to ordered standbys within three checkpoint intervals. The seat table is derived only
+from finalized blocks, so two forks cannot build different tables.
 
-[**ARCHITECTURE.md**](docs/ARCHITECTURE.md) is the reference atlas for this tree: 80 Mermaid
-diagrams covering the executor pipeline, bridge verification, the EVM receipt and MPT path,
-the snapshot trust boundary, the STARK proof lifecycle, and the governance and tokenomics
-state machines. [budzero/ARCHITECTURE.md](budzero/ARCHITECTURE.md) covers the BudZKVM ISA,
-VM, prover and verifier separately, since BudZero is its own workspace.
+**Instant Task Handover.** Every duty has a trigger, a successor and a time bound: a missed
+slot passes to the next round's leader, a silent seat passes to its standby, a silent piece
+holder is replaced by another holder for reads at once and by repair for durability, a repair
+task that does not start in 20 blocks passes to the next candidate. No duty waits for a human
+or a vote. Being offline is never slashed; a long absence only suspends the validator.
 
-Both are code maps first and design documents second. Where a diagram and the code disagree,
-the code is the fact and the diagram is the bug.
+### B.U.D. 3.0
+
+B.U.D. 3.0 is the only storage system. An upload becomes one B.U.D. 3.0 object: the shortest
+complete representation of the content. The object is split into segments; each segment is
+encoded with RFC 6330 (RaptorQ) into symbols. Any `k + 2` symbols rebuild a segment. Symbols
+are spread over Full and Mobile validators by a class-aware wide-stripe placement, with at
+least 30 % of the symbols on Mobile validators. No validator holds a whole object. Holders
+answer storage audits with sub-block proofs; missed audits lose rewards; repair rebuilds lost
+pieces lazily. Sealed content is encrypted on the owner's device, padded, and its length,
+identity and readers are not visible on chain. The same object can be shown as a QR video
+and read back with a camera; the QR video is a presentation, never a stored record.
+
+### Universal Execution Layer
+
+Each execution environment runs in its own worker process, so an engine panic produces a
+fault receipt instead of stopping the chain. One coordinator orders transactions, meters gas
+in one unit (BGU), keeps one state and one BUD ledger, and opens a frame for every Universal
+Call. A transaction can call across environments; either every call applies or none does.
+Assets live only in their home environment; pointer contracts expose them elsewhere with no
+balance of their own.
+
+### BudZero
+
+BudZero is Budlum's zero-knowledge VM: a deterministic ISA, a gas-metered VM, a compiler and a
+Plonky3 STARK prover and verifier. On testnet BudZero runs programs in execution mode; every
+Full validator re-executes them. Proof-dependent features are closed on testnet until their
+soundness work lands. See [budzero/ARCHITECTURE.md](budzero/ARCHITECTURE.md).
 
 ---
 
-## Operator scenarios (measured)
+## Validator classes
 
-Three production paths run end to end in CI. Every number below is read from a
-CI log; none of it is a local measurement.
+| | Full validator | Mobile validator (Android) | Mobile validator (iOS, opportunistic) |
+| --- | --- | --- | --- |
+| Hardware | Server or desktop | Android 10+, arm64, 4 GB RAM | iPhone, iOS 17+ |
+| Stake | 1,000 BUD | 10 BUD | 10 BUD |
+| Proposes blocks, runs all environments | Yes | No | No |
+| Finality seats | Yes | No | No |
+| Stores B.U.D. 3.0 pieces | Yes | Yes (user quota) | Yes (up to 8 GiB) |
+| Audit answer window | 2 epochs | 24 hours | 48 hours |
+| Repair, relay, upload gateway | Yes (relay and gateway optional) | No | No |
+| Suspended after | 1 day offline | 72 hours offline | 7 days offline |
+| Slashed for | Double signing, proven bad repair | Double signing presence | Double signing presence |
+| Status on testnet | Open | Open | Beta |
 
-1. **Canonical proof relay.** `bud-cli relay` first re-derives both canonical
-   check programs (private-transfer, syscall-context) from the pinned operand
-   values, slot by slot, and compares the recomputed Keccak-256 against the
-   pin table: a drifted builder refuses the run before a proof is touched.
-   The signed `relay_report.json` is then verified from disk: the pretty JSON
-   is regenerated from the parsed report and compared byte-for-byte, the proof
-   fingerprint is re-derived from the loaded envelope, and `--payload-out`
-   writes the exact bytes the signature covers, so a monitor can re-hash them
-   without re-implementing the layout. `--verified-at <unix>` pins the clock
-   and makes a re-run reproduce the signature.
-2. **AI inference layer grading loop.** `ai-ops tune data.jsonl` validates the dataset
-   label (model target, sample count), attaches the curriculum's eval-set
-   digest to the plan and checks the binding; `ai-ops eval data.jsonl
-   responses.jsonl [MIN_SCORE]` refuses a curriculum whose golden rules pass on
-   an empty answer, grades the produced answers against the golden rules, and
-   exits non-zero when the report does not clear the gate. On the device side,
-   `ai-serve` refuses a consensus bridge whose residency plan streams more
-   from disk than the operator's `disk_budget_bytes` allows, before the
-   streaming policy decides anything.
-3. **Storage throughput.** `cargo bench --bench ratio_rayon` measures the QR
-   payload packer on a 96 x 65536 B corpus (6291456 B in, 7 repetitions,
-   fastest reported): serial 39.7 MB/s (158352 us), rayon pool 97.5 MB/s
-   (64539 us), speedup 2.45x. The packed outputs of the two paths are
-   byte-compared; a mismatch exits non-zero. Measured in CI at `usl@967acce4c`
-   (job `Timing-Safe Regression`, step `Ratio rayon vs serial throughput`,
-   2026-08-30T06:18:49Z).
+Mobile validators do not vote on finality, so all of them leaving at once never stops
+finality. They store content and earn storage rewards.
+
+---
+
+## Testnet feature status
+
+| Feature | Testnet |
+| --- | --- |
+| PoS block production, committee finality, Instant Task Handover | Open |
+| Full validators, Android Mobile validators | Open |
+| iOS opportunistic validators | Beta |
+| B.U.D. 3.0 public and sealed content | Open |
+| EVM, WASM (CosmWasm ABI), SVM, Move (Aptos dialect), BudZero environments | Open |
+| Universal Call across environments; asset registry with EVM and WASM pointers | Open |
+| Ethereum, Solana, Aptos and Cosmos compatible RPC | Open |
+| Migration Kit for EVM contracts | Beta |
+| Consensus domain registry (PoW, PoS, PoA, BFT, ZK) | Open |
+| Lock, mint, burn, unlock transfers | Open |
+| On-chain AI inference layer | Closed |
+| BNS names, SocialFi, Data Market, explorer, faucet | Open |
+| Private transfers, AI execution proofs, cross-owner private deduplication, live streaming, shared security, remote app binding, Universal Object Layer | Closed on testnet |
+
+A closed feature exists in code and is refused on chain id `45261`; a test proves the refusal.
+Each closed feature opens later at an announced activation height.
+
+---
+
+## Measured on the testnet rehearsal
+
+Every number below comes from [docs/rehearsal/RESULTS.md](docs/rehearsal/RESULTS.md) or a CI
+job. None is a local estimate.
+
+| Measurement | Value |
+| --- | --- |
+| Rehearsal | 8 (rehearsal config) Full validators, >= 20 target (pending field run) Android phones, 1,000 (harness target) simulated Mobile validators, 72 (soak target) hours |
+| Finality delay, median and p95 | recorded in docs/rehearsal/RESULTS.md, recorded in docs/rehearsal/RESULTS.md |
+| All Mobile validators stopped at once | Finality delay change: 0 extra checkpoints (verified in T-1 harness); objects lost: 0 (verified in T-1 harness) |
+| 10 % of Full validators stopped at once | Extra finality delay: <= 2 (verified in T-2 harness) checkpoints |
+| Android phone, default policy | Battery per day: <= 5% unplugged budget (pending 24h field run); data per day: capped by policy (see docs/MOBILE_DEVICE_MATRIX.md) |
+| Mobile connectivity | Direct pending field NAT run, hole punched pending field NAT run, relayed pending field NAT run |
+| Storage redundancy | RFC 6330 RaptorQ symbol expansion (see docs/STORAGE_MEASUREMENTS.md) |
+| Full validator resources | CPU pending multi-region soak (docs/rehearsal/RESULTS.md), RAM pending multi-region soak (docs/rehearsal/RESULTS.md), disk growth pending multi-region soak (docs/rehearsal/RESULTS.md) per day |
+
+---
 
 ## Repository layout
 
-This repository is the whole stack. The layers below are **in-tree**, not separate
-dependencies, so the entire system builds, tests and ships as one tree.
-
-### The Universal Settlement Layer core: [`src/`](src)
-
 | Path | Role |
 | --- | --- |
-| [`src/consensus/`](src/consensus) | PoW · PoS · PoA · BFT engines, block-size and reorg-depth bounds |
-| [`src/chain/`](src/chain) | Blockchain, BLS/QC finality, checkpoints, snapshots |
-| [`src/domain/`](src/domain) | Domain registry and per-domain finality adapters |
-| [`src/cross_domain/`](src/cross_domain) | Bridge lifecycle, cross-domain messages, replay protection |
-| [`src/execution/`](src/execution) | Transaction executor and BudZKVM host |
-| [`src/registry/`](src/registry) | Permissionless stake registry (validator · verifier · relayer · storage) and slashing |
-| [`src/core/`](src/core) | Accounts, blocks, transactions, chain config, genesis |
-| [`src/mempool/`](src/mempool) | Admission control and cheap pre-signature rejection |
-| [`src/network/`](src/network) | libp2p stack, wire protocol, peer scoring and bans |
-| [`src/crypto/`](src/crypto) | Ed25519, BLS12-381, Dilithium / ML-DSA, PKCS#11 |
-| [`src/rpc/`](src/rpc) | JSON-RPC: split public/operator listeners, auth, per-IP quota, CORS |
-| [`src/tokenomics/`](src/tokenomics) | `$BUD` supply, burn schedule, vesting, validator rewards |
-
-### Composable layers
-
-| Layer | In this repo | What it is |
-| --- | --- | --- |
-| **BudZero** | [`budzero/`](budzero), [README](budzero/README.md) | ZK-native VM: deterministic ISA, gas-metered VM, compiler, and a Plonky3 STARK prover/verifier |
-| **B.U.D.** | [`bud/`](bud) · [`src/storage/`](src/storage) | Broad Universal Database: `bud/` is the 1.0/2.0/3.0 implementation (tarif / QR / receipt / settlement modules, [bud README](bud/README.md)); `src/storage/` is the settlement layer's storage engine (content addressing, deals, challenge/response proofs) |
-| **AI inference layer** | [`src/ai_inference/`](src/ai_inference) | Closed-circuit AI layer: model registry, operator compute-bond, effort tiers, Pollen-gated data access, perception declarations (V3), SocialFi output bridge. Off-chain workspace: [`crates/ai-inference/`](crates/ai-inference) |
-| **Pollen** | [`src/pollen/`](src/pollen) | Consent-gated data marketplace, grants, encryption, and the gate the AI layer must pass |
-| **BNS** | [`src/bns/`](src/bns) | `.bud` naming: registration, renewal, transfer, subdomains, content and storage records |
-| **Wallet Core** | [`crates/wallet-core/`](crates/wallet-core), [README](crates/wallet-core/README.md) | BIP39 + SLIP-0010 Ed25519 derivation and transaction signing. A wallet, not a relayer |
-
-### Supporting trees
-
-| Path | Contents |
-| --- | --- |
-| [`crates/`](crates) | Standalone workspaces: wallet-core, budlum-explorer, ai_inference, note-packing |
-| [`bud/`](bud) | B.U.D. 1.0/2.0/3.0 implementation (its own workspace) |
-| [`docs/`](docs) | Reference docs: ARCHITECTURE, SPECIFICATION, SECURITY, CONTRIBUTING, PROVENANCE_NOTES |
-| [`config/`](config) | Devnet / testnet / mainnet profiles and genesis templates |
-| [`xtask/gates/`](xtask/gates) | CI gates, every one is self-testing (see [Engineering standards](#engineering-standards)) |
-| [`kani/`](kani) · [`fuzz/`](fuzz) | Model-checking harnesses and fuzz targets ([fuzz README](fuzz/README.md)) |
-| [`benches/`](benches) | Signature-verification, Merkle and single-node throughput benchmarks |
-| [`ops/`](ops) | systemd unit, Prometheus config, backup/restore drill |
-| [`proto/`](proto) | Protobuf wire schemas |
-| [`supply-chain/`](supply-chain) | `cargo-vet` audit records |
-
-### Root files kept at the root
-
-| File | Why it stays at the root |
-| --- | --- |
-| `Cargo.toml` · `Cargo.lock` · `build.rs` | Cargo package root: the core crate, its benches and the path dependencies (`budzero/*`, `crates/*`) resolve from here |
-| `rust-toolchain.toml` | rustup walks up from the working directory and must find it here |
-| `buf.yaml` | Protobuf workspace root, paired with `proto/` (Repo Lint gate runs `buf` from the root) |
-| `flake.nix` · `flake.lock` | Nix flake discovery is root-only |
-| `README.md` | GitHub renders the repo homepage from the root README |
-| `LICENSE.md` | GitHub license detection, `cargo-deny` and the `license-consistency` gate read it from the root |
-| `.gitignore` · `.gitleaks.toml` | Git and gitleaks resolve configs from the root |
-
-Container and licence-notice files moved in-tree: `ops/Dockerfile`, `ops/docker-compose*.yml` (build context stays at the root), `docs/NOTICE`.
-
-### Related repositories
-
-| Repository | Purpose |
-| --- | --- |
-| [budlum-xyz/budlum.com](https://github.com/budlum-xyz/budlum.com) | Project website |
-| [budlum-xyz/budlum.xyz](https://github.com/budlum-xyz/budlum.xyz) | Brand and design system |
+| [`src/consensus/`](src/consensus) | PoS, PoW, PoA, BFT engines, committee, leader election |
+| [`src/validators/`](src/validators) | Validator classes, duties, presence, Instant Task Handover |
+| [`src/chain/`](src/chain) | Blockchain, finality, genesis, snapshots, state recovery |
+| [`src/storage/bud3/`](src/storage/bud3) | B.U.D. 3.0 |
+| [`src/execution/`](src/execution) | Execution Coordinator and the BudZero environment adapter |
+| [`execution/`](execution) | Execution environment workers (EVM, WASM, SVM, Move) and conformance suites |
+| [`src/rpc/`](src/rpc) | `bud_*` RPC and the compatibility gateways |
+| [`src/domain/`](src/domain), [`src/cross_domain/`](src/cross_domain), [`src/settlement/`](src/settlement) | Domain registry, finality adapters, cross-domain messages, `GlobalBlockHeader` |
+| [`src/network/`](src/network) | libp2p stack with relay, hole punching and AutoNAT |
+| [`src/persistence/`](src/persistence) | The node's key-value store and state trie |
+| [`mobile/`](mobile) | Mobile core (Rust, UniFFI), Android app, iOS app |
+| [`budzero/`](budzero) | BudZero workspace: ISA, VM, compiler, prover, verifier |
+| [`crates/`](crates) | `bud-codec`, `uel-abi`, `budlum-types`, `wallet-core`, `budlum-explorer`, and more |
+| [`contracts/`](contracts) | Solidity contracts: external domain verifier, Universal Call library |
+| [`xtask/`](xtask), [`fuzz/`](fuzz), [`kani/`](kani), [`benches/`](benches) | CI gates, fuzz targets, model checking, benchmarks |
+| [`config/`](config), [`ops/`](ops), [`proto/`](proto), [`docs/`](docs) | Profiles and genesis, operations, wire schemas, documentation |
 
 ---
 
-## Getting started
+## Build from source
 
-### Prerequisites
-
-- **Rust 1.97.1**: pinned in [`rust-toolchain.toml`](rust-toolchain.toml); `rustup` selects it automatically
-- **protoc** (Protocol Buffers compiler): `apt install protobuf-compiler` or `brew install protobuf`
-- Optional: [Nix](https://nixos.org), `nix develop` provisions the full toolchain from [`flake.nix`](flake.nix)
-
-### Build and test
+Prerequisites: Rust 1.97.1 (pinned in [`rust-toolchain.toml`](rust-toolchain.toml)),
+`protoc`. Optional: Nix (`nix develop`).
 
 ```bash
 git clone https://github.com/budlum-xyz/budlum.git
 cd budlum
-
-cargo build --release              # the core node
-cargo test --lib                   # the core test suite
-
-# BudZero / BudZKVM is its own workspace
+cargo build --release                                   # the node
+cargo test --lib                                        # core tests
 cargo test --manifest-path budzero/Cargo.toml --workspace
+cargo run --manifest-path xtask/tools/Cargo.toml -- pre-push   # the checks CI runs
 ```
 
-Before opening a pull request, run the same checks CI runs:
+Execution workers are separate workspaces under `execution/`. The node starts the workers it
+finds next to its binary. Release builds ship all of them.
+
+Local networks:
 
 ```bash
-cargo run --manifest-path xtask/tools/Cargo.toml -- pre-push   # fmt + clippy, pinned toolchain
+cargo run --release -- --network devnet                 # one node
+docker compose -f ops/docker-compose.yml up             # four nodes with Prometheus
 ```
-
-### Build features
-
-| Feature | Default | Effect |
-| --- | --- | --- |
-| `pq-ml-dsa` | OK | FIPS 204 ML-DSA (NIST final) - ML-DSA-65 validator signatures (`ml-dsa`). Scheme is written into genesis; a node whose build disagrees with the chain refuses to start |
-| `p2p-mdns` | - | Devnet-only local peer discovery. Deliberately excluded from release builds so mDNS advisories stay unreachable |
-
-`cargo build --all-features` is **expected to fail**: the PQ backends are mutually exclusive
-and a `compile_error!` enforces it. CI asserts that failure, so the guard cannot silently rot.
 
 ---
 
-## Running a node
+## JSON-RPC and compatibility gateways
 
-### Devnet, single node
-
-```bash
-cargo run --release -- --network devnet
-```
-
-### Devnet, four nodes + Prometheus
+The node exposes the `bud_` JSON-RPC on two listeners: a public one (reads and signed
+transaction submission, no key needed) and an operator one bound to loopback (node control,
+key required). Compatibility gateways serve the Ethereum JSON-RPC, Solana JSON-RPC, Aptos REST
+and Cosmos RPC subsets. Gateways only read state and submit signed transactions to the pool.
+Every method's listener and effect is written in one table per gateway.
 
 ```bash
-docker compose -f ops/docker-compose.yml up   # see ops/docker-compose.yml
-bash ops/scripts/devnet-multinode-smoke.sh
-```
-
-### From a profile
-
-```bash
-cargo run --release -- --config config/devnet.toml
-```
-
-Profiles live in [`config/`](config): [`devnet.toml`](config/devnet.toml),
-[`testnet.toml`](config/testnet.toml), [`archive.toml`](config/archive.toml) and the
-[`mainnet.toml`](config/mainnet.toml) ceremony template. The mainnet genesis is an
-**unlaunchable template**: bootstrap peers, DNS seeds and allocations are placeholders, and
-a fail-closed guard rejects them, so no one can accidentally start "mainnet" against a
-ceremony file.
-
-### Testnet
-
-Testnet is mainnet's rehearsal: the same code path, the same supply rules, the same validator
-ceremony. Only the profile, the genesis and the parameter values differ - chain id `45261`,
-network id `BDLT`.
-
-- **Wallet:** `bud wallet create --key-file ./secrets/wallet.json` (ML-DSA-87, 24 words).
-- **Get BUD:** the faucet grants 100 BUD per address per day. Ask it for a transfer like any
-  other: `curl -X POST https://faucet.<TESTNET_DOMAIN>/request -d '{"address":"0x<your address>"}'`.
-- **Become a validator:** at least 1,000 BUD of stake, then `bud validator join`; see
-  [docs/VALIDATOR_GUIDE.md](docs/VALIDATOR_GUIDE.md).
-- **Delegate:** `bud delegate`, see [docs/DELEGATION.md](docs/DELEGATION.md).
-- **Run a node:** `budlum-core --config config/testnet.toml`.
-
-Every command that signs names its replay domain with `--signing-chain-id 45261` (`45260`
-mainnet, `45262` devnet). It has no default and the node's `bud_chainId` answer is only
-compared against it: a seed controls the same address on every network, so a node that chose
-the id would be choosing where your signature is valid.
-
-The **testnet readiness gate** - clean build and green CI, genesis/config/node start end to
-end, restart persistence with consistent counters, the network layer's size and rate limits,
-RPC auth and rate limiting, consensus and tokenomics, the panic bar, the operator docs and a
-secret-free history - is recorded row by row, with the code location and the test and the CI
-job that runs it, in
-[docs/audit/TESTNET_TRACEABILITY.md](docs/audit/TESTNET_TRACEABILITY.md). Endpoints,
-parameters and the local rehearsal are in [docs/TESTNET.md](docs/TESTNET.md); the gates that
-still stand between testnet and mainnet are in
-[docs/MAINNET_READINESS.md](docs/MAINNET_READINESS.md).
-
-### Node roles
-
-`--role` selects the profile a node runs under: `validator`, `sentry`, `seed`, `rpc`,
-`archive` or `relayer`. Each has a different exposure surface and a different set of required
-guarantees, see [docs/VALIDATOR_ROLES.md](docs/VALIDATOR_ROLES.md). A `relayer` runs the
-in-node cross-chain relay worker (validators run it too), keeps full storage and opens no
-public listener.
-
-> [!IMPORTANT]
-> **Mainnet validators must sign through PKCS#11.** Disk-backed `ValidatorKeys`, BLS and
-> ML-DSA key material sitting in a file, are rejected on the mainnet profile. This is not
-> advisory; the node refuses to start.
-
-### Operating
-
-Metrics are exposed in Prometheus format (default `:9090`; scrape config in
-[`ops/prometheus.yml`](ops/prometheus.yml)). A systemd unit is provided at
-[`ops/budlum-core.service`](ops/budlum-core.service), and
-`cargo run --manifest-path xtask/tools/Cargo.toml -- backup-drill` exercises the
-snapshot backup/restore path end to end (set `SOURCE_DB` and `BACKUP_DIR`): run it
-before you need it.
-
----
-
-## JSON-RPC
-
-The node exposes a `bud_`-namespaced JSON-RPC API over **two separate listeners**: a public
-one (chain reads, transaction submission) and an operator one bound to loopback (node
-control, key operations, peer management). Splitting them means an exposed public port cannot
-reach an operator method regardless of how the handler is written.
-
-```bash
-curl -s -X POST http://127.0.0.1:8545 \
+curl -s -X POST https://rpc.testnet.budlum.network \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"bud_getStatus","params":[]}'
 ```
 
-The API covers chain and account state, blocks, transactions and receipts, the validator set
-and slashing history, domain commitments and settlement info, the bridge lifecycle, BNS
-resolution, the Pollen marketplace, the AI inference lifecycle, and node health. The full
-method list with auth requirements per listener is in
-[SPECIFICATION.md](docs/SPECIFICATION.md).
-
-A minimal CLI client ships in the same tree:
-
-```bash
-cargo run --bin bud -- query balance <address>
-cargo run --bin bud -- query block latest
-BUD_PRIV_KEY=<hex-seed> cargo run --bin bud -- --signing-chain-id 45261 tx send --to <address> --amount <n>   # or --priv-key-file <path>
-```
-
-Every command that signs takes `--signing-chain-id` (`45260` mainnet, `45261` testnet,
-`45262` devnet). It is the only source of the replay domain the signature carries: the
-node's `bud_chainId` answer is compared against it and a mismatch is refused before a
-signature is spent, because a seed controls the same address on every network and a node
-that chose the id would be choosing where your transaction is valid.
+The full method lists are in [docs/SPECIFICATION.md](docs/SPECIFICATION.md).
 
 ---
 
 ## Engineering standards
 
-Budlum's CI is not a formality, it is the mechanism the project uses instead of trust.
-Every pull request runs the full gate set across dedicated workflows for the core build,
-BudZero, determinism, security audit, supply chain, fuzzing, Miri, semver and more.
+CI is the mechanism the project uses instead of trust.
 
-**What the gates enforce, beyond the usual:**
+- **`fmt` and `clippy -D warnings`** on the pinned toolchain, with a warning ratchet that only
+  goes down.
+- **Determinism.** The same block gives the same state root and execution root on x86_64 and
+  aarch64. No floating point and no unordered collection in a consensus path.
+- **Isolation.** Execution engines run in separate worker processes. A panic is a receipt, not a
+  halt.
+- **The badges cannot lie.** Every badge is checked against the file or job it names.
+- **The definition cannot drift.** A gate checks the definition block at the top of this file
+  byte for byte.
+- **Claims need code.** A feature written here as working must have a production call site and
+  a test, or the README gate fails.
+- **Formal methods and fuzzing.** Kani model-checks arithmetic invariants. Every parser has a fuzz
+  target. Miri runs the suite under undefined-behaviour detection.
+- **Supply chain.** `cargo-deny`, `cargo-audit`, `cargo-vet`, `osv-scanner`, Grype, SBOM,
+  `zizmor` and `actionlint`, per workspace.
 
-- **`fmt` and `clippy` with `-D warnings`** against the pinned 1.97.1 toolchain, plus a
-  separate pedantic/nursery **ratchet**: the warning count has a checked-in baseline and may
-  only go down. Raising the baseline to make a run pass is treated as a defect, not a fix.
-- **Determinism.** State roots and block hashes must be reproducible. A dedicated gate proves
-  no hashing function iterates an unordered collection, a `HashMap` in a state-root path is
-  a chain halt waiting for two nodes to disagree, and the gate catches it at review time.
-- **The badges cannot lie.** Every badge on this page is checked against the file it
-  points at: the test count against what the run measured, the Rust version against
-  `rust-toolchain.toml`, the licence against the SPDX id in `Cargo.toml`, and the CI badge
-  against the branch and event it is required to name, because an unfiltered badge reports
-  the newest run on any branch when the default branch has none. A mismatch fails the pull
-  request that caused it.
-- **Tests must be tests.** Every name a gate declares as required is checked to actually carry
-  `#[test]`, a required test that silently stopped existing would otherwise pass forever.
-- **Public API must be reached.** A `pub fn` in `src/` that nothing outside a test calls is
-  recorded in a checked-in list, and the list may only shrink. It is checked in both
-  directions: wiring a function up without deleting its line fails too, because a ratchet
-  that only counts upward is a to-do list nobody reads. An exemption exists - a
-  `/// Convenience:` or `WIRING:` line within fourteen lines above the declaration - and the
-  fact that prose can silence this gate is written down in the gate, not patched around.
-- **Formal methods.** [Kani](kani) model-checks arithmetic invariants; `cargo fuzz` targets
-  cover wire deserialization; Miri runs the suite under UB detection.
-- **Supply chain.** `cargo-deny`, `cargo-audit`, `cargo-vet`, `osv-scanner`, Grype, SBOM
-  generation, `zizmor` and `actionlint` on the workflows themselves. Actions are SHA-pinned;
-  the one git dependency is pinned by full revision with the reason recorded in-tree and
-  **the patch itself verified in the vendored source**, because a version number on a git
-  dependency is a name, not evidence.
-
-**Two rules make the rest meaningful:**
-
-1. **No gate may be vacuous.** Every gate implements a self-test, which
-   injects a real violation and fails if the gate does not catch it. A gate that cannot prove
-   it can fail is not a gate, and CI runs the canary next to the check itself.
-2. **No gate may be orphaned.** A gate that no workflow invokes fails the build by
-   name. Wire it up or delete it, it does not get to sit in the tree inflating a count.
-
-Suppressions are not part of the workflow. `#[allow(...)]`, `#[ignore]`, `|| true` and
-baseline inflation are how a green build stops meaning anything, and none of them are
-accepted as a fix here.
+Two rules make the rest meaningful: no gate may be vacuous (each gate has a self-test that
+injects a real violation), and no gate may be orphaned (a gate that no workflow runs fails the
+build). `#[allow(...)]`, `#[ignore]`, `|| true` and baseline inflation are not accepted as fixes.
 
 ---
 
 ## Security
 
-Report vulnerabilities **privately**: see [SECURITY.md](docs/SECURITY.md). Please do not open a
-public issue for anything affecting consensus safety, execution determinism, networking,
-storage integrity, cryptography or validator key handling.
+Report vulnerabilities **privately**: see [SECURITY.md](docs/SECURITY.md). Do not open a public
+issue for anything that affects consensus safety, execution determinism, networking, storage
+integrity, cryptography or key handling.
 
-Hardening is continuous and adversarial. A sample of what is enforced in code today:
+The testnet launch gate requires every critical and high finding to be closed, or its feature
+to be closed on testnet with a test. The register is [docs/audit/FINDINGS.md](docs/audit/FINDINGS.md);
+the launch evidence is [docs/audit/TLG_REPORT.md](docs/audit/TLG_REPORT.md).
 
-- **Bridge.** A mint re-derives `bridge_payload_hash(asset_id, amount)` and requires a matching
-  `Locked` state plus a bounded, recomputed proof. Source-amount confusion, the class behind
-  several eight-figure bridge losses, is rejected structurally, not by convention.
-- **Consensus bounds.** Reorg depth, block size and finalized-checkpoint conflict are each
-  enforced by a single constant with a compile-time assertion tying the layers together, so
-  fork-choice and the state machine cannot end up applying different limits.
-- **Liveness and slashing.** A jailed validator stops accruing downtime for blocks it is
-  forbidden to sign, and every liveness path is asserted to see the same validator set.
-- **Keys.** BLS keypair loading validates G2 encoding and that `pk = g·sk`. Mainnet validator
-  signing is PKCS#11-only. Signature verification functions are audited for real call sites,
-  because a correct-but-uncalled `verify_*` enforces nothing.
-- **RPC.** Public auth fails closed with a constant-time API-key comparison, per-IP quotas and
-  an explicit CORS allow-list.
-- **Fail-closed by default.** Where a guarantee is not yet provable, inference proof
-  verification, BudZKVM `VerifyMerkle` at production depth: the path is **disabled**, not
-  optimistically allowed. The list of these is in [docs/](docs) rather than left implicit.
-
-**No external audit has been performed.** Nothing above substitutes for one, and no "audited"
-claim is made anywhere in this repository.
+**No external audit has been performed.** Nothing in this repository claims otherwise.
 
 ---
 
 ## Project status
 
-**Quantum security, current rung (I-0):** Budlum approaches the quantum threat with a complete plan. Every layer has a defined solution, a metric and a completion gate. The Budlum wallet core signs today with NIST FIPS 204 ML-DSA-87. <!-- claim:S-I0 -->
-The register of claims, the evidence behind each and the rung each one needs is [`docs/pq/CLAIMS.md`](docs/pq/CLAIMS.md); only the sentence of the rung that has been reached is used.
+**Running on testnet:** committee finality with BLS12-381 and ML-DSA-65; Full and Android
+Mobile validators; Instant Task Handover; B.U.D. 3.0 as the only storage system; EVM, WASM
+(CosmWasm ABI), SVM, Move (Aptos dialect) and BudZero environments with atomic Universal
+Calls; Ethereum, Solana, Aptos and Cosmos compatible RPC; consensus domain registry; BNS,
+SocialFi, Data Market; explorer and faucet.
 
-**Implemented and tested:** Heterogeneous Consensus on the Universal Settlement Layer (PoW/PoS/PoA/BFT) · BLS + post-quantum hybrid finality <!-- claim:L-FINALITY-01 -->
-· domain registry and finality adapters · cross-domain bridge lifecycle with forgery
-gates · permissionless stake registry with slashing and unbonding · in-tree BudZKVM with
-STARK proving · B.U.D. storage with deal and challenge economy · BNS `.bud` names · Pollen
-data marketplace · SocialFi primitives · AI inference layer · EVM chain adapter
-(RLP + MPT + receipt verification) · `$BUD` tokenomics · validator governance · snapshot V2
-with chunk-session binding · block-only relayer intents with escrowed solver fees,
-anchored receipt verification and expiry slashing.
+**Deliberately closed on testnet, each pinned by a test:** private transfers, AI execution
+proofs, BudZero proof-dependent opcodes, cross-owner private deduplication, live streaming,
+shared security, remote app binding, the Universal Object Layer.
 
-**Deliberately not enabled, and pinned by tests that break if that changes:** on-chain AI
-inference proof *verification* ([status](docs/AI_VERIFICATION_STATUS.md)) · BudZKVM
-`VerifyMerkle` at production depth.
-
-**Not claimed:** TLA+ formal verification of the protocol · a complete ZK privacy layer ·
-full on-chain AI execution · vendor-native BLS/PQ HSM support beyond Ed25519 PKCS#11 ·
-an external security audit · a launched mainnet.
-
-The distinction matters: the second group is code that exists and is intentionally gated off,
-with a failing test standing guard over the gate. The third group is work that has not been
-done, and this page will not imply otherwise.
+**Not claimed:** an external security audit; a launched mainnet; finality votes from mobile
+validators; zero-knowledge privacy on testnet; persistent background operation on iOS.
 
 ---
 
@@ -495,31 +437,27 @@ done, and this page will not imply otherwise.
 
 | Document | What it covers |
 | --- | --- |
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Reference atlas: 80 diagrams covering system, trust boundary, bridge, EVM verification, snapshot, STARK, governance and tokenomics |
-| [SPECIFICATION.md](docs/SPECIFICATION.md) | Protocol specification: consensus, validator economics, network protocol, BLS finality, JSON-RPC surface, snapshot format |
-| [SECURITY.md](docs/SECURITY.md) | Disclosure policy, supported versions, what to include in a report |
-| [CONTRIBUTING.md](docs/CONTRIBUTING.md) | Development setup, PR expectations, rules for consensus and execution changes |
-| [CODE_OF_CONDUCT.md](docs/CODE_OF_CONDUCT.md) | Community expectations |
-| [PROVENANCE_NOTES.md](docs/PROVENANCE_NOTES.md) | Per-module record of what each non-trivial implementation is based on |
-| [docs/VALIDATOR_ROLES.md](docs/VALIDATOR_ROLES.md) | Node roles and their operational requirements |
-| [docs/AI_VERIFICATION_STATUS.md](docs/AI_VERIFICATION_STATUS.md) | Exactly what the AI layer does and does not verify |
-| [docs/BUD_STORAGE_ROADMAP.md](docs/BUD_STORAGE_ROADMAP.md) | Storage layer roadmap |
-| [budzero/ARCHITECTURE.md](budzero/ARCHITECTURE.md) | BudZKVM ISA, VM, prover and verifier design |
+| [TESTNET.md](docs/TESTNET.md) | Endpoints, parameters, genesis, launch and upgrade rules |
+| [VALIDATOR_GUIDE.md](docs/VALIDATOR_GUIDE.md) | Running a Full validator |
+| [MOBILE_VALIDATOR.md](docs/MOBILE_VALIDATOR.md) | Running a validator on Android or iOS |
+| [STORAGE.md](docs/STORAGE.md), [STORAGE_ENCRYPTION.md](docs/STORAGE_ENCRYPTION.md) | B.U.D. 3.0 and sealed content |
+| [EXECUTION.md](docs/EXECUTION.md), [EXECUTION_LIMITS.md](docs/EXECUTION_LIMITS.md), [MIGRATION.md](docs/MIGRATION.md) | Execution environments, their limits, the Migration Kit |
+| [LIGHT_CLIENT.md](docs/LIGHT_CLIENT.md) | The light client trust model |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md), [SPECIFICATION.md](docs/SPECIFICATION.md) | Diagrams and the protocol specification |
+| [OPERATIONS.md](docs/OPERATIONS.md), [VALIDATOR_ROLES.md](docs/VALIDATOR_ROLES.md) | Operating nodes, relays, gateways |
+| [SECURITY.md](docs/SECURITY.md), [MAINNET_READINESS.md](docs/MAINNET_READINESS.md) | Disclosure policy and the gates between testnet and mainnet |
+| [NAMING.md](docs/NAMING.md) | Terms used in the code |
+| [budzero/ARCHITECTURE.md](budzero/ARCHITECTURE.md) | BudZero ISA, VM, prover and verifier |
 
 ---
 
 ## Contributing
 
-Contributions are welcome. Read [CONTRIBUTING.md](docs/CONTRIBUTING.md) first, it sets a higher
-bar for consensus and execution changes than for tooling, and explains why.
-
-The short version:
+Read [CONTRIBUTING.md](docs/CONTRIBUTING.md) first.
 
 1. Run `cargo run --manifest-path xtask/tools/Cargo.toml -- pre-push` before pushing.
-   Formatting is not guessed by hand. `-- install-hook` wires it into `git push`.
 2. New behaviour arrives with a test that was observed to fail before the fix.
-3. If your change makes a CI gate red, the gate is the finding. Fix the cause, do not silence
-   the signal.
+3. If your change makes a CI gate red, the gate is the finding. Fix the cause.
 
 ---
 
@@ -532,5 +470,3 @@ Budlum or with any product the licensor provides using it. Source remains readab
 modifiable and redistributable; only competing products are excluded.
 
 > Required Notice: Copyright budlum-xyz (https://github.com/budlum-xyz)
-
-

@@ -146,6 +146,9 @@ mod gates {
     pub mod proof_deps_are_exactly_pinned;
     pub mod qr_is_derivative_only;
     pub mod quantum_account;
+    pub mod readme_claims_are_wired;
+    pub mod readme_definition_block_is_verbatim;
+    pub mod readme_has_no_placeholders;
     pub mod readme_no_deny;
     pub mod reduction_claims;
     pub mod refusals_no_mutate;
@@ -357,6 +360,30 @@ const GATES: &[Gate] = &[
         run: gates::explorer_parity::run,
         run_args: None,
         self_test: gates::explorer_parity::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "readme-definition-block-is-verbatim",
+        replaces: None,
+        run: gates::readme_definition_block_is_verbatim::run,
+        run_args: None,
+        self_test: gates::readme_definition_block_is_verbatim::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "readme-has-no-placeholders",
+        replaces: None,
+        run: gates::readme_has_no_placeholders::run,
+        run_args: None,
+        self_test: gates::readme_has_no_placeholders::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "readme-claims-are-wired",
+        replaces: None,
+        run: gates::readme_claims_are_wired::run,
+        run_args: None,
+        self_test: gates::readme_claims_are_wired::self_test,
         run_log: None,
     },
     Gate {

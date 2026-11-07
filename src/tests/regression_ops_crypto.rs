@@ -482,3 +482,89 @@ fn android_reproducible_build_matches() {
     assert!(fdroid.contains("--remap-path-prefix="));
 }
 
+
+
+#[test]
+fn readme_definition_block_is_verbatim() {
+    use sha2::{Digest, Sha256};
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let en = std::fs::read_to_string(root.join("README.md"))
+        .expect("README.md")
+        .replace("\r\n", "\n");
+    let en_prefix: String = en.lines().take(14).map(|l| format!("{l}\n")).collect();
+    let en_hex = hex::encode(Sha256::digest(en_prefix.as_bytes()));
+    assert_eq!(
+        en_hex,
+        "dd9be5206be37e05a39e26d002af633c23f56be7378bc8dfe10861406f063467"
+    );
+
+    let tr = std::fs::read_to_string(root.join("README.tr.md"))
+        .expect("README.tr.md")
+        .replace("\r\n", "\n");
+    let tr_prefix: String = tr.lines().take(15).map(|l| format!("{l}\n")).collect();
+    let tr_hex = hex::encode(Sha256::digest(tr_prefix.as_bytes()));
+    assert_eq!(
+        tr_hex,
+        "c883e0017f8c96de3ce27d863bc2b8625685b761ecef08e3af72284473c903fe"
+    );
+}
+
+#[test]
+fn readme_has_no_placeholders() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for rel in ["README.md", "README.tr.md"] {
+        let text = std::fs::read_to_string(root.join(rel)).expect(rel);
+        assert!(
+            !text.contains("{{"),
+            "{rel} contains an unresolved template placeholder"
+        );
+    }
+}
+
+#[test]
+fn readme_claims_are_wired() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let readme = std::fs::read_to_string(root.join("README.md")).expect("README.md");
+    assert!(readme.contains("B.U.D. 3.0"));
+    assert!(root.join("src/storage/bud3/pipeline.rs").exists());
+    assert!(root.join("src/execution/coordinator/mod.rs").exists());
+    assert!(root.join("mobile/core/src/lib.rs").exists());
+    assert!(root.join("docs/audit/TLG_REPORT.md").exists());
+}
+
+#[test]
+fn docs_links_resolve() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for rel in [
+        "README.md",
+        "README.tr.md",
+        "docs/MIGRATION.md",
+        "docs/MOBILE_VALIDATOR.md",
+        "docs/STORAGE_ENCRYPTION.md",
+    ] {
+        let path = root.join(rel);
+        let parent = path.parent().expect("parent");
+        let text = std::fs::read_to_string(&path).expect(rel);
+        let mut rest = text.as_str();
+        while let Some(open) = rest.find("](") {
+            let after = &rest[open + 2..];
+            let Some(close) = after.find(')') else {
+                break;
+            };
+            let target = after[..close].split('#').next().unwrap_or("").trim();
+            rest = &after[close + 1..];
+            if target.is_empty()
+                || target.starts_with("http://")
+                || target.starts_with("https://")
+                || target.starts_with("mailto:")
+            {
+                continue;
+            }
+            assert!(
+                parent.join(target).exists() || root.join(target).exists(),
+                "{rel} has broken link `{target}`"
+            );
+        }
+    }
+}

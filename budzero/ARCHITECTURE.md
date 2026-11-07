@@ -22,11 +22,11 @@ BudZKVM is a ZKP-native Layer 1 execution environment designed from first princi
 ## 4. Proving Layer: bud-proof
 - **Trace Matrix**: Converts VM trace into a row-major execution matrix.
 - **STARK Prover**: Generates deterministic proofs based on field-accumulated trace hashes.
-- **Recursive Aggregation**: Combines multiple transaction proofs into a single block proof.
+- **Segment & Batch Folding (Post-Launch Staged)**: `bud-proof` verifies individual program STARK proofs at testnet launch; binary segment recursion and `D = 8` block batch proofs (`src/cross_domain/external/phase_a_dual.rs`) are height-gated for post-launch activation. In-circuit Poseidon2 uses width 12 (`POSEIDON_G12_V1`).
 
 ## 5. State Layer: bud-state
 - **Merkle Roots**: XOR-based state accumulation for account and storage integrity.
 - **Account Model**: Tracking nonces and balances.
 
 ## Execution Flow
-`Source (.bud)` -> `Bytecode` -> `VM Execution` -> `Trace` -> `STARK Proof` -> `Recursive Aggregation`
+`Source (.bud)` -> `Bytecode` -> `VM Execution` -> `Trace` -> `STARK Proof` (-> post-launch staged segment folding)
