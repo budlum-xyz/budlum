@@ -2,7 +2,7 @@
 //!
 //! WIRING: [`crate::duty::MobileCore`] is the only caller.
 
-use crate::custody::{symbol_leaf, symbol_root, Audit, CustodyProof, ProofContext, prove};
+use crate::custody::{prove, symbol_leaf, symbol_root, Audit, CustodyProof, ProofContext};
 use crate::error::CoreError;
 use crate::quota::fits;
 use std::collections::BTreeMap;
@@ -102,7 +102,8 @@ impl ShareStore {
     /// # Errors
     ///
     /// [`CoreError`] when the share would exceed the quota, or when the
-    /// placed leaf does not match the symbol.
+    /// placed leaf does not match the symbol, the assignment conflicts with
+    /// an already stored symbol, or the local id space is exhausted.
     pub fn accept(
         &mut self,
         assigned: AssignedShare,
@@ -118,7 +119,11 @@ impl ShareStore {
         // The position used by audit proofs must identify this exact ESI and
         // leaf, not merely some matching entry elsewhere in the placement.
         // Strict ordering also rules out ambiguous duplicate ESIs.
-        if assigned.placed.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+        if assigned
+            .placed
+            .windows(2)
+            .any(|pair| pair[0].0 >= pair[1].0)
+        {
             return Err(CoreError::new(
                 "mobile_share_placement_order",
                 "the placement must contain unique ESIs in ascending order",
@@ -133,8 +138,23 @@ impl ShareStore {
                 "the assigned position, ESI and symbol must match the placed leaf",
             ));
         }
+        if self.shares.values().any(|share| {
+            share.object == assigned.object
+                && share.segment == assigned.segment
+                && (share.position == assigned.position || share.esi == assigned.esi)
+        }) {
+            return Err(CoreError::new(
+                "mobile_share_already_stored",
+                "this object's segment already has a symbol at that position or ESI",
+            ));
+        }
         let id = self.next_id;
-        self.next_id = self.next_id.saturating_add(1);
+        let next_id = id.checked_add(1).ok_or_else(|| {
+            CoreError::new(
+                "mobile_share_id_exhausted",
+                "the local share identifier space is exhausted",
+            )
+        })?;
         let record = ShareRecord {
             id: ShareId(id),
             object: assigned.object,
@@ -145,6 +165,7 @@ impl ShareStore {
             placed: assigned.placed,
         };
         self.shares.insert(id, record.clone());
+        self.next_id = next_id;
         Ok(record)
     }
 
@@ -162,10 +183,7 @@ impl ShareStore {
     /// Id of the largest share, if any.
     #[must_use]
     pub fn largest_id(&self) -> Option<ShareId> {
-        self.shares
-            .values()
-            .max_by_key(|s| s.size())
-            .map(|s| s.id)
+        self.shares.values().max_by_key(|s| s.size()).map(|s| s.id)
     }
 
     /// The share that matches `audit`, if any.
@@ -192,10 +210,7 @@ impl ShareStore {
             CoreError::new("mobile_audit_position", "the share position does not fit")
         })?;
         let sub = usize::try_from(audit.sub_block).map_err(|_| {
-            CoreError::new(
-                "mobile_audit_sub_block",
-                "the sub-block index does not fit",
-            )
+            CoreError::new("mobile_audit_sub_block", "the sub-block index does not fit")
         })?;
         prove(share.segment, &share.placed, position, &share.symbol, sub).ok_or_else(|| {
             CoreError::new(
@@ -203,5 +218,35 @@ impl ShareStore {
                 "the stored symbol cannot prove this sub-block",
             )
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mobile_share_id_exhaustion_does_not_overwrite_a_record() -> Result<(), CoreError> {
+        let symbol = vec![1; 64];
+        let mut store = ShareStore::new();
+        let mut assigned = AssignedShare {
+            object: [1; 32],
+            segment: 0,
+            esi: 0,
+            position: 0,
+            placed: vec![(0, symbol_leaf(&symbol))],
+            symbol,
+        };
+        let original = store.accept(assigned.clone(), 1_000)?;
+        store.next_id = u64::MAX;
+        assigned.object = [2; 32];
+        assert_eq!(
+            store.accept(assigned, 1_000).err().map(|e| e.code),
+            Some("mobile_share_id_exhausted")
+        );
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.get(original.id), Some(&original));
+        assert_eq!(store.next_id, u64::MAX);
+        Ok(())
     }
 }
