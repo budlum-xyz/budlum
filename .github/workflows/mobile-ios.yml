@@ -64,10 +64,8 @@ jobs:
           import re, sys
           log = open("/tmp/ios-tests.log", encoding="utf-8", errors="replace").read()
           for req in ("test_ios_bg_task_answers_audit", "test_ios_quota_cap_is_8_gib", "test_ios_class_is_opportunistic"):
-              passed = re.search(rf"{req}[^
-]*passed", log, re.I)
-              failed = re.search(rf"{req}[^
-]*failed", log, re.I)
+              passed = re.search(rf"\b{req}\b[^\n]*\bpassed\b", log, re.I)
+              failed = re.search(rf"\b{req}\b[^\n]*\bfailed\b", log, re.I)
               if not passed or failed:
                   print(f"ERROR: {req} did not run and pass in /tmp/ios-tests.log", file=sys.stderr)
                   print(log[-3000:], file=sys.stderr)
