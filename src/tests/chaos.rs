@@ -601,6 +601,7 @@ mod chaos_tests {
                     agg_sig_bls: vec![0u8; 48],
                     bitmap: vec![255],
                     set_hash: "snap_hash".to_string(),
+                    seat_table_version: 0,
                 },
                 validator_snapshot: ValidatorSetSnapshot {
                     epoch: i,

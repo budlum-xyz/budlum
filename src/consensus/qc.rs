@@ -351,7 +351,7 @@ impl QcBlob {
     /// # Errors
     ///
     /// The encoding errors of [`Self::to_bytes`].
-    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    /// Convenience: public consensus primitive retained for protocol verification and conformance suites.
     pub fn to_chunks(&self) -> Result<Vec<Vec<u8>>, String> {
         Ok(self
             .to_bytes()?

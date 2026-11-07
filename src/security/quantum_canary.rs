@@ -92,17 +92,20 @@ pub enum CanaryId {
 
 /// How far the chain reacts to a solved canary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum AlarmLevel {
+pub enum QuantumAlertLevel {
     /// No classical curve has fallen.
     Clear,
-    /// Kiragi: a 192-bit curve fell. Profiles warn; TEE shortcuts close.
-    Watch,
-    /// Don: a 224-bit curve fell. Classical-backed domains take no new messages.
-    Restrict,
-    /// Zemheri: a 256-bit curve fell. Classical-backed domains are isolated and
+    /// Level 1: a 192-bit curve fell. Profiles warn; TEE shortcuts close.
+    Advisory,
+    /// Level 2: a 224-bit curve fell. Classical-backed domains take no new messages.
+    Restricted,
+    /// Level 3: a 256-bit curve fell. Classical-backed domains are isolated and
     /// the BLS half drops out of finality.
-    Isolate,
+    Isolated,
 }
+
+/// Type alias retained for internal callers within the security module.
+pub type AlarmLevel = QuantumAlertLevel;
 
 /// Breaks that are not a curve falling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -192,10 +195,10 @@ impl CanaryId {
     #[must_use]
     pub const fn effect(self) -> CanaryEffect {
         match self {
-            Self::Ecc192 => CanaryEffect::Level(AlarmLevel::Watch),
-            Self::Ecc224 => CanaryEffect::Level(AlarmLevel::Restrict),
+            Self::Ecc192 => CanaryEffect::Level(QuantumAlertLevel::Advisory),
+            Self::Ecc224 => CanaryEffect::Level(QuantumAlertLevel::Restricted),
             Self::EccK1 | Self::EccR1 | Self::Ecc25519 | Self::BlsG1 => {
-                CanaryEffect::Level(AlarmLevel::Isolate)
+                CanaryEffect::Level(QuantumAlertLevel::Isolated)
             }
             Self::Lat65 | Self::Lat87 => CanaryEffect::Kind(AlarmKind::LatticeBreak),
             Self::Slh256s => CanaryEffect::Kind(AlarmKind::HashSigBreak),
@@ -538,27 +541,27 @@ pub enum CanaryError {
     ZeroClaimer,
 }
 
-impl AlarmLevel {
-    /// The wire name of the level, with alarm names.
+impl QuantumAlertLevel {
+    /// The canonical English wire name of the alert level.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
             Self::Clear => "clear",
-            Self::Watch => "watch (kiragi)",
-            Self::Restrict => "restrict (don)",
-            Self::Isolate => "isolate (zemheri)",
+            Self::Advisory => "advisory",
+            Self::Restricted => "restricted",
+            Self::Isolated => "isolated",
         }
     }
 }
 
 impl AlarmKind {
-    /// The wire name of the break, with alarm names.
+    /// The canonical English wire name of the break.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
-            Self::LatticeBreak => "lattice-break (kafes)",
-            Self::HashSigBreak => "hash-signature-break (hash-imza)",
-            Self::HashBreak => "hash-break (hash)",
+            Self::LatticeBreak => "lattice-break",
+            Self::HashSigBreak => "hash-signature-break",
+            Self::HashBreak => "hash-break",
         }
     }
 }
@@ -592,7 +595,7 @@ impl QuantumAlarmState {
     /// The curve alarm level. It never falls on its own.
     #[must_use]
     pub fn level(&self) -> AlarmLevel {
-        self.level.unwrap_or(AlarmLevel::Clear)
+        self.level.unwrap_or(QuantumAlertLevel::Clear)
     }
 
     /// The breaks that are not a curve falling.
@@ -989,11 +992,11 @@ mod tests {
         assert_eq!(names.len(), CanaryId::ALL.len());
         assert_eq!(
             CanaryId::Ecc192.effect(),
-            CanaryEffect::Level(AlarmLevel::Watch)
+            CanaryEffect::Level(QuantumAlertLevel::Advisory)
         );
         assert_eq!(
             CanaryId::Ecc224.effect(),
-            CanaryEffect::Level(AlarmLevel::Restrict)
+            CanaryEffect::Level(QuantumAlertLevel::Restricted)
         );
         for id in [
             CanaryId::EccK1,
@@ -1003,7 +1006,7 @@ mod tests {
         ] {
             assert_eq!(
                 id.effect(),
-                CanaryEffect::Level(AlarmLevel::Isolate),
+                CanaryEffect::Level(QuantumAlertLevel::Isolated),
                 "{id:?}"
             );
         }
@@ -1322,7 +1325,7 @@ mod tests {
             Err(CanaryError::InvalidProof)
         );
         assert_eq!(book.pending_len(), 1);
-        assert_eq!(book.alarm().level(), AlarmLevel::Clear);
+        assert_eq!(book.alarm().level(), QuantumAlertLevel::Clear);
     }
 
     /// A collision proof is the one puzzle a test can solve, and only against
@@ -1331,22 +1334,22 @@ mod tests {
     #[test]
     fn alarm_escalates_and_never_falls() {
         let mut state = QuantumAlarmState::default();
-        assert_eq!(state.level(), AlarmLevel::Clear);
+        assert_eq!(state.level(), QuantumAlertLevel::Clear);
         let claim = |h| CanaryClaim {
             commit_height: h,
             claimer: addr(1),
             accepted_height: h + 100,
         };
         state.apply(CanaryId::Ecc224, claim(1));
-        assert_eq!(state.level(), AlarmLevel::Restrict);
+        assert_eq!(state.level(), QuantumAlertLevel::Restricted);
         state.apply(CanaryId::Ecc192, claim(2));
         assert_eq!(
             state.level(),
-            AlarmLevel::Restrict,
+            QuantumAlertLevel::Restricted,
             "a lower level cannot lower it"
         );
         state.apply(CanaryId::EccK1, claim(3));
-        assert_eq!(state.level(), AlarmLevel::Isolate);
+        assert_eq!(state.level(), QuantumAlertLevel::Isolated);
         state.apply(CanaryId::Lat65, claim(4));
         assert!(state.has(AlarmKind::LatticeBreak));
         assert!(!state.has(AlarmKind::HashBreak));
@@ -1484,7 +1487,7 @@ mod state_tests {
         let json = serde_json::to_string(&book).expect("serialize");
         let back: CanaryBook = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.state_root(), book.state_root());
-        assert_eq!(back.alarm().level(), AlarmLevel::Restrict);
+        assert_eq!(back.alarm().level(), QuantumAlertLevel::Restricted);
         assert!(back.alarm().has(AlarmKind::HashBreak));
         assert_eq!(back.pending_len(), 2);
         // An unknown canary code is refused, not skipped.

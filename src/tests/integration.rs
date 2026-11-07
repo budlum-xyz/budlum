@@ -19,6 +19,7 @@ mod integration_tests {
 
     use crate::core::block::Block;
     use crate::core::governance::ProposalType;
+    use crate::core::transaction::DEFAULT_CHAIN_ID;
     use crate::core::transaction::Transaction;
     use crate::crypto::primitives::BlsKeypair;
     use crate::crypto::primitives::KeyPair;
@@ -456,6 +457,7 @@ mod integration_tests {
                 .unwrap()
                 .set_hash
                 .clone(),
+            seat_table_version: 0,
         };
 
         let msg = cert.signing_message();
@@ -706,6 +708,7 @@ mod integration_tests {
                 .unwrap()
                 .set_hash
                 .clone(),
+            seat_table_version: 0,
         };
 
         let msg = cert.signing_message();
@@ -1022,7 +1025,9 @@ mod integration_tests {
         let voter = Address::from(keys.sig_key.public_key_bytes());
 
         let consensus = Arc::new(PoSEngine::new(PoSConfig::default(), Some(keys)));
-        let bc = Blockchain::new(consensus, None, 45262, None);
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
+        // Sequential finality (7.4.5): height 10 is voteable once 8 is final.
+        bc.finalized_height = 8;
 
         let prevote = bc.sign_prevote(1, 10, "test_cp_hash", &voter).unwrap();
 
@@ -1044,7 +1049,9 @@ mod integration_tests {
         let voter = Address::from(keys.sig_key.public_key_bytes());
 
         let consensus = Arc::new(PoSEngine::new(PoSConfig::default(), Some(keys)));
-        let bc = Blockchain::new(consensus, None, 45262, None);
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
+        // Sequential finality (7.4.5): height 10 is voteable once 8 is final.
+        bc.finalized_height = 8;
 
         let precommit = bc.sign_precommit(1, 10, "test_cp_hash", &voter).unwrap();
 
@@ -1075,7 +1082,8 @@ mod integration_tests {
 
         let snapshot = make_validator_snapshot(&addrs, &bls_keys);
 
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snapshot.clone());
+        let mut agg =
+            FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "cp_hash".into(), snapshot.clone());
 
         // 3 out of 4 validators send BLS-signed prevotes (meets 2/3 quorum)
         for i in 0..3 {
@@ -1153,7 +1161,7 @@ mod integration_tests {
 
         let snapshot = make_validator_snapshot(&[(addr, 2000)], std::slice::from_ref(&bls_key));
 
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snapshot);
+        let mut agg = FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "cp_hash".into(), snapshot);
 
         let state = agg.get_state();
         assert!(state.active);
@@ -1198,7 +1206,7 @@ mod integration_tests {
 
         let snapshot = make_validator_snapshot(&[(addr, 1000)], std::slice::from_ref(&bls_key));
 
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snapshot);
+        let mut agg = FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "cp_hash".into(), snapshot);
 
         let vote1 = Prevote {
             chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
@@ -1240,7 +1248,7 @@ mod integration_tests {
 
         let snapshot = make_validator_snapshot(&[(addr, 1000)], std::slice::from_ref(&bls_key));
 
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snapshot);
+        let mut agg = FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "cp_hash".into(), snapshot);
 
         let pc = Precommit {
             chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
@@ -1276,7 +1284,8 @@ mod integration_tests {
         }
         let snapshot = make_validator_snapshot(&addrs, &bls_keys);
 
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snapshot.clone());
+        let mut agg =
+            FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "cp_hash".into(), snapshot.clone());
 
         for i in 0..3 {
             let vote = Prevote {
@@ -1350,7 +1359,10 @@ mod integration_tests {
         let consensus = Arc::new(PoWEngine::new(0));
         let bc = Blockchain::new(consensus, None, 45262, None);
 
-        let result = bc.sign_prevote(1, 10, "test", &voter);
+        // Vote at the round the chain is on, so the refusal is about the missing
+        // key and not about sequential finality.
+        let interval = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
+        let result = bc.sign_prevote(0, interval, "test", &voter);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("No BLS signing capability"));
     }

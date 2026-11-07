@@ -40,7 +40,7 @@ pub enum DomainState {
     /// An attestation was refused after admission. Not a judgement about the
     /// chain - a record that the adapter and the evidence disagreed.
     Faulted,
-    /// The quantum alarm reached Isolate (Zemheri) while the domain's observed
+    /// The quantum alarm reached Isolated while the domain's observed
     /// schemes were classical. The domain takes no attestation:
     /// its signatures no longer bind anything on a chain whose curves fell.
     /// Appended last so the serialized codes of the older states stay put.

@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
 /// The committee size above which the PQ part of a Handoff Certificate is committee signed.
-/// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
-pub const COMMITTEE_SIZE: usize = 512;
+/// Convenience: public consensus primitive retained for protocol verification and conformance suites.
+pub const COMMITTEE_SIZE: usize = crate::validators::committee::COMMITTEE_MAX_SEATS;
 
 const COMMITTEE_TAG: &[u8] = b"BDLM_HANDOFF_COMMITTEE_V1";
 
@@ -38,7 +38,7 @@ fn rank(randomness: &[u8; 32], address: &[u8]) -> [u8; 32] {
 /// index is returned: the whole set signs. A duplicate address ranks by its own hash and an
 /// index tie-break, so the result stays total and deterministic.
 #[must_use]
-/// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
+/// Convenience: public consensus primitive retained for protocol verification and conformance suites.
 pub fn handoff_committee(validators: &[Vec<u8>], randomness: &[u8; 32]) -> Vec<usize> {
     if validators.len() <= COMMITTEE_SIZE {
         return (0..validators.len()).collect();
@@ -110,7 +110,7 @@ pub fn set_digest(chain_id: u64, epoch: u64, members: &[HandoffMember]) -> [u8; 
 /// One committee member's ML-DSA-65 signature; `index` is the member's
 /// position in the outgoing set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-/// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
+/// Convenience: public consensus primitive retained for protocol verification and conformance suites.
 pub struct HandoffSignature {
     pub index: u32,
     pub signature: Vec<u8>,
@@ -133,7 +133,7 @@ pub struct HandoffCertificate {
 
 /// Why a Handoff Certificate or a chain of them was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-/// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
+/// Convenience: public consensus primitive retained for protocol verification and conformance suites.
 pub enum HandoffError {
     #[error("the outgoing set does not match the certificate")]
     OutgoingSet,
@@ -176,7 +176,7 @@ impl HandoffCertificate {
 
     /// An unsigned certificate for the move from `outgoing` to `incoming`.
     #[must_use]
-    /// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
+    /// Convenience: public consensus primitive retained for protocol verification and conformance suites.
     pub fn unsigned(
         chain_id: u64,
         epoch: u64,
@@ -195,7 +195,7 @@ impl HandoffCertificate {
     }
 
     /// Add one member's signature, keeping the index order.
-    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    /// Convenience: public consensus primitive retained for protocol verification and conformance suites.
     pub fn insert_signature(&mut self, index: u32, signature: Vec<u8>) {
         match self.signatures.binary_search_by_key(&index, |s| s.index) {
             Ok(at) => self.signatures[at].signature = signature,
@@ -222,6 +222,64 @@ impl HandoffCertificate {
     /// [`HandoffError`] for a set mismatch, a randomness that is not the
     /// epoch's, a signer outside the committee, an order violation, two
     /// thirds not reached, or a bad signature.
+    /// Verify that the certificate is signed by seat holders of `seat_table`
+    /// covering at least `seat_table.quorum_seats()` seats (section 7.5 / WP-12).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HandoffError`] if any signer holds zero seats in `seat_table`,
+    /// signatures are out of order or invalid, or covered seats fall short of quorum.
+    /// Convenience: seat-holder verification path paired with `verify_in`.
+    pub fn verify_by_seat_holders(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+        outgoing: &[HandoffMember],
+        seat_table: &crate::validators::committee::CommitteeTable,
+    ) -> Result<(), HandoffError> {
+        if set_digest(self.chain_id, self.epoch, outgoing) != self.outgoing_set {
+            return Err(HandoffError::OutgoingSet);
+        }
+        if !self.signatures.windows(2).all(|w| w[0].index < w[1].index) {
+            return Err(HandoffError::Order);
+        }
+        let message = self.signing_message();
+        let mut signer_addrs = Vec::with_capacity(self.signatures.len());
+        for entry in &self.signatures {
+            let Some(member) = outgoing.get(entry.index as usize) else {
+                return Err(HandoffError::NotCommittee(entry.index));
+            };
+            let Ok(bytes) = <[u8; 20]>::try_from(member.address.as_slice()) else {
+                return Err(HandoffError::NotCommittee(entry.index));
+            };
+            let addr = crate::core::address::Address::from_bytes(bytes);
+            if seat_table.seats_of(&addr).is_empty() {
+                return Err(HandoffError::NotCommittee(entry.index));
+            }
+            crate::crypto::pq::verify_in(
+                registry,
+                crate::crypto::scheme::SchemeId::ML_DSA_65,
+                &member.pq_public_key,
+                crate::crypto::ctx::HANDOFF_V1,
+                &message,
+                &entry.signature,
+            )
+            .map_err(|e| HandoffError::Signature {
+                index: entry.index,
+                reason: e.to_string(),
+            })?;
+            signer_addrs.push(addr);
+        }
+        let covered = seat_table.covered_seats(signer_addrs.iter());
+        let needed = seat_table.quorum_seats();
+        if covered < needed {
+            return Err(HandoffError::Quorum {
+                signed: covered,
+                committee: seat_table.active_seats(),
+            });
+        }
+        Ok(())
+    }
+
     pub fn verify_in(
         &self,
         registry: &crate::crypto::scheme::SchemeStatusRegistry,
@@ -278,7 +336,7 @@ impl HandoffCertificate {
 /// # Errors
 ///
 /// The first step that does not continue the chain or does not verify.
-/// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
+/// Convenience: public consensus primitive retained for protocol verification and conformance suites.
 pub fn follow_handoffs<'a>(
     registry: &crate::crypto::scheme::SchemeStatusRegistry,
     chain_id: u64,
@@ -417,6 +475,43 @@ mod tests {
             follow_handoffs(&registry, 7, 4, &outgoing, &[(cert, forged_set)], &|_| [3;
                 32]),
             Err(HandoffError::IncomingSet)
+        );
+    }
+
+    #[test]
+    fn handoff_certificate_signed_by_seat_holders() {
+        use crate::core::address::Address;
+        use crate::validators::committee::{CommitteeParams, CommitteeTable, COMMITTEE_MAX_SEATS};
+
+        assert_eq!(COMMITTEE_SIZE, COMMITTEE_MAX_SEATS);
+        let keys: Vec<_> = (0..5)
+            .map(|_| crate::crypto::primitives::PqKeyPair::generate())
+            .collect();
+        let outgoing: Vec<HandoffMember> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| HandoffMember {
+                address: vec![u8::try_from(i + 1).unwrap(); 20],
+                pq_public_key: k.public_key_bytes(),
+                stake: 1_000,
+            })
+            .collect();
+        let incoming = outgoing.clone();
+        // Seat table includes only validators 0..4; validator 4 has zero seats.
+        let eligible: Vec<(Address, u64)> = (0..4)
+            .map(|i| (Address::from_bytes([u8::try_from(i + 1).unwrap(); 20]), 1_000))
+            .collect();
+        let table = CommitteeTable::derive(4, 20, &[3; 32], &eligible, &CommitteeParams::default());
+        let registry = crate::crypto::scheme::SchemeStatusRegistry::genesis();
+
+        let cert = signed(&keys, &outgoing, &incoming, &[0, 1, 2]);
+        assert_eq!(cert.verify_by_seat_holders(&registry, &outgoing, &table), Ok(()));
+
+        // Including non-seat-holder index 4 is refused with NotCommittee(4).
+        let outsider = signed(&keys, &outgoing, &incoming, &[0, 1, 2, 4]);
+        assert_eq!(
+            outsider.verify_by_seat_holders(&registry, &outgoing, &table),
+            Err(HandoffError::NotCommittee(4))
         );
     }
 }

@@ -13,16 +13,16 @@
 //!
 //! | Level | Effect |
 //! |---|---|
-//! | Watch (Kiragi) | TEE shortcuts close; a classical-class message waits seven days |
-//! | Restrict (Don) | a classical-class message is no longer taken at all |
-//! | Isolate (Zemheri) | classical native domains freeze, classical external domains isolate, the BLS half leaves finality |
+//! | Advisory | TEE shortcuts close; a classical-class message waits seven days |
+//! | Restricted | a classical-class message is no longer taken at all |
+//! | Isolated | classical native domains freeze, classical external domains isolate, the BLS half leaves finality |
 //!
 //! A broken signature family is separate from the level: a lattice or hash
 //! signature break takes the scheme family along the status ladder to
 //! `Disabled` in the same block, which is also what opens the recovery
 //! path of.
 
-use super::quantum_canary::{AlarmKind, AlarmLevel, QuantumAlarmState};
+use super::quantum_canary::{AlarmKind, QuantumAlarmState, QuantumAlertLevel};
 use crate::core::account::AccountState;
 use crate::crypto::scheme::{SchemeId, SchemeStatus, TransitionSource};
 
@@ -45,23 +45,23 @@ pub enum ClassicalIntake {
 #[must_use]
 pub fn classical_intake(alarm: &QuantumAlarmState) -> ClassicalIntake {
     match alarm.level() {
-        AlarmLevel::Clear => ClassicalIntake::Open,
-        AlarmLevel::Watch => ClassicalIntake::Wait(CLASSICAL_MESSAGE_WAIT_BLOCKS),
-        AlarmLevel::Restrict | AlarmLevel::Isolate => ClassicalIntake::Stopped,
+        QuantumAlertLevel::Clear => ClassicalIntake::Open,
+        QuantumAlertLevel::Advisory => ClassicalIntake::Wait(CLASSICAL_MESSAGE_WAIT_BLOCKS),
+        QuantumAlertLevel::Restricted | QuantumAlertLevel::Isolated => ClassicalIntake::Stopped,
     }
 }
 
 /// Whether TEE shortcuts stay open. They close at Watch.
 #[must_use]
 pub fn tee_shortcuts_open(alarm: &QuantumAlarmState) -> bool {
-    alarm.level() < AlarmLevel::Watch
+    alarm.level() < QuantumAlertLevel::Advisory
 }
 
 /// Whether finality still needs the BLS certificate next to the ML-DSA QC.
 /// At Isolate the BLS half drops out and the QC alone suffices.
 #[must_use]
 pub fn bls_required_for_finality(alarm: &QuantumAlarmState) -> bool {
-    alarm.level() < AlarmLevel::Isolate
+    alarm.level() < QuantumAlertLevel::Isolated
 }
 
 /// The signature schemes a broken family takes with it.
@@ -101,7 +101,7 @@ pub fn apply_to_state(state: &mut AccountState) -> AlarmEffectReport {
     let mut report = AlarmEffectReport::default();
     let (schemes, isolate) = {
         let alarm = state.settlement.quantum.alarm();
-        (dropped_schemes(alarm), alarm.level() >= AlarmLevel::Isolate)
+        (dropped_schemes(alarm), alarm.level() >= QuantumAlertLevel::Isolated)
     };
     for scheme in schemes {
         let mut moved = false;

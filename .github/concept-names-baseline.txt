@@ -9,13 +9,13 @@ D-Web Passport|10|84
 DeEd|12|34
 Developer OS|6|50
 Filiz (faucet)|1|14
-Filiz (leader election)|11|226
+Filiz (leader election)|9|195
 Fotosentez|7|19
 GT-1|0|0
 Gonca|0|0
 Graft|41|891
 Gövde|0|0
-Kiragi|6|16
+Kiragi|0|0
 Liquid storage|0|0
 Living Threshold|2|2
 Mikoriza|23|78

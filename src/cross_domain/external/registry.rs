@@ -384,7 +384,7 @@ impl ExternalDomainRegistry {
     }
 
     /// Isolate every domain whose observed schemes are classical: the
-    /// quantum alarm reached Zemheri. A domain with no observation is left
+    /// quantum alarm reached Isolated. A domain with no observation is left
     /// alone (nothing is known about it), one already outside the serving
     /// states keeps its state. Returns how many moved.
     pub fn isolate_classical_domains(&mut self) -> usize {

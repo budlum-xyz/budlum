@@ -65,7 +65,7 @@ binds only within one proof.
   account layer's cryptography.
 - Budlum Network (mesh), Budweb and Lubot follow one rule from the first line: to apply.
 - TEE attestation is not on the security path. It carries the label "classical vendor signature" in the profile,
-  and TEE shortcuts close on a Kiragi (Watch) alarm.
+  and TEE shortcuts close on a Advisory alarm.
 - FN-DSA has a reserved scheme id and is closed. It opens only when four conditions hold, and it is never described as a
   final standard before then.
 - No pairing-based SNARK (Groth16, KZG-based PLONK, anything over BN254) is on a verification path. Those names stay

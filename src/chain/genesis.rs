@@ -813,6 +813,7 @@ impl GenesisConfig {
             storage_root: None,
             shards_root: None,
             witness_root: None,
+            seat_participation: None,
         };
 
         block.tx_root = block.calculate_tx_root();
@@ -1818,6 +1819,7 @@ mod tests {
                 agg_sig_bls: vec![],
                 bitmap: vec![],
                 set_hash: snapshot.set_hash.clone(),
+                seat_table_version: 0,
             };
             let status = if kind == "PoS" {
                 crate::domain::PoSFinalityAdapter.verify_finality(

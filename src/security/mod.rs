@@ -3,3 +3,4 @@
 
 pub mod alarm_effects;
 pub mod quantum_canary;
+pub use quantum_canary::QuantumAlertLevel;

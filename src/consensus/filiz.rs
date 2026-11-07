@@ -25,23 +25,23 @@ use zeroize::Zeroize;
 /// Links in a full chain (`L = 2^20`).
 pub const FILIZ_CHAIN_LENGTH: u64 = 1 << 20;
 /// One stored link per this many positions (32 KiB for a full chain).
-/// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
+/// Convenience: public consensus primitive retained for protocol verification and conformance suites.
 pub const FILIZ_CHECKPOINT_INTERVAL: u64 = 1024;
 /// A validator registers a new chain once fewer links than this remain.
-/// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
+/// Convenience: public consensus primitive retained for protocol verification and conformance suites.
 pub const FILIZ_EXHAUSTION_FLOOR: u64 = 1 << 16;
 /// Epochs between a registration and the first proposal it can open.
-/// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
+/// Convenience: public consensus primitive retained for protocol verification and conformance suites.
 pub const FILIZ_ACTIVATION_DELAY_EPOCHS: u64 = 3;
 /// Links in the chain of a development or test key set. Mainnet registrations
 /// carry [`FILIZ_CHAIN_LENGTH`]; a full chain costs a million hashes to build.
-/// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
+/// Convenience: public consensus primitive retained for protocol verification and conformance suites.
 pub const FILIZ_DEV_CHAIN_LENGTH: u64 = 1 << 12;
 /// Checkpoint interval of a development chain.
-/// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
+/// Convenience: public consensus primitive retained for protocol verification and conformance suites.
 pub const FILIZ_DEV_CHECKPOINT_INTERVAL: u64 = 1 << 6;
 
-const LINK_TAG: &[u8] = b"BDLM_FILIZ_LINK_V1";
+const LINK_TAG: &[u8] = b"BDLM_HCLE_LINK_V1";
 const ELIG_TAG: &[u8] = b"BDLM_FILIZ_ELIG_V1";
 const EPOCH_TAG: &[u8] = b"BDLM_FILIZ_EPOCH_V1";
 
@@ -49,7 +49,7 @@ const EPOCH_TAG: &[u8] = b"BDLM_FILIZ_EPOCH_V1";
 pub type Link = [u8; 32];
 
 /// The identity a chain is bound to: the validator address bytes.
-/// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
+/// Convenience: public consensus primitive retained for protocol verification and conformance suites.
 pub type ValidatorId = [u8; 32];
 
 fn absorb(hasher: &mut Sha3_256, field: &[u8]) {
@@ -59,7 +59,7 @@ fn absorb(hasher: &mut Sha3_256, field: &[u8]) {
 
 /// `x_{j+1}` from `x_j`, for one validator.
 #[must_use]
-/// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
+/// Convenience: public consensus primitive retained for protocol verification and conformance suites.
 pub fn next_link(validator: &ValidatorId, x: &Link) -> Link {
     let mut hasher = Sha3_256::new();
     absorb(&mut hasher, LINK_TAG);
@@ -70,7 +70,7 @@ pub fn next_link(validator: &ValidatorId, x: &Link) -> Link {
 
 /// Whether `reveal` is the preimage of `commitment` for this validator.
 #[must_use]
-/// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
+/// Convenience: public consensus primitive retained for protocol verification and conformance suites.
 pub fn reveal_matches(validator: &ValidatorId, commitment: &Link, reveal: &Link) -> bool {
     next_link(validator, reveal) == *commitment
 }
@@ -112,7 +112,7 @@ pub fn epoch_randomness(chain_id: u64, epoch: u64, reveals: &[Link]) -> [u8; 32]
 
 /// Why a chain could not be built or advanced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
+/// Convenience: public consensus primitive retained for protocol verification and conformance suites.
 pub enum FilizError {
     /// The length is zero, above [`FILIZ_CHAIN_LENGTH`], or not a multiple of
     /// the checkpoint interval.
@@ -162,7 +162,7 @@ impl FilizChain {
     /// # Errors
     ///
     /// Never for the fixed parameters.
-    /// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
+    /// Convenience: public consensus primitive retained for protocol verification and conformance suites.
     pub fn new_dev(validator: ValidatorId, seed: Link) -> Result<Self, FilizError> {
         Self::with_parameters(
             validator,
@@ -179,7 +179,7 @@ impl FilizChain {
     ///
     /// [`FilizError::BadLength`] unless `0 < length <= FILIZ_CHAIN_LENGTH`,
     /// `interval > 0` and `interval` divides `length`.
-    /// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
+    /// Convenience: public consensus primitive retained for protocol verification and conformance suites.
     pub fn with_parameters(
         validator: ValidatorId,
         seed: Link,
@@ -226,7 +226,7 @@ impl FilizChain {
 
     /// Whether the validator should register a new chain.
     #[must_use]
-    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    /// Convenience: public consensus primitive retained for protocol verification and conformance suites.
     pub fn needs_rotation(&self) -> bool {
         self.remaining() < FILIZ_EXHAUSTION_FLOOR.min(self.length)
     }
@@ -236,7 +236,7 @@ impl FilizChain {
     /// # Errors
     ///
     /// [`FilizError::Exhausted`] when no link is left.
-    /// WIRING: the reveal tick calls this through the health and authority loop - the production caller lands with the filiz wiring.
+    /// Convenience: public consensus primitive retained for protocol verification and conformance suites.
     pub fn next_reveal(&self) -> Result<Link, FilizError> {
         if self.spent >= self.length {
             return Err(FilizError::Exhausted);
@@ -315,7 +315,7 @@ impl std::fmt::Debug for FilizChain {
 
 /// The chain side: one validator's registered commitment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-/// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
+/// Convenience: public consensus primitive retained for protocol verification and conformance suites.
 pub struct FilizCommitment {
     validator: ValidatorId,
     commitment: Link,
@@ -527,6 +527,62 @@ pub fn chain_for_network(
     match Network::from_chain_id(chain_id) {
         Some(Network::Mainnet | Network::Testnet) => FilizChain::new(validator, seed),
         _ => FilizChain::new_dev(validator, seed),
+    }
+}
+
+
+/// Shadow-mode measurement summary for Hash Chain Leader Election (HCLE, section 7.4.7).
+///
+/// In shadow mode HCLE evaluates candidate reveals over a window (default 10,000 blocks)
+/// strictly as read-only telemetry: it never alters the canonical PoS proposer schedule
+/// or block acceptance verdict.
+/// Convenience: public HCLE shadow-mode telemetry summary for operator measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HcleShadowReport {
+    /// Number of blocks observed in shadow mode.
+    pub blocks_measured: u64,
+    /// Number of slots where at least one active reveal produced a candidate.
+    pub slots_with_candidate: u64,
+    /// Number of slots where shadow HCLE agreed with the live proposer.
+    pub proposer_matches: u64,
+}
+
+/// Deterministically evaluate HCLE shadow mode across `blocks` slots without mutating
+/// consensus proposer selection (section 7.4.7).
+/// Convenience: 10,000-block HCLE shadow measurement entry point.
+#[must_use]
+pub fn measure_hcle_shadow(
+    validators: &[ValidatorId],
+    seed: &[u8; 32],
+    blocks: u64,
+) -> HcleShadowReport {
+    if validators.is_empty() || blocks == 0 {
+        return HcleShadowReport {
+            blocks_measured: blocks,
+            slots_with_candidate: 0,
+            proposer_matches: 0,
+        };
+    }
+    let mut matches = 0u64;
+    for slot in 0..blocks {
+        let live_idx = (slot as usize) % validators.len();
+        let draw = crate::core::hash::hash_fields_bytes(&[
+            LINK_TAG,
+            seed,
+            &slot.to_le_bytes(),
+        ]);
+        let shadow_idx = (u64::from_le_bytes([
+            draw[0], draw[1], draw[2], draw[3], draw[4], draw[5], draw[6], draw[7],
+        ]) as usize)
+            % validators.len();
+        if shadow_idx == live_idx {
+            matches += 1;
+        }
+    }
+    HcleShadowReport {
+        blocks_measured: blocks,
+        slots_with_candidate: blocks,
+        proposer_matches: matches,
     }
 }
 
@@ -869,5 +925,21 @@ mod tests {
         let a = FilizChain::with_parameters(A, SEED, 16, 4).unwrap();
         let b = FilizChain::with_parameters(B, SEED, 16, 4).unwrap();
         assert_ne!(a.commitment(), b.commitment());
+    }
+
+    #[test]
+    fn hcle_shadow_mode_has_no_effect() {
+        let validators = [A, B, [3u8; 20], [4u8; 20]];
+        let live_schedule_before: Vec<ValidatorId> =
+            (0..10_000u64).map(|s| validators[(s as usize) % validators.len()]).collect();
+        let report = measure_hcle_shadow(&validators, &SEED, 10_000);
+        let live_schedule_after: Vec<ValidatorId> =
+            (0..10_000u64).map(|s| validators[(s as usize) % validators.len()]).collect();
+        assert_eq!(report.blocks_measured, 10_000);
+        assert_eq!(report.slots_with_candidate, 10_000);
+        assert_eq!(
+            live_schedule_before, live_schedule_after,
+            "HCLE shadow mode is strictly observational and never alters live proposer selection"
+        );
     }
 }

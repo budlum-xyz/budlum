@@ -272,6 +272,7 @@ pub fn build_bft_commitment(
         agg_sig_bls: G1Affine::from(aggregate).to_compressed().to_vec(),
         bitmap,
         set_hash: snapshot.set_hash.clone(),
+        seat_table_version: 0,
     };
     let set_hash: Hash32 = hex::decode(&snapshot.set_hash)
         .ok()
