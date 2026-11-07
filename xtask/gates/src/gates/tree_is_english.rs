@@ -10,7 +10,9 @@
 //! Exactly three things:
 //!
 //!   * [`ALLOWED_FILES`] - `README.tr.md` is a deliberate translation for
-//!     Turkish readers and is published as such.
+//!     Turkish readers and is published as such; the concept-name register and
+//!     its English table hold Turkish names because the Turkish name is the name
+//!     being retired; and two gate files hold the vocabulary they search for.
 //!   * [`ALLOWED_DIRS`] - a Turkish localisation directory. The strings shown
 //!     to a Turkish user ARE the product there; translating them into English
 //!     would delete the feature rather than clean the tree.
