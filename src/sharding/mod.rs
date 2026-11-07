@@ -221,9 +221,17 @@ pub fn apply_cross_shard_transfer(
 
     let total_cost = tx.total_cost();
     // Read-only checks: `get_or_create` would insert empty accounts into
-    // the state on a rejected transfer.
-    if state.get_balance(&tx.from) < total_cost {
-        return Err("insufficient balance for cross-shard transfer".into());
+    // the state on a rejected transfer. Spendable, not raw balance: vesting
+    // locked funds cannot cross a shard boundary either.
+    if state.spendable_balance(&tx.from) < total_cost {
+        return Err("insufficient spendable balance for cross-shard transfer".into());
+    }
+    let expected_nonce = state.get_nonce(&tx.from);
+    if tx.nonce != expected_nonce {
+        return Err("stale or exhausted nonce on cross-shard transfer".into());
+    }
+    if expected_nonce == u64::MAX {
+        return Err("nonce exhausted on cross-shard transfer".into());
     }
     state
         .get_balance(&tx.to)
@@ -239,7 +247,10 @@ pub fn apply_cross_shard_transfer(
         .balance
         .checked_sub(total_cost)
         .ok_or("shard transfer: sender balance underflow")?;
-    sender.nonce = sender.nonce.saturating_add(1);
+    sender.nonce = sender
+        .nonce
+        .checked_add(1)
+        .ok_or("shard transfer: nonce overflow")?;
     let receiver = state.get_or_create(&tx.to);
     receiver.balance = receiver
         .balance
@@ -381,6 +392,17 @@ mod tests {
         state.get_or_create(&addr(0)).balance = 100;
         let same_shard = transfer(addr(0), addr(4), 10, 1);
         assert!(apply_cross_shard_transfer(&mut state, &same_shard, 4).is_err());
+    }
+
+    #[test]
+    fn rejects_replayed_nonce_on_cross_shard_transfer() {
+        let mut state = AccountState::new();
+        state.get_or_create(&addr(0)).balance = 100;
+        let tx = transfer(addr(0), addr(1), 10, 1);
+        apply_cross_shard_transfer(&mut state, &tx, 2).expect("first apply");
+        let err = apply_cross_shard_transfer(&mut state, &tx, 2).unwrap_err();
+        assert!(err.contains("nonce"));
+        assert_eq!(state.get_or_create(&addr(0)).balance, 89);
     }
 
     #[test]
