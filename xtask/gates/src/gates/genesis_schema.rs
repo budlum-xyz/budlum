@@ -295,6 +295,6 @@ mod entry_tests {
             ),
             &mut errs,
         );
-        assert!(errs.is_empty());
+        assert_eq!(errs.len(), 0);
     }
 }

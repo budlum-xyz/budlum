@@ -474,7 +474,7 @@ mod absent_tests {
     fn a_guard_absent_from_every_sibling_is_a_finding() {
         let bodies = vec![("a", String::from("{ x }")), ("b", String::from("{ y }"))];
         let (with, without) = guard_split(&bodies, &["ensure_mint_headroom"]);
-        assert!(with.is_empty());
+        assert_eq!(with.len(), 0);
         assert_eq!(without.len(), 2);
     }
 }

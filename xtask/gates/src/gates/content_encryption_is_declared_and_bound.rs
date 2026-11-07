@@ -822,18 +822,21 @@ mod shape_tests {
 
     #[test]
     fn compound_names_and_byte_payloads_are_key_material() {
-        assert!(!key_material_in("master_key: Foo,").is_empty());
-        assert!(!key_material_in("ClientSide(ContentCipher, [u8; 32]),").is_empty());
-        assert!(key_material_in("ClientSide(ContentCipher),").is_empty());
+        assert_ne!(key_material_in("master_key: Foo,").len(), 0);
+        assert_ne!(
+            key_material_in("ClientSide(ContentCipher, [u8; 32]),").len(),
+            0
+        );
+        assert_eq!(key_material_in("ClientSide(ContentCipher),").len(), 0);
     }
 
     #[test]
     fn split_call_without_the_declaration_is_found_and_zero_calls_fail() {
         let bad = "self.id = manifest_id_from_parts(\n    &self.shards,\n    &literal,\n);";
-        assert!(!check_call_sites(bad).problems.is_empty());
+        assert_ne!(check_call_sites(bad).problems.len(), 0);
         let good = "self.id = manifest_id_from_parts(\n    &self.shards,\n    &self.encryption,\n);\nfn manifest_id_from_parts(a: u8) {}";
-        assert!(check_call_sites(good).problems.is_empty());
-        assert!(!check_call_sites("fn other() {}").problems.is_empty());
+        assert_eq!(check_call_sites(good).problems.len(), 0);
+        assert_ne!(check_call_sites("fn other() {}").problems.len(), 0);
     }
 
     #[test]
@@ -841,15 +844,15 @@ mod shape_tests {
         // The helper has no `self`: forwarding the parameter it was handed
         // is the declaration reaching the id, not a literal beside it.
         let helper = "pub fn manifest_id_from_parts_stored(shards: &[u8], encryption: &ContentEncryption) -> u8 {\n    manifest_id_from_parts(shards, erasure, encryption, size)\n}\nfn manifest_id_from_parts(a: u8) {}";
-        assert!(check_call_sites(helper).problems.is_empty());
+        assert_eq!(check_call_sites(helper).problems.len(), 0);
         // The same bare name outside the helper is the invented-literal
         // shape and stays a finding.
         let stray =
             "fn anywhere() { let id = manifest_id_from_parts(shards, erasure, encryption, size); }";
-        assert!(!check_call_sites(stray).problems.is_empty());
+        assert_ne!(check_call_sites(stray).problems.len(), 0);
         // And a helper that does not bind the name as its parameter does
         // not earn the shape either.
         let unbound = "pub fn manifest_id_from_parts_stored(shards: &[u8]) -> u8 {\n    manifest_id_from_parts(shards, erasure, encryption, size)\n}";
-        assert!(!check_call_sites(unbound).problems.is_empty());
+        assert_ne!(check_call_sites(unbound).problems.len(), 0);
     }
 }

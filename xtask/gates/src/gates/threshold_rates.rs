@@ -620,6 +620,6 @@ mod tests {
     #[test]
     fn a_processor_rate_on_the_first_line_does_not_panic() {
         let src = "cpu_picodollars_per_nano: 5,\ndisk_picodollars_per_byte_epoch: 7,\n";
-        assert!(off_scale_pairs(src).is_empty());
+        assert_eq!(off_scale_pairs(src).len(), 0);
     }
 }

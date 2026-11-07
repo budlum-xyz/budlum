@@ -1068,27 +1068,27 @@ mod tests {
 
     #[test]
     fn real_guards_pass() {
-        assert!(judge_file(&tee_src(M, B, R, ""), TEE_ONLY).is_empty());
+        assert_eq!(judge_file(&tee_src(M, B, R, ""), TEE_ONLY).len(), 0);
     }
 
     #[test]
     fn inverted_guards_fail() {
         let inv_m = "if a.verify_measurement(t) { return Err(E); }";
-        assert!(!judge_file(&tee_src(inv_m, B, R, ""), TEE_ONLY).is_empty());
+        assert_ne!(judge_file(&tee_src(inv_m, B, R, ""), TEE_ONLY).len(), 0);
         let inv_b = "if a.backend == k { return Err(E); }";
-        assert!(!judge_file(&tee_src(M, inv_b, R, ""), TEE_ONLY).is_empty());
+        assert_ne!(judge_file(&tee_src(M, inv_b, R, ""), TEE_ONLY).len(), 0);
     }
 
     #[test]
     fn later_decoy_if_does_not_overwrite_a_guard() {
         let decoy = "if a.backend_name.is_empty() { log(); }";
-        assert!(judge_file(&tee_src(M, B, R, decoy), TEE_ONLY).is_empty());
+        assert_eq!(judge_file(&tee_src(M, B, R, decoy), TEE_ONLY).len(), 0);
     }
 
     #[test]
     fn return_ok_of_error_type_is_not_a_refusal() {
         let m = "if !a.verify_measurement(t) { return Ok(Error::X); }";
-        assert!(!judge_file(&tee_src(m, B, R, ""), TEE_ONLY).is_empty());
+        assert_ne!(judge_file(&tee_src(m, B, R, ""), TEE_ONLY).len(), 0);
     }
 
     const GOV_ONLY: Checks = Checks {
@@ -1106,26 +1106,26 @@ mod tests {
     #[test]
     fn gov_digest_forms() {
         let good = "let ok = h.iter().any(|r| { let d = f(r); d == evidence_hash });";
-        assert!(judge_file(&gov_src(good), GOV_ONLY).is_empty());
+        assert_eq!(judge_file(&gov_src(good), GOV_ONLY).len(), 0);
         let or_true = "let ok = h.iter().any(|r| { let d = f(r); d == evidence_hash || true });";
-        assert!(!judge_file(&gov_src(or_true), GOV_ONLY).is_empty());
+        assert_ne!(judge_file(&gov_src(or_true), GOV_ONLY).len(), 0);
         let inverted = "if d != evidence_hash { return true; }";
-        assert!(!judge_file(&gov_src(inverted), GOV_ONLY).is_empty());
+        assert_ne!(judge_file(&gov_src(inverted), GOV_ONLY).len(), 0);
         let good_if = "if d == evidence_hash { return true; }";
-        assert!(judge_file(&gov_src(good_if), GOV_ONLY).is_empty());
+        assert_eq!(judge_file(&gov_src(good_if), GOV_ONLY).len(), 0);
     }
 
     #[test]
     fn gov_weak_condition_is_sticky() {
         let both = "if d == evidence_hash { return true; } if d != evidence_hash { return true; }";
-        assert!(!judge_file(&gov_src(both), GOV_ONLY).is_empty());
+        assert_ne!(judge_file(&gov_src(both), GOV_ONLY).len(), 0);
     }
 
     #[test]
     fn loop_and_nested_method_are_not_direct() {
         let w = "if !a.verify_measurement(t) { while false { return Err(E); } }";
-        assert!(!judge_file(&tee_src(w, B, R, ""), TEE_ONLY).is_empty());
+        assert_ne!(judge_file(&tee_src(w, B, R, ""), TEE_ONLY).len(), 0);
         let f = "if !a.verify_measurement(t) { for _ in x { return Err(E); } }";
-        assert!(!judge_file(&tee_src(f, B, R, ""), TEE_ONLY).is_empty());
+        assert_ne!(judge_file(&tee_src(f, B, R, ""), TEE_ONLY).len(), 0);
     }
 }

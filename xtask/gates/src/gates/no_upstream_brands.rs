@@ -395,9 +395,15 @@ mod camel_tests {
 
     #[test]
     fn camel_case_use_is_found_and_a_wide_line_does_not_panic() {
-        assert!(!findings_in("src/x.rs", "struct ColibriEngine;").is_empty());
-        assert!(!findings_in("src/x.rs", "let m = JcodeMemory::new();").is_empty());
-        assert!(findings_in("src/x.rs", "let decoded = jcodex_value; let y = Jcodes;").is_empty());
+        assert_ne!(findings_in("src/x.rs", "struct ColibriEngine;").len(), 0);
+        assert_ne!(
+            findings_in("src/x.rs", "let m = JcodeMemory::new();").len(),
+            0
+        );
+        assert_eq!(
+            findings_in("src/x.rs", "let decoded = jcodex_value; let y = Jcodes;").len(),
+            0
+        );
         let wide = format!("a{} colibri", "\u{00f6}".repeat(70));
         assert_eq!(findings_in("src/x.rs", &wide).len(), 1);
     }

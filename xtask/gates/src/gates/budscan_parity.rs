@@ -298,7 +298,7 @@ mod tests {
             "pub const EPOCH_LENGTH: u64 = 10;",
             &mut p,
         );
-        assert!(p.is_empty());
+        assert_eq!(p.len(), 0);
     }
 
     #[test]
@@ -317,6 +317,6 @@ mod tests {
         assert_eq!(p.len(), 1);
         p.clear();
         content_id_problems(browser, &format!("x {CORE_CONTENT_CALL}"), &mut p);
-        assert!(p.is_empty());
+        assert_eq!(p.len(), 0);
     }
 }

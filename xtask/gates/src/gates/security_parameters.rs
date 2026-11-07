@@ -1069,6 +1069,6 @@ mod tests {
         let mut problems = Vec::new();
         let mut checked = 0usize;
         check_absorption(src, "prover", &mut problems, &mut checked);
-        assert!(!problems.is_empty());
+        assert_ne!(problems.len(), 0);
     }
 }
