@@ -239,6 +239,17 @@ name = "budlum-domain-reporter"
 path = "src/bin/budlum-domain-reporter.rs"
 required-features = ["wallet-ml-dsa"]
 
+# DOC-GAP-07: the indexer is a public service. It has its own contract
+# (`docs/explorer-api.openapi.yaml`), its own test target in CI
+# (`cargo test --bin budlum-indexer`) and its own container in
+# `ops/testnet-local.yml`. Cargo's auto-discovery would find the file, but an
+# explicit registration is what makes the binary part of the manifest's
+# declared surface: renaming or deleting the file then breaks the manifest
+# instead of silently dropping the service from the release.
+[[bin]]
+name = "budlum-indexer"
+path = "src/bin/budlum-indexer.rs"
+
 [[bin]]
 name = "bench_sig_verify"
 path = "benches/micro/sig_verify.rs"
