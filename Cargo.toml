@@ -194,6 +194,10 @@ bud-node = { path = "budzero/bud-node" }
 # one in the zkVM state layer, and nothing forced them to stay equal. They now
 # read one definition.
 budlum-note-packing = { path = "crates/note-packing" }
+# The Universal Execution Layer ABI (directive 8.3, WP-09): the interface, wire
+# types, framing and socket transport between the Execution Coordinator in this
+# process and the `budlum-ee-*` worker binaries.
+budlum-uel-abi = { path = "crates/uel-abi" }
 # In-tree, feature-gated (2026-09-19 user decision: no separate repository).
 budlum-bpqs = { path = "crates/bpqs", optional = true }
 
