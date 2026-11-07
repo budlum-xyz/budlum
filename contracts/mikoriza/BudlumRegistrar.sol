@@ -8,7 +8,7 @@ import {BudlumSlasher} from "./BudlumSlasher.sol";
 import {IAllocationManager, OperatorSet, SlashingParams} from "./IAllocationManager.sol";
 
 /// @title BudlumRegistrar
-/// @notice The Mikoriza AVS on Ethereum (10.2): an
+/// @notice The Mikoriza AVS on Ethereum: an
 ///         EigenLayer operator in the Budlum operator set binds a Budlum
 ///         validator address and its BLS key, and reports its allocation to
 ///         Budlum as an outbound message the `SharedSecurityTx::Observe` door

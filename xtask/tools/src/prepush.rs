@@ -45,7 +45,7 @@ pub fn run(root: &Path) -> Result<String, String> {
             "toolchain: {}",
             String::from_utf8_lossy(&out.stdout).trim()
         )),
-        Err(e) => return Err(format!("`cargo` bulunamadi: {e}")),
+        Err(e) => return Err(format!("`cargo` was not found: {e}")),
     }
 
     let checks = [

@@ -60,7 +60,7 @@ const PPM: u128 = 1_000_000;
 /// The Mikoriza parameters of a profile (genesis parameters).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SharedSecurityParams {
-    /// The genesis flag (10.7).
+    /// The genesis flag.
     pub enabled: bool,
     /// The restaked share of the total weight never exceeds this.
     pub max_restaked_share_ppm: u32,
