@@ -240,9 +240,10 @@ pub fn apply_cross_shard_transfer(
         .checked_total_cost()
         .ok_or_else(|| "cross-shard transfer amount + fee overflows u64".to_string())?;
     // Read-only checks: `get_or_create` would insert empty accounts into
-    // the state on a rejected transfer.
-    if state.get_balance(&tx.from) < total_cost {
-        return Err("insufficient balance for cross-shard transfer".into());
+    // the state on a rejected transfer. Vesting-locked value is not a
+    // spendable balance at this state-transition boundary either.
+    if state.spendable_balance(&tx.from) < total_cost {
+        return Err("insufficient spendable balance for cross-shard transfer".into());
     }
     state
         .get_balance(&tx.to)
@@ -382,6 +383,34 @@ mod tests {
         assert_eq!(state.get_or_create(&addr(0)).balance, 100 - 45);
         assert_eq!(state.get_or_create(&addr(1)).balance, 40);
         assert_eq!(state.get_or_create(&addr(0)).nonce, 1);
+    }
+
+    #[test]
+    fn blg_020_cross_shard_transfer_respects_vesting_lock() {
+        let sender = addr(0);
+        let recipient = addr(1);
+        let mut state = AccountState::new();
+        state.get_or_create(&sender).balance = 100;
+        state.team_vesting = Some((
+            sender,
+            crate::tokenomics::VestingSchedule {
+                total: 100,
+                start_epoch: 0,
+                cliff_epochs: 10,
+                duration_epochs: 100,
+            },
+        ));
+        assert_eq!(state.spendable_balance(&sender), 0);
+        let before = shards_commitment(&state, 2);
+        let locked = transfer(sender, recipient, 1, 1);
+
+        let error = apply_cross_shard_transfer(&mut state, &locked, 2)
+            .expect_err("vesting-locked value must not fund a cross-shard transfer");
+        assert!(error.contains("insufficient spendable balance"));
+        assert_eq!(shards_commitment(&state, 2), before);
+        assert_eq!(state.get_balance(&sender), 100);
+        assert_eq!(state.get_balance(&recipient), 0);
+        assert_eq!(state.get_nonce(&sender), 0);
     }
 
     #[test]
