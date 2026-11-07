@@ -134,7 +134,7 @@ impl BnsRegistry {
         let expires_at = current_epoch
             .checked_add(duration)
             .ok_or(BnsError::InvalidName)?;
-        let record = NameRecord::new(name.clone(), owner, expires_at);
+        let record = NameRecord::try_new(name.clone(), owner, current_epoch, expires_at)?;
         self.names.insert(name, record);
         Ok(())
     }

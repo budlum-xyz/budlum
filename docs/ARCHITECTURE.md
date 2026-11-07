@@ -2019,7 +2019,7 @@ Keccak/SHA3 hasher with program words; it currently finds **7 sites**.
 
 ## 58. Permission at the browser boundary: CORS is not a refusal, it is a delivery decision
 
-For a client running inside a browser, such as Budscan, the node's RPC surface is
+For a client running inside a browser, such as Budlum Explorer, the node's RPC surface is
 determined not only by what the server returns but by whether the browser
 delivers that response to JavaScript. These are two separate decisions and each
 must have its own counterpart in the code.
@@ -2044,7 +2044,7 @@ not carry the authority its name implies.
 
 ```mermaid
 flowchart TD
-  B["Browser: fetch from Budscan"] --> Pre{"Custom header? preflight needed"}
+  B["Browser: fetch from Budlum Explorer"] --> Pre{"Custom header? preflight needed"}
   Pre -->|"yes"| OPT["OPTIONS preflight, no x-api-key"]
   OPT --> Auth1{"before: authentication runs first"}
   Auth1 -->|"401"| Dead["Real request never sent"]
@@ -2919,7 +2919,7 @@ bytes with `generate_content`, rehashes them with the manifest slicing construct
 compares the identity. If it does not hold, the request is refused.
 
 This is not an internal consistency check but the proof that what the gateway serves is the
-**requested thing**. The same question as Budscan's fifth step: are the fetched bytes the
+**requested thing**. The same question as Budlum Explorer's fifth step: are the fetched bytes the
 requested bytes.
 
 ### Three outcomes, three meanings

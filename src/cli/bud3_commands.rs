@@ -4,23 +4,18 @@
 //! exposed for CLI binary subcommands, wallet SDK scripts, and integration tests.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::core::address::Address;
-use crate::core::hash::hash_fields_bytes;
-use crate::storage::bud3::content_gateway::{Bud3ContentGateway, ContentGatewayError};
-use crate::storage::bud3::content_id::ContentKey;
-use crate::storage::bud3::content_ref::{ContentRef, ContentRefError};
-use crate::storage::bud3::delete::GrantShredAuth;
-use crate::storage::bud3::grants::{build_grant_row, compute_grant_tag, GrantBud3Error, GrantRow};
-use crate::storage::bud3::keys::{seal_key_package, KeyPkgBud3Error};
-use crate::storage::bud3::limits::Profile;
-use crate::storage::bud3::placement::{Candidate, Class, PlacementRow};
+use crate::storage::bud3::content_gateway::{Bud3ContentGateway, GatewayError, GatewayResponse};
+use crate::storage::bud3::delete::GrantRevocationAuth;
+use crate::storage::bud3::grants::{build_grant_row, GrantRow};
+use crate::storage::bud3::keys::{seal_key_package_xwing, ObjectKeyPackage, XWingPublicKey};
+use crate::storage::bud3::limits::{Bud3Limits, Profile};
+use crate::storage::bud3::placement::{Class, Share};
 use crate::storage::bud3::registry::{Bud3Registry, NftId, ObjectKey, RegistryError};
 use crate::storage::bud3::tx::StorageTxV3;
-use crate::storage::bud3::upload::{FinishedUploadSession, UploadError, UploadSessionManager};
-use crate::storage::bud3::view::{
-    view_from_network, NetworkSymbolSource, PaidViewReceipt, ViewBud3Error,
-};
+use crate::storage::bud3::upload::{FinishedUpload, UploadError, UploadSessionManager};
 
 /// Domain tag deriving deterministic cross-environment account aliases (`bud alias show`).
 pub const DOMAIN_CLI_ALIAS: &[u8] = b"BDLM_BUD3_CLI_ALIAS_V1";
@@ -46,18 +41,12 @@ pub enum CliBud3Error {
     UnavailableNetworkBaseFee,
     /// Streaming upload session error.
     Upload(UploadError),
-    /// Content gateway error.
-    Gateway(ContentGatewayError),
-    /// Network view reconstruction error.
-    View(ViewBud3Error),
-    /// Invalid `ContentRef`.
-    InvalidContentRef(ContentRefError),
+    /// Content gateway / reveal session error.
+    Gateway(GatewayError),
     /// On-chain B.U.D. 3.0 registry error.
     Registry(RegistryError),
-    /// X-Wing sealing error.
-    KeyPackage(KeyPkgBud3Error),
-    /// Grant row validation error.
-    Grant(GrantBud3Error),
+    /// Grant building or X-Wing sealing error.
+    Grant(String),
     /// Invalid validator registration parameters.
     InvalidValidatorRegistration(&'static str),
     /// Proof-of-work search exhausted `max_attempts` without meeting `difficulty_bits`.
@@ -73,13 +62,10 @@ impl std::fmt::Display for CliBud3Error {
             Self::UnavailableNetworkBaseFee => {
                 f.write_str("network base_fee must be queried and non-zero when --fee is omitted")
             }
-            Self::Upload(e) => write!(f, "cli upload error: {e:?}"),
-            Self::Gateway(e) => write!(f, "cli gateway error: {e:?}"),
-            Self::View(e) => write!(f, "cli view error: {e:?}"),
-            Self::InvalidContentRef(e) => write!(f, "cli ContentRef error: {e:?}"),
+            Self::Upload(e) => write!(f, "cli upload error: {e}"),
+            Self::Gateway(e) => write!(f, "cli view error: {e}"),
             Self::Registry(e) => write!(f, "cli registry error: {e:?}"),
-            Self::KeyPackage(e) => write!(f, "cli key-package error: {e:?}"),
-            Self::Grant(e) => write!(f, "cli grant error: {e:?}"),
+            Self::Grant(msg) => write!(f, "cli grant error: {msg}"),
             Self::InvalidValidatorRegistration(msg) => {
                 write!(f, "invalid validator command: {msg}")
             }
@@ -117,17 +103,6 @@ pub fn resolve_cli_fee_default(
     }
 }
 
-/// Parameters controlling a streaming `bud storage upload` CLI session.
-#[derive(Debug, Clone, Copy)]
-pub struct CliUploadParams {
-    pub uploader: [u8; 32],
-    pub signing_chain_id: u64,
-    pub chunk_size: usize,
-    pub profile: Profile,
-    pub lifetime_epochs: u64,
-    pub now_secs: u64,
-}
-
 /// Stream-upload content via `UploadSessionManager` (`bud storage upload`) and
 /// construct the ready-to-sign [`StorageTxV3::RegisterObject`] transaction.
 /// exposed for `bud storage upload` CLI command.
@@ -135,78 +110,80 @@ pub struct CliUploadParams {
 /// # Errors
 ///
 /// Returns [`CliBud3Error`] if `signing_chain_id == 0` or the upload session fails.
+#[allow(clippy::too_many_arguments)]
 pub fn cli_storage_upload(
     sessions: &mut UploadSessionManager,
-    bud3: &Bud3Registry,
-    params: &CliUploadParams,
+    uploader: [u8; 32],
+    signing_chain_id: u64,
     payload: &[u8],
-    row: &PlacementRow,
-    candidates: &[Candidate],
-) -> Result<FinishedUploadSession, CliBud3Error> {
-    if params.signing_chain_id == 0 {
+    chunk_size: usize,
+    profile: Profile,
+    limits: &Bud3Limits,
+    shares: Vec<(u64, Share)>,
+    lifetime_epochs: u64,
+    now_secs: u64,
+) -> Result<(FinishedUpload, StorageTxV3), CliBud3Error> {
+    if signing_chain_id == 0 {
         return Err(CliBud3Error::MissingSigningChainId);
     }
-    let step = params.chunk_size.max(1);
+    let step = chunk_size.max(1);
     let sid = sessions
-        .open_session(
-            (params.uploader, [0u8; 16]),
-            payload.len() as u64,
-            0,
-            params.lifetime_epochs,
-            false,
-            params.now_secs,
-        )
+        .open_session(uploader, payload.len() as u64, false, profile, limits, now_secs)
         .map_err(CliBud3Error::Upload)?;
 
-    for chunk in payload.chunks(step) {
-        sessions
-            .append_chunk(sid, chunk, params.now_secs)
-            .map_err(CliBud3Error::Upload)?;
+    let mut offset = 0usize;
+    while offset < payload.len() {
+        let end = offset.saturating_add(step).min(payload.len());
+        if let Some(slice) = payload.get(offset..end) {
+            sessions
+                .append_chunk(sid, slice, now_secs)
+                .map_err(CliBud3Error::Upload)?;
+        }
+        offset = end;
     }
 
-    sessions
-        .finish_session(
-            sid,
-            &params.profile,
-            row,
-            candidates,
-            bud3,
-            params.now_secs,
-        )
-        .map_err(CliBud3Error::Upload)
+    let finished = sessions
+        .finish_public(sid, limits)
+        .map_err(CliBud3Error::Upload)?;
+    let tx = StorageTxV3::RegisterObject {
+        record: finished.record.clone(),
+        shares,
+        lifetime_epochs,
+    };
+    Ok((finished, tx))
 }
 
-/// Retrieve and verify content via `Bud3ContentGateway` / `bud3::view` (`bud storage view`).
+/// Retrieve and verify content via `Bud3ContentGateway` (`bud storage view`).
 /// exposed for `bud storage view` CLI command.
 ///
 /// # Errors
 ///
-/// Returns [`CliBud3Error`] if view authorization or symbol recovery fails.
-pub fn cli_storage_view<N: NetworkSymbolSource>(
+/// Returns [`CliBud3Error::Gateway`] if view authorization or symbol recovery fails.
+pub fn cli_storage_view(
     bud3: &Bud3Registry,
-    network: &N,
+    gateway: &mut Bud3ContentGateway,
     object_commitment: &ObjectKey,
     nft_id: Option<NftId>,
-    content_key: Option<&ContentKey>,
-    paid_receipt: Option<&PaidViewReceipt>,
-) -> Result<Vec<u8>, CliBud3Error> {
-    let entry = bud3
-        .object(object_commitment)
-        .ok_or(CliBud3Error::Registry(RegistryError::UnknownObject))?;
-    let cref = ContentRef::new(entry.record.content_id, *object_commitment, nft_id)
-        .map_err(CliBud3Error::InvalidContentRef)?;
-
-    if let Some(receipt) = paid_receipt {
-        return Bud3ContentGateway::serve_paid_public_fallback(bud3, &cref, receipt, network)
+    grant_tag: Option<[u8; 32]>,
+    paid_fallback_bud: Option<u64>,
+    current_height: u64,
+) -> Result<GatewayResponse, CliBud3Error> {
+    if nft_id.is_some() || grant_tag.is_some() {
+        return gateway
+            .get_object(bud3, object_commitment, nft_id, grant_tag, current_height)
             .map_err(CliBud3Error::Gateway);
     }
-
-    let _bundle = Bud3ContentGateway::fetch_symbol_bundle(bud3, &cref, network)
-        .map_err(CliBud3Error::Gateway)?;
-    view_from_network(bud3, object_commitment, content_key, network).map_err(CliBud3Error::View)
+    if let Some(paid) = paid_fallback_bud {
+        return gateway
+            .get_public_paid(bud3, object_commitment, paid)
+            .map_err(CliBud3Error::Gateway);
+    }
+    gateway
+        .get_object(bud3, object_commitment, None, None, current_height)
+        .map_err(CliBud3Error::Gateway)
 }
 
-/// Build a `bud storage renew` transaction (`StorageTxV3::RenewObject`).
+/// Build a `bud storage renew`, `burn`, `grant`, or `revoke` transaction.
 /// exposed for `bud storage` lifecycle CLI commands.
 #[must_use]
 pub fn cli_storage_renew(object: ObjectKey, extra_epochs: u64) -> StorageTxV3 {
@@ -219,22 +196,15 @@ pub fn cli_storage_renew(object: ObjectKey, extra_epochs: u64) -> StorageTxV3 {
 /// Build a `bud storage burn` transaction (`BurnReference` or `SocialDelete`).
 /// exposed for `bud storage burn` CLI command.
 #[must_use]
-pub fn cli_storage_burn(nft: NftId, grant_shreds: Vec<GrantShredAuth>) -> StorageTxV3 {
-    if grant_shreds.is_empty() {
+pub fn cli_storage_burn(nft: NftId, grant_revocations: Vec<GrantRevocationAuth>) -> StorageTxV3 {
+    if grant_revocations.is_empty() {
         StorageTxV3::BurnReference { nft }
     } else {
-        StorageTxV3::SocialDelete { nft, grant_shreds }
+        StorageTxV3::SocialDelete {
+            nft,
+            grant_revocations,
+        }
     }
-}
-
-/// Parameters used to seal and build an unlinkable `bud storage grant` row.
-pub struct CliGrantRequest<'a> {
-    pub nft_id: NftId,
-    pub grant_nonce: [u8; 32],
-    pub one_time_pk: Vec<u8>,
-    pub object: ObjectKey,
-    pub content_key: &'a ContentKey,
-    pub grantee_hpke_public: &'a [u8],
 }
 
 /// Build an unlinkable `bud storage grant` (`StorageTxV3::IssueViewGrant`).
@@ -242,29 +212,28 @@ pub struct CliGrantRequest<'a> {
 ///
 /// # Errors
 ///
-/// Returns [`CliBud3Error`] if X-Wing sealing or grant validation fails.
+/// Returns [`CliBud3Error::Grant`] if X-Wing sealing or grant validation fails.
 pub fn cli_storage_grant(
-    req: CliGrantRequest<'_>,
-    expires_at_epoch: u64,
-    current_epoch: u64,
+    nft_id: &NftId,
+    grant_nonce: &[u8; 32],
+    one_time_public_key: Vec<u8>,
+    key_package: &ObjectKeyPackage,
+    grantee_xwing_pk: &XWingPublicKey,
+    seal_seed: &[u8; 64],
+    expires_at_height: u64,
+    current_height: u64,
 ) -> Result<(GrantRow, StorageTxV3), CliBud3Error> {
-    let tag = compute_grant_tag(&req.nft_id, &req.grant_nonce);
-    let sealed = seal_key_package(
-        req.grantee_hpke_public,
-        &tag,
-        &req.object,
-        req.content_key,
-    )
-    .map_err(CliBud3Error::KeyPackage)?;
+    let capsule = seal_key_package_xwing(key_package, grantee_xwing_pk, seal_seed)
+        .map_err(|e| CliBud3Error::Grant(e.to_string()))?;
     let row = build_grant_row(
-        &req.nft_id,
-        &req.grant_nonce,
-        req.one_time_pk,
-        sealed,
-        expires_at_epoch,
-        current_epoch,
+        nft_id,
+        grant_nonce,
+        one_time_public_key,
+        capsule.to_bytes(),
+        expires_at_height,
+        current_height,
     )
-    .map_err(CliBud3Error::Grant)?;
+    .map_err(|e| CliBud3Error::Grant(e.to_string()))?;
     Ok((row.clone(), StorageTxV3::IssueViewGrant { row }))
 }
 
@@ -362,7 +331,11 @@ pub struct AccountAliases {
 #[must_use]
 pub fn cli_alias_show(address: Address) -> AccountAliases {
     let derive = |env_label: &[u8]| -> [u8; 32] {
-        hash_fields_bytes(&[DOMAIN_CLI_ALIAS, env_label, address.as_bytes()])
+        let mut h = Sha256::new();
+        h.update(DOMAIN_CLI_ALIAS);
+        h.update(env_label);
+        h.update(address.as_bytes());
+        h.finalize().into()
     };
     let evm_full = derive(b"evm");
     let mut evm_address = [0u8; 20];
@@ -406,12 +379,12 @@ pub fn solve_faucet_pow(
     max_attempts: u64,
 ) -> Result<(u64, [u8; 32]), CliBud3Error> {
     for nonce in 0..max_attempts {
-        let digest = hash_fields_bytes(&[
-            DOMAIN_CLI_FAUCET_POW,
-            challenge_seed,
-            address.as_bytes(),
-            &nonce.to_le_bytes(),
-        ]);
+        let mut h = Sha256::new();
+        h.update(DOMAIN_CLI_FAUCET_POW);
+        h.update(challenge_seed);
+        h.update(address.as_bytes());
+        h.update(nonce.to_le_bytes());
+        let digest: [u8; 32] = h.finalize().into();
         if leading_zero_bits(&digest) >= difficulty_bits {
             return Ok((nonce, digest));
         }
@@ -422,85 +395,65 @@ pub fn solve_faucet_pow(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::bud3::limits::Bud3Limits;
     use crate::storage::bud3::tx::apply as apply_bud3_tx;
-    use crate::storage::bud3::view::MemorySymbolNetwork;
 
     const P: Profile = Profile {
         id: 0,
         qr_version: 40,
-        symbol_size: 128,
+        symbol_size: 1024,
         fps: 10,
-        k_max: 16,
+        k_max: 64,
     };
 
     #[test]
     fn cli_storage_upload_view_round_trip() {
-        let mut sessions = UploadSessionManager::new(Bud3Limits::default());
-        let mut bud3 = Bud3Registry::default();
+        let mut sessions = UploadSessionManager::new();
+        let mut bud3 = Bud3Registry::new();
+        let mut gateway = Bud3ContentGateway::new();
 
         let uploader = [0x42; 32];
-        let payload = b"bud cli streaming upload and view round trip".repeat(8);
-        let candidates: Vec<Candidate> = (0..4u8)
-            .map(|i| Candidate {
-                validator: [10 + i; 32],
-                account: [10 + i; 32],
+        let payload = b"bud cli streaming upload and view round trip".repeat(60);
+        let shares = vec![(
+            0,
+            Share {
+                validator: [7u8; 32],
                 class: Class::Full,
-                stake: 5_000,
-                free_quota_bytes: u64::MAX,
-                network: None,
-            })
-            .collect();
-        let row = PlacementRow {
-            n_full: 2,
-            s_full: 6,
-            n_mobile: 0,
-            s_mobile: 0,
-        };
-
-        let finished = cli_storage_upload(
-            &mut sessions,
-            &bud3,
-            &CliUploadParams {
-                uploader,
-                signing_chain_id: 45261,
-                chunk_size: 199,
-                profile: P,
-                lifetime_epochs: 20,
-                now_secs: 100,
+                first_esi: 0,
+                symbol_count: 8,
             },
+        )];
+
+        let (finished, tx) = cli_storage_upload(
+            &mut sessions,
+            uploader,
+            45261,
             &payload,
-            &row,
-            &candidates,
+            512,
+            P,
+            &Bud3Limits::default(),
+            shares,
+            20,
+            100,
         )
         .unwrap();
 
         let key = finished.record.commitment;
         let nft_id = [0x88; 32];
-        let shares = match &finished.unsigned_tx {
-            StorageTxV3::RegisterObject { shares, .. } => shares.clone(),
-            _ => panic!("expected RegisterObject"),
-        };
-        let mut net = MemorySymbolNetwork::default();
-        for (seg_idx, sh) in &shares {
-            let seg_syms = &finished.segments[usize::try_from(*seg_idx).unwrap()];
-            let start = usize::try_from(sh.first_esi).unwrap();
-            let end = start + usize::try_from(sh.symbols).unwrap();
-            for sym in &seg_syms[start..end] {
-                net.insert(sh.validator, key, sym.clone());
-            }
-        }
+        apply_bud3_tx(&mut bud3, uploader, tx, 1, 10, 10_000).unwrap();
+        bud3.bind_nft(nft_id, key).unwrap();
+        gateway
+            .stage_object(&finished.record, &finished.object_bytes)
+            .unwrap();
 
-        apply_bud3_tx(&mut bud3, uploader, finished.unsigned_tx, 1).unwrap();
-        bud3.bind_nft(nft_id, uploader, &key).unwrap();
-
-        let viewed = cli_storage_view(&bud3, &net, &key, Some(nft_id), None, None).unwrap();
-        assert_eq!(viewed, payload);
+        let viewed =
+            cli_storage_view(&bud3, &mut gateway, &key, Some(nft_id), None, None, 10).unwrap();
+        assert_eq!(viewed.body, payload);
+        assert_eq!(viewed.content_id, finished.record.content_id);
     }
 
     #[test]
     fn cli_validator_register_mobile_class() {
-        let addr = Address([0x19; 32]);
+        let addr = Address::from([0x19; 32]);
         assert!(cli_validator_register(addr, "mobile", 50_000_000, 1 << 30, 45261).is_err());
         assert!(cli_validator_register(addr, "mobile", 100_000_000, 512, 45261).is_err());
 
@@ -531,7 +484,7 @@ mod tests {
 
     #[test]
     fn cli_alias_and_faucet_pow_work() {
-        let addr = Address([0x77; 32]);
+        let addr = Address::from([0x77; 32]);
         let a1 = cli_alias_show(addr);
         let a2 = cli_alias_show(addr);
         assert_eq!(a1, a2);

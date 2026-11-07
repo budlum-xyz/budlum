@@ -99,8 +99,8 @@ jobs:
       # machines, and the wallet code sees the user's seed; neither is "just a test".
       # is not.
       #
-      # crates/budscan/Cargo.lock was added for the same reason, and the "was every
-      # lockfile scanned" step below caught exactly this: because budscan is its own
+      # crates/budlum-explorer/Cargo.lock was added for the same reason, and the "was every
+      # lockfile scanned" step below caught exactly this: because budlum-explorer is its own
       # workspace it does not enter the root lock, and before being added to the
       # list by hand it was out of scope. The gate worked.
       - name: Scan - every lockfile in the repository (a finding = fail)
@@ -120,7 +120,10 @@ jobs:
             --lockfile=xtask/gates/Cargo.lock \
             --lockfile=xtask/tools/Cargo.lock \
             --lockfile=crates/ai-inference/Cargo.lock \
-            --lockfile=crates/budscan/Cargo.lock \
+            --lockfile=crates/budlum-explorer/Cargo.lock \
+            --lockfile=crates/budlum-types/Cargo.lock \
+            --lockfile=mobile/core/Cargo.lock \
+            --lockfile=mobile/ffi/Cargo.lock \
             --lockfile=xtask/release/Cargo.lock
 
       # So the list above never shrinks: every Cargo.lock in the repository must

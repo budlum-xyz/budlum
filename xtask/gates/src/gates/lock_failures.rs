@@ -13,7 +13,7 @@ const SCAN_ROOTS: &[&str] = &[
     "budzero",
     "crates/ai-inference",
     "crates/bpqs",
-    "crates/budscan",
+    "crates/budlum-explorer",
     "crates/note-packing",
     "crates/uel-abi",
     "crates/wallet-core",

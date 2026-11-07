@@ -12,3 +12,7 @@ license = "LicenseRef-PolyForm-Shield-1.0.0"
 
 [dependencies]
 # std only: the tool must build on any host with any toolchain.
+
+[profile.release]
+overflow-checks = true
+panic = "abort"

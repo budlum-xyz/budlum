@@ -99,7 +99,7 @@ fn workflows_and_dependabot_are_current() {
         "/fuzz",
         "/crates/ai-inference",
         "/crates/bpqs",
-        "/crates/budscan",
+        "/crates/budlum-explorer",
         "/crates/note-packing",
         "/crates/wallet-core",
         "/xtask/gates",

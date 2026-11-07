@@ -73,12 +73,14 @@
 /// budlum_version = "0.1.0"
 /// ```
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BudlumToml {
     /// Project metadata.
     pub project: ProjectSection,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectSection {
     /// Project name.
     pub name: String,
@@ -249,5 +251,22 @@ mod tests {
         std::fs::write(&path, "not valid toml [[[[").unwrap();
         let result = BudlumToml::load(&path);
         assert!(matches!(result, Err(BudlumTomlError::Parse { .. })));
+    }
+
+    #[test]
+    fn blg_169_removed_sections_and_unknown_fields_are_rejected() {
+        let base = "[project]\nname = \"x\"\nversion = \"0.1.0\"\n";
+        for extra in [
+            "[devnet]\ndomains = [\"pow\"]\n",
+            "[contracts]\nentry = \"a.budl\"\n",
+            "[fixtures]\ndir = \"f\"\n",
+            "unknown_key = true\n",
+        ] {
+            let doc = format!("{base}{extra}");
+            assert!(
+                toml::from_str::<BudlumToml>(&doc).is_err(),
+                "removed or unknown schema field must be rejected: {doc}"
+            );
+        }
     }
 }
