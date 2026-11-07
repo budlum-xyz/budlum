@@ -17,6 +17,7 @@ pub mod assignment;
 /// B.U.D. 3.0: content id, BOF-1 object, segments and the RFC 6330 code.
 pub mod bud3;
 pub mod column_commitment;
+pub mod content_gateway;
 pub mod content_id;
 pub mod derived;
 pub mod dictionary;

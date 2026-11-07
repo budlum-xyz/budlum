@@ -9,6 +9,7 @@ use crate::storage::content_id::ContentId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub mod nft_folders;
 pub mod vault;
 pub use vault::{execute_vault_tx, VaultError, VaultRegistry, VaultTx};
 

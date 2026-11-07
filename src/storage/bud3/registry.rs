@@ -28,6 +28,7 @@ use super::custody::{
     MOBILE_AUDIT_PPM,
 };
 use super::dedup_index::DedupIndex;
+use super::grants::{GrantBud3Error, GrantRow, GrantShredAuth};
 use super::pipeline::ObjectRecord;
 use super::placement::{Class, Share};
 use super::segment::Segmentation;
@@ -191,6 +192,8 @@ pub enum RegistryError {
     /// The replacement is refused: not enough independent Full validators,
     /// a bad validation signature, or a self-replacement.
     BadReplacement(&'static str),
+    /// View-grant issuance, lookup, or revocation failed.
+    BadGrant(GrantBud3Error),
 }
 
 /// An RPC read of the registry.
@@ -226,6 +229,8 @@ pub struct Bud3Registry {
     nfts: BTreeMap<NftId, (ObjectKey, Address)>,
     tombstones: BTreeMap<ObjectKey, u64>,
     declines: BTreeSet<([u8; 32], Address)>,
+    grants: BTreeMap<[u8; 32], GrantRow>,
+    revoked_grant_tags: BTreeSet<[u8; 32]>,
 }
 
 /// The serialized form of [`Bud3Registry`].
@@ -236,6 +241,10 @@ struct FlatRegistry {
     nfts: Vec<(NftId, (ObjectKey, Address))>,
     tombstones: Vec<(ObjectKey, u64)>,
     declines: Vec<([u8; 32], Address)>,
+    #[serde(default)]
+    grants: Vec<([u8; 32], GrantRow)>,
+    #[serde(default)]
+    revoked_grant_tags: Vec<[u8; 32]>,
 }
 
 impl From<Bud3Registry> for FlatRegistry {
@@ -246,6 +255,8 @@ impl From<Bud3Registry> for FlatRegistry {
             nfts: r.nfts.into_iter().collect(),
             tombstones: r.tombstones.into_iter().collect(),
             declines: r.declines.into_iter().collect(),
+            grants: r.grants.into_iter().collect(),
+            revoked_grant_tags: r.revoked_grant_tags.into_iter().collect(),
         }
     }
 }
@@ -258,6 +269,8 @@ impl From<FlatRegistry> for Bud3Registry {
             nfts: f.nfts.into_iter().collect(),
             tombstones: f.tombstones.into_iter().collect(),
             declines: f.declines.into_iter().collect(),
+            grants: f.grants.into_iter().collect(),
+            revoked_grant_tags: f.revoked_grant_tags.into_iter().collect(),
         }
     }
 }
@@ -1186,7 +1199,87 @@ impl Bud3Registry {
     /// Whether the registry has zero entries.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.objects.is_empty() && self.tombstones.is_empty() && self.declines.is_empty()
+        self.objects.is_empty()
+            && self.tombstones.is_empty()
+            && self.declines.is_empty()
+            && self.grants.is_empty()
+            && self.revoked_grant_tags.is_empty()
+    }
+
+    /// Look up a live, non-expired view grant by `grant_tag`.
+    ///
+    /// exposed for: `bud3::view` and Data Market access verification (`WP-23`).
+    #[must_use]
+    pub fn active_grant(&self, grant_tag: &[u8; 32], current_epoch: u64) -> Option<&GrantRow> {
+        let row = self.grants.get(grant_tag)?;
+        if row.expires_at_epoch <= current_epoch {
+            return None;
+        }
+        Some(row)
+    }
+
+    /// Issue an unlinkable B.U.D. 3.0 view grant (`WP-22`/`WP-23`).
+    ///
+    /// exposed for: Data Market `settle_purchase_with_grant` and CLI `bud storage grant`.
+    pub fn issue_grant(
+        &mut self,
+        row: GrantRow,
+        current_epoch: u64,
+    ) -> Result<(), RegistryError> {
+        if self.grants.contains_key(&row.grant_tag)
+            || self.revoked_grant_tags.contains(&row.grant_tag)
+        {
+            return Err(RegistryError::BadGrant(GrantBud3Error::DuplicateOrRevokedTag));
+        }
+        row.validate_for_issue(current_epoch)
+            .map_err(RegistryError::BadGrant)?;
+        self.grants.insert(row.grant_tag, row);
+        Ok(())
+    }
+
+    /// Revoke an active view grant with a signature under its one-time ML-DSA-65 key.
+    ///
+    /// exposed for: Data Market grant revocation and SocialFi burn shredding (`WP-23`).
+    pub fn revoke_grant(
+        &mut self,
+        grant_tag: &[u8; 32],
+        one_time_signature: &[u8],
+    ) -> Result<(), RegistryError> {
+        let row = self
+            .grants
+            .get(grant_tag)
+            .ok_or(RegistryError::BadGrant(GrantBud3Error::UnknownGrant))?;
+        row.verify_revocation(one_time_signature)
+            .map_err(RegistryError::BadGrant)?;
+        self.grants.remove(grant_tag);
+        self.revoked_grant_tags.insert(*grant_tag);
+        Ok(())
+    }
+
+    /// Atomically shred listed grants and release an NFT reference (`BLG-109`).
+    ///
+    /// exposed for: SocialFi `burn_bud3_nft` (`WP-23`).
+    pub fn social_delete(
+        &mut self,
+        nft: &NftId,
+        owner: &Address,
+        shreds: &[GrantShredAuth],
+        current_epoch: u64,
+    ) -> Result<bool, RegistryError> {
+        for s in shreds {
+            let row = self
+                .grants
+                .get(&s.grant_tag)
+                .ok_or(RegistryError::BadGrant(GrantBud3Error::UnknownGrant))?;
+            row.verify_revocation(&s.one_time_signature)
+                .map_err(RegistryError::BadGrant)?;
+        }
+        let deleted = self.burn_reference(nft, owner, current_epoch)?;
+        for s in shreds {
+            self.grants.remove(&s.grant_tag);
+            self.revoked_grant_tags.insert(s.grant_tag);
+        }
+        Ok(deleted)
     }
 
     /// The registry state root over every map, in order.
@@ -1262,6 +1355,18 @@ impl Bud3Registry {
         }
         for (d, v) in &self.declines {
             fold(&[b"decline", d, v]);
+        }
+        for (tag, g) in &self.grants {
+            fold(&[
+                b"grant",
+                tag,
+                &g.one_time_pk,
+                &g.sealed_key_package,
+                &g.expires_at_epoch.to_le_bytes(),
+            ]);
+        }
+        for tag in &self.revoked_grant_tags {
+            fold(&[b"revoked_grant", tag]);
         }
         acc
     }
