@@ -3495,6 +3495,29 @@ impl Executor {
             .map_err(|e| e.message().to_string())
     }
 
+    /// Check the nonce against the candidate state at the block boundary.
+    /// This remains mandatory when a stored block has pruned witnesses and
+    /// therefore skips signature-oriented transaction admission.
+    fn check_block_transaction_nonce(
+        state: &AccountState,
+        tx: &Transaction,
+    ) -> BudlumResult<()> {
+        let expected = state.get_nonce(&tx.from);
+        if tx.nonce != expected {
+            return Err(BudlumError::validation(
+                "invalid_nonce",
+                format!("invalid nonce: expected {expected}, got {}", tx.nonce),
+            ));
+        }
+        tx.nonce.checked_add(1).ok_or_else(|| {
+            BudlumError::validation(
+                "nonce_exhausted",
+                "transaction sender has exhausted the nonce space",
+            )
+        })?;
+        Ok(())
+    }
+
     /// Apply a whole block atomically. A rejected block leaves `state` exactly
     /// as it was before the call, including effects from transactions earlier
     /// in the same block.
@@ -3521,6 +3544,7 @@ impl Executor {
     ) -> BudlumResult<()> {
         Self::check_block_contract_gas(transactions)?;
         for tx in transactions {
+            Self::check_block_transaction_nonce(state, tx)?;
             Self::apply_transaction_checked(state, tx)?;
         }
         if let Some(producer) = block_producer {
@@ -3712,13 +3736,13 @@ mod tests {
         state.add_balance(&alice, 100);
         let root_before = state.calculate_state_root();
 
-        let transfer = |to, amount| {
+        let transfer = |to, amount, nonce| {
             let mut tx = Transaction::new_with_chain_id(
                 alice,
                 to,
                 amount,
                 1,
-                0,
+                nonce,
                 vec![],
                 DEFAULT_CHAIN_ID,
                 TransactionType::Transfer,
@@ -3726,7 +3750,7 @@ mod tests {
             tx.hash = tx.calculate_hash();
             tx
         };
-        let transactions = [transfer(bob, 10), transfer(carol, 100)];
+        let transactions = [transfer(bob, 10, 0), transfer(carol, 100, 1)];
 
         assert!(Executor::apply_block_checked(&mut state, &transactions, None).is_err());
         assert_eq!(state.calculate_state_root(), root_before);
@@ -3734,6 +3758,62 @@ mod tests {
         assert_eq!(state.get_nonce(&alice), 0);
         assert_eq!(state.get_balance(&bob), 0);
         assert_eq!(state.get_balance(&carol), 0);
+    }
+
+    #[test]
+    fn blg_113_block_nonce_failures_are_atomic() {
+        use crate::core::account::AccountState;
+        use crate::core::address::Address;
+        use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
+        use crate::execution::executor::Executor;
+
+        let sender = Address::from([0x31; 32]);
+        let recipient = Address::from([0x32; 32]);
+        let transfer = |nonce, amount| {
+            let mut tx = Transaction::new_with_chain_id(
+                sender,
+                recipient,
+                amount,
+                1,
+                nonce,
+                vec![],
+                DEFAULT_CHAIN_ID,
+                TransactionType::Transfer,
+            );
+            tx.hash = tx.calculate_hash();
+            tx
+        };
+
+        let mut stale_state = AccountState::new();
+        stale_state.add_balance(&sender, 100);
+        let stale_root = stale_state.calculate_state_root();
+        let error = Executor::apply_block_checked(
+            &mut stale_state,
+            &[transfer(0, 10), transfer(0, 1)],
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "invalid_nonce");
+        assert_eq!(stale_state.calculate_state_root(), stale_root);
+        assert_eq!(stale_state.get_balance(&sender), 100);
+        assert_eq!(stale_state.get_balance(&recipient), 0);
+        assert_eq!(stale_state.get_nonce(&sender), 0);
+
+        let mut exhausted_state = AccountState::new();
+        exhausted_state.add_balance(&sender, 100);
+        exhausted_state.get_or_create(&sender).nonce = u64::MAX;
+        let exhausted_root = exhausted_state.calculate_state_root();
+        let error = Executor::apply_block_checked(
+            &mut exhausted_state,
+            &[transfer(u64::MAX, 1)],
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "nonce_exhausted");
+        assert_eq!(exhausted_state.calculate_state_root(), exhausted_root);
+        assert_eq!(exhausted_state.get_balance(&sender), 100);
+        assert_eq!(exhausted_state.get_balance(&recipient), 0);
+        assert_eq!(exhausted_state.get_nonce(&sender), u64::MAX);
     }
 
     #[test]
