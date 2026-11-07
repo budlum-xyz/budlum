@@ -83,6 +83,22 @@ that added this page.
 - `access_tiering, TierTransition` (WP-24): Standard industry term.
 - `project_manifest` (WP-39): The name states the function.
 
+## Known false positives
+
+The counter counts matches, and two patterns in the map match text that is not
+the concept:
+
+- `(?i)lubot` matches the repository owner's name as a substring. Anything that
+  has to write the owner name - a badge, a clone URL, an issue body - is
+  counted. The register in `docs/work/` avoids writing it for that reason.
+- `(?i)recipe` matches ordinary English prose about a procedure, not only the
+  storage concept it names.
+
+Neither is a reason to weaken a pattern: the ratchet is a count, and a count
+that includes a known false positive still only goes down. They are written
+here so a package that lowers its number knows which matches it is allowed to
+leave and which it must actually rename.
+
 ## Renaming a name
 
 1. Rename it in your own locked paths. The record's `owner` above says which
