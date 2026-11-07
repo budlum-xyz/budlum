@@ -200,6 +200,12 @@ enum Command {
         #[command(subcommand)]
         action: ProjectAction,
     },
+    /// Print and check one epoch's 40 / 50 / 10 security-pool split.
+    RewardPool {
+        /// Epoch whose calendar budget is split.
+        #[arg(long)]
+        epoch: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1779,7 +1785,9 @@ fn run_genesis_assemble(
     fund: &[String],
     out: &std::path::Path,
 ) -> Result<(), String> {
-    use budlum_core::chain::genesis_ceremony::{assemble, genesis_hash, CeremonyInputs};
+    use budlum_core::chain::genesis_ceremony::{
+        assemble, genesis_hash, supply_audit, CeremonyInputs, SupplyAudit,
+    };
     use budlum_core::core::chain_config::Network;
     let network = match network {
         "testnet" => Network::Testnet,
@@ -1826,11 +1834,18 @@ fn run_genesis_assemble(
             .collect::<Result<_, _>>()?,
     };
     let genesis = assemble(network, inputs)?;
+    // WP-16 item 1: the ceremony publishes the audit report beside the file
+    // and its hash, so every operator can repeat the same `u128` sum.
+    let audit: SupplyAudit = supply_audit(&genesis)?;
     let json = serde_json::to_string_pretty(&genesis).map_err(|e| e.to_string())?;
     std::fs::write(out, json + "\n").map_err(|e| format!("cannot write {}: {e}", out.display()))?;
     println!("validators: {}", genesis.validators.len());
     println!("genesis file: {}", out.display());
     println!("genesis hash: {}", genesis_hash(&genesis));
+    println!(
+        "supply audit: {}",
+        serde_json::to_string(&audit).map_err(|e| e.to_string())?
+    );
     Ok(())
 }
 
@@ -2141,6 +2156,36 @@ fn run_node_identity(
     Ok(())
 }
 
+/// `bud reward-pool --epoch N`: the operator-facing audit of one epoch's
+/// Network Security Pool split. The command names and checks the three
+/// interfaces the storage-fee path reads, so a split that stops conserving
+/// the budget is refused here rather than discovered in a payout.
+fn run_reward_pool(epoch: u64) -> Result<(), String> {
+    use budlum_core::tokenomics::reward_pool::{
+        split_epoch_budget, storage_share, storage_share_for, RewardPoolSchedule, RewardPoolSplit,
+        DEFAULT_VALIDATION_REWARD_POOL,
+    };
+    let schedule = RewardPoolSchedule::default();
+    let remaining = DEFAULT_VALIDATION_REWARD_POOL;
+    let budget = schedule.per_epoch_budget(epoch, remaining);
+    let split: RewardPoolSplit = split_epoch_budget(budget);
+    if split.total() != budget {
+        return Err("the pool split does not conserve the epoch budget".into());
+    }
+    if storage_share(epoch) != split.storage {
+        return Err("the default storage share disagrees with the split".into());
+    }
+    if storage_share_for(epoch, &schedule, remaining) != split.storage {
+        return Err("the schedule-aware storage share disagrees with the split".into());
+    }
+    println!("epoch: {epoch}");
+    println!("budget_atoms: {budget}");
+    println!("consensus_atoms: {}", split.consensus);
+    println!("storage_atoms: {}", split.storage);
+    println!("repair_and_relay_atoms: {}", split.repair_and_relay);
+    Ok(())
+}
+
 fn main() {
     let cli = Cli::parse();
     set_signing_chain_id(cli.signing_chain_id);
@@ -2353,6 +2398,7 @@ fn main() {
                 proof_hash,
             } => run_project_bind_proof(name, source_hash, fixture, proof_hash),
         },
+        Command::RewardPool { epoch } => run_reward_pool(*epoch),
     };
     if let Err(e) = result {
         eprintln!("error: {e}");

@@ -8,7 +8,7 @@
 
 [Unit]
 Description=Budlum Core Node
-Documentation=https://github.com/rade/budlum-core
+Documentation=https://github.com/lubothebook/budlum
 After=network-online.target
 Wants=network-online.target
 

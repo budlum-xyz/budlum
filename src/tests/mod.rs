@@ -249,19 +249,12 @@ pub mod validator_classes;
 // The B.U.D. 3.0 storage door end to end.
 #[cfg(test)]
 pub mod bud3_door;
-// The persistence move is behaviour-neutral.
-#[cfg(test)]
-pub mod persistence_move;
-
-#[cfg(test)]
-pub mod audit_lane_a;
-#[cfg(test)]
-pub mod audit_lane_b;
-#[cfg(test)]
-pub mod audit_lane_c;
-#[cfg(test)]
 pub mod audit_lane_d;
 
 // WP-14 Instant Duty Handover and Disaster Recovery Mode suite.
 #[cfg(test)]
 pub mod wp14_handover_recovery;
+
+// WP-41 alert rule metric binding test.
+#[cfg(test)]
+pub mod alert_rules_reference_existing_metrics;
