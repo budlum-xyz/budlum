@@ -54,9 +54,12 @@ are explicitly not a live count: this tree has no artifact that could produce on
 ## Findings verified in this session
 
 Four records were verified against the tree while this file was written. They are
-not the register, and they do not close anything: a finding closes by the protocol
-in 14.5, and no `blg_NNN_` test exists yet. They are here because the evidence was
-in hand and a register that arrives later should not have to re-derive it.
+not the register, and none of them closes a finding of the directive's list: a
+finding closes by the protocol in 14.5, and no `blg_NNN_` test exists yet. The one
+record marked closed is BLG-268, a repository defect this branch found and fixed and
+therefore one that has no history to re-derive. The rest are here because the
+evidence was in hand and a register that arrives later should not have to re-derive
+it.
 
 | Identity | Severity | Area | State on this tree | Evidence | Closing package |
 |---|---|---|---|---|---|
@@ -103,8 +106,9 @@ and a live number is what M0 asks for. The proposal, in the order it has to happ
 3. Recount by state and severity, and replace the table above with the recount.
 4. Only then update the directive's summary, and only with the recount.
 
-Step 1 is the whole of M0 and it is not started. This file exists so that the gap is
-visible in the tree rather than in a comment on a pull request.
+Step 1 is the whole of M0 and it is not written: four records are entered above and
+265 are not. This file exists so that the gap is visible in the tree rather than in a
+comment on a pull request.
 
 ## Blocked: one record per package
 
