@@ -138,7 +138,7 @@ add a 16-byte tag, so an object declaring `ClientSide` and shorter than 16 bytes
 is refused. This catches the careless client, not the
 determined liar.
 
-Detail, what is not claimed, and why: `docs/BUD_CONTENT_ENCRYPTION.md`.
+Detail, what is not claimed, and why: `docs/STORAGE_ENCRYPTION.md`.
 Gate: `scripts/check-content-encryption-is-declared-and-bound.sh` (14 canaries).
 
 ## Coding audit: is the parity really parity
