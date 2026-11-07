@@ -238,7 +238,7 @@ fn eth_send_raw_transaction_and_other_compat_gateways_work() {
     assert!(tx_hash_hex.starts_with("0x"));
 
     // Solana, Aptos, and Cosmos route tables are complete and responsive.
-    assert_eq!(SOLANA_METHOD_CLASSES.len(), 30);
+    assert_eq!(SOLANA_METHOD_CLASSES.len(), 35);
     assert_eq!(APTOS_REST_ROUTES.len(), 18);
     assert_eq!(COMETBFT_RPC_METHODS.len(), 12);
     assert_eq!(ABCI_QUERY_PATHS.len(), 10);

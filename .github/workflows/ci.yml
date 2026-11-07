@@ -2167,6 +2167,31 @@ jobs:
       # measured: stale lock exits 101, fresh exits 0; --no-deps does NOT
       # validate, measured the same day). The discovery is dynamic, like
       # the machete gate: hand-kept lists go stale silently.
+      # These two checks read the README only, so they run in the
+      # `gates` job with the rest of the Rust gates rather than in `repo-lint`:
+      # this job owns /tmp/gate-out.log, and the Tally below lists every red gate
+      # by name. The canary of each runs first, so a red pair says whether the
+      # finding is the README or the check.
+      - name: README definition block is verbatim canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-definition-block-is-verbatim --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: README definition block is verbatim
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-definition-block-is-verbatim 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: README carries no placeholder canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-has-no-placeholders --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: README carries no placeholder
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-has-no-placeholders 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: lockfiles match their manifests (--locked metadata)
         run: |
           set -euo pipefail

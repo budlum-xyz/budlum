@@ -397,6 +397,10 @@ BudZero, determinism, security audit, supply chain, fuzzing, Miri, semver and mo
 - **Determinism.** State roots and block hashes must be reproducible. A dedicated gate proves
   no hashing function iterates an unordered collection, a `HashMap` in a state-root path is
   a chain halt waiting for two nodes to disagree, and the gate catches it at review time.
+- **The README's own claims are checked.** The definition block is pinned byte for byte
+  against the digest the specification states, so a wording change there is a decision and
+  not an edit, and no unfilled value slot or to-do marker may ship: an unfilled value
+  reads as a measurement and is not one. Both checks live in `xtask/gates/`.
 - **The badges cannot lie.** Every badge on this page is checked against the file it
   points at: the test count against what the run measured, the Rust version against
   `rust-toolchain.toml`, the licence against the SPDX id in `Cargo.toml`, and the CI badge

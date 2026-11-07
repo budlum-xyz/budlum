@@ -6,12 +6,17 @@
 //! - Strict Ed25519 signature verification over the serialized message.
 //! - Recent 150-Budlum-blockhash replay window and signature replay cache.
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Maximum age in Budlum blocks of a `recent_blockhash` accepted by `Foreign::Solana`.
 pub const MAX_SOLANA_BLOCKHASH_WINDOW: usize = 150;
+
+/// Solana's maximum serialized transaction packet size.
+pub const MAX_SOLANA_TRANSACTION_BYTES: usize = 1_232;
+
+const MAX_SOLANA_BASE64_BYTES: usize = 1_644;
 
 /// One compiled SVM instruction inside a Solana message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +57,11 @@ pub enum SolanaEnvelopeError {
     MalformedCompactU16,
     UnsupportedMessageVersion(u8),
     InvalidSignatureCount,
+    PacketTooLarge,
+    HeaderInconsistent,
+    DuplicateSigner { index: usize },
+    ProgramIdOutOfRange,
+    AccountIndexOutOfRange,
     InvalidSignature(String),
     UnknownOrExpiredBlockhash,
     ReplayedSignature,
@@ -67,6 +77,17 @@ impl std::fmt::Display for SolanaEnvelopeError {
             }
             Self::InvalidSignatureCount => {
                 write!(f, "Solana signature count does not match header")
+            }
+            Self::PacketTooLarge => write!(f, "Solana transaction exceeds the packet-size limit"),
+            Self::HeaderInconsistent => write!(f, "Solana header bands exceed the account list"),
+            Self::DuplicateSigner { index } => {
+                write!(f, "duplicate Solana signer at account index {index}")
+            }
+            Self::ProgramIdOutOfRange => {
+                write!(f, "Solana program id is not a static account")
+            }
+            Self::AccountIndexOutOfRange => {
+                write!(f, "Solana instruction account index is out of range")
             }
             Self::InvalidSignature(m) => write!(f, "invalid Solana Ed25519 signature: {m}"),
             Self::UnknownOrExpiredBlockhash => {
@@ -122,6 +143,9 @@ fn read_exact_32(buf: &[u8], cursor: &mut usize) -> Result<[u8; 32], SolanaEnvel
 
 /// Decodes a Solana wire transaction and verifies all required Ed25519 signatures.
 pub fn decode_solana_tx(raw: &[u8]) -> Result<DecodedSolanaTx, SolanaEnvelopeError> {
+    if raw.len() > MAX_SOLANA_TRANSACTION_BYTES {
+        return Err(SolanaEnvelopeError::PacketTooLarge);
+    }
     let mut cur = 0usize;
     let sig_count = read_compact_u16(raw, &mut cur)?;
     if sig_count == 0 || sig_count > 64 {
@@ -169,6 +193,16 @@ pub fn decode_solana_tx(raw: &[u8]) -> Result<DecodedSolanaTx, SolanaEnvelopeErr
     for _ in 0..key_count {
         account_keys.push(read_exact_32(raw, &mut cur)?);
     }
+    if usize::from(num_readonly_signed) > sig_count
+        || usize::from(num_readonly_unsigned) > key_count - sig_count
+    {
+        return Err(SolanaEnvelopeError::HeaderInconsistent);
+    }
+    for (index, key) in account_keys[..sig_count].iter().enumerate() {
+        if account_keys[..index].contains(key) {
+            return Err(SolanaEnvelopeError::DuplicateSigner { index });
+        }
+    }
     let recent_blockhash = read_exact_32(raw, &mut cur)?;
 
     let ix_count = read_compact_u16(raw, &mut cur)?;
@@ -196,6 +230,12 @@ pub fn decode_solana_tx(raw: &[u8]) -> Result<DecodedSolanaTx, SolanaEnvelopeErr
             accounts,
             data,
         });
+    }
+
+    for instruction in &instructions {
+        if usize::from(instruction.program_id_index) >= key_count {
+            return Err(SolanaEnvelopeError::ProgramIdOutOfRange);
+        }
     }
 
     let mut address_table_lookups = Vec::new();
@@ -228,12 +268,26 @@ pub fn decode_solana_tx(raw: &[u8]) -> Result<DecodedSolanaTx, SolanaEnvelopeErr
     if cur != raw.len() {
         return Err(SolanaEnvelopeError::Truncated);
     }
+    let resolved_account_count = address_table_lookups.iter().fold(key_count, |count, lookup| {
+        count
+            .saturating_add(lookup.writable_indexes.len())
+            .saturating_add(lookup.readonly_indexes.len())
+    });
+    for instruction in &instructions {
+        if instruction
+            .accounts
+            .iter()
+            .any(|index| usize::from(*index) >= resolved_account_count)
+        {
+            return Err(SolanaEnvelopeError::AccountIndexOutOfRange);
+        }
+    }
 
     for (sig64, pubkey32) in signatures.iter().zip(account_keys.iter()) {
         let vk = VerifyingKey::from_bytes(pubkey32)
             .map_err(|e| SolanaEnvelopeError::InvalidSignature(e.to_string()))?;
         let sig = Signature::from_bytes(sig64);
-        vk.verify(message_bytes, &sig)
+        vk.verify_strict(message_bytes, &sig)
             .map_err(|e| SolanaEnvelopeError::InvalidSignature(e.to_string()))?;
     }
 
@@ -258,6 +312,138 @@ pub fn decode_solana_tx(raw: &[u8]) -> Result<DecodedSolanaTx, SolanaEnvelopeErr
         instructions,
         address_table_lookups,
     })
+}
+
+const BASE58_ALPHABET: &[u8; 58] =
+    b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+/// Decodes a fixed-width Solana base58 value without truncating overflow.
+pub fn decode_solana_base58<const N: usize>(text: &str) -> Result<[u8; N], &'static str> {
+    if text.len() > N.saturating_mul(2).saturating_add(2) {
+        return Err("base58 value exceeds its fixed-width encoding bound");
+    }
+    let input = text.as_bytes();
+    if input.is_empty() {
+        return Err("empty base58 value");
+    }
+    let zeros = input.iter().take_while(|byte| **byte == b'1').count();
+    if zeros > N {
+        return Err("base58 value has too many leading zero bytes");
+    }
+
+    // Little-endian base-256 digits. Each base58 digit multiplies the complete
+    // value by 58, so leading `1`s remain explicit zero bytes rather than being
+    // confused with the significant digit buffer.
+    let mut digits = Vec::<u8>::new();
+    for &byte in &input[zeros..] {
+        let digit = BASE58_ALPHABET
+            .iter()
+            .position(|candidate| *candidate == byte)
+            .ok_or("character outside the Solana base58 alphabet")? as u32;
+        let mut carry = digit;
+        for value in &mut digits {
+            carry += u32::from(*value) * 58;
+            *value = (carry & 0xff) as u8;
+            carry >>= 8;
+        }
+        while carry != 0 {
+            digits.push((carry & 0xff) as u8);
+            carry >>= 8;
+        }
+        if zeros.saturating_add(digits.len()) > N {
+            return Err("base58 value exceeds the requested byte width");
+        }
+    }
+
+    let mut out = [0u8; N];
+    let start = N - digits.len();
+    for (offset, digit) in digits.iter().rev().enumerate() {
+        out[start + offset] = *digit;
+    }
+    Ok(out)
+}
+
+/// Encodes bytes in the base58 alphabet used by Solana keys and signatures.
+#[must_use]
+pub fn encode_solana_base58(bytes: &[u8]) -> String {
+    let zeros = bytes.iter().take_while(|byte| **byte == 0).count();
+    let mut digits = Vec::<u8>::new();
+    for &byte in bytes {
+        let mut carry = u32::from(byte);
+        for digit in &mut digits {
+            carry += u32::from(*digit) << 8;
+            *digit = (carry % 58) as u8;
+            carry /= 58;
+        }
+        while carry != 0 {
+            digits.push((carry % 58) as u8);
+            carry /= 58;
+        }
+    }
+
+    let mut out = String::with_capacity(zeros.saturating_add(digits.len()));
+    out.extend(std::iter::repeat_n('1', zeros));
+    for digit in digits.iter().rev() {
+        out.push(char::from(BASE58_ALPHABET[usize::from(*digit)]));
+    }
+    out
+}
+
+fn base64_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
+}
+
+/// Decodes canonical padded base64 for one bounded Solana transaction.
+pub fn decode_solana_base64(text: &str) -> Result<Vec<u8>, &'static str> {
+    let input = text.as_bytes();
+    if input.len() > MAX_SOLANA_BASE64_BYTES {
+        return Err("base64 transaction exceeds the packet-size encoding bound");
+    }
+    if input.len() % 4 != 0 {
+        return Err("base64 transaction length is not a quartet boundary");
+    }
+
+    let mut out = Vec::with_capacity(input.len() / 4 * 3);
+    let quartet_count = input.len() / 4;
+    for (index, quartet) in input.chunks_exact(4).enumerate() {
+        let last = index + 1 == quartet_count;
+        let a = base64_digit(quartet[0]).ok_or("invalid base64 first digit")?;
+        let b = base64_digit(quartet[1]).ok_or("invalid base64 second digit")?;
+        out.push((a << 2) | (b >> 4));
+
+        match (quartet[2], quartet[3]) {
+            (b'=', b'=') if last => {
+                if b & 0x0f != 0 {
+                    return Err("non-zero base64 spare bits");
+                }
+            }
+            (c, b'=') if last => {
+                let c = base64_digit(c).ok_or("invalid base64 third digit")?;
+                if c & 0x03 != 0 {
+                    return Err("non-zero base64 spare bits");
+                }
+                out.push((b << 4) | (c >> 2));
+            }
+            (b'=', _) | (_, b'=') => return Err("base64 padding outside the final quartet"),
+            (c, d) => {
+                let c = base64_digit(c).ok_or("invalid base64 third digit")?;
+                let d = base64_digit(d).ok_or("invalid base64 fourth digit")?;
+                out.push((b << 4) | (c >> 2));
+                out.push((c << 6) | d);
+            }
+        }
+    }
+    if out.len() > MAX_SOLANA_TRANSACTION_BYTES {
+        return Err("decoded transaction exceeds the packet-size limit");
+    }
+    Ok(out)
 }
 
 /// Builds and signs a single-signer Solana transaction (legacy or `v0`).
@@ -305,4 +491,49 @@ pub fn sign_solana_tx(
     wire.extend_from_slice(&sig.to_bytes());
     wire.extend_from_slice(&msg);
     wire
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::*;
+
+    #[test]
+    fn base58_preserves_leading_zeroes_and_never_panics() {
+        let zeroes = [0u8; 32];
+        let encoded_zeroes = "1".repeat(32);
+        assert_eq!(decode_solana_base58::<32>(&encoded_zeroes), Ok(zeroes));
+        assert_eq!(encode_solana_base58(&zeroes), encoded_zeroes);
+
+        let mut one = [0u8; 32];
+        one[31] = 1;
+        let encoded_one = format!("{}2", "1".repeat(31));
+        assert_eq!(decode_solana_base58::<32>(&encoded_one), Ok(one));
+        assert_eq!(encode_solana_base58(&one), encoded_one);
+
+        assert!(decode_solana_base58::<32>(&"1".repeat(33)).is_err());
+        assert!(decode_solana_base58::<32>("0").is_err());
+    }
+
+    #[test]
+    fn base58_round_trip_covers_every_byte_value() {
+        let mut value = [0u8; 64];
+        for (index, byte) in value.iter_mut().enumerate() {
+            *byte = index as u8;
+        }
+        let encoded = encode_solana_base58(&value);
+        assert_eq!(decode_solana_base58::<64>(&encoded), Ok(value));
+    }
+
+    #[test]
+    fn base64_is_canonical_and_packet_bounded() {
+        assert_eq!(decode_solana_base64(""), Ok(Vec::new()));
+        assert_eq!(decode_solana_base64("Zg=="), Ok(b"f".to_vec()));
+        assert_eq!(decode_solana_base64("Zm8="), Ok(b"fo".to_vec()));
+        assert_eq!(decode_solana_base64("Zm9v"), Ok(b"foo".to_vec()));
+        assert!(decode_solana_base64("Zh==").is_err());
+        assert!(decode_solana_base64("Zm9=").is_err());
+        assert!(decode_solana_base64("Zg=").is_err());
+        assert!(decode_solana_base64("=m9v").is_err());
+        assert!(decode_solana_base64(&"A".repeat(MAX_SOLANA_BASE64_BYTES + 4)).is_err());
+    }
 }

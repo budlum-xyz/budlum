@@ -406,20 +406,16 @@ fn review_2_cross_ee_alias_collision_and_bounded_solana_window() {
     let bh0 = [0xA0u8; 32];
     state.execution_state.foreign_lane.record_blockhash(bh0);
     let sol_seed = [0x51u8; 32];
-    let sol_pk = ed25519_dalek::SigningKey::from_bytes(&sol_seed)
-        .verifying_key()
-        .to_bytes();
     let sol_raw = sign_solana_tx(
         &sol_seed,
         false,
-        vec![sol_pk, SVM_MEMO_PROGRAM_ID],
         bh0,
-        vec![SolanaCompiledInstruction {
+        &[SVM_MEMO_PROGRAM_ID],
+        &[SolanaCompiledInstruction {
             program_id_index: 1,
             accounts: vec![0],
             data: b"memo".to_vec(),
         }],
-        Vec::new(),
     );
     coord
         .process_foreign_envelope(

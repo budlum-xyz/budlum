@@ -2,6 +2,9 @@
 
 use crate::core::account::AccountState;
 use crate::execution::coordinator::alias::{derive_foreign_account, ForeignScheme};
+use crate::execution::coordinator::foreign::solana::{
+    decode_solana_base58, decode_solana_base64, decode_solana_tx, encode_solana_base58,
+};
 use crate::execution::coordinator::foreign::{ForeignTx, VerifiedForeignOutcome};
 use crate::execution::coordinator::state::NS_SVM_ACCOUNT;
 use crate::execution::coordinator::svm_ee::ATTOS_PER_LAMPORT;
@@ -48,6 +51,11 @@ pub const SOLANA_METHOD_CLASSES: &[CompatMethodClass] = &[
     row("slotSubscribe", CompatEffect::LocalFilter),
     row("logsSubscribe", CompatEffect::LocalFilter),
     row("programSubscribe", CompatEffect::LocalFilter),
+    row("accountUnsubscribe", CompatEffect::LocalFilter),
+    row("signatureUnsubscribe", CompatEffect::LocalFilter),
+    row("slotUnsubscribe", CompatEffect::LocalFilter),
+    row("logsUnsubscribe", CompatEffect::LocalFilter),
+    row("programUnsubscribe", CompatEffect::LocalFilter),
 ];
 
 /// Solana JSON-RPC gateway adapter (`state` is read-only).
@@ -83,7 +91,7 @@ impl SolanaCompatGateway {
                 JsonRpcResponse::ok(id, serde_json::json!({ "solana-core": "2.0.0-budlum" }))
             }
             "getGenesisHash" => {
-                JsonRpcResponse::ok(id, serde_json::json!(hex::encode([0xBDu8; 32])))
+                JsonRpcResponse::ok(id, serde_json::json!(encode_solana_base58(&[0xBDu8; 32])))
             }
             "getSlot" | "getBlockHeight" => JsonRpcResponse::ok(id, serde_json::json!(self.slot)),
             "getEpochInfo" => JsonRpcResponse::ok(
@@ -98,31 +106,27 @@ impl SolanaCompatGateway {
                 id,
                 serde_json::json!({
                     "value": {
-                        "blockhash": hex::encode(self.latest_blockhash),
+                        "blockhash": encode_solana_base58(&self.latest_blockhash),
                         "lastValidBlockHeight": self.slot + 150,
                     }
                 }),
             ),
             "isBlockhashValid" => {
-                let bh_hex = req
-                    .params
-                    .get(0)
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("");
-                let valid = bh_hex == hex::encode(self.latest_blockhash);
+                let valid = parse_pubkey(&req.params, 0)
+                    .is_some_and(|blockhash| blockhash == self.latest_blockhash);
                 JsonRpcResponse::ok(id, serde_json::json!({ "value": valid }))
             }
             "getBalance" => {
-                let Some(pk32) = parse_pubkey_hex(&req.params, 0) else {
-                    return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "invalid pubkey hex");
+                let Some(pk32) = parse_pubkey(&req.params, 0) else {
+                    return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "invalid Solana pubkey");
                 };
                 let bud_addr = derive_foreign_account(ForeignScheme::SolanaEd25519, &pk32);
                 let lamports = state.get_attos_balance(&bud_addr) / ATTOS_PER_LAMPORT;
                 JsonRpcResponse::ok(id, serde_json::json!({ "value": lamports }))
             }
             "getAccountInfo" => {
-                let Some(pk32) = parse_pubkey_hex(&req.params, 0) else {
-                    return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "invalid pubkey hex");
+                let Some(pk32) = parse_pubkey(&req.params, 0) else {
+                    return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "invalid Solana pubkey");
                 };
                 let data = state
                     .execution_state
@@ -148,11 +152,15 @@ impl SolanaCompatGateway {
                 JsonRpcResponse::ok(id, serde_json::json!([]))
             }
             "sendTransaction" => {
-                let Some(raw_hex) = req.params.get(0).and_then(serde_json::Value::as_str) else {
-                    return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "missing tx hex");
+                let Some(encoded) = req.params.get(0).and_then(serde_json::Value::as_str) else {
+                    return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "missing transaction");
                 };
-                let Ok(raw_wire) = hex::decode(raw_hex.trim_start_matches("0x")) else {
-                    return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "bad Solana wire hex");
+                let Some(raw_wire) = parse_transaction_bytes(encoded) else {
+                    return JsonRpcResponse::err(
+                        id,
+                        JSONRPC_INVALID_PARAMS,
+                        "transaction is neither canonical base64 nor legacy hex",
+                    );
                 };
                 let mut preview = state.clone();
                 if !preview
@@ -174,7 +182,10 @@ impl SolanaCompatGateway {
                 };
                 match coord.process_foreign_envelope(&mut preview, &env, 0) {
                     Ok(VerifiedForeignOutcome::Solana { decoded, .. }) => {
-                        JsonRpcResponse::ok(id, serde_json::json!(hex::encode(decoded.tx_hash)))
+                        JsonRpcResponse::ok(
+                            id,
+                            serde_json::json!(encode_solana_base58(&decoded.fee_payer_signature)),
+                        )
                     }
                     Ok(_) => JsonRpcResponse::err(id, JSONRPC_TX_REJECTED, "unexpected tx kind"),
                     Err(e) => JsonRpcResponse::err(id, JSONRPC_TX_REJECTED, e.to_string()),
@@ -195,10 +206,33 @@ impl SolanaCompatGateway {
     }
 }
 
-fn parse_pubkey_hex(params: &serde_json::Value, idx: usize) -> Option<[u8; 32]> {
-    let s = params.get(idx)?.as_str()?;
-    let b = hex::decode(s.trim_start_matches("0x")).ok()?;
-    <[u8; 32]>::try_from(b.as_slice()).ok()
+fn parse_pubkey(params: &serde_json::Value, idx: usize) -> Option<[u8; 32]> {
+    let text = params.get(idx)?.as_str()?;
+    if let Ok(key) = decode_solana_base58::<32>(text) {
+        if encode_solana_base58(&key) == text {
+            return Some(key);
+        }
+    }
+    let bytes = hex::decode(text.trim_start_matches("0x")).ok()?;
+    <[u8; 32]>::try_from(bytes.as_slice()).ok()
+}
+
+fn parse_transaction_bytes(text: &str) -> Option<Vec<u8>> {
+    if let Some(explicit_hex) = text.strip_prefix("0x") {
+        return hex::decode(explicit_hex).ok();
+    }
+
+    let base64 = decode_solana_base64(text).ok();
+    let looks_like_legacy_hex = !text.is_empty()
+        && text.len() % 2 == 0
+        && text.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if looks_like_legacy_hex {
+        if let Some(wire) = base64.as_ref().filter(|wire| decode_solana_tx(wire).is_ok()) {
+            return Some(wire.clone());
+        }
+        return hex::decode(text).ok();
+    }
+    base64
 }
 
 /// Evaluates a raw Solana JSON-RPC 2.0 request string against read-only `state` (`18548`).

@@ -19,6 +19,15 @@ use std::fmt;
 /// Recent blockhash window length for the Solana foreign lane (Section 8.6.2).
 pub const SOLANA_BLOCKHASH_WINDOW: usize = 150;
 
+/// The 32-byte digest the Solana lane keeps for a 64-byte signature.
+///
+/// The lane stores one digest per signature, not the signature itself, because
+/// the cache outlives the transaction and a digest is not a credential.
+fn sha256_32(bytes: &[u8]) -> [u8; 32] {
+    use sha2::{Digest as _, Sha256};
+    Sha256::digest(bytes).into()
+}
+
 /// Envelope lane classification (Section 8.6.3 item 1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LaneKind {
@@ -91,6 +100,8 @@ pub enum LaneAdmissionError {
     ReplayRejected(&'static str),
     /// Expired Aptos transaction or unknown Solana recent blockhash.
     StaleOrExpired(&'static str),
+    /// A Solana envelope failed strict decoding or carried no execution budget.
+    InvalidSolana(&'static str),
 }
 
 impl fmt::Display for LaneAdmissionError {
@@ -100,6 +111,7 @@ impl fmt::Display for LaneAdmissionError {
             Self::LaneFull(lane) => write!(f, "mempool lane {lane:?} is full"),
             Self::ReplayRejected(why) => write!(f, "replay rejected: {why}"),
             Self::StaleOrExpired(why) => write!(f, "stale or expired envelope: {why}"),
+            Self::InvalidSolana(why) => write!(f, "invalid Solana envelope: {why}"),
         }
     }
 }
@@ -121,6 +133,7 @@ pub struct MultiLaneMempool {
     lanes: BTreeMap<LaneKind, SingleLane>,
     recent_blockhashes: VecDeque<[u8; 32]>,
     seen_solana_sigs: BTreeSet<[u8; 32]>,
+    solana_sigs_by_blockhash: BTreeMap<[u8; 32], BTreeSet<[u8; 32]>>,
     seen_duty_windows: BTreeSet<([u8; 32], u64)>,
 }
 
@@ -136,6 +149,7 @@ impl MultiLaneMempool {
             lanes: BTreeMap::new(),
             recent_blockhashes: VecDeque::new(),
             seen_solana_sigs: BTreeSet::new(),
+            solana_sigs_by_blockhash: BTreeMap::new(),
             seen_duty_windows: BTreeSet::new(),
         }
     }
@@ -144,10 +158,91 @@ impl MultiLaneMempool {
     ///
     /// Convenience: called at block commit to advance the Solana blockhash window.
     pub fn push_recent_blockhash(&mut self, block_hash: [u8; 32]) {
+        if let Some(position) = self
+            .recent_blockhashes
+            .iter()
+            .position(|existing| *existing == block_hash)
+        {
+            let _ = self.recent_blockhashes.remove(position);
+        }
         if self.recent_blockhashes.len() >= SOLANA_BLOCKHASH_WINDOW {
-            let _ = self.recent_blockhashes.pop_front();
+            if let Some(expired) = self.recent_blockhashes.pop_front() {
+                if let Some(signatures) = self.solana_sigs_by_blockhash.remove(&expired) {
+                    for signature in signatures {
+                        self.seen_solana_sigs.remove(&signature);
+                    }
+                }
+            }
         }
         self.recent_blockhashes.push_back(block_hash);
+
+        if let Some(lane) = self.lanes.get_mut(&LaneKind::Solana) {
+            let recent = &self.recent_blockhashes;
+            let expired: Vec<[u8; 32]> = lane
+                .entries
+                .iter()
+                .filter(|(_, entry)| {
+                    matches!(
+                        &entry.replay,
+                        LaneReplayRule::SolanaWindow { recent_blockhash, .. }
+                            if !recent.contains(recent_blockhash)
+                    )
+                })
+                .map(|(hash, _)| *hash)
+                .collect();
+            for hash in expired {
+                if let Some(entry) = lane.entries.remove(&hash) {
+                    lane.used_bytes = lane.used_bytes.saturating_sub(entry.raw_bytes.len());
+                }
+            }
+        }
+    }
+
+    /// Strictly decode and admit one Solana wire transaction with its execution budget.
+    ///
+    /// The method decodes internally so callers cannot pair a valid hash with a
+    /// different fee payer, signature, blockhash, or raw envelope. The complete
+    /// transaction hash identifies the entry; the fee-payer signature is the
+    /// independent replay key. Both raw bytes and BGU/fee limits are retained
+    /// for block selection and execution.
+    pub fn admit_foreign_solana(
+        &mut self,
+        raw_wire: &[u8],
+        gas_limit_bgu: u64,
+        max_fee_per_bgu_atto: u128,
+        max_priority_fee_per_bgu_atto: u128,
+        now_unix_s: u64,
+    ) -> Result<
+        crate::execution::coordinator::foreign::solana::DecodedSolanaTx,
+        LaneAdmissionError,
+    > {
+        use crate::execution::coordinator::foreign::solana::decode_solana_tx;
+
+        if gas_limit_bgu == 0 {
+            return Err(LaneAdmissionError::InvalidSolana("zero BGU budget"));
+        }
+        let transaction = decode_solana_tx(raw_wire)
+            .map_err(|_| LaneAdmissionError::InvalidSolana("strict wire decoding failed"))?;
+        let entry = LaneEntry {
+            tx_hash: transaction.tx_hash,
+            lane: LaneKind::Solana,
+            replay: LaneReplayRule::SolanaWindow {
+                recent_blockhash: transaction.recent_blockhash,
+                signature_digest: sha256_32(&transaction.fee_payer_signature),
+            },
+            gas_limit_bgu,
+            max_fee_per_bgu_atto,
+            max_priority_fee_per_bgu_atto,
+            raw_bytes: raw_wire.to_vec(),
+        };
+        self.admit(entry, now_unix_s)?;
+        Ok(transaction)
+    }
+
+    /// The Solana blockhash window, newest last, as the door reads it.
+    #[must_use]
+    pub fn solana_blockhash_window(&self) -> Vec<[u8; 32]> {
+        self.recent_blockhashes.iter().copied().collect()
     }
 
     /// Number of queued transactions in `lane`.
@@ -243,10 +338,15 @@ impl MultiLaneMempool {
 
         // 2. Commit into the target lane only after every check succeeded.
         if let LaneReplayRule::SolanaWindow {
-            signature_digest, ..
+            recent_blockhash,
+            signature_digest,
         } = &entry.replay
         {
             self.seen_solana_sigs.insert(*signature_digest);
+            self.solana_sigs_by_blockhash
+                .entry(*recent_blockhash)
+                .or_default()
+                .insert(*signature_digest);
         }
         if let LaneReplayRule::DutyWindow {
             validator,
@@ -273,6 +373,13 @@ impl MultiLaneMempool {
         let mut candidates: Vec<(u128, LaneEntry)> = Vec::new();
         for lane in self.lanes.values() {
             for entry in lane.entries.values() {
+                if matches!(
+                    &entry.replay,
+                    LaneReplayRule::SolanaWindow { recent_blockhash, .. }
+                        if !self.recent_blockhashes.contains(recent_blockhash)
+                ) {
+                    continue;
+                }
                 if let Some(tip) = entry.effective_priority_fee(base_fee_atto) {
                     candidates.push((tip, entry.clone()));
                 }
@@ -383,5 +490,64 @@ mod tests {
         assert_eq!(batch[0].lane, LaneKind::Local);
         assert_eq!(batch[1].lane, LaneKind::Solana);
         assert_eq!(batch[2].lane, LaneKind::Ethereum);
+    }
+
+    #[test]
+    fn solana_admission_retains_wire_bytes_prices_execution_and_evicts_replays() {
+        use crate::execution::coordinator::foreign::solana::{
+            sign_solana_tx, SolanaCompiledInstruction,
+        };
+
+        let key = [21u8; 32];
+        let blockhash = [0x7Au8; 32];
+        let instruction = SolanaCompiledInstruction {
+            program_id_index: 1,
+            accounts: vec![0],
+            data: vec![2, 0, 0, 0],
+        };
+        let wire = sign_solana_tx(
+            &key,
+            false,
+            blockhash,
+            &[[0xEEu8; 32]],
+            &[instruction.clone()],
+        );
+        let mut pool = MultiLaneMempool::new(8, 4096);
+        pool.push_recent_blockhash(blockhash);
+        let decoded = pool
+            .admit_foreign_solana(&wire, 1_000, 100, 10, 1_000)
+            .expect("valid Solana envelope");
+        assert_eq!(pool.lane_len(LaneKind::Solana), 1);
+        let entries = pool.select_for_block(0, 1_000);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].raw_bytes, wire);
+        assert_eq!(entries[0].tx_hash, decoded.tx_hash);
+
+        assert_eq!(
+            pool.admit_foreign_solana(&wire, 1_000, 100, 10, 1_000),
+            Err(LaneAdmissionError::ReplayRejected(
+                "duplicate Solana signature"
+            ))
+        );
+        assert_eq!(
+            pool.admit_foreign_solana(&wire, 0, 100, 10, 1_000),
+            Err(LaneAdmissionError::InvalidSolana("zero BGU budget"))
+        );
+
+        let stale = sign_solana_tx(&key, false, [0x01u8; 32], &[[0xEEu8; 32]], &[instruction]);
+        assert!(matches!(
+            pool.admit_foreign_solana(&stale, 1_000, 100, 10, 1_000),
+            Err(LaneAdmissionError::StaleOrExpired(_))
+        ));
+
+        for step in 0..SOLANA_BLOCKHASH_WINDOW {
+            let mut next = [0u8; 32];
+            next[..8].copy_from_slice(&(step as u64 + 1).to_le_bytes());
+            pool.push_recent_blockhash(next);
+        }
+        assert!(pool.seen_solana_sigs.is_empty());
+        assert!(pool.solana_sigs_by_blockhash.is_empty());
+        assert_eq!(pool.lane_len(LaneKind::Solana), 0);
+        assert!(pool.select_for_block(0, 1_000).is_empty());
     }
 }
