@@ -74,7 +74,7 @@ reason = "The name states the function."
 [[concept]]
 old = ["Budscan", "BudScan"]
 patterns = ['(?i)budscan']
-allow_paths = ["xtask/gates/tests/repository_locks.rs"]
+allow_paths = ["xtask/gates/tests/repository_locks.rs", "xtask/gates/src/gates/tree_is_english.rs"]
 new_code = "budlum-explorer"
 term_en = "Budlum Explorer"
 term_tr = "Budlum Gezgini"
