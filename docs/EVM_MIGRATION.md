@@ -12,12 +12,9 @@ slots, **without migrating source-chain ETH balance** (`8.12.2` item 7).
      proof against `transactionsRoot` and a status-1 receipt proof against
      `receiptsRoot`. The recovered sender is the deployment authority and the
      contract address must equal `CREATE(deployer, nonce)`.
-   - **Factory creation (`CREATE` or `CREATE2`):** When a contract was created
-     through a factory, the caller supplies `FactoryCreationEvidence` proving
-     the factory's own deployment transaction + receipt and the deterministic
-     `CREATE(factory, factory_nonce)` or `CREATE2(factory, salt, keccak256(init))`
-     derivation. Authority belongs to the factory deployer, never an arbitrary
-     transaction caller.
+   - **Factory creation:** refused with `FactoryDeploymentRequiresExecutionEvidence`.
+     A transaction/receipt proof does not prove which address a factory's execution
+     created. Nonce, salt and init-code claims are not accepted as a substitute.
 2. **EIP-712 `MigrationAuthorization`:**
    - Domain: `name = "Budlum Migration"`, `version = "1"`, `chainId = budlumChainId`,
      `verifyingContract = contract`.
@@ -33,7 +30,11 @@ slots, **without migrating source-chain ETH balance** (`8.12.2` item 7).
    - `MigrationTx::FinalizeEvmImport` recomputes the full Ethereum storage MPT
      root from the staged non-zero slots (`storage_root::compute_storage_root`)
      and refuses unless it matches the proven `storageRoot` byte-for-byte
-     (`migration_preserves_address_code_and_storage_root`).
+     (`migration_preserves_address_code_and_storage_root` and
+     `migration_finalize_refuses_incomplete_storage`).
+   - Deployment transaction/receipt roots belong to `deployment_block`; account
+     and storage state belong to the later `source_block`. The authorization
+     binds `source_block`, and a deployment after that state is refused.
 4. **Target occupation & zero-ETH rule (`8.12.2` items 6-7):**
    - Refuses if the 20-byte address is already occupied in `ee/evm/account`,
      collides with a registered native alias or `0x...B001` precompile, has a
@@ -45,7 +46,8 @@ slots, **without migrating source-chain ETH balance** (`8.12.2` item 7).
    - Verification BGU (`proof_nodes`, `code_bytes`, `storage_slots`) plus storage
      byte deposit is charged in `attoBUD` from the migrator to `reward_pool_account()`
      before any namespace write commits (`G-3` supply conservation, `G-4` refusal
-     atomicity).
+     atomicity). The quote separately reports `verification_attos`,
+     `storage_deposit_attos` and their checked `total_attos` sum.
 
 ## 2. `bud-migrate` CLI
 
@@ -60,9 +62,14 @@ bud-migrate digest --contract 0xa3183498b579bd228aa2b62101c40cc1da978f24 \
 # 2. Scan runtime bytecode for PUSH20 hardcoded addresses and external CALLs:
 bud-migrate analyze --code-file ./token.runtime.hex --json
 
-# 3. Verify an offline migration bundle end-to-end (authority + MPT + fee quote):
-bud-migrate verify ./sepolia-erc20-bundle.json
+# 3. Verify with node-owned pricing (the migrator bundle cannot set the schedule):
+bud-migrate verify ./sepolia-erc20-bundle.json ./chain-fee-schedule.json
 ```
+
+The second file is node-owned chain configuration with `bgu_per_proof_node`,
+`bgu_per_code_byte`, `bgu_per_storage_slot`, `attos_per_bgu` and
+`attos_per_storage_byte`. It is deliberately separate from the migrator's
+bundle; a `fee_schedule` field inside that bundle is rejected.
 
 ## 3. On-Chain Installation Flow (`ExecutionCoordinator::apply_evm_migration`)
 

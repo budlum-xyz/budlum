@@ -15,6 +15,7 @@
 | `fuzz_blockchain_serialize` | A minimal byte-slice harness; a placeholder for a future roundtrip extension | Present |
 | `evm_rlp_decode` | F10.1 RLP decoder: random relayer bytes -> canonical decode/error, no panic | Present |
 | `evm_mpt_verify` | F10.1 MPT verifier: bounded key/proof pieces -> verify/error, no panic | Present |
+| `evm_deployment_proof` | Signed deployment transaction and receipt proof -> evidence/refusal, no panic | Present |
 | `consensus_state_transition` | produce_block + try_reorg panic freedom / MAX_REORG_DEPTH | Present |
 | `relayer_escrow` | bridge lock -> mint -> burn -> unlock plus the UniversalRelayer proof path | Present |
 | `zk_verifier` | ProofEnvelope bincode + DefaultAdapter::verify fail-closed | Present |
@@ -38,6 +39,7 @@ cargo +nightly fuzz run consensus_validate
 cargo +nightly fuzz run fuzz_blockchain_serialize
 cargo +nightly fuzz run evm_rlp_decode
 cargo +nightly fuzz run evm_mpt_verify
+cargo +nightly fuzz run evm_deployment_proof
 ```
 
 A short smoke run example:

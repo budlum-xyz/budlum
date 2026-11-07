@@ -3,7 +3,7 @@
 //! Commands:
 //! - `bud-migrate digest --contract 0x... --chain-id <id> --source-block <n>`
 //! - `bud-migrate analyze --code-file <path> [--json]`
-//! - `bud-migrate verify <bundle.json>`
+//! - `bud-migrate verify <bundle.json> <chain-fee-schedule.json>`
 
 use std::collections::BTreeMap;
 use std::env;
@@ -13,7 +13,7 @@ use std::process::ExitCode;
 use budlum_core::cross_domain::evm::account_proof;
 use budlum_core::execution::coordinator::migration::{
     begin_import, dependency_report, verify_deployment, DependencyReport, DeploymentProof,
-    FactoryCreationEvidence, FactoryDerivation, ImportEvmStorageChunk, MigrationAuthorization,
+    ImportEvmStorageChunk, MigrationAuthorization,
     MigrationFeeSchedule, MigrationRecord, MigrationRequest, StorageEntry,
 };
 use serde::{Deserialize, Serialize};
@@ -52,7 +52,7 @@ fn usage() -> String {
         "Commands:",
         "  digest   --contract 0x<20-bytes> --chain-id <u64> --source-block <u64>",
         "  analyze  --code-file <path> [--json]",
-        "  verify   <bundle.json>",
+        "  verify   <bundle.json> <chain-fee-schedule.json>",
     ]
     .join("\n")
 }
@@ -132,20 +132,28 @@ fn format_dependency_report(report: &DependencyReport) -> String {
 }
 
 fn run_verify(args: &[String]) -> Result<String, String> {
-    if args.len() != 1 {
-        return Err(String::from("verify expects exactly one <bundle.json> path"));
+    if args.len() != 2 {
+        return Err(String::from(
+            "verify expects <bundle.json> and <chain-fee-schedule.json>",
+        ));
     }
-    let Some(path) = args.first() else {
-        return Err(String::from("missing bundle path"));
-    };
+    let path = &args[0];
+    let fee_path = &args[1];
     let raw = fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
     let bundle: MigrationBundleFile =
         serde_json::from_str(&raw).map_err(|e| format!("parse {path}: {e}"))?;
-    let output = verify_bundle(bundle)?;
+    // This is node configuration, never a field supplied by the migrator.
+    let fee_raw = fs::read_to_string(fee_path).map_err(|e| format!("read {fee_path}: {e}"))?;
+    let fee_schedule: MigrationFeeSchedule =
+        serde_json::from_str(&fee_raw).map_err(|e| format!("parse {fee_path}: {e}"))?;
+    let output = verify_bundle(bundle, &fee_schedule)?;
     serde_json::to_string_pretty(&output).map_err(|e| format!("encode output: {e}"))
 }
 
-fn verify_bundle(bundle: MigrationBundleFile) -> Result<VerifiedMigrationOutput, String> {
+fn verify_bundle(
+    bundle: MigrationBundleFile,
+    fee_schedule: &MigrationFeeSchedule,
+) -> Result<VerifiedMigrationOutput, String> {
     let deployment = bundle.deployment.into_proof()?;
     let evidence = verify_deployment(&deployment, bundle.source_chain_id)
         .map_err(|e| format!("deployment proof: {e}"))?;
@@ -163,9 +171,6 @@ fn verify_bundle(bundle: MigrationBundleFile) -> Result<VerifiedMigrationOutput,
         source_block: bundle.authorization.source_block,
         signature: parse_hex_bytes(&bundle.authorization.signature)?,
     };
-    let fee_schedule = bundle
-        .fee_schedule
-        .unwrap_or(MigrationFeeSchedule::TESTNET_DEFAULT);
     let request = MigrationRequest {
         chain_id: bundle.chain_id,
         source_chain_id: bundle.source_chain_id,
@@ -184,7 +189,7 @@ fn verify_bundle(bundle: MigrationBundleFile) -> Result<VerifiedMigrationOutput,
         plan.import_chunk(&decoded).map_err(|e| e.to_string())?;
     }
     let deps = dependency_report(&parse_hex_bytes(&bundle.code)?);
-    let record = plan.finalize(&fee_schedule).map_err(|e| e.to_string())?;
+    let record = plan.finalize(fee_schedule).map_err(|e| e.to_string())?;
     Ok(VerifiedMigrationOutput::from_record(
         record,
         evidence.deployer,
@@ -194,6 +199,7 @@ fn verify_bundle(bundle: MigrationBundleFile) -> Result<VerifiedMigrationOutput,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MigrationBundleFile {
     chain_id: u64,
     source_chain_id: u64,
@@ -208,23 +214,10 @@ struct MigrationBundleFile {
     authorization: AuthorizationFile,
     #[serde(default)]
     chunks: Vec<StorageChunkFile>,
-    #[serde(default)]
-    fee_schedule: Option<MigrationFeeSchedule>,
 }
 
 #[derive(Deserialize)]
-struct FactoryFile {
-    factory_deployment: Box<DeploymentProofFile>,
-    kind: String,
-    #[serde(default)]
-    factory_nonce: u64,
-    #[serde(default)]
-    salt: String,
-    #[serde(default)]
-    init_code: String,
-}
-
-#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DeploymentProofFile {
     deployment_block: u64,
     transaction_index: u64,
@@ -233,32 +226,10 @@ struct DeploymentProofFile {
     transactions_root: String,
     receipt_proof: Vec<String>,
     receipts_root: String,
-    #[serde(default)]
-    factory: Option<FactoryFile>,
 }
 
 impl DeploymentProofFile {
     fn into_proof(self) -> Result<DeploymentProof, String> {
-        let factory = match self.factory {
-            None => None,
-            Some(f) => {
-                let inner = f.factory_deployment.into_proof()?;
-                let derivation = match f.kind.as_str() {
-                    "create" => FactoryDerivation::Create {
-                        factory_nonce: f.factory_nonce,
-                    },
-                    "create2" => FactoryDerivation::Create2 {
-                        salt: parse_hex_array::<32>(&f.salt)?,
-                        init_code: parse_hex_bytes(&f.init_code)?,
-                    },
-                    other => return Err(format!("unknown factory derivation `{other}`")),
-                };
-                Some(FactoryCreationEvidence {
-                    factory_deployment: Box::new(inner),
-                    derivation,
-                })
-            }
-        };
         Ok(DeploymentProof {
             deployment_block: self.deployment_block,
             transaction_index: self.transaction_index,
@@ -267,7 +238,6 @@ impl DeploymentProofFile {
             transactions_root: parse_hex_array::<32>(&self.transactions_root)?,
             receipt_proof: parse_hex_list(&self.receipt_proof)?,
             receipts_root: parse_hex_array::<32>(&self.receipts_root)?,
-            factory,
         })
     }
 }
@@ -361,6 +331,7 @@ struct FeeOutput {
     code_bytes: u64,
     storage_slots: u64,
     verification_bgu: u64,
+    storage_bytes: u64,
     verification_attos: String,
     storage_deposit_attos: String,
     total_attos: String,
@@ -400,6 +371,7 @@ impl VerifiedMigrationOutput {
                 code_bytes: record.usage.code_bytes,
                 storage_slots: record.usage.storage_slots,
                 verification_bgu: record.fee.verification_bgu,
+                storage_bytes: record.fee.storage_bytes,
                 verification_attos: record.fee.verification_attos.to_string(),
                 storage_deposit_attos: record.fee.storage_deposit_attos.to_string(),
                 total_attos: record.fee.total_attos.to_string(),

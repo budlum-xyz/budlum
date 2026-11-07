@@ -3,6 +3,8 @@
 #![no_main]
 
 use budlum_core::cross_domain::evm::account_proof::{check_code, verify_account, verify_storage};
+use budlum_core::cross_domain::evm::mpt;
+use budlum_core::cross_domain::evm::rlp::{self, Item};
 use budlum_core::execution::coordinator::migration::{
     dependency_report, verify_deployment, DeploymentProof,
 };
@@ -27,6 +29,39 @@ fn split_nodes(mut raw: &[u8]) -> Vec<Vec<u8>> {
 }
 
 fuzz_target!(|data: &[u8]| {
+    if data.len() > 8192 {
+        return;
+    }
+
+    // Make the fuzz input the MPT-proven transaction. Unlike arbitrary roots,
+    // this reaches legacy/typed transaction decoding and signature recovery.
+    let key = rlp::encode(&Item::String(Vec::new()));
+    let path = mpt::hp_encode(&mpt::to_nibbles(&key), true);
+    let transaction_node = rlp::encode(&Item::List(vec![
+        Item::String(path.clone()),
+        Item::String(data.to_vec()),
+    ]));
+    let receipt = rlp::encode(&Item::List(vec![
+        Item::String(vec![1]),
+        Item::String(Vec::new()),
+        Item::String(vec![0; 256]),
+        Item::List(Vec::new()),
+    ]));
+    let receipt_node = rlp::encode(&Item::List(vec![
+        Item::String(path),
+        Item::String(receipt),
+    ]));
+    let proven = DeploymentProof {
+        deployment_block: 0,
+        transaction_index: 0,
+        transaction: data.to_vec(),
+        transaction_proof: vec![transaction_node.clone()],
+        transactions_root: mpt::keccak256(&transaction_node),
+        receipt_proof: vec![receipt_node.clone()],
+        receipts_root: mpt::keccak256(&receipt_node),
+    };
+    let _ = verify_deployment(&proven, 11_155_111);
+
     if data.len() < 120 {
         return;
     }
@@ -65,7 +100,6 @@ fuzz_target!(|data: &[u8]| {
         transactions_root,
         receipt_proof: nodes.clone(),
         receipts_root,
-        factory: None,
     };
     let _ = verify_deployment(&proof, 11_155_111);
     let _ = verify_account(&nodes, &state_root, &contract);

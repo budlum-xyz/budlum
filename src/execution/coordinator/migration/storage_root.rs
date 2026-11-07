@@ -138,4 +138,69 @@ mod tests {
         let r2 = compute_storage_root(&map);
         assert_eq!(r1, r2);
     }
+    fn manual_leaf(slot: &[u8; 32], value: [u8; 32]) -> Vec<u8> {
+        let path = mpt::hp_encode(&mpt::to_nibbles(&mpt::keccak256(slot)), true);
+        rlp::encode(&Item::List(vec![
+            Item::String(path),
+            Item::String(rlp::encode(&Item::String(minimal_word(&value)))),
+        ]))
+    }
+
+    #[test]
+    fn one_slot_matches_an_independently_built_leaf() {
+        let slot = [0x42u8; 32];
+        let leaf = manual_leaf(&slot, value(7));
+        assert_eq!(
+            compute_storage_root(&BTreeMap::from([(slot, value(7))])),
+            mpt::keccak256(&leaf)
+        );
+    }
+
+    #[test]
+    fn extension_and_inline_branch_encoding_match_a_manual_trie() {
+        let entries = vec![
+            TrieEntry {
+                path: vec![0, 1],
+                value: vec![1],
+            },
+            TrieEntry {
+                path: vec![0, 2],
+                value: vec![2],
+            },
+        ];
+        let mut fields: Vec<Item> = (0..16)
+            .map(|index| match index {
+                1 => leaf(&[], vec![1]),
+                2 => leaf(&[], vec![2]),
+                _ => Item::String(Vec::new()),
+            })
+            .collect();
+        fields.push(Item::String(Vec::new()));
+        let branch = Item::List(fields);
+        let extension = Item::List(vec![
+            Item::String(mpt::hp_encode(&[0], false)),
+            Item::String(mpt::keccak256(&rlp::encode(&branch)).to_vec()),
+        ]);
+        assert_eq!(
+            mpt::keccak256(&rlp::encode(&build_node(&entries, 0))),
+            mpt::keccak256(&rlp::encode(&extension))
+        );
+    }
+
+    #[test]
+    fn complete_and_partial_storage_have_distinct_independent_roots() {
+        let first = [0x11u8; 32];
+        let second = [0x22u8; 32];
+        let complete = BTreeMap::from([(first, value(1)), (second, value(2))]);
+        let partial = BTreeMap::from([(first, value(1))]);
+        // Independently generated with an external HexaryTrie implementation.
+        assert_eq!(
+            hex::encode(compute_storage_root(&complete)),
+            "4c78f36c95677bfff06e5e4c367c53fbf230c81dcba95e905bf90ce13f64ebbe"
+        );
+        assert_eq!(
+            hex::encode(compute_storage_root(&partial)),
+            "39898e1d5b8c286eaaa0efd7e4c24d8002e57cc86895895f250cfb1eb7d2b0d4"
+        );
+    }
 }

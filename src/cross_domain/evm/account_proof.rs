@@ -315,6 +315,17 @@ mod tests {
         ]));
         assert_eq!(decode_account(&too_wide_33b), Err(AccountProofError::FieldTooWide));
 
+        let short_hash = rlp::encode(&Item::List(vec![
+            Item::String(Vec::new()),
+            Item::String(Vec::new()),
+            Item::String(vec![0u8; 31]),
+            Item::String(vec![0u8; 32]),
+        ]));
+        assert_eq!(
+            decode_account(&short_hash),
+            Err(AccountProofError::InvalidHashLength)
+        );
+
         let not_an_account = rlp::encode(&Item::List(vec![Item::String(uint_bytes(1))]));
         assert_eq!(
             decode_account(&not_an_account),

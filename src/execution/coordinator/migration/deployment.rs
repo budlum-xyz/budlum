@@ -2,42 +2,22 @@
 //!
 //! Proves both the deployment transaction (`transactionsRoot`) and its receipt
 //! (`receiptsRoot`), recovering the deployer from the signed transaction and
-//! deriving the created contract address. Supports both direct `CREATE` and
-//! factory deployments (`FactoryCreationEvidence`, where migration authority
-//! belongs to the account that deployed the factory).
+//! deriving the direct `CREATE` contract address. Factory calls are refused:
+//! their created address requires execution evidence that this proof does not carry.
 
 use super::DeploymentEvidence;
 use crate::cross_domain::evm::mpt::{self, MptError};
 use crate::cross_domain::evm::receipt::{self, ReceiptError};
 use crate::cross_domain::evm::rlp::{self, Item, RlpError};
 use crate::crypto::secp256k1_recover::{recover_address, RecoverError};
-use crate::execution::coordinator::evm_ee::compute_create2_address;
 use serde::{Deserialize, Serialize};
 
 /// Maximum RLP proof nodes accepted per transaction or receipt trie walk.
 pub const MAX_PROOF_NODES: usize = 64;
 
-/// Deterministic derivation rule proving how a verified factory created `contract`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FactoryDerivation {
-    /// Factory executed `CREATE` at `factory_nonce`.
-    Create { factory_nonce: u64 },
-    /// Factory executed `CREATE2` with `salt` and `init_code`.
-    Create2 { salt: [u8; 32], init_code: Vec<u8> },
-}
-
-/// Evidence proving the deployer of a factory that created the migrated contract
-/// (directive 8.12.2 item 2: factory rule).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FactoryCreationEvidence {
-    /// Direct `CREATE` deployment proof of the factory contract itself.
-    pub factory_deployment: Box<DeploymentProof>,
-    /// Deterministic `CREATE` or `CREATE2` derivation from the factory address.
-    pub derivation: FactoryDerivation,
-}
-
 /// Source-chain evidence proving who holds migration authority for `contract`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeploymentProof {
     /// Finalized source block supplying `transactions_root` and `receipts_root`.
     pub deployment_block: u64,
@@ -53,23 +33,15 @@ pub struct DeploymentProof {
     pub receipt_proof: Vec<Vec<u8>>,
     /// Finalized block's `receiptsRoot`.
     pub receipts_root: [u8; 32],
-    /// Optional factory deployment proof when `transaction` called a factory.
-    #[serde(default)]
-    pub factory: Option<FactoryCreationEvidence>,
 }
 
 impl DeploymentProof {
-    /// Total MPT proof nodes verified across this deployment (including factory proof).
+    /// Total transaction and receipt MPT proof nodes verified for this deployment.
     #[must_use]
     pub fn proof_node_count(&self) -> usize {
-        let base = self
-            .transaction_proof
+        self.transaction_proof
             .len()
-            .saturating_add(self.receipt_proof.len());
-        match &self.factory {
-            Some(fac) => base.saturating_add(fac.factory_deployment.proof_node_count()),
-            None => base,
-        }
+            .saturating_add(self.receipt_proof.len())
     }
 }
 
@@ -89,8 +61,6 @@ pub enum DeploymentProofError {
     SourceChainMismatch { signed: u64, expected: u64 },
     DeploymentReverted,
     FactoryDeploymentRequiresExecutionEvidence,
-    FactoryAddressMismatch,
-    NestedFactoryUnsupported,
 }
 
 impl std::fmt::Display for DeploymentProofError {
@@ -119,14 +89,8 @@ impl std::fmt::Display for DeploymentProofError {
             Self::DeploymentReverted => write!(f, "deployment proof: deployment reverted"),
             Self::FactoryDeploymentRequiresExecutionEvidence => write!(
                 f,
-                "deployment proof: factory call requires factory creation evidence"
+                "deployment proof: factory call requires execution evidence for the created address"
             ),
-            Self::FactoryAddressMismatch => {
-                write!(f, "deployment proof: tx target does not match proven factory")
-            }
-            Self::NestedFactoryUnsupported => {
-                write!(f, "deployment proof: nested factory chain is not supported")
-            }
         }
     }
 }
@@ -184,41 +148,14 @@ pub fn verify_deployment(
             expected: expected_source_chain_id,
         });
     }
-    if tx.to.is_empty() {
-        let deployer = recover_address(&tx.signing_digest, &tx.signature)?;
-        let contract = create_address(&deployer, tx.nonce);
-        return Ok(DeploymentEvidence {
-            contract,
-            deployer,
-            deployment_block: proof.deployment_block,
-        });
-    }
-
-    let Some(factory_ev) = &proof.factory else {
+    if !tx.to.is_empty() {
         return Err(DeploymentProofError::FactoryDeploymentRequiresExecutionEvidence);
-    };
-    if factory_ev.factory_deployment.factory.is_some() {
-        return Err(DeploymentProofError::NestedFactoryUnsupported);
     }
-    let _ = recover_address(&tx.signing_digest, &tx.signature)?;
-    let factory_info = verify_deployment(&factory_ev.factory_deployment, expected_source_chain_id)?;
-    if factory_info.deployment_block > proof.deployment_block {
-        return Err(DeploymentProofError::InvalidTransaction);
-    }
-    if tx.to.as_slice() != factory_info.contract {
-        return Err(DeploymentProofError::FactoryAddressMismatch);
-    }
-    let created = match &factory_ev.derivation {
-        FactoryDerivation::Create { factory_nonce } => {
-            create_address(&factory_info.contract, *factory_nonce)
-        }
-        FactoryDerivation::Create2 { salt, init_code } => {
-            compute_create2_address(&factory_info.contract, salt, init_code)
-        }
-    };
+    let deployer = recover_address(&tx.signing_digest, &tx.signature)?;
+    let contract = create_address(&deployer, tx.nonce);
     Ok(DeploymentEvidence {
-        contract: created,
-        deployer: factory_info.deployer,
+        contract,
+        deployer,
         deployment_block: proof.deployment_block,
     })
 }
@@ -478,7 +415,6 @@ mod tests {
             transactions_root: mpt::keccak256(&tx_node),
             receipt_proof: vec![rec_node.clone()],
             receipts_root: mpt::keccak256(&rec_node),
-            factory: None,
         }
     }
 
@@ -509,6 +445,23 @@ mod tests {
         assert_eq!(
             verify_deployment(&proof(FACTORY_CALL_TX, true), SOURCE_CHAIN_ID),
             Err(DeploymentProofError::FactoryDeploymentRequiresExecutionEvidence)
+        );
+    }
+
+    #[test]
+    fn deployment_proof_refuses_substitution_and_oversized_proofs() {
+        let mut substituted = proof(LEGACY_TX, true);
+        substituted.transaction = hex::decode(EIP1559_TX.concat()).expect("hex");
+        assert_eq!(
+            verify_deployment(&substituted, SOURCE_CHAIN_ID),
+            Err(DeploymentProofError::TransactionMismatch)
+        );
+
+        let mut too_large = proof(LEGACY_TX, true);
+        too_large.transaction_proof = vec![Vec::new(); MAX_PROOF_NODES + 1];
+        assert_eq!(
+            verify_deployment(&too_large, SOURCE_CHAIN_ID),
+            Err(DeploymentProofError::ProofTooLarge)
         );
     }
 }

@@ -1,7 +1,7 @@
 //! EVM Migration Kit verification core and state-installing door (directive 8.12).
 //!
 //! 1. **Authorization (`8.12.2 item 2`):** Proven deployment transaction and receipt
-//!    (direct `CREATE` or factory rule) plus EIP-712 `MigrationAuthorization`.
+//!    (direct `CREATE`; factory calls fail closed) plus EIP-712 `MigrationAuthorization`.
 //! 2. **Account proof (`8.12.2 item 3`):** MPT state proof at finalized `source_block`.
 //! 3. **Storage chunks (`8.12.2 item 4`):** `MigrationTx::ImportEvmStorageChunk`
 //!    proving slots against `storageRoot` atomically (`G-4`).
@@ -33,10 +33,7 @@ pub mod fee;
 pub mod storage_root;
 
 pub use dependencies::{dependency_report, DependencyReport};
-pub use deployment::{
-    create_address, verify_deployment, DeploymentProof, DeploymentProofError,
-    FactoryCreationEvidence, FactoryDerivation,
-};
+pub use deployment::{create_address, verify_deployment, DeploymentProof, DeploymentProofError};
 pub use fee::{
     quote_migration_fee, MigrationFeeOverflow, MigrationFeeQuote, MigrationFeeSchedule,
     MigrationUsage,
@@ -656,15 +653,12 @@ mod tests {
     use super::*;
     use crate::core::account::ATTOS_PER_ATOM;
     use crate::cross_domain::evm::rlp::{self, Item};
-    use crate::execution::coordinator::evm_ee::compute_create2_address;
-    use crate::execution::coordinator::foreign::ethereum::sign_eip1559_tx;
     use crate::execution::coordinator::gas::MIN_UEL_BASE_FEE_ATTOS;
     use crate::execution::coordinator::{
         ExecutionCoordinator, UelAction, UelReceiptStatus, UelTx,
     };
     use crate::rpc::compat::ethereum::handle_eth_jsonrpc;
     use budlum_uel_abi::BlockContext;
-    use k256::ecdsa::SigningKey as SecpSigningKey;
 
     const DEPLOYER: &str = "7e5f4552091a69125d5dfcb7b8c2659029395bdf";
     const CONTRACT: &str = "a3183498b579bd228aa2b62101c40cc1da978f24";
@@ -744,7 +738,6 @@ mod tests {
             transactions_root: mpt::keccak256(&tx_node),
             receipt_proof: vec![rec_node.clone()],
             receipts_root: mpt::keccak256(&rec_node),
-            factory: None,
         }
     }
 
@@ -868,6 +861,31 @@ mod tests {
     }
 
     #[test]
+    fn migration_deployment_precedes_the_migrated_state() {
+        let (mut request, _) = request_with_code(sample_code(), [0u8; 32], 42);
+        request.deployment.deployment_block = SOURCE_BLOCK + 1;
+        assert_eq!(
+            begin_import(request),
+            Err(ImportError::DeploymentAfterSource {
+                deployment_block: SOURCE_BLOCK + 1,
+                source_block: SOURCE_BLOCK,
+            })
+        );
+    }
+
+    #[test]
+    fn migration_finalize_refuses_incomplete_storage() {
+        let slot = [0x42u8; 32];
+        let (request, expected) = request_with_code(sample_code(), slot, 42);
+        let plan = begin_import(request).expect("authorized and proven");
+        let computed = storage_root::compute_storage_root(&BTreeMap::new());
+        assert_eq!(
+            plan.finalize(&fee_schedule()),
+            Err(ImportError::StorageRootMismatch { expected, computed })
+        );
+    }
+
+    #[test]
     fn migration_preserves_address_code_and_storage_root() {
         let code = b"contract Token {}".to_vec();
         let slot = [0x42u8; 32];
@@ -897,7 +915,14 @@ mod tests {
         assert_eq!(record.imported_from.domain, "sepolia");
         assert_eq!(record.imported_from.block, SOURCE_BLOCK);
         assert_eq!(record.imported_from.address, address_of(CONTRACT));
-        assert_eq!(record.fee.total_attos, 927);
+        assert_eq!(record.usage.proof_nodes, 4);
+        assert_eq!(record.usage.code_bytes, 9);
+        assert_eq!(record.usage.storage_slots, 1);
+        assert_eq!(record.fee.verification_bgu, 158);
+        assert_eq!(record.fee.storage_bytes, 73);
+        assert_eq!(record.fee.verification_attos, 474);
+        assert_eq!(record.fee.storage_deposit_attos, 365);
+        assert_eq!(record.fee.total_attos, 839);
     }
 
     #[test]
@@ -932,106 +957,6 @@ mod tests {
         };
         assert!(plan.import_chunk(&mixed).is_err());
         assert_eq!(plan, before);
-    }
-
-    #[test]
-    fn migration_factory_create2_authority_belongs_to_factory_deployer() {
-        // Key 1 = factory deployer; Key 2 = caller invoking factory.
-        let factory_sk = [0x01u8; 32];
-        let caller_sk = [0x02u8; 32];
-        let fac_signing = SecpSigningKey::from_bytes((&factory_sk).into()).expect("sk1");
-        let fac_deployer = address_of(DEPLOYER);
-
-        let fac_proof = deployment_proof();
-        let factory_addr = address_of(CONTRACT);
-        let salt = [0x77u8; 32];
-        let init_code = vec![0x60, 0x00, 0x60, 0x00, 0xf3];
-        let child_contract = compute_create2_address(&factory_addr, &salt, &init_code);
-
-        let caller_tx = sign_eip1559_tx(
-            &caller_sk,
-            SOURCE_CHAIN_ID,
-            0,
-            1_000,
-            2_000,
-            100_000,
-            Some(factory_addr),
-            0,
-            &init_code,
-            &[],
-        )
-        .expect("sign caller factory invocation");
-        let receipt = {
-            let mut r = vec![0x02];
-            r.extend_from_slice(&rlp::encode(&Item::List(vec![
-                Item::String(vec![1]),
-                Item::String(uint_bytes(80_000)),
-                Item::String(vec![0; 256]),
-                Item::List(Vec::new()),
-            ])));
-            r
-        };
-        let key = rlp::encode(&Item::String(Vec::new()));
-        let path = mpt::hp_encode(&mpt::to_nibbles(&key), true);
-        let tx_node = rlp::encode(&Item::List(vec![
-            Item::String(path.clone()),
-            Item::String(caller_tx.clone()),
-        ]));
-        let rec_node = rlp::encode(&Item::List(vec![Item::String(path), Item::String(receipt)]));
-        let child_dep = DeploymentProof {
-            deployment_block: SOURCE_BLOCK - 500,
-            transaction_index: 0,
-            transaction: caller_tx,
-            transaction_proof: vec![tx_node.clone()],
-            transactions_root: mpt::keccak256(&tx_node),
-            receipt_proof: vec![rec_node.clone()],
-            receipts_root: mpt::keccak256(&rec_node),
-            factory: Some(FactoryCreationEvidence {
-                factory_deployment: Box::new(fac_proof),
-                derivation: FactoryDerivation::Create2 { salt, init_code },
-            }),
-        };
-
-        let ev = verify_deployment(&child_dep, SOURCE_CHAIN_ID).expect("factory proof valid");
-        assert_eq!(ev.contract, child_contract);
-        assert_eq!(ev.deployer, fac_deployer);
-
-        let mut auth = MigrationAuthorization {
-            contract: child_contract,
-            budlum_chain_id: CHAIN_ID,
-            source_block: SOURCE_BLOCK,
-            signature: Vec::new(),
-        };
-        let (sig, rec_id) = fac_signing
-            .sign_prehash_recoverable(&auth.digest())
-            .expect("sign auth");
-        auth.signature.extend_from_slice(&sig.to_bytes());
-        auth.signature.push(rec_id.to_byte());
-
-        let code = sample_code();
-        let empty_root = storage_root::compute_storage_root(&BTreeMap::new());
-        let acc_node = leaf(
-            &mpt::keccak256(&child_contract),
-            rlp::encode(&Item::List(vec![
-                Item::String(uint_bytes(1)),
-                Item::String(Vec::new()),
-                Item::String(empty_root.to_vec()),
-                Item::String(account_proof::code_hash(&code).to_vec()),
-            ])),
-        );
-        let req = MigrationRequest {
-            chain_id: CHAIN_ID,
-            source_chain_id: SOURCE_CHAIN_ID,
-            source_domain: String::from("sepolia"),
-            source_block: SOURCE_BLOCK,
-            deployment: child_dep,
-            authorization: auth,
-            state_root: mpt::keccak256(&acc_node),
-            account_proof: vec![acc_node],
-            code,
-            occupied: false,
-        };
-        assert!(begin_import(req).is_ok());
     }
 
     #[test]

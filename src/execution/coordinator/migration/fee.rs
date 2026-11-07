@@ -47,7 +47,11 @@ pub struct MigrationFeeQuote {
     pub verification_bgu: u64,
     /// Code plus 32-byte slot keys and 32-byte slot values.
     pub storage_bytes: u64,
-    /// `verification_bgu * attos_per_bgu + storage_bytes * attos_per_storage_byte`.
+    /// `verification_bgu * attos_per_bgu`.
+    pub verification_attos: u128,
+    /// `storage_bytes * attos_per_storage_byte`.
+    pub storage_deposit_attos: u128,
+    /// `verification_attos + storage_deposit_attos`.
     pub total_attos: u128,
 }
 
@@ -104,6 +108,54 @@ pub fn quote_migration_fee(
     Ok(MigrationFeeQuote {
         verification_bgu,
         storage_bytes,
+        verification_attos: gas_attos,
+        storage_deposit_attos: byte_attos,
         total_attos,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn schedule() -> MigrationFeeSchedule {
+        MigrationFeeSchedule {
+            bgu_per_proof_node: 10,
+            bgu_per_code_byte: 2,
+            bgu_per_storage_slot: 100,
+            attos_per_bgu: 3,
+            attos_per_storage_byte: 5,
+        }
+    }
+
+    #[test]
+    fn migration_fee_charges_each_checked_component() {
+        let quote = quote_migration_fee(
+            MigrationUsage {
+                proof_nodes: 7,
+                code_bytes: 20,
+                storage_slots: 2,
+            },
+            &schedule(),
+        )
+        .expect("the integer quote does not overflow");
+        assert_eq!(quote.verification_bgu, 310);
+        assert_eq!(quote.storage_bytes, 148);
+        assert_eq!(quote.verification_attos, 930);
+        assert_eq!(quote.storage_deposit_attos, 740);
+        assert_eq!(quote.total_attos, 1670);
+    }
+
+    #[test]
+    fn migration_fee_never_wraps() {
+        let overflow = quote_migration_fee(
+            MigrationUsage {
+                proof_nodes: u64::MAX,
+                code_bytes: 0,
+                storage_slots: 0,
+            },
+            &schedule(),
+        );
+        assert_eq!(overflow, Err(MigrationFeeOverflow));
+    }
 }
