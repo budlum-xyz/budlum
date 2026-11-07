@@ -46,7 +46,6 @@ const MODULE_PREFIXES: &[(&str, &str)] = &[
     ("budlum:education_domain", "src/education_domain/"),
     ("budlum:execution", "src/execution/"),
     ("budlum:explorer_evidence", "src/explorer_evidence/"),
-    ("budlum:gateway", "src/gateway/"),
     ("budlum:light_client", "src/light_client/"),
     ("budlum:mempool", "src/mempool/"),
     ("budlum:network", "src/network/"),
