@@ -121,8 +121,7 @@ fn write_database_backup(
         .create(true)
         .truncate(false)
         .open(backup_dir.join(".budlum-backup.lock"))?;
-    lock.try_lock()
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    lock.try_lock()?;
     let timestamp_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(std::io::Error::other)?
