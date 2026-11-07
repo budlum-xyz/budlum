@@ -255,3 +255,5 @@ pub mod bud3_door;
 pub mod audit_lane_a;
 #[cfg(test)]
 pub mod audit_lane_b;
+#[cfg(test)]
+pub mod audit_lane_c;
