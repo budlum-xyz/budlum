@@ -2180,6 +2180,13 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-idle-code --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-idle-code
+      # B.U.D. 3.0 is the only storage system, so the identifiers of the systems it
+      # replaces may only leave the tree. Directive section 5.5 names them; this
+      # gate counts them and holds the count against a baseline that may only fall.
+      - name: no legacy storage gate + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-legacy-storage --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-legacy-storage
       # A registered Prometheus metric that nothing writes is a dashboard lie:
       # scrapes report a permanent zero next to real counters. Ratched off
       # .github/unwritten-metrics-baseline.txt; the baseline only shrinks.
@@ -2492,6 +2499,17 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-does-not-deny-shipped-code --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-does-not-deny-shipped-code
+      # The definition of Budlum does not change, so the first fourteen lines of both
+      # READMEs are held byte for byte.
+      - name: readme definition block is verbatim + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-definition-block-is-verbatim --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-definition-block-is-verbatim
+      # A template token in a page a reader sees says nobody filled it in.
+      - name: readme has no placeholders + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-has-no-placeholders --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-has-no-placeholders
       # The licence is named in LICENSE.md, budzero/LICENSE, every Cargo.toml,
       # the README badge and docs/NOTICE. They once contradicted each other
       # (MIT in one file, Apache-2.0 in the next) and the python check that

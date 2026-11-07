@@ -1,0 +1,38 @@
+# Legacy storage identifiers and paths of directive section 5.5.
+# One line per entry: name|count. A ratchet: the numbers may only fall.
+# Lower it with: BUDLUM_NO_LEGACY_STORAGE_WRITE=1 budlum-gates no-legacy-storage
+# Delete this file when every line is zero; the gate then becomes absolute.
+AcceptReallocation|12
+AnswerChallenge|13
+AnswerCodingAudit|18
+BudBitswap|16
+BudStorageEdition|38
+ContentDiscovery|22
+ContentManifest|237
+CustodyLedger|20
+EncodedObject|17
+ErasureScheme|114
+GeneratedSpec|59
+InMemoryStorageProvider|21
+LrcLayout|38
+MemoryContentStore|24
+MobileSelfContentPolicy|29
+MobileSelfProfile|50
+MsrError|13
+OneShareRegistry|14
+OpenChallenge|10
+OpenDeal|16
+PactBinding|2
+ReedSolomon|25
+ServerAdmission|8
+SingleScreenView|14
+StorageDealOpen|16
+StorageProvider|10
+StorageRegistry|281
+ThreeRecipePublic|71
+VideoRecipe|18
+path:bud/|119
+path:budzero/bud-node/|6
+path:src/chain/storage_maintenance.rs|1
+path:src/domain/deal_open.rs|1
+path:src/domain/storage_deal.rs|1

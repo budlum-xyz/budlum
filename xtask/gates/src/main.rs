@@ -118,6 +118,7 @@ mod gates {
     pub mod no_constant_security_verdicts;
     pub mod no_float_in_consensus_paths;
     pub mod no_idle_code;
+    pub mod no_legacy_storage;
     pub mod no_new_shell_gates;
     pub mod no_orphan_source_files;
     pub mod no_out_of_block_consensus_writes;
@@ -137,6 +138,8 @@ mod gates {
     pub mod proof_deps_are_exactly_pinned;
     pub mod qr_is_derivative_only;
     pub mod quantum_account;
+    pub mod readme_definition_block_is_verbatim;
+    pub mod readme_has_no_placeholders;
     pub mod readme_no_deny;
     pub mod reduction_claims;
     pub mod refusals_no_mutate;
@@ -1112,6 +1115,30 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::gates_are_wired::self_test,
+    },
+    Gate {
+        name: "no-legacy-storage",
+        replaces: None,
+        run: gates::no_legacy_storage::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::no_legacy_storage::self_test,
+    },
+    Gate {
+        name: "readme-definition-block-is-verbatim",
+        replaces: None,
+        run: gates::readme_definition_block_is_verbatim::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::readme_definition_block_is_verbatim::self_test,
+    },
+    Gate {
+        name: "readme-has-no-placeholders",
+        replaces: None,
+        run: gates::readme_has_no_placeholders::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::readme_has_no_placeholders::self_test,
     },
     Gate {
         name: "readme-does-not-deny-shipped-code",
