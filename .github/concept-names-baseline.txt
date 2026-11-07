@@ -22,7 +22,7 @@ Mikoriza|23|78
 Mobile Self|13|117
 PUL|14|100
 Pollen|70|755
-Regeneration|43|316
+Regeneration|41|247
 Sera|0|0
 Tarif|50|1433
 Universal Gateway|5|8

@@ -1,14 +1,14 @@
 //! Storage layer.
 //!
-//! Two intentionally separate namespaces live in `src/storage/`:
-//!
-//! * [`db`] / [`traits`] - the *node-local* key-value store (sled) that
-//!   Holds chain state, accounts, blocks, etc. Pre-existing, not touched
-//!   By the storage layer.
+//! The content namespace lives in `src/storage/`:
 //!
 //! * [`content_id`] / [`manifest`] - the *B.U.D. on-chain content-addressing
 //!   Primitives* introduced. These are
 //!   Pure data shapes - no I/O, no admin hooks, no team-server dependency.
+//!
+//! The node-local key-value store, the account proof trie and the pruning
+//! and witness-retention policies live in `crate::persistence` - chain
+//! state and blocks for this node, kept apart from the content shapes here.
 //!
 //! The domain-level deal / challenge accounting lives in
 //! `crate::domain::storage_deal::StorageRegistry` (kept under
@@ -18,7 +18,6 @@
 pub mod assignment;
 pub mod column_commitment;
 pub mod content_id;
-pub mod db;
 pub mod derived;
 pub mod dictionary;
 pub mod emit;
@@ -31,14 +30,12 @@ pub mod lifecycle;
 pub mod living_threshold;
 pub mod lrc;
 pub mod manifest;
-pub mod merkle_trie;
 pub mod mobile_self;
 pub mod msr;
 pub mod one_share;
 pub mod one_view;
 pub mod payload_crypt;
 pub mod provider;
-pub mod pruning;
 pub mod qr_carousel;
 pub mod qr_codec;
 pub mod qr_encode;
@@ -66,10 +63,8 @@ pub mod three_regime;
 pub mod three_reveal;
 pub mod three_rpc;
 pub mod three_visibility;
-pub mod traits;
 pub mod transformed;
 pub mod view_grant;
-pub mod witness_retention;
 
 pub use assignment::{
     assign_object, assign_shard, displaced_shards, AssignmentError, ShardCandidate,
@@ -121,7 +116,7 @@ pub use provider::{
     provider_challenge_id, ChallengeId, DealId, InMemoryStorageProvider, ProviderChallengeResult,
     PutReceipt, StorageProof, StorageProvider, StorageProviderError,
 };
-pub use pruning::{NodeMode, PruningPolicy};
+pub use crate::persistence::pruning::{NodeMode, PruningPolicy};
 pub use render::{render, render_and_verify, RenderError, RenderFormat};
 pub use server_admission::{admit_device_as_server, ServerAdmission, ServerAdmissionRefusal};
 

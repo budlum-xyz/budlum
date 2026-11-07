@@ -674,7 +674,7 @@ fn is_scannable(path: &Path) -> bool {
     let s = path.to_string_lossy();
     s.ends_with(".rs")
         && !s.contains("/target/")
-        && path.file_name().is_none_or(|n| n != "regeneration.rs")
+        && path.file_name().is_none_or(|n| n != "canonical_programs_reproduce.rs")
 }
 
 /// Walks the source tree and **discovers** EVERY point producing a program hash.
@@ -1329,7 +1329,7 @@ mod tests {
         assert!(!is_scannable(Path::new(
             "xtask/gates/src/gates/regeneration.rs"
         )));
-        assert!(is_scannable(Path::new("src/domain/regeneration_stage.rs")));
+        assert!(is_scannable(Path::new("src/chain/state_recovery/regeneration_stage.rs")));
         assert!(is_scannable(Path::new("src/regeneration.rs.bak.rs")));
     }
 

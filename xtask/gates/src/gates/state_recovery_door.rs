@@ -26,8 +26,8 @@
 use std::path::Path;
 
 const MOD_RS: &str = "src/domain/mod.rs";
-const STAGE_RS: &str = "src/domain/regeneration_stage.rs";
-const HEALTH_RS: &str = "src/domain/regen_health.rs";
+const STAGE_RS: &str = "src/chain/state_recovery/regeneration_stage.rs";
+const HEALTH_RS: &str = "src/chain/state_recovery/regen_health.rs";
 const CHAOS_RS: &str = "src/tests/regeneration_recovery.rs";
 
 /// The decision-order tokens inside `assess`, in the required order. Each is
@@ -359,7 +359,7 @@ pub fn self_test() -> Result<String, String> {
         return Err(problems.join("\n  "));
     }
     Ok(String::from(
-        "regen-health-door gate canaries all caught: deletion, re-unwiring, forgery-door \
+        "state-recovery-door gate canaries all caught: deletion, re-unwiring, forgery-door \
          removal, order scramble, test dissolution",
     ))
 }

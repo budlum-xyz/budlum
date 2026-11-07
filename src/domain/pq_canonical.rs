@@ -31,7 +31,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::regeneration_stage::Stage;
+use crate::chain::state_recovery::regeneration_stage::Stage;
 use crate::crypto::scheme::{SchemeFamily, SchemeId};
 use crate::settlement::anchor_ledger::AnchorKeyLedger;
 use crate::settlement::pq_anchor::{verify_anchor_full, PqAnchor};
@@ -415,8 +415,8 @@ pub(crate) fn test_seal(stage: Stage, height: u64) -> SealId {
 /// `snapshot` with the post-quantum seal of its stage and height.
 #[cfg(test)]
 pub(crate) fn sealed(
-    mut snapshot: super::regeneration_stage::StageSnapshot,
-) -> super::regeneration_stage::StageSnapshot {
+    mut snapshot: crate::chain::state_recovery::regeneration_stage::StageSnapshot,
+) -> crate::chain::state_recovery::regeneration_stage::StageSnapshot {
     snapshot.seal = Some(test_seal(snapshot.stage, snapshot.height));
     snapshot
 }

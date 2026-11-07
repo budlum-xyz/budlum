@@ -72,6 +72,7 @@ src/chain/finality.rs:is_checkpoint_height
 src/chain/genesis.rs:with_bud_tokenomics_params
 src/chain/genesis.rs:with_validator
 src/chain/snapshot.rs:save_snapshot
+src/consensus/poa.rs:active_validator_count
 src/core/account.rs:add_role
 src/core/account.rs:clear_dirty
 src/core/account.rs:dirty_account_count
@@ -135,6 +136,10 @@ src/network/peer_manager.rs:report_slow_sync
 src/network/peer_manager.rs:set_max_peers_per_subnet
 src/network/peer_manager.rs:subnet_connection_count
 src/network/peer_manager.rs:tracked_peer_count
+src/persistence/db.rs:put_content
+src/persistence/pruning.rs:archive_node_default
+src/persistence/pruning.rs:full_node_default
+src/persistence/state_trie.rs:bulk_insert
 src/pollen/content_gate.rs:is_protected
 src/privacy/note_registry.rs:prune_spent_nullifiers
 src/privacy/note_registry.rs:spent_nullifier_count
@@ -147,7 +152,6 @@ src/registry/poa_compliance.rs:screen_address
 src/registry/poa_compliance.rs:travel_rule
 src/registry/poa_onboarding.rs:kyc_expiry_of
 src/rpc/server.rs:with_security
-src/storage/db.rs:put_content
 src/storage/derived.rs:acquire_master
 src/storage/derived.rs:hold_master
 src/storage/derived.rs:is_master_held
@@ -172,7 +176,6 @@ src/storage/lrc.rs:lrc_parity_shards
 src/storage/manifest.rs:loss_tolerance
 src/storage/manifest.rs:overhead_per_mille
 src/storage/manifest.rs:with_edition
-src/storage/merkle_trie.rs:bulk_insert
 src/storage/mobile_self.rs:availability_label
 src/storage/mobile_self.rs:put_user_content
 src/storage/mobile_self.rs:recommendation_for_content
@@ -185,11 +188,8 @@ src/storage/one_view.rs:network_held_bytes
 src/storage/pact_binding.rs:add_pact
 src/storage/pact_binding.rs:kq_pact_registry
 src/storage/pact_binding.rs:kq_storage_pact
-src/storage/pruning.rs:archive_node_default
-src/storage/pruning.rs:full_node_default
 src/storage/qr_reemit.rs:recipe_digest
 src/tokenomics/mod.rs:address_of
 src/tokenomics/mod.rs:amount_of
 src/tokenomics/mod.rs:calculate_epoch_reward
 src/tokenomics/reward_pool.rs:total_epoch_payout
-src/consensus/poa.rs:active_validator_count

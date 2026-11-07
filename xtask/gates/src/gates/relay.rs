@@ -6,7 +6,7 @@
 //! monitor, a chain, or the diverse-double-compiling workflow can consume
 //! without trusting the producer:
 //!
-//!   1. Runs the [`super::regeneration`] gate and parses its machine-readable
+//!   1. Runs the [`super::canonical_programs_reproduce`] gate and parses its machine-readable
 //!      tokens (`program-hash`, `matmul-hash`, `syscall-hash`,
 //!      `canonical-set`).
 //!   2. Independently recomputes the proof-side canonical-set digest from
@@ -30,7 +30,7 @@
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::regeneration::{hex32, hex_decode, keccak256};
+use super::canonical_programs_reproduce::{hex32, hex_decode, keccak256};
 
 /// Schema version of the relay status report.
 ///
@@ -407,7 +407,7 @@ fn validate_live_report_text(text: &str) -> Result<LiveProofSideReport, String> 
 /// Run the relay: regenerate, compare, sign, publish.
 pub fn run(root: &Path) -> Result<String, String> {
     // 1. Regeneration gate output (the consensus source).
-    let regen_out = super::regeneration::run(root)?;
+    let regen_out = super::canonical_programs_reproduce::run(root)?;
     let tokens = parse_regen_tokens(&regen_out)?;
 
     // 2. Independent proof-side digest from the source tree.

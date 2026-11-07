@@ -1,7 +1,7 @@
 //! The node-health layer: the caller that decides *when* a node reverts.
 //!
 //! WIRING: wired - the production caller is the node runtime's health tick,
-//! `crate::network::regen_health_tick`, which `Node::run` drives once per
+//! `crate::chain::state_recovery::regen_health_tick`, which `Node::run` drives once per
 //! finality beat and which executes the verdict through the ledger. The rules
 //! are pinned by this file's tests, the chaos acceptance suite, and the
 //! `regen-health-door` gate.
@@ -20,7 +20,7 @@
 //!
 //! The order is substance. Each earlier class rules out the later ones:
 //!
-//! 1. **Audit-trail integrity** ([`RegenerationLedger::validate`]). A ledger
+//! 1. **Audit-trail integrity** ([`RecoveryLedger::validate`]). A ledger
 //!    whose own history does not recompute cannot be trusted to choose a
 //!    reversion: whatever damaged the node damaged its memory of damage too.
 //!    The shallowest honest answer is a full reversion, subject to policy.
@@ -28,7 +28,7 @@
 //!    commitment) is checked against the network-agreed source. A mismatch is
 //!    a divergence; recovery means reverting to the cheapest stage at or
 //!    below the damage window, chosen by
-//!    [`RegenerationLedger::cheapest_target`] - never deeper than the damage,
+//!    [`RecoveryLedger::cheapest_target`] - never deeper than the damage,
 //!    never shallower than needed.
 //! 3. **Economics** ([`reversion_beats_repair`]). Reversion that costs more
 //!    than repair is a recovery mechanism operators learn to avoid, and a
@@ -60,7 +60,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::regeneration_stage::{
-    reversion_beats_repair, RegenerationLedger, ReversionPolicy, Stage, StageSnapshot, Stress,
+    reversion_beats_repair, RecoveryLedger, ReversionPolicy, Stage, StageSnapshot, Stress,
 };
 
 /// Why a human must hear about this node instead of the node healing itself.
@@ -128,8 +128,8 @@ pub enum HealthVerdict {
     /// The node must revert to this stage snapshot under this stress class.
     /// Execution belongs to the ledger; this verdict is the instruction,
     /// not the reversion. The executor's honest choice:
-    /// [`RegenerationLedger::revert`] when the audit trail validates, and
-    /// [`RegenerationLedger::revert_after_forgery`] when it does not - the
+    /// [`RecoveryLedger::revert`] when the audit trail validates, and
+    /// [`RecoveryLedger::revert_after_forgery`] when it does not - the
     /// ledger refuses to have those two reversed.
     RevertTo {
         /// The target snapshot. Already checked to be at or below the damage
@@ -189,14 +189,14 @@ impl Default for HealthPolicy {
 ///   canonical" and "unverifiable", and unverifiable is never signed off.
 /// - `stage_height(stage)` returns the height at which the node holds a
 ///   snapshot of that stage, feeding
-///   [`RegenerationLedger::cheapest_target`].
+///   [`RecoveryLedger::cheapest_target`].
 ///
 /// `repair_cost` and `regrowth_cost` are the caller's estimates for this
 /// damage event; the health layer owns no cost model of its own, because a
 /// cost model that lived here would quietly become policy nobody reads.
 #[must_use]
 pub fn assess(
-    ledger: &RegenerationLedger,
+    ledger: &RecoveryLedger,
     policy: &HealthPolicy,
     canonical: &dyn Fn(Stage, u64) -> Option<[u8; 32]>,
     stage_height: &dyn Fn(Stage) -> Option<u64>,
@@ -361,7 +361,7 @@ pub fn assess(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::regeneration_stage::Transdifferentiated;
+    use crate::chain::state_recovery::regeneration_stage::Transdifferentiated;
 
     const C_POLYP: [u8; 32] = [0xA1; 32];
     const C_EPHYRA: [u8; 32] = [0xB2; 32];
@@ -384,8 +384,8 @@ mod tests {
         }
     }
 
-    fn healthy_ledger() -> RegenerationLedger {
-        RegenerationLedger::at(100, C_MEDUSA)
+    fn healthy_ledger() -> RecoveryLedger {
+        RecoveryLedger::at(100, C_MEDUSA)
     }
 
     #[test]
@@ -453,7 +453,7 @@ mod tests {
     #[test]
     fn no_canonical_source_is_an_alarm_never_a_guess() {
         // A ledger at a height the canonical source does not know.
-        let ledger = RegenerationLedger::at(200, C_MEDUSA);
+        let ledger = RecoveryLedger::at(200, C_MEDUSA);
         let v = assess(
             &ledger,
             &HealthPolicy::default(),
@@ -492,7 +492,7 @@ mod tests {
         policy.reversion.allow_full_reversion = false;
         // Damage at height 1: only the Polyp snapshot (height 0) is below it,
         // and full reversions are forbidden.
-        let ledger = RegenerationLedger::at(1, C_EPHYRA);
+        let ledger = RecoveryLedger::at(1, C_EPHYRA);
         // canonical source has no entry at (Ephyra, 1) either; supply one
         // on the fly so canonicality, not sourcing, is what fails.
         let canonical_with_height_one = |stage: Stage, height: u64| -> Option<[u8; 32]> {
@@ -541,7 +541,7 @@ mod tests {
         let mut forged = ledger.clone();
         forged
             .reversion_events
-            .push(crate::domain::regeneration_stage::Reversion {
+            .push(crate::chain::state_recovery::regeneration_stage::Reversion {
                 from: Stage::Medusa,
                 to: Stage::Ephyra,
                 stress: Stress::Divergence,
