@@ -240,11 +240,11 @@ fn collect_files(dir: &Path, root: &Path, out: &mut Vec<(String, std::path::Path
 
 fn under(rel: &str, prefixes: &[String]) -> bool {
     prefixes.iter().any(|prefix| {
-        let prefix = prefix.strip_suffix('/').unwrap_or(prefix);
-        rel == prefix
-            || rel
-                .strip_prefix(prefix)
-                .is_some_and(|remaining| remaining.starts_with('/'))
+        if prefix.ends_with('/') {
+            rel.starts_with(prefix)
+        } else {
+            rel == prefix
+        }
     })
 }
 
@@ -513,12 +513,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn path_prefixes_match_repository_components_only() {
-        let prefixes = vec!["src/foo".to_string(), "docs/NAMING.md".to_string()];
+    fn path_filters_distinguish_directories_from_exact_files() {
+        let prefixes = vec!["src/foo/".to_string(), "docs/NAMING.md".to_string()];
         assert!(under("src/foo/module.rs", &prefixes));
         assert!(under("docs/NAMING.md", &prefixes));
         assert!(!under("src/foobar/module.rs", &prefixes));
         assert!(!under("docs/NAMING.md.bak", &prefixes));
+        assert!(!under("docs/NAMING.md/hidden.rs", &prefixes));
     }
 
     #[test]
