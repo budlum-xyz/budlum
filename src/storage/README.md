@@ -114,7 +114,7 @@ The root `README.md` is a dashboard only; maturity and risk warnings live here.
 ## Test suite
 
 - **Gate:** the `B.U.D. E2E Invariants (9/9 name-locked)` CI job (`ci.yml`) -
-  `cargo test --lib bud_e2e` + the `scripts/check-bud-e2e.sh` name canary
+  `cargo test --lib bud_e2e` + the `bud-e2e` gate name canary
   (vacuous-gate protection: if an invariant is deleted or renamed the gate FAILs).
 - **Coverage:** 9 module-independence invariants + 4 E2E flows (13 required tests),
   including a malicious cached-range operator scenario against an entropy-chosen challenge
@@ -139,7 +139,7 @@ is refused. This catches the careless client, not the
 determined liar.
 
 Detail, what is not claimed, and why: `docs/BUD_CONTENT_ENCRYPTION.md`.
-Gate: `scripts/check-content-encryption-is-declared-and-bound.sh` (14 canaries).
+Gate: `content-encryption-bound` (14 canaries).
 
 ## Coding audit: is the parity really parity
 
@@ -164,7 +164,7 @@ someone holding nothing. Replicated objects are not audited but refused: if ever
 there is no `i`, and saying "passed" would report a check that was never performed.
 
 Detail and probability table: `docs/BUD_STORAGE_ROADMAP.md` Gap 3b.
-Gate: `scripts/check-coding-audit-samples-the-relationship.sh` (13 canaries).
+Gate: `coding-audit-samples-the-relationship` (13 canaries).
 
 ## Roadmap markers
 

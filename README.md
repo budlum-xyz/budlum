@@ -278,8 +278,10 @@ cargo run --release -- --network devnet
 ### Devnet, four nodes + Prometheus
 
 ```bash
-docker compose -f ops/docker-compose.yml up   # see ops/docker-compose.yml
-bash ops/scripts/devnet-multinode-smoke.sh
+# The tool brings the four-validator devnet up itself; tear it down afterwards.
+cargo run --release --manifest-path xtask/tools/Cargo.toml -- devnet-multinode-smoke
+docker compose -f ops/docker-compose.yml -f ops/docker-compose.ci.yml \
+  -p budlum-multinode-smoke down -v --remove-orphans
 ```
 
 ### From a profile

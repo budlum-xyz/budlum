@@ -498,7 +498,7 @@ units or neither.** "40% of your objects are free" and "0.1% of your bytes are
 free" are the same measurement, and each on its own misleads a reader in the
 opposite direction. `DerivedSpec::stored_versus_independent` returns a pair
 rather than a ratio for this reason, and
-`check-derived-content-stays-byte-exact.sh` refuses a version that collapses
+the `derived-content-stays-byte-exact` gate refuses a version that collapses
 it to one number.
 
 The derived-content path exists because of this table. It is the only lever

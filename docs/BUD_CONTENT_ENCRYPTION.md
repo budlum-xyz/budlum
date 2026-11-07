@@ -39,7 +39,7 @@ fixed identity:
 ```
 
 That is why the gate checks not the presence of the field but its
-**boundness**: `scripts/check-content-encryption-is-declared-and-bound.sh`
+**boundness**: the `content-encryption-bound` gate
 catches, with a separate canary, the case where the commitment function takes
 the argument and discards it without reading, because every signature-based
 check passes in that state too.
