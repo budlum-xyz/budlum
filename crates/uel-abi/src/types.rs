@@ -33,6 +33,22 @@ impl EeId {
     pub const SVM: Self = Self(0x03);
     /// Move (Aptos dialect).
     pub const MOVE: Self = Self(0x04);
+    /// Move (Sui object-centric dialect, post-launch T-Expansion).
+    pub const MOVE_SUI: Self = Self(0x05);
+    /// Cairo (Starknet Sierra/CASM, post-launch T-Expansion).
+    pub const CAIRO: Self = Self(0x06);
+    /// NEAR WASM interpreter (post-launch T-Expansion).
+    pub const NEAR: Self = Self(0x07);
+    /// PolkaVM RV32EM interpreter (post-launch T-Expansion).
+    pub const POLKAVM: Self = Self(0x08);
+    /// TVM (TON virtual machine interpreter, post-launch T-Expansion).
+    pub const TVM: Self = Self(0x09);
+    /// Bitcoin-style UTXO verification script (post-launch T-Expansion).
+    pub const UTXO: Self = Self(0x0A);
+    /// Cardano Plutus Core UPLC interpreter (post-launch T-Expansion).
+    pub const PLUTUS: Self = Self(0x0B);
+    /// BudZero RV32IM provable guest environment (post-launch T-Expansion).
+    pub const BUDZERO_RV32: Self = Self(0x0C);
 }
 
 /// A state namespace the coordinator keeps for a worker, such as `uel/alias`.

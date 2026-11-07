@@ -15,6 +15,8 @@ pub mod cosmos;
 pub mod ethereum;
 pub mod solana;
 pub mod solana_coordinator;
+pub mod starknet;
+pub mod sui;
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

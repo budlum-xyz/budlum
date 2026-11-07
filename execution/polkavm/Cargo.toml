@@ -1,0 +1,11 @@
+[package]
+name = "budlum-ee-polkavm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Sandboxed out-of-process PolkaVM RV32EM interpreter worker for Budlum UEL (WP-53)."
+
+[dependencies]
+budlum-uel-abi = { path = "../../crates/uel-abi" }
+sha2 = "0.10"

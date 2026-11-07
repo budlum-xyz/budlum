@@ -11,6 +11,8 @@
 //!   every balance and approval operation executes at home via `UniversalCall`.
 //! WIRING: Unified Asset Registry pointer constants and records wired into UEL coordinator execution.
 
+pub mod svm_move_pointers;
+
 use crate::core::account::AccountState;
 use crate::execution::coordinator::alias::bech32_contract_addr;
 use crate::execution::coordinator::state::{

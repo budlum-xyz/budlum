@@ -7,6 +7,7 @@ pub mod bcs_admission;
 pub mod cosmos;
 pub mod ethereum;
 pub mod solana;
+pub mod sui;
 
 #[cfg(test)]
 mod foreign_tests;

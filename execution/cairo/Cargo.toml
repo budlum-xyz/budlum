@@ -1,0 +1,11 @@
+[package]
+name = "budlum-ee-cairo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Sandboxed out-of-process Cairo (Starknet) execution worker for Budlum UEL (WP-51)."
+
+[dependencies]
+budlum-uel-abi = { path = "../../crates/uel-abi" }
+sha2 = "0.10"

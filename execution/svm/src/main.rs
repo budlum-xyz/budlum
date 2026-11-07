@@ -1,5 +1,7 @@
 //! Out-of-process `budlum-ee-svm` worker binary (`EeId::SVM`, JIT disabled).
 
+pub mod pointer;
+
 use budlum_uel_abi::{
     BlockContext, CodeInfo, EeCall, EeCallKind, EeFault, EeId, EeOutcome, EeQuery, EeRefusal,
     ExecutionEnvironment, HostApi, HostRead, Namespace, OutcomeStatus, RefusalCode,

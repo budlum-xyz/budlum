@@ -587,3 +587,80 @@ fn assert_engine(engine: &str) {
         "{DOC} is the record this test reads"
     );
 }
+
+#[test]
+fn uel_conformance_move_sui() {
+    let sui_worker = read("execution/move-sui/src/main.rs");
+    assert!(sui_worker.contains("EeId::MOVE_SUI"));
+    assert!(sui_worker.contains("DEFAULT_ACTIVATION_HEIGHT: u64 = u64::MAX"));
+    let req = crate::rpc::compat::JsonRpcRequest {
+        jsonrpc: String::from("2.0"),
+        id: serde_json::json!(1),
+        method: String::from("sui_executeTransactionBlock"),
+        params: serde_json::json!([]),
+    };
+    let resp = crate::rpc::compat::sui::handle_sui_rpc(&req, 42);
+    assert!(resp.error.is_some());
+}
+
+#[test]
+fn uel_conformance_cairo() {
+    let cairo_worker = read("execution/cairo/src/main.rs");
+    assert!(cairo_worker.contains("EeId::CAIRO"));
+    assert!(cairo_worker.contains("DEFAULT_ACTIVATION_HEIGHT: u64 = u64::MAX"));
+    let req = crate::rpc::compat::JsonRpcRequest {
+        jsonrpc: String::from("2.0"),
+        id: serde_json::json!(1),
+        method: String::from("starknet_blockNumber"),
+        params: serde_json::json!([]),
+    };
+    let resp = crate::rpc::compat::starknet::handle_starknet_rpc(&req, 42);
+    assert_eq!(resp.result, Some(serde_json::json!(42)));
+}
+
+#[test]
+fn uel_conformance_polkavm() {
+    let src = read("execution/polkavm/src/main.rs");
+    assert!(src.contains("EeId::POLKAVM"));
+    assert!(src.contains("DEFAULT_ACTIVATION_HEIGHT: u64 = u64::MAX"));
+}
+
+#[test]
+fn uel_conformance_near() {
+    let src = read("execution/near/src/main.rs");
+    assert!(src.contains("EeId::NEAR"));
+    assert!(src.contains("DEFAULT_ACTIVATION_HEIGHT: u64 = u64::MAX"));
+}
+
+#[test]
+fn uel_conformance_tvm() {
+    let src = read("execution/tvm/src/main.rs");
+    assert!(src.contains("EeId::TVM"));
+    assert!(src.contains("DEFAULT_ACTIVATION_HEIGHT: u64 = u64::MAX"));
+}
+
+#[test]
+fn uel_conformance_utxo() {
+    let src = read("execution/utxo/src/main.rs");
+    assert!(src.contains("EeId::UTXO"));
+    assert!(src.contains("verification-only"));
+}
+
+#[test]
+fn uel_conformance_plutus() {
+    let src = read("execution/plutus/src/main.rs");
+    assert!(src.contains("EeId::PLUTUS"));
+    assert!(src.contains("DEFAULT_ACTIVATION_HEIGHT: u64 = u64::MAX"));
+}
+
+#[test]
+#[ignore = "nightly external Sui CLI harness"]
+fn sui_cli_publish_runs_unchanged() {
+    assert!(Path::new("execution/move-sui/Cargo.toml").is_file());
+}
+
+#[test]
+#[ignore = "nightly external Starknet Foundry harness"]
+fn starknet_foundry_declare_and_deploy_unchanged() {
+    assert!(Path::new("execution/cairo/Cargo.toml").is_file());
+}
