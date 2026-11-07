@@ -2133,7 +2133,7 @@ mod tests {
     use budlum_core::cli::ConsensusType;
 
     #[test]
-    fn zero_retention_refuses_backup_without_deleting_existing_files() {
+    fn blg_202_zero_retention_refuses_backup_without_deletion() {
         let dir = tempfile::tempdir().expect("temporary directory");
         let db_path = dir.path().join("db");
         let storage = budlum_core::storage::db::Storage::new(db_path.to_str().unwrap())
@@ -2149,7 +2149,7 @@ mod tests {
     }
 
     #[test]
-    fn retention_uses_numeric_timestamps_and_preserves_current_and_unknown_files() {
+    fn blg_202_retention_preserves_current_and_unknown_files() {
         let dir = tempfile::tempdir().unwrap();
         for name in [
             "budlum-2.budbak",
@@ -2168,7 +2168,7 @@ mod tests {
     }
 
     #[test]
-    fn backup_refuses_concurrent_writer_without_pruning() {
+    fn blg_202_backup_refuses_concurrent_writer_without_pruning() {
         let dir = tempfile::tempdir().unwrap();
         let storage =
             budlum_core::storage::db::Storage::new(dir.path().join("db").to_str().unwrap())
@@ -2184,7 +2184,7 @@ mod tests {
     }
 
     #[test]
-    fn backup_returns_a_verified_existing_snapshot() {
+    fn blg_202_backup_returns_a_verified_existing_snapshot() {
         let dir = tempfile::tempdir().unwrap();
         let storage =
             budlum_core::storage::db::Storage::new(dir.path().join("db").to_str().unwrap())

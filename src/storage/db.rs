@@ -2516,7 +2516,7 @@ mod tests {
     // storage tests exercise this regression instead.
     #[cfg(not(miri))]
     #[test]
-    fn snapshot_refuses_existing_partial_without_overwriting_it() {
+    fn blg_202_snapshot_refuses_existing_partial() {
         let dir = tempdir().unwrap();
         let storage = Storage::new(dir.path().join("db").to_str().unwrap()).unwrap();
         let backup = dir.path().join("backup.bin");

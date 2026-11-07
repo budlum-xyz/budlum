@@ -3699,7 +3699,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_later_transaction_rolls_back_the_whole_block() {
+    fn blg_020_refused_later_transaction_rolls_back_block() {
         use crate::core::account::AccountState;
         use crate::core::address::Address;
         use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
@@ -3737,7 +3737,7 @@ mod tests {
     }
 
     #[test]
-    fn an_overflowing_amount_and_fee_is_rejected_before_state_mutation() {
+    fn blg_197_amount_fee_overflow_is_rejected_before_mutation() {
         use crate::core::account::AccountState;
         use crate::core::address::Address;
         use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};

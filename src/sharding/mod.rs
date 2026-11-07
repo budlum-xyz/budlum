@@ -385,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn cross_shard_transfer_rejects_a_stale_nonce_without_mutation() {
+    fn blg_104_cross_shard_transfer_rejects_stale_nonce() {
         let mut state = AccountState::new();
         state.get_or_create(&addr(0)).balance = 100;
         state.get_or_create(&addr(0)).nonce = 1;
@@ -402,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn cross_shard_transfer_rejects_exhausted_nonce_without_mutation() {
+    fn blg_104_cross_shard_transfer_rejects_exhausted_nonce() {
         let mut state = AccountState::new();
         state.get_or_create(&addr(0)).balance = 100;
         state.get_or_create(&addr(0)).nonce = u64::MAX;

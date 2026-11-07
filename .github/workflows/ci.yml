@@ -187,7 +187,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --bin budlum-core 2>&1 | tee /tmp/node-tests.log
-          for name in zero_retention_refuses_backup_without_deleting_existing_files retention_uses_numeric_timestamps_and_preserves_current_and_unknown_files backup_refuses_concurrent_writer_without_pruning backup_returns_a_verified_existing_snapshot; do
+          for name in blg_202_zero_retention_refuses_backup_without_deletion blg_202_retention_preserves_current_and_unknown_files blg_202_backup_refuses_concurrent_writer_without_pruning blg_202_backup_returns_a_verified_existing_snapshot; do
             grep -Eq "${name} \.\.\. ok" /tmp/node-tests.log || {
               echo "::error::backup regression $name did not pass"
               exit 1

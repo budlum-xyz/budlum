@@ -2686,7 +2686,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_total_cost_rejects_overflow() {
+    fn blg_197_checked_total_cost_rejects_overflow() {
         let recipient = test_addr_from_byte(1u8);
         let tx = Transaction::new_with_fee(Address::zero(), recipient, u64::MAX, 1, 1, vec![]);
         assert_eq!(tx.checked_total_cost(), None);
