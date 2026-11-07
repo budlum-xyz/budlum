@@ -274,3 +274,19 @@ pub mod wp17_state_hardening;
 // WP-44 domains, bridge, settlement, and testnet feature-matrix locks.
 #[cfg(test)]
 pub mod wp44_domains_bridge_settlement;
+
+// WP-41 operational readiness, alerts, edge, backup, and topology locks.
+#[cfg(test)]
+pub mod alert_rules_reference_existing_metrics;
+#[cfg(test)]
+pub mod alerts_have_runbook_entries;
+#[cfg(test)]
+pub mod backup_covers_persisted_paths;
+#[cfg(test)]
+pub mod caddy_edges_match_the_services;
+#[cfg(test)]
+pub mod compose_topology_matches_services;
+#[cfg(test)]
+pub mod readiness_metrics;
+#[cfg(test)]
+pub mod scrape_topology_covers_the_rules;
