@@ -25,12 +25,17 @@ use crate::object_layer::family::{
     class_ref_bytes, profile_for, AssetKind, EndpointEvent, FamilyError, HomeVmFamily,
     RawEndpointEvent, SliceSource,
 };
-use crate::object_layer::ids::{ArrivalKey, AssetClassId, AssetId, DepartureId, HomeIdentity};
+use crate::object_layer::ids::{
+    ArrivalKey, AssetClassId, AssetId, DepartureId, DependencyId, HomeIdentity,
+};
 use crate::object_layer::rule::{
     apply_rule, sample_commitment, verify_samples, AssetSlice, ClassRule, ClassSlice, Condition,
-    Holder, ReferenceSample, RuleRefusal, Verb,
+    Holder, ReferenceSample, RuleRefusal, TemplateId, Verb,
 };
-use crate::object_layer::{DEFAULT_MIN_REFERENCE_SAMPLES, MAX_COMPOSITE_CALLS};
+use crate::object_layer::{
+    DEFAULT_CHALLENGE_WINDOW_BLOCKS, DEFAULT_MIN_REFERENCE_SAMPLES, MAX_COMPOSITE_CALLS,
+    MAX_ESCAPE_ADDRESS_BYTES,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -73,6 +78,8 @@ pub enum FreezeReason {
     UpgradeAuthorityChanged,
     /// Home custody fell below the object-layer record (N-4).
     CustodyDeficit,
+    /// A rule-fidelity challenge went un-rebutted past the challenge window.
+    UnrebuttedChallenge,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,6 +216,13 @@ pub enum Refusal {
     UnknownOffer,
     OfferExpired,
     WantNotMet(usize),
+    EscapeAddressTooLong,
+    PendingTentativeDependency,
+    UnknownDependency,
+    NothingToAdopt,
+    ChallengeAlreadyOpen,
+    NoChallengeOpen,
+    ChallengeExpired,
     Overflow,
 }
 
@@ -233,6 +247,24 @@ pub struct CustodyAudit {
     pub delta: i128,
 }
 
+/// One unresolved opt-in tentative home arrival dependency (single-dependency rule).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TentativeDependency {
+    pub id: DependencyId,
+    pub class: AssetClassId,
+    pub asset: AssetId,
+    pub holder: Holder,
+    pub amount: u128,
+    pub kind: AssetKind,
+}
+
+/// An open rule-fidelity challenge against a registered class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChallengeRecord {
+    pub challenger: Address,
+    pub opened_at: u64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectLayerRegistry {
     pub params: ObjectLayerParams,
@@ -253,6 +285,14 @@ pub struct ObjectLayerRegistry {
     #[serde(with = "crate::object_layer::pairs")]
     pub offers: BTreeMap<Hash32, Offer>,
     pub offer_seq: u64,
+    #[serde(with = "crate::object_layer::pairs", default)]
+    pub escape_addresses: BTreeMap<Address, Vec<u8>>,
+    #[serde(default)]
+    pub tentative_consent: BTreeSet<Address>,
+    #[serde(with = "crate::object_layer::pairs", default)]
+    pub dependencies: BTreeMap<DependencyId, TentativeDependency>,
+    #[serde(with = "crate::object_layer::pairs", default)]
+    pub challenges: BTreeMap<AssetClassId, ChallengeRecord>,
 }
 
 impl ObjectLayerRegistry {
@@ -276,6 +316,10 @@ impl ObjectLayerRegistry {
             && self.departures.is_empty()
             && self.home_nonces.is_empty()
             && self.offers.is_empty()
+            && self.escape_addresses.is_empty()
+            && self.tentative_consent.is_empty()
+            && self.dependencies.is_empty()
+            && self.challenges.is_empty()
     }
 
     /// The registry root. Folded into the settlement root only when the
@@ -386,7 +430,8 @@ impl ObjectLayerRegistry {
         let ClassRule::Template { id, .. } = &reg.rule else {
             return Err(Refusal::ClassClosedRule);
         };
-        if *id != family.template_for(reg.kind) {
+        let record_ok = reg.kind == AssetKind::Unique && *id == TemplateId::RecordV1;
+        if *id != family.template_for(reg.kind) && !record_ok {
             return Err(Refusal::TemplateNotForFamily);
         }
         if !family.slice_read_rule().admits(reg.slice_source) {
@@ -460,7 +505,7 @@ impl ObjectLayerRegistry {
 
     // ------------------------------------------------------------ arrival
 
-    /// `ObjectLayerTx::Arrive`, final phase. Anybody may carry the event.
+    /// `ObjectLayerTx::Arrive`, final or opt-in single-dependency tentative phase.
     pub fn arrive(
         &mut self,
         proof: &HomeEventProof,
@@ -478,6 +523,21 @@ impl ObjectLayerRegistry {
         else {
             return Err(Refusal::UnexpectedEvent);
         };
+        if proof.phase == Phase::Tentative {
+            let Some(account) = recipient else {
+                return Err(Refusal::TentativeClosed);
+            };
+            if !self.tentative_consent.contains(&account) {
+                return Err(Refusal::TentativeClosed);
+            }
+            if self
+                .dependencies
+                .values()
+                .any(|d| d.holder == Holder::Account(account))
+            {
+                return Err(Refusal::PendingTentativeDependency);
+            }
+        }
         self.atomic(|r| {
             r.use_arrival(proof)?;
             let class_id = AssetClassId::derive(proof.domain, &class_ref_bytes(kind, &contract));
@@ -509,6 +569,25 @@ impl ObjectLayerRegistry {
                 AssetKind::Fungible => {
                     r.credit(class_id, holder, amount)?;
                 }
+            }
+            if proof.phase == Phase::Tentative {
+                let dep_id = DependencyId::derive(
+                    proof.domain,
+                    proof.home_height,
+                    &proof.home_block_hash,
+                    &proof.event_id,
+                );
+                r.dependencies.insert(
+                    dep_id,
+                    TentativeDependency {
+                        id: dep_id,
+                        class: class_id,
+                        asset,
+                        holder,
+                        amount: if kind == AssetKind::Unique { 1 } else { amount },
+                        kind,
+                    },
+                );
             }
             Ok(asset)
         })
@@ -722,8 +801,10 @@ impl ObjectLayerRegistry {
             }
             Condition::Holds { class, holder } => self.holds(class, holder),
             Condition::SignedBy { signer } => signer == maker || signer == taker,
-            // Escape addresses are set by `SetEscapeAddress` (step 5).
-            Condition::EscapeAddress { .. } => false,
+            Condition::EscapeAddress { holder, home } => match holder {
+                Holder::Account(addr) => self.escape_addresses.get(addr) == Some(home),
+                Holder::Home(_) => false,
+            },
         }
     }
 
@@ -781,6 +862,12 @@ impl ObjectLayerRegistry {
         height: u64,
     ) -> Result<DepartureId, Refusal> {
         self.atomic(|r| {
+            if r.dependencies
+                .values()
+                .any(|d| d.holder == actor && d.class == class)
+            {
+                return Err(Refusal::PendingTentativeDependency);
+            }
             let entry = r.class(&class)?.clone();
             let family = profile_for(r.active_charter(entry.home_domain)?.vm_family);
             family.validate_address(&home_to)?;
@@ -935,6 +1022,179 @@ impl ObjectLayerRegistry {
                 home_custody,
                 delta,
             })
+        })
+    }
+
+    // ----------------------------------------- consent, escape, adopt, challenge
+
+    /// `ObjectLayerTx::SetEscapeAddress`: register or clear an account's raw
+    /// home escape/adoption binding (`<= MAX_ESCAPE_ADDRESS_BYTES`).
+    pub fn set_escape_address(
+        &mut self,
+        account: Address,
+        home: Vec<u8>,
+    ) -> Result<(), Refusal> {
+        if home.len() > MAX_ESCAPE_ADDRESS_BYTES {
+            return Err(Refusal::EscapeAddressTooLong);
+        }
+        if home.is_empty() {
+            self.escape_addresses.remove(&account);
+        } else {
+            self.escape_addresses.insert(account, home);
+        }
+        Ok(())
+    }
+
+    /// `ObjectLayerTx::SetTentativeConsent`: opt an account in or out of
+    /// single-dependency tentative arrivals.
+    pub fn set_tentative_consent(&mut self, account: Address, consent: bool) {
+        if consent {
+            self.tentative_consent.insert(account);
+        } else {
+            self.tentative_consent.remove(&account);
+        }
+    }
+
+    /// `ObjectLayerTx::Resolve`: clear an open tentative dependency once
+    /// home finality settles.
+    pub fn resolve(&mut self, dependency: DependencyId) -> Result<(), Refusal> {
+        if self.dependencies.remove(&dependency).is_none() {
+            return Err(Refusal::UnknownDependency);
+        }
+        Ok(())
+    }
+
+    /// `ObjectLayerTx::Adopt`: migrate assets held by `Holder::Home` to
+    /// `Holder::Account(account)` once `account` has bound `home` (`4-byte LE
+    /// domain || raw_home_address`) via `SetEscapeAddress`.
+    pub fn adopt(&mut self, account: Address, home: &[u8]) -> Result<u64, Refusal> {
+        if self.escape_addresses.get(&account).map(Vec::as_slice) != Some(home) {
+            return Err(Refusal::NotAuthorized);
+        }
+        let Some((domain_bytes, raw_addr)) = home.split_at_checked(4) else {
+            return Err(Refusal::Family(FamilyError::Malformed("adopt domain prefix")));
+        };
+        let mut prefix = [0u8; 4];
+        prefix.copy_from_slice(domain_bytes);
+        let domain = u32::from_le_bytes(prefix);
+        let charter = self.active_charter(domain)?;
+        profile_for(charter.vm_family).validate_address(raw_addr)?;
+        let identity = HomeIdentity::derive(domain, raw_addr);
+        let from = Holder::Home(identity);
+        let to = Holder::Account(account);
+
+        self.atomic(|r| {
+            let mut moved: u64 = 0;
+            let fungible_keys: Vec<(AssetClassId, u128)> = r
+                .balances
+                .iter()
+                .filter_map(|((c, h), v)| {
+                    if *h == from && r.classes.get(c).is_some_and(|cl| cl.home_domain == domain) {
+                        Some((*c, *v))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for (class_id, amount) in fungible_keys {
+                r.debit(class_id, from, amount)?;
+                r.credit(class_id, to, amount)?;
+                moved = moved.saturating_add(1);
+            }
+            for asset in r.unique.values_mut() {
+                if asset.location == Location::ObjectLayer && asset.holder == Some(from) {
+                    asset.holder = Some(to);
+                    moved = moved.saturating_add(1);
+                }
+            }
+            if moved == 0 {
+                return Err(Refusal::NothingToAdopt);
+            }
+            Ok(moved)
+        })
+    }
+
+    /// `ObjectLayerTx::AuditCode`: verify that `class`'s charter remains active
+    /// and its recorded upgrade-authority slice matches `upgrade_authority`.
+    pub fn audit_code(&mut self, class: AssetClassId) -> Result<ClassStatus, Refusal> {
+        self.atomic(|r| {
+            let domain = r.class(&class)?.home_domain;
+            let charter_ok = r
+                .charters
+                .get(&domain)
+                .is_some_and(|c| c.status == CharterStatus::Active);
+            if !charter_ok {
+                let entry = r.classes.get_mut(&class).ok_or(Refusal::UnknownClass)?;
+                entry.status = ClassStatus::Frozen(FreezeReason::UpgradeAuthorityChanged);
+                return Ok(entry.status);
+            }
+            let vm_family = r.active_charter(domain)?.vm_family;
+            let field = profile_for(vm_family).upgrade_authority_field();
+            let entry = r.classes.get_mut(&class).ok_or(Refusal::UnknownClass)?;
+            let current = entry.slice.get(field).cloned();
+            if current != entry.upgrade_authority {
+                entry.upgrade_authority = current;
+                entry.status = ClassStatus::Frozen(FreezeReason::UpgradeAuthorityChanged);
+            }
+            Ok(entry.status)
+        })
+    }
+
+    /// `ObjectLayerTx::Challenge`: open a rule-fidelity challenge on an active
+    /// class, or freeze the class if an existing challenge has passed the
+    /// rebuttal window (`DEFAULT_CHALLENGE_WINDOW_BLOCKS`) without rebuttal.
+    pub fn challenge(
+        &mut self,
+        challenger: Address,
+        class: AssetClassId,
+        height: u64,
+    ) -> Result<ClassStatus, Refusal> {
+        self.atomic(|r| {
+            let status = r.class(&class)?.status;
+            if let Some(existing) = r.challenges.get(&class).copied() {
+                if height >= existing.opened_at.saturating_add(DEFAULT_CHALLENGE_WINDOW_BLOCKS) {
+                    r.challenges.remove(&class);
+                    let entry = r.classes.get_mut(&class).ok_or(Refusal::UnknownClass)?;
+                    entry.status = ClassStatus::Frozen(FreezeReason::UnrebuttedChallenge);
+                    return Ok(entry.status);
+                }
+                return Err(Refusal::ChallengeAlreadyOpen);
+            }
+            if status != ClassStatus::Active {
+                return Err(Refusal::ClassFrozen);
+            }
+            r.challenges.insert(
+                class,
+                ChallengeRecord {
+                    challenger,
+                    opened_at: height,
+                },
+            );
+            Ok(status)
+        })
+    }
+
+    /// `ObjectLayerTx::Rebut`: clear an open challenge within the rebuttal
+    /// window when signed by the class registrant.
+    pub fn rebut(
+        &mut self,
+        actor: Address,
+        class: AssetClassId,
+        height: u64,
+    ) -> Result<(), Refusal> {
+        self.atomic(|r| {
+            let registrant = r.class(&class)?.registrant;
+            if actor != registrant {
+                return Err(Refusal::NotAuthorized);
+            }
+            let existing = r
+                .challenges
+                .remove(&class)
+                .ok_or(Refusal::NoChallengeOpen)?;
+            if height >= existing.opened_at.saturating_add(DEFAULT_CHALLENGE_WINDOW_BLOCKS) {
+                return Err(Refusal::ChallengeExpired);
+            }
+            Ok(())
         })
     }
 }

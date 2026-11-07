@@ -168,7 +168,7 @@ reason = "Standard industry term."
 [[concept]]
 old = ["PUL", "PUL-Full", "Pul-Lite"]
 patterns = ['Pul[A-Z]', '(?i)bud[-_]pul', '\bPUL\b', '\bpul_']
-allow_paths = ["xtask/gates/src/gates/module_coverage.rs"]
+allow_paths = ["xtask/gates/src/gates/module_coverage.rs", "budzero/Cargo.lock"]
 new_code = "sigagg (crate bud-sigagg)"
 term_en = "signature aggregation proof"
 term_tr = "İmza toplama kanıtı"

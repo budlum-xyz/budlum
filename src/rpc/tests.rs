@@ -157,6 +157,40 @@ mod rpc_tests {
     }
 
     #[tokio::test]
+    async fn object_layer_reads_answer_absent_and_refuse_malformed_ids() {
+        let (server, _chain) = setup().await;
+
+        let charter = server
+            .get_charter(u32::MAX)
+            .await
+            .expect("every u32 is a valid charter lookup");
+        assert!(charter.is_null());
+
+        let valid_id = format!("0x{}", hex::encode([0xEEu8; 32]));
+        let class = server
+            .get_asset_class(valid_id.clone())
+            .await
+            .expect("a well-formed unknown class id answers null");
+        assert!(class.is_null());
+        let class_error = server
+            .get_asset_class("not-hex".to_owned())
+            .await
+            .unwrap_err();
+        assert_eq!(class_error.code(), -32602);
+
+        let asset = server
+            .get_asset(valid_id)
+            .await
+            .expect("a well-formed unknown asset id answers null");
+        assert!(asset.is_null());
+        let asset_error = server
+            .get_asset("0x00".to_owned())
+            .await
+            .unwrap_err();
+        assert_eq!(asset_error.code(), -32602);
+    }
+
+    #[tokio::test]
     async fn bud_identity_resolve_refuses_malformed_and_answers_null_for_absent() {
         let (server, _chain) = setup().await;
         let malformed = server.identity_resolve("did:bud:zz".to_string()).await;

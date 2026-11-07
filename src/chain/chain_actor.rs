@@ -4,7 +4,7 @@ use crate::consensus::qc::{QcBlob, QcFaultProof};
 use crate::core::address::Address;
 use crate::core::block::Block;
 use crate::core::transaction::Transaction;
-use crate::storage::merkle_trie::AccountProofBundle;
+use crate::persistence::state_trie::AccountProofBundle;
 use tokio::sync::{mpsc, oneshot};
 
 /// Direction filter for agent payment queries.
@@ -54,7 +54,7 @@ pub enum ChainCommand {
     /// balance is, this answers what the node can *prove* about it.
     GetAccountProof(
         Address,
-        oneshot::Sender<Option<crate::storage::merkle_trie::AccountProofBundle>>,
+        oneshot::Sender<Option<crate::persistence::state_trie::AccountProofBundle>>,
     ),
     AddTransaction(Transaction, oneshot::Sender<Result<(), String>>),
     AddTransactionBundle(
@@ -133,7 +133,7 @@ pub enum ChainCommand {
         oneshot::Sender<Option<crate::chain::finality::FinalityCert>>,
     ),
     GetPqStageObservation(
-        crate::domain::regeneration_stage::Stage,
+        crate::chain::state_recovery::stage::Stage,
         u64,
         oneshot::Sender<crate::chain::blockchain::PqStageObservation>,
     ),
@@ -495,6 +495,18 @@ pub enum ChainCommand {
         requester: Address,
         document: String,
         response: oneshot::Sender<Result<(), String>>,
+    },
+    ObjectLayerCharter {
+        domain_id: u32,
+        response: oneshot::Sender<Option<crate::object_layer::DomainCharter>>,
+    },
+    ObjectLayerAssetClass {
+        class_id: crate::object_layer::AssetClassId,
+        response: oneshot::Sender<Option<(crate::object_layer::registry::AssetClass, u128)>>,
+    },
+    ObjectLayerAsset {
+        asset_id: crate::object_layer::AssetId,
+        response: oneshot::Sender<Option<crate::object_layer::registry::UniqueAsset>>,
     },
     BnsCalculateCost {
         name: String,
@@ -1337,10 +1349,10 @@ impl ChainHandle {
     }
 
     /// The commitment this node holds and the post-quantum canonical
-    /// commitment with its seal, for one regeneration stage and height.
+    /// commitment with its seal, for one recovery stage and height.
     pub async fn pq_stage_observation(
         &self,
-        stage: crate::domain::regeneration_stage::Stage,
+        stage: crate::chain::state_recovery::stage::Stage,
         height: u64,
     ) -> crate::chain::blockchain::PqStageObservation {
         let (tx, rx) = oneshot::channel();
@@ -2278,6 +2290,51 @@ impl ChainHandle {
         rx.await.map_err(|_| "chain actor closed".to_string())?
     }
 
+    pub async fn object_layer_charter(
+        &self,
+        domain_id: u32,
+    ) -> Option<crate::object_layer::DomainCharter> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::ObjectLayerCharter {
+                domain_id,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn object_layer_asset_class(
+        &self,
+        class_id: crate::object_layer::AssetClassId,
+    ) -> Option<(crate::object_layer::registry::AssetClass, u128)> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::ObjectLayerAssetClass {
+                class_id,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn object_layer_asset(
+        &self,
+        asset_id: crate::object_layer::AssetId,
+    ) -> Option<crate::object_layer::registry::UniqueAsset> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::ObjectLayerAsset {
+                asset_id,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
     pub async fn bns_calculate_cost(&self, name: String, duration: u64) -> u64 {
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -2438,7 +2495,7 @@ impl ChainHandle {
 /// The compare is one pass over the accounts and is far cheaper than a build.
 struct ProofTrieCache {
     leaves: Vec<([u8; 32], u64, u64)>,
-    trie: crate::storage::merkle_trie::MerkleTrie,
+    trie: crate::persistence::state_trie::MerkleTrie,
 }
 
 pub struct ChainActor {
@@ -2483,7 +2540,7 @@ impl ChainActor {
     /// stale trie would produce a proof that verifies against its own root and
     /// describes state that no longer exists - worse than no proof, because it
     /// is a correct-looking answer to the wrong question.
-    fn account_proof(&mut self, addr: &Address) -> crate::storage::merkle_trie::AccountProofBundle {
+    fn account_proof(&mut self, addr: &Address) -> crate::persistence::state_trie::AccountProofBundle {
         let accounts = &self.blockchain.state.accounts;
         let fresh = self.proof_trie.as_ref().is_some_and(|cached| {
             cached.leaves.len() == accounts.len()
@@ -2498,18 +2555,18 @@ impl ChainActor {
                 .iter()
                 .map(|(a, acct)| (a.0, acct.balance, acct.nonce))
                 .collect();
-            let mut trie = crate::storage::merkle_trie::MerkleTrie::new();
+            let mut trie = crate::persistence::state_trie::MerkleTrie::new();
             for (a, balance, nonce) in &leaves {
                 trie.insert(a, *balance, *nonce);
             }
             self.proof_trie = Some(ProofTrieCache { leaves, trie });
         }
         match self.proof_trie.as_ref() {
-            Some(cached) => crate::storage::merkle_trie::prove_from_trie(&cached.trie, &addr.0),
+            Some(cached) => crate::persistence::state_trie::prove_from_trie(&cached.trie, &addr.0),
             // Unreachable: the branch above assigns it. Written as a fallback
             // rather than an unwrap so a future edit that breaks the
             // invariant costs one rebuild instead of stopping the node.
-            None => crate::storage::merkle_trie::prove_account(
+            None => crate::persistence::state_trie::prove_account(
                 self.blockchain
                     .state
                     .accounts
@@ -3746,6 +3803,40 @@ impl ChainActor {
                             &document,
                         )
                         .map_err(|e| e.to_string()),
+                    );
+                }
+                ChainCommand::ObjectLayerCharter {
+                    domain_id,
+                    response,
+                } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .settlement
+                            .object_layer
+                            .charters
+                            .get(&domain_id)
+                            .cloned(),
+                    );
+                }
+                ChainCommand::ObjectLayerAssetClass { class_id, response } => {
+                    let uol = &self.blockchain.state.settlement.object_layer;
+                    let out = uol
+                        .classes
+                        .get(&class_id)
+                        .cloned()
+                        .map(|cl| (cl, uol.recorded_custody(&class_id)));
+                    let _ = response.send(out);
+                }
+                ChainCommand::ObjectLayerAsset { asset_id, response } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .settlement
+                            .object_layer
+                            .unique
+                            .get(&asset_id)
+                            .cloned(),
                     );
                 }
                 ChainCommand::BnsCalculateCost {

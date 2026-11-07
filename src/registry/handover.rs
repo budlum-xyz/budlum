@@ -1,7 +1,10 @@
 //! Instant Task Handover (AGD, Section 7.6), 40-block finality stall disaster
 //! recovery mode (Section 7.7), and multi-validator churn simulation.
 //! exposed for consensus proposer rotation, checkpoint seat handover, storage
-//! task schedulers, and churn harness (`tests/churn/main.rs`).
+//! task schedulers, and the standalone rehearsal harness. The node's live
+//! recovery metric and PoS round path use `validators::handover`; this
+//! coordinator remains a separate drill model, not a second chain-state
+//! authority.
 //!
 //! # Risk R-03 (Section 7.7 item 5)
 //!
@@ -271,19 +274,38 @@ impl HandoverCoordinator {
     /// finality-stall disaster recovery state (Section 7.7).
     /// Convenience: exposed for block import recovery monitor.
     pub fn observe_block(&mut self, height: u64, epoch: u64, new_finalized_height: Option<u64>) {
+        self.observe_block_at_interval(
+            height,
+            epoch,
+            new_finalized_height,
+            CHECKPOINT_INTERVAL_BLOCKS,
+        );
+    }
+
+    /// Interval-aware form for rehearsals on networks whose checkpoint period
+    /// differs from testnet. Eight missed checkpoints trigger recovery.
+    /// Convenience: exposed for chain-specific recovery drills.
+    pub fn observe_block_at_interval(
+        &mut self,
+        height: u64,
+        epoch: u64,
+        new_finalized_height: Option<u64>,
+        checkpoint_interval: u64,
+    ) {
         self.latest_height = height;
         self.current_epoch = epoch;
+        let stall_blocks = 8u64.saturating_mul(checkpoint_interval.max(1));
         if let Some(fin) = new_finalized_height {
             if fin > self.finalized_height {
                 self.finalized_height = fin;
             }
-            if height.saturating_sub(self.finalized_height) < FINALITY_STALL_RECOVERY_BLOCKS {
+            if height.saturating_sub(self.finalized_height) < stall_blocks {
                 self.recovery_mode = RecoveryMode::Normal;
                 return;
             }
         }
         if matches!(self.recovery_mode, RecoveryMode::Normal)
-            && height.saturating_sub(self.finalized_height) >= FINALITY_STALL_RECOVERY_BLOCKS
+            && height.saturating_sub(self.finalized_height) >= stall_blocks
         {
             self.recovery_mode = RecoveryMode::Recovery {
                 entered_at_height: height,
@@ -301,7 +323,7 @@ impl HandoverCoordinator {
             RecoveryMode::Normal => false,
             RecoveryMode::Recovery {
                 entered_at_epoch, ..
-            } => next_epoch > entered_at_epoch.saturating_add(1),
+            } => next_epoch.saturating_sub(entered_at_epoch) >= 1,
         }
     }
 

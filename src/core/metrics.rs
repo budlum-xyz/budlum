@@ -70,7 +70,8 @@ pub struct Metrics {
     pub peer_connection_quality: IntGauge,
     pub consensus_round_seconds: Histogram,
     pub finality_lag: IntGauge,
-    /// 1 when finality lag reaches the eight-checkpoint recovery threshold (Section 7.7).
+    /// 1 when the recovery tracker is stalled or finality lag reaches the
+    /// chain-specific eight-checkpoint recovery threshold (Section 7.7).
     pub finality_stalled: IntGauge,
     pub storage_db_size_bytes: IntGauge,
     /// Content chunks retained by the durable B.U.D. content store.
@@ -421,6 +422,10 @@ impl Metrics {
         ))?;
         let finality_lag =
             IntGauge::new("budlum_finality_lag", "Head height minus finalized height")?;
+        let finality_stalled = IntGauge::new(
+            "budlum_finality_stalled",
+            "1 when recovery is stalled or finality lag reaches eight chain-specific checkpoint intervals",
+        )?;
         let storage_db_size_bytes = IntGauge::new(
             "budlum_storage_db_size_bytes",
             "Approximate storage size in bytes",
@@ -784,10 +789,6 @@ impl Metrics {
         let finality_lag_checkpoints = IntGauge::new(
             "budlum_finality_lag_checkpoints",
             "Head height minus finalized height, in finality checkpoints",
-        )?;
-        let finality_stalled = IntGauge::new(
-            "budlum_finality_stalled",
-            "1 when no checkpoint has finalized for eight checkpoint intervals",
         )?;
         let state_root_mismatch_total = IntCounter::new(
             "budlum_state_root_mismatch_total",

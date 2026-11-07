@@ -3,7 +3,7 @@
 //! exposed for: wallet identity profile RPC handlers.
 //!
 //! This module is intentionally read-only. It builds evidence-labelled profile
-//! Data for budlum.xyz without claiming that unproven data is verified.
+//! Data without claiming that unproven data is verified.
 //!
 //! Reached from the RPC surface: `rpc/server.rs` calls
 //! `validate_passport_name` at line 2873, `build_passport_profile` at 2889
@@ -159,7 +159,9 @@ impl PassportProofBundle {
         {
             return Err("PassportProofBundle profile binding mismatch".into());
         }
-        if self.items.len() > MAX_PASSPORT_EVIDENCE_ITEMS {
+        if self.items.len() > MAX_PASSPORT_EVIDENCE_ITEMS
+            || profile.evidence.len() != self.items.len()
+        {
             return Err("PassportProofBundle item limit exceeded".into());
         }
         if self.evidence_count as usize != self.items.len()
@@ -465,7 +467,7 @@ pub fn build_passport_profile(
     evidence.push(EvidenceCard {
         subject: "pollen".into(),
         status: EvidenceStatus::Verified,
-        source: "Pollen registry root".into(),
+        source: "data-market registry root".into(),
         root: None,
         warning: Some(
             "Counts are registry-derived; individual data bytes are never exposed by this endpoint"
@@ -648,5 +650,48 @@ mod tests {
         let mut forged_exp = profile;
         forged_exp.is_expired = true;
         assert!(bundle.validate_against_profile(&forged_exp).is_err());
+    }
+
+    #[test]
+    fn bundle_commits_all_fields_and_excludes_revoked_lineage() {
+        let owner = addr(9);
+        let cid = ContentId::of(b"site-v2");
+        let resolved = BnsResolved {
+            name: "alice.bud".into(),
+            owner,
+            address: Some(owner),
+            storage_root: Some(*cid.as_bytes()),
+            storage_domain_id: Some(3),
+            content_id: Some(cid),
+            is_expired: false,
+        };
+        let mut revoked: DataAsset = serde_json::from_value(serde_json::json!({
+            "asset_id": DataAsset::derive_id(&owner, &cid, &[1u8; 32]),
+            "owner": owner,
+            "manifest_id": cid,
+            "metadata_commitment": [1u8; 32],
+            "encrypted": true,
+            "status": "Revoked"
+        }))
+        .unwrap();
+        assert!(!revoked.is_active());
+        let active = DataAsset::new(owner, cid, [2u8; 32], true);
+        let profile = build_passport_profile(
+            "alice.bud".into(),
+            Some(resolved),
+            None,
+            &[revoked, active],
+            &[],
+            &[],
+        );
+        let lineage_count = (&profile.pollen).assets_owned;
+        assert_eq!(lineage_count, 1);
+        let bundle = try_build_passport_proof_bundle(&profile, 50).unwrap();
+        let mut spoofed = profile.clone();
+        spoofed.is_expired = true;
+        assert!(bundle.validate_against_profile(&spoofed).is_err());
+        let mut spoofed_addr = profile;
+        spoofed_addr.address = Some(addr(10));
+        assert!(bundle.validate_against_profile(&spoofed_addr).is_err());
     }
 }

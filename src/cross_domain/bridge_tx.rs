@@ -290,10 +290,13 @@ pub fn lock(
     // row exists: a refusal after the insert would leave a lock that never
     // debited anyone, and the expiry sweep would refund units never locked.
     let owner_balance = state.spendable_balance(&owner);
-    let needed = params.amount.saturating_add(reserve);
+    let needed = params
+        .amount
+        .checked_add(reserve)
+        .ok_or_else(|| "Bridge lock amount + fee overflows u64".to_string())?;
     if owner_balance < needed {
         return Err(format!(
-            "Insufficient balance for bridge lock: owner has {owner_balance}, needed {needed}"
+            "Insufficient spendable balance for bridge lock: owner has {owner_balance}, needed {needed}"
         ));
     }
     // The message registry refusal rolls the row back,
@@ -479,10 +482,12 @@ pub fn burn_with_event(
     let amount = held.get();
     let burner = transfer.recipient;
     let burner_balance = state.spendable_balance(&burner);
-    let needed = amount.saturating_add(reserve);
+    let needed = amount
+        .checked_add(reserve)
+        .ok_or_else(|| "Bridge burn amount + fee overflows u64".to_string())?;
     if burner_balance < needed {
         return Err(format!(
-            "Insufficient balance for bridge burn: burner has {burner_balance}, needed {needed}"
+            "Insufficient spendable balance for bridge burn: burner has {burner_balance}, needed {needed}"
         ));
     }
     let bridge_before = state.bridge_state.clone();
@@ -834,7 +839,10 @@ pub fn execute_bridge_tx(
         }
         BridgeTx::Lock(request) => {
             let balance = state.spendable_balance(&ctx.sender);
-            let needed = request.amount.saturating_add(ctx.fee);
+            let needed = request
+                .amount
+                .checked_add(ctx.fee)
+                .ok_or_else(|| refused("Bridge lock amount + fee overflows u64"))?;
             if balance < needed {
                 return Err(BridgeTxError::Unfunded { needed, balance });
             }

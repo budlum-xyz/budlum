@@ -26,7 +26,7 @@ use crate::settlement::ColdWalletState;
 use crate::settlement::{merkle_root, GlobalBlockHeader};
 #[cfg(test)]
 use crate::settlement::{ProofVerificationError, VerifiedDomainEvent};
-use crate::storage::db::Storage;
+use crate::persistence::db::Storage;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -75,7 +75,7 @@ pub struct GlobalHeaderProof {
     pub state_root_body: Option<crate::domain::Hash32>,
 }
 
-/// What the regeneration tick reads about one stage and height.
+/// What the state recovery tick reads about one stage and height.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PqStageObservation {
     /// The commitment this node holds.
@@ -169,9 +169,9 @@ pub struct Blockchain {
     /// checkpoint header a committed block carries; the default is GatedOff
     /// (skip).
     pub anchor_emission: AnchorEmission,
-    /// The seals regeneration may trust: Root Seals and verified
+    /// The seals state recovery may trust: Root Seals and verified
     /// anchors from the emission pipeline, finality checkpoints with a
-    /// verified ML-DSA QC. Read by the node's regeneration health tick.
+    /// verified ML-DSA QC. Read by the node's state recovery tick.
     pub pq_source: crate::domain::PqCanonicalSource,
     /// The weakest quantum class each emitted anchor window carried, so the
     /// local recomputation of its aggregate root uses the class it was signed
@@ -188,6 +188,9 @@ pub struct Blockchain {
     /// Signature checks that run on behalf of the chain read it through
     /// `crypto::pq::verify_in`.
     pub scheme_registry: crate::crypto::scheme::SchemeStatusRegistry,
+    /// Node-local disaster recovery tracker (Section 7.7: eight chain-specific
+    /// checkpoint intervals, `budlum_finality_stalled`, and 1-epoch recovery).
+    pub recovery_tracker: crate::validators::handover::RecoveryTracker,
 }
 
 /// Heights one finality event looks at for witness pruning: finality
@@ -331,25 +334,20 @@ impl Blockchain {
             m.pending_bud_boost_atoms
                 .set(i64::try_from(self.state.pending_bud_boost_share).unwrap_or(i64::MAX));
             m.blocks_produced.inc();
-            let lag = (height as u64).saturating_sub(self.finalized_height);
+            let head_height = self.chain.last().map_or(0, |block| block.index);
+            let lag = head_height.saturating_sub(self.finalized_height);
             m.finality_lag.set(lag as i64);
-            // The same lag in the unit the recovery rule is written in. The
-            // checkpoints are fixed per network (5 on the testnet, 10 on
-            // mainnet), so the block reading of one missed checkpoint is not a
-            // constant, and an alert written against blocks would be wrong on
-            // one of the two chains.
+            // Keep the checkpoint reading and threshold in the same
+            // chain-specific unit: intervals differ between testnet and mainnet.
             let checkpoint = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(
                 self.chain_id,
             )
             .max(1);
             m.finality_lag_checkpoints
                 .set(i64::try_from(lag / checkpoint).unwrap_or(i64::MAX));
-            // Section 7.7: eight checkpoint intervals without finality is the
-            // recovery threshold. Exported rather than left to an alert
-            // expression so the node and the rule cannot disagree about the
-            // threshold.
-            m.finality_stalled
-                .set(i64::from(lag >= checkpoint.saturating_mul(8)));
+            let stalled = self.recovery_tracker.is_stalled()
+                || lag >= checkpoint.saturating_mul(8);
+            m.finality_stalled.set(i64::from(stalled));
             self.emit_bud3_metrics(m);
             m.mempool_size.set(self.mempool.len() as i64);
             // Exported alongside the count because the count does not bound
@@ -712,7 +710,7 @@ impl Blockchain {
                 for (pubkey, account) in &state.accounts {
                     accounts_to_save.push((*pubkey, account.clone()));
                 }
-                let batch = crate::storage::traits::DurableCommitBatch {
+                let batch = crate::persistence::traits::DurableCommitBatch {
                     block: genesis.clone(),
                     state_root: genesis.state_root.clone(),
                     finality_cert: None,
@@ -1108,6 +1106,7 @@ impl Blockchain {
             anchor_classes: BTreeMap::new(),
             cold_wallet: None,
             scheme_registry: crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            recovery_tracker: crate::validators::handover::RecoveryTracker::new(),
         };
 
         if let Some(first) = bc.chain.first() {
@@ -2069,17 +2068,17 @@ impl Blockchain {
         crate::settlement::aggregate_finality_roots(&digests).ok()
     }
 
-    /// What the regeneration tick needs about one stage and height: the
+    /// What the state recovery tick needs about one stage and height: the
     /// commitment this node holds, and the canonical commitment with the seal
     /// behind it. A finalized checkpoint that is not in the source yet is
     /// taken from storage when its certificate and verified QC blob are both
     /// there (a restart empties the memory source).
     pub fn pq_stage_observation(
         &mut self,
-        stage: crate::domain::regeneration_stage::Stage,
+        stage: crate::chain::state_recovery::stage::Stage,
         height: u64,
     ) -> PqStageObservation {
-        use crate::domain::regeneration_stage::Stage;
+        use crate::chain::state_recovery::stage::Stage;
         if stage == Stage::Medusa && self.pq_source.canonical(stage, height).is_none() {
             self.rehydrate_finality(height);
         }
@@ -2142,7 +2141,7 @@ impl Blockchain {
     /// or below `live` (Ephyra).
     #[must_use]
     pub fn pq_sealed_heights(&self, live: u64) -> (Option<u64>, Option<u64>) {
-        use crate::domain::regeneration_stage::Stage;
+        use crate::chain::state_recovery::stage::Stage;
         (
             self.pq_source.latest_height(Stage::Polyp),
             self.pq_source.latest_at_or_below(Stage::Ephyra, live),
@@ -2169,6 +2168,22 @@ impl Blockchain {
     /// Record a finality checkpoint whose BLS certificate and ML-DSA-65 QC
     /// were both verified.
     fn feed_finality(&mut self, height: u64, checkpoint_hash: &str, with_bls: bool) {
+        let (head_height, head_epoch) = self.chain.last().map_or((0, 0), |b| (b.index, b.epoch));
+        let stalled = self.recovery_tracker.observe_finality_at_interval(
+            head_height,
+            head_epoch,
+            self.finalized_height,
+            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(self.chain_id),
+        );
+        if let Some(ref m) = self.metrics {
+            m.finalized_height
+                .set(i64::try_from(self.finalized_height).unwrap_or(i64::MAX));
+            m.finality_lag.set(
+                i64::try_from(head_height.saturating_sub(self.finalized_height))
+                    .unwrap_or(i64::MAX),
+            );
+            m.finality_stalled.set(i64::from(stalled));
+        }
         use crate::crypto::scheme::SchemeId;
         let Some(hash) = hex::decode(checkpoint_hash)
             .ok()
@@ -3408,6 +3423,13 @@ impl Blockchain {
 
         self.finalized_height = new_finalized_height;
         self.finalized_hash = new_finalized_hash;
+        let (head_height, head_epoch) = self.chain.last().map_or((0, 0), |b| (b.index, b.epoch));
+        self.recovery_tracker.observe_finality_at_interval(
+            head_height,
+            head_epoch,
+            self.finalized_height,
+            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(self.chain_id),
+        );
 
         if let Some(store) = &self.storage {
             if let Err(e) = store.save_canonical_height(self.finalized_height) {
@@ -3591,7 +3613,23 @@ impl Blockchain {
                 break;
             }
 
-            let pending_cost = pending.total_cost();
+            let pending_cost = if matches!(
+                &pending.tx_type,
+                crate::core::transaction::TransactionType::Unstake
+                    | crate::core::transaction::TransactionType::Vote
+                    | crate::core::transaction::TransactionType::Undelegate { .. }
+                    | crate::core::transaction::TransactionType::WithdrawDelegation { .. }
+                    | crate::core::transaction::TransactionType::SetValidatorCommission { .. }
+                    | crate::core::transaction::TransactionType::Redelegate { .. }
+                    | crate::core::transaction::TransactionType::ClaimRewards { .. }
+                    | crate::core::transaction::TransactionType::AiOperatorWithdraw
+            ) {
+                pending.fee
+            } else if let Some(cost) = pending.checked_total_cost() {
+                cost
+            } else {
+                break;
+            };
             if spendable_balance < pending_cost {
                 break;
             }
@@ -3649,15 +3687,25 @@ impl Blockchain {
         }
         let precheck_cost = if matches!(
             &tx.tx_type,
-            crate::core::transaction::TransactionType::Undelegate { .. }
+            crate::core::transaction::TransactionType::AiOperatorWithdraw
+        ) {
+            0
+        } else if matches!(
+            &tx.tx_type,
+            crate::core::transaction::TransactionType::Unstake
+                | crate::core::transaction::TransactionType::Vote
+                | crate::core::transaction::TransactionType::Undelegate { .. }
                 | crate::core::transaction::TransactionType::WithdrawDelegation { .. }
                 | crate::core::transaction::TransactionType::SetValidatorCommission { .. }
                 | crate::core::transaction::TransactionType::Redelegate { .. }
                 | crate::core::transaction::TransactionType::ClaimRewards { .. }
         ) {
             tx.fee
+        } else if let Some(cost) = tx.checked_total_cost() {
+            cost
         } else {
-            tx.total_cost()
+            reasons.push("transaction_cost_overflow".to_string());
+            u64::MAX
         };
         if spendable_balance < precheck_cost {
             reasons.push("insufficient_funds".to_string());
@@ -4292,7 +4340,7 @@ impl Blockchain {
             let mut archive = self.global_headers.clone();
             let global_headers =
                 Self::reconcile_global_header_archive(&mut archive, committed_state);
-            let batch = crate::storage::traits::DurableCommitBatch {
+            let batch = crate::persistence::traits::DurableCommitBatch {
                 block: block.clone(),
                 state_root: block.state_root.clone(),
                 finality_cert,
@@ -4493,7 +4541,7 @@ impl Blockchain {
         next_state.current_block_unix_secs = Self::block_timestamp_secs(block.timestamp);
         next_state.current_block_entropy =
             Self::block_context_entropy(&block.previous_hash, &block.vrf_output);
-        Executor::apply_block_checked(
+        Executor::apply_block_candidate_checked(
             &mut next_state,
             &block.transactions,
             block.producer.as_ref(),
@@ -4993,6 +5041,13 @@ impl Blockchain {
         }
 
         self.mempool.set_min_fee(self.state.base_fee);
+        self.recovery_tracker
+            .observe_block_at_interval(
+                block.index,
+                block.epoch,
+                self.finalized_height,
+                crate::core::chain_config::finality_checkpoint_interval_for_chain_id(self.chain_id),
+            );
         self.emit_chain_metrics();
         self.emit_tx_processed(block.transactions.len() as u64);
         self.emit_applied_tx_metrics(&block.transactions, ai_outcomes_before);
@@ -5261,7 +5316,7 @@ impl Blockchain {
         blocks: &[Block],
         certified_tip: u64,
     ) -> Result<(), String> {
-        use crate::storage::witness_retention::{may_prune, NodeKind, DEFAULT_RETENTION_BLOCKS};
+        use crate::persistence::witness_retention::{may_prune, NodeKind, DEFAULT_RETENTION_BLOCKS};
 
         let (kind, retention) = match &self.pruning_manager {
             Some(pm) if !pm.archive_mode => (
@@ -5293,7 +5348,7 @@ impl Blockchain {
     /// Returns the heights pruned now.
     /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
     pub fn prune_released_witnesses(&self, retention_blocks: u64, window: u64) -> Vec<u64> {
-        use crate::storage::witness_retention::{may_prune, NodeKind};
+        use crate::persistence::witness_retention::{may_prune, NodeKind};
         let (Some(store), Some(pm)) = (&self.storage, &self.pruning_manager) else {
             return Vec::new();
         };
@@ -5603,6 +5658,17 @@ impl Blockchain {
             }
         }
 
+        if let Some(tip) = self.chain.last() {
+            self.recovery_tracker
+                .observe_block_at_interval(
+                    tip.index,
+                    tip.epoch,
+                    self.finalized_height,
+                    crate::core::chain_config::finality_checkpoint_interval_for_chain_id(
+                        self.chain_id,
+                    ),
+                );
+        }
         self.emit_chain_metrics();
         self.emit_tx_processed(applied_tx_count);
         Ok(nft_burn_cids.iter().map(|(cid, _)| cid.0).collect())
@@ -6632,7 +6698,7 @@ impl Blockchain {
 
         // finality may release old witnesses (Pul-Lite).
         let pruned = self.prune_released_witnesses(
-            crate::storage::witness_retention::DEFAULT_RETENTION_BLOCKS,
+            crate::persistence::witness_retention::DEFAULT_RETENTION_BLOCKS,
             WITNESS_PRUNE_WINDOW,
         );
         if !pruned.is_empty() {
@@ -8142,6 +8208,7 @@ impl Clone for Blockchain {
             anchor_classes: self.anchor_classes.clone(),
             cold_wallet: self.cold_wallet.clone(),
             scheme_registry: self.scheme_registry.clone(),
+            recovery_tracker: self.recovery_tracker.clone(),
         }
     }
 }
@@ -8161,7 +8228,7 @@ mod tests {
         let tx = Transaction::new(Address::from([1; 32]), Address::from([2; 32]), 1, vec![]);
         let stripped = Block::new(1, "00".repeat(32), vec![tx]);
         assert!(stripped.witness_is_stripped());
-        let retention = crate::storage::witness_retention::DEFAULT_RETENTION_BLOCKS + 10;
+        let retention = crate::persistence::witness_retention::DEFAULT_RETENTION_BLOCKS + 10;
         let finalized_tip = 1 + retention;
         // An unconfigured or archive node never accepts missing witnesses.
         assert!(chain
@@ -8919,7 +8986,7 @@ mod tests {
     }
     use crate::consensus::PoWEngine;
     use crate::crypto::primitives::KeyPair;
-    use crate::storage::db::Storage;
+    use crate::persistence::db::Storage;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tempfile::tempdir;
 
@@ -8948,7 +9015,7 @@ mod tests {
 
         fn load_state(
             &self,
-            _storage: &crate::storage::db::Storage,
+            _storage: &crate::persistence::db::Storage,
         ) -> Result<(), crate::consensus::ConsensusError> {
             self.loaded.store(true, Ordering::SeqCst);
             Ok(())

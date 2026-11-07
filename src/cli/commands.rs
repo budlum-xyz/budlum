@@ -1185,10 +1185,10 @@ impl NodeConfig {
         self.max_peers.unwrap_or(profile_cap).clamp(1, profile_cap)
     }
 
-    pub fn pruning_policy(&self) -> Result<crate::storage::PruningPolicy, String> {
-        let mode = crate::storage::NodeMode::from_role(&self.role)
+    pub fn pruning_policy(&self) -> Result<crate::persistence::PruningPolicy, String> {
+        let mode = crate::persistence::NodeMode::from_role(&self.role)
             .ok_or_else(|| format!("unknown node role '{}'", self.role))?;
-        Ok(crate::storage::PruningPolicy {
+        Ok(crate::persistence::PruningPolicy {
             mode,
             pruning_enabled: self.features_pruning,
             finalized_snapshot_retention: self.snapshot_dir.is_some(),
@@ -1786,7 +1786,7 @@ mod tests {
         assert_eq!(cfg.role, "archive");
         assert_eq!(
             cfg.pruning_policy().unwrap().mode,
-            crate::storage::NodeMode::Archive
+            crate::persistence::NodeMode::Archive
         );
     }
 
@@ -1804,7 +1804,7 @@ mod tests {
         assert_eq!(cfg.role, "validator");
         assert_eq!(
             cfg.pruning_policy().unwrap().mode,
-            crate::storage::NodeMode::Full
+            crate::persistence::NodeMode::Full
         );
     }
 

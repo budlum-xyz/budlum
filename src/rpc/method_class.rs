@@ -285,6 +285,9 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_identityResolve", Public, Read),
     row("bud_identityCredential", Public, Read),
     row("bud_identityVerifyPresentation", Public, Read),
+    row("bud_getCharter", Public, Read),
+    row("bud_getAssetClass", Public, Read),
+    row("bud_getAsset", Public, Read),
     // WebSocket subscriptions: read-only feeds (src/rpc/subscriptions.rs).
     row("bud_subscribe", Public, Read),
     row("bud_unsubscribe", Public, Read),
@@ -528,6 +531,12 @@ mod tests {
     /// trait does not declare (a subscription, a method that arrives through an
     /// alias) is asked for both, because the rule cannot see its shape.
     fn wants_refusal(method: &str) -> bool {
+        // `get_charter` is total over its `u32` domain id: every value is a
+        // well-formed lookup and an absent charter answers `null`. There is
+        // no invalid call at this layer to invent a refusal test for.
+        if method == "bud_getCharter" {
+            return false;
+        }
         match declared_arguments(method) {
             Some(count) => count > 0,
             None => true,

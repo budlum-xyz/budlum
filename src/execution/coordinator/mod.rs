@@ -1,6 +1,9 @@
 //! The Universal Execution Layer coordinator: account aliases, sparse Merkle
 //! namespaces, BGU gas and EIP-1559 fee accounting, nested call-frame overlays,
 //! stateful BudZero contract execution, and worker supervision.
+//!
+//! The scheduler executes independent waves in parallel with deterministic
+//! sequential fallback and byte-identical checked state transitions.
 
 pub mod alias;
 pub mod assets;

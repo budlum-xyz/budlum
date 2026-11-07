@@ -14,7 +14,7 @@ use crate::cross_domain::message_registry::CrossDomainMessageRegistry;
 use crate::cross_domain::BridgeState;
 use crate::domain::storage_deal::StorageRegistry;
 use crate::registry::role::{roles, RoleId};
-use crate::storage::db::Storage;
+use crate::persistence::db::Storage;
 #[cfg(not(miri))]
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -1251,7 +1251,7 @@ impl AccountState {
                 provided: 0,
             });
         }
-        let balance = self.get_balance(address);
+        let balance = self.spendable_balance(address);
         if balance < amount {
             return Err(RegistryError::InsufficientStake {
                 required: amount,
@@ -1641,6 +1641,16 @@ impl AccountState {
             .get(address, roles::AI_OPERATOR)
             .map(|registration| registration.stake)
             .ok_or_else(|| "AI inference layer operator is not registered".to_string())?;
+        if self
+            .spendable_balance(address)
+            .checked_add(stake)
+            .is_none_or(|available| available < fee)
+        {
+            return Err(
+                "AI inference layer withdrawal fee exceeds spendable balance plus matured bond"
+                    .to_string(),
+            );
+        }
         let final_balance = self
             .get_balance(address)
             .checked_add(stake)
@@ -2002,18 +2012,25 @@ impl AccountState {
         }
         // Overflow guard (security): reject amount+fee > u64::MAX explicitly
         // for transaction types that actually debit the signed amount. An
-        // undelegation/withdrawal moves already-locked value and only debits
-        // its fee, so its amount must not be treated as liquid cost.
+        // unstake/undelegation/withdrawal moves already-locked value and only
+        // debits its fee, so its amount must not be treated as liquid cost.
         let debits_amount = !matches!(
             &tx.tx_type,
-            TransactionType::Undelegate { .. }
+            TransactionType::Unstake
+                | TransactionType::Vote
+                | TransactionType::Undelegate { .. }
                 | TransactionType::WithdrawDelegation { .. }
                 | TransactionType::SetValidatorCommission { .. }
+                | TransactionType::Redelegate { .. }
+                | TransactionType::ClaimRewards { .. }
+                | TransactionType::AiOperatorWithdraw
         );
-        if debits_amount && tx.amount.checked_add(tx.fee).is_none() {
+        if debits_amount && tx.checked_total_cost().is_none() {
             return Err("Transaction amount + fee overflows u64".into());
         }
-        let total_cost = if debits_amount {
+        let total_cost = if matches!(&tx.tx_type, TransactionType::AiOperatorWithdraw) {
+            0
+        } else if debits_amount {
             tx.total_cost()
         } else {
             tx.fee
@@ -2754,9 +2771,14 @@ impl AccountState {
                         "the owner already has a validator record",
                     ));
                 }
-                if self.validator_directory.iter().any(|r| {
-                    r.peer_id == registration.peer_id || r.operator_key == registration.operator_key
-                }) {
+                if self
+                    .validator_directory
+                    .iter()
+                    .any(|r| r.peer_id == registration.peer_id)
+                    || self
+                        .validator_directory
+                        .operator_key_in_use(&registration.operator_key)
+                {
                     return Err(refuse(
                         "validator_peer_or_operator_key_in_use",
                         "the peer id or the operator key belongs to another validator",
@@ -2785,7 +2807,38 @@ impl AccountState {
                     )?;
                 }
             }
-            ValidatorTx::ChangeClass { .. } | ValidatorTx::RotateOperatorKey { .. } => {
+            ValidatorTx::ChangeClass { new_class, seat } => {
+                if tx.amount != 0 {
+                    return Err(refuse(
+                        "validator_tx_shape",
+                        "this validator transaction moves no value",
+                    ));
+                }
+                let Some(record) = self.validator_directory.get(&tx.from) else {
+                    return Err(refuse(
+                        "validator_not_registered",
+                        "only the owner account of a validator may send this",
+                    ));
+                };
+                if new_class.holds_seat() {
+                    if self.validators.contains_key(&tx.from) {
+                        return Err(refuse(
+                            "validator_already_registered",
+                            "the owner is already in the consensus set",
+                        ));
+                    }
+                    if let Some(seat) = seat {
+                        Self::check_seat_keys(
+                            &tx.from,
+                            &record.bls_key,
+                            &record.bls_pop,
+                            seat,
+                            tx.chain_id,
+                        )?;
+                    }
+                }
+            }
+            ValidatorTx::RotateOperatorKey { new_operator_key } => {
                 if tx.amount != 0 {
                     return Err(refuse(
                         "validator_tx_shape",
@@ -2796,6 +2849,12 @@ impl AccountState {
                     return Err(refuse(
                         "validator_not_registered",
                         "only the owner account of a validator may send this",
+                    ));
+                }
+                if self.validator_directory.operator_key_in_use(new_operator_key) {
+                    return Err(refuse(
+                        "validator_peer_or_operator_key_in_use",
+                        "the operator key belongs to a validator already",
                     ));
                 }
             }
@@ -2817,6 +2876,12 @@ impl AccountState {
                         "the owner has no validator record",
                     )
                 })?;
+                if record.pending_operator_key.is_some() {
+                    return Err(refuse(
+                        "validator_rotation_pending",
+                        "quota updates are frozen while an operator key rotation is pending",
+                    ));
+                }
                 let message = crate::validators::quota_update_message(
                     tx.chain_id,
                     owner,
@@ -2884,32 +2949,44 @@ impl AccountState {
             return Err("the owner is already in the consensus set".into());
         }
         Self::check_seat_keys(&owner, bls_key, bls_pop, seat, chain_id).map_err(|e| e.message)?;
+        let epoch = self.epoch_index;
+        if epoch.checked_add(1).is_none()
+            || seat.leader_commitment.length == 0
+            || seat.leader_commitment.length > 100_000
+        {
+            return Err("leader commitment epoch or chain length out of range".into());
+        }
         let floor = crate::core::chain_config::Network::from_chain_id(chain_id)
             .map_or(1, |n| n.min_stake_full());
-        let epoch = self.epoch_index;
         self.add_validator_with_floor(owner, stake, floor);
-        let validator = self
+        let reg_res = self
             .validators
             .get_mut(&owner)
-            .ok_or_else(|| "the validator was not created".to_string())?;
-        validator.vrf_public_key = seat.vrf_key.clone();
-        validator.bls_public_key = bls_key.to_vec();
-        validator.pop_signature = bls_pop.to_vec();
-        validator.pq_public_key = seat.pq_vote_key.clone();
-        validator.active = validator.stake >= floor
-            && validator.is_consensus_ready()
-            && validator.verify_pop_is_valid(chain_id)
-            && !validator.jailed;
-        validator
-            .filiz
-            .get_or_insert_with(Default::default)
-            .register(
-                owner.0,
-                seat.leader_commitment.commitment,
-                seat.leader_commitment.length,
-                epoch,
-            )
-            .map_err(|e| format!("{e:?}"))?;
+            .ok_or_else(|| "the validator was not created".to_string())
+            .and_then(|validator| {
+                validator.vrf_public_key = seat.vrf_key.clone();
+                validator.bls_public_key = bls_key.to_vec();
+                validator.pop_signature = bls_pop.to_vec();
+                validator.pq_public_key = seat.pq_vote_key.clone();
+                validator.active = validator.stake >= floor
+                    && validator.is_consensus_ready()
+                    && validator.verify_pop_is_valid(chain_id)
+                    && !validator.jailed;
+                validator
+                    .filiz
+                    .get_or_insert_with(Default::default)
+                    .register(
+                        owner.0,
+                        seat.leader_commitment.commitment,
+                        seat.leader_commitment.length,
+                        epoch,
+                    )
+                    .map_err(|e| format!("{e:?}"))
+            });
+        if let Err(err) = reg_res {
+            self.validators.remove(&owner);
+            return Err(err);
+        }
         self.sync_validator_registration_with_floor(&owner, floor);
         self.keys_dirty = true;
         Ok(())
@@ -3160,30 +3237,33 @@ impl AccountState {
                     tracing::warn!(
                         "Rejecting SlashValidator {address}: no slashing record matching the committed evidence_hash in registry history"
                     );
-                } else if let Some(v) = self.validators.get_mut(address) {
-                    v.slashed = true;
-                    v.active = false;
-                    v.jailed = true;
-                    v.jail_until = self.epoch_index.saturating_add(7);
-                    let mut destroyed = u128::from(std::mem::take(&mut v.stake));
-                    // A full governance slash also takes the stake that is
-                    // still waiting to unbond. Otherwise unstake before the
-                    // vote would keep it whole.
-                    destroyed += self
-                        .unbonding_queue
-                        .iter()
-                        .filter(|entry| entry.address == *address)
-                        .map(|entry| u128::from(entry.amount))
-                        .sum::<u128>();
-                    self.unbonding_queue
-                        .retain(|entry| entry.address != *address);
-                    // The destroyed stake was issued once. Counting it as
-                    // burned keeps it from reopening mint headroom.
-                    self.record_destroyed(destroyed);
-                    // Same tally rule as the report path: the stake this arm
-                    // just removed from the eligible set has to leave the
-                    // numerator too, or a vote cast before the slash keeps
-                    // weighing against a denominator it is no longer part of.
+                } else if self.validators.contains_key(address) {
+                    let committed_before = self.total_bud_committed();
+                    if let Some(v) = self.validators.get_mut(address) {
+                        let stake_before = v.stake;
+                        v.slashed = true;
+                        v.active = false;
+                        v.jailed = true;
+                        v.jail_until = self.epoch_index.saturating_add(7);
+                        v.stake = 0;
+                        self.unbonding_queue
+                            .retain(|entry| entry.address != *address);
+                        let _ = self.registry.slash(
+                            *address,
+                            crate::registry::role::roles::VALIDATOR,
+                            crate::registry::permissionless::SlashingCondition::DoubleSign,
+                            crate::core::chain_config::FIXED_POINT_SCALE,
+                        );
+                        self.registry
+                            .reduce_delegated_for_slash(address, stake_before, stake_before);
+                        let _ = self.registry.slash_delegation_unbonding(
+                            address,
+                            crate::core::chain_config::FIXED_POINT_SCALE,
+                        );
+                    }
+                    // Measure exact drop across validator stake, unbonding queue,
+                    // and delegation records so burned supply is booked once.
+                    self.record_destroyed_since(committed_before);
                     for proposal in self.governance.proposals.iter_mut() {
                         if proposal.status == crate::core::governance::ProposalStatus::Active {
                             proposal.reduce_vote_weight(address, u64::MAX);

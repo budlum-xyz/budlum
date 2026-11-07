@@ -5,7 +5,7 @@
 use crate::chain::chain_actor::ChainHandle;
 use crate::network::node::NodeClient;
 use crate::storage::content_id::ContentId;
-use crate::storage::db::Storage;
+use crate::persistence::db::Storage;
 
 /// B.U.D. Universal Gateway.
 /// Resolves a BNS name (.bud) to content stored in B.U.D.

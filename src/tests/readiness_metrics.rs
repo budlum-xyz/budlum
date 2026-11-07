@@ -114,16 +114,16 @@ fn finality_gauges_follow_the_chain() {
         "a chain id with no network falls back to the mainnet interval"
     );
 
-    // The genesis block is block 0 and is final; the emit path reads the height
-    // as the chain length, so a finalized height of 1 makes the lag the number
-    // of blocks after genesis.
+    // The genesis block is block 0 and is final. Finality lag uses the actual
+    // tip index, not the number of blocks retained in memory.
     let genesis = bc.chain[0].clone();
-    bc.finalized_height = 1;
+    bc.finalized_height = 0;
 
     // Under eight intervals this is a lag, not a stall.
     bc.chain = vec![genesis.clone(); 1 + (checkpoint * 4) as usize];
+    bc.chain.last_mut().expect("tip").index = checkpoint * 4;
     bc.emit_chain_metrics();
-    assert_eq!(metrics.finality_lag.get(), bc.chain.len() as i64 - 1);
+    assert_eq!(metrics.finality_lag.get(), (checkpoint * 4) as i64);
     assert_eq!(metrics.finality_lag_checkpoints.get(), 4);
     assert_eq!(
         metrics.finality_stalled.get(),
@@ -131,7 +131,8 @@ fn finality_gauges_follow_the_chain() {
         "four checkpoint intervals is under the recovery trigger"
     );
 
-    bc.chain = vec![genesis.clone(); 1 + (checkpoint * 8) as usize];
+    bc.chain = vec![genesis; 1 + (checkpoint * 8) as usize];
+    bc.chain.last_mut().expect("tip").index = checkpoint * 8;
     bc.emit_chain_metrics();
     assert_eq!(metrics.finality_lag_checkpoints.get(), 8);
     assert_eq!(
@@ -145,7 +146,7 @@ fn finality_gauges_follow_the_chain() {
 
     // Finality catching up clears it again: the gauge describes the gap, not a
     // latch, or a node that recovered would alarm forever.
-    bc.finalized_height = bc.chain.len() as u64;
+    bc.finalized_height = bc.chain.last().expect("tip").index;
     bc.emit_chain_metrics();
     assert_eq!(metrics.finality_lag.get(), 0);
     assert_eq!(metrics.finality_lag_checkpoints.get(), 0);

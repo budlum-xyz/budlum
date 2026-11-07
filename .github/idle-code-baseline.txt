@@ -1665,9 +1665,9 @@ src/storage/assignment.rs	enum	AssignmentError
 src/storage/assignment.rs	fn	displaced_shards
 src/storage/content_id.rs	const	DEFAULT_CHUNK_SIZE_BYTES
 src/storage/content_id.rs	fn	of_subrange
-src/storage/db.rs	fn	apply_migrations
-src/storage/db.rs	fn	put_content
-src/storage/db.rs	fn	recover_interrupted_commit
+src/persistence/db.rs	fn	apply_migrations
+src/persistence/db.rs	fn	put_content
+src/persistence/db.rs	fn	recover_interrupted_commit
 src/storage/derived.rs	const	DERIVED_BLOCK_PIXELS
 src/storage/derived.rs	const	DERIVED_MAX_BLOCKS_PER_SIDE
 src/storage/derived.rs	const	DERIVED_PREFIX_SPEC_BYTES
@@ -1746,8 +1746,8 @@ src/storage/manifest.rs	fn	manifest_id_from_parts_stored
 src/storage/manifest.rs	fn	manifest_id_from_shards
 src/storage/manifest.rs	fn	overhead_per_mille
 src/storage/manifest.rs	fn	replication
-src/storage/merkle_trie.rs	fn	bulk_insert
-src/storage/merkle_trie.rs	fn	root_ref
+src/persistence/state_trie.rs	fn	bulk_insert
+src/persistence/state_trie.rs	fn	root_ref
 src/storage/mobile_self.rs	enum	ReplicaRecommendation
 src/storage/mobile_self.rs	fn	availability_label
 src/storage/mobile_self.rs	fn	recommendation_for_content
@@ -1771,8 +1771,8 @@ src/storage/provider.rs	struct	PutReceipt
 src/storage/provider.rs	struct	StorageProof
 src/storage/provider.rs	type	ChallengeId
 src/storage/provider.rs	type	DealId
-src/storage/pruning.rs	fn	archive_node_default
-src/storage/pruning.rs	fn	full_node_default
+src/persistence/pruning.rs	fn	archive_node_default
+src/persistence/pruning.rs	fn	full_node_default
 src/storage/render.rs	enum	RenderError
 src/storage/render.rs	fn	format_tag
 src/storage/render.rs	fn	qr_stream_content_id

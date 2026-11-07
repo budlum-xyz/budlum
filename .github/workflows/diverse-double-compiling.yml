@@ -99,7 +99,7 @@ jobs:
           # No `|| true`. If the gate does not run this job goes red: something
           # unmeasurable cannot be counted green, and a silently skipped stage empties
           # the comparison.
-          (cd xtask/gates && cargo run --release --quiet -- regeneration) > /tmp/proghash.txt 2>&1
+          (cd xtask/gates && cargo run --release --quiet -- canonical-programs-reproduce) > /tmp/proghash.txt 2>&1
           PROGRAM=$(grep -oE "program-hash [0-9a-f]+" /tmp/proghash.txt | tail -1 | awk '{print $2}')
           test -n "${PROGRAM}"
           # The matmul guest is the largest canonical program; its hash is the

@@ -1,18 +1,16 @@
-# Mikoriza: shared security from restaked Ethereum collateral
+# Shared Security: restaked Ethereum collateral (`shared_security`)
 
-Mikoriza (code name `shared_security`) lets an Ethereum operator that
-restakes secure Budlum as well. The operator keeps its Ethereum duties and
-runs a second piece of software, a Budlum validator. The same collateral backs
-two networks. There are two separate proof-of-stake systems: Gasper on
-Ethereum and Budlum PoS (leader election plus BLS and ML-DSA finality) here.
-The keys are separate.
-
-The name is the fungal network that shares nutrients between roots.
+Shared security (`shared_security`) lets an Ethereum operator that restakes
+secure Budlum as well. The operator keeps its Ethereum duties and runs a second
+piece of software, a Budlum validator. The same collateral backs two networks.
+There are two separate proof-of-stake systems: Gasper on Ethereum and Budlum
+PoS (leader election plus BLS and ML-DSA finality) here. The keys are separate.
 
 Status: the Budlum side is wired behind a genesis flag. It is on for devnet
-and off for testnet until the end-to-end Sepolia test passes; the mainnet
-decision is not taken. The Ethereum contracts (`BudlumRegistrar`,
-`BudlumSlasher`) are part of.
+and **closed on testnet** (`45261`, proven by `shared_security_is_closed_on_testnet`)
+until the end-to-end Sepolia test passes; the mainnet decision is not taken.
+The Ethereum contracts (`BudlumRegistrar`, `BudlumSlasher`) implement the
+origin-side registration and slashing interface.
 
 ## Interface
 
@@ -44,18 +42,9 @@ creates new, Budlum-only keys and says so.
 Budlum reads Ethereum state only through verified evidence. The registrar
 emits one allocation event per change. A relayer carries the event to Budlum
 as an anchored external result (the same evidence path the bridge, the relayer
-intents and Graft use): the result leaf must reach the external root Budlum
-has anchored for that domain. No trusted party reports Ethereum state.
-
-The event binds:
-
-| Field | Value |
-|---|---|
-| kind | `budlum/mikoriza/allocation/v1` |
-| sender | the registrar contract the domain operator named (`SetRegistrar`) |
-| recipient | the Budlum validator address |
-| correlation id | `H("BDLM_MIKORIZA_OPERATOR_V1", eth_operator)` |
-| payload hash | `H("BDLM_MIKORIZA_ALLOCATION_V1", source, validator, eth_operator, units, observed_epoch, bls_key)` |
+intents and remote app binding use): the result leaf must reach the external
+root Budlum has anchored for that domain. No trusted party reports Ethereum
+state.
 
 The transaction `SettlementTx::SharedSecurity(Observe { .. })` carries the
 fields in clear; the door recomputes the payload hash, refuses a replayed
@@ -85,9 +74,10 @@ validators. Leader election and the finality snapshot read
 
 | Parameter | Testnet default | Note |
 |---|---|---|
+| `enabled` | `false` | Closed on testnet (`45261`); open on devnet (`45262`) for rehearsal. |
 | `max_restaked_share_ppm` | `300_000` | TESTNET-DEFAULT. Below one third: ETH-backed validators cannot finalize alone. |
 | `units_to_weight_ppm` | `1_000_000` | TESTNET-DEFAULT. One BUD weight atom per allocated unit (one gwei of allocated ETH magnitude). |
-| minimum BUD bond | `min_stake` | testnet value is 0. The activation path still requires `min_stake`. |
+| minimum BUD bond | `min_stake` | Testnet activation requires `min_stake`. |
 
 ## Slashing
 
@@ -118,5 +108,3 @@ is needed.
 | Method | Returns |
 |---|---|
 | `bud_getRestakedValidators` | every restaked validator: operator, units, source, observed epoch, status, and the capped weight in force this epoch |
-
-Facts only, no score.

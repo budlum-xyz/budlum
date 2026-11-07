@@ -1514,6 +1514,21 @@ pub trait BudlumApi {
         document: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Read a Universal Object Layer domain charter by settlement domain id.
+    #[method(name = "bud_getCharter")]
+    async fn get_charter(&self, domain_id: u32) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Read a Universal Object Layer asset class and its recorded custody by 32-byte hex id.
+    #[method(name = "bud_getAssetClass")]
+    async fn get_asset_class(
+        &self,
+        class_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Read a Universal Object Layer unique/record asset placement by 32-byte hex id.
+    #[method(name = "bud_getAsset")]
+    async fn get_asset(&self, asset_id: String) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// WebSocket subscriptions: `kind` is
     /// `newHeads`, `finalizedHeads` or `logs`; `logs` takes an optional
     /// address and yields the transactions that send to or from it.

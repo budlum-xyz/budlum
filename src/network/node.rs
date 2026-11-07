@@ -473,7 +473,7 @@ use crate::chain::chain_actor::ChainHandle;
 use crate::chain::finality::{Precommit, Prevote};
 use crate::network::gossip_dedup::{DedupResult, GossipDedup};
 use crate::network::peer_manager::PeerManager;
-use crate::network::regen_health_tick::{Checkpoint, CheckpointView, RegenHealthTick, TickOutcome};
+use crate::chain::state_recovery::tick::{Checkpoint, CheckpointView, StateRecoveryTick, TickOutcome};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 #[allow(clippy::large_enum_variant)]
@@ -956,7 +956,7 @@ pub struct Node {
     /// `None` keeps the previous behaviour for nodes that never set a policy,
     /// which is every test and ephemeral devnet node. A node that stores
     /// content in production should set one.
-    pub pruning_policy: Option<crate::storage::PruningPolicy>,
+    pub pruning_policy: Option<crate::persistence::PruningPolicy>,
     pub shard_manager: Option<Arc<bud_node::ShardManager>>,
     pub mobile_mode: bool,
     /// What this device says it can spend on being a peer.
@@ -981,16 +981,16 @@ pub struct Node {
     /// leaving the node stuck at whatever its flattest battery earned it. It
     /// is a ceiling and never a floor: a profile can only ask for fewer.
     mobile_peer_ceiling: usize,
-    /// The reversion ledger the regeneration health tick assesses and moves.
+    /// The reversion ledger the state recovery tick assesses and moves.
     ///
     /// Node-local and in memory: the ledger records what this node verified
     /// about its own view against the finality certificates, and it starts
     /// again from the live checkpoint on restart.
-    regen_health: RegenHealthTick,
+    recovery_tick: StateRecoveryTick,
     /// Transactions a reversion gave up, offered again after re-growth
     ///, and the height the stash starts above.
-    regen_mempool: crate::domain::RegenMempool,
-    regen_stash_from: Option<u64>,
+    recovery_mempool: crate::chain::state_recovery::RecoveryMempool,
+    recovery_stash_from: Option<u64>,
     /// Witness requests in flight, with the root the answer must hash to.
     witness_requests: HashMap<
         request_response::OutboundRequestId,
@@ -1494,16 +1494,16 @@ impl Node {
         true
     }
 
-    /// One regeneration health tick against the finalized checkpoints.
+    /// One state recovery tick against the finalized checkpoints.
     ///
     /// The canonical commitment of each stage comes from the post-quantum
     /// source (Root Seal, verified anchor, finality checkpoint with its QC);
-    /// the held one is this node's own. [`RegenHealthTick::observe`] decides
+    /// the held one is this node's own. [`StateRecoveryTick::observe`] decides
     /// and moves the reversion ledger. This method gathers the view and acts on the
     /// outcome: repair and revert open a sync round, alarms are logged as
     /// errors with their stable kind label.
-    async fn regen_health_tick(&mut self) {
-        use crate::domain::regeneration_stage::Stage;
+    async fn state_recovery_tick(&mut self) {
+        use crate::chain::state_recovery::stage::Stage;
         let live = self.chain.get_finalized_height().await;
         let (polyp, previous) = self.chain.pq_sealed_heights(live).await;
         // Every stage is read through the post-quantum canonical source: a
@@ -1513,8 +1513,8 @@ impl Node {
         wanted.extend(previous.map(|height| (Stage::Ephyra, height)));
         wanted.extend(polyp.map(|height| (Stage::Polyp, height)));
         let held = (
-            self.regen_health.held_stage(),
-            self.regen_health.held_height(),
+            self.recovery_tick.held_stage(),
+            self.recovery_tick.held_height(),
         );
         if !wanted.contains(&held) {
             wanted.push(held);
@@ -1536,7 +1536,7 @@ impl Node {
             polyp,
             checkpoints,
         };
-        let outcome = self.regen_health.observe(&view);
+        let outcome = self.recovery_tick.observe(&view);
         match &outcome {
             TickOutcome::Idle | TickOutcome::Healthy => {}
             TickOutcome::Repair {
@@ -1548,7 +1548,7 @@ impl Node {
                 repair_cost,
                 regrowth_cost,
                 height = live,
-                "Regeneration health: view diverges from the finality certificate, repair by sync"
+                "State recovery: view diverges from the finality certificate, repair by sync"
             ),
             TickOutcome::Reverted(reversion) => warn!(
                 from = ?reversion.from,
@@ -1556,19 +1556,19 @@ impl Node {
                 stress = ?reversion.stress,
                 height_after = reversion.height_after,
                 event = reversion.event_number,
-                "Regeneration health: reversion ledger reverted, re-growing by sync"
+                "State recovery: reversion ledger reverted, re-growing by sync"
             ),
             TickOutcome::RevertRefused(error) => tracing::error!(
                 %error,
                 height = live,
-                "Regeneration health: the ledger refused the reversion verdict"
+                "State recovery: the ledger refused the reversion verdict"
             ),
             TickOutcome::Alarm { reason, stress } => tracing::error!(
                 kind = reason.kind(),
                 ?reason,
                 ?stress,
                 height = live,
-                "Regeneration health alarm: self-recovery is impossible or unsafe"
+                "State recovery alarm: self-recovery is impossible or unsafe"
             ),
         }
         match &outcome {
@@ -1576,7 +1576,7 @@ impl Node {
                 self.stash_reverted_transactions(reversion.height_after, live)
                     .await;
             }
-            TickOutcome::Healthy if self.regen_health.held_stage() == Stage::Medusa => {
+            TickOutcome::Healthy if self.recovery_tick.held_stage() == Stage::Medusa => {
                 self.rebroadcast_stashed_transactions(live).await;
             }
             _ => {}
@@ -1584,7 +1584,7 @@ impl Node {
         if outcome.opens_sync() {
             let locator = self.chain.get_locator().await;
             if !self.request_headers_from_peer(None, locator, 500) {
-                info!("Regeneration health: no sync round opened, one is open or no peer fits");
+                info!("State recovery: no sync round opened, one is open or no peer fits");
             }
         }
     }
@@ -1621,19 +1621,19 @@ impl Node {
             let Some(block) = self.chain.get_block(height).await else {
                 continue;
             };
-            kept += self.regen_mempool.stash(
+            kept += self.recovery_mempool.stash(
                 &block.transactions,
                 height,
                 &crate::mempool::pool::charged_bytes,
             );
         }
-        self.regen_stash_from = Some(
-            self.regen_stash_from
+        self.recovery_stash_from = Some(
+            self.recovery_stash_from
                 .map_or(target, |held| held.min(target)),
         );
         info!(
             kept,
-            target, live, "Regeneration: stashed the transactions of the reverted heights"
+            target, live, "State recovery: stashed the transactions of the reverted heights"
         );
     }
 
@@ -1641,11 +1641,11 @@ impl Node {
     /// transactions the canonical chain did not include to the mempool and the
     /// network again. The mempool door validates them like any other.
     async fn rebroadcast_stashed_transactions(&mut self, live: u64) {
-        let Some(from) = self.regen_stash_from else {
+        let Some(from) = self.recovery_stash_from else {
             return;
         };
-        if self.regen_mempool.is_empty() {
-            self.regen_stash_from = None;
+        if self.recovery_mempool.is_empty() {
+            self.recovery_stash_from = None;
             return;
         }
         let mut confirmed = std::collections::HashSet::new();
@@ -1656,9 +1656,9 @@ impl Node {
             }
         }
         let txs = self
-            .regen_mempool
+            .recovery_mempool
             .take_unconfirmed(live, &|hash| confirmed.contains(hash));
-        self.regen_stash_from = None;
+        self.recovery_stash_from = None;
         let mut accepted = 0;
         for tx in txs {
             if self.chain.add_transaction(tx.clone()).await.is_ok() {
@@ -1677,7 +1677,7 @@ impl Node {
         }
         info!(
             accepted,
-            "Regeneration: re-offered the stashed transactions after re-growth"
+            "State recovery: re-offered the stashed transactions after re-growth"
         );
     }
 
@@ -2310,9 +2310,9 @@ impl Node {
             mobile_mode,
             mobile_profile: None,
             mobile_peer_ceiling: MAX_PEERS,
-            regen_health: RegenHealthTick::default(),
-            regen_mempool: crate::domain::RegenMempool::new(),
-            regen_stash_from: None,
+            recovery_tick: StateRecoveryTick::default(),
+            recovery_mempool: crate::chain::state_recovery::RecoveryMempool::new(),
+            recovery_stash_from: None,
             witness_requests: HashMap::new(),
             reorg_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reorg_last_completed_at: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -2403,7 +2403,7 @@ impl Node {
     /// an archive node. `PruningPolicy::validate` should be called on the
     /// policy before it reaches here; this only stores it.
     #[must_use]
-    pub const fn with_pruning_policy(mut self, policy: crate::storage::PruningPolicy) -> Self {
+    pub const fn with_pruning_policy(mut self, policy: crate::persistence::PruningPolicy) -> Self {
         self.pruning_policy = Some(policy);
         self
     }
@@ -2840,7 +2840,7 @@ impl Node {
                 _ = finality_health_interval.tick() => {
                     // Every node checks its own view, validator or not,
                     // so the health tick runs on a beat of its own.
-                    self.regen_health_tick().await;
+                    self.state_recovery_tick().await;
                 }
                 _ = finality_interval.tick() => {
                     // Resolve validator address lazily
@@ -3282,7 +3282,7 @@ impl Node {
                                 let policy_permits = self
                                     .pruning_policy
                                     .as_ref()
-                                    .is_none_or(crate::storage::PruningPolicy::should_prune_historical_state);
+                                    .is_none_or(crate::persistence::PruningPolicy::should_prune_historical_state);
                                 if !policy_permits {
                                     if let Some(ref policy) = self.pruning_policy {
                                         info!(

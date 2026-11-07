@@ -104,14 +104,14 @@ mod tests {
     /// REGRESSION: chain account Merkle trie uses 256-bit keys.
     #[test]
     fn l1_merkle_trie_is_256bit_keys() {
-        let mut trie = crate::storage::merkle_trie::MerkleTrie::new();
+        let mut trie = crate::persistence::state_trie::MerkleTrie::new();
         let key = [0xABu8; 32];
         trie.insert(&key, 1, 0);
         assert_ne!(trie.root(), [0u8; 32]);
         // Two keys that differ only in the lowest bit stay distinct leaves.
         let mut near = key;
         near[31] ^= 1;
-        let mut near_trie = crate::storage::merkle_trie::MerkleTrie::new();
+        let mut near_trie = crate::persistence::state_trie::MerkleTrie::new();
         near_trie.insert(&near, 1, 0);
         assert_ne!(trie.root(), near_trie.root());
         let single_root = trie.root();

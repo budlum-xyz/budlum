@@ -112,7 +112,7 @@ const BASELINE: &[&str] = &[
     "src/storage/erasure.rs",
     "src/storage/generated.rs",
     "src/storage/manifest.rs",
-    "src/storage/merkle_trie.rs",
+    "src/persistence/state_trie.rs",
     "src/storage/msr.rs",
     "src/storage/provider.rs",
     "src/storage/render.rs",
@@ -131,7 +131,7 @@ const BASELINE: &[&str] = &[
     "src/network/witness_protocol.rs", // "bytes.len() < 12" guard above; [..8] and [8..12] read the 12-byte header
     "src/security/quantum_canary.rs", // try-and-increment: P-192/P-224/P-256 field sizes 24/28/32 never exceed the 32-byte SHA3-256 digest
     "src/settlement/graft.rs",        // "origin.len() <= 32" guard in origin_emitter
-    "src/storage/db.rs",              // &[1u8][..] is a one-byte literal
+    "src/persistence/db.rs",              // &[1u8][..] is a one-byte literal
     "src/storage/key_package.rs", // "bytes.len() < 64" guard above; [..32] and [32..64] split the first 64
 ];
 

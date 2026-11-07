@@ -34,6 +34,7 @@ pub mod light_client;
 pub mod mempool;
 pub mod network;
 pub mod object_layer;
+pub mod persistence;
 pub mod pollen;
 pub mod privacy;
 pub mod prover;

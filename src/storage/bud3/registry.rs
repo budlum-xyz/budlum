@@ -85,6 +85,10 @@ pub struct ShareState {
     pub lost: bool,
     /// Index of the symbol root this share's symbols are under.
     pub root: usize,
+    /// Epoch when the current holder was assigned this share (for 3-epoch
+    /// unacknowledged assignment handover, Section 7.6).
+    #[serde(default)]
+    pub assigned_epoch: u64,
 }
 
 /// A symbol root and the ESI range it covers. The upload root covers ESI
@@ -442,6 +446,7 @@ impl Bud3Registry {
                 consecutive_misses: 0,
                 lost: false,
                 root: usize::try_from(segment).unwrap_or(usize::MAX),
+                assigned_epoch: epoch,
             })
             .collect();
         let roots = record
@@ -1032,6 +1037,87 @@ impl Bud3Registry {
         Ok(n)
     }
 
+    /// Convenience: hand over every unacknowledged custody assignment whose
+    /// 3-epoch confirmation window (`CUSTODY_ASSIGNMENT_HANDOVER_EPOCHS`) has
+    /// elapsed by `current_epoch` to the next eligible candidate in
+    /// `candidates`. Returns the number of shares reassigned.
+    pub fn handover_unacked_shares(
+        &mut self,
+        current_epoch: u64,
+        candidates: &[(Address, Class)],
+    ) -> usize {
+        let mut moved = 0;
+        for obj in self.objects.values_mut() {
+            let digest = obj.record.content_id.digest;
+            let len = obj.shares.len();
+            for idx in 0..len {
+                let Some((segment, current_holder, class, assigned_epoch, confirmed, lost)) = obj
+                    .shares
+                    .get(idx)
+                    .map(|s| {
+                        (
+                            s.segment,
+                            s.share.validator,
+                            s.share.class,
+                            s.assigned_epoch,
+                            s.status == ShareStatus::Confirmed,
+                            s.lost,
+                        )
+                    })
+                else {
+                    continue;
+                };
+                if lost
+                    || !super::custody::assignment_due_for_handover(
+                        assigned_epoch,
+                        current_epoch,
+                        confirmed,
+                    )
+                {
+                    continue;
+                }
+                let mut excluded: Vec<Address> = obj
+                    .shares
+                    .iter()
+                    .filter(|s| s.segment == segment && !s.lost)
+                    .map(|s| s.share.validator)
+                    .collect();
+                for (declined_digest, validator) in &self.declines {
+                    if *declined_digest == digest {
+                        excluded.push(*validator);
+                    }
+                }
+                if let Some(next_holder) = super::custody::select_next_custody_holder(
+                    &current_holder,
+                    &excluded,
+                    candidates,
+                    class,
+                ) {
+                    if let Some(slot) = obj.shares.get_mut(idx) {
+                        slot.share.validator = next_holder;
+                        slot.assigned_epoch = current_epoch;
+                        slot.status = ShareStatus::Pending;
+                        moved += 1;
+                    }
+                }
+            }
+        }
+        moved
+    }
+
+    /// Convenience: every `(object_key, segment)` pair currently due for lazy
+    /// repair across the registry.
+    #[must_use]
+    pub fn all_repairs_due(&self) -> Vec<(ObjectKey, u64)> {
+        let mut out = Vec::new();
+        for key in self.objects.keys() {
+            for seg in self.repairs_due(key) {
+                out.push((*key, seg));
+            }
+        }
+        out
+    }
+
     /// Open this epoch's audits from `seed`. A share with an audit still
     /// open is not drawn again. Returns the number opened.
     pub fn open_audits(&mut self, seed: &[u8; 32], epoch: u64, params: &AuditParams) -> usize {
@@ -1450,6 +1536,7 @@ impl Bud3Registry {
                 consecutive_misses: 0,
                 lost: false,
                 root,
+                assigned_epoch: 0,
             });
         }
         if let Some(n) = obj.next_esi.get_mut(seg_idx) {

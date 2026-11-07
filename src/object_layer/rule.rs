@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 pub enum TemplateId {
     FungibleV1,
     UniqueV1,
-    /// Opens in a later step. Registration refuses it until then.
+    /// Single-holder record object template (step 9).
     RecordV1,
 }
 
@@ -59,13 +59,13 @@ pub enum ClassRule {
 
 impl ClassRule {
     /// Whether the rule may be registered today. `Program` and `Replica`
-    /// are closed gates; `RecordV1` opens with step 9.
+    /// are closed gates; `FungibleV1`, `UniqueV1`, and `RecordV1` are open.
     #[must_use]
     pub fn is_open(&self) -> bool {
         matches!(
             self,
             Self::Template {
-                id: TemplateId::FungibleV1 | TemplateId::UniqueV1,
+                id: TemplateId::FungibleV1 | TemplateId::UniqueV1 | TemplateId::RecordV1,
                 ..
             }
         )
@@ -207,7 +207,7 @@ pub fn apply_rule(
                 requirements: vec![Condition::SignedBy { signer: *from }],
             })
         }
-        (TemplateId::UniqueV1, AssetSlice::Unique { holder }) => {
+        (TemplateId::UniqueV1 | TemplateId::RecordV1, AssetSlice::Unique { holder }) => {
             if *amount != 1 {
                 return Err(RuleRefusal::WrongShape);
             }
@@ -220,7 +220,6 @@ pub fn apply_rule(
                 requirements: vec![Condition::SignedBy { signer: *from }],
             })
         }
-        (TemplateId::RecordV1, _) => Err(RuleRefusal::ClosedRule),
         _ => Err(RuleRefusal::WrongShape),
     }
 }

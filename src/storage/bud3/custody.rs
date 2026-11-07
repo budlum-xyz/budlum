@@ -380,6 +380,42 @@ pub fn reassign_unacked_share(
     })
 }
 
+/// Client custody-share read timeout before immediate failover to the next
+/// share holder (Instant Duty Handover, Section 7.6).
+pub const CUSTODY_READ_TIMEOUT_MS: u64 = 2_000;
+
+/// Epochs an assigned custody share may stay unacknowledged before handing
+/// over to the next ranked candidate (Instant Duty Handover, Section 7.6).
+pub const CUSTODY_ASSIGNMENT_HANDOVER_EPOCHS: u64 = 3;
+
+/// Convenience: whether a pending custody assignment opened at `assigned_epoch`
+/// must hand over at `current_epoch`.
+#[must_use]
+pub const fn assignment_due_for_handover(
+    assigned_epoch: u64,
+    current_epoch: u64,
+    confirmed: bool,
+) -> bool {
+    !confirmed && current_epoch.saturating_sub(assigned_epoch) >= CUSTODY_ASSIGNMENT_HANDOVER_EPOCHS
+}
+
+/// Convenience: pick the next custody holder of `required_class` from an
+/// ordered candidate list, skipping `current` and any address in `excluded`.
+#[must_use]
+pub fn select_next_custody_holder(
+    current: &[u8; 32],
+    excluded: &[[u8; 32]],
+    candidates: &[([u8; 32], super::placement::Class)],
+    required_class: super::placement::Class,
+) -> Option<[u8; 32]> {
+    candidates
+        .iter()
+        .find(|(addr, class)| {
+            *class == required_class && addr != current && !excluded.contains(addr)
+        })
+        .map(|(addr, _)| *addr)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

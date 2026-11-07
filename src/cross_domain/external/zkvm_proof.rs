@@ -258,6 +258,14 @@ impl ExternalFinalityAdapter for ZkVmFinalityAdapter {
             });
         }
 
+        // Empty or bare `[Halt]` bytecode performs zero computation and cannot
+        // attest an external state transition.
+        if crate::prover::is_empty_or_halt_only_program(&decoded.program) {
+            return Err(AdapterError::ConsensusRule {
+                rule: "an empty or bare Halt program cannot attest a state root".to_string(),
+            });
+        }
+
         // The verification itself. All three parts go in; the verifier is the
         // chain's own STARK verifier, not a reimplementation. It runs under
         // the default activation state and then requires the proven program

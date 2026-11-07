@@ -18,7 +18,7 @@ mod tests {
     use crate::core::account::AccountState;
     use crate::core::address::Address;
 
-    use crate::storage::db::Storage;
+    use crate::persistence::db::Storage;
 
     use std::sync::Arc;
     use tempfile::tempdir;

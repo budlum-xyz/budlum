@@ -695,16 +695,8 @@ pub fn execute_graft_tx(
     ctx: &SettlementTxContext,
     tx: &GraftTx,
 ) -> Result<(), SettlementTxError> {
-    let testnet = crate::core::chain_config::Network::Testnet
-        .chain_id()
-        .value();
-    let mainnet = crate::core::chain_config::Network::Mainnet
-        .chain_id()
-        .value();
-    if ctx.chain_id == testnet || ctx.chain_id == mainnet {
-        return Err(refused(
-            "remote app binding is closed on testnet and mainnet",
-        ));
+    if !crate::core::chain_config::app_binding_enabled_for_chain_id(ctx.chain_id) {
+        return Err(refused("remote app binding is not enabled on this network"));
     }
     let block = state.current_block_height;
     match tx {

@@ -119,7 +119,7 @@ pub fn build_wallet_context(
             AtlasEvidenceCard {
                 subject: "pollen_lineage".into(),
                 status: AtlasEvidenceStatus::Derived,
-                source: "Pollen registry indexes".into(),
+                source: "data-market registry indexes".into(),
                 warning: Some(
                     "Atlas derives graph counts from registry commitments; it does not expose data bytes"
                         .into(),
@@ -255,7 +255,7 @@ pub enum WalletEdgeType {
     StorageDeal,
     /// A governance vote.
     GovernanceVote,
-    /// A Pollen access grant.
+    /// A data-market access grant.
     PollenGrant,
 }
 

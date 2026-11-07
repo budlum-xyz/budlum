@@ -441,7 +441,7 @@ mod tests {
 
     /// Wheeler DDC pin: the canonical matmul guest program hash.
     ///
-    /// The same pins are asserted in `xtask/gates/src/gates/regeneration.rs`,
+    /// The same pins are asserted in `xtask/gates/src/gates/canonical_programs_reproduce.rs`,
     /// where the program is reproduced independently from the specification.
     /// The tree produces it here; the gate reproduces it there; both must land
     /// on the same value. If this builder drifts, this test turns red and the

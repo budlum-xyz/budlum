@@ -102,7 +102,7 @@ pub mod private_transfer_fee_market;
 #[cfg(test)]
 pub mod prover;
 #[cfg(test)]
-pub mod regeneration_recovery;
+pub mod state_recovery;
 #[cfg(test)]
 pub mod relayer_liveness;
 // chain relayer proof cryptographic verification + M5 budlumxyz fee + M4 BNS fee
@@ -271,3 +271,27 @@ pub mod compose_topology_matches_services;
 pub mod readiness_metrics;
 #[cfg(test)]
 pub mod scrape_topology_covers_the_rules;
+
+// The persistence move is behaviour-neutral.
+#[cfg(test)]
+pub mod persistence_move;
+
+// State transition, vesting, staking, governance, sharding, and snapshot hardening.
+#[cfg(test)]
+pub mod state_hardening;
+
+// Domains, cross-domain bridge, settlement, and testnet feature-matrix locks.
+#[cfg(test)]
+pub mod domains_bridge_settlement;
+
+// Instant Duty Handover and finality recovery.
+#[cfg(test)]
+pub mod handover_recovery;
+
+// Ceremony rehearsal and protocol drills.
+#[cfg(test)]
+pub mod ceremony_and_drills;
+
+// Security, conservation, and privilege-boundary regressions.
+#[cfg(test)]
+pub mod security_review;

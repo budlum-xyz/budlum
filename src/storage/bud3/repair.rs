@@ -279,6 +279,11 @@ pub fn handover_expired_repair_duty(
     })
 }
 
+
+/// Deterministic lazy repair scheduler used by duty-handover simulations.
+pub mod scheduler;
+pub use scheduler::{RepairTask, RepairScheduler};
+
 #[cfg(test)]
 mod tests {
     use super::*;

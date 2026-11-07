@@ -21,7 +21,7 @@ drills (`T-1` through `T-7`) verified by `src/registry/rehearsal.rs` and `tests/
 |---|---|---|
 | `T-1` | Simultaneous shutdown of 100% of Mobile validators | Finality latency remains within 500 ms baseline, `0` objects are lost, and Full-class reads continue without interruption |
 | `T-2` | Sudden crash of 10% (at least 1) of Full validators | Finality lags by at most `2` checkpoints and standby seat handover completes within `3` checkpoints |
-| `T-3` | More than 1/3 of active seats halted for `50` blocks, then restored | `budlum_finality_stalled` alert fires (`40`-block disaster recovery threshold) and finality resumes cleanly once seats return |
+| `T-3` | More than 1/3 of active seats halted for `50` blocks, then restored | `budlum_finality_stalled` alert fires after `8` chain-specific checkpoints (`16` blocks on this devnet rehearsal, `40` on testnet) and finality resumes cleanly once seats return |
 | `T-4` | Mobile validators reconnect and submit `ResumeValidator` | Duty activates after `1` epoch boundary, zero stake is slashed (`V-4`), and lazy repair drains backlog to `0` |
 | `T-5` | Storage load test: `>= 100 GiB` uploaded plus `>= 10,000` small objects with concurrent views | All uploads register, sub-symbol objects pack into `AggregationVolume`, and concurrent view failure count equals `0` |
 | `T-6` | Multi-environment execution: Foundry, Hardhat, viem, CosmJS, Anchor, Aptos CLI, plus atomic EVM-to-CW20 transfer | All six toolchains complete green and the single-transaction cross-environment EVM -> CW20 call commits atomically |

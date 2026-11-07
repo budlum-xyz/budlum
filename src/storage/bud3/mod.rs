@@ -18,8 +18,11 @@
 //! | [`tx`] | `StorageTx` v3 and its one apply door |
 //! | [`custody`] | Sub-block tree, symbol root, the audit draw and custody proofs |
 //! | [`fees`] | Physical-byte storage fees, Custody Endowment, 95/5 split and epoch custody rewards |
+//! | [`repair`] | Segment repair scheduling and Instant Duty Handover |
 //! | [`pipeline`] | Upload (content to record and symbols) and view (symbols to checked content) |
 //! | [`fountain`] | RFC 6330 per-segment encoder and decoder, and the streaming encoder |
+//! | [`compression_context`] | Post-launch shared compression context, corpus rotation and access tiering |
+//! | [`private_dedup`] | Post-launch threshold-OPRF private cross-owner deduplication |
 //!
 //! The commitment is fixed-size (32 bytes). The object is not fixed-size: it
 //! is the header plus the payload, and it is at most the header larger than

@@ -112,13 +112,25 @@ fn rehearsal_t1_to_t7_drills_and_mobile_field_matrix_hold() {
     let read_t1 = view_from_network(&bud3, &key, None, &net).unwrap();
     assert_eq!(read_t1, payload);
 
-    // T-3: > 1/3 Full seats silent for 50 blocks triggers disaster-recovery gauge, then clears on checkpoint.
+    // T-3: > 1/3 Full seats silent for 50 blocks triggers disaster recovery
+    // after eight chain-specific checkpoints, then clears on finality.
     let mut handover = HandoverCoordinator::default();
-    for h in 1..=50 {
-        handover.observe_block(h, 1, None);
+    let checkpoint = budlum_core::core::chain_config::finality_checkpoint_interval_for_chain_id(
+        topo.chain_id,
+    );
+    let stall_height = 8 * checkpoint;
+    assert_eq!(stall_height, 16, "the devnet rehearsal uses two-block checkpoints");
+    for h in 1..stall_height {
+        handover.observe_block_at_interval(h, 1, None, checkpoint);
     }
+    assert_eq!(handover.budlum_finality_stalled(), 0);
+    handover.observe_block_at_interval(stall_height, 1, None, checkpoint);
     assert_eq!(handover.budlum_finality_stalled(), 1);
-    handover.observe_block(51, 2, Some(51));
+    assert!(handover.can_recompute_recovery_committee(2));
+    for h in stall_height + 1..=50 {
+        handover.observe_block_at_interval(h, 1, None, checkpoint);
+    }
+    handover.observe_block_at_interval(51, 2, Some(51), checkpoint);
     assert_eq!(handover.budlum_finality_stalled(), 0);
 
     // T-5 small-object packing smoke via AggregationVolume.

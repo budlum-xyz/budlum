@@ -72,6 +72,7 @@ mod gates {
     pub mod bud_e2e;
     pub mod budscan_parity;
     pub mod budscan_patchset;
+    pub mod canonical_programs_reproduce;
     pub mod capability_modules_are_wired;
     pub mod cargo_vet;
     pub mod chain_id_is_not_hardcoded;
@@ -160,8 +161,6 @@ mod gates {
     pub mod readme_no_deny;
     pub mod reduction_claims;
     pub mod refusals_no_mutate;
-    pub mod regen_health_door;
-    pub mod regeneration;
     pub mod rehearsal_and_field_matrix;
     pub mod rejection_tests;
     pub mod relay;
@@ -178,6 +177,7 @@ mod gates {
     pub mod shard_placement;
     pub mod slash_expression;
     pub mod source_reading;
+    pub mod state_recovery_door;
     pub mod storage_penalties;
     pub mod storage_priced;
     pub mod storage_proof_boundary;
@@ -206,7 +206,7 @@ mod gates {
     pub mod zero_storage_frozen;
     pub mod zero_tests_witness;
     pub mod zizmor;
-    pub mod zkvm_immune_regeneration;
+    pub mod zkvm_refuses_untrusted_proofs;
 }
 
 /// A gate's plain run: inspect the repo root, return a verdict.
@@ -236,12 +236,12 @@ struct Gate {
 
 const GATES: &[Gate] = &[
     Gate {
-        name: "zkvm-immune-regeneration",
+        name: "zkvm-refuses-untrusted-proofs",
         replaces: None,
-        run: gates::zkvm_immune_regeneration::run,
+        run: gates::zkvm_refuses_untrusted_proofs::run,
         run_log: None,
         run_args: None,
-        self_test: gates::zkvm_immune_regeneration::self_test,
+        self_test: gates::zkvm_refuses_untrusted_proofs::self_test,
     },
     Gate {
         name: "quantum-account",
@@ -744,20 +744,20 @@ const GATES: &[Gate] = &[
         self_test: gates::domain_tags::self_test,
     },
     Gate {
-        name: "regeneration",
+        name: "canonical-programs-reproduce",
         replaces: None,
-        run: gates::regeneration::run,
+        run: gates::canonical_programs_reproduce::run,
         run_log: None,
         run_args: None,
-        self_test: gates::regeneration::self_test,
+        self_test: gates::canonical_programs_reproduce::self_test,
     },
     Gate {
-        name: "regen-health-door",
+        name: "state-recovery-door",
         replaces: None,
-        run: gates::regen_health_door::run,
+        run: gates::state_recovery_door::run,
         run_log: None,
         run_args: None,
-        self_test: gates::regen_health_door::self_test,
+        self_test: gates::state_recovery_door::self_test,
     },
     Gate {
         name: "relay",

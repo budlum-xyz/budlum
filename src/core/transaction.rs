@@ -2359,6 +2359,13 @@ impl Transaction {
         self.amount.saturating_add(self.fee)
     }
 
+    /// Convenience: checked sum of `amount + fee` for consensus debit paths so
+    /// an overflowing pair is rejected instead of saturating to `u64::MAX`.
+    #[must_use]
+    pub const fn checked_total_cost(&self) -> Option<u64> {
+        self.amount.checked_add(self.fee)
+    }
+
     /// Per-type gas cost under a `GasSchedule`.
     ///
     /// **This is not what the chain charges.** The live protocol is a flat fee:
@@ -4162,6 +4169,12 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
             for sibling in &delivery.proof.siblings {
                 put_fixed(out, sibling);
             }
+        }
+        SettlementTx::ObjectLayer(uol_tx) => {
+            put_u8(out, 9);
+            let bytes = postcard::to_allocvec(uol_tx.as_ref())
+                .unwrap_or_else(|_| b"budlum/object-layer/serialize-failed".to_vec());
+            put_bytes(out, &bytes);
         }
     }
 }

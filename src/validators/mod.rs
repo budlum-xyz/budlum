@@ -19,6 +19,8 @@ pub mod handover;
 use crate::core::address::Address;
 use crate::crypto::scheme::SchemeId;
 use serde::{Deserialize, Serialize};
+pub mod handover;
+
 use std::collections::BTreeMap;
 
 /// The longest multiaddress or gateway address a registration may carry.
@@ -419,6 +421,22 @@ impl ValidatorDirectory {
         self.records.values()
     }
 
+    /// Whether `operator_key` is already bound or queued for activation on any
+    /// registered validator.
+    #[must_use]
+    pub fn operator_key_in_use(&self, operator_key: &[u8]) -> bool {
+        self.records.values().any(|r| {
+            r.operator_key == operator_key
+                || r.pending_operator_key
+                    .as_ref()
+                    .is_some_and(|p| p.value == operator_key)
+        })
+    }
+
+    pub(crate) fn remove(&mut self, owner: &Address) {
+        self.records.remove(&owner.0);
+    }
+
     /// Insert a registration. The floor for the class and the stake the
     /// transaction bonds are decided by the caller; this method owns the
     /// uniqueness rules.
@@ -449,9 +467,12 @@ impl ValidatorDirectory {
                 "the owner already has a validator record",
             ));
         }
-        if self.records.values().any(|r| {
-            r.peer_id == registration.peer_id || r.operator_key == registration.operator_key
-        }) {
+        if self
+            .records
+            .values()
+            .any(|r| r.peer_id == registration.peer_id)
+            || self.operator_key_in_use(&registration.operator_key)
+        {
             return Err(ValidatorError::new(
                 "validator_peer_or_operator_key_in_use",
                 "the peer id or the operator key belongs to another validator",
@@ -529,8 +550,12 @@ impl ValidatorDirectory {
                 ),
             ));
         }
+        let effective_quota = record
+            .pending_quota
+            .as_ref()
+            .map_or(record.custody_quota_bytes, |p| p.value);
         if new_class == ValidatorClass::MobileOpportunistic
-            && record.custody_quota_bytes > MOBILE_OPPORTUNISTIC_MAX_QUOTA_BYTES
+            && effective_quota > MOBILE_OPPORTUNISTIC_MAX_QUOTA_BYTES
         {
             return Err(ValidatorError::new(
                 "validator_quota_above_class_cap",
@@ -555,11 +580,7 @@ impl ValidatorDirectory {
         new_operator_key: Vec<u8>,
         epoch: u64,
     ) -> Result<(), ValidatorError> {
-        if self
-            .records
-            .values()
-            .any(|r| r.operator_key == new_operator_key)
-        {
+        if self.operator_key_in_use(&new_operator_key) {
             return Err(ValidatorError::new(
                 "validator_peer_or_operator_key_in_use",
                 "the operator key belongs to a validator already",
@@ -598,6 +619,12 @@ impl ValidatorDirectory {
         epoch: u64,
     ) -> Result<(), ValidatorError> {
         let record = self.records.get_mut(&owner.0).ok_or_else(no_record)?;
+        if record.pending_operator_key.is_some() {
+            return Err(ValidatorError::new(
+                "validator_rotation_pending",
+                "quota updates are frozen while an operator key rotation is pending",
+            ));
+        }
         if seq != record.quota_seq {
             return Err(ValidatorError::new(
                 "validator_quota_sequence",
@@ -616,9 +643,12 @@ impl ValidatorDirectory {
                 "UpdateCustodyQuota raises the quota; lower it by releasing shares",
             ));
         }
-        if record.class == ValidatorClass::MobileOpportunistic
-            && new_quota_bytes > MOBILE_OPPORTUNISTIC_MAX_QUOTA_BYTES
-        {
+        let target_is_opportunistic = record.class == ValidatorClass::MobileOpportunistic
+            || record
+                .pending_class
+                .as_ref()
+                .is_some_and(|p| p.value.0 == ValidatorClass::MobileOpportunistic);
+        if target_is_opportunistic && new_quota_bytes > MOBILE_OPPORTUNISTIC_MAX_QUOTA_BYTES {
             return Err(ValidatorError::new(
                 "validator_quota_above_class_cap",
                 "an opportunistic mobile validator holds at most 8 GiB",

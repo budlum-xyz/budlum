@@ -6,15 +6,15 @@
 //!
 //! WIRING: the block executor reaches this module through the
 //! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door, and RPC reads it
-//! through `bud_getCharter`, `bud_getAssetClass`, `bud_getAsset` and the
-//! other object-layer read methods. Both land in a later step; until then
-//! the state is held by `SettlementRegistries::object_layer` and closed on
-//! the testnet by `ACTIVATION`.
+//! through `bud_getCharter`, `bud_getAssetClass` and `bud_getAsset`.
+//! State is held by `SettlementRegistries::object_layer`; public testnet is
+//! closed by `ACTIVATION`, and variants still marked `StepNotOpen` remain
+//! closed on every network.
 
 use crate::core::address::Address;
 use crate::domain::types::{DomainId, Hash32};
 use crate::object_layer::charter::{CodeProof, DomainCharter};
-use crate::object_layer::ids::AssetClassId;
+use crate::object_layer::ids::{AssetClassId, DependencyId};
 use crate::object_layer::registry::{
     Call, ClassRegistration, HomeEventProof, HomeFinality, ObjectLayerRegistry, Phase, Refusal,
 };
@@ -189,13 +189,27 @@ impl ObjectLayerTx {
             Self::ConfirmDeparture(proof) => {
                 registry.confirm_departure(proof, ctx.finality)?;
             }
-            Self::AuditCode { .. }
-            | Self::Resolve { .. }
-            | Self::SetEscapeAddress { .. }
-            | Self::SetTentativeConsent { .. }
-            | Self::Adopt { .. }
-            | Self::Challenge { .. }
-            | Self::Rebut { .. } => return Err(TxRefusal::StepNotOpen),
+            Self::AuditCode { class } => {
+                registry.audit_code(*class)?;
+            }
+            Self::Resolve { dependency } => {
+                registry.resolve(DependencyId(*dependency))?;
+            }
+            Self::SetEscapeAddress { home } => {
+                registry.set_escape_address(ctx.signer, home.clone())?;
+            }
+            Self::SetTentativeConsent { consent } => {
+                registry.set_tentative_consent(ctx.signer, *consent);
+            }
+            Self::Adopt { home } => {
+                registry.adopt(ctx.signer, home)?;
+            }
+            Self::Challenge { class } => {
+                registry.challenge(ctx.signer, *class, ctx.height)?;
+            }
+            Self::Rebut { class } => {
+                registry.rebut(ctx.signer, *class, ctx.height)?;
+            }
         }
         Ok(())
     }
