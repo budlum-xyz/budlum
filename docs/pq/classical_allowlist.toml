@@ -6,7 +6,10 @@
 #   b  the BLS12-381 finality peer, required together with the ML-DSA-65 QC,
 #   c  X25519 inside a hybrid KEM,
 #   d  proofs of external networks, marked in the domain profile,
-#   e  TEE attestation, which is not on a security path.
+#   e  TEE attestation, which is not on a security path,
+#   f  UEL foreign Compatibility Lane (`src/execution/coordinator/foreign/`),
+#      where a classical account is tagged `Classical`, moves only its own
+#      classical holdings (K-3), and closes under Quantum Alert Levels 2 and 3.
 #
 # The gate (xtask/gates/src/gates/classical_crypto_is_paired.rs) turns every use of
 # ed25519_dalek, schnorrkel, bls12_381, x25519 and libp2p::noise in production code
@@ -107,3 +110,20 @@ function = "(imports)"
 pq_companion = "ML-DSA-65 QC of the same producer (consensus/qc.rs); a block needs the QC too"
 category = "b"
 
+[[entry]]
+path = "src/execution/coordinator/foreign/mod.rs"
+function = "*"
+pq_companion = "none: UEL Compatibility Lane Adopt verification; K-3 classical-only account isolation and quantum alert closure"
+category = "f"
+
+[[entry]]
+path = "src/execution/coordinator/foreign/solana.rs"
+function = "*"
+pq_companion = "none: UEL Compatibility Lane Solana Ed25519 envelope; K-3 classical-only account isolation and quantum alert closure"
+category = "f"
+
+[[entry]]
+path = "src/execution/coordinator/foreign/aptos.rs"
+function = "*"
+pq_companion = "none: UEL Compatibility Lane Aptos Ed25519 envelope; K-3 classical-only account isolation and quantum alert closure"
+category = "f"

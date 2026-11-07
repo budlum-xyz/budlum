@@ -1,10 +1,8 @@
-//! Execution-environment ABI and worker client surface (`BLG-250`).
-//!
-//! WIRING: consumed by [`crate::execution::coordinator::worker_manager`], which
-//! supervises out-of-process `budlum-ee-*` workers over [`abi::transport::EeClient`].
+//! The execution-environment interface and worker supervisor wired to the
+//! Execution Coordinator (`execution::coordinator`).
 
-pub use budlum_uel_abi as abi;
-pub use crate::execution::coordinator::worker_manager::{
-    CoordinatorBlockError, ExecutionCoordinator, UelCallReceipt, WorkerPool,
-    MAX_BLOCK_WORKER_ATTEMPTS, WORKER_RLIMIT_AS_BYTES, WORKER_WATCHDOG,
+pub use crate::execution::coordinator::worker::{
+    WorkerEndpoint, WorkerError, WorkerSupervisor, MAX_BLOCK_WORKER_RETRIES,
+    WORKER_RLIMIT_AS_BYTES, WORKER_RLIMIT_AS_KIB,
 };
+pub use budlum_uel_abi as abi;

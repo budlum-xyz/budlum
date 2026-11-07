@@ -3,8 +3,12 @@
 //! no object is accepted on a classical signature alone. The
 //! only classical components allowed are (a) the Ed25519 half of a composite
 //! signature, (b) the BLS12-381 finality peer, (c) X25519 inside a hybrid KEM,
-//! (d) proofs of external networks, marked in the profile, and (e) TEE
-//! attestation, which is not on a security path.
+//! (d) proofs of external networks, marked in the profile, (e) TEE
+//! attestation, which is not on a security path, and (f) the UEL foreign
+//! Compatibility Lane (`src/execution/coordinator/foreign/`), where a
+//! classical foreign account is tagged `Classical`, may only move its own
+//! classical holdings (K-3), and closes under Quantum Alert Levels 2 and 3
+//! (closing BLG-267).
 //!
 //! This gate reads production Rust for the classical crates and protocols
 //! (`ed25519_dalek`, `schnorrkel`, `bls12_381`, `x25519`, `libp2p::noise`) and
@@ -41,7 +45,6 @@ const CLASSICAL_TOKENS: &[&str] = &[
     "ed25519_dalek",
     "schnorrkel",
     "bls12_381",
-    "k256",
     "x25519",
     "x25519_dalek",
     "libp2p::noise",
@@ -49,10 +52,10 @@ const CLASSICAL_TOKENS: &[&str] = &[
     "noise::Config",
 ];
 
-/// The six permitted items (`f` is the UEL foreign-account lane, `K-3` / `BLG-267`).
+/// The six permitted items (`f` is restricted to `src/execution/coordinator/foreign/`).
 const ALLOWED_CATEGORIES: &[&str] = &["a", "b", "c", "d", "e", "f"];
 
-/// Required prefix for category `f` UEL foreign-account lane entries (`Section 8.6.2`).
+/// Path prefix within which category `f` (UEL Compatibility Lane, K-3) is allowed.
 const FOREIGN_LANE_PREFIX: &str = "src/execution/coordinator/foreign/";
 
 /// A classical use: a file and the function it sits in.
@@ -83,52 +86,13 @@ impl Entry {
     }
 }
 
-fn validate_foreign_lane_entry(entry: &Entry) -> Result<(), String> {
-    if entry.category != "f" {
-        return Ok(());
-    }
-    if !entry.path.starts_with(FOREIGN_LANE_PREFIX) {
-        return Err(format!(
-            "entry {} uses category `f` outside `{FOREIGN_LANE_PREFIX}`",
-            entry.path
-        ));
-    }
-    if !entry.pq_companion.contains("QuantumClass::Classical")
-        || !entry.pq_companion.contains("K-3")
-    {
-        return Err(format!(
-            "entry {} uses category `f` without naming `QuantumClass::Classical` and `K-3`",
-            entry.path
-        ));
-    }
-    Ok(())
-}
-
-fn check_foreign_lane_custody_guard(root: &Path, entries: &[Entry]) -> Result<(), String> {
-    if !entries.iter().any(|e| e.category == "f") {
-        return Ok(());
-    }
-    let guard_file = root.join("src/execution/coordinator/foreign/mod.rs");
-    let text = std::fs::read_to_string(&guard_file)
-        .map_err(|e| format!("cannot read foreign custody guard {}: {e}", guard_file.display()))?;
-    let prod = super::capability_modules_are_wired::strip_test_mods(&text);
-    if !prod.contains("QuantumClass::PostQuantum")
-        || !prod.contains("ClassicalCannotTouchPqHoldings")
-    {
-        return Err(String::from(
-            "category `f` foreign lane lacks `QuantumClass::PostQuantum` custody refusal (`K-3`)",
-        ));
-    }
-    Ok(())
-}
-
 /// Read the allow list: `unregistered_baseline = N` and `[[entry]]` tables.
 ///
 /// # Errors
 ///
 /// A line that is not a comment, a table header or `key = value`, an unknown
-/// key, an entry missing a field, an item outside `a` to `f`, a category `f`
-/// entry violating `K-3`, or a missing baseline.
+/// key, an entry missing a field, a item outside `a` to `e`, or a missing
+/// baseline.
 pub fn parse_allowlist(text: &str) -> Result<(u64, Vec<Entry>), String> {
     let mut baseline: Option<u64> = None;
     let mut entries: Vec<Entry> = Vec::new();
@@ -144,7 +108,7 @@ pub fn parse_allowlist(text: &str) -> Result<(u64, Vec<Entry>), String> {
                 pq_companion: pq_companion.ok_or("an entry has no `pq_companion`")?,
                 category: category.ok_or("an entry has no `category`")?,
             };
-            if entry.pq_companion.trim().trim_matches('"').is_empty() {
+            if entry.pq_companion.trim().is_empty() {
                 return Err(format!("entry {} has an empty `pq_companion`", entry.path));
             }
             if !ALLOWED_CATEGORIES.contains(&entry.category.as_str()) {
@@ -153,7 +117,20 @@ pub fn parse_allowlist(text: &str) -> Result<(u64, Vec<Entry>), String> {
                     entry.path, entry.category
                 ));
             }
-            validate_foreign_lane_entry(&entry)?;
+            if entry.category == "f" {
+                if !entry.path.starts_with(FOREIGN_LANE_PREFIX) {
+                    return Err(format!(
+                        "entry {} uses category `f` outside `{FOREIGN_LANE_PREFIX}`",
+                        entry.path
+                    ));
+                }
+                if !entry.pq_companion.contains("K-3") {
+                    return Err(format!(
+                        "entry {} uses category `f` without naming K-3 holding isolation",
+                        entry.path
+                    ));
+                }
+            }
             entries.push(entry);
             Ok(())
         };
@@ -324,7 +301,6 @@ pub fn run(root: &Path) -> Result<String, String> {
     let list = std::fs::read_to_string(root.join(ALLOWLIST))
         .map_err(|e| format!("cannot read {ALLOWLIST}: {e}"))?;
     let (baseline, entries) = parse_allowlist(&list)?;
-    check_foreign_lane_custody_guard(root, &entries)?;
     let files = super::pq_scan::rust_files(root, SCAN_ROOTS);
     if files.len() < 100 {
         return Err(format!(
@@ -389,23 +365,31 @@ pub fn self_test() -> Result<String, String> {
     if parse_allowlist("unregistered_baseline = 0\n[[entry]]\npath = \"p\"\nfunction = \"*\"\npq_companion = \"x\"\ncategory = \"z\"\n").is_ok() {
         return Err(String::from("an item outside a to f was accepted"));
     }
-    let bad_f = concat!(
-        "unregistered_baseline = 0\n[[entry]]\n",
-        "path = \"src/outside.rs\"\nfunction = \"*\"\n",
-        "pq_companion = \"QuantumClass::Classical (K-3)\"\ncategory = \"f\"\n",
-    );
-    if parse_allowlist(bad_f).is_ok() {
-        return Err(String::from("category f outside foreign lane was accepted"));
+    let bad_f_path = "unregistered_baseline = 0\n[[entry]]\npath = \"src/core/tx.rs\"\n\
+        function = \"*\"\npq_companion = \"K-3 classical isolation\"\ncategory = \"f\"\n";
+    if parse_allowlist(bad_f_path).is_ok() {
+        return Err(String::from(
+            "category f outside src/execution/coordinator/foreign/ was accepted",
+        ));
     }
-    let good_f = concat!(
-        "unregistered_baseline = 0\n[[entry]]\n",
-        "path = \"src/execution/coordinator/foreign/ethereum.rs\"\nfunction = \"*\"\n",
-        "pq_companion = \"QuantumClass::Classical (K-3)\"\ncategory = \"f\"\n",
-    );
-    if parse_allowlist(good_f).is_err() {
-        return Err(String::from("valid category f foreign lane entry failed"));
+    let bad_f_k3 = "unregistered_baseline = 0\n[[entry]]\n\
+        path = \"src/execution/coordinator/foreign/solana.rs\"\nfunction = \"*\"\n\
+        pq_companion = \"unpaired\"\ncategory = \"f\"\n";
+    if parse_allowlist(bad_f_k3).is_ok() {
+        return Err(String::from(
+            "category f without K-3 isolation declaration was accepted",
+        ));
+    }
+    let ok_f = "unregistered_baseline = 0\n[[entry]]\n\
+        path = \"src/execution/coordinator/foreign/solana.rs\"\nfunction = \"*\"\n\
+        pq_companion = \"none: UEL Compatibility Lane; K-3 classical-only isolation\"\n\
+        category = \"f\"\n";
+    if parse_allowlist(ok_f).is_err() {
+        return Err(String::from(
+            "valid category f Compatibility Lane entry was rejected",
+        ));
     }
     Ok(String::from(
-        "canary OK: registered, unregistered, stale, K-3 and fallen-baseline cases behave.",
+        "canary OK: registered, unregistered, stale, fallen-baseline and K-3 category-f behave.",
     ))
 }

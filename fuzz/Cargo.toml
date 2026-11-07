@@ -181,6 +181,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "evm_deployment_proof"
+path = "fuzz_targets/evm_deployment_proof.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "uel_foreign_envelopes"
+path = "fuzz_targets/uel_foreign_envelopes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "bud3_qr_frame_decode"
 path = "fuzz_targets/bud3_qr_frame_decode.rs"
 test = false

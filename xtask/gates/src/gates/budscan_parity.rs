@@ -189,7 +189,7 @@ fn const_line<'a>(text: &'a str, name: &str) -> Option<&'a str> {
 fn check_shared_constants(root: &Path, problems: &mut Vec<String>) -> Result<(), String> {
     // -- 3. Size bound: identical in three places ------------------------
     let browser_fetch = read(root, "crates/budscan/src/fetch.rs")?;
-    let core_gateway = read(root, "src/gateway/service.rs")?;
+    let core_gateway = read(root, "src/storage/content_gateway.rs")?;
     let browser_lc = read(root, "crates/budscan/src/light_client.rs")?;
     let chain = read(root, "src/chain/blockchain.rs")?;
     shared_constant_problems(&browser_fetch, &core_gateway, &browser_lc, &chain, problems);
@@ -208,7 +208,7 @@ fn shared_constant_problems(
     if browser_limit.is_none() || browser_limit != core_limit {
         problems.push(String::from(
             "the content size bound has diverged between crates/budscan/src/fetch.rs and \
-             src/gateway/service.rs. Two different bounds open a gap where one accepts \
+             src/storage/content_gateway.rs. Two different bounds open a gap where one accepts \
              what the other refuses",
         ));
     }

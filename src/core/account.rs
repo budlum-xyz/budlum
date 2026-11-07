@@ -58,17 +58,101 @@ pub struct PendingPoaCompliance {
     pub reason_hash: [u8; 32],
 }
 
-/// One whole BUD atom (`10^-6` BUD) expressed in attoBUD (`10^-18` BUD).
-pub const ATTO_PER_ATOM: u64 = 1_000_000_000_000;
+/// Number of attoBUD (`10^-18` BUD) in one native atom (`10^-6` BUD).
+///
+/// Every `Account.frac_attos` stays strictly below this ceiling; reaching it
+/// carries into `Account.balance`.
+pub const ATTOS_PER_ATOM: u64 = 1_000_000_000_000;
+/// Number of attoBUD in one whole BUD (`10^18`).
+pub const ATTOS_PER_BUD: u128 = 1_000_000_000_000_000_000;
+/// Number of attoBUD in one SVM lamport (`10^-9` BUD).
+pub const ATTOS_PER_LAMPORT: u128 = 1_000_000_000;
+/// Number of attoBUD in one Move octa (`10^-8` BUD).
+pub const ATTOS_PER_OCTA: u128 = 10_000_000_000;
+
+/// Environment-specific view and transfer quantum over the single BUD ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BudEnvUnit {
+    /// EVM wei (18 decimals, 1 attoBUD).
+    EvmWei,
+    /// SVM lamport (9 decimals, `10^9` attoBUD).
+    SvmLamport,
+    /// Move octa (8 decimals, `10^10` attoBUD).
+    MoveOcta,
+    /// CosmWasm `ubud` (6 decimals, `10^12` attoBUD = 1 atom).
+    WasmUbud,
+    /// BudZero atom (6 decimals, `10^12` attoBUD = 1 atom).
+    BudZeroAtom,
+}
+
+impl BudEnvUnit {
+    /// Maps a catalog execution environment to its BUD unit rule.
+    ///
+    /// exposed for: the Execution Coordinator (`execution::coordinator`) and UEL RPC gateways.
+    #[must_use]
+    pub const fn for_ee(ee: budlum_uel_abi::EeId) -> Option<Self> {
+        match ee {
+            budlum_uel_abi::EeId::BUDZERO => Some(Self::BudZeroAtom),
+            budlum_uel_abi::EeId::EVM => Some(Self::EvmWei),
+            budlum_uel_abi::EeId::WASM => Some(Self::WasmUbud),
+            budlum_uel_abi::EeId::SVM => Some(Self::SvmLamport),
+            budlum_uel_abi::EeId::MOVE => Some(Self::MoveOcta),
+            _ => None,
+        }
+    }
+
+    /// Smallest attoBUD amount this environment may transfer.
+    ///
+    /// exposed for: the Execution Coordinator (`execution::coordinator`) and UEL unit checks.
+    #[must_use]
+    pub const fn quantum_attos(self) -> u128 {
+        match self {
+            Self::EvmWei => 1,
+            Self::SvmLamport => ATTOS_PER_LAMPORT,
+            Self::MoveOcta => ATTOS_PER_OCTA,
+            Self::WasmUbud | Self::BudZeroAtom => ATTOS_PER_ATOM as u128,
+        }
+    }
+
+    /// Projects an account's exact attoBUD value into the environment's native unit.
+    ///
+    /// exposed for: the Execution Coordinator (`execution::coordinator`) and UEL RPC gateways.
+    #[must_use]
+    pub const fn visible_balance(self, balance: u64, frac_attos: u64) -> u128 {
+        let clamped_frac = if frac_attos < ATTOS_PER_ATOM {
+            frac_attos
+        } else {
+            ATTOS_PER_ATOM - 1
+        };
+        let total = (balance as u128) * (ATTOS_PER_ATOM as u128) + (clamped_frac as u128);
+        match self {
+            Self::EvmWei => total,
+            Self::SvmLamport => total / ATTOS_PER_LAMPORT,
+            Self::MoveOcta => total / ATTOS_PER_OCTA,
+            Self::WasmUbud | Self::BudZeroAtom => balance as u128,
+        }
+    }
+
+    /// Checks that `attos` is an exact multiple of this environment's unit quantum.
+    ///
+    /// exposed for: the Execution Coordinator (`execution::coordinator`) and UEL transfer doors.
+    pub fn check_transfer_quantum(self, attos: u128) -> Result<(), String> {
+        let q = self.quantum_attos();
+        if attos % q != 0 {
+            return Err(format!(
+                "transfer amount {attos} attoBUD is not divisible by environment quantum {q}"
+            ));
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
     pub public_key: Address,
     pub balance: u64,
     pub nonce: u64,
-    /// Sub-atom fractional balance in attoBUD (`10^-18` BUD), strictly below
-    /// [`ATTO_PER_ATOM`] (`10^12`). Enables exact 18-decimal EVM wei and
-    /// 9-decimal SVM lamport accounting on the single BUD ledger.
+    /// Sub-atom balance in attoBUD (`0 <= frac_attos < 10^12`).
     #[serde(default)]
     pub frac_attos: u64,
 }
@@ -78,20 +162,6 @@ pub struct Account {
 /// node recomputes this root: an abort would stop the whole validator set at
 /// once, and a fixed marker keeps the root identical across nodes.
 const STATE_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/account-state";
-
-fn account_leaf_hash(pubkey: &Address, account: &Account) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update([0x00]);
-    h.update(pubkey.0);
-    h.update(account.balance.to_le_bytes());
-    h.update(account.nonce.to_le_bytes());
-    if account.frac_attos != 0 {
-        h.update(b"BDLM_FRAC_ATTOS_V1");
-        h.update(account.frac_attos.to_le_bytes());
-    }
-    h.finalize().into()
-}
 
 impl Account {
     pub fn new(public_key: Address) -> Self {
@@ -110,12 +180,39 @@ impl Account {
             frac_attos: 0,
         }
     }
-    /// Exact total balance in attoBUD (`balance * 10^12 + frac_attos`).
-    pub(crate) fn bud_amount(
-        &self,
-    ) -> Result<budlum_uel_abi::BudAmount, crate::execution::coordinator::bud_unit::BudUnitError>
-    {
-        crate::execution::coordinator::bud_unit::account_bud_amount(self)
+
+    /// Full account value in attoBUD (`balance * 10^12 + frac_attos`).
+    ///
+    /// Refuses an out-of-range `frac_attos` (`>= 10^12`) rather than folding
+    /// corrupt deserialized data into a consensus arithmetic step.
+    /// exposed for: the Execution Coordinator (`execution::coordinator`) and economy invariants.
+    pub fn checked_total_attos(&self) -> Result<u128, String> {
+        if self.frac_attos >= ATTOS_PER_ATOM {
+            return Err(format!(
+                "account frac_attos {} exceeds ceiling {}",
+                self.frac_attos, ATTOS_PER_ATOM
+            ));
+        }
+        u128::from(self.balance)
+            .checked_mul(u128::from(ATTOS_PER_ATOM))
+            .and_then(|atoms| atoms.checked_add(u128::from(self.frac_attos)))
+            .ok_or_else(|| String::from("account attoBUD total overflow"))
+    }
+
+    /// Decomposes an attoBUD total into normalized `(balance, frac_attos)`
+    /// with `frac_attos < 10^12`.
+    /// exposed for: the Execution Coordinator (`execution::coordinator`) and economy invariants.
+    pub fn set_from_total_attos(&mut self, total_attos: u128) -> Result<(), String> {
+        let q = u128::from(ATTOS_PER_ATOM);
+        let atoms_u128 = total_attos / q;
+        let rem_u128 = total_attos % q;
+        let balance = u64::try_from(atoms_u128)
+            .map_err(|_| String::from("account atom balance overflow from attoBUD total"))?;
+        let frac_attos = u64::try_from(rem_u128)
+            .map_err(|_| String::from("account frac_attos conversion overflow"))?;
+        self.balance = balance;
+        self.frac_attos = frac_attos;
+        Ok(())
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -503,9 +600,9 @@ pub struct AccountState {
     /// The B.U.D. 3.0 registry: objects, references, shares and audits.
     /// Rooted and snapshotted.
     pub bud3_registry: crate::storage::bud3::registry::Bud3Registry,
-    /// Universal Execution Layer namespace key-value store (`ee/*`, `uel/*`).
-    /// Folded into the state root via `execution_root()` once non-empty.
-    pub uel_state: crate::execution::coordinator::commitment::UelNamespaceStore,
+    /// Universal Execution Layer state: per-environment namespaces, alias table,
+    /// asset registry, deploy freeze flags and UEL base fee.
+    pub execution_state: crate::execution::coordinator::state::ExecutionState,
     /// Governance-queued compliance freezes/unfreezes awaiting
     /// application (see [`PendingPoaCompliance`]).
     pub pending_poa_freezes: Vec<PendingPoaCompliance>,
@@ -580,7 +677,7 @@ impl AccountState {
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
             validator_directory: crate::validators::ValidatorDirectory::new(),
             bud3_registry: crate::storage::bud3::registry::Bud3Registry::default(),
-            uel_state: crate::execution::coordinator::commitment::UelNamespaceStore::default(),
+            execution_state: crate::execution::coordinator::state::ExecutionState::new(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -646,7 +743,7 @@ impl AccountState {
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
             validator_directory: crate::validators::ValidatorDirectory::new(),
             bud3_registry: crate::storage::bud3::registry::Bud3Registry::default(),
-            uel_state: crate::execution::coordinator::commitment::UelNamespaceStore::default(),
+            execution_state: crate::execution::coordinator::state::ExecutionState::new(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -721,7 +818,7 @@ impl AccountState {
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
             validator_directory: crate::validators::ValidatorDirectory::new(),
             bud3_registry: crate::storage::bud3::registry::Bud3Registry::default(),
-            uel_state: crate::execution::coordinator::commitment::UelNamespaceStore::default(),
+            execution_state: crate::execution::coordinator::state::ExecutionState::new(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -839,7 +936,7 @@ impl AccountState {
             poa_compliance: snapshot.poa_compliance.clone().unwrap_or_default(),
             validator_directory: snapshot.validator_directory.clone().unwrap_or_default(),
             bud3_registry: snapshot.bud3_registry.clone().unwrap_or_default(),
-            uel_state: crate::execution::coordinator::commitment::UelNamespaceStore::default(),
+            execution_state: crate::execution::coordinator::state::ExecutionState::new(),
             burned_total: snapshot.burned_total,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -3566,68 +3663,183 @@ impl AccountState {
         balance
     }
 
-    /// Total $BUD in liquid account balances.
+    /// Total $BUD in liquid account balances, rounded up across fractional
+    /// attoBUD sub-units so splitting an atom across accounts never reopens
+    /// false minting headroom.
     ///
     /// Validator stake and unbonding entries are bonded separately and are not
     /// Part of `accounts`, so supply-cap checks must use [`Self::total_bud_committed`]
     /// Instead of this helper alone.
     pub fn circulating_supply(&self) -> u128 {
-        let mut atoms = 0u128;
-        let mut frac_sum = 0u128;
-        for a in self.accounts.values() {
-            atoms = atoms.saturating_add(u128::from(a.balance));
-            frac_sum = frac_sum.saturating_add(u128::from(a.frac_attos));
+        let attos = self.circulating_supply_attos();
+        let q = u128::from(ATTOS_PER_ATOM);
+        if attos == 0 {
+            0
+        } else {
+            attos.saturating_add(q - 1) / q
         }
-        atoms.saturating_add(frac_sum.div_ceil(u128::from(ATTO_PER_ATOM)))
     }
 
-    /// Exact total committed supply in attoBUD (`10^-18` BUD):
-    /// `sum(balance * 10^12 + frac_attos)` across liquid accounts plus `10^12`
-    /// times all staked, unbonding, role-bonded, and escrowed whole-atom pools.
+    /// Exact liquid supply in attoBUD: `sum(balance * 10^12 + frac_attos)`.
     ///
-    /// Convenience: exposed alongside [`Self::total_bud_committed`] for UEL
-    /// conservation checks and compatibility gateways.
-    pub fn total_atto_bud_committed(&self) -> u128 {
-        let liquid_attos = self.accounts.values().fold(0u128, |acc, a| {
-            let acct_attos = a.bud_amount().map_or_else(
-                |_| {
-                    u128::from(a.balance)
-                        .saturating_mul(u128::from(ATTO_PER_ATOM))
-                        .saturating_add(u128::from(a.frac_attos))
-                },
-                |amt| amt.0,
-            );
-            acc.saturating_add(acct_attos)
-        });
-        let non_liquid_atoms = self
-            .total_staked_supply()
-            .saturating_add(self.total_unbonding_supply())
-            .saturating_add(self.total_registry_role_bonded_supply())
-            .saturating_add(self.registry.total_delegation_unbonding_supply())
-            .saturating_add(self.total_external_bonded_supply())
-            .saturating_add(self.proof_market.total_locked_supply())
-            .saturating_add(self.settlement.relayer_policy.total_escrowed_supply())
-            .saturating_add(self.settlement.graft.total_escrowed_supply())
-            .saturating_add(self.total_storage_escrowed_supply());
-        liquid_attos
-            .saturating_add(non_liquid_atoms.saturating_mul(u128::from(ATTO_PER_ATOM)))
+    /// exposed for: the Execution Coordinator (`execution::coordinator`) and economy invariants.
+    #[must_use]
+    pub fn circulating_supply_attos(&self) -> u128 {
+        let q = u128::from(ATTOS_PER_ATOM);
+        self.accounts.values().fold(0u128, |acc, a| {
+            let item = u128::from(a.balance)
+                .saturating_mul(q)
+                .saturating_add(u128::from(a.frac_attos));
+            acc.saturating_add(item)
+        })
     }
 
-    /// Conservation-preserving transfer of `attos` attoBUD (`10^-18` BUD)
-    /// between two accounts under `ee`'s unit quantum rule.
+    /// Exact total committed supply in attoBUD across liquid accounts and all
+    /// bonded/escrowed atom pools.
     ///
-    /// Convenience: exposed on [`AccountState`] for the execution coordinator
-    /// host bridge and conservation tests.
-    pub fn transfer_atto_bud(
+    /// exposed for: the Execution Coordinator (`execution::coordinator`) and economy invariants.
+    #[must_use]
+    pub fn total_bud_committed_attos(&self) -> u128 {
+        let q = u128::from(ATTOS_PER_ATOM);
+        self.circulating_supply_attos()
+            .saturating_add(self.non_liquid_committed_atoms().saturating_mul(q))
+    }
+
+    /// Exact attoBUD balance of `address` (`balance * 10^12 + frac_attos`).
+    ///
+    /// exposed for: the Execution Coordinator (`execution::coordinator`) and UEL `HostRead`.
+    #[must_use]
+    pub fn get_attos_balance(&self, address: &Address) -> u128 {
+        self.accounts.get(address).map_or(0, |a| {
+            u128::from(a.balance)
+                .saturating_mul(u128::from(ATTOS_PER_ATOM))
+                .saturating_add(u128::from(a.frac_attos))
+        })
+    }
+
+    /// Spendable attoBUD balance of `address`, respecting burn-reserve freeze
+    /// and team vesting locks.
+    ///
+    /// exposed for: the Execution Coordinator (`execution::coordinator`) and UEL `HostApi`.
+    #[must_use]
+    pub fn spendable_attos(&self, address: &Address) -> u128 {
+        if self.burn_reserve_address == Some(*address) {
+            return 0;
+        }
+        let Some(acct) = self.accounts.get(address) else {
+            return 0;
+        };
+        let spendable_atoms = self.spendable_balance(address);
+        let frac = if spendable_atoms == acct.balance {
+            acct.frac_attos
+        } else {
+            // If `spendable_balance` is capped below `acct.balance`, locked
+            // atoms sit below the spendable ceiling and all `frac_attos` are
+            // above the locked atom floor too.
+            acct.frac_attos
+        };
+        if spendable_atoms == 0 && acct.balance > 0 {
+            // Every whole atom is locked by vesting; sub-atom dust above the
+            // locked floor is spendable only if `acct.balance >= locked`.
+            let locked = self
+                .team_vesting
+                .as_ref()
+                .filter(|(team, _)| team == address)
+                .map_or(0, |(_, schedule)| schedule.locked_at(self.epoch_index));
+            if acct.balance < locked {
+                return 0;
+            }
+        }
+        u128::from(spendable_atoms)
+            .saturating_mul(u128::from(ATTOS_PER_ATOM))
+            .saturating_add(u128::from(frac))
+    }
+
+    /// Atomically transfers `attos` attoBUD from `from` to `to` under `unit`'s
+    /// divisibility rule, preserving `0 <= frac_attos < 10^12` and exact supply
+    /// conservation without creating or destroying a single attoBUD.
+    ///
+    /// exposed for: the Execution Coordinator (`execution::coordinator`) and UEL `HostApi`.
+    pub fn transfer_attos_in_unit(
         &mut self,
         from: &Address,
         to: &Address,
-        ee: budlum_uel_abi::EeId,
         attos: u128,
-    ) -> Result<u64, crate::execution::coordinator::bud_unit::BudUnitError> {
-        crate::execution::coordinator::bud_unit::transfer_atto_bud_in_state(
-            self, from, to, ee, attos,
-        )
+        unit: BudEnvUnit,
+    ) -> Result<(), String> {
+        unit.check_transfer_quantum(attos)?;
+        if attos == 0 || from == to {
+            let avail = self.spendable_attos(from);
+            if avail < attos {
+                return Err(format!(
+                    "insufficient spendable attoBUD: have {avail}, need {attos}"
+                ));
+            }
+            return Ok(());
+        }
+        let spendable = self.spendable_attos(from);
+        if spendable < attos {
+            return Err(format!(
+                "insufficient spendable attoBUD: have {spendable}, need {attos}"
+            ));
+        }
+        let sender_total = self
+            .accounts
+            .get(from)
+            .ok_or_else(|| String::from("sender account does not exist"))?
+            .checked_total_attos()?;
+        let new_sender_total = sender_total
+            .checked_sub(attos)
+            .ok_or_else(|| String::from("sender attoBUD underflow"))?;
+        let recipient_existed = self.accounts.contains_key(to);
+        let recipient_total = match self.accounts.get(to) {
+            Some(acct) => acct.checked_total_attos()?,
+            None => 0,
+        };
+        let new_recipient_total = recipient_total
+            .checked_add(attos)
+            .ok_or_else(|| String::from("recipient attoBUD overflow"))?;
+
+        // Validate both normalized endpoints before mutating either account.
+        let mut updated_sender = self
+            .accounts
+            .get(from)
+            .cloned()
+            .ok_or_else(|| String::from("sender account missing"))?;
+        updated_sender.set_from_total_attos(new_sender_total)?;
+
+        let mut updated_recipient = self
+            .accounts
+            .get(to)
+            .cloned()
+            .unwrap_or_else(|| Account::new(*to));
+        updated_recipient.set_from_total_attos(new_recipient_total)?;
+
+        self.accounts.insert(*from, updated_sender);
+        self.dirty_accounts.insert(*from);
+        self.accounts.insert(*to, updated_recipient);
+        self.dirty_accounts.insert(*to);
+        if !recipient_existed {
+            self.keys_dirty = true;
+        }
+        Ok(())
+    }
+
+    /// Executes a batch of UEL transactions against this `AccountState` through
+    /// `coordinator`, committing the resulting `ExecutionState` and fee splits.
+    ///
+    /// exposed for: block execution (`WP-26` slice 2/2).
+    pub fn execute_uel_block(
+        &mut self,
+        coordinator: &mut crate::execution::coordinator::ExecutionCoordinator,
+        ctx: budlum_uel_abi::BlockContext,
+        proposer: Address,
+        txs: &[crate::execution::coordinator::UelTx],
+    ) -> Result<
+        Vec<crate::execution::coordinator::UelReceipt>,
+        crate::execution::coordinator::CoordinatorError,
+    > {
+        coordinator.execute_block(self, ctx, proposer, txs)
     }
 
     /// Total $BUD locked in validator stake, including inactive/jailed validators.
@@ -3664,9 +3876,8 @@ impl AccountState {
     /// Burn and reopen false minting headroom. Delegation exits, proof-market
     /// escrow, relayer-intent escrow and Graft intent escrow are counted for the
     /// same reason.
-    pub fn total_bud_committed(&self) -> u128 {
-        self.circulating_supply()
-            .saturating_add(self.total_staked_supply())
+    fn non_liquid_committed_atoms(&self) -> u128 {
+        self.total_staked_supply()
             .saturating_add(self.total_unbonding_supply())
             .saturating_add(self.total_registry_role_bonded_supply())
             .saturating_add(self.registry.total_delegation_unbonding_supply())
@@ -3675,6 +3886,11 @@ impl AccountState {
             .saturating_add(self.settlement.relayer_policy.total_escrowed_supply())
             .saturating_add(self.settlement.graft.total_escrowed_supply())
             .saturating_add(self.total_storage_escrowed_supply())
+    }
+
+    pub fn total_bud_committed(&self) -> u128 {
+        self.circulating_supply()
+            .saturating_add(self.non_liquid_committed_atoms())
     }
 
     /// Total $BUD held in storage-deal escrow: the operator bond and the part
@@ -4159,7 +4375,17 @@ impl AccountState {
                 self.cached_leaves = self
                     .accounts
                     .par_iter()
-                    .map(|(pubkey, account)| account_leaf_hash(pubkey, account))
+                    .map(|(pubkey, account)| {
+                        let mut h = Sha256::new();
+                        h.update([0x00]);
+                        h.update(pubkey.0);
+                        h.update(account.balance.to_le_bytes());
+                        h.update(account.nonce.to_le_bytes());
+                        if account.frac_attos != 0 {
+                            h.update(account.frac_attos.to_le_bytes());
+                        }
+                        h.finalize().into()
+                    })
                     .collect();
             }
             #[cfg(miri)]
@@ -4167,7 +4393,17 @@ impl AccountState {
                 self.cached_leaves = self
                     .accounts
                     .iter()
-                    .map(|(pubkey, account)| account_leaf_hash(pubkey, account))
+                    .map(|(pubkey, account)| {
+                        let mut h = Sha256::new();
+                        h.update([0x00]);
+                        h.update(pubkey.0);
+                        h.update(account.balance.to_le_bytes());
+                        h.update(account.nonce.to_le_bytes());
+                        if account.frac_attos != 0 {
+                            h.update(account.frac_attos.to_le_bytes());
+                        }
+                        h.finalize().into()
+                    })
                     .collect();
             }
 
@@ -4212,7 +4448,15 @@ impl AccountState {
             for dirty_key in &self.dirty_accounts {
                 if let Ok(pos) = self.cached_keys.binary_search(dirty_key) {
                     if let Some(account) = self.accounts.get(dirty_key) {
-                        self.cached_leaves[pos] = account_leaf_hash(dirty_key, account);
+                        let mut h = Sha256::new();
+                        h.update([0x00]);
+                        h.update(dirty_key.0);
+                        h.update(account.balance.to_le_bytes());
+                        h.update(account.nonce.to_le_bytes());
+                        if account.frac_attos != 0 {
+                            h.update(account.frac_attos.to_le_bytes());
+                        }
+                        self.cached_leaves[pos] = h.finalize().into();
                         affected_indices.insert(pos);
                     }
                 }
@@ -4458,9 +4702,11 @@ impl AccountState {
             final_hasher.update(b"bud3_registry_v1");
             final_hasher.update(self.bud3_registry.state_root());
         }
-        if !self.uel_state.is_empty() {
+        // UEL execution state folds in once non-empty so pre-UEL chains keep
+        // their pinned genesis and block state roots.
+        if !self.execution_state.is_empty() {
             final_hasher.update(b"uel_execution_v1");
-            final_hasher.update(self.uel_state.execution_root());
+            final_hasher.update(self.execution_state.execution_root());
         }
         if !self.external_roots.is_empty() {
             final_hasher.update(b"external_roots_v1");
@@ -6372,5 +6618,104 @@ mod validator_v7_binding_tests {
         let forged_tx = signed(&forged, TransactionType::Unstake);
         assert_eq!(forged_tx.from, tx.from);
         assert!(state.check_validator_v7_binding(&forged_tx).is_err());
+    }
+
+    #[test]
+    fn frac_attos_stays_below_1e12() {
+        let alice = Address::from([0xA1; 32]);
+        let bob = Address::from([0xB2; 32]);
+        let mut state = AccountState::new();
+        state.accounts.insert(alice, Account::with_balance(alice, 5));
+        state.keys_dirty = true;
+
+        // Transfer 1 wei (`1` attoBUD) out of 5 whole atoms: borrows 1 atom into
+        // `999_999_999_999` frac_attos on Alice and `1` frac_attos on Bob.
+        state
+            .transfer_attos_in_unit(&alice, &bob, 1, BudEnvUnit::EvmWei)
+            .expect("1 wei transfer");
+        let a = state.accounts.get(&alice).expect("alice");
+        let b = state.accounts.get(&bob).expect("bob");
+        assert_eq!(a.balance, 4);
+        assert_eq!(a.frac_attos, ATTOS_PER_ATOM - 1);
+        assert!(a.frac_attos < ATTOS_PER_ATOM);
+        assert_eq!(b.balance, 0);
+        assert_eq!(b.frac_attos, 1);
+        assert!(b.frac_attos < ATTOS_PER_ATOM);
+
+        // Transferring `ATTOS_PER_ATOM - 1` more to Bob carries Bob cleanly to
+        // `(balance = 1, frac_attos = 0)` and Alice to `(balance = 4, frac_attos = 0)`.
+        let carry = u128::from(ATTOS_PER_ATOM - 1);
+        state
+            .transfer_attos_in_unit(&alice, &bob, carry, BudEnvUnit::EvmWei)
+            .expect("carry transfer");
+        let a = state.accounts.get(&alice).expect("alice");
+        let b = state.accounts.get(&bob).expect("bob");
+        assert_eq!((a.balance, a.frac_attos), (4, 0));
+        assert_eq!((b.balance, b.frac_attos), (1, 0));
+
+        // Corrupt out-of-range `frac_attos >= 10^12` is refused fail-closed.
+        let mut corrupt = Account::with_balance(alice, 1);
+        corrupt.frac_attos = ATTOS_PER_ATOM;
+        assert!(corrupt.checked_total_attos().is_err());
+
+        // Non-divisible transfers are refused without mutating state.
+        let root_before = state.calculate_state_root();
+        assert!(state
+            .transfer_attos_in_unit(&bob, &alice, 500, BudEnvUnit::SvmLamport)
+            .is_err());
+        assert_eq!(state.calculate_state_root(), root_before);
+    }
+
+    #[test]
+    fn uel_bud_conservation() {
+        let addrs: Vec<Address> = (1u8..=6).map(|i| Address::from([i; 32])).collect();
+        let mut state = AccountState::new();
+        for (idx, addr) in addrs.iter().enumerate() {
+            state
+                .accounts
+                .insert(*addr, Account::with_balance(*addr, (idx as u64 + 1) * 1_000));
+        }
+        state.keys_dirty = true;
+        let initial_attos = state.total_bud_committed_attos();
+        let initial_ceiling_atoms = state.circulating_supply();
+
+        let units = [
+            BudEnvUnit::EvmWei,
+            BudEnvUnit::SvmLamport,
+            BudEnvUnit::MoveOcta,
+            BudEnvUnit::WasmUbud,
+            BudEnvUnit::BudZeroAtom,
+        ];
+        // Deterministic LCG exercising cross-unit transfers, sub-atom splits,
+        // carries, borrows and refusals across 250 steps.
+        let mut seed: u64 = 0x5EED_CAFE_2026_0026;
+        for step in 0..250usize {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let from = addrs[(seed as usize) % addrs.len()];
+            let to = addrs[((seed >> 16) as usize) % addrs.len()];
+            let unit = units[step % units.len()];
+            let q = unit.quantum_attos();
+            let mult = u128::from((seed >> 32) % 2_500_000 + 1);
+            let amount = q.saturating_mul(mult);
+            let _ = state.transfer_attos_in_unit(&from, &to, amount, unit);
+
+            assert_eq!(
+                state.total_bud_committed_attos(),
+                initial_attos,
+                "attoBUD conservation violated at step {step}"
+            );
+            for acct in state.accounts.values() {
+                assert!(
+                    acct.frac_attos < ATTOS_PER_ATOM,
+                    "frac_attos ceiling violated at step {step}: {}",
+                    acct.frac_attos
+                );
+            }
+            // Splitting atoms across accounts must never undercount `circulating_supply`
+            // below the true whole-atom ceiling.
+            assert!(state.circulating_supply() >= initial_ceiling_atoms);
+        }
     }
 }

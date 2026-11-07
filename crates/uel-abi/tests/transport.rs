@@ -1,6 +1,7 @@
 //! The coordinator <-> worker round trip over a real Unix socket, with the mock
 //! environment on the worker side.
 
+#![cfg(unix)]
 // A panic is how a test reports a broken invariant; the node-wide panic gate is for
 // production code (the same exemption the root manifest documents for tests).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -304,6 +305,54 @@ fn uel_abi_watchdog_trips_the_nondeterministic_class() {
 }
 
 #[test]
+fn uel_abi_handshake_response_must_match_request_id() {
+    let path = socket_path();
+    let _ = std::fs::remove_file(&path);
+    let listener = UnixListener::bind(&path).expect("bind");
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let hello = read_frame(&mut stream).expect("hello");
+        write_frame(
+            &mut stream,
+            &pb::Envelope {
+                abi_version: ABI_VERSION,
+                request_id: hello.request_id.wrapping_add(1),
+                body: Some(pb::envelope::Body::Hello(pb::Hello { ee: 1 })),
+            },
+        )
+        .expect("mismatched hello reply");
+
+        if let Ok(request) = read_frame(&mut stream) {
+            let response = pb::ValidateDeployResponse {
+                result: Some(pb::validate_deploy_response::Result::Info(pb::CodeInfo {
+                    code_hash: vec![0; 32],
+                    abi_tag: "unexpected/1".into(),
+                })),
+            };
+            let _ = write_frame(
+                &mut stream,
+                &pb::Envelope {
+                    abi_version: ABI_VERSION,
+                    request_id: request.request_id,
+                    body: Some(pb::envelope::Body::ValidateDeployResponse(response)),
+                },
+            );
+        }
+    });
+
+    let mut client = EeClient::new(&path, EeId::EVM);
+    let error = client
+        .validate_deploy(b"x")
+        .expect_err("a response to another request is not a valid handshake");
+    assert!(matches!(
+        error,
+        TransportError::Protocol(message)
+            if message.contains("handshake response for request")
+    ));
+    assert!(!client.is_connected());
+}
+
+#[test]
 fn uel_abi_wrong_environment_is_refused() {
     let path = spawn_worker(|| MockEe::new(EeId::WASM));
     let mut client = EeClient::new(&path, EeId::EVM);
@@ -477,4 +526,43 @@ fn uel_abi_wire_values_are_bounded() {
     ));
     let _: Option<UnixStream> = None;
     let _ = ServeEnd::Closed;
+}
+
+#[cfg(unix)]
+#[test]
+fn uel_abi_partial_request_write_is_not_retried() {
+    use std::net::Shutdown;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let path = socket_path();
+    let listener = UnixListener::bind(&path).expect("bind");
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let accepts_bg = Arc::clone(&accepts);
+
+    let worker = thread::spawn(move || {
+        // Accept first connection, complete handshake, then shut down read side
+        // so the subsequent request write fails after reuse.
+        let (mut s1, _) = listener.accept().expect("accept 1");
+        accepts_bg.fetch_add(1, Ordering::SeqCst);
+        let h = read_frame(&mut s1).expect("hello");
+        write_frame(
+            &mut s1,
+            &pb::Envelope {
+                abi_version: ABI_VERSION,
+                request_id: h.request_id,
+                body: Some(pb::envelope::Body::Hello(pb::Hello { ee: EeId::EVM.0 as u32 })),
+            },
+        )
+        .expect("hello reply");
+        let _ = s1.shutdown(Shutdown::Both);
+        drop(s1);
+    });
+
+    let mut client = EeClient::new(&path, EeId::EVM);
+    // Warm connection via explicit connect test path: first validate_deploy fails
+    // without attempting a second accept on `listener`.
+    let _ = client.validate_deploy(b"code");
+    worker.join().expect("worker join");
+    assert_eq!(accepts.load(Ordering::SeqCst), 1);
 }

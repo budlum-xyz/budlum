@@ -5704,7 +5704,7 @@ impl BudlumApiServer for RpcServer {
         let resolved = self.chain.bns_resolve_full(name.clone()).await;
         for cid in resolved
             .as_ref()
-            .map(crate::gateway::pollen_guard_ids)
+            .map(crate::storage::content_gateway::pollen_guard_ids)
             .unwrap_or_default()
         {
             if self.chain.pollen_asset_for_content(cid).await.is_some() {
@@ -5715,8 +5715,11 @@ impl BudlumApiServer for RpcServer {
                 ));
             }
         }
-        let gateway =
-            crate::gateway::BudGateway::new(self.chain.clone(), Some(self.node.clone()), None);
+        let gateway = crate::storage::content_gateway::BudGateway::new(
+            self.chain.clone(),
+            Some(self.node.clone()),
+            None,
+        );
         let data = gateway.fetch_name_content(&name).await.map_err(|e| {
             ErrorObjectOwned::owned(
                 -32000,
@@ -5738,7 +5741,7 @@ impl BudlumApiServer for RpcServer {
         let resolved = self.chain.bns_resolve_full(name.clone()).await;
         for cid in resolved
             .as_ref()
-            .map(crate::gateway::pollen_guard_ids)
+            .map(crate::storage::content_gateway::pollen_guard_ids)
             .unwrap_or_default()
         {
             if self.chain.pollen_asset_for_content(cid).await.is_some() {
@@ -5752,8 +5755,11 @@ impl BudlumApiServer for RpcServer {
         let parsed = parse_render_format(&format).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid render format: {e}"), None::<()>)
         })?;
-        let gateway =
-            crate::gateway::BudGateway::new(self.chain.clone(), Some(self.node.clone()), None);
+        let gateway = crate::storage::content_gateway::BudGateway::new(
+            self.chain.clone(),
+            Some(self.node.clone()),
+            None,
+        );
         let (bytes, id) = gateway
             .render_name_content(&name, &parsed)
             .await
@@ -5771,7 +5777,7 @@ impl BudlumApiServer for RpcServer {
         &self,
         name: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        crate::gateway::validate_passport_name(&name).map_err(|e| {
+        crate::wallet::identity_profile::validate_passport_name(&name).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid passport name: {e}"), None::<()>)
         })?;
         let resolved = self.chain.bns_resolve_full(name.clone()).await;
@@ -5787,7 +5793,7 @@ impl BudlumApiServer for RpcServer {
         let data_assets = self.chain.pollen_get_data_assets().await;
         let access_grants = self.chain.pollen_get_access_grants().await;
         let sale_authorizations = self.chain.pollen_get_sale_authorizations().await;
-        let profile = crate::gateway::build_passport_profile(
+        let profile = crate::wallet::identity_profile::build_passport_profile(
             name,
             resolved,
             manifest,
@@ -5808,7 +5814,7 @@ impl BudlumApiServer for RpcServer {
         &self,
         name: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        crate::gateway::validate_passport_name(&name).map_err(|e| {
+        crate::wallet::identity_profile::validate_passport_name(&name).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid passport name: {e}"), None::<()>)
         })?;
         let resolved = self.chain.bns_resolve_full(name.clone()).await;
@@ -5824,7 +5830,7 @@ impl BudlumApiServer for RpcServer {
         let data_assets = self.chain.pollen_get_data_assets().await;
         let access_grants = self.chain.pollen_get_access_grants().await;
         let sale_authorizations = self.chain.pollen_get_sale_authorizations().await;
-        let profile = crate::gateway::build_passport_profile(
+        let profile = crate::wallet::identity_profile::build_passport_profile(
             name,
             resolved,
             manifest,
@@ -5834,13 +5840,14 @@ impl BudlumApiServer for RpcServer {
         );
         let height = self.chain.get_height().await;
         let bundle =
-            crate::gateway::try_build_passport_proof_bundle(&profile, height).map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32603,
-                    format!("failed to build passport proof bundle: {e}"),
-                    None::<()>,
-                )
-            })?;
+            crate::wallet::identity_profile::try_build_passport_proof_bundle(&profile, height)
+                .map_err(|e| {
+                    ErrorObjectOwned::owned(
+                        -32603,
+                        format!("failed to build passport proof bundle: {e}"),
+                        None::<()>,
+                    )
+                })?;
         serde_json::to_value(bundle).map_err(|e| {
             ErrorObjectOwned::owned(
                 -32603,
@@ -5863,7 +5870,7 @@ impl BudlumApiServer for RpcServer {
         let data_assets = self.chain.pollen_get_data_assets().await;
         let access_grants = self.chain.pollen_get_access_grants().await;
         let sale_authorizations = self.chain.pollen_get_sale_authorizations().await;
-        let context = crate::gateway::build_wallet_context(
+        let context = crate::explorer_evidence::build_wallet_context(
             address,
             balance,
             nonce,

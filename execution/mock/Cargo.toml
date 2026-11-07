@@ -1,0 +1,18 @@
+[package]
+name = "budlum-ee-mock"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+description = "Deterministic mock UEL execution-environment worker binary (`budlum-ee-mock`)"
+publish = false
+
+[[bin]]
+name = "budlum-ee-mock"
+path = "src/main.rs"
+
+[dependencies]
+budlum-uel-abi = { path = "../../crates/uel-abi" }
+
+[workspace]
+resolver = "2"

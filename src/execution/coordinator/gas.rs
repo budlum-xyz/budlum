@@ -1,269 +1,259 @@
-//! Universal gas model (`BGU`) and EIP-1559 fee split for UEL execution.
+//! Budlum Gas Unit (BGU) budgets, soft per-EE limits, and EIP-1559 fee split.
 //!
-//! Section 8.9 defines a single consensus gas unit (`1 BGU`) across all five
-//! execution environments, a `60_000_000 BGU` block limit (`30_000_000 BGU`
-//! EIP-1559 target), per-environment soft limits, the EIP-150 `63/64`
-//! cross-environment call stipend, and an exact integer EIP-1559 fee split
-//! (10% of base fee burned, 90% of base fee to `reward_pool`, 100% of priority
-//! fee to the block proposer).
+//! Implements section 8.9 and section 11.3:
+//! - Block limit: `60_000_000` BGU (TESTNET-DEFAULT).
+//! - Soft per-environment limits: EVM `30_000_000`, WASM `24_000_000`,
+//!   SVM `24_000_000`, Move `24_000_000` (`1 Move unit = 100 BGU`),
+//!   BudZero `MAX_BLOCK_CONTRACT_GAS`.
+//! - EIP-1559 base fee in attoBUD per BGU: 50% target (`30_000_000` BGU),
+//!   max 12.5% (`1/8`) adjustment per block.
+//! - Base fee split: 10% burned, 90% credited to the Network Security Pool
+//!   (`reward_pool_account`). Priority fee: 100% credited to block proposer.
 
-use std::fmt;
+use crate::core::account::{AccountState, BudEnvUnit, ATTOS_PER_ATOM};
+use crate::core::address::Address;
+use crate::execution::zkvm::MAX_BLOCK_CONTRACT_GAS;
+use crate::tokenomics::reward_pool::reward_pool_account;
+use budlum_uel_abi::EeId;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
-use budlum_uel_abi::{EeId, OutOfGas};
-
-/// Maximum nesting depth for `universal_call` (`depth` 0..=8; `> 8` refused).
-pub const MAX_UNIVERSAL_CALL_DEPTH: u32 = 8;
-
-/// Target BGU per block for EIP-1559 elasticity (`30M BGU`, 50% of block limit).
-///
-/// Convenience: exposed for block producer gas accounting and fee updates.
-pub const BLOCK_BGU_TARGET: u64 = 30_000_000;
-
-/// Hard maximum BGU per block (`60M BGU`, `TESTNET-DEFAULT`, Section 8.9 item 2).
-///
-/// Convenience: exposed for block validation and coordinator admission.
+/// Hard block-wide BGU ceiling (section 8.9 item 2).
 pub const BLOCK_BGU_LIMIT: u64 = 60_000_000;
+/// Target block utilization (50% of `BLOCK_BGU_LIMIT`).
+pub const TARGET_BLOCK_BGU: u64 = BLOCK_BGU_LIMIT / 2;
+/// Maximum EIP-1559 base-fee step denominator (`1/8` = 12.5%).
+pub const BASE_FEE_MAX_CHANGE_DENOM: u128 = 8;
+/// Genesis floor for UEL base fee: 1,000,000 attoBUD/BGU (`10^-6` atom/BGU).
+pub const MIN_UEL_BASE_FEE_ATTOS: u128 = 1_000_000;
 
-/// Hard maximum BGU per single transaction (`30M BGU`).
-///
-/// Convenience: exposed for mempool and coordinator transaction admission.
-pub const TX_BGU_LIMIT: u64 = 30_000_000;
-
-/// Soft per-environment BGU cap inside one block (`EVM = 30M`).
+/// Soft per-environment BGU limits within a single block (section 8.9 item 3).
 pub const EVM_SOFT_BGU_LIMIT: u64 = 30_000_000;
-/// Soft per-environment BGU cap inside one block (`WASM = 24M`).
 pub const WASM_SOFT_BGU_LIMIT: u64 = 24_000_000;
-/// Soft per-environment BGU cap inside one block (`SVM = 24M`).
 pub const SVM_SOFT_BGU_LIMIT: u64 = 24_000_000;
-/// Soft per-environment BGU cap inside one block (`Move = 24M`).
 pub const MOVE_SOFT_BGU_LIMIT: u64 = 24_000_000;
 
-/// Base BGU cost of `HostRead::read`.
-pub const BGU_READ_BASE: u64 = 200;
-/// Additional BGU per 32-byte chunk read.
-pub const BGU_READ_PER_32B: u64 = 3;
+/// Initial native-unit to BGU conversion factor for Move (`1 unit = 100 BGU`).
+pub const MOVE_GAS_TO_BGU: u64 = 100;
 
-/// Base BGU cost of inserting a brand-new state key (`HostApi::write`).
-pub const BGU_WRITE_NEW_BASE: u64 = 20_000;
-/// Additional BGU per 32-byte chunk when inserting a new state key.
-pub const BGU_WRITE_NEW_PER_32B: u64 = 640;
-
-/// Base BGU cost of updating or deleting an existing state key.
-pub const BGU_WRITE_UPDATE_BASE: u64 = 5_000;
-/// Additional BGU per 32-byte chunk when updating an existing state key.
-pub const BGU_WRITE_UPDATE_PER_32B: u64 = 160;
-
-/// Base BGU cost of `HostApi::universal_call`.
-pub const BGU_UNIVERSAL_CALL_BASE: u64 = 2_600;
-/// Extra BGU on first access to a target contract in the transaction.
-pub const BGU_UNIVERSAL_CALL_COLD_EXTRA: u64 = 2_500;
-/// Extra BGU on warm access to a target contract in the transaction.
-pub const BGU_UNIVERSAL_CALL_WARM_EXTRA: u64 = 100;
-
-/// BGU cost of `HostApi::bud_transfer`.
-pub const BGU_BUD_TRANSFER: u64 = 9_000;
-
-/// Base BGU cost of `HostApi::emit_log`.
-pub const BGU_LOG_BASE: u64 = 375;
-/// Additional BGU per indexed log topic.
-pub const BGU_LOG_PER_TOPIC: u64 = 375;
-/// Additional BGU per byte of log payload.
-pub const BGU_LOG_PER_BYTE: u64 = 8;
-
-/// EIP-1559 maximum base-fee change denominator per block (`1/8 = 12.5%`).
-const BASE_FEE_MAX_CHANGE_DENOM: u128 = 8;
-
-/// Soft BGU limit for one execution environment within a block (Section 8.9 item 3).
-///
-/// Convenience: enforced by the block coordinator per environment.
+/// Returns the soft per-block BGU limit for environment `ee`.
 #[must_use]
-pub const fn ee_soft_bgu_limit(ee: EeId) -> u64 {
+pub const fn soft_limit_for_ee(ee: EeId) -> Option<u64> {
     match ee {
-        EeId::EVM => EVM_SOFT_BGU_LIMIT,
-        EeId::WASM => WASM_SOFT_BGU_LIMIT,
-        EeId::SVM => SVM_SOFT_BGU_LIMIT,
-        EeId::MOVE => MOVE_SOFT_BGU_LIMIT,
-        EeId::BUDZERO => crate::execution::zkvm::MAX_BLOCK_CONTRACT_GAS,
-        _ => 0,
+        EeId::EVM => Some(EVM_SOFT_BGU_LIMIT),
+        EeId::WASM => Some(WASM_SOFT_BGU_LIMIT),
+        EeId::SVM => Some(SVM_SOFT_BGU_LIMIT),
+        EeId::MOVE => Some(MOVE_SOFT_BGU_LIMIT),
+        EeId::BUDZERO => Some(MAX_BLOCK_CONTRACT_GAS),
+        _ => None,
     }
 }
 
-/// Convert `native_units` of `ee`'s internal gas/fuel/cycle meter into `BGU`
-/// (Section 8.9 item 3: EVM/WASM/SVM/BudZero `1:1`, Move `1:100`).
+/// Converts environment-native gas units to BGU (section 8.9 item 3).
 ///
-/// Convenience: exposed for EE adapters and coordinator gas accounting.
-pub fn native_units_to_bgu(ee: EeId, native_units: u64) -> Result<u64, OutOfGas> {
+/// exposed for: UEL environment adapters and gas calibration (`WP-27`..`WP-35`).
+pub fn native_gas_to_bgu(ee: EeId, native_units: u64) -> Result<u64, String> {
     match ee {
         EeId::EVM | EeId::WASM | EeId::SVM | EeId::BUDZERO => Ok(native_units),
-        EeId::MOVE => native_units.checked_mul(100).ok_or(OutOfGas),
-        _ => Err(OutOfGas),
+        EeId::MOVE => native_units
+            .checked_mul(MOVE_GAS_TO_BGU)
+            .ok_or_else(|| String::from("Move gas to BGU conversion overflow")),
+        other => Err(format!("unsupported execution environment 0x{:02x}", other.0)),
     }
 }
 
-/// Number of 32-byte words needed to cover `byte_len` (ceiling division).
-#[must_use]
-pub const fn words_32(byte_len: usize) -> u64 {
-    let n = byte_len as u64;
-    n / 32 + (if n.is_multiple_of(32) { 0 } else { 1 })
+/// Tracks cumulative BGU consumption across a block against both the hard
+/// `60_000_000` ceiling and each environment's soft cap.
+#[derive(Debug, Clone, Default)]
+pub struct BlockBguMeter {
+    total_used: u64,
+    per_ee_used: BTreeMap<u8, u64>,
 }
 
-/// Deterministic BGU cost of `HostRead::read` for `key_len + val_len` bytes.
-#[must_use]
-pub fn read_cost_bgu(key_len: usize, val_len: usize) -> u64 {
-    let chunks = words_32(key_len.saturating_add(val_len));
-    BGU_READ_BASE.saturating_add(chunks.saturating_mul(BGU_READ_PER_32B))
-}
+impl BlockBguMeter {
+    /// Creates a fresh block BGU meter.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-/// Deterministic BGU cost of `HostApi::write`.
-#[must_use]
-pub fn write_cost_bgu(is_new_key: bool, key_len: usize, val_len: usize) -> u64 {
-    let chunks = words_32(key_len.saturating_add(val_len));
-    if is_new_key {
-        BGU_WRITE_NEW_BASE.saturating_add(chunks.saturating_mul(BGU_WRITE_NEW_PER_32B))
-    } else {
-        BGU_WRITE_UPDATE_BASE.saturating_add(chunks.saturating_mul(BGU_WRITE_UPDATE_PER_32B))
+    /// Total BGU consumed in the block so far.
+    #[must_use]
+    pub const fn total_used(&self) -> u64 {
+        self.total_used
+    }
+
+    /// Checks whether a call in `ee` requesting up to `gas_limit_bgu` fits inside
+    /// both `ee`'s soft cap and the block's hard `BLOCK_BGU_LIMIT`.
+    pub fn check_admissible(&self, ee: EeId, gas_limit_bgu: u64) -> Result<(), String> {
+        let soft = soft_limit_for_ee(ee)
+            .ok_or_else(|| format!("unsupported execution environment 0x{:02x}", ee.0))?;
+        let ee_used = self.per_ee_used.get(&ee.0).copied().unwrap_or(0);
+        if ee_used.saturating_add(gas_limit_bgu) > soft {
+            return Err(format!(
+                "environment 0x{:02x} soft BGU limit {soft} exceeded ({ee_used} + {gas_limit_bgu})",
+                ee.0
+            ));
+        }
+        if self.total_used.saturating_add(gas_limit_bgu) > BLOCK_BGU_LIMIT {
+            return Err(format!(
+                "block BGU limit {BLOCK_BGU_LIMIT} exceeded ({} + {gas_limit_bgu})",
+                self.total_used
+            ));
+        }
+        Ok(())
+    }
+
+    /// Commits `gas_used_bgu` spent by a finalized transaction in `ee`.
+    pub fn record_used(&mut self, ee: EeId, gas_used_bgu: u64) -> Result<(), String> {
+        self.check_admissible(ee, gas_used_bgu)?;
+        self.total_used = self.total_used.saturating_add(gas_used_bgu);
+        let entry = self.per_ee_used.entry(ee.0).or_insert(0);
+        *entry = entry.saturating_add(gas_used_bgu);
+        Ok(())
     }
 }
 
-/// Deterministic BGU cost of `HostApi::emit_log`.
+/// Computes the next block's UEL base fee in attoBUD per BGU (section 8.9 item 5).
 #[must_use]
-pub fn log_cost_bgu(topics: usize, data_len: usize) -> u64 {
-    BGU_LOG_BASE
-        .saturating_add((topics as u64).saturating_mul(BGU_LOG_PER_TOPIC))
-        .saturating_add((data_len as u64).saturating_mul(BGU_LOG_PER_BYTE))
-}
-
-/// EIP-150 `63/64` stipend cap for `universal_call` (Section 8.7.3 item 4).
-#[must_use]
-pub const fn callee_gas_stipend(remaining_bgu: u64, requested_bgu: u64) -> u64 {
-    let max_forward = remaining_bgu - (remaining_bgu / 64);
-    if requested_bgu < max_forward {
-        requested_bgu
-    } else {
-        max_forward
-    }
-}
-
-/// Pure-integer EIP-1559 next-block base fee in attoBUD per BGU.
-///
-/// Convenience: exposed for block header base-fee updates on UEL gas usage.
-#[must_use]
-pub fn next_block_base_fee_atto(parent_base_fee_atto: u128, block_bgu_used: u64) -> u128 {
-    let used = u128::from(block_bgu_used);
-    let target = u128::from(BLOCK_BGU_TARGET);
+pub fn next_uel_base_fee_attos(current_base_fee_attos: u128, block_gas_used_bgu: u64) -> u128 {
+    let base = current_base_fee_attos.max(MIN_UEL_BASE_FEE_ATTOS);
+    let used = u128::from(block_gas_used_bgu.min(BLOCK_BGU_LIMIT));
+    let target = u128::from(TARGET_BLOCK_BGU);
     if used == target {
-        return parent_base_fee_atto;
+        return base;
     }
     if used > target {
-        let delta_gas = used - target;
-        let num = parent_base_fee_atto.saturating_mul(delta_gas);
-        let denom = target.saturating_mul(BASE_FEE_MAX_CHANGE_DENOM);
-        let step = (num / denom).max(1);
-        parent_base_fee_atto.saturating_add(step)
+        let excess = used - target;
+        let num = base.saturating_mul(excess);
+        let den = target.saturating_mul(BASE_FEE_MAX_CHANGE_DENOM);
+        let delta = (num / den).max(1);
+        base.saturating_add(delta)
     } else {
-        let delta_gas = target - used;
-        let num = parent_base_fee_atto.saturating_mul(delta_gas);
-        let denom = target.saturating_mul(BASE_FEE_MAX_CHANGE_DENOM);
-        let step = num / denom;
-        parent_base_fee_atto.saturating_sub(step).max(1)
+        let deficit = target - used;
+        let num = base.saturating_mul(deficit);
+        let den = target.saturating_mul(BASE_FEE_MAX_CHANGE_DENOM);
+        let delta = num / den;
+        base.saturating_sub(delta).max(MIN_UEL_BASE_FEE_ATTOS)
     }
 }
 
-/// Exact attoBUD distribution of one UEL transaction's gas payment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UelFeeSplit {
-    /// Total attoBUD charged to the payer (`burned + reward_pool + proposer_tip`).
-    pub total_charged_atto: u128,
-    /// 10% of base fee burned permanently (Section 8.9 item 6).
-    pub burned_atto: u128,
-    /// 90% of base fee routed to `reward_pool` (Section 8.9 item 6).
-    pub reward_pool_atto: u128,
-    /// 100% of priority fee routed to the block proposer.
-    pub proposer_tip_atto: u128,
-}
-
-/// Arithmetic refusal when computing a UEL fee split.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GasFeeError {
-    /// Fee multiplication overflowed `u128` or gas exceeded `TX_BGU_LIMIT`.
-    OverflowOrLimitExceeded,
-}
-
-impl fmt::Display for GasFeeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::OverflowOrLimitExceeded => write!(f, "UEL gas fee overflow or tx limit exceeded"),
-        }
+/// Effective priority fee per BGU (`min(max_priority_fee_per_bgu, max_fee_per_bgu - base_fee)`).
+pub fn effective_priority_fee_attos(
+    base_fee_attos: u128,
+    max_fee_per_bgu_attos: u128,
+    max_priority_fee_per_bgu_attos: u128,
+) -> Result<u128, String> {
+    let base = base_fee_attos.max(MIN_UEL_BASE_FEE_ATTOS);
+    if max_fee_per_bgu_attos < base {
+        return Err(format!(
+            "max_fee_per_bgu ({max_fee_per_bgu_attos}) is below base_fee ({base})"
+        ));
     }
+    let headroom = max_fee_per_bgu_attos - base;
+    Ok(max_priority_fee_per_bgu_attos.min(headroom))
 }
 
-impl std::error::Error for GasFeeError {}
+/// Breakdown of settled UEL fees in attoBUD.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UelFeeSettlement {
+    pub gas_used_bgu: u64,
+    pub burned_attos: u128,
+    pub security_pool_attos: u128,
+    pub proposer_tip_attos: u128,
+}
 
-/// Compute the exact Section 8.9 item 6 EIP-1559 fee split in attoBUD:
-/// 10% base fee burned, 90% base fee to `reward_pool`, 100% tip to proposer.
+/// Settles `gas_used_bgu` for `payer` against `state`:
+/// - Base fee (`gas_used * base_fee`): 10% burned, 90% to `reward_pool_account()`.
+/// - Priority fee (`gas_used * effective_tip`): 100% to `proposer`.
 ///
-/// Convenience: called by coordinator settlement and fee-split audits.
-pub fn settle_bgu_fee_split(
-    bgu_used: u64,
-    base_fee_atto: u128,
-    priority_fee_atto: u128,
-) -> Result<UelFeeSplit, GasFeeError> {
-    if bgu_used > TX_BGU_LIMIT {
-        return Err(GasFeeError::OverflowOrLimitExceeded);
-    }
-    let used = u128::from(bgu_used);
-    let base_total = used
-        .checked_mul(base_fee_atto)
-        .ok_or(GasFeeError::OverflowOrLimitExceeded)?;
-    let tip_total = used
-        .checked_mul(priority_fee_atto)
-        .ok_or(GasFeeError::OverflowOrLimitExceeded)?;
-    let total = base_total
+/// Whole burned atoms increment `state.burned_total`; sub-atom burned dust is
+/// routed to `burn_reserve_address` when configured or else to `reward_pool_account()`
+/// so `Account` balances never leak unaccounted fractional supply.
+pub fn settle_uel_fee_attos(
+    state: &mut AccountState,
+    payer: &Address,
+    proposer: &Address,
+    gas_used_bgu: u64,
+    base_fee_attos: u128,
+    max_fee_per_bgu_attos: u128,
+    max_priority_fee_per_bgu_attos: u128,
+) -> Result<UelFeeSettlement, String> {
+    let base = base_fee_attos.max(MIN_UEL_BASE_FEE_ATTOS);
+    let tip = effective_priority_fee_attos(
+        base,
+        max_fee_per_bgu_attos,
+        max_priority_fee_per_bgu_attos,
+    )?;
+    let gas = u128::from(gas_used_bgu);
+    let base_total = gas
+        .checked_mul(base)
+        .ok_or_else(|| String::from("UEL base fee overflow"))?;
+    let tip_total = gas
+        .checked_mul(tip)
+        .ok_or_else(|| String::from("UEL priority fee overflow"))?;
+    let total_charge = base_total
         .checked_add(tip_total)
-        .ok_or(GasFeeError::OverflowOrLimitExceeded)?;
+        .ok_or_else(|| String::from("UEL total fee overflow"))?;
 
-    let burned_atto = base_total / 10;
-    let reward_pool_atto = base_total - burned_atto;
-    Ok(UelFeeSplit {
-        total_charged_atto: total,
-        burned_atto,
-        reward_pool_atto,
-        proposer_tip_atto: tip_total,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bgu_conversions_and_eip1559_10_90_fee_split_conserve_every_atto() {
-        assert_eq!(native_units_to_bgu(EeId::EVM, 21_000).unwrap(), 21_000);
-        assert_eq!(native_units_to_bgu(EeId::WASM, 25).unwrap(), 25);
-        assert_eq!(native_units_to_bgu(EeId::SVM, 500).unwrap(), 500);
-        assert_eq!(native_units_to_bgu(EeId::MOVE, 7).unwrap(), 700);
-        assert_eq!(native_units_to_bgu(EeId::BUDZERO, 999).unwrap(), 999);
-
-        assert_eq!(ee_soft_bgu_limit(EeId::EVM), 30_000_000);
-        assert_eq!(ee_soft_bgu_limit(EeId::WASM), 24_000_000);
-        assert_eq!(ee_soft_bgu_limit(EeId::SVM), 24_000_000);
-        assert_eq!(ee_soft_bgu_limit(EeId::MOVE), 24_000_000);
-
-        let split = settle_bgu_fee_split(21_003, 1_000_000_007, 50_000).unwrap();
-        assert_eq!(split.burned_atto, (21_003u128 * 1_000_000_007u128) / 10);
-        assert_eq!(
-            split
-                .burned_atto
-                .checked_add(split.reward_pool_atto)
-                .unwrap()
-                .checked_add(split.proposer_tip_atto)
-                .unwrap(),
-            split.total_charged_atto
-        );
-
-        let base = 1_000_000_000u128;
-        assert!(next_block_base_fee_atto(base, BLOCK_BGU_LIMIT) > base);
-        assert!(next_block_base_fee_atto(base, 0) < base);
-        assert_eq!(next_block_base_fee_atto(base, BLOCK_BGU_TARGET), base);
+    if state.spendable_attos(payer) < total_charge {
+        return Err(format!(
+            "insufficient spendable attoBUD for UEL fee: need {total_charge}"
+        ));
     }
+
+    let ten_percent = base_total / 10;
+    let pool_share = base_total - ten_percent;
+    let atom_q = u128::from(ATTOS_PER_ATOM);
+    let whole_burn_atoms = u64::try_from(ten_percent / atom_q)
+        .map_err(|_| String::from("UEL burn atom overflow"))?;
+    let burn_dust_attos = ten_percent % atom_q;
+
+    let pool_addr = reward_pool_account();
+    let pool_plus_dust = if let Some(burn_reserve) = state.burn_reserve_address {
+        if burn_dust_attos > 0 {
+            state.transfer_attos_in_unit(
+                payer,
+                &burn_reserve,
+                burn_dust_attos,
+                BudEnvUnit::EvmWei,
+            )?;
+        }
+        pool_share
+    } else {
+        pool_share.saturating_add(burn_dust_attos)
+    };
+
+    if pool_plus_dust > 0 {
+        state.transfer_attos_in_unit(payer, &pool_addr, pool_plus_dust, BudEnvUnit::EvmWei)?;
+    }
+    if tip_total > 0 {
+        state.transfer_attos_in_unit(payer, proposer, tip_total, BudEnvUnit::EvmWei)?;
+    }
+    if whole_burn_atoms > 0 {
+        let exact_burn_attos = u128::from(whole_burn_atoms).saturating_mul(atom_q);
+        let acct = state
+            .accounts
+            .get_mut(payer)
+            .ok_or_else(|| String::from("payer account missing during burn"))?;
+        let current = acct.checked_total_attos()?;
+        let after = current
+            .checked_sub(exact_burn_attos)
+            .ok_or_else(|| String::from("payer attoBUD underflow during burn"))?;
+        acct.set_from_total_attos(after)?;
+        state.dirty_accounts.insert(*payer);
+        state.burned_total = state.burned_total.saturating_add(whole_burn_atoms);
+    }
+
+    let burned_recorded = if state.burn_reserve_address.is_some() {
+        ten_percent
+    } else {
+        u128::from(whole_burn_atoms).saturating_mul(atom_q)
+    };
+    Ok(UelFeeSettlement {
+        gas_used_bgu,
+        burned_attos: burned_recorded,
+        security_pool_attos: base_total.saturating_sub(burned_recorded),
+        proposer_tip_attos: tip_total,
+    })
 }

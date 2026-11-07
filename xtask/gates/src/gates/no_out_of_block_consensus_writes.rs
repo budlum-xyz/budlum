@@ -145,6 +145,9 @@ const READ_NAMES: &[&str] = &[
     "deals_for_manifest",
     "deals_for_shard",
     "under_replicated_shards",
+    // The admission fee quote: a pure function of the parameters, the base
+    // fee and the governance proposal fee. `chain_actor` answers
+    // `get_required_fee` with it and never writes the state.
     "required_fee",
 ];
 

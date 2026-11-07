@@ -15,7 +15,7 @@
 //!
 //! # How it relates to Atlas
 //!
-//! `src/gateway/atlas.rs` already carries an evidence-card model
+//! `src/explorer_evidence/mod.rs` already carries an evidence-card model
 //! (`AtlasEvidenceStatus`: `Verified`, `Derived`, `PendingProof`,
 //! `Unverified`) and says it "does not label raw, unproven UI data as
 //! verified". Budscan draws the same distinction but uses four **different**

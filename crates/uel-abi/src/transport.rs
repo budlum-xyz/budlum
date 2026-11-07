@@ -12,14 +12,14 @@
 //! must not write anything.
 
 use crate::frame::{read_frame, write_frame, FrameError, ABI_VERSION};
-use crate::host::{ExecutionEnvironment, HostApi, HostRead};
+pub use crate::host::panic_digest;
+use crate::host::{panic_message, ExecutionEnvironment, HostApi, HostRead};
 use crate::pb;
 use crate::types::{
     BlockContext, BudAmount, CodeInfo, EeCall, EeFault, EeId, EeIdentity, EeLog, EeOutcome,
     EeQuery, EeRefusal, HostError, Namespace, OutOfGas, RefusalCode, UniversalCall,
     UniversalResult, WireError,
 };
-use sha2::{Digest, Sha256};
 use std::cell::{Cell, RefCell};
 use std::io;
 use std::os::unix::net::UnixStream;
@@ -92,28 +92,6 @@ fn envelope(request_id: u64, body: pb::envelope::Body) -> pb::Envelope {
         abi_version: ABI_VERSION,
         request_id,
         body: Some(body),
-    }
-}
-
-/// The digest an environment reports for a caught panic. Domain-separated and
-/// bound to the environment, so two environments panicking with one message
-/// still differ.
-#[must_use]
-pub fn panic_digest(ee: EeId, message: &str) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(b"BDLM_UEL_PANIC_V1");
-    hasher.update([ee.0]);
-    hasher.update(message.as_bytes());
-    hasher.finalize().into()
-}
-
-fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(s) = payload.downcast_ref::<&str>() {
-        (*s).to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "non-string panic".to_string()
     }
 }
 
@@ -288,6 +266,12 @@ impl EeClient {
             ),
         )?;
         let reply = read_frame(&mut stream)?;
+        if reply.request_id != id {
+            return Err(TransportError::Protocol(format!(
+                "handshake response for request {} while waiting for {id}",
+                reply.request_id
+            )));
+        }
         let Some(pb::envelope::Body::Hello(hello)) = reply.body else {
             return Err(TransportError::Protocol(
                 "handshake reply is not a hello".into(),
@@ -308,42 +292,22 @@ impl EeClient {
 
     /// Sends the first frame of a request, connecting (or reconnecting once,
     /// when a reused connection turns out to be dead) as needed.
+    /// Sends one request frame, connecting if needed. A failed write may have
+    /// delivered a prefix or even the complete frame, so it is never retried.
     fn open_request(&mut self, body: pb::envelope::Body) -> Result<u64, TransportError> {
-        let reused = self.stream.is_some();
-        if !reused {
+        if self.stream.is_none() {
             self.connect()?;
         }
         let id = self.take_request_id();
-        let frame = envelope(id, body);
-        let first = match self.stream.as_mut() {
-            Some(stream) => write_frame(stream, &frame),
+        let result = match self.stream.as_mut() {
+            Some(stream) => write_frame(stream, &envelope(id, body)),
             None => return Err(TransportError::Protocol("no connection".into())),
         };
-        match first {
-            Ok(()) => Ok(id),
-            Err(error) if reused && !matches!(error, FrameError::TooLarge { .. }) => {
-                // The worker restarted since the last call: nothing of this
-                // request reached it, so one fresh attempt is safe.
-                self.stream = None;
-                self.connect()?;
-                let id = self.take_request_id();
-                let frame = envelope(
-                    id,
-                    frame
-                        .body
-                        .unwrap_or(pb::envelope::Body::Hello(pb::Hello { ee: 0 })),
-                );
-                match self.stream.as_mut() {
-                    Some(stream) => write_frame(stream, &frame)?,
-                    None => return Err(TransportError::Protocol("no connection".into())),
-                }
-                Ok(id)
-            }
-            Err(error) => {
-                self.stream = None;
-                Err(error.into())
-            }
+        if let Err(error) = result {
+            self.stream = None;
+            return Err(error.into());
         }
+        Ok(id)
     }
 
     /// Reads frames until the final response for `id`, answering host requests.
@@ -447,7 +411,10 @@ impl EeClient {
         match self.drive(id, Some(HostAccess::Full(host)))? {
             pb::envelope::Body::ExecuteResponse(response) => match response.result {
                 Some(pb::execute_response::Result::Outcome(outcome)) => Ok(Ok(outcome.try_into()?)),
-                Some(pb::execute_response::Result::Fault(fault)) => Ok(Err(fault.try_into()?)),
+                Some(pb::execute_response::Result::Fault(fault)) => {
+                    self.stream = None;
+                    Ok(Err(fault.try_into()?))
+                }
                 None => Err(TransportError::Protocol("empty execute response".into())),
             },
             _ => Err(TransportError::Protocol(

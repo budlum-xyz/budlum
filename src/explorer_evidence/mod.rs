@@ -1,4 +1,6 @@
-//! Budlum Atlas / bud.scan evidence models.
+//! Budlum explorer / bud.scan evidence models.
+//!
+//! exposed for: explorer evidence queries and RPC handlers.
 //!
 //! Atlas is read-only. It never mutates chain state and it never labels raw,
 //! Unproven UI data as verified.
@@ -397,6 +399,7 @@ impl AtlasQueryEngine {
         Self::default()
     }
 
+    /// exposed for: explorer evidence query engine.
     pub fn insert_evidence_record(&mut self, record: EvidenceRecord) -> Result<(), String> {
         record.validate()?;
         if self.evidence_records.len() >= MAX_ATLAS_EVIDENCE_RECORDS {
@@ -406,6 +409,7 @@ impl AtlasQueryEngine {
         Ok(())
     }
 
+    /// exposed for: explorer evidence query engine.
     pub fn upsert_domain_summary(&mut self, summary: DomainSummary) -> Result<(), String> {
         summary.validate()?;
         if !self.domain_summaries.contains_key(&summary.domain_id)
@@ -424,6 +428,8 @@ impl AtlasQueryEngine {
     }
 
     /// Queries evidence records by domain ID.
+    ///
+    /// exposed for: explorer evidence query engine.
     pub fn query_evidence_by_domain(&self, domain_id: DomainId) -> Vec<&EvidenceRecord> {
         self.evidence_records
             .iter()
@@ -432,6 +438,8 @@ impl AtlasQueryEngine {
     }
 
     /// Queries evidence records within a given height range.
+    ///
+    /// exposed for: explorer evidence query engine.
     pub fn query_evidence_by_height_range(
         &self,
         domain_id: DomainId,
@@ -452,11 +460,15 @@ impl AtlasQueryEngine {
     }
 
     /// Returns the summary for one domain.
+    ///
+    /// exposed for: explorer evidence query engine.
     pub fn get_domain_summary(&self, domain_id: DomainId) -> Option<&DomainSummary> {
         self.domain_summaries.get(&domain_id)
     }
 
     /// Returns every domain summary.
+    ///
+    /// exposed for: explorer evidence query engine.
     pub fn all_domain_summaries(&self) -> Vec<&DomainSummary> {
         self.domain_summaries.values().collect()
     }

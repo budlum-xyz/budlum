@@ -5,8 +5,7 @@
 //! the behaviour it wants in the call itself; faults and panics are injected
 //! deterministically by call number.
 
-use crate::host::{ExecutionEnvironment, HostApi, HostRead};
-use crate::transport::panic_digest;
+use crate::host::{panic_digest, ExecutionEnvironment, HostApi, HostRead};
 use crate::types::{
     BlockContext, BudAmount, CodeInfo, EeCall, EeFault, EeId, EeIdentity, EeLog, EeOutcome,
     EeQuery, EeRefusal, HostError, Namespace, OutOfGas, OutcomeStatus, RefusalCode, UniversalCall,

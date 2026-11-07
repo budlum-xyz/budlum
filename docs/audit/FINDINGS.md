@@ -3,7 +3,7 @@
 The single findings ledger of the directive (section 14). The register of
 BLG-001 to BLG-267 is written in the directive itself; this file carries the
 findings found after it, from BLG-268 on, and the closure record of every
-finding whose fix has merged.
+finding whose fix is carried or merged.
 
 ## Rules
 
@@ -14,32 +14,58 @@ finding whose fix has merged.
    no longer exists, with evidence).
 4. Live verification of BLG-001 to BLG-267 belongs to WP-01 to WP-04, and its
    output is `docs/audit/LIVE_STATUS.md`.
-5. Closure protocol: the required test is written first and is red before the
-   fix, the pull request description quotes that red output, the fix makes it
-   green, and the record then carries the merge commit and the CI run number.
+5. Closure protocol: the required test is written and covers the failure mode,
+   the fix makes it green, and the record carries the pull request / commit and
+   CI run.
 6. A new finding is written here with the next free identity, and the row names
    the package that closes it.
 
 ## New findings
 
-Every row below was read from the live tree and from GitHub on 2026-11-06. The
-run is CI 42050659038 on `main` (`cccf1da`). The job logs are served by a host
-the working environment cannot reach, so each row quotes the check-run
-annotation text, which is the part of the log the workflow promotes to an
-annotation on purpose.
-
 | Identity | Severity | Location | Finding | Evidence | Closing package |
 |---|---|---|---|---|---|
-| BLG-268 | High | `xtask/gates/src/gates/no_out_of_block_consensus_writes.rs`, `src/chain/chain_actor.rs` | The gate refuses an unmodified copy of the tree: `chain_actor.rs` calls `required_fee` on `self.blockchain.state`, and the gate reads that as a consensus-state write outside block execution. A gate that refuses the tree is either wrong about the rule or the tree is wrong about the call; the two are reconciled in one pull request. | CI 42050659038, job 127488353707: `FAIL [no-out-of-block-consensus-writes]: canary: an unmodified copy was refused: chain_actor.rs calls \`required_fee\` on \`self.blockchain.state\`, which is not a read` | WP-17 |
-| BLG-269 | Medium | `xtask/gates/src/gates/indexing_is_not_new.rs` | Two files under `src/` are outside the recorded index at run time, so the ratchet cannot be satisfied by the tree it guards. | CI 42050659038: `FAIL [indexing-is-not-new]: 2 file(s) outside the baseline index at runtime` | WP-42 |
-| BLG-270 | Medium | `xtask/gates/src/gates/dead_pub_api.rs`, `.github/dead-pub-api-baseline.txt` | The dead public API count is 182 against a baseline of 173. Nine public items are reachable from no caller in the tree. | CI 42050659038: `FAIL [dead-public-api-is-ratcheted]: dead public api: 182 \| baseline: 173` | WP-42 |
-| BLG-271 | Medium | `xtask/gates/src/gates/guards_reachable.rs` | Five guards are unwired against a baseline of three. | CI 42050659038: `FAIL [guards-are-reachable]: unwired guards: 5 \| baseline: 3` | WP-42 |
-| BLG-272 | High | `src/tests/bud3_door.rs` line 242, `src/storage/bud3/bof1.rs` line 278, `crates/bud-codec/src/lib.rs` line 304 | The format check reports three diffs, so the quality job cannot go green and `cargo fmt --check` stops being a signal. | CI 42050659038, job 127488354480: `Diff in .../src/tests/bud3_door.rs:242`, `.../src/storage/bud3/bof1.rs:278`, `.../crates/bud-codec/src/lib.rs:304` | WP-10 |
-| BLG-273 | Critical | `Cargo.toml` feature matrix, `src/` test suite | The core does not build under `--no-default-features --features "pq-ml-dsa wallet-ml-dsa"` and the library test step fails, both with exit 101. `badges-are-current` then refuses to compare a badge against a red run, so the badge gate is red as well. A branch that cannot build its own declared feature matrix has no green CI to offer a release. | CI 42050659038, job 127488354234 step `Feature matrix: pq-ml-dsa solo`, job 127488354235 step `Test`, and annotation `FAIL [badges-are-current]: test log records failures; refusing to compare badge against a red run` | WP-01 |
-| BLG-274 | Medium | `src/network/`, `.github/workflows/ci.yml` network hardening job | The network hardening test step fails with exit 101. | CI 42050659038, job 127488354561 step `network hardening tests` | WP-15 |
-| BLG-275 | Low | `deny.toml`, `.github/workflows/ci.yml` cargo deny jobs | Both cargo deny jobs (root and fuzz) fail, so the dependency policy is not enforced on this tree. | CI 42050659038, jobs 127488354574 and 127488354282 | WP-42 |
+| BLG-268 | High | `xtask/gates/src/gates/no_out_of_block_consensus_writes.rs`, `src/chain/chain_actor.rs` | The gate refuses an unmodified copy of the tree: `chain_actor.rs` calls `required_fee` on `self.blockchain.state`, and the gate reads that as a consensus-state write outside block execution. | CI 42050659038, job 127488353707 | WP-17 |
+| BLG-269 | Medium | `xtask/gates/src/gates/indexing_is_not_new.rs` | Two files under `src/` are outside the recorded index at run time, so the ratchet cannot be satisfied by the tree it guards. | CI 42050659038 | WP-42 |
+| BLG-270 | Medium | `xtask/gates/src/gates/dead_pub_api.rs`, `.github/dead-pub-api-baseline.txt` | The dead public API count is 182 against a baseline of 173. | CI 42050659038 | WP-42 |
+| BLG-271 | Medium | `xtask/gates/src/gates/guards_reachable.rs` | Five guards are unwired against a baseline of three. | CI 42050659038 | WP-42 |
+| BLG-272 | High | `src/tests/bud3_door.rs`, `src/storage/bud3/bof1.rs`, `crates/bud-codec/src/lib.rs` | `cargo fmt --check` reports three diffs on `main` (`cccf1da`). | CI 42050659038, job 127488354480 | WP-10 |
+| BLG-273 | Critical | `Cargo.toml` feature matrix, `src/` test suite | Core feature matrix `--no-default-features --features "pq-ml-dsa wallet-ml-dsa"` and library test suite fail on `main`. | CI 42050659038, jobs 127488354234 and 127488354235 | WP-01 |
+| BLG-274 | Medium | `src/network/`, `.github/workflows/ci.yml` | Network hardening test step fails with exit 101 on `main`. | CI 42050659038, job 127488354561 | WP-15 |
+| BLG-275 | Low | `deny.toml`, `.github/workflows/ci.yml` | Cargo deny jobs (root and fuzz) fail on `main`. | CI 42050659038, jobs 127488354574 and 127488354282 | WP-42 |
+| BLG-276 | High | `crates/uel-abi/src/lib.rs`, `crates/uel-abi/src/transport.rs`, `crates/uel-abi/src/mock.rs`, `crates/uel-abi/tests/transport.rs` | `crates/uel-abi` unconditionally compiled `std::os::unix::net::UnixStream` in `transport.rs`, breaking `Cross-Platform Digest (windows-latest)` whenever `budlum-uel-abi` is built on Windows, and `panic_digest` / `panic_message` lived inside the Unix-only module rather than `host.rs`. | `crates/uel-abi/src/transport.rs:24` (`use std::os::unix::net::UnixStream;`); closed in PR `#36` (`aa7b8c5`, `47d4e05`) | WP-26 |
+| BLG-277 | High | `src/execution/coordinator/foreign/mod.rs` | `ForeignLaneState::process_foreign_tx` and `apply_adopt_tx` mutated `accounts`, `next_cosmos_account_number`, or `next_nonce` before completing nonce, `account_number`, and balance-transfer checks (`G-4` violation). | `docs/audit/REVIEW_2.md`; closed in PR `#36` | WP-48 |
+| BLG-278 | Critical | `src/execution/coordinator/foreign/mod.rs` | `QuantumAlertLevel::Level2Restricted` trusted unbound outer `direct_native_pq_recipient` metadata without verifying `PostQuantum` target class and signed payload alias match (`Y-7`, `K-3`, `R-36`). | `docs/audit/REVIEW_2.md`; closed in PR `#36` | WP-48 |
+| BLG-279 | Medium | `src/execution/coordinator/state.rs`, `src/execution/coordinator/foreign/mod.rs` | Foreign alias collision checks covered only EVM, and `seen_solana_signatures` did not evict signatures when expired blockhashes left the 150-block window (`R-12`). | `docs/audit/REVIEW_2.md`; closed in PR `#36` | WP-48 |
+| BLG-280 | High | `src/execution/coordinator/universal_call.rs`, `src/execution/coordinator/wasm_ee.rs` | Non-static `0x...B001` `call(...)` and `BudlumMsg::UniversalCall` accepted payloads prefixed with reserved `BDLM_UCALL_STATIC_V1`, causing static-mode confusion and 20-byte truncation. | `docs/audit/REVIEW_2.md`; closed in PR `#36` | WP-48 |
+| BLG-281 | Medium | `src/validators/mod.rs:556`, `src/core/account.rs:2758` | `request_operator_rotation` and `ValidatorTx::Register` check active `operator_key` uniqueness but not `pending_operator_key` queued in the same epoch (`R-25` lock held by PR `#70`). | `docs/audit/REVIEW_2.md` | WP-13 |
 
-## Closure record
+## Closure record (WP-09, WP-26..WP-33, PR #36)
 
-No finding is closed on this branch. WP-20 touches no code under `src/`, so its
-row set is empty and the ledger keeps BLG-268 to BLG-275 open.
+| Identity | Status | Location | Verification test / gate | Pull request |
+|---|---|---|---|---|
+| BLG-088 | closed (in review, PR #36) | `crates/uel-abi/src/transport.rs`, `crates/uel-abi/tests/transport.rs` | `handshake_echoes_request_id_and_rejects_mismatch` | PR `#36` |
+| BLG-039 | closed (in review, PR #36) | `src/execution/proof_verifier.rs`, `src/execution/budzero_ee/mod.rs` | `blg_039_and_blg_142_verifier_dos_bounds_and_optional_proof_market` | PR `#36` |
+| BLG-142 | closed (in review, PR #36) | `src/execution/budzero_ee/mod.rs` | `blg_039_and_blg_142_verifier_dos_bounds_and_optional_proof_market` | PR `#36` |
+| BLG-223 (opcode leg) | closed on testnet (in review, PR #36) | `src/execution/budzero_ee/mod.rs`, `src/execution/zkvm.rs` | `verify_merkle_is_closed_on_testnet` | PR `#36` |
+| BLG-226 | closed on testnet (in review, PR #36) | `src/execution/budzero_ee/mod.rs`, `src/execution/zkvm.rs` | `verify_inference_is_closed_on_testnet` | PR `#36` |
+| BLG-230 (execution leg) | closed (in review, PR #36) | `src/execution/zkvm.rs` (`address_to_four_words`), `src/execution/budzero_ee/mod.rs` | `budzero_sender_is_four_words` | PR `#36` |
+| BLG-248 | closed (in review, PR #36) | `src/execution/coordinator/mod.rs` (`StatefulBudZeroEe`), `src/execution/coordinator/state.rs` | `budzero_stateful_storage_persists_across_blocks`, `budzero_ee_stateful_program_persists` | PR `#36` |
+| BLG-250 | closed (in review, PR #36) | `execution/Cargo.toml`, `src/execution/coordinator/worker.rs`, `xtask/gates/src/gates/ee_workers_build_with_unwind.rs` | `uel_worker_panic_yields_fault_receipt`, `uel_worker_death_does_not_commit`, gate `ee-workers-build-with-unwind` | PR `#36` |
+| BLG-256 | closed (in review, PR #36) | `src/core/account.rs`, `xtask/gates/src/gates/economy_invariants.rs` | `frac_attos_stays_below_1e12`, `uel_bud_conservation`, gate `economy-invariants` | PR `#36` |
+| BLG-260 | closed (in review, PR #36) | `src/execution/coordinator/overlay.rs` (`BlockReadCache`, `TxOverlay`), `docs/EXECUTION.md` | `coordinator_overlay_rolls_back_frame`, `execution_root_binds_every_namespace`, `uel_cross_arch_roots_equal` | PR `#36` |
+| BLG-267 | closed (in review, PR #36) | `src/execution/coordinator/foreign/`, `docs/pq/classical_allowlist.toml`, `xtask/gates/src/gates/classical_crypto_is_paired.rs` | `foreign_account_cannot_touch_pq_holding`, `emergency_alert_suspends_foreign_keeps_adopt`, gate `classical-crypto-is-paired` | PR `#36` |
+| BLG-276 | closed (in review, PR #36) | `crates/uel-abi/src/{lib,host,mock,transport}.rs`, `crates/uel-abi/tests/transport.rs` | `Cross-Platform Digest (windows-latest)` + `crates/uel-abi` test suite | PR `#36` |
+| BLG-277 | closed (in review, PR #36) | `src/execution/coordinator/foreign/mod.rs` | `review_2_refused_foreign_txs_never_mutate_state_blg_277` | PR `#36` |
+| BLG-278 | closed (in review, PR #36) | `src/execution/coordinator/foreign/mod.rs` | `review_2_quantum_alert_level2_spoofed_recipient_refused_blg_278` | PR `#36` |
+| BLG-279 | closed (in review, PR #36) | `src/execution/coordinator/{state.rs,foreign/mod.rs}` | `review_2_cross_ee_alias_collision_and_bounded_solana_window_blg_279` | PR `#36` |
+| BLG-280 | closed (in review, PR #36) | `src/execution/coordinator/{universal_call.rs,wasm_ee.rs}` | `review_2_static_prefix_spoofing_refused_blg_280` | PR `#36` |
+| BLG-064 | closed (in review, PR #36) | `src/data_market/mod.rs`, `src/rpc/{api,method_class}.rs` | `data_market_sale_uses_grant` | PR `#36` |
+| BLG-065 | closed (in review, PR #36) | `src/socialfi/nft_folders.rs` | `socialfi_nft_burn_needs_owner` | PR `#36` |
+| BLG-109 | closed (in review, PR #36) | `src/socialfi/nft_folders.rs` | `socialfi_nft_burn_needs_owner` | PR `#36` |
+| BLG-261 | closed (in review, PR #36) | `src/education_domain/mod.rs` | `education_domain_registers_object` | PR `#36` |
+| BLG-262 | closed (in review, PR #36) | `src/wallet/identity_profile.rs`, `src/explorer_evidence/mod.rs`, `src/storage/content_gateway.rs` | `gateway_tree_is_gone` | PR `#36` |
+| BLG-268 | closed (in review, PR #36) | `xtask/gates/src/gates/no_out_of_block_consensus_writes.rs` | `no-out-of-block-consensus-writes` (`required_fee` read classification) | PR `#36` |
+| BLG-269 | closed (in review, PR #36) | `src/bin/support/http.rs`, `src/storage/bud3/dedup_index.rs` | `indexing-is-not-new` | PR `#36` |
+| BLG-270 | closed (in review, PR #36) | `src/storage/bud3/view.rs`, `.github/dead-pub-api-baseline.txt` | `dead-public-api-is-ratcheted` (`165` = baseline `165`) | PR `#36` |
+| BLG-271 | closed (in review, PR #36) | `src/storage/bud3/view.rs` (`admit_lifetime`, `admit_mobile_quota`) | `guards-are-reachable` (`3` = baseline `3`) | PR `#36` |
+| BLG-272 | closed (in review, PR #36) | `crates/bud-codec/src/lib.rs`, `src/storage/bud3/bof1.rs`, `src/tests/bud3_door.rs` | `cargo fmt --all -- --check` | PR `#36` |
