@@ -2109,13 +2109,9 @@ impl AccountState {
                 }
             }
             TransactionType::PrivateTransferSubmit(_) | TransactionType::PrivacyNoteInsert(_) => {
-                if tx.chain_id
-                    == crate::core::chain_config::Network::Mainnet
-                        .chain_id()
-                        .value()
-                {
+                if !crate::core::chain_config::privacy_transfers_enabled(tx.chain_id) {
                     return Err(
-                        "privacy transfers are disabled on mainnet until full proof verification is wired"
+                        "privacy transfers are disabled on this network until full proof verification is wired"
                             .into(),
                     );
                 }
