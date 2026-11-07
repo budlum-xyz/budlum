@@ -26,6 +26,75 @@ fn funded_state(addr: Address, balance: u64) -> AccountState {
 }
 
 #[test]
+fn private_transfer_with_composite_authorization_executes() {
+    use crate::crypto::ctx::PRIVATE_TRANSFER_V1;
+    use crate::crypto::key_derivation::RootSecret;
+
+    let account = RootSecret::derive(&[7u8; 32], "")
+        .unwrap()
+        .user_account(0, 0)
+        .unwrap();
+    let from = Address::from(account.address);
+    let mut state = funded_state(from, 1_000_000);
+    let chain_id = crate::core::transaction::DEFAULT_CHAIN_ID;
+    let commitment = hash_from_field(101);
+    let proof = hash_from_field(0xA11CE);
+    let nullifier = L1NoteRegistry::derive_nullifier(&commitment, &proof);
+    let output = hash_from_field(103);
+    state.note_registry.insert_note(commitment).unwrap();
+
+    let digest = PrivateTransferSubmit::compute_public_digest(&[nullifier], &[output]);
+    let auth_message = PrivateTransferSubmit::authorization_message(
+        chain_id,
+        from.as_bytes(),
+        0,
+        &digest,
+    );
+    let authorization_sig = account
+        .signing
+        .sign_in(
+            &state.scheme_registry,
+            PRIVATE_TRANSFER_V1,
+            &auth_message,
+            &[4u8; 32],
+        )
+        .unwrap()
+        .encode();
+    let submit = PrivateTransferSubmit {
+        spent_commitments: vec![commitment],
+        nullifiers: vec![nullifier],
+        output_commitments: vec![output],
+        nullifier_proofs: vec![proof],
+        authorization_sig,
+        public_digest: digest,
+    };
+
+    let mut tx = Transaction::new_with_chain_id(
+        from,
+        Address::zero(),
+        0,
+        100,
+        0,
+        vec![],
+        chain_id,
+        TransactionType::PrivateTransferSubmit(submit),
+    );
+    tx.sign_v7(
+        &state.scheme_registry,
+        &account.signing,
+        &account.recovery_public_key,
+        &[5u8; 32],
+    )
+    .unwrap();
+
+    assert!(tx.verify_in(&state.scheme_registry));
+    Executor::apply_transaction(&mut state, &tx).expect("composite-authorized transfer");
+    assert!(!state.note_registry.contains_commitment(&commitment));
+    assert!(state.note_registry.contains_commitment(&output));
+    assert!(state.note_registry.is_nullifier_spent(&nullifier));
+}
+
+#[test]
 fn private_transfer_submit_spend_and_create() {
     let kp = KeyPair::generate().unwrap();
     let from = Address::from(kp.public_key_bytes());
