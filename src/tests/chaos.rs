@@ -886,6 +886,7 @@ mod chaos_tests {
             tx_ttl_secs: 3600,
             rbf_bump_percent: 10,
             max_pool_bytes: crate::mempool::pool::DEFAULT_MAX_POOL_BYTES,
+            duty_block_bytes: crate::mempool::pool::DEFAULT_DUTY_BLOCK_BYTES,
         };
         let mut pool = Mempool::new(cfg);
 

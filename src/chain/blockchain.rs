@@ -3850,6 +3850,12 @@ impl Blockchain {
                     crate::mempool::pool::MempoolError::InvalidNonce => "invalid_nonce",
                     crate::mempool::pool::MempoolError::TransactionExpired => "transaction_expired",
                     crate::mempool::pool::MempoolError::RbfFeeTooLow => "rbf_fee_too_low",
+                    // Separate from `fee_too_low` on purpose: the duty lane's
+                    // limit is a window, so the client waits for the next one
+                    // or replaces the batch it already sent. Raising the fee
+                    // changes nothing, and telling the client to try is how a
+                    // phone ends up retrying a transaction that cannot enter.
+                    crate::mempool::pool::MempoolError::DutyLaneRefused(_) => "duty_lane_refused",
                     crate::mempool::pool::MempoolError::InvalidTransaction(_) => {
                         "invalid_transaction"
                     }
@@ -5899,7 +5905,11 @@ impl Blockchain {
                 }
             }
         }
-        for tx in &self.mempool.get_sorted_transactions(self.mempool.len()) {
+        // The whole pool, not a block's worth of it: this path empties the
+        // pool and re-admits what it read here, so a transaction left out of
+        // the snapshot is a transaction the node silently forgot. The duty
+        // lane's block share belongs to the block door and is not applied.
+        for tx in &self.mempool.all_pending_transactions(self.mempool.len()) {
             if !chain_txs.contains(&tx.hash) {
                 new_pending.push(tx.clone());
             }
