@@ -305,10 +305,11 @@ impl Storage {
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
     ///
-    /// The temporary file is written beside the destination and renamed only
-    /// After all bytes are durable, so a crash never presents a partial file as
-    /// A usable backup. On Unix the verified destination's parent directory is
-    /// also synced before success is returned.
+    /// The temporary file is written and synced beside the destination, then
+    /// published with a no-clobber hard link only after all bytes are durable.
+    /// A crash therefore never presents a partial file as a usable backup.
+    /// On Unix the verified destination's parent directory is also synced
+    /// before success is returned.
     /// Reads every row twice and accepts the result only when both passes
     /// agree and no durable commit is in flight. sled offers no point in time
     /// iterator, so a commit landing mid-scan would otherwise be copied
@@ -386,8 +387,9 @@ impl Storage {
         }
         #[cfg(unix)]
         {
-            // The file data and the rename are separate durability steps.
-            // Persist the directory entry before the caller prunes old backups.
+            // File data and directory entries are separate durability steps.
+            // Persist both the verified link and partial-file removal before
+            // the caller prunes old backups.
             let parent = path
                 .parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
