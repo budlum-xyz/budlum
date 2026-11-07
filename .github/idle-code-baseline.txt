@@ -337,7 +337,6 @@ bud/src/bud_format_model.rs	const	MODEL_MAGIC
 bud/src/bud_format_model.rs	const	MODEL_VERSION
 bud/src/bud_format_model.rs	enum	FloatKind
 bud/src/bud_format_model.rs	struct	ModelFloatSplit
-bud/src/bud_format_msr.rs	const	K
 bud/src/bud_format_msr.rs	const	MSR_MAGIC
 bud/src/bud_format_msr.rs	fn	msr_decode
 bud/src/bud_format_msr.rs	fn	msr_digest
@@ -1568,7 +1567,6 @@ src/network/node.rs	fn	apply_power_mode
 src/network/node.rs	fn	broadcast_domain_commitment_sync
 src/network/node.rs	fn	broadcast_slashing_evidence_sync
 src/network/node.rs	fn	broadcast_tx
-src/network/node.rs	fn	ipv4_slash24
 src/network/node.rs	fn	new_with_bootstrap
 src/network/node.rs	fn	resolve_dns_seeds
 src/network/node.rs	fn	storage_prune
