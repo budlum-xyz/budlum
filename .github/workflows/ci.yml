@@ -813,6 +813,16 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-float-in-consensus-paths 2>&1 | tee -a /tmp/gate-out.log
           exit "${PIPESTATUS[0]}"
+      - name: Nightly workflows canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- nightly-workflows-are-required --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: Nightly workflows carry binding verification steps
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- nightly-workflows-are-required 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: Derived content canary
         if: always() && steps.build.outcome == 'success'
         run: |
