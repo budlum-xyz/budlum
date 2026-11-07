@@ -93,3 +93,11 @@ pruning = false
 # can state an honest proof. A true value here must not open those opcodes.
 # The VM reads MainnetActivation::default(), not this flag.
 verify_merkle = false
+
+[relay]
+enable_circuit_relay = true
+max_reservations = 128
+max_reservations_per_subnet = 4
+max_circuits = 64
+max_circuit_bytes = 1048576
+max_circuit_duration_secs = 120

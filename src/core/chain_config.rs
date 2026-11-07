@@ -516,6 +516,52 @@ pub struct SecurityConfig {
     pub enable_circuit_relay: bool,
 }
 
+
+/// Relay server and NAT traversal limits (Directive Section 7.11, WP-15).
+/// Convenience: public `[relay]` configuration table shared by node config and relay admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayConfig {
+    /// Whether this node serves circuit-relay reservations and circuits.
+    #[serde(default)]
+    pub enable_circuit_relay: bool,
+    /// Maximum concurrent relay reservations across all peers.
+    #[serde(default = "RelayConfig::default_max_reservations")]
+    pub max_reservations: u32,
+    /// Maximum concurrent relay reservations per `/24` or `/48` peer subnet.
+    #[serde(default = "RelayConfig::default_max_reservations_per_subnet")]
+    pub max_reservations_per_subnet: u32,
+    /// Maximum active relayed circuits at one time.
+    #[serde(default = "RelayConfig::default_max_circuits")]
+    pub max_circuits: u32,
+    /// Maximum bytes transferred over one relayed circuit before DCUtR upgrade or close.
+    #[serde(default = "RelayConfig::default_max_circuit_bytes")]
+    pub max_circuit_bytes: u64,
+    /// Maximum duration in seconds of one relayed circuit.
+    #[serde(default = "RelayConfig::default_max_circuit_duration_secs")]
+    pub max_circuit_duration_secs: u64,
+}
+
+impl RelayConfig {
+    const fn default_max_reservations() -> u32 { 128 }
+    const fn default_max_reservations_per_subnet() -> u32 { 4 }
+    const fn default_max_circuits() -> u32 { 64 }
+    const fn default_max_circuit_bytes() -> u64 { 1 << 20 }
+    const fn default_max_circuit_duration_secs() -> u64 { 120 }
+}
+
+impl Default for RelayConfig {
+    fn default() -> Self {
+        Self {
+            enable_circuit_relay: false,
+            max_reservations: Self::default_max_reservations(),
+            max_reservations_per_subnet: Self::default_max_reservations_per_subnet(),
+            max_circuits: Self::default_max_circuits(),
+            max_circuit_bytes: Self::default_max_circuit_bytes(),
+            max_circuit_duration_secs: Self::default_max_circuit_duration_secs(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ChainId(pub u64);
 

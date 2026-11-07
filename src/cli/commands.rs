@@ -466,6 +466,7 @@ pub struct FileConfig {
     pub features: Option<FeaturesSection>,
     pub consensus: Option<ConsensusSection>, // for integration of other sections
     pub anchor: Option<AnchorSection>,
+    pub relay: Option<crate::core::chain_config::RelayConfig>,
 }
 
 /// The `[anchor]` section: how this node emits PQ anchors.

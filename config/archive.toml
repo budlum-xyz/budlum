@@ -43,3 +43,11 @@ listener = "127.0.0.1:19090"
 
 [features]
 pruning = false
+
+[relay]
+enable_circuit_relay = true
+max_reservations = 128
+max_reservations_per_subnet = 4
+max_circuits = 64
+max_circuit_bytes = 1048576
+max_circuit_duration_secs = 120

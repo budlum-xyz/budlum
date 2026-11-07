@@ -223,6 +223,14 @@ pub struct Metrics {
     /// counter lives in the facade (it has no dependency on the node), and
     /// [`Metrics::encode`] folds it into this series before every scrape.
     pub pq_verifier_disagreement: IntCounter,
+    /// Active circuit-relay reservations held on this node.
+    pub relay_reservations: IntGauge,
+    /// Active relayed circuits currently open on this node.
+    pub relay_circuits: IntGauge,
+    /// AutoNAT reachability status (0 = unknown, 1 = public, 2 = private).
+    pub nat_status: IntGauge,
+    /// Cumulative relayed circuits upgraded to direct connections via DCUtR.
+    pub dcutr_success_total: IntCounter,
 }
 
 impl Metrics {
@@ -445,6 +453,10 @@ impl Metrics {
         // Domain metrics.
         let bridge_transfers_total = IntCounter::new(
             "budlum_bridge_transfers_total",
+            "budlum_relay_reservations",
+            "budlum_relay_circuits",
+            "budlum_nat_status",
+            "budlum_dcutr_success_total",
             "Total bridge transfers processed",
         )?;
         let bridge_amount_locked = IntGauge::new(
@@ -667,6 +679,22 @@ impl Metrics {
             "budlum_rpc_rate_limited_total",
             "Total RPC requests rejected due to rate limiting",
         )?;
+        let relay_reservations = IntGauge::new(
+            "budlum_relay_reservations",
+            "Active circuit-relay reservations held on this node",
+        )?;
+        let relay_circuits = IntGauge::new(
+            "budlum_relay_circuits",
+            "Active relayed circuits open on this node",
+        )?;
+        let nat_status = IntGauge::new(
+            "budlum_nat_status",
+            "AutoNAT reachability status (0 unknown, 1 public, 2 private)",
+        )?;
+        let dcutr_success_total = IntCounter::new(
+            "budlum_dcutr_success_total",
+            "Total relayed connections upgraded to direct connections via DCUtR",
+        )?;
 
         registry.register(Box::new(chain_height.clone()))?;
         registry.register(Box::new(account_rows.clone()))?;
@@ -782,6 +810,10 @@ impl Metrics {
         registry.register(Box::new(slashing_events_total.clone()))?;
         registry.register(Box::new(pq_verifier_disagreement.clone()))?;
         registry.register(Box::new(rpc_rate_limited_total.clone()))?;
+        registry.register(Box::new(relay_reservations.clone()))?;
+        registry.register(Box::new(relay_circuits.clone()))?;
+        registry.register(Box::new(nat_status.clone()))?;
+        registry.register(Box::new(dcutr_success_total.clone()))?;
 
         Ok(Metrics {
             registry: Arc::new(registry),
@@ -899,6 +931,10 @@ impl Metrics {
             identity_revoked_rows,
             slashing_events_total,
             pq_verifier_disagreement,
+            relay_reservations,
+            relay_circuits,
+            nat_status,
+            dcutr_success_total,
         })
     }
 
@@ -909,6 +945,12 @@ impl Metrics {
         let seen = crate::crypto::pq::verifier_disagreements();
         self.pq_verifier_disagreement
             .inc_by(seen.saturating_sub(self.pq_verifier_disagreement.get()));
+        let (res_n, circ_n, nat_v, dcutr_n) = crate::network::relay::snapshot_metrics();
+        self.relay_reservations.set(res_n);
+        self.relay_circuits.set(circ_n);
+        self.nat_status.set(nat_v);
+        self.dcutr_success_total
+            .inc_by(dcutr_n.saturating_sub(self.dcutr_success_total.get()));
         let encoder = TextEncoder::new();
         let metric_families = self.registry.gather();
         let mut buffer = Vec::new();
