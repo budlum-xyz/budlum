@@ -383,17 +383,29 @@ impl PruningManager {
     }
 
     pub fn save_snapshot_v2(&self, snapshot: &StateSnapshotV2) -> Result<(), String> {
-        use std::fs;
+        use std::fs::{self, File};
+        use std::io::Write as _;
         use std::path::Path;
         let dir = Path::new(&self.snapshot_dir);
         if !dir.exists() {
             fs::create_dir_all(dir).map_err(|e| format!("Failed to create snapshot dir: {e}"))?;
         }
         let filename = format!("snapshot_{}.json", snapshot.height);
+        let tmp_filename = format!(".snapshot_{}.json.tmp", snapshot.height);
         let path = dir.join(filename);
+        let tmp_path = dir.join(tmp_filename);
         let data = serde_json::to_string_pretty(snapshot)
             .map_err(|e| format!("Failed to serialize snapshot v2: {e}"))?;
-        fs::write(&path, data).map_err(|e| format!("Failed to write snapshot v2: {e}"))?;
+        let mut tmp_file =
+            File::create(&tmp_path).map_err(|e| format!("Failed to create snapshot tmp: {e}"))?;
+        tmp_file
+            .write_all(data.as_bytes())
+            .map_err(|e| format!("Failed to write snapshot v2: {e}"))?;
+        tmp_file
+            .sync_all()
+            .map_err(|e| format!("Failed to sync snapshot v2: {e}"))?;
+        drop(tmp_file);
+        fs::rename(&tmp_path, &path).map_err(|e| format!("Failed to commit snapshot v2: {e}"))?;
         println!(
             "Snapshot V2 saved: {} ({} accounts)",
             path.display(),
@@ -1347,20 +1359,17 @@ impl StateSnapshotV2 {
         let mut snapshot: StateSnapshotV2 = serde_json::from_slice(data)
             .map_err(|e| format!("Failed to parse snapshot V2: {e}"))?;
         snapshot.migration_report()?;
+        if !snapshot.verify() {
+            return Err(format!(
+                "snapshot schema {} does not match its own digest",
+                snapshot.schema_version
+            ));
+        }
         // C6 legacy import (RFC_GAP1 section 7.3, AllowUnsigned transition window):
         // Schema<4 snapshots arrived with the old digest; the new code recomputes
         // the schema-4 snapshot_hash + AllowUnsigned (devnet transition).
         // A RequireSigned production loader expects a signature (sign_manifest).
         if snapshot.schema_version < CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION {
-            // The old blob must match the digest of ITS OWN schema before it
-            // is rewritten; the rewrite recomputes the hash, so an edited
-            // legacy file would otherwise always pass.
-            if !snapshot.verify() {
-                return Err(format!(
-                    "legacy snapshot schema {} does not match its own digest",
-                    snapshot.schema_version
-                ));
-            }
             snapshot.schema_version = CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION;
             snapshot.snapshot_hash = snapshot.calculate_hash();
         }

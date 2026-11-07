@@ -253,8 +253,8 @@ pub mod audit_lane_d;
 
 // WP-14 Instant Duty Handover and Disaster Recovery Mode suite.
 #[cfg(test)]
-pub mod wp14_handover_recovery;
-
-// WP-41 alert rule metric binding test.
-#[cfg(test)]
 pub mod alert_rules_reference_existing_metrics;
+
+// WP-17 state transition, vesting, staking, governance, sharding, and V2 snapshot suite.
+#[cfg(test)]
+pub mod wp17_state_hardening;

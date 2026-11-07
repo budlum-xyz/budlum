@@ -212,28 +212,55 @@ impl Executor {
             _ => {}
         }
 
-        let liquid_cost = match tx.tx_type {
+        let debits_amount = !matches!(
+            tx.tx_type,
             TransactionType::Unstake
-            | TransactionType::Vote
-            | TransactionType::Undelegate { .. }
-            | TransactionType::WithdrawDelegation { .. }
-            | TransactionType::SetValidatorCommission { .. }
-            | TransactionType::Redelegate { .. }
-            | TransactionType::ClaimRewards { .. } => tx.fee,
-            _ => tx.total_cost(),
+                | TransactionType::Vote
+                | TransactionType::Undelegate { .. }
+                | TransactionType::WithdrawDelegation { .. }
+                | TransactionType::SetValidatorCommission { .. }
+                | TransactionType::Redelegate { .. }
+                | TransactionType::ClaimRewards { .. }
+                | TransactionType::AiOperatorWithdraw
+        );
+        let total_cost = if debits_amount {
+            tx.checked_total_cost().ok_or_else(|| {
+                BudlumError::validation(
+                    "amount_fee_overflow",
+                    "Transaction amount + fee overflows u64",
+                )
+            })?
+        } else {
+            tx.fee
         };
 
-        {
-            let sender_account = state.get_or_create(&tx.from);
-            if sender_account.balance < liquid_cost {
-                return Err(BudlumError::validation(
-                    "insufficient_balance",
-                    "Insufficient balance",
-                ));
-            }
-        }
+        let liquid_cost = if matches!(tx.tx_type, TransactionType::AiOperatorWithdraw) {
+            0
+        } else {
+            total_cost
+        };
 
-        let total_cost = tx.total_cost();
+        if state.get_balance(&tx.from) < liquid_cost {
+            return Err(BudlumError::validation(
+                "insufficient_balance",
+                "Insufficient balance",
+            ));
+        }
+        if !matches!(
+            &tx.tx_type,
+            TransactionType::Transfer
+                | TransactionType::Stake
+                | TransactionType::Delegate { .. }
+                | TransactionType::AiOperatorWithdraw
+        ) && state.spendable_balance(&tx.from) < liquid_cost
+        {
+            return Err(BudlumError::validation(
+                "vesting_locked",
+                format!(
+                    "Transaction cost exceeds spendable balance (vesting-locked funds cannot be spent): need {liquid_cost}"
+                ),
+            ));
+        }
 
         match &tx.tx_type {
             TransactionType::Transfer => {
@@ -293,13 +320,18 @@ impl Executor {
                         ),
                     ));
                 }
+                let stake_amount = tx.amount;
+                if let Some(existing) = state.get_validator(&tx.from) {
+                    existing.stake.checked_add(stake_amount).ok_or_else(|| {
+                        BudlumError::validation("stake_overflow", "stake overflow")
+                    })?;
+                }
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(total_cost).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
                 sender.nonce = sender.nonce.saturating_add(1);
 
-                let stake_amount = tx.amount;
                 let min_stake = crate::core::chain_config::Network::from_chain_id(tx.chain_id)
                     .map_or(1, |network| network.min_stake());
                 let validator = state.get_validator_mut(&tx.from);
@@ -714,28 +746,28 @@ impl Executor {
                         "Only eligible validators can vote in governance",
                     ));
                 }
-                let sender_acc = state.get_or_create(&tx.from);
-                sender_acc.balance = sender_acc.balance.checked_sub(tx.fee).ok_or_else(|| {
-                    BudlumError::validation("balance_underflow", "balance underflow")
-                })?;
-                sender_acc.nonce = sender_acc.nonce.saturating_add(1);
 
                 if tx.to != Address::zero() {
                     if let Some(target) = state.get_validator_mut(&tx.to) {
                         if tx.amount > 0 {
-                            target.votes_for += 1;
+                            target.votes_for = target.votes_for.saturating_add(1);
                         } else {
-                            target.votes_against += 1;
+                            target.votes_against = target.votes_against.saturating_add(1);
                         }
                     }
                 } else if !tx.data.is_empty() && tx.data.len() >= 9 {
                     if tx.data.len() == 9 {
-                        let vote_for = tx.data[0] != 0;
+                        let vote_for = tx.data.first().copied().unwrap_or(0) != 0;
                         let mut id_bytes = [0u8; 8];
-                        id_bytes.copy_from_slice(&tx.data[1..9]);
+                        if let Some(slice) = tx.data.get(1..9) {
+                            id_bytes.copy_from_slice(slice);
+                        }
                         let proposal_id = u64::from_le_bytes(id_bytes);
 
-                        let voter_stake = state.get_validator(&tx.from).map_or(0, |v| v.stake);
+                        let voter_stake = state
+                            .get_validator(&tx.from)
+                            .filter(|v| v.is_eligible(state.epoch_index))
+                            .map_or(0, |v| v.stake);
                         if voter_stake == 0 {
                             return Err(BudlumError::validation(
                                 "governance_voter_not_validator",
@@ -743,19 +775,27 @@ impl Executor {
                             ));
                         }
 
-                        if let Some(proposal) = state.governance.find_proposal_mut(proposal_id) {
-                            proposal
-                                .add_vote(tx.from, voter_stake, vote_for, state.epoch_index)
-                                .map_err(|e| {
-                                    BudlumError::validation("governance_vote_failed", e)
-                                })?;
-                        }
+                        let proposal = state
+                            .governance
+                            .find_proposal_mut(proposal_id)
+                            .ok_or_else(|| {
+                                BudlumError::validation(
+                                    "governance_proposal_not_found",
+                                    "Governance proposal does not exist",
+                                )
+                            })?;
+                        proposal
+                            .add_vote(tx.from, voter_stake, vote_for, state.epoch_index)
+                            .map_err(|e| BudlumError::validation("governance_vote_failed", e))?;
                     } else {
                         let mut duration_bytes = [0u8; 8];
-                        duration_bytes.copy_from_slice(&tx.data[0..8]);
+                        if let Some(slice) = tx.data.get(0..8) {
+                            duration_bytes.copy_from_slice(slice);
+                        }
                         let duration = u64::from_le_bytes(duration_bytes);
+                        let payload = tx.data.get(8..).unwrap_or(&[]);
                         let p_type: crate::core::governance::ProposalType =
-                            serde_json::from_slice(&tx.data[8..]).map_err(|e| {
+                            serde_json::from_slice(payload).map_err(|e| {
                                 BudlumError::validation(
                                     "governance_proposal_invalid",
                                     e.to_string(),
@@ -773,7 +813,10 @@ impl Executor {
                             })?;
                         }
 
-                        let proposer_stake = state.get_validator(&tx.from).map_or(0, |v| v.stake);
+                        let proposer_stake = state
+                            .get_validator(&tx.from)
+                            .filter(|v| v.is_eligible(state.epoch_index))
+                            .map_or(0, |v| v.stake);
                         if proposer_stake == 0 {
                             return Err(BudlumError::validation(
                                 "governance_proposer_not_validator",
@@ -793,6 +836,12 @@ impl Executor {
                             })?;
                     }
                 }
+
+                let sender_acc = state.get_or_create(&tx.from);
+                sender_acc.balance = sender_acc.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender_acc.nonce = sender_acc.nonce.saturating_add(1);
             }
             TransactionType::ContractCall => {
                 // The VM runs for this transaction: its sender, nonce and the
