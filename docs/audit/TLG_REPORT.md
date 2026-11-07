@@ -4,7 +4,7 @@ The sentence "Budlum is ready for the testnet" holds only when every row below
 is green. Each row carries its evidence type, the commit it was read at, a CI
 run number or a record path, and the reviewer. A row with no evidence is red.
 
-Read at commit `7b49d7bc` (branch `arena/ce59116c-budlum`, base `20140e8`) on
+Read at commit `c11a463b` (branch `arena/ce59116c-budlum`, base `20140e8`) on
 2026-11-07. The reviewer column is blank wherever no second agent has reviewed
 the row. No CI run number is written on this page: the environment this report
 was written in has no Rust toolchain and no access to the job logs, so a run
@@ -19,7 +19,7 @@ is missing, the gate is missing, or the artefact is missing), `Red, unproven`
 | --- | --- | --- | --- | --- |
 | TLG-01 | No open Critical or High finding; a feature that stays open is closed on chain id `45261` and a test proves the refusal. | Red | `docs/audit/FINDINGS.md` lists BLG-268 to BLG-275, of which BLG-268 and BLG-272, BLG-273 are Critical or High. | All |
 | TLG-02 | Every `Closed` feature of section 1.5 has a `<feature>_is_closed_on_testnet` test. | Red, unproven | 19 such tests exist (for example `object_layer_is_closed_on_testnet`, `foreign_sui_is_closed_on_testnet`, `parallel_scheduler_is_closed_on_testnet`). Not every closed feature has one, and no run is recorded. | All |
-| TLG-03 | No legacy storage code remains. | Red | The gate exists now (`no-legacy-storage`) and ratchets the 29 identifiers and 5 paths of directive section 5.5 against `.github/no-legacy-storage-baseline.txt`: 1354 occurrences at the commit above, `path:bud/` alone counting 119 files. The row is red because the condition the gate measures is not met: the baseline is not empty, so the legacy code is still in the tree. | WP-07 |
+| TLG-03 | No legacy storage code remains. | Red | The gate exists now (`no-legacy-storage`) and ratchets the 29 identifiers and 5 paths of directive section 5.5 against `.github/no-legacy-storage-baseline.txt`: 1321 occurrences at the commit above, `path:bud/` alone counting 119 files (the gate excludes its own identifier list, which would otherwise add one per name). The row is red because the condition the gate measures is not met: the baseline is not empty, so the legacy code is still in the tree. | WP-07 |
 | TLG-04 | B.U.D. 3.0 acceptance suite and the nightly T3, T4, T6, T7, T17 green for 7 nights. | Red, unproven | No run recorded. `storage-nightly.yml` is in the tree. | WP-18 to WP-25 |
 | TLG-05 | Committee finality and seat handoff tests green. | Red, unproven | No run recorded. | WP-12, WP-13 |
 | TLG-06 | Instant Duty Handoff tests and the churn simulation green. | Red, unproven | No run recorded. | WP-14 |
