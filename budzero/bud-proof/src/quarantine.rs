@@ -73,6 +73,16 @@ impl QuarantineReason {
             Self::PublicInputsMismatch => "public_inputs_mismatch",
         }
     }
+
+    /// Severe canonical-program offences that must not be evicted by
+    /// permissionless `NonCanonicalProgram` floods (BLG-139).
+    #[must_use]
+    ///
+    /// Convenience: classifies canonical-program bans whose audit trail is
+    /// protected against permissionless non-canonical eviction floods.
+    pub const fn is_severe(self) -> bool {
+        !matches!(self, Self::NonCanonicalProgram)
+    }
 }
 
 /// One quarantine entry: the banned program and the rule derived from it.
@@ -118,7 +128,9 @@ impl QuarantineLedger {
         if let Some(entry) = self.entries.get(&program_hash) {
             return entry.rule_id;
         }
-        self.evict_if_needed();
+        if !self.evict_for_reason(reason) {
+            return rule_id;
+        }
         self.entries.insert(
             program_hash,
             QuarantineEntry {
@@ -198,8 +210,21 @@ impl QuarantineLedger {
         Ok(ledger)
     }
 
-    fn evict_if_needed(&mut self) {
+    fn evict_for_reason(&mut self, incoming: QuarantineReason) -> bool {
         while self.entries.len() >= MAX_QUARANTINE_ENTRIES {
+            let oldest_non_severe = self
+                .entries
+                .iter()
+                .filter(|(_, e)| !e.reason.is_severe())
+                .min_by_key(|(_, e)| e.seq)
+                .map(|(h, _)| *h);
+            if let Some(hash) = oldest_non_severe {
+                self.entries.remove(&hash);
+                continue;
+            }
+            if !incoming.is_severe() {
+                return false;
+            }
             let oldest = self
                 .entries
                 .iter()
@@ -212,6 +237,7 @@ impl QuarantineLedger {
                 None => break,
             }
         }
+        true
     }
 }
 
@@ -305,5 +331,20 @@ mod tests {
         assert!(ledger.is_empty());
         assert_eq!(ledger.len(), 0);
         assert!(ledger.entry(&hash_of(9)).is_none());
+    }
+
+    #[test]
+    fn blg_139_non_canonical_flood_cannot_evict_canonical_bans() {
+        let mut ledger = QuarantineLedger::new();
+        let canonical_offender = hash_of(1);
+        ledger.ban(canonical_offender, QuarantineReason::TransferViolation);
+        for seed in 10..(10 + MAX_QUARANTINE_ENTRIES + 32) {
+            ledger.ban(hash_of(seed), QuarantineReason::NonCanonicalProgram);
+        }
+        assert_eq!(ledger.len(), MAX_QUARANTINE_ENTRIES);
+        assert!(
+            ledger.is_banned(&canonical_offender),
+            "canonical-program TransferViolation must survive NonCanonicalProgram floods"
+        );
     }
 }

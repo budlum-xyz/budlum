@@ -141,9 +141,80 @@ impl std::error::Error for VerifyError {}
 /// Verifies the whole program. Returns the first error found.
 pub fn verify_program(program: &IrProgram) -> Result<(), VerifyError> {
     let valid_fids: HashSet<FunctionId> = program.functions.iter().map(|f| f.id).collect();
+    let signatures: HashMap<FunctionId, (Vec<IrType>, IrType)> = program
+        .functions
+        .iter()
+        .map(|f| {
+            let param_tys = f.params.iter().map(|(_, ty)| ty.clone()).collect();
+            (f.id, (param_tys, f.ret_ty.clone()))
+        })
+        .collect();
 
     for func in &program.functions {
         verify_function(func, &valid_fids)?;
+        verify_function_call_signatures(func, &signatures)?;
+    }
+    Ok(())
+}
+
+fn verify_function_call_signatures(
+    func: &IrFunction,
+    signatures: &HashMap<FunctionId, (Vec<IrType>, IrType)>,
+) -> Result<(), VerifyError> {
+    let mut defined: HashMap<ValueId, IrType> = HashMap::new();
+    for (vid, ty) in &func.params {
+        defined.insert(*vid, ty.clone());
+    }
+    for block in &func.blocks {
+        for node in &block.instrs {
+            if let (Some(vid), Some(ty)) = (node.result, node.instr.result_type()) {
+                defined.insert(vid, ty);
+            }
+        }
+    }
+    for block in &func.blocks {
+        for node in &block.instrs {
+            if let Instruction::Call {
+                function,
+                args,
+                ret_ty,
+            } = &node.instr
+            {
+                let (param_tys, expected_ret) = signatures.get(function).ok_or_else(|| {
+                    VerifyError::UndefinedFunction {
+                        function: *function,
+                        in_caller: func.name.clone(),
+                    }
+                })?;
+                if expected_ret != ret_ty {
+                    return Err(VerifyError::ReturnTypeMismatch {
+                        expected: expected_ret.clone(),
+                        got: Some(ret_ty.clone()),
+                        in_function: func.name.clone(),
+                    });
+                }
+                if args.len() != param_tys.len() {
+                    return Err(VerifyError::OperandTypeMismatch {
+                        lhs_ty: param_tys.first().cloned().unwrap_or(IrType::Void),
+                        rhs_ty: args
+                            .first()
+                            .and_then(|v| defined.get(v).cloned())
+                            .unwrap_or(IrType::Void),
+                        in_function: func.name.clone(),
+                    });
+                }
+                for (arg_vid, expected_ty) in args.iter().zip(param_tys.iter()) {
+                    let arg_ty = check_value_ref(*arg_vid, &func.name, &defined)?;
+                    if &arg_ty != expected_ty {
+                        return Err(VerifyError::OperandTypeMismatch {
+                            lhs_ty: expected_ty.clone(),
+                            rhs_ty: arg_ty,
+                            in_function: func.name.clone(),
+                        });
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -218,8 +289,16 @@ fn verify_block(
 ) -> Result<(), VerifyError> {
     // ── Check the instructions ───────────────────────────────────
     for node in &block.instrs {
+        if node.result.is_some() != node.instr.result_type().is_some() {
+            return Err(VerifyError::ReturnTypeMismatch {
+                expected: node.instr.result_type().unwrap_or(IrType::Void),
+                got: None,
+                in_function: fname.to_string(),
+            });
+        }
         verify_instr(
             &node.instr,
+            func,
             fname,
             defined,
             valid_blocks,
@@ -302,6 +381,7 @@ fn verify_block(
 
 fn verify_instr(
     instr: &Instruction,
+    func: &IrFunction,
     fname: &str,
     defined: &HashMap<ValueId, IrType>,
     valid_blocks: &HashSet<BlockId>,
@@ -356,12 +436,28 @@ fn verify_instr(
             check_value_ref(*value, fname, defined)?;
         }
 
-        Instruction::ReadLocal { local, .. } => {
+        Instruction::ReadLocal { local, ty } => {
             check_local_ref(*local, fname, local_count)?;
+            let slot_ty = &func.locals[local.index()];
+            if slot_ty != ty {
+                return Err(VerifyError::OperandTypeMismatch {
+                    lhs_ty: slot_ty.clone(),
+                    rhs_ty: ty.clone(),
+                    in_function: fname.to_string(),
+                });
+            }
         }
         Instruction::WriteLocal { local, value } => {
             check_local_ref(*local, fname, local_count)?;
-            check_value_ref(*value, fname, defined)?;
+            let val_ty = check_value_ref(*value, fname, defined)?;
+            let slot_ty = &func.locals[local.index()];
+            if &val_ty != slot_ty {
+                return Err(VerifyError::OperandTypeMismatch {
+                    lhs_ty: slot_ty.clone(),
+                    rhs_ty: val_ty,
+                    in_function: fname.to_string(),
+                });
+            }
         }
 
         Instruction::Call { function, args, .. } => {
@@ -377,11 +473,27 @@ fn verify_instr(
         }
 
         Instruction::Assert { condition } => {
-            check_value_ref(*condition, fname, defined)?;
+            let cond_ty = check_value_ref(*condition, fname, defined)?;
+            if cond_ty != IrType::Bool {
+                return Err(VerifyError::BranchConditionNotBool {
+                    value: *condition,
+                    actual_ty: cond_ty,
+                    in_function: fname.to_string(),
+                });
+            }
         }
         Instruction::Poseidon { lhs, rhs } => {
-            check_value_ref(*lhs, fname, defined)?;
-            check_value_ref(*rhs, fname, defined)?;
+            let l_ty = check_value_ref(*lhs, fname, defined)?;
+            let r_ty = check_value_ref(*rhs, fname, defined)?;
+            if !matches!(l_ty, IrType::U64 | IrType::Field)
+                || !matches!(r_ty, IrType::U64 | IrType::Field)
+            {
+                return Err(VerifyError::OperandTypeMismatch {
+                    lhs_ty: l_ty,
+                    rhs_ty: r_ty,
+                    in_function: fname.to_string(),
+                });
+            }
         }
         Instruction::Emit { args, .. } => {
             for &arg in args {
@@ -559,7 +671,7 @@ mod tests {
         let block = BasicBlock {
             id: BlockId::new(0),
             instrs: vec![],
-            terminator: None, // eksik!
+            terminator: None, // missing!
         };
         let func = IrFunction {
             id: FunctionId(0),
@@ -672,7 +784,7 @@ mod tests {
                     },
                 },
                 InstrNode {
-                    result: Some(ValueId::new(0)), // tekrar!
+                    result: Some(ValueId::new(0)), // duplicate!
                     instr: Instruction::Const {
                         ty: IrType::U64,
                         value: 2,
@@ -734,7 +846,7 @@ mod tests {
     // ── 17. The verifier counts function params as defined ───────
     #[test]
     fn verifier_params_are_defined() {
-        // fn add(a: u64, b: u64) -> u64 { ret %0 + %1 }  (parametreler %0, %1)
+        // fn add(a: u64, b: u64) -> u64 { ret %0 + %1 }  (params %0, %1)
         let block = BasicBlock {
             id: BlockId::new(0),
             instrs: vec![InstrNode {
@@ -763,5 +875,124 @@ mod tests {
             function_names: Default::default(),
         };
         assert!(verify_program(&prog).is_ok());
+    }
+
+    #[test]
+    fn blg_136_verifier_rejects_local_assert_and_call_type_mismatches() {
+        // 1. WriteLocal with Bool into a U64 local slot fails.
+        let bad_local_block = BasicBlock {
+            id: BlockId::new(0),
+            instrs: vec![
+                InstrNode {
+                    result: Some(ValueId::new(0)),
+                    instr: Instruction::Const {
+                        ty: IrType::Bool,
+                        value: 1,
+                    },
+                },
+                InstrNode {
+                    result: None,
+                    instr: Instruction::WriteLocal {
+                        local: LocalId::new(0),
+                        value: ValueId::new(0),
+                    },
+                },
+            ],
+            terminator: Some(Terminator::Return(None)),
+        };
+        let bad_local_fn = IrFunction {
+            id: FunctionId(0),
+            name: "bad_local".to_string(),
+            params: vec![],
+            ret_ty: IrType::Void,
+            blocks: vec![bad_local_block],
+            locals: vec![IrType::U64],
+        };
+        let prog_local = IrProgram {
+            functions: vec![bad_local_fn],
+            function_names: Default::default(),
+        };
+        assert!(matches!(
+            verify_program(&prog_local),
+            Err(VerifyError::OperandTypeMismatch { .. })
+        ));
+
+        // 2. Assert on non-Bool fails.
+        let bad_assert_block = BasicBlock {
+            id: BlockId::new(0),
+            instrs: vec![
+                InstrNode {
+                    result: Some(ValueId::new(0)),
+                    instr: Instruction::Const {
+                        ty: IrType::U64,
+                        value: 1,
+                    },
+                },
+                InstrNode {
+                    result: None,
+                    instr: Instruction::Assert {
+                        condition: ValueId::new(0),
+                    },
+                },
+            ],
+            terminator: Some(Terminator::Return(None)),
+        };
+        let bad_assert_fn = IrFunction {
+            id: FunctionId(0),
+            name: "bad_assert".to_string(),
+            params: vec![],
+            ret_ty: IrType::Void,
+            blocks: vec![bad_assert_block],
+            locals: vec![],
+        };
+        let prog_assert = IrProgram {
+            functions: vec![bad_assert_fn],
+            function_names: Default::default(),
+        };
+        assert!(matches!(
+            verify_program(&prog_assert),
+            Err(VerifyError::BranchConditionNotBool { .. })
+        ));
+
+        // 3. Call with wrong argument count fails.
+        let callee = IrFunction {
+            id: FunctionId(0),
+            name: "callee".to_string(),
+            params: vec![(ValueId::new(0), IrType::U64)],
+            ret_ty: IrType::U64,
+            blocks: vec![BasicBlock {
+                id: BlockId::new(0),
+                instrs: vec![],
+                terminator: Some(Terminator::Return(Some(ValueId::new(0)))),
+            }],
+            locals: vec![],
+        };
+        let caller = IrFunction {
+            id: FunctionId(1),
+            name: "caller".to_string(),
+            params: vec![],
+            ret_ty: IrType::U64,
+            blocks: vec![BasicBlock {
+                id: BlockId::new(0),
+                instrs: vec![InstrNode {
+                    result: Some(ValueId::new(0)),
+                    instr: Instruction::Call {
+                        function: FunctionId(0),
+                        args: vec![],
+                        ret_ty: IrType::U64,
+                    },
+                }],
+                terminator: Some(Terminator::Return(Some(ValueId::new(0)))),
+            }],
+            locals: vec![],
+        };
+        let prog_call = IrProgram {
+            functions: vec![callee, caller],
+            function_names: Default::default(),
+        };
+        assert!(matches!(
+            verify_program(&prog_call),
+            Err(VerifyError::OperandTypeMismatch { .. })
+        ));
     }
 }
