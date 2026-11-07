@@ -7,7 +7,7 @@ Atlas|7|55
 Budscan|32|258
 D-Web Passport|10|88
 DeEd|12|34
-Developer OS|6|50
+Project Manifest|6|50
 Filiz (faucet)|1|14
 Filiz (leader election)|11|225
 Fotosentez|7|19

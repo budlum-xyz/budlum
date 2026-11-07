@@ -17,7 +17,7 @@
 use budlum_core::core::address::Address;
 use budlum_core::core::transaction::{Transaction, TransactionType};
 use budlum_core::crypto::primitives::KeyPair;
-use budlum_core::developer_os::{DeveloperOsManifest, ProofFixtureStatus};
+use budlum_core::project_manifest::{ProjectManifest, ProofFixtureStatus};
 use clap::{Parser, Subcommand};
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -1073,9 +1073,9 @@ fn parse_digest(field: &str, hex_str: &str) -> Result<[u8; 32], String> {
 /// computed for a manifest that does not pass `validate`. Otherwise a manifest
 /// carrying an invented compiler profile or a zero source hash would also produce
 /// a smooth id, indistinguishable from a real one.
-fn build_manifest(name: &str, source_hash: &str) -> Result<DeveloperOsManifest, String> {
+fn build_manifest(name: &str, source_hash: &str) -> Result<ProjectManifest, String> {
     let digest = parse_digest("--source-hash", source_hash)?;
-    let manifest = DeveloperOsManifest::local_standard(name, digest);
+    let manifest = ProjectManifest::local_standard(name, digest);
     manifest
         .validate()
         .map_err(|e| format!("manifest refused: {e:?}"))?;
