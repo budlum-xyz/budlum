@@ -27,6 +27,11 @@ extend-exclude = [
                           # hand-edited here. A typo inside it is fixed upstream in
                           # the crate, never by editing the mirror and calling it
                           # an export.
+  "config/naming/concept_map.toml",  # the binding concept-name register, written
+                                     # byte for byte from the directive's appendix.
+                                     # Its Turkish entries are the names being
+                                     # retired: "correcting" one would delete the
+                                     # name the register exists to find.
 ]
 
 [default]
