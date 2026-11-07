@@ -310,7 +310,7 @@ struct V5Signer {
     #[arg(long)]
     password_file: Option<std::path::PathBuf>,
     /// Fee (base units). When omitted, the node's current base fee is used.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_positive_fee)]
     fee: Option<u64>,
 }
 
@@ -632,7 +632,7 @@ enum TxAction {
         #[arg(long)]
         priv_key_file: Option<std::path::PathBuf>,
         /// Transaction fee (base units). Defaults to the node's base fee.
-        #[arg(long)]
+        #[arg(long, value_parser = parse_positive_fee)]
         fee: Option<u64>,
         /// Transaction nonce (fetched from the node with `bud_getNonce` if omitted).
         #[arg(long)]
@@ -882,6 +882,21 @@ fn node_chain_id(rpc_url: &str) -> Result<u64, String> {
     let value = rpc_call(rpc_url, "bud_chainId", serde_json::json!([]))?;
     let node = parse_rpc_u64(&value, "bud_chainId")?;
     chain_id_binding(node, requested)
+}
+
+/// Reject zero as an explicit fee; zero is reserved as the unfilled template
+/// value used when the network fee is queried.
+fn parse_positive_fee(value: &str) -> Result<u64, std::io::Error> {
+    let fee = value.parse::<u64>().map_err(|error| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
+    })?;
+    if fee == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "an explicit fee must be greater than zero",
+        ));
+    }
+    Ok(fee)
 }
 
 /// Read the fee floor from the node. The server exposes the same value through
@@ -2524,6 +2539,12 @@ mod tests {
     fn cli_fee_default_reads_network_base_fee() {
         assert_eq!(fee_or_network_base(None, 37), 37);
         assert_eq!(fee_or_network_base(Some(91), 37), 91);
+    }
+
+    #[test]
+    fn cli_rejects_zero_as_an_explicit_fee() {
+        assert!(parse_positive_fee("0").is_err());
+        assert_eq!(parse_positive_fee("1").unwrap(), 1);
     }
 
     #[test]
