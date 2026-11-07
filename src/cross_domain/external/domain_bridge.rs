@@ -51,6 +51,8 @@ pub fn encode_external_evidence(
     Ok(FinalityProof::Raw(payload))
 }
 
+const MAX_EXTERNAL_EVIDENCE_BYTES: u64 = 2 * 1024 * 1024;
+
 /// Decodes the local carrier. It does not validate the evidence: only the
 /// bound adapter may interpret its payload or decide whether it is final.
 ///
@@ -60,12 +62,21 @@ pub fn encode_external_evidence(
 pub fn decode_external_evidence(
     proof: &FinalityProof,
 ) -> Result<RawConsensusEvidence, FinalityError> {
+    use bincode::Options;
     let FinalityProof::Raw(payload) = proof else {
         return Err(FinalityError(
             "external-domain finality requires a raw evidence envelope".to_string(),
         ));
     };
-    bincode::deserialize(payload)
+    if (payload.len() as u64) > MAX_EXTERNAL_EVIDENCE_BYTES {
+        return Err(FinalityError(
+            "external evidence carrier exceeds size ceiling".to_string(),
+        ));
+    }
+    bincode::options()
+        .with_fixint_encoding()
+        .with_limit(MAX_EXTERNAL_EVIDENCE_BYTES)
+        .deserialize(payload)
         .map_err(|error| FinalityError(format!("external evidence carrier is malformed: {error}")))
 }
 

@@ -58,7 +58,15 @@ pub fn verify_inference_stark(
     expected_inputs: &ExecutionPublicInputs,
     program: &[u64],
 ) -> Result<(), String> {
-    let envelope: ProofEnvelope = bincode::deserialize(proof_bytes)
+    use bincode::Options;
+    let max_bytes = crate::execution::proof_verifier::MAX_PROOF_BYTES as u64;
+    if (proof_bytes.len() as u64) > max_bytes {
+        return Err("AI inference layer STARK: ProofEnvelope exceeds size ceiling".to_string());
+    }
+    let envelope: ProofEnvelope = bincode::options()
+        .with_fixint_encoding()
+        .with_limit(max_bytes)
+        .deserialize(proof_bytes)
         .map_err(|e| format!("AI inference layer STARK: ProofEnvelope deserialize failed: {e}"))?;
     DefaultAdapter::verify(&envelope, expected_inputs, program)
         .map_err(|e| format!("AI inference layer STARK: verification failed: {e:?}"))

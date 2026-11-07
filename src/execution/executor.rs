@@ -11,9 +11,23 @@ use serde_json;
 /// hashes; the bound leaves room for framing while preventing a length prefix
 /// from allocating attacker-sized memory during block execution.
 const MAX_RELAYER_RESULT_PROOF_BYTES: u64 = 4 * 1024;
+/// Maximum byte and allocation budget for structured BNS/NFT transaction `data` payloads.
+pub(crate) const MAX_STRUCTURED_TX_DATA_BYTES: u64 = 64 * 1024;
 /// How far before the including block a grant may be dated. A wider window would let a grant
 /// slip under an encryption policy that was deprecated since.
 const MAX_GRANT_BACKDATE_BLOCKS: u64 = 64;
+
+pub(crate) fn deserialize_tx_data<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+) -> bincode::Result<T> {
+    if (bytes.len() as u64) > MAX_STRUCTURED_TX_DATA_BYTES {
+        return Err(Box::new(bincode::ErrorKind::SizeLimit));
+    }
+    bincode::options()
+        .with_fixint_encoding()
+        .with_limit(MAX_STRUCTURED_TX_DATA_BYTES)
+        .deserialize(bytes)
+}
 
 pub struct Executor;
 
@@ -914,7 +928,7 @@ impl Executor {
                 sender.nonce = sender.nonce.saturating_add(1);
             }
             TransactionType::BnsRegister => {
-                let (name, duration): (String, u64) = bincode::deserialize(&tx.data)
+                let (name, duration): (String, u64) = deserialize_tx_data(&tx.data)
                     .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
 
                 let cost = state.bns_registry.calculate_cost(&name, duration);
@@ -976,7 +990,7 @@ impl Executor {
                 state.record_destroyed(u128::from(cost));
             }
             TransactionType::BnsRenew => {
-                let (name, duration): (String, u64) = bincode::deserialize(&tx.data)
+                let (name, duration): (String, u64) = deserialize_tx_data(&tx.data)
                     .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
 
                 let cost = state.bns_registry.calculate_cost(&name, duration);
@@ -1030,7 +1044,7 @@ impl Executor {
                 state.record_destroyed(u128::from(cost));
             }
             TransactionType::BnsTransfer => {
-                let (name, new_owner): (String, Address) = bincode::deserialize(&tx.data)
+                let (name, new_owner): (String, Address) = deserialize_tx_data(&tx.data)
                     .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
                 if tx.amount != 0 || tx.to != Address::zero() {
                     return Err(BudlumError::validation(
@@ -1062,7 +1076,7 @@ impl Executor {
             }
             TransactionType::BnsSetContent => {
                 let (name, cid): (String, crate::storage::content_id::ContentId) =
-                    bincode::deserialize(&tx.data)
+                    deserialize_tx_data(&tx.data)
                         .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
 
                 state
@@ -1080,7 +1094,7 @@ impl Executor {
             }
             TransactionType::BnsRegisterSubdomain => {
                 let (parent, label, sub_owner): (String, String, Address) =
-                    bincode::deserialize(&tx.data)
+                    deserialize_tx_data(&tx.data)
                         .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
 
                 state
@@ -1095,7 +1109,7 @@ impl Executor {
                 sender.nonce = sender.nonce.saturating_add(1);
             }
             TransactionType::BnsSetStorage => {
-                let (name, root, dom_id): (String, [u8; 32], u32) = bincode::deserialize(&tx.data)
+                let (name, root, dom_id): (String, [u8; 32], u32) = deserialize_tx_data(&tx.data)
                     .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
 
                 state
@@ -1113,7 +1127,7 @@ impl Executor {
             }
             TransactionType::NftMint => {
                 let (cid, author): (crate::storage::content_id::ContentId, Option<String>) =
-                    bincode::deserialize(&tx.data)
+                    deserialize_tx_data(&tx.data)
                         .map_err(|e| BudlumError::validation("nft_invalid_data", e.to_string()))?;
 
                 // A duplicate id means the registry's counter disagrees with
@@ -1133,7 +1147,7 @@ impl Executor {
                 sender.nonce = sender.nonce.saturating_add(1);
             }
             TransactionType::NftTransfer => {
-                let (id, to): (u64, Address) = bincode::deserialize(&tx.data)
+                let (id, to): (u64, Address) = deserialize_tx_data(&tx.data)
                     .map_err(|e| BudlumError::validation("nft_invalid_data", e.to_string()))?;
 
                 // Folder-lock rule: a membership is the token owner's claim
@@ -1170,7 +1184,7 @@ impl Executor {
                 sender.nonce = sender.nonce.saturating_add(1);
             }
             TransactionType::NftBurn => {
-                let id: u64 = bincode::deserialize(&tx.data)
+                let id: u64 = deserialize_tx_data(&tx.data)
                     .map_err(|e| BudlumError::validation("nft_invalid_data", e.to_string()))?;
 
                 // The same lock burns enforce as transfers, for the same
@@ -4013,5 +4027,19 @@ mod tests {
 
         assert!(!privacy_transfers_enabled(mainnet));
         assert!(privacy_transfers_enabled(devnet));
+    }
+
+    #[test]
+    fn structured_tx_data_decoder_rejects_oversized_length_prefixes() {
+        let mut forged = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40];
+        forged.extend_from_slice(&[0u8; 8]);
+        assert!(deserialize_tx_data::<(String, u64)>(&forged).is_err());
+
+        let cid = crate::storage::content_id::ContentId::from_bytes(b"nft-mint-payload");
+        let wire = bincode::serialize(&(cid, None::<String>)).expect("serialize");
+        let (back_cid, back_author): (crate::storage::content_id::ContentId, Option<String>) =
+            deserialize_tx_data(&wire).expect("Option::None author round-trips");
+        assert_eq!(back_cid, cid);
+        assert!(back_author.is_none());
     }
 }

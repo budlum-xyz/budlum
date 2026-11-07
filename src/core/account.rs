@@ -1940,8 +1940,9 @@ impl AccountState {
                 if tx.amount == 0 || tx.to != Address::zero() {
                     return Err("BNS renewal requires a positive payment and zero recipient".into());
                 }
-                let (name, duration): (String, u64) = bincode::deserialize(&tx.data)
-                    .map_err(|e| format!("Invalid BNS renewal data: {e}"))?;
+                let (name, duration): (String, u64) =
+                    crate::execution::executor::deserialize_tx_data(&tx.data)
+                        .map_err(|e| format!("Invalid BNS renewal data: {e}"))?;
                 if duration == 0 {
                     return Err("BNS renewal duration must be greater than zero".into());
                 }
@@ -1957,8 +1958,9 @@ impl AccountState {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     return Err("BNS transfer requires zero amount and recipient".into());
                 }
-                let (_name, new_owner): (String, Address) = bincode::deserialize(&tx.data)
-                    .map_err(|e| format!("Invalid BNS transfer data: {e}"))?;
+                let (_name, new_owner): (String, Address) =
+                    crate::execution::executor::deserialize_tx_data(&tx.data)
+                        .map_err(|e| format!("Invalid BNS transfer data: {e}"))?;
                 if new_owner == Address::zero() {
                     return Err("BNS transfer new owner cannot be the zero address".into());
                 }

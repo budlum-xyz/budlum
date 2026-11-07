@@ -3676,7 +3676,7 @@ impl Blockchain {
                 }
             }
             crate::core::transaction::TransactionType::BnsRenew => {
-                match bincode::deserialize::<(String, u64)>(&tx.data) {
+                match crate::execution::executor::deserialize_tx_data::<(String, u64)>(&tx.data) {
                     Ok((name, duration)) => {
                         if tx.amount != self.state.bns_registry.calculate_cost(&name, duration) {
                             reasons.push("invalid_bns_renewal_payment".to_string());
@@ -3692,7 +3692,8 @@ impl Blockchain {
                 }
             }
             crate::core::transaction::TransactionType::BnsTransfer => {
-                match bincode::deserialize::<(String, Address)>(&tx.data) {
+                match crate::execution::executor::deserialize_tx_data::<(String, Address)>(&tx.data)
+                {
                     Ok((_name, new_owner)) if new_owner != Address::zero() => {}
                     Ok(_) => reasons.push("invalid_bns_transfer_owner".to_string()),
                     Err(_) => reasons.push("invalid_bns_transfer_data".to_string()),
@@ -4246,7 +4247,8 @@ impl Blockchain {
         let mut cids = Vec::new();
         for tx in &block.transactions {
             if let crate::core::transaction::TransactionType::NftBurn = tx.tx_type {
-                if let Ok(nft_id) = bincode::deserialize::<u64>(&tx.data) {
+                if let Ok(nft_id) = crate::execution::executor::deserialize_tx_data::<u64>(&tx.data)
+                {
                     if let Some(nft) = state.nft_registry.get_nft(nft_id) {
                         // Burning a token is not proof of owning the content
                         // it names: `NftMint` accepts an arbitrary content id.
