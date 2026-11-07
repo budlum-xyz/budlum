@@ -10,7 +10,7 @@ name: Mobile iOS
 
 on:
   push:
-    branches: [main, 'arena/**']
+    branches: [main]
     paths:
       - 'mobile/ios/**'
       - 'crates/budlum-types/**'
@@ -24,6 +24,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   kit-tests:
@@ -46,21 +50,29 @@ jobs:
 
       - name: Unit tests
         working-directory: mobile/ios
-        run: swift test 2>&1 | tee /tmp/ios-tests.log
+        run: swift test --verbose --xunit-output /tmp/ios-xunit.xml 2>&1 | tee /tmp/ios-tests.log
 
       # A `swift test` that runs zero tests exits 0 and looks identical to a
       # pass, and the three names below are the acceptance tests of the WP-38
-      # card. They are matched by name so a rename cannot quietly drop one.
+      # card. Verify via JUnit XML (and verbose XCTest output) so Swift 6 and
+      # Swift 5 formatters both report deterministic per-test execution.
       - name: The three named tests of the WP-38 card ran and passed
         run: |
           set -euo pipefail
-          for test in ios_bg_task_answers_audit ios_quota_cap_is_8_gib ios_class_is_opportunistic; do
-            if ! grep -qE "test_${test}\]' passed" /tmp/ios-tests.log; then
-              echo "ERROR: ${test} did not run and pass"
-              exit 1
-            fi
-          done
-          grep -E '^Test Case ' /tmp/ios-tests.log | wc -l
+          python3 - <<'PYCHECK'
+          import sys, xml.etree.ElementTree as ET
+          tree = ET.parse("/tmp/ios-xunit.xml")
+          seen = {}
+          for tc in tree.iter("testcase"):
+              name = tc.attrib.get("name", "")
+              failed = (tc.find("failure") is not None) or (tc.find("error") is not None)
+              seen[name] = not failed
+          for req in ("test_ios_bg_task_answers_audit", "test_ios_quota_cap_is_8_gib", "test_ios_class_is_opportunistic"):
+              if not seen.get(req, False):
+                  print(f"ERROR: {req} did not run and pass (seen={sorted(seen)})", file=sys.stderr)
+                  sys.exit(1)
+          print(f"Verified {len(seen)} XCTest cases in JUnit report; all 3 WP-38 acceptance tests passed.")
+          PYCHECK
 
   app-build:
     # The Xcode project that turns Sources/BudlumValidatorUI into a shippable

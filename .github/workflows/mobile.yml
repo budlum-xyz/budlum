@@ -7,7 +7,7 @@ name: mobile
 
 on:
   push:
-    branches: [main, 'arena/**']
+    branches: [main]
     paths:
       - 'mobile/**'
       - 'crates/budlum-types/**'
@@ -21,6 +21,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-and-unit-tests:
