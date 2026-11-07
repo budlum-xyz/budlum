@@ -67,6 +67,9 @@ pub struct Metrics {
     pub peer_connection_quality: IntGauge,
     pub consensus_round_seconds: Histogram,
     pub finality_lag: IntGauge,
+    /// Disaster mode (directive 7.7): 1 while the node runs finality-stall
+    /// recovery mode, 0 otherwise.
+    pub finality_stalled: IntGauge,
     pub storage_db_size_bytes: IntGauge,
     /// Content chunks retained by the durable B.U.D. content store.
     pub content_store_chunks: IntGauge,
@@ -356,6 +359,10 @@ impl Metrics {
         ))?;
         let finality_lag =
             IntGauge::new("budlum_finality_lag", "Head height minus finalized height")?;
+        let finality_stalled = IntGauge::new(
+            "budlum_finality_stalled",
+            "1 while the node runs finality-stall recovery mode",
+        )?;
         let storage_db_size_bytes = IntGauge::new(
             "budlum_storage_db_size_bytes",
             "Approximate storage size in bytes",
@@ -747,6 +754,7 @@ impl Metrics {
         registry.register(Box::new(peer_connection_quality.clone()))?;
         registry.register(Box::new(consensus_round_seconds.clone()))?;
         registry.register(Box::new(finality_lag.clone()))?;
+        registry.register(Box::new(finality_stalled.clone()))?;
         registry.register(Box::new(storage_db_size_bytes.clone()))?;
         registry.register(Box::new(content_store_chunks.clone()))?;
         registry.register(Box::new(content_store_bytes.clone()))?;
@@ -872,6 +880,7 @@ impl Metrics {
             peer_connection_quality,
             consensus_round_seconds,
             finality_lag,
+            finality_stalled,
             storage_db_size_bytes,
             content_store_chunks,
             content_store_bytes,
@@ -1103,6 +1112,7 @@ mod tests {
             "budlum_tokenomics_years_burned",
             "budlum_tokenomics_timed_burned_total",
             "budlum_tokenomics_team_locked",
+            "budlum_finality_stalled",
             "budlum_slashing_events_total",
             "budlum_pq_verifier_disagreement",
             "budlum_settlement_equivocations_detected",

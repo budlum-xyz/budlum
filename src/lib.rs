@@ -44,6 +44,7 @@ pub mod sharding;
 pub mod socialfi;
 pub mod storage;
 pub mod tokenomics;
+pub mod validators;
 // The V5 command-line wallet; its keys are ML-DSA-87.
 #[cfg(feature = "wallet-ml-dsa")]
 pub mod wallet;
