@@ -3662,7 +3662,7 @@ impl AccountState {
     /// Validator unbonding entries, and independently debited role bonds such as
     /// AI_OPERATOR. Excluding role bonds would make a bond look like a supply
     /// Burn and reopen false minting headroom. Delegation exits, proof-market
-    /// escrow, relayer-intent escrow and Graft intent escrow are counted for the
+    /// escrow, relayer-intent escrow and remote app binding intent escrow are counted for the
     /// same reason.
     pub fn total_bud_committed(&self) -> u128 {
         self.circulating_supply()

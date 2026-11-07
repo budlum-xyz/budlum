@@ -74,7 +74,7 @@ category = "a"
 [[entry]]
 path = "src/crypto/secp256k1_recover.rs"
 function = "*"
-pq_companion = "External Ethereum EOA recovery combinator; paired with ML-DSA-87 in Graft/Adopt or confined to QuantumClass::Classical foreign lane"
+pq_companion = "External Ethereum EOA recovery combinator; paired with ML-DSA-87 in the remote app binding or adopt path, or confined to QuantumClass::Classical foreign lane"
 category = "d"
 
 [[entry]]

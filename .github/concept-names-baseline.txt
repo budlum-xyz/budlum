@@ -4,7 +4,7 @@
 # The map moves to `absolute` mode once every line is zero.
 Anaç|0|0
 Atlas|7|55
-Budscan|33|268
+Budscan|31|248
 D-Web Passport|10|88
 DeEd|12|34
 Developer OS|6|50

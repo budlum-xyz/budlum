@@ -7275,22 +7275,22 @@ mod tests {
     /// the body of a header-less response from JavaScript.
     #[test]
     fn allowed_origin_is_reflected_into_the_response() {
-        let config = cors_config(&["https://budscan.example"]);
-        let req = request_from_origin("https://budscan.example");
+        let config = cors_config(&["https://explorer.example"]);
+        let req = request_from_origin("https://explorer.example");
         let outcome = cors_outcome(&config, &req);
         assert_eq!(
             outcome,
-            CorsOutcome::Allow("https://budscan.example".into())
+            CorsOutcome::Allow("https://explorer.example".into())
         );
 
         let mut response = text_response(StatusCode::OK, "ok");
-        apply_cors_headers(&mut response, "https://budscan.example");
+        apply_cors_headers(&mut response, "https://explorer.example");
         assert_eq!(
             response
                 .headers()
                 .get("access-control-allow-origin")
                 .and_then(|v| v.to_str().ok()),
-            Some("https://budscan.example")
+            Some("https://explorer.example")
         );
         // A cache must not serve one origin's response to another.
         assert_eq!(
@@ -7307,7 +7307,7 @@ mod tests {
 
     #[test]
     fn unlisted_origin_is_denied_and_gets_no_headers() {
-        let config = cors_config(&["https://budscan.example"]);
+        let config = cors_config(&["https://explorer.example"]);
         let req = request_from_origin("https://saldirgan.example");
         let outcome = cors_outcome(&config, &req);
         assert_eq!(outcome, CorsOutcome::Deny);
@@ -7330,11 +7330,11 @@ mod tests {
         let req = request_from_origin("https://saldirgan.example");
         assert_eq!(cors_outcome(&config, &req), CorsOutcome::Allow("*".into()));
         // A named origin next to `*` still gets its own name back.
-        let config = cors_config(&["*", "https://budscan.example"]);
-        let req = request_from_origin("https://budscan.example");
+        let config = cors_config(&["*", "https://explorer.example"]);
+        let req = request_from_origin("https://explorer.example");
         assert_eq!(
             cors_outcome(&config, &req),
-            CorsOutcome::Allow("https://budscan.example".into())
+            CorsOutcome::Allow("https://explorer.example".into())
         );
     }
 
@@ -7394,7 +7394,7 @@ mod tests {
             api_key: Some("secret".into()),
             ..Default::default()
         };
-        let req = request_from_origin("https://budscan.example");
+        let req = request_from_origin("https://explorer.example");
         assert_eq!(cors_outcome(&config, &req), CorsOutcome::NotApplicable);
     }
 
@@ -7405,17 +7405,17 @@ mod tests {
         let mut req = HttpRequest::builder()
             .method(hyper::Method::OPTIONS)
             .uri("/")
-            .header("origin", "https://budscan.example")
+            .header("origin", "https://explorer.example")
             .header("access-control-request-method", "POST")
             .body(())
             .unwrap();
         assert!(is_cors_preflight(&req));
 
         // No identity header, and the allow decision still has to be reachable.
-        let config = cors_config(&["https://budscan.example"]);
+        let config = cors_config(&["https://explorer.example"]);
         assert!(!is_authorized(&config, &req));
 
-        let response = preflight_response("https://budscan.example");
+        let response = preflight_response("https://explorer.example");
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert_eq!(
             response

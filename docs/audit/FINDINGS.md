@@ -38,8 +38,24 @@ annotation on purpose.
 | BLG-273 | Critical | `Cargo.toml` feature matrix, `src/` test suite | The core does not build under `--no-default-features --features "pq-ml-dsa wallet-ml-dsa"` and the library test step fails, both with exit 101. `badges-are-current` then refuses to compare a badge against a red run, so the badge gate is red as well. A branch that cannot build its own declared feature matrix has no green CI to offer a release. | CI 42050659038, job 127488354234 step `Feature matrix: pq-ml-dsa solo`, job 127488354235 step `Test`, and annotation `FAIL [badges-are-current]: test log records failures; refusing to compare badge against a red run` | WP-01 |
 | BLG-274 | Medium | `src/network/`, `.github/workflows/ci.yml` network hardening job | The network hardening test step fails with exit 101. | CI 42050659038, job 127488354561 step `network hardening tests` | WP-15 |
 | BLG-275 | Low | `deny.toml`, `.github/workflows/ci.yml` cargo deny jobs | Both cargo deny jobs (root and fuzz) fail, so the dependency policy is not enforced on this tree. | CI 42050659038, jobs 127488354574 and 127488354282 | WP-42 |
+| BLG-276 | High | `config/naming/concept_map.toml`, `.github/concept-names-baseline.txt` | The concept name ratchet cannot be green on the integrated tree: five entries measured above their baseline (Graft 897 against 895, Budscan 272 against 268, PUL 100 against 99, Tarif 1444 against 1442, Govde 2 against 1), and four entries measured below theirs (Pollen, Budscan, Tarif, the `three_*` modules). A ratchet that is wrong in both directions protects nothing. | Static measurement of the same rules the `concept_names` gate applies, run over this tree: 27 entries, 5036 matches, equal to the baseline after the fix. No CI run is available in this environment, so the red state is reproduced by measurement rather than by a job log. | WP-05 |
 
 ## Closure record
 
-No finding is closed on this branch. WP-20 touches no code under `src/`, so its
-row set is empty and the ledger keeps BLG-268 to BLG-275 open.
+`BLG-276` is closed by this branch. The fix has three parts:
+
+1. The four detection and lock registers that must name a legacy concept are
+   listed in the `allow_paths` of the entry they mention: the forbidden phrase
+   list in `xtask/gates/src/gates/bud3_forbidden_phrases.rs` (Tarif, Govde),
+   the module coverage list in `xtask/gates/src/gates/module_coverage.rs`
+   (PUL), the locked path list in `xtask/gates/tests/repository_locks.rs` and
+   the regression test `src/tests/regression_ops_crypto.rs` (Budscan), and
+   `docs/MOBILE_VALIDATOR.md` (Mobile Self). A register exists to carry the
+   name it watches; deleting the name from it would delete the check.
+2. The new names that were decoration are gone: the CORS test origins in
+   `src/rpc/server.rs`, the escrow comment in `src/core/account.rs` and the
+   suite description in `docs/pq/classical_allowlist.toml`.
+3. The baseline is lowered, never raised, to the measured counts: 5036 legacy
+   matches across 27 entries.
+
+`BLG-268` to `BLG-275` stay open.
