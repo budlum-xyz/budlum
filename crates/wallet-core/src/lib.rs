@@ -28,8 +28,8 @@
 //! use budlum_wallet_core::{Wallet, WalletPrivacyConfig, ML_DSA_87_SIGNATURE_LEN};
 //!
 //! // Fixed entropy: reproducible, and never a real wallet.
-//! let mut wallet = Wallet::from_entropy(&[1u8; 16]).unwrap();
-//! assert_eq!(wallet.mnemonic().split_whitespace().count(), 12);
+//! let mut wallet = Wallet::from_entropy(&[1u8; 32]).unwrap();
+//! assert_eq!(wallet.mnemonic().split_whitespace().count(), 24);
 //! assert_eq!(wallet.address_hex().len(), 64);
 //!
 //! // Signing is what the wallet is for; the relayer it is handed to is not
@@ -80,6 +80,7 @@ use crypto::scheme::SchemeId;
 use ml_dsa::{MlDsa87, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 use sha3::Sha3_256;
+use unicode_normalization::UnicodeNormalization;
 use zeroize::Zeroize;
 
 /// ML-DSA-87 (FIPS 204, Category 5) public key length in bytes.
@@ -127,10 +128,10 @@ impl std::fmt::Display for WalletError {
         match self {
             WalletError::InvalidMnemonic(m) => write!(f, "invalid mnemonic: {m}"),
             WalletError::InvalidEntropy(n) => {
-                write!(f, "invalid entropy size: {n} bytes (expected 16 or 32)")
+                write!(f, "invalid entropy size: {n} bytes (expected 32)")
             }
             WalletError::InvalidWordCount(n) => {
-                write!(f, "invalid mnemonic word count: {n} (expected 12 or 24)")
+                write!(f, "invalid mnemonic word count: {n} (expected 24)")
             }
             WalletError::InvalidSeed => write!(f, "invalid seed"),
             WalletError::InvalidMultisigPolicy(m) => write!(f, "invalid multisig policy: {m}"),
@@ -204,7 +205,8 @@ pub fn entropy_to_mnemonic(entropy: &[u8]) -> Result<String, WalletError> {
 
 /// BIP39 mnemonic → entropy (reverse: checksum validation + entropy extraction).
 pub fn mnemonic_to_entropy(mnemonic: &str) -> Result<Vec<u8>, WalletError> {
-    let words: Vec<&str> = mnemonic.split_whitespace().collect();
+    let normalized = mnemonic.nfkd().collect::<String>();
+    let words: Vec<&str> = normalized.split_whitespace().collect();
     if words.len() != 12 && words.len() != 24 {
         return Err(WalletError::InvalidMnemonic(format!(
             "expected 12 or 24 words, got {}",
@@ -1088,7 +1090,7 @@ impl Wallet {
     }
     /// Create a new wallet (random entropy -> mnemonic -> seed -> keypair).
     ///
-    /// `word_count`: 12 (128-bit entropy) or 24 (256-bit entropy).
+    /// `word_count`: 24 (256-bit entropy). Twelve-word wallets are refused.
     ///
     /// **Production safety:** this function only works when the `production` feature
     /// is enabled. Without it `Wallet::generate` returns
@@ -1096,7 +1098,6 @@ impl Wallet {
     /// environment. Use `from_entropy` for test/dev environments.
     pub fn generate(word_count: usize) -> Result<Self, WalletError> {
         let entropy_len = match word_count {
-            12 => 16, // 128 bit
             24 => 32, // 256 bit
             _ => return Err(WalletError::InvalidWordCount(word_count)),
         };
@@ -1137,11 +1138,11 @@ impl Wallet {
     /// Use `Wallet::generate` for production wallet generation
     /// (production feature + getrandom CSPRNG gerektirir).
     pub fn from_entropy(entropy: &[u8]) -> Result<Self, WalletError> {
-        if entropy.len() != 16 && entropy.len() != 32 {
+        if entropy.len() != 32 {
             return Err(WalletError::InvalidEntropy(entropy.len()));
         }
 
-        // BIP39 mnemonic: tam wordlist + SHA256 checksum
+        // BIP39 mnemonic: full wordlist + SHA256 checksum
         let mnemonic = entropy_to_mnemonic(entropy)?;
 
         // ML-DSA-87 seed: domain-separated SHA3-256 over BIP39 entropy.
@@ -1169,10 +1170,15 @@ impl Wallet {
         })
     }
 
-    /// Restore a wallet from a mnemonic (with BIP39 checksum verification).
+    /// Restore a wallet from a 24-word, NFKD-normalized mnemonic.
     pub fn from_mnemonic(mnemonic: &str) -> Result<Self, WalletError> {
+        let normalized = mnemonic.nfkd().collect::<String>();
+        let words = normalized.split_whitespace().count();
+        if words != 24 {
+            return Err(WalletError::InvalidWordCount(words));
+        }
         // BIP39 reverse: mnemonic -> entropy (with checksum verification)
-        let mut entropy = mnemonic_to_entropy(mnemonic)?;
+        let mut entropy = mnemonic_to_entropy(&normalized)?;
 
         let mut hasher = Sha3_256::new();
         hasher.update(b"BUDLUM_MLDSA87_SEED_V1");
@@ -1187,7 +1193,7 @@ impl Wallet {
         let signing_key = signing_key_from_seed(&seed);
 
         Ok(Self {
-            mnemonic: mnemonic.to_string(),
+            mnemonic: normalized,
             seed,
             signing_key,
             privacy: WalletPrivacyConfig::default(),
@@ -1708,7 +1714,7 @@ mod tests {
     #[cfg(not(feature = "production"))]
     #[test]
     fn deterministic_fallback_signatures_verify_and_are_stable() {
-        let w = Wallet::from_entropy(&[0x77u8; 16]).unwrap();
+        let w = Wallet::from_entropy(&[0x77u8; 32]).unwrap();
         let msg = b"private transfer authorization";
         let a = w.sign(msg);
         let b = w.sign(msg);
@@ -1720,16 +1726,21 @@ mod tests {
     }
 
     #[test]
-    fn generate_12_word_wallet() {
-        let wallet = Wallet::from_entropy(&[0x42u8; 16]).expect("12-word wallet must succeed");
-        let words: Vec<&str> = wallet.mnemonic().split_whitespace().collect();
-        assert_eq!(words.len(), 12, "must have 12 words");
-        assert_eq!(wallet.address().len(), 32, "address must be 32 bytes");
-        assert_eq!(
-            wallet.public_key().len(),
-            ML_DSA_87_PUBLIC_KEY_LEN,
-            "pubkey must be ML-DSA-87 encoded (2592 bytes)"
-        );
+    fn wallet_refuses_12_word_seed() {
+        let mnemonic = entropy_to_mnemonic(&[0x42u8; 16]).unwrap();
+        assert_eq!(mnemonic.split_whitespace().count(), 12);
+        assert!(matches!(
+            Wallet::from_mnemonic(&mnemonic),
+            Err(WalletError::InvalidWordCount(12))
+        ));
+        assert!(matches!(
+            Wallet::from_entropy(&[0x42u8; 16]),
+            Err(WalletError::InvalidEntropy(16))
+        ));
+        assert!(matches!(
+            Wallet::generate(12),
+            Err(WalletError::InvalidWordCount(12))
+        ));
     }
 
     #[test]
@@ -1742,7 +1753,7 @@ mod tests {
     /// A restored wallet resumes the saved counter and never goes back.
     #[test]
     fn a_resumed_blinding_counter_blocks_reuse_and_only_moves_forward() {
-        let mut wallet = Wallet::from_entropy(&[0x42u8; 16]).unwrap();
+        let mut wallet = Wallet::from_entropy(&[0x42u8; 32]).unwrap();
         wallet.set_note_privacy_enabled(true);
         wallet.resume_blinding_counter(5);
         assert_eq!(wallet.next_blinding_counter(), 5);
@@ -1769,7 +1780,7 @@ mod tests {
 
     #[test]
     fn sign_and_verify_roundtrip() {
-        let wallet = Wallet::from_entropy(&[0x42u8; 16]).unwrap();
+        let wallet = Wallet::from_entropy(&[0x42u8; 32]).unwrap();
         let msg = b"hello budlum";
         let sig = wallet.sign(msg);
         let pubkey = wallet.public_key();
@@ -1778,7 +1789,7 @@ mod tests {
 
     #[test]
     fn verify_rejects_wrong_message() {
-        let wallet = Wallet::from_entropy(&[0x42u8; 16]).unwrap();
+        let wallet = Wallet::from_entropy(&[0x42u8; 32]).unwrap();
         let sig = wallet.sign(b"original message");
         let pubkey = wallet.public_key();
         assert!(
@@ -1790,7 +1801,7 @@ mod tests {
     #[test]
     fn restore_from_mnemonic() {
         // Generate a valid mnemonic from entropy, then restore from it
-        let wallet = Wallet::from_entropy(&[0x42u8; 16]).unwrap();
+        let wallet = Wallet::from_entropy(&[0x42u8; 32]).unwrap();
         let mnemonic = wallet.mnemonic().to_string();
         let restored = Wallet::from_mnemonic(&mnemonic).expect("restore must succeed");
         assert_eq!(restored.mnemonic(), mnemonic);
@@ -1804,8 +1815,8 @@ mod tests {
 
     #[test]
     fn different_mnemonics_different_addresses() {
-        let w1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let w2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
+        let w1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let w2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
         assert_ne!(
             w1.address(),
             w2.address(),
@@ -1823,17 +1834,22 @@ mod tests {
     }
 
     #[test]
-    fn from_entropy_valid_sizes() {
-        assert!(Wallet::from_entropy(&[0u8; 16]).is_ok(), "16 bytes OK");
+    fn from_entropy_requires_256_bits() {
+        assert!(matches!(
+            Wallet::from_entropy(&[0u8; 16]),
+            Err(WalletError::InvalidEntropy(16))
+        ));
         assert!(Wallet::from_entropy(&[0u8; 32]).is_ok(), "32 bytes OK");
     }
 
     #[test]
-    fn entropy_size_preserves_mnemonic_word_count() {
-        let short = Wallet::from_entropy(&[0u8; 16]).unwrap();
-        let long = Wallet::from_entropy(&[0u8; 32]).unwrap();
-        assert_eq!(short.mnemonic().split_whitespace().count(), 12);
-        assert_eq!(long.mnemonic().split_whitespace().count(), 24);
+    fn wallet_mnemonic_is_nfkd_normalised() {
+        let wallet = Wallet::from_entropy(&[0x42u8; 32]).unwrap();
+        // NFKD maps ideographic separators to ordinary spaces before parsing.
+        let decomposed_separators = wallet.mnemonic().replace(' ', "\u{3000}");
+        let restored = Wallet::from_mnemonic(&decomposed_separators).unwrap();
+        assert_eq!(restored.mnemonic(), wallet.mnemonic());
+        assert_eq!(restored.address(), wallet.address());
     }
 
     /// Production entropy fail-closed gate: Wallet::generate must fail
@@ -1842,7 +1858,7 @@ mod tests {
     #[test]
     fn wallet_generate_rejects_placeholder_entropy_in_production() {
         // Without --features production, Wallet::generate must fail-closed
-        let result = Wallet::generate(12);
+        let result = Wallet::generate(24);
         #[cfg(not(feature = "production"))]
         {
             assert!(
@@ -1872,8 +1888,8 @@ mod tests {
     /// BIP39 checksum validation: invalid mnemonic must be rejected.
     #[test]
     fn mnemonic_checksum_validation_rejects_invalid() {
-        // Valid 12-word mnemonic from from_entropy (deterministic)
-        let wallet = Wallet::from_entropy(&[0x42u8; 16]).unwrap();
+        // Valid 24-word mnemonic from from_entropy (deterministic)
+        let wallet = Wallet::from_entropy(&[0x42u8; 32]).unwrap();
         let valid_mnemonic = wallet.mnemonic().to_string();
 
         // Tampered mnemonic (last word changed) must fail checksum
@@ -1966,7 +1982,7 @@ mod tests {
 
     #[test]
     fn address_is_deterministic() {
-        let entropy = [0x42u8; 16];
+        let entropy = [0x42u8; 32];
         let w1 = Wallet::from_entropy(&entropy).unwrap();
         let w2 = Wallet::from_entropy(&entropy).unwrap();
         assert_eq!(
@@ -1993,8 +2009,8 @@ mod tests {
 
     #[test]
     fn multisig_policy_validates_threshold() {
-        let w1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let w2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
+        let w1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let w2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
         let policy = MultisigPolicy::new(vec![w1.public_key(), w2.public_key()], 2).unwrap();
         assert_eq!(policy.owner_count(), 2);
         assert!(MultisigPolicy::new(vec![w1.public_key()], 0).is_err());
@@ -2003,9 +2019,9 @@ mod tests {
 
     #[test]
     fn multisig_requires_distinct_valid_owner_signatures() {
-        let w1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let w2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
-        let w3 = Wallet::from_entropy(&[3u8; 16]).unwrap();
+        let w1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let w2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
+        let w3 = Wallet::from_entropy(&[3u8; 32]).unwrap();
         let msg = b"budlum multisig proposal digest";
         let policy =
             MultisigPolicy::new(vec![w1.public_key(), w2.public_key(), w3.public_key()], 2)
@@ -2044,9 +2060,9 @@ mod tests {
 
     #[test]
     fn multisig_rejects_wrong_message_or_non_owner() {
-        let w1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let w2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
-        let outsider = Wallet::from_entropy(&[9u8; 16]).unwrap();
+        let w1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let w2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
+        let outsider = Wallet::from_entropy(&[9u8; 32]).unwrap();
         let policy = MultisigPolicy::new(vec![w1.public_key(), w2.public_key()], 2).unwrap();
         let msg = b"proposal";
         let approvals = [
@@ -2081,7 +2097,7 @@ mod tests {
     #[test]
     fn multisig_accepts_all_two_of_three_combinations() {
         let wallets = (0u8..3)
-            .map(|i| Wallet::from_entropy(&[10u8 + i; 16]).unwrap())
+            .map(|i| Wallet::from_entropy(&[10u8 + i; 32]).unwrap())
             .collect::<Vec<_>>();
         let policy =
             MultisigPolicy::new(wallets.iter().map(Wallet::public_key).collect(), 2).unwrap();
@@ -2100,7 +2116,7 @@ mod tests {
     #[test]
     fn multisig_enforces_three_of_five_combinations() {
         let wallets = (0u8..5)
-            .map(|i| Wallet::from_entropy(&[20u8 + i; 16]).unwrap())
+            .map(|i| Wallet::from_entropy(&[20u8 + i; 32]).unwrap())
             .collect::<Vec<_>>();
         let policy =
             MultisigPolicy::new(wallets.iter().map(Wallet::public_key).collect(), 3).unwrap();
@@ -2118,8 +2134,8 @@ mod tests {
 
     #[test]
     fn social_recovery_policy_validates_threshold_and_timelock() {
-        let g1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let g2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
+        let g1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let g2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
         let policy =
             SocialRecoveryPolicy::new(vec![g1.public_key(), g2.public_key()], 2, 100).unwrap();
         assert_eq!(policy.threshold, 2);
@@ -2130,9 +2146,9 @@ mod tests {
 
     #[test]
     fn social_recovery_requires_distinct_guardian_signatures() {
-        let g1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let g2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
-        let g3 = Wallet::from_entropy(&[3u8; 16]).unwrap();
+        let g1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let g2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
+        let g3 = Wallet::from_entropy(&[3u8; 32]).unwrap();
         let digest = b"recover wallet to new key";
         let policy = SocialRecoveryPolicy::new(
             vec![g1.public_key(), g2.public_key(), g3.public_key()],
@@ -2166,9 +2182,9 @@ mod tests {
 
     #[test]
     fn social_recovery_rejects_non_guardian_or_wrong_digest() {
-        let g1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let g2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
-        let outsider = Wallet::from_entropy(&[9u8; 16]).unwrap();
+        let g1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let g2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
+        let outsider = Wallet::from_entropy(&[9u8; 32]).unwrap();
         let digest = b"recover";
         let policy =
             SocialRecoveryPolicy::new(vec![g1.public_key(), g2.public_key()], 2, 100).unwrap();
@@ -2187,12 +2203,12 @@ mod tests {
 
     #[test]
     fn social_recovery_rotates_compromised_guardian() {
-        let g1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let g2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
-        let g3 = Wallet::from_entropy(&[3u8; 16]).unwrap();
-        let replacement = Wallet::from_entropy(&[4u8; 16]).unwrap();
-        let owner = Wallet::from_entropy(&[7u8; 16]).unwrap();
-        let new_owner = Wallet::from_entropy(&[8u8; 16]).unwrap();
+        let g1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let g2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
+        let g3 = Wallet::from_entropy(&[3u8; 32]).unwrap();
+        let replacement = Wallet::from_entropy(&[4u8; 32]).unwrap();
+        let owner = Wallet::from_entropy(&[7u8; 32]).unwrap();
+        let new_owner = Wallet::from_entropy(&[8u8; 32]).unwrap();
         let policy = SocialRecoveryPolicy::new(
             vec![g1.public_key(), g2.public_key(), g3.public_key()],
             2,
@@ -2242,10 +2258,10 @@ mod tests {
 
     #[test]
     fn social_recovery_removal_preserves_threshold_safety() {
-        let g1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let g2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
-        let g3 = Wallet::from_entropy(&[3u8; 16]).unwrap();
-        let unknown = Wallet::from_entropy(&[9u8; 16]).unwrap();
+        let g1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let g2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
+        let g3 = Wallet::from_entropy(&[3u8; 32]).unwrap();
+        let unknown = Wallet::from_entropy(&[9u8; 32]).unwrap();
         let policy = SocialRecoveryPolicy::new(
             vec![g1.public_key(), g2.public_key(), g3.public_key()],
             2,
@@ -2264,9 +2280,9 @@ mod tests {
 
     #[test]
     fn recovery_proposal_sets_timelock_and_addresses() {
-        let owner = Wallet::from_entropy(&[7u8; 16]).unwrap();
-        let new_owner = Wallet::from_entropy(&[8u8; 16]).unwrap();
-        let guardian = Wallet::from_entropy(&[1u8; 16]).unwrap();
+        let owner = Wallet::from_entropy(&[7u8; 32]).unwrap();
+        let new_owner = Wallet::from_entropy(&[8u8; 32]).unwrap();
+        let guardian = Wallet::from_entropy(&[1u8; 32]).unwrap();
         let policy = SocialRecoveryPolicy::new(vec![guardian.public_key()], 1, 100).unwrap();
         let proposal = RecoveryProposal::new(
             owner.public_key(),
@@ -2288,10 +2304,10 @@ mod tests {
 
     #[test]
     fn recovery_proposal_digest_binds_target_and_timelock() {
-        let owner = Wallet::from_entropy(&[7u8; 16]).unwrap();
-        let new_owner = Wallet::from_entropy(&[8u8; 16]).unwrap();
-        let other_new_owner = Wallet::from_entropy(&[9u8; 16]).unwrap();
-        let guardian = Wallet::from_entropy(&[1u8; 16]).unwrap();
+        let owner = Wallet::from_entropy(&[7u8; 32]).unwrap();
+        let new_owner = Wallet::from_entropy(&[8u8; 32]).unwrap();
+        let other_new_owner = Wallet::from_entropy(&[9u8; 32]).unwrap();
+        let guardian = Wallet::from_entropy(&[1u8; 32]).unwrap();
         let policy = SocialRecoveryPolicy::new(vec![guardian.public_key()], 1, 100).unwrap();
         let proposal = RecoveryProposal::new(
             owner.public_key(),
@@ -2320,11 +2336,11 @@ mod tests {
 
     #[test]
     fn recovery_proposal_requires_quorum_and_timelock() {
-        let owner = Wallet::from_entropy(&[7u8; 16]).unwrap();
-        let new_owner = Wallet::from_entropy(&[8u8; 16]).unwrap();
-        let g1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let g2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
-        let g3 = Wallet::from_entropy(&[3u8; 16]).unwrap();
+        let owner = Wallet::from_entropy(&[7u8; 32]).unwrap();
+        let new_owner = Wallet::from_entropy(&[8u8; 32]).unwrap();
+        let g1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let g2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
+        let g3 = Wallet::from_entropy(&[3u8; 32]).unwrap();
         let policy = SocialRecoveryPolicy::new(
             vec![g1.public_key(), g2.public_key(), g3.public_key()],
             2,
@@ -2385,9 +2401,9 @@ mod tests {
 
     #[test]
     fn recovery_proposal_rejects_same_owner_or_overflow() {
-        let owner = Wallet::from_entropy(&[7u8; 16]).unwrap();
-        let new_owner = Wallet::from_entropy(&[8u8; 16]).unwrap();
-        let guardian = Wallet::from_entropy(&[1u8; 16]).unwrap();
+        let owner = Wallet::from_entropy(&[7u8; 32]).unwrap();
+        let new_owner = Wallet::from_entropy(&[8u8; 32]).unwrap();
+        let guardian = Wallet::from_entropy(&[1u8; 32]).unwrap();
         let policy = SocialRecoveryPolicy::new(vec![guardian.public_key()], 1, 100).unwrap();
         assert!(RecoveryProposal::new(
             owner.public_key(),
@@ -2495,7 +2511,7 @@ mod tests {
 
     #[test]
     fn d2_wallet_defaults_privacy_off() {
-        let w = Wallet::from_entropy(&[0x11u8; 16]).unwrap();
+        let w = Wallet::from_entropy(&[0x11u8; 32]).unwrap();
         assert!(!w.privacy_config().is_note_privacy_active());
         assert!(!w.privacy_config().is_privacy_active());
         assert_eq!(w.tee_backend_kind(), TeeBackendKind::None);
@@ -2503,7 +2519,7 @@ mod tests {
 
     #[test]
     fn d2_wallet_private_transfer_requires_note_privacy() {
-        let w = Wallet::from_entropy(&[0x22u8; 16]).unwrap();
+        let w = Wallet::from_entropy(&[0x22u8; 32]).unwrap();
         let inp = PrivateNoteInput {
             amount: 100,
             recipient_tag: 1,
@@ -2531,7 +2547,7 @@ mod tests {
     /// formatted value takes to the terminal.
     #[test]
     fn a_formatted_transfer_never_prints_the_note_opening() {
-        let w = Wallet::from_entropy(&[0x44u8; 16]).unwrap();
+        let w = Wallet::from_entropy(&[0x44u8; 32]).unwrap();
         let inp = PrivateNoteInput {
             amount: 987_654_321,
             recipient_tag: 112_233_445_566,
@@ -2581,7 +2597,7 @@ mod tests {
     /// that refuses a counter it already handed out.
     #[test]
     fn the_final_blinding_counter_cannot_be_reused_after_overflow() {
-        let mut w = Wallet::from_entropy(&[0x34u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x34u8; 32]).unwrap();
         w.set_note_privacy_enabled(true);
         let err = w.prepare_receive_note(100, u64::MAX).unwrap_err();
         assert!(matches!(err, WalletError::InvalidPrivateTransfer(_)));
@@ -2594,7 +2610,7 @@ mod tests {
 
     #[test]
     fn a_reused_blinding_counter_is_refused() {
-        let mut w = Wallet::from_entropy(&[0x33u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x33u8; 32]).unwrap();
         w.set_privacy_config(WalletPrivacyConfig::note_privacy_only(true));
         let first = w.prepare_receive_note(100, 7).unwrap();
         let err = w.prepare_receive_note(100, 7).unwrap_err();
@@ -2613,7 +2629,7 @@ mod tests {
 
     #[test]
     fn d2_wallet_private_transfer_1in_1out_signs() {
-        let mut w = Wallet::from_entropy(&[0x33u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x33u8; 32]).unwrap();
         w.set_privacy_config(WalletPrivacyConfig::note_privacy_only(true));
         let (blinding, _c, _) = w.prepare_receive_note(100, 0).unwrap();
         let input = w.note_input_from_receive(100, blinding).unwrap();
@@ -2665,7 +2681,7 @@ mod tests {
 
     #[test]
     fn d2_wallet_private_transfer_with_change() {
-        let mut w = Wallet::from_entropy(&[0x44u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x44u8; 32]).unwrap();
         w.set_note_privacy_enabled(true);
         let (blinding, _, _) = w.prepare_receive_note(100, 0).unwrap();
         let input = w.note_input_from_receive(100, blinding).unwrap();
@@ -2688,7 +2704,7 @@ mod tests {
 
     #[test]
     fn d2_wallet_change_cannot_be_redirected_by_a_foreign_tag() {
-        let mut w = Wallet::from_entropy(&[0x45u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x45u8; 32]).unwrap();
         w.set_note_privacy_enabled(true);
         let (blinding, _, _) = w.prepare_receive_note(100, 0).unwrap();
         let input = w.note_input_from_receive(100, blinding).unwrap();
@@ -2708,7 +2724,7 @@ mod tests {
 
     #[test]
     fn d2_wallet_tee_enabled_fail_closed_without_runtime() {
-        let mut w = Wallet::from_entropy(&[0x55u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x55u8; 32]).unwrap();
         w.set_privacy_config(WalletPrivacyConfig::from_user_opt_in(true));
         assert!(w.privacy_config().tee_enabled);
         let rt = w.default_tee_runtime();
@@ -2735,7 +2751,7 @@ mod tests {
     fn d2_wallet_tee_ready_mock_allows_sign() {
         let rt = crate::tee::mock::MockTeeRuntime::new(TeeBackendKind::ClientSgx);
         let verifier = crate::tee::mock::MockQuoteVerifier::default();
-        let mut w = Wallet::from_entropy(&[0x66u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x66u8; 32]).unwrap();
         w.set_tee_enabled(true);
         // Enrol the measurement the mock attests with; without this the
         // wallet would refuse any attestation, self-attested or not.
@@ -2757,7 +2773,7 @@ mod tests {
         // follow-up work).
         let rt = crate::tee::mock::MockTeeRuntime::new(TeeBackendKind::ClientSgx);
         let verifier = crate::tee::mock::MockQuoteVerifier::default();
-        let mut w = Wallet::from_entropy(&[0x6Au8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x6Au8; 32]).unwrap();
         w.set_tee_enabled(true);
         let err = w.sign_with_privacy(b"hello", &rt, &verifier).unwrap_err();
         assert!(matches!(err, WalletError::TeeUnavailable(_)));
@@ -2773,7 +2789,7 @@ mod tests {
         let verifier = crate::tee::mock::MockQuoteVerifier {
             recognized_measurements: vec![foreign],
         };
-        let mut w = Wallet::from_entropy(&[0x6Bu8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x6Bu8; 32]).unwrap();
         w.set_tee_enabled(true);
         w.set_trusted_tee_measurement(crate::tee::mock::MOCK_MEASUREMENT);
         let err = w.sign_with_privacy(b"hello", &rt, &verifier).unwrap_err();
@@ -2787,7 +2803,7 @@ mod tests {
         // user did not opt into must not satisfy it.
         let rt = crate::tee::mock::MockTeeRuntime::new(TeeBackendKind::ServerNitro);
         let verifier = crate::tee::mock::MockQuoteVerifier::default();
-        let mut w = Wallet::from_entropy(&[0x6Cu8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x6Cu8; 32]).unwrap();
         w.set_tee_enabled(true);
         w.set_trusted_tee_measurement(crate::tee::mock::MOCK_MEASUREMENT);
         let err = w.sign_with_privacy(b"hello", &rt, &verifier).unwrap_err();
@@ -2825,7 +2841,7 @@ mod tests {
                 Ok(fake)
             }
         }
-        let mut w = Wallet::from_entropy(&[0x6Du8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x6Du8; 32]).unwrap();
         w.set_tee_enabled(true);
         w.set_trusted_tee_measurement(crate::tee::mock::MOCK_MEASUREMENT);
         let err = w
@@ -2836,7 +2852,7 @@ mod tests {
 
     #[test]
     fn d2_wallet_view_key_bound_to_seed() {
-        let mut w = Wallet::from_entropy(&[0x77u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x77u8; 32]).unwrap();
         let vk = w.ensure_view_key();
         let again = w.ensure_view_key();
         assert_eq!(vk, again);
@@ -2846,7 +2862,7 @@ mod tests {
 
     #[test]
     fn d2_wallet_overspend_rejected() {
-        let mut w = Wallet::from_entropy(&[0x88u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x88u8; 32]).unwrap();
         w.set_note_privacy_enabled(true);
         let (blinding, _, _) = w.prepare_receive_note(50, 0).unwrap();
         let input = w.note_input_from_receive(50, blinding).unwrap();
