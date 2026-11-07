@@ -98,6 +98,13 @@ const ALLOWED_FILES: &[&str] = &[
     // forbids and the scope words it looks for have to be written in
     // Turkish in its lists. The lists are the only Turkish in the file.
     "xtask/gates/src/gates/pq_claims_are_backed.rs",
+    // The concept-name map. Its whole subject is the Turkish concept names
+    // being removed: `old` carries the name that leaves and `term_tr` carries
+    // the Turkish term a Turkish reader replaces it with. Translating either
+    // column would delete the map's only content, and the `concept-names` gate
+    // cannot search for a name it is not allowed to write down. The English
+    // register of the same map is `docs/NAMING.md`, which this gate does scan.
+    "config/naming/concept_map.toml",
 ];
 
 /// Path fragments whose contents are a Turkish localisation.

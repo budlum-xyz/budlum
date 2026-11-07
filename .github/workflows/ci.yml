@@ -707,6 +707,21 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-upstream-brands 2>&1 | tee -a /tmp/gate-out.log
           exit "${PIPESTATUS[0]}"
+      - name: Concept-name counter canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- concept-names --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      # The old concept names are counted, not banned: the rename is spread over
+      # fifty packages, so a ban would fail every commit until the last one lands
+      # and would then be switched off. The counter in
+      # .github/concept-names-baseline.txt only goes down; the final documentation
+      # package flips the map to `absolute` and one occurrence becomes a finding.
+      - name: Old concept names only go down
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- concept-names 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: Repair trigger canary
         if: always() && steps.build.outcome == 'success'
         run: |

@@ -1,0 +1,46 @@
+# Old concept names still in the tree, per record of config/naming/concept_map.toml.
+#
+# One line per map record, keyed by the record's `new_code`:
+#
+#     <new_code>\t<files still carrying an old name>\t<matches>
+#
+# This is a ratchet, the same shape as turkish-baseline.txt and
+# udeps-baseline.txt. The numbers may only fall. A record that goes up fails
+# the gate; a record that goes down fails it too, until the line here is
+# lowered with it, because a rename nobody records is a rename the next
+# package cannot see. The key is the new code name rather than the old one so
+# this file stays English (tree_is_english) while the map it counts is not.
+#
+# When the last package has renamed what it owns, WP-43 sets `mode` to
+# "absolute" in the map and every line below must read 0\t0.
+#
+# Produced by the concept-names gate's own scan; regenerate with
+# `cargo run --release --manifest-path xtask/gates/Cargo.toml -- concept-names`
+# and copy the replacement lines the gate prints.
+hash_chain_election	11	225
+faucet	1	14
+QuantumAlertLevel::{Advisory, Restricted, Isolated}	6	16
+shared_security	23	78
+app_binding	41	895
+data_market	70	755
+budlum-explorer	31	257
+explorer_evidence	7	55
+identity_profile	10	88
+nft_folders	7	152
+education_domain	12	34
+app_registry	25	203
+project_manifest	6	50
+content_gateway	5	8
+state_recovery	43	316
+sigagg (crate bud-sigagg)	12	98
+bud3::Object, ObjectCommitment, bof1	50	1433
+src/storage/bud3/*	30	196
+wide_stripe	0	0
+access_tiering, TierTransition	5	15
+(removed)	13	117
+sealed_object, ciphertext_chunks, CipherProfile::{Aead, FieldNative}, plaintext_root, deletion_set, EscrowedDisclosure, PredicateProof	0	0
+private_transfer_v1	0	0
+DomainFinalityProof, BlockAggregateProof, RemoteStateView	0	0
+ai_verification, VerificationLevel, DeterministicInferenceProfile, AnswerProofBundle, on_device_assistant	7	19
+budzero core, budzero-rv32, budzero-guest, MobileProverProfile	1	1
+object_layer and Section 2.2 object layer terms	0	0
