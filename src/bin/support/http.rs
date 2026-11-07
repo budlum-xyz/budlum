@@ -34,7 +34,13 @@ fn bucket(ip: IpAddr) -> IpAddr {
         IpAddr::V4(v4) => IpAddr::V4(v4),
         IpAddr::V6(v6) => {
             let mut octets = v6.octets();
-            octets[8..].fill(0);
+            // Written as an iterator rather than `octets[8..].fill(0)`: the
+            // `indexing-is-not-new` ratchet refuses a runtime index in a file
+            // outside its frozen list, and an iterator split says the same
+            // thing without one.
+            for low in octets.iter_mut().skip(8) {
+                *low = 0;
+            }
             IpAddr::V6(std::net::Ipv6Addr::from(octets))
         }
     }
