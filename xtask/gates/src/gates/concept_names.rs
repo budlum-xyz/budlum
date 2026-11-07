@@ -57,9 +57,20 @@ enum Mode {
 /// One entry of the map, reduced to what the gate reads.
 struct Concept {
     name: String,
+    owner: String,
     patterns: Vec<regex::Regex>,
     paths: Vec<String>,
     allow_paths: Vec<String>,
+}
+
+fn is_known_package(owner: &str) -> bool {
+    let Some(digits) = owner.strip_prefix("WP-") else {
+        return false;
+    };
+    if digits.len() != 2 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    matches!(digits.parse::<u8>(), Ok(1..=64))
 }
 
 struct Map {
@@ -104,6 +115,24 @@ fn string_list(table: &toml::Table, key: &str) -> Result<Vec<String>, String> {
     }
 }
 
+fn validate_path_prefixes(paths: &[String], who: &str, key: &str) -> Result<(), String> {
+    for path in paths {
+        let normalized = path.strip_suffix('/').unwrap_or(path);
+        if normalized.is_empty()
+            || path.starts_with('/')
+            || path.contains('\\')
+            || normalized
+                .split('/')
+                .any(|component| component.is_empty() || component == "." || component == "..")
+        {
+            return Err(format!(
+                "{who}: `{key}` contains an invalid repository-relative path `{path}`"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn required_str<'a>(table: &'a toml::Table, key: &str, who: &str) -> Result<&'a str, String> {
     table
         .get(key)
@@ -127,6 +156,7 @@ fn parse_map(text: &str) -> Result<Map, String> {
         }
     };
     let global_allow = string_list(&table, "global_allow_paths")?;
+    validate_path_prefixes(&global_allow, MAP_PATH, "global_allow_paths")?;
     let entries = table
         .get("concept")
         .and_then(toml::Value::as_array)
@@ -145,6 +175,10 @@ fn parse_map(text: &str) -> Result<Map, String> {
         for key in ["new_code", "term_en", "term_tr", "area", "reason"] {
             required_str(t, key, &who)?;
         }
+        let owner = required_str(t, "owner", &who)?.to_string();
+        if !is_known_package(&owner) {
+            return Err(format!("{who}: unknown package owner `{owner}`"));
+        }
         let raw = string_list(t, "patterns")?;
         if raw.is_empty() {
             return Err(format!("{who}: `patterns` is empty"));
@@ -154,11 +188,16 @@ fn parse_map(text: &str) -> Result<Map, String> {
             patterns
                 .push(regex::Regex::new(&p).map_err(|e| format!("{who}: bad pattern {p}: {e}"))?);
         }
+        let paths = string_list(t, "paths")?;
+        let allow_paths = string_list(t, "allow_paths")?;
+        validate_path_prefixes(&paths, &who, "paths")?;
+        validate_path_prefixes(&allow_paths, &who, "allow_paths")?;
         concepts.push(Concept {
             name,
+            owner,
             patterns,
-            paths: string_list(t, "paths")?,
-            allow_paths: string_list(t, "allow_paths")?,
+            paths,
+            allow_paths,
         });
     }
     Ok(Map {
@@ -200,7 +239,13 @@ fn collect_files(dir: &Path, root: &Path, out: &mut Vec<(String, std::path::Path
 }
 
 fn under(rel: &str, prefixes: &[String]) -> bool {
-    prefixes.iter().any(|p| rel.starts_with(p.as_str()))
+    prefixes.iter().any(|prefix| {
+        if prefix.ends_with('/') {
+            rel.starts_with(prefix)
+        } else {
+            rel == prefix
+        }
+    })
 }
 
 /// Count every concept over the tree.
@@ -348,6 +393,11 @@ fn check(root: &Path, write: bool) -> Result<String, String> {
         ));
     }
 
+    let owners: BTreeMap<&str, &str> = map
+        .concepts
+        .iter()
+        .map(|c| (c.name.as_str(), c.owner.as_str()))
+        .collect();
     let mut bad = String::new();
     for (name, c) in &counts {
         match baseline.get(name) {
@@ -356,7 +406,8 @@ fn check(root: &Path, write: bool) -> Result<String, String> {
             }
             Some(b) => {
                 if let Err(e) = compare(name, *c, *b) {
-                    let _ = writeln!(bad, "  {e}");
+                    let owner = owners.get(name.as_str()).copied().unwrap_or("unknown");
+                    let _ = writeln!(bad, "  [{owner}] {e}");
                 }
             }
         }
@@ -388,7 +439,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     check(root, std::env::var_os(WRITE_ENV).is_some_and(|v| v == "1"))
 }
 
-const CANARY_MAP: &str = "schema = 1\nmode = \"count\"\nglobal_allow_paths = [\"config/naming/\", \"docs/NAMING.md\"]\n\n[[concept]]\nold = [\"Canaryname\"]\npatterns = ['(?i)canary-?name']\nnew_code = \"x\"\nterm_en = \"x\"\nterm_tr = \"x\"\narea = \"x\"\nreason = \"x\"\n";
+const CANARY_MAP: &str = "schema = 1\nmode = \"count\"\nglobal_allow_paths = [\"config/naming/\", \"docs/NAMING.md\"]\n\n[[concept]]\nold = [\"Canaryname\"]\npatterns = ['(?i)canary-?name']\nnew_code = \"x\"\nterm_en = \"x\"\nterm_tr = \"x\"\narea = \"x\"\nowner = \"WP-05\"\nreason = \"x\"\n";
 
 fn stage(root: &Path, map: &str, baseline: &str) -> Result<(), String> {
     let put = |rel: &str, body: &str| -> Result<(), String> {
@@ -444,6 +495,10 @@ pub fn self_test() -> Result<String, String> {
         if check(&dir, false).is_ok() {
             return Err(String::from("canary: absolute mode accepted a legacy name"));
         }
+        stage(&dir, &CANARY_MAP.replace("WP-05", "WP-00"), zero)?;
+        if check(&dir, false).is_ok() {
+            return Err(String::from("canary: accepted an unknown package owner"));
+        }
         Ok(())
     })();
     let _ = std::fs::remove_dir_all(&dir);
@@ -456,6 +511,42 @@ pub fn self_test() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_filters_distinguish_directories_from_exact_files() {
+        let prefixes = vec!["src/foo/".to_string(), "docs/NAMING.md".to_string()];
+        assert!(under("src/foo/module.rs", &prefixes));
+        assert!(under("docs/NAMING.md", &prefixes));
+        assert!(!under("src/foobar/module.rs", &prefixes));
+        assert!(!under("docs/NAMING.md.bak", &prefixes));
+        assert!(!under("docs/NAMING.md/hidden.rs", &prefixes));
+    }
+
+    #[test]
+    fn concept_map_rejects_empty_or_escaping_paths() {
+        let empty_allow = CANARY_MAP.replace(
+            "global_allow_paths = [\"config/naming/\", \"docs/NAMING.md\"]",
+            "global_allow_paths = [\"\"]",
+        );
+        assert!(parse_map(&empty_allow).is_err());
+
+        let escaping_scope = CANARY_MAP.replace(
+            "global_allow_paths = [\"config/naming/\", \"docs/NAMING.md\"]",
+            "global_allow_paths = [\"../\"]",
+        );
+        assert!(parse_map(&escaping_scope).is_err());
+
+        let escaping_concept = CANARY_MAP
+            .replace(
+                "global_allow_paths = [\"config/naming/\", \"docs/NAMING.md\"]",
+                "global_allow_paths = []",
+            )
+            .replace(
+                "owner = \"WP-05\"",
+                "owner = \"WP-05\"\npaths = [\"src/../\"]",
+            );
+        assert!(parse_map(&escaping_concept).is_err());
+    }
 
     #[test]
     fn concept_names_gate_catches_injected_name() {
@@ -527,5 +618,28 @@ mod tests {
         if let Ok(m) = parsed {
             assert_eq!(m.concepts.len(), 27);
         }
+    }
+
+    #[test]
+    fn concept_map_owner_is_a_known_package() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let map = std::fs::read_to_string(root.join(MAP_PATH)).unwrap_or_default();
+        let parsed = parse_map(&map);
+        assert!(parsed.is_ok(), "{:?}", parsed.as_ref().err());
+        if let Ok(m) = parsed {
+            for concept in &m.concepts {
+                assert!(
+                    is_known_package(&concept.owner),
+                    "unknown owner {} for {}",
+                    concept.owner,
+                    concept.name
+                );
+            }
+        }
+        assert!(!is_known_package(""));
+        assert!(!is_known_package("WP-00"));
+        assert!(!is_known_package("WP-65"));
+        assert!(!is_known_package("WP-5"));
+        assert!(!is_known_package("IP-05"));
     }
 }
