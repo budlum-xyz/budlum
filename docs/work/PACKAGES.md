@@ -181,34 +181,35 @@ them is closed by this pull request.
    them, so no lane has started them: WP-01, WP-03, WP-14, WP-29, WP-30, WP-39, WP-49, WP-50, WP-51, WP-52, WP-53, WP-54, WP-56, WP-57, WP-58, WP-59, WP-60, WP-62, WP-63, WP-64.
    WP-01 and WP-03 are the two lane audits that gate M0 and have no
    dependency, so they are the cheapest of the set to start.
-2. **`docs/audit/LIVE_STATUS.md` does not exist.** Section 14.1.4 makes it
+2. **`docs/audit/LIVE_STATUS.md` does not exist on `main`.** Section 14.1.4 makes it
    the output of WP-01 to WP-04 and the only live status of the 267
    findings. Lane D's baseline note exists on an open branch only
    (`docs/audit/live/lane-d.md`, PR #118), so the file is missing from
    `main` and the finding ledger in `docs/audit/FINDINGS.md` therefore
    records closures only.
-3. **`docs/audit/live/lane-a.md`, `lane-b.md` and `lane-c.md` do not
-   exist.** They are the lock paths of WP-01, WP-02 and WP-03.
-4. **33 registered gates never run in a workflow.** `xtask/gates` exposes
-   them and `ci.yml` invokes neither each one nor `--all`, so they are
-   registered protection that proves nothing on a commit. This is WP-42
-   work and is deliberately not wired here, because a gate that fails on
-   `main` the first time it runs turns the whole job red:
-   `ai-inference-prompt-is-true`, `ai-inference-zk`, `ast-security-gates`,
-   `bns-names`, `bridge-dual-tree`, `chain-id-is-not-hardcoded`,
-   `consensus-state-only-changes-in-blocks`, `every-fuzz-target-is-run`,
-   `fixture-integrity`, `fsf-import-boundaries`, `gas-calibration`,
-   `gates-do-not-panic`, `gov-slash-evidence-validator-only`,
-   `image-builds-the-manifest`, `mempool-mev-free`, `mermaid`,
-   `minting-paths-are-counted`, `multi-ratio-consensus`,
-   `no-new-shell-gates`, `no-out-of-block-consensus-writes`,
-   `one-house-guards`, `parallel-execution`,
-   `proof-deps-are-exactly-pinned`, `quantum-account`, `regen-health-door`,
-   `release-profile-pins`, `security-scans-can-fail`,
-   `suppressions-are-justified`, `tee-trust-boundary-structural`,
-   `transcript-mirrors`, `workflows-produce-jobs`,
-   `zero-address-sender-verified`, `zkvm-immune-regeneration`.
-5. **Two gates named by the directive do not exist yet:**
-   `workflows_cover_every_workspace` (section 16.2.3) and
-   `no_float_in_consensus_paths` (WP-42 item 4). Both are static scans over
-   the tree, so neither needs a running node.
+3. **`docs/audit/live/lane-a.md` and `lane-c.md` do not exist.** They are the
+   lock paths of WP-01 and WP-03. `lane-b.md` exists on WP-02's branch (pull
+   request #117) and `lane-d.md` on WP-04's (pull request #118), so both are
+   waiting on those merges rather than on further work.
+4. **Gate wiring was reported as a hole and is not one.** An earlier version
+   of this row said 33 registered gates never run in a workflow. That was
+   measured against the individual `xtask/gates/Cargo.toml -- <gate>` lines
+   only, and it was wrong: `ci.yml` runs the whole registry twice, at
+   `--all --self-test` and at `--all`, so every gate that does not opt out of
+   `--all` runs on every pull request. The 21 gates that do opt out (they need
+   an argument, a log file or a tool this job does not install) are each
+   invoked by name in another workflow: `fork-choice`, `node-classification`,
+   `governance-invariants`, `poa-compliance`, `storage-provider`,
+   `network-hardening`, `economy-invariants`, `module-coverage`, `tree-pin`,
+   `geiger`, `clippy-extra`, `ownerless-dependencies`, `udeps`, `coverage`,
+   `bns-gate`, `bud-e2e`, `wallet-core-gate`, `badges-are-current`, `kani`,
+   `semver` and `pq-core-gate`. What is left is a coverage question, not an
+   inventory question: whether `--all`'s opt-outs are each wired somewhere, and
+   `docs/work/PACKAGES.md` records that as open only where a gate names no
+   workflow at all.
+5. **Two gates named by the directive did not exist.** Both are now written
+   and wired: `workflows_cover_every_workspace` (section 16.2.3) and
+   `no_float_in_consensus_paths` (WP-42 item 4), on the WP-42 branch of pull
+   request #156, with a canary, a unit test and two CI steps each. They are
+   not merged, so this row records them as in review rather than done. Both
+   are static scans over the tree and neither needs a running node.
