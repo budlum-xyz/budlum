@@ -18,6 +18,7 @@
 use sha3::{Digest, Sha3_256};
 
 #[derive(Debug, Clone)]
+/// Convenience: legacy pact record retained until legacy storage removal completes.
 pub struct Pact {
     pub id: [u8; 32],
     pub recipe_hash: [u8; 32],

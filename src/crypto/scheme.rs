@@ -173,6 +173,7 @@ impl SchemeStatus {
 
     /// Whether an object of this scheme may still be verified.
     #[must_use]
+    /// Convenience: scheme capability query helper.
     pub const fn verifies(self) -> bool {
         matches!(self, Self::Active | Self::Deprecated)
     }

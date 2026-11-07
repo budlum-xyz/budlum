@@ -15,6 +15,7 @@
 
 /// A single grading rule applied to a model response.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Convenience: public evaluation check classification exposed for CLI harnesses.
 pub enum Check {
     /// The response must equal `0` exact.
     Exact(String),

@@ -27,7 +27,7 @@
 //!
 //! The scanned set is the root READMEs, `docs/` (without `docs/audit/` and
 //! `docs/pq/`, which are the ledgers and the design record themselves),
-//! `bud/README.md`, `budzero/README.md` and `crates/*/README*.md`.
+//! `budzero/README.md` and `crates/*/README*.md`.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -389,8 +389,7 @@ fn is_scanned_document(rel: &str) -> bool {
     if rel.starts_with("docs/") {
         return true;
     }
-    rel == "bud/README.md"
-        || rel == "budzero/README.md"
+    rel == "budzero/README.md"
         || (rel.starts_with("crates/")
             && rel.matches('/').count() == 2
             && file.starts_with("README"))

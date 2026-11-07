@@ -11,7 +11,6 @@ use std::path::Path;
 const SCAN_ROOTS: &[&str] = &[
     "src",
     "budzero",
-    "bud",
     "crates/ai-inference",
     "crates/bpqs",
     "crates/budscan",
@@ -215,7 +214,7 @@ mod scan_root_tests {
     #[test]
     fn every_crate_directory_is_a_scan_root() {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        assert!(SCAN_ROOTS.contains(&"bud"), "bud/ is not scanned");
+        assert!(!SCAN_ROOTS.contains(&"bud"), "the removed tree is still scanned");
         let entries = std::fs::read_dir(repo.join("crates")).expect("crates/ is readable");
         for e in entries.flatten() {
             if e.file_type().is_ok_and(|t| t.is_dir()) {

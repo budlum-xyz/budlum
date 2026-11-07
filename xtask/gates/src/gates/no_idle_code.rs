@@ -87,7 +87,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Roots that hold production code.
-const PROD_ROOTS: &[&str] = &["src", "budzero", "crates", "bud"];
+const PROD_ROOTS: &[&str] = &["src", "budzero", "crates"];
 
 /// Directories that are never production, wherever they appear.
 const SKIP_DIRS: &[&str] = &[

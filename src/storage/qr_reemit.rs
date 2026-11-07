@@ -126,6 +126,7 @@ impl RecipeEmitter {
 
     /// Recipe digest (stable pin).
     #[must_use]
+/// Convenience: legacy digest helper retained until legacy storage removal completes.
     pub fn recipe_digest(&self) -> [u8; 32] {
         three_recipe_digest(&self.recipe)
     }

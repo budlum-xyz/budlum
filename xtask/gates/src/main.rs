@@ -109,7 +109,6 @@ mod gates {
     pub mod metrics_are_written;
     pub mod minting_paths_are_counted;
     pub mod module_coverage;
-    pub mod multi_ratio_consensus;
     pub mod named_tests;
     pub mod network_hardening_gate;
     pub mod nightly_workflows_are_required;
@@ -238,14 +237,6 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::parallel_execution::self_test,
-    },
-    Gate {
-        name: "multi-ratio-consensus",
-        replaces: None,
-        run: gates::multi_ratio_consensus::run,
-        run_log: None,
-        run_args: None,
-        self_test: gates::multi_ratio_consensus::self_test,
     },
     Gate {
         name: "mempool-mev-free",

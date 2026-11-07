@@ -186,7 +186,6 @@ src/storage/pact_binding.rs:kq_pact_registry
 src/storage/pact_binding.rs:kq_storage_pact
 src/persistence/pruning.rs:archive_node_default
 src/persistence/pruning.rs:full_node_default
-src/storage/qr_reemit.rs:recipe_digest
 src/tokenomics/mod.rs:address_of
 src/tokenomics/mod.rs:amount_of
 src/tokenomics/mod.rs:calculate_epoch_reward

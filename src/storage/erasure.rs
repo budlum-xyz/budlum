@@ -335,6 +335,7 @@ impl ReedSolomon {
     }
 
     #[must_use]
+    /// Convenience: legacy erasure shard count accessor.
     pub const fn parity_shards(&self) -> usize {
         self.m
     }

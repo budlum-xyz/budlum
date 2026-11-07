@@ -1,5 +1,4 @@
 # Shrinking legacy-storage baseline (WP-07 ratchet)
-bud/
 budzero/bud-node/
 budzero/bud-node/src/bitswap.rs
 budzero/bud-node/src/discovery.rs

@@ -36,7 +36,6 @@ const ROOTS: &[&str] = &[
     "src",
     "crates",
     "budzero",
-    "bud",
     "xtask",
     "docs",
     "tests",

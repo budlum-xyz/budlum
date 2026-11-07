@@ -31,7 +31,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 /// Roots holding shipped code.
-const SCAN_ROOTS: &[&str] = &["src", "crates", "budzero", "bud/src"];
+const SCAN_ROOTS: &[&str] = &["src", "crates", "budzero"];
 
 /// The allow list.
 const ALLOWLIST: &str = "docs/pq/classical_allowlist.toml";

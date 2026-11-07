@@ -9,7 +9,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-const SCAN_ROOTS: &[&str] = &["src", "budzero", "crates", "bud/src"];
+const SCAN_ROOTS: &[&str] = &["src", "budzero", "crates"];
 
 /// Balanced brace body starting at `open` (index of `{`).
 /// Skip a regular string literal starting at `b[j] == b'"'`. Returns the

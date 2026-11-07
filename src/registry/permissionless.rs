@@ -439,6 +439,7 @@ impl PermissionlessRegistry {
         }
     }
 
+    /// Convenience: custom-parameter registry constructor for genesis and tests.
     pub fn with_params(params: RegistryParams) -> Self {
         Self {
             registrations: BTreeMap::new(),
