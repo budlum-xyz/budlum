@@ -102,7 +102,7 @@ pub mod private_transfer_fee_market;
 #[cfg(test)]
 pub mod prover;
 #[cfg(test)]
-pub mod regeneration_recovery;
+pub mod state_recovery;
 #[cfg(test)]
 pub mod relayer_liveness;
 // chain relayer proof cryptographic verification + M5 budlumxyz fee + M4 BNS fee
@@ -249,7 +249,15 @@ pub mod validator_classes;
 // The B.U.D. 3.0 storage door end to end.
 #[cfg(test)]
 pub mod bud3_door;
-mod audit_lane_a;
-mod audit_lane_b;
-mod audit_lane_c;
-mod audit_lane_d;
+// The persistence move is behaviour-neutral.
+#[cfg(test)]
+pub mod persistence_move;
+
+#[cfg(test)]
+pub mod audit_lane_a;
+#[cfg(test)]
+pub mod audit_lane_b;
+#[cfg(test)]
+pub mod audit_lane_c;
+#[cfg(test)]
+pub mod audit_lane_d;

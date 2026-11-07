@@ -17,7 +17,7 @@ use crate::cross_domain::message::{CrossDomainMessage, CrossDomainMessageParams}
 use crate::cross_domain::MessageKind;
 use crate::registry::evidence::{SlashingProof, SlashingReport};
 use crate::registry::role::roles;
-use crate::storage::db::Storage;
+use crate::persistence::db::Storage;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tempfile::tempdir;
