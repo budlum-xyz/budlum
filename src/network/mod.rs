@@ -1,3 +1,4 @@
+pub(crate) mod bounded_bincode;
 pub mod deferred_votes;
 pub mod fork_rewalk;
 pub mod gossip_dedup;
