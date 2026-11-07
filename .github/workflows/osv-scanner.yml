@@ -120,7 +120,6 @@ jobs:
             --lockfile=crates/budscan/Cargo.lock \
             --lockfile=crates/bud-codec/Cargo.lock \
             --lockfile=crates/uel-abi/Cargo.lock \
-            --lockfile=bud/Cargo.lock \
             --lockfile=kani/Cargo.lock \
             --lockfile=xtask/release/Cargo.lock
 

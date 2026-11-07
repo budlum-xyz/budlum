@@ -83,7 +83,7 @@ pub mod testnet_rehearsal;
 /// binary count, and it is checked the same way before it is trusted.
 ///
 /// The third marker is what tells the checkout root from a member crate.
-/// `bud/`, `budzero/bud-proof/`, `xtask/gates/` and `xtask/tools/` each
+/// `crates/bud-codec/`, `budzero/bud-proof/`, `xtask/gates/` and `xtask/tools/` each
 /// carry a manifest and a `src/` tree too, so a tool started inside one of
 /// them used to take that crate for the root and run `.git`, `data`,
 /// `target` and `fuzz/corpus` work there. The root manifest is a package,
