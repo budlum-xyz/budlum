@@ -21,7 +21,7 @@
 
 use std::fs;
 use std::io::Write as _;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
@@ -278,10 +278,18 @@ fn verify_release(
     Ok(entries.len())
 }
 
+fn create_self_test_dir() -> Result<PathBuf, String> {
+    let suffix = hex_encode(&random_bytes(32)?);
+    let dir = std::env::temp_dir().join(format!("budlum-release-selftest-{suffix}"));
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&dir)
+        .map_err(|e| format!("cannot create private self-test directory: {e}"))?;
+    Ok(dir)
+}
+
 fn self_test() -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!("budlum-release-selftest-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let dir = create_self_test_dir()?;
     let result = self_test_in(&dir);
     let _ = fs::remove_dir_all(&dir);
     result
@@ -418,7 +426,7 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::write_new_key_file;
+    use super::{create_self_test_dir, write_new_key_file};
     use std::fs;
     use std::os::unix::fs::{symlink, PermissionsExt};
     use std::path::PathBuf;
@@ -446,11 +454,31 @@ mod tests {
     }
 
     #[test]
+    fn self_test_directories_are_private_and_distinct() {
+        let first = Directory(create_self_test_dir().expect("create first directory"));
+        let sentinel = first.0.join("sentinel");
+        fs::write(&sentinel, b"keep").expect("write sentinel");
+        let second = Directory(create_self_test_dir().expect("create second directory"));
+        assert_ne!(first.0, second.0);
+        for dir in [&first, &second] {
+            let mode = fs::metadata(&dir.0)
+                .expect("directory metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o077, 0);
+        }
+        assert_eq!(fs::read(&sentinel).expect("read sentinel"), b"keep");
+    }
+
+    #[test]
     fn key_files_are_private_and_never_overwritten() {
         let dir = Directory::new();
         let path = dir.0.join("seed");
         write_new_key_file(&path, "seed material").expect("create seed");
-        let mode = fs::metadata(&path).expect("seed metadata").permissions().mode();
+        let mode = fs::metadata(&path)
+            .expect("seed metadata")
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o077, 0);
         assert_eq!(fs::read(&path).expect("read seed"), b"seed material");
         assert!(write_new_key_file(&path, "replacement").is_err());
