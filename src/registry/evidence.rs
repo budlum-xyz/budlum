@@ -103,6 +103,29 @@ pub enum SlashingProof {
     /// A domain-defined proof the core does not model; carried opaquely so
     /// Other domains can reuse the same envelope.
     Other { tag: String, data: Vec<u8> },
+    /// A repair symbol that does not regenerate from the source symbols.
+    ///
+    /// §6.10 item 8: every epoch, a random 1% of audits re-derive one repair
+    /// symbol from the source symbols and compare. A mismatch is a proved
+    /// bad repair against the repairer, and §11.7 prices it at 1% of its
+    /// stake. The three digests carry the claim so a third party can check it
+    /// against the symbols it already holds: the segment, the ESI that was
+    /// re-derived, the root the repairer committed to, and the root the
+    /// re-derivation produced.
+    BadRepair {
+        /// The object the repair was recorded for.
+        object: [u8; 32],
+        /// The repaired segment.
+        segment: u64,
+        /// The epoch the repair was recorded in, which is when it was paid.
+        epoch: u64,
+        /// The ESI of the symbol that was re-derived.
+        esi: u32,
+        /// SHA-256 of the symbol the repairer committed to.
+        claimed: [u8; 32],
+        /// SHA-256 of the symbol the source symbols produce.
+        derived: [u8; 32],
+    },
     /// Repeated invalid-signature votes within a single epoch.
     ///
     /// The consensus layer rejects each cryptographically-invalid vote at
@@ -141,6 +164,7 @@ impl SlashingProof {
             // Repeated invalid-signature spam is treated as provable malicious
             // Behaviour (approved severity decision: reuse the existing
             // MaliciousBehaviour ratio rather than adding a new one).
+            SlashingProof::BadRepair { .. } => SlashingCondition::BadRepair,
             SlashingProof::InvalidSignatureSpam { .. } => SlashingCondition::MaliciousBehaviour,
         }
     }
@@ -212,6 +236,9 @@ pub enum EvidenceError {
     /// A double-sign proof's `kind` and `epoch` disagree: voting messages
     /// are bound to an epoch, block headers have none.
     KindEpochMismatch,
+    /// A bad-repair proof claims the repair symbol matches its own
+    /// re-derivation, so there is no repair to punish.
+    RepairRegenerates,
 }
 
 impl std::fmt::Display for EvidenceError {
@@ -255,6 +282,9 @@ impl std::fmt::Display for EvidenceError {
             }
             EvidenceError::KindEpochMismatch => {
                 write!(f, "double-sign proof kind and epoch disagree")
+            }
+            EvidenceError::RepairRegenerates => {
+                write!(f, "bad-repair proof says the symbol regenerates")
             }
         }
     }
@@ -610,6 +640,15 @@ impl SlashingReport {
                         len: data.len(),
                         max: MAX_EVIDENCE_DATA_LEN,
                     });
+                }
+            }
+            SlashingProof::BadRepair { claimed, derived, .. } => {
+                // Identical roots are a repair that agrees with itself: there
+                // is nothing to punish, and a report claiming one is either a
+                // mistake or an attempt to spend a validator's bond on a
+                // correctly repaired segment.
+                if claimed == derived {
+                    return Err(EvidenceError::RepairRegenerates);
                 }
             }
             SlashingProof::InvalidSignatureSpam {

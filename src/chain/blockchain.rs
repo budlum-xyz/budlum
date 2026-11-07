@@ -229,6 +229,58 @@ impl Blockchain {
         self
     }
 
+    /// Record that a block was refused for a state-root disagreement and
+    /// export the counter at once.
+    ///
+    /// The refusal returns an error and unwinds out of the validation path, so
+    /// this cannot wait for the next successful commit to reach
+    /// `emit_chain_metrics`: on a node that is failing every candidate that
+    /// commit never comes, and the one series that would explain the outage
+    /// would stay at zero.
+    ///
+    /// This doc lives on a private method, so the public [`Self::is_valid`]
+    /// above describes the effect rather than linking to it.
+    fn record_state_root_mismatch(&self) {
+        if let Some(ref m) = self.metrics {
+            m.state_root_mismatch_total.inc();
+        }
+    }
+
+    /// B.U.D. 3.0 storage health for the scrape: objects, segments at risk,
+    /// the repair backlog and custody bytes per validator class.
+    ///
+    /// Every value is read from the rooted registry through its own readers,
+    /// not from a process-local side table, so a restart shows the same
+    /// numbers the chain says and the metrics pass cannot drift from the
+    /// registry's rules. `class` is `full` or `mobile`: a mobile share is the
+    /// one whose loss the durability warning is really about.
+    fn emit_bud3_metrics(&self, m: &crate::core::metrics::Metrics) {
+        let registry = &self.state.bud3_registry;
+        let (full_bytes, mobile_bytes) = registry.custody_bytes_by_class();
+        m.bud3_objects
+            .set(i64::try_from(registry.object_count()).unwrap_or(i64::MAX));
+        m.bud3_segments_at_risk
+            .set(i64::try_from(registry.total_segments_at_risk()).unwrap_or(i64::MAX));
+        m.bud3_repair_backlog
+            .set(i64::try_from(registry.repair_backlog()).unwrap_or(i64::MAX));
+        m.bud3_custody_bytes
+            .with_label_values(&["full"])
+            .set(i64::try_from(full_bytes).unwrap_or(i64::MAX));
+        m.bud3_custody_bytes
+            .with_label_values(&["mobile"])
+            .set(i64::try_from(mobile_bytes).unwrap_or(i64::MAX));
+        // IP-20 item 13: how long an open audit has waited. The unit is
+        // seconds, so the epoch length of this chain is the conversion; a
+        // series in epochs would be unreadable next to the windows in
+        // `AuditParams`, which are stated in epochs but compared against a
+        // histogram whose buckets are minutes.
+        let epoch_seconds = crate::core::chain_config::epoch_seconds_for_chain_id(self.chain_id);
+        for age in registry.open_audit_ages(self.state.epoch_index) {
+            let seconds = age.saturating_mul(epoch_seconds) as f64;
+            m.bud3_audit_latency_seconds.observe(seconds);
+        }
+    }
+
     pub(crate) fn emit_chain_metrics(&self) {
         if let Some(ref m) = self.metrics {
             let height = self.chain.len() as i64;
@@ -285,15 +337,17 @@ impl Blockchain {
             m.pending_bud_boost_atoms
                 .set(i64::try_from(self.state.pending_bud_boost_share).unwrap_or(i64::MAX));
             m.blocks_produced.inc();
-            let head_height = self.chain.last().map_or(0, |b| b.index);
-            m.finality_lag
-                .set((height as u64).saturating_sub(self.finalized_height) as i64);
-            let stalled = self.recovery_tracker.is_stalled()
-                || crate::validators::handover::is_finality_stalled(
-                    head_height,
-                    self.finalized_height,
-                );
+            let lag = (height as u64).saturating_sub(self.finalized_height);
+            m.finality_lag.set(lag as i64);
+            let checkpoint = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(
+                self.chain_id,
+            )
+            .max(1);
+            m.finality_lag_checkpoints
+                .set(i64::try_from(lag / checkpoint).unwrap_or(i64::MAX));
+            let stalled = self.recovery_tracker.is_stalled() || lag >= checkpoint.saturating_mul(8);
             m.finality_stalled.set(i64::from(stalled));
+            self.emit_bud3_metrics(m);
             m.mempool_size.set(self.mempool.len() as i64);
             // Exported alongside the count because the count does not bound
             // memory. See `mempool::pool::DEFAULT_MAX_POOL_BYTES`.
@@ -5535,10 +5589,18 @@ impl Blockchain {
         Ok(nft_burn_cids.iter().map(|(cid, _)| cid.0).collect())
     }
 
+    /// Validate the chain this node holds.
+    ///
+    /// A refusal for a state-root disagreement also increments
+    /// `budlum_state_root_mismatch_total` on the bound metrics; every other
+    /// refusal is silent, because a malformed candidate is ordinary peer
+    /// traffic and a mismatch is a determinism split.
     pub fn is_valid(&self) -> bool {
         self.validate_candidate_chain(&self.chain).is_ok()
     }
 
+    /// Validate a candidate chain without adopting it. Counted like
+    /// [`Self::is_valid`].
     pub fn is_valid_chain(&self, chain: &[Block]) -> bool {
         self.validate_candidate_chain(chain).is_ok()
     }
@@ -5623,6 +5685,13 @@ impl Blockchain {
             // The roots are derived from the chain prefix, as on the live path.
             Self::apply_block_end_roots(&mut next_state, block, &chain[..index], self.chain_id);
             if next_state.calculate_state_root() != block.state_root {
+                // A determinism split (R-11), not a bad candidate: this node
+                // executed the same blocks and got a different root than the
+                // ones a peer committed. Counted before the error unwinds,
+                // because on a node that refuses every candidate the next
+                // successful commit that would have exported the series never
+                // arrives.
+                self.record_state_root_mismatch();
                 return Err(format!(
                     "Candidate state root mismatch at block {}",
                     block.index
@@ -6022,6 +6091,10 @@ impl Blockchain {
                 self.chain_id,
             );
             if current_state.calculate_state_root() != block.state_root {
+                // Same class as the candidate refusal above: a root this node
+                // cannot reproduce. Counted here too, or a node whose reorgs
+                // all fail on the root would report a healthy scrape.
+                self.record_state_root_mismatch();
                 return Err(format!(
                     "Reorg persistence state root mismatch at block {}",
                     block.index
@@ -6830,6 +6903,45 @@ impl Blockchain {
                                 "InvalidSignatureSpam sample carries a valid vote signature".into(),
                             );
                         }
+                    }
+                }
+                crate::registry::evidence::SlashingProof::BadRepair {
+                    object,
+                    segment,
+                    epoch,
+                    esi,
+                    claimed,
+                    derived,
+                } => {
+                    // §6.10 item 8: the claim is that the repair symbol the
+                    // repairer committed to does not come out of the source
+                    // symbols. A block cannot carry a proof of that without
+                    // the object it belongs to, so the object must still be
+                    // live, the segment must be one of its repaired segments,
+                    // and the two digests must differ. The chain does not
+                    // re-derive the symbol here: a producer that could make
+                    // the check pass locally would be the only thing standing
+                    // between a repairer and its bond, and the re-derivation
+                    // needs the source bytes that live in the shares, not in
+                    // the block.
+                    let live = state
+                        .bud3_registry
+                        .object(object)
+                        .ok_or_else(|| "Bad-repair report names an unknown object".to_string())?;
+                    if segment >= live.record.symbol_roots.len() as u64 {
+                        return Err("Bad-repair report names a segment the object lacks".into());
+                    }
+                    if claimed == derived {
+                        return Err("Bad-repair report says the symbol regenerates".into());
+                    }
+                    if *claimed == [0u8; 32] {
+                        return Err("Bad-repair report carries no symbol".into());
+                    }
+                    if u64::from(*esi) >= u64::from(live.record.symbols_per_segment) {
+                        return Err("Bad-repair report names an ESI the segment lacks".into());
+                    }
+                    if *epoch > state.epoch_index {
+                        return Err("Bad-repair report is dated after this block".into());
                     }
                 }
                 _ => {

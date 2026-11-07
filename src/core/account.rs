@@ -3335,6 +3335,11 @@ impl AccountState {
                     .parse::<u64>()
                     .map_err(|e| format!("invalid malicious_slash_ratio_fixed: {e}"))?;
             }
+            "bad_repair_slash_ratio_fixed" => {
+                params.bad_repair_slash_ratio_fixed = value
+                    .parse::<u64>()
+                    .map_err(|e| format!("invalid bad_repair_slash_ratio_fixed: {e}"))?;
+            }
             "bridge_relayer_fee_ppm" => {
                 params.bridge_relayer_fee_ppm = value
                     .parse::<u64>()

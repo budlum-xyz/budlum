@@ -117,7 +117,7 @@ pub fn apply(
         StorageTxV3::CustodyAck { object } => registry.ack(&object, &signer).map(Applied::Acked),
         StorageTxV3::CustodyProofBatch { proofs } => registry
             .submit_proofs(&signer, &proofs, epoch)
-            .map(Applied::Proved),
+            .map(|(count, _waited)| Applied::Proved(count)),
         StorageTxV3::RecordRepair {
             object,
             segment,

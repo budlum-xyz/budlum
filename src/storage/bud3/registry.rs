@@ -67,8 +67,14 @@ pub struct ShareState {
     pub share: Share,
     /// Status.
     pub status: ShareStatus,
-    /// The open audit and the last epoch a proof is accepted.
-    pub open_audit: Option<(Audit, u64)>,
+    /// The open audit, the last epoch a proof is accepted, and the epoch the
+    /// audit opened in.
+    ///
+    /// The third field is what `budlum_bud3_audit_latency_seconds` measures
+    /// (IP-20 item 13). It is part of the share's state rather than a node's
+    /// memory because every node has to report the same latency for the same
+    /// scrape to mean anything.
+    pub open_audit: Option<(Audit, u64, u64)>,
     /// Audits passed.
     pub passes: u64,
     /// Audits missed.
@@ -144,6 +150,7 @@ impl AuditParams {
 
     /// Convert an hour window to epochs: `ceil(hours x 3600 / (slot x epoch))`.
     #[must_use]
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
     pub const fn hours_to_epochs(hours: u64, slot_secs: u64, epoch_slots: u64) -> u64 {
         let per = slot_secs.saturating_mul(epoch_slots);
         if per == 0 {
@@ -299,12 +306,14 @@ fn check_placement(record: &ObjectRecord, shares: &[(u64, Share)]) -> Result<(),
 impl Bud3Registry {
     /// A live object.
     #[must_use]
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
     pub fn object(&self, key: &ObjectKey) -> Option<&ObjectEntry> {
         self.objects.get(key)
     }
 
     /// Whether `key` was deleted, and when.
     #[must_use]
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
     pub fn tombstone(&self, key: &ObjectKey) -> Option<u64> {
         self.tombstones.get(key).copied()
     }
@@ -316,6 +325,7 @@ impl Bud3Registry {
     /// [`RegistryError`] for a codec that is not open, a malformed record, a
     /// bad placement, a zero or overflowing lifetime, a tombstoned commitment,
     /// or a share on a validator that declined the content.
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
     pub fn register_object(
         &mut self,
         owner: Address,
@@ -411,6 +421,7 @@ impl Bud3Registry {
     ///
     /// [`RegistryError::UnknownObject`], [`RegistryError::Tombstoned`] or
     /// [`RegistryError::NftAlreadyBound`].
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
     pub fn bind_nft(
         &mut self,
         nft: NftId,
@@ -434,6 +445,7 @@ impl Bud3Registry {
 
     /// The reference count of an object.
     #[must_use]
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
     pub fn refcount(&self, key: &ObjectKey) -> u64 {
         self.objects
             .get(key)
@@ -458,6 +470,7 @@ impl Bud3Registry {
     /// # Errors
     ///
     /// [`RegistryError::UnknownNft`] or [`RegistryError::NotAuthorized`].
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
     pub fn burn_reference(
         &mut self,
         nft: &NftId,
@@ -484,6 +497,7 @@ impl Bud3Registry {
     /// # Errors
     ///
     /// [`RegistryError::UnknownObject`] or [`RegistryError::BadLifetime`].
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
     pub fn renew(&mut self, key: &ObjectKey, extra_epochs: u64) -> Result<u64, RegistryError> {
         if extra_epochs == 0 {
             return Err(RegistryError::BadLifetime);
@@ -501,6 +515,7 @@ impl Bud3Registry {
 
     /// Expire every object past its paid lifetime; expiry is handled as a
     /// burn of every reference. Returns the deleted keys.
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
     pub fn expire(&mut self, epoch: u64) -> Vec<ObjectKey> {
         let due: Vec<ObjectKey> = self
             .objects
@@ -515,6 +530,7 @@ impl Bud3Registry {
     }
 
     /// `DeclineContent`: a validator refuses future shares of a content id.
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
     pub fn decline(&mut self, validator: Address, content: &ContentId) {
         self.declines.insert((content.digest, validator));
     }
@@ -525,6 +541,7 @@ impl Bud3Registry {
     /// # Errors
     ///
     /// [`RegistryError::UnknownObject`].
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
     pub fn ack(&mut self, key: &ObjectKey, holder: &Address) -> Result<usize, RegistryError> {
         let obj = self
             .objects
@@ -627,6 +644,7 @@ impl Bud3Registry {
 
     /// Open this epoch's audits from `seed`. A share with an audit still
     /// open is not drawn again. Returns the number opened.
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
     pub fn open_audits(&mut self, seed: &[u8; 32], epoch: u64, params: &AuditParams) -> usize {
         let mut opened = 0;
         for obj in self.objects.values_mut() {
@@ -649,7 +667,7 @@ impl Bud3Registry {
                     symbols: u64::from(s.share.symbols),
                 };
                 if let Some(a) = audit_for(seed, &r, ppm, subs) {
-                    s.open_audit = Some((a, epoch.saturating_add(window)));
+                    s.open_audit = Some((a, epoch.saturating_add(window), epoch));
                     opened += 1;
                 }
             }
@@ -664,12 +682,20 @@ impl Bud3Registry {
     /// # Errors
     ///
     /// [`RegistryError::BadProof`] or [`RegistryError::UnknownObject`].
+    ///
+    /// Returns the number of audits answered and, per answered audit, how many
+    /// epochs it had been open. The second half is what
+    /// `budlum_bud3_audit_latency_seconds` reports: the chain converts epochs
+    /// to seconds with the network's own epoch length and observes it, so the
+    /// series is written from the path that answers audits rather than from a
+    /// metric that is declared and never set.
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
     pub fn submit_proofs(
         &mut self,
         holder: &Address,
         proofs: &[(ObjectKey, CustodyProof)],
         epoch: u64,
-    ) -> Result<usize, RegistryError> {
+    ) -> Result<(usize, Vec<u64>), RegistryError> {
         // Check everything first.
         let mut hits = Vec::new();
         for (key, proof) in proofs {
@@ -680,12 +706,13 @@ impl Bud3Registry {
                 .position(|s| {
                     s.share.validator == *holder
                         && s.segment == proof.segment
-                        && s.open_audit
-                            .is_some_and(|(a, last)| a.position == proof.position && epoch <= last)
+                        && s.open_audit.is_some_and(|(a, last, _)| {
+                            a.position == proof.position && epoch <= last
+                        })
                 })
                 .ok_or(RegistryError::BadProof)?;
             let share = obj.shares.get(idx).ok_or(RegistryError::BadProof)?;
-            let (audit, _) = share.open_audit.ok_or(RegistryError::BadProof)?;
+            let (audit, _, opened) = share.open_audit.ok_or(RegistryError::BadProof)?;
             let root = obj.roots.get(share.root).ok_or(RegistryError::BadProof)?;
             let ctx = ProofContext {
                 symbol_root: root.root,
@@ -695,12 +722,12 @@ impl Bud3Registry {
             proof
                 .verify(&audit, &ctx)
                 .map_err(|_| RegistryError::BadProof)?;
-            if hits.contains(&(*key, idx)) {
+            if hits.iter().any(|(k, i, _)| k == key && *i == idx) {
                 return Err(RegistryError::BadProof);
             }
-            hits.push((*key, idx));
+            hits.push((*key, idx, epoch.saturating_sub(opened)));
         }
-        for (key, idx) in &hits {
+        for (key, idx, _) in &hits {
             if let Some(s) = self
                 .objects
                 .get_mut(key)
@@ -711,16 +738,43 @@ impl Bud3Registry {
                 s.consecutive_misses = 0;
             }
         }
-        Ok(hits.len())
+        Ok((
+            hits.len(),
+            hits.iter().map(|(_, _, waited)| *waited).collect(),
+        ))
+    }
+
+    /// How many epochs each currently open audit has been waiting, at `epoch`.
+    ///
+    /// This is the reading `budlum_bud3_audit_latency_seconds` takes every
+    /// block: an audit that is still open after three of its window's epochs
+    /// is a holder that is not answering, and the series has to show that
+    /// while it is happening rather than only when the window closes. An audit
+    /// that is answered reports its exact wait through
+    /// [`Self::submit_proofs`], which is the other half of the same
+    /// distribution.
+    #[must_use]
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
+    pub fn open_audit_ages(&self, epoch: u64) -> Vec<u64> {
+        let mut out = Vec::new();
+        for obj in self.objects.values() {
+            for s in &obj.shares {
+                if let Some((_, _, opened)) = s.open_audit {
+                    out.push(epoch.saturating_sub(opened));
+                }
+            }
+        }
+        out
     }
 
     /// Close every audit window that ended before `epoch`: each is a miss.
     /// Returns the number of misses.
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
     pub fn close_windows(&mut self, epoch: u64) -> usize {
         let mut missed = 0;
         for obj in self.objects.values_mut() {
             for s in &mut obj.shares {
-                if s.open_audit.is_some_and(|(_, last)| last < epoch) {
+                if s.open_audit.is_some_and(|(_, last, _)| last < epoch) {
                     s.open_audit = None;
                     s.misses += 1;
                     s.consecutive_misses += 1;
@@ -740,6 +794,7 @@ impl Bud3Registry {
 
     /// Mark every share of `holder` lost: the holder was unseen for its
     /// class window (one day Full, seven days Mobile). Returns how many.
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
     pub fn mark_unseen(&mut self, holder: &Address) -> usize {
         let mut n = 0;
         for obj in self.objects.values_mut() {
@@ -758,10 +813,91 @@ impl Bud3Registry {
         n
     }
 
+    /// How many segments of this object have at least one lost share.
+    ///
+    /// This is the "deteriorating" reading, and it is deliberately not the
+    /// repair trigger: repair is lazy and fires at `f / 2` lost shares (see
+    /// [`Self::repairs_due`]). A segment counted here with no open task is a
+    /// segment the node is still tolerating, which is exactly what an
+    /// operator needs to see before the task opens.
+    #[must_use]
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
+    pub fn segments_at_risk(&self, key: &ObjectKey) -> usize {
+        let Some(obj) = self.objects.get(key) else {
+            return 0;
+        };
+        let mut lost: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+        for share in &obj.shares {
+            if share.lost {
+                lost.insert(share.segment);
+            }
+        }
+        lost.len()
+    }
+
+    /// Sum of [`Self::segments_at_risk`] over every live object.
+    #[must_use]
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
+    pub fn total_segments_at_risk(&self) -> usize {
+        self.objects
+            .keys()
+            .map(|key| self.segments_at_risk(key))
+            .sum()
+    }
+
+    /// Sum of [`Self::repairs_due`] over every live object: the open repair
+    /// tasks the registry is waiting for a Full repairer to take.
+    #[must_use]
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
+    pub fn repair_backlog(&self) -> usize {
+        self.objects
+            .keys()
+            .map(|key| self.repairs_due(key).len())
+            .sum()
+    }
+
+    /// Custody bytes per validator class as `(full, mobile)`.
+    ///
+    /// One share holds `symbols` symbols of `symbol_size` bytes each, so the
+    /// sum over shares is the physical byte count the class is holding, not
+    /// the logical object size. A share that is lost still counts: the bytes
+    /// are still required until repair places them somewhere else, and
+    /// dropping them would make the durability warning shrink exactly when
+    /// the object is least safe.
+    #[must_use]
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
+    pub fn custody_bytes_by_class(&self) -> (u64, u64) {
+        let mut full = 0u64;
+        let mut mobile = 0u64;
+        for obj in self.objects.values() {
+            let symbol_size = u64::from(obj.record.profile.symbol_size);
+            for share in &obj.shares {
+                let bytes = u64::from(share.share.symbols).saturating_mul(symbol_size);
+                match share.share.class {
+                    crate::storage::bud3::placement::Class::Full => {
+                        full = full.saturating_add(bytes);
+                    }
+                    crate::storage::bud3::placement::Class::Mobile => {
+                        mobile = mobile.saturating_add(bytes);
+                    }
+                }
+            }
+        }
+        (full, mobile)
+    }
+
+    /// The live object count.
+    #[must_use]
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
+    pub fn object_count(&self) -> usize {
+        self.objects.len()
+    }
+
     /// The segments of `key` that need repair. Repair is lazy: a segment is
     /// due once its lost shares reach half its tolerance `f`, where `f` is the
     /// number of its largest shares it can lose and keep `k + 2` symbols.
     #[must_use]
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
     pub fn repairs_due(&self, key: &ObjectKey) -> Vec<u64> {
         let Some(obj) = self.objects.get(key) else {
             return Vec::new();
@@ -811,6 +947,7 @@ impl Bud3Registry {
     /// [`RegistryError::BadRepair`] when the segment needs no repair, the new
     /// ESIs reuse an old one or overlap, or the new symbols do not replace
     /// the lost ones; [`RegistryError::UnknownObject`].
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
     pub fn record_repair(
         &mut self,
         key: &ObjectKey,
@@ -885,6 +1022,7 @@ impl Bud3Registry {
     /// Drop the lost shares of every segment whose repair shares are all
     /// confirmed. Old shares never go before the new ones hold. Returns how
     /// many were dropped.
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
     pub fn settle_repairs(&mut self) -> usize {
         let mut dropped = 0;
         for obj in self.objects.values_mut() {
@@ -913,6 +1051,7 @@ impl Bud3Registry {
     /// The RPC read: one object, one validator's shares, or a what-if
     /// repair plan for an unseen holder.
     #[must_use]
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
     pub fn query_json(&self, query: &Bud3Query) -> serde_json::Value {
         match query {
             Bud3Query::Object(key) => {
@@ -989,11 +1128,14 @@ impl Bud3Registry {
                                     "symbols": s.share.symbols,
                                     "confirmed": s.status == ShareStatus::Confirmed,
                                     "lost": s.lost,
-                                    "open_audit": s.open_audit.map(|(a, last)| serde_json::json!({
-                                        "position": a.position,
-                                        "sub_block": a.sub_block,
-                                        "last_epoch": last,
-                                    })),
+                                    "open_audit": s.open_audit.map(|(a, last, opened)| {
+                                        serde_json::json!({
+                                            "position": a.position,
+                                            "sub_block": a.sub_block,
+                                            "last_epoch": last,
+                                            "opened_epoch": opened,
+                                        })
+                                    }),
                                     "passes": s.passes,
                                     "misses": s.misses,
                                 })
@@ -1011,12 +1153,14 @@ impl Bud3Registry {
 
     /// Whether the registry holds nothing.
     #[must_use]
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
     pub fn is_empty(&self) -> bool {
         self.objects.is_empty() && self.tombstones.is_empty() && self.declines.is_empty()
     }
 
     /// The registry state root over every map, in order.
     #[must_use]
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
     pub fn state_root(&self) -> [u8; 32] {
         let mut acc = hash_fields_bytes(&[REGISTRY_TAG, b"empty"]);
         let mut fold = |fields: &[&[u8]]| {
@@ -1051,14 +1195,20 @@ impl Bud3Registry {
             }
             for s in &o.shares {
                 let status = [u8::from(s.status == ShareStatus::Confirmed)];
-                let audit = s.open_audit.map_or([0u8; 24], |(a, last)| {
-                    let mut b = [0u8; 24];
+                // The audit, its closing epoch and the epoch it opened in.
+                // The third word is new: a share whose audit opened in one
+                // epoch and whose window closes in another hashes the same as
+                // before only when both epochs are the same, so the state root
+                // moves - which is what a consensus-visible field has to do.
+                let audit = s.open_audit.map_or([0u8; 32], |(a, last, opened)| {
+                    let mut b = [0u8; 32];
                     for (d, v) in b.iter_mut().zip(
                         a.position
                             .to_le_bytes()
                             .iter()
                             .chain(a.sub_block.to_le_bytes().iter())
-                            .chain(last.to_le_bytes().iter()),
+                            .chain(last.to_le_bytes().iter())
+                            .chain(opened.to_le_bytes().iter()),
                     ) {
                         *d = *v;
                     }
@@ -1288,7 +1438,7 @@ mod tests {
             .iter()
             .filter(|s| s.share.validator == addr(10))
         {
-            let (a, _) = s.open_audit.unwrap();
+            let (a, _, _) = s.open_audit.unwrap();
             let syms = &up.segments[s.segment as usize];
             let leaves: Vec<(u32, [u8; 32])> =
                 syms.iter().map(|x| (x.esi, symbol_leaf(&x.data))).collect();
@@ -1319,7 +1469,12 @@ mod tests {
             r.submit_proofs(&addr(11), &proofs, 2),
             Err(RegistryError::BadProof)
         );
-        assert_eq!(r.submit_proofs(&addr(10), &proofs, 2), Ok(proofs.len()));
+        let (answered, waited) = r.submit_proofs(&addr(10), &proofs, 2).unwrap();
+        assert_eq!(answered, proofs.len());
+        // The audit opened in epoch 1 and is answered in epoch 2: one epoch of
+        // latency per answered audit, which is what
+        // `budlum_bud3_audit_latency_seconds` reports.
+        assert_eq!(waited, vec![1; proofs.len()]);
 
         // Full windows close after 2 epochs; Mobile after 24.
         let missed = r.close_windows(4);
@@ -1433,10 +1588,15 @@ mod tests {
             .find(|s| s.share.validator == addr(20))
             .unwrap()
             .clone();
-        let (a, _) = s.open_audit.unwrap();
+        let (a, _, opened) = s.open_audit.unwrap();
         let pos = a.position as usize;
         let proof = prove(0, &leaves, pos, &fresh[pos].data, a.sub_block as usize).unwrap();
-        assert_eq!(r.submit_proofs(&addr(20), &[(key, proof)], 6), Ok(1));
+        // The audit was drawn in epoch 5 and is answered in epoch 6.
+        assert_eq!(opened, 5);
+        assert_eq!(
+            r.submit_proofs(&addr(20), &[(key, proof)], 6),
+            Ok((1, vec![1]))
+        );
     }
 
     #[test]

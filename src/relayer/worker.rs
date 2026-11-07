@@ -117,6 +117,14 @@ pub struct RelayerWorker {
     /// the map is written to disk next to the cursor so a restart between
     /// the external action and that finality resumes the same submission.
     observed: std::collections::HashMap<String, PendingResult>,
+    /// Metrics handle, when the node wired one.
+    ///
+    /// The two reservation gauges are the operator's view of the pending store
+    /// without reading its file: how much work is waiting on finality, and how
+    /// much of it needs a person. Both are rewritten whenever the store
+    /// changes, so a scrape can never show a reservation the worker has
+    /// already dropped.
+    metrics: Option<Arc<crate::core::metrics::Metrics>>,
 }
 
 /// A verified external result together with the hash of the result
@@ -223,6 +231,7 @@ struct DeadLetter {
 const DEAD_LETTER_FILE_NAME: &str = "relayer-deadletter.jsonl";
 
 impl RelayerWorker {
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
     pub fn new(chain: ChainHandle, relayer_address: Address) -> Self {
         Self {
             chain,
@@ -234,6 +243,7 @@ impl RelayerWorker {
             attempts: std::collections::HashMap::new(),
             next_nonce: None,
             observed: std::collections::HashMap::new(),
+            metrics: None,
         }
     }
 
@@ -261,6 +271,7 @@ impl RelayerWorker {
     /// Bind a signing key so result TXs are
     /// cryptographically signed before injection into the chain.
     #[must_use]
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
     pub fn with_signing_key(mut self, keypair: Arc<KeyPair>) -> Self {
         self.relayer_keypair = Some(RelayerKey::Legacy(keypair));
         self
@@ -317,6 +328,43 @@ impl RelayerWorker {
         self
     }
 
+    /// Bind the node's metrics registry so the reservation gauges are
+    /// exported.
+    ///
+    /// A worker built in a test keeps `None` and simply holds its pending
+    /// store privately, which is what the tests relied on before the gauges
+    /// existed.
+    #[must_use]
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
+    pub fn with_metrics(mut self, metrics: Arc<crate::core::metrics::Metrics>) -> Self {
+        self.metrics = Some(metrics);
+        self.emit_reservation_metrics();
+        self
+    }
+
+    /// Publish the pending-store depth and its operator-needed subset.
+    ///
+    /// `relay_reservations` counts every entry that has not been seen in a
+    /// finalized block; `relay_inflight_reservations` counts the ones whose
+    /// external action is still unresolved (no verified result yet). The
+    /// second is the number a person has to work off by hand, so it gets its
+    /// own series rather than a label an alert would have to filter.
+    fn emit_reservation_metrics(&self) {
+        let Some(ref m) = self.metrics else {
+            return;
+        };
+        let live = self.observed.len();
+        let inflight = self
+            .observed
+            .values()
+            .filter(|pending| pending.result.is_none())
+            .count();
+        m.relay_reservations
+            .set(i64::try_from(live).unwrap_or(i64::MAX));
+        m.relay_inflight_reservations
+            .set(i64::try_from(inflight).unwrap_or(i64::MAX));
+    }
+
     /// Persist the relay cursor to `path` so a restart resumes where it left
     /// off.
     ///
@@ -326,6 +374,7 @@ impl RelayerWorker {
     /// on chain forever with nothing acting on it, a silent service failure,
     /// not a loud one.
     #[must_use]
+    /// WIRING: exercised by the B.U.D. 3.0 custody, repair, and readiness paths.
     pub fn with_cursor_path(mut self, path: Option<std::path::PathBuf>) -> Self {
         self.cursor_path = path;
         self
@@ -497,6 +546,10 @@ impl RelayerWorker {
             warn!(error = %e, path = %path.display(),
                   "Relayer: failed to persist pending results; a restart may repeat an external action");
         }
+        // The gauges follow the in-memory store, not the file: a write that
+        // failed leaves the worker holding a reservation the operator still
+        // needs to see.
+        self.emit_reservation_metrics();
     }
 
     /// Drop every pending result whose transaction sits in a finalized block,
@@ -852,6 +905,10 @@ impl RelayerWorker {
                 return;
             }
         };
+        // The resumed set is already a backlog: those are requests a previous
+        // run could not confirm, so the gauges start from it rather than from
+        // zero until the first change.
+        self.emit_reservation_metrics();
 
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -1771,6 +1828,63 @@ mod pending_results {
             receipt_proof: vec![tag; 4],
             external_state_root: [tag; 32],
         }
+    }
+
+    /// WP-41 item 6: the two reservation gauges follow the pending store.
+    ///
+    /// `relay_reservations` is everything the worker still holds; the
+    /// in-flight gauge is the subset whose external action has no verified
+    /// result yet, which is the part that needs a person. Both are rewritten
+    /// on every change to the store, so a scrape between two changes shows
+    /// the store, not the last state the file happened to hold.
+    #[test]
+    fn relay_reservation_gauges_follow_the_pending_store() {
+        let metrics = Arc::new(
+            crate::core::metrics::Metrics::new().expect("metric names are literals"),
+        );
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut w = RelayerWorker::new(ChainHandle::new(tx), Address::from([7u8; 32]))
+            .with_metrics(metrics.clone());
+        assert_eq!(metrics.relay_reservations.get(), 0);
+        assert_eq!(metrics.relay_inflight_reservations.get(), 0);
+
+        // One reservation whose action completed and one still in flight.
+        w.observed.insert(
+            "req-done".to_string(),
+            PendingResult {
+                result: Some(observation(1)),
+                submitted_tx: Some("tx-a".to_string()),
+                requester_lookups_failed: 0,
+                done: false,
+            },
+        );
+        w.observed.insert(
+            "req-inflight".to_string(),
+            PendingResult {
+                result: None,
+                submitted_tx: None,
+                requester_lookups_failed: 0,
+                done: false,
+            },
+        );
+        // No cursor path: the store is in memory only, and the gauges must
+        // still follow it. This is the case a test worker runs in.
+        w.emit_reservation_metrics();
+        assert_eq!(metrics.relay_reservations.get(), 2);
+        assert_eq!(
+            metrics.relay_inflight_reservations.get(),
+            1,
+            "only the entry with no verified result needs an operator"
+        );
+
+        w.observed.remove("req-inflight");
+        w.emit_reservation_metrics();
+        assert_eq!(metrics.relay_reservations.get(), 1);
+        assert_eq!(metrics.relay_inflight_reservations.get(), 0);
+
+        let scrape = metrics.encode();
+        assert!(scrape.contains("budlum_relay_reservations 1"));
+        assert!(scrape.contains("budlum_relay_inflight_reservations 0"));
     }
 
     /// An actor stub that answers the relay loop's finality questions from

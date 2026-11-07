@@ -2248,7 +2248,7 @@ jobs:
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- pq-ctx-is-bound
       # The tree is written in English. Turkish is allowed in exactly three
       # places: README.tr.md, a Turkish localisation directory whose strings are
-      # what the Turkish user reads, and the word "Türkçe" as the label on the
+      # what the Turkish user reads, and the word "Turkce" as the label on the
       # link that points at that README. The translation is unfinished, so the gate ratchets
       # off .github/turkish-baseline.txt: counts only go down, and a count that
       # is higher than what is actually in the file also fails, so finishing
@@ -2276,6 +2276,28 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-unicode-dashes --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-unicode-dashes
+      # WP-20 item 12, G-2: the placement path selects a bucket with integer
+      # comparison and no floating point. Two nodes whose FPUs disagree would
+      # place the same segment on different validators and split the state
+      # root, which is why the table is computed off-chain and only read here.
+      - name: bud3 placement gate + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-placement --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-placement
+      # §6.10: the repair path has to be reachable, not merely present. Every
+      # limb of it - the threshold, the assignment, the verification, the 1%
+      # report - is a function somebody can leave with no caller.
+      - name: bud3 repair fires gate + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-repair-fires --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-repair-fires
+      # §6.11.2: a custody proof is checked against the stored symbol root,
+      # not against a root the holder supplies, and a bad proof in a batch
+      # leaves none of that batch applied.
+      - name: bud3 custody proofs gate + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-custody-proofs --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-custody-proofs
       # BudZero proofs are STARKs and rest on a hash only. A Groth16, KZG or
       # BN254 crate in any manifest, or a verifier arm for the external labels,
       # would put a pairing assumption on a verification path.

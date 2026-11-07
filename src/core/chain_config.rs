@@ -327,6 +327,23 @@ pub fn epoch_len_for_chain_id(chain_id: u64) -> u64 {
     Network::from_chain_id(chain_id).map_or(EPOCH_LEN, |network| network.epoch_len())
 }
 
+/// The wall-clock length of one epoch on `chain_id`, in whole seconds.
+///
+/// `epoch_len` counts slots and `slot_ms` counts milliseconds, so this is the
+/// one conversion a metric that reports epochs as seconds has to use. It is
+/// written as whole seconds because every caller is a scrape: sub-second
+/// precision on a value in the tens of minutes carries no information.
+///
+/// An unknown chain id falls back to the same defaults `epoch_len_for_chain_id`
+/// uses rather than returning zero, which would make a latency of N epochs
+/// report as N x 0 seconds and hide the problem the series exists to show.
+#[must_use]
+pub fn epoch_seconds_for_chain_id(chain_id: u64) -> u64 {
+    let slots = epoch_len_for_chain_id(chain_id);
+    let slot_ms = Network::from_chain_id(chain_id).map_or(SLOT_MS, |network| network.slot_ms());
+    slots.saturating_mul(slot_ms) / 1_000
+}
+
 /// The state machine reads the epoch length from the chain id while the
 /// consensus engine reads it from the selected network. One chain must use
 /// one value, so a chain id that maps to another epoch length is refused.

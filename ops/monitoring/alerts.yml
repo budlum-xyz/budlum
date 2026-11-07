@@ -87,7 +87,11 @@ groups:
     rules:
       - alert: BudlumDiskFillingUp
         # Needs node_exporter on the host; the node itself reports only its
-        # database size (budlum_storage_db_size_bytes).
+        # database size (budlum_storage_db_size_bytes). The `node` job in
+        # ops/prometheus.yml and ops/monitoring/testnet-local-prometheus.yml
+        # scrapes it, and `every_series_the_rules_read_has_a_scrape_job`
+        # (src/tests/scrape_topology_covers_the_rules.rs) fails without it -
+        # before that job existed this rule could not fire on any node.
         expr: node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"} < 0.10
         for: 10m
         labels:
@@ -95,23 +99,148 @@ groups:
         annotations:
           summary: "Less than 10% disk left on {{ $labels.instance }}"
 
-  # WP-41 public services. The faucet's proof-of-work difficulty is demand
-  # driven, so a rising refusal counter is the observable signal that the
-  # public door is under pressure (section 11.9 item 3).
+  # WP-41 item 6: the readiness alerts the directive names explicitly.
   #
-  # The remaining mandatory alerts of WP-41 item 6 are NOT written here yet:
-  # budlum_finality_stalled, budlum_finality_lag_checkpoints,
-  # budlum_bud3_segments_at_risk, budlum_bud3_repair_backlog,
-  # budlum_relay_reservations, budlum_ee_fault_total and
-  # budlum_state_root_mismatch_total are not exported by src/core/metrics.rs.
-  # Writing those rules now would produce alerts that can never fire; they
-  # belong with the packages that export the metrics (WP-15, WP-20, WP-26,
-  # WP-42). The named test alert_rules_reference_existing_metrics refuses any
-  # rule that gets ahead of its exporter.
-  - name: budlum-public-services
+  # Each expression reads a `budlum_*` series that `src/core/metrics.rs`
+  # registers and the node writes on its production paths, so none of these is
+  # a rule that can never fire. `alert_rules_reference_existing_metrics`
+  # (src/tests/alert_rules_reference_existing_metrics.rs) checks that against
+  # the metric inventory before a change can land.
+  - name: budlum-readiness
+    rules:
+      - alert: BudlumFinalityRecoveryMode
+        # Section 7.7: eight checkpoint intervals without finality is the
+        # recovery trigger. The node computes the reading itself rather than
+        # leaving each rule to divide a block count by an interval that is 5 on
+        # the testnet and 10 on mainnet.
+        expr: budlum_finality_stalled > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Finality recovery mode on {{ $labels.node }}"
+          description: "No checkpoint has finalized for eight checkpoint intervals ({{ $value }} on budlum_finality_stalled)."
+
+      - alert: BudlumFinalityLagCheckpoints
+        # Halfway to the recovery trigger: 4 checkpoints behind on any network.
+        # Written against the checkpoint gauge, not the block gauge, so the
+        # threshold means the same thing on testnet and mainnet.
+        expr: budlum_finality_lag_checkpoints >= 4
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Finality is {{ $value }} checkpoints behind on {{ $labels.node }}"
+
+      - alert: BudlumStateRootMismatch
+        # R-11: the same blocks produced a different root on this node than on
+        # the node that committed them. Any increase is a determinism split and
+        # the forked node stops agreeing with the network, so this fires on the
+        # first one instead of waiting for a rate.
+        expr: increase(budlum_state_root_mismatch_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "State-root mismatch on {{ $labels.node }}"
+          description: "This node computed a root the committed block disagrees with; it is forking away from the network."
+
+  - name: budlum-bud3
+    rules:
+      - alert: BudlumBud3SegmentsAtRisk
+        # R-04: mobile loss higher than the placement assumed. A segment with a
+        # lost share is still decodable - that is what the tolerance is for -
+        # so this is a warning that the margin is shrinking, not an outage.
+        expr: budlum_bud3_segments_at_risk > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} B.U.D. 3.0 segments have a lost share on {{ $labels.node }}"
+
+      - alert: BudlumBud3RepairBacklog
+        # The work half of the same reading: these segments are past the lazy
+        # threshold and wait for a Full repairer to take them.
+        expr: budlum_bud3_repair_backlog > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} B.U.D. 3.0 repairs are waiting on {{ $labels.node }}"
+
+      - alert: BudlumBud3AuditLatencyHigh
+        # IP-20 item 13's fourth series. An audit that stays open is a holder
+        # that is not answering; the Full window is 2 epochs (about 100 s at
+        # testnet's slot) and the Mobile window 24 epochs, so a p90 above ten
+        # minutes means holders are drifting out of their window long before
+        # the window closes and the miss is recorded.
+        expr: histogram_quantile(0.9, sum by (le, node) (rate(budlum_bud3_audit_latency_seconds_bucket[15m]))) > 600
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "B.U.D. 3.0 custody audits wait {{ $value }}s at p90 on {{ $labels.node }}"
+          description: "Holders are answering audits late; a window that closes unanswered is a lost share and, at f / 2, a repair."
+
+      - alert: BudlumBud3MobileCustodyMissing
+        # The mobile floor is a promise about where the network's custody sits.
+        # A node that placed objects but holds no mobile custody is not meeting
+        # it; mobile churn alone does not explain a flat zero across a window.
+        expr: budlum_bud3_objects > 0 and budlum_bud3_custody_bytes{class="mobile"} == 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No B.U.D. 3.0 mobile custody on {{ $labels.node }}"
+
+  - name: budlum-relayer
+    rules:
+      - alert: BudlumRelayReservationsStuck
+        # A reservation is a result that was submitted and has not reached a
+        # finalized block. A handful is normal; a table that only grows means
+        # results keep being dropped before finality.
+        #
+        # `increase()` is deliberately NOT used: it is defined for counters, and
+        # `budlum_relay_reservations` is a gauge - the depth of the pending
+        # table, which falls again when a result finalizes. A Prometheus
+        # counter reset inside the window makes `increase()` report a negative
+        # number, and a comparison against it would either never fire or fire
+        # on the reset. This compares the current depth and, with `for:`, the
+        # part of it that is not merely a burst being worked through.
+        expr: budlum_relay_reservations > 50
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} relayer reservations are pending on {{ $labels.node }}"
+
+      - alert: BudlumRelayReservationNeedsOperator
+        # The external action was in flight when a run stopped. Only a person
+        # can resolve it (look the external transaction up by nonce and clear
+        # or complete the entry), so it pages rather than warns.
+        expr: budlum_relay_inflight_reservations > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $value }} relayer reservations need an operator on {{ $labels.node }}"
+
+  - name: budlum-execution
+    rules:
+      - alert: BudlumExecutionEnvironmentFaulting
+        # R-01: a fault is the deterministic panic an environment returns
+        # instead of an outcome. One is a receipt; a rate is an environment to
+        # switch off, and the label says which.
+        expr: increase(budlum_ee_fault_total[10m]) > 5
+        labels:
+          severity: critical
+        annotations:
+          summary: "Execution environment {{ $labels.ee }} faulting on {{ $labels.node }}"
+
+  - name: budlum_public_services
+    interval: 30s
     rules:
       - alert: BudlumRpcRateLimitedSpike
-        expr: increase(budlum_rpc_rate_limited_total[5m]) > 1000
+        expr: increase(budlum_rpc_rate_limited_total[5m]) > 500
         for: 5m
         labels:
           severity: warning
