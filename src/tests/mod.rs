@@ -232,3 +232,9 @@ pub mod real_chain_fixtures;
 //.
 #[cfg(test)]
 pub mod refusal_locks;
+// Permanent regression locks for the lane-D findings that the M0 live
+// verification found already fixed with no test behind them. Each lock is a
+// finding identity, so a red test names the row in `docs/audit/FINDINGS.md`
+// that went open again.
+#[cfg(test)]
+pub mod audit_lane_d_locks;

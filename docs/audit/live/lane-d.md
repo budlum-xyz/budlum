@@ -121,15 +121,19 @@ gap is WP-42 work and is recorded here rather than fixed silently.
 
 ## What this lane still owes
 
-1. The permanent regression tests for the seven `closed - previously fixed`
-   rows and the one `closed by removal` row, in `src/tests/audit_lane_d.rs`.
-   Two of the seven already have a named test in the tree that pins the fix -
-   `constant_time_eq_str_correctness` in `src/tests/hardening_h4_locks.rs` for
-   BLG-099 and `the_total_is_read_not_the_first_file` in
-   `xtask/gates/src/gates/coverage.rs` for BLG-012 - and those are recorded
-   here rather than duplicated. The other five (BLG-011, BLG-014, BLG-029,
-   BLG-092, BLG-150) are evidenced by reading the tree and still owe a
-   regression test that fails if the fix is reverted.
+1. A CI run number. The six findings that came back fixed with no test behind
+   them now have locks in `src/tests/audit_lane_d_locks.rs` - BLG-005, BLG-011,
+   BLG-013, BLG-014, BLG-092 and BLG-150, each named after its finding identity
+   so a red test names the ledger row that went open again. Three rows are
+   covered by tests that already existed and are not duplicated here:
+   BLG-012 by `the_total_is_read_not_the_first_file` in
+   `xtask/gates/src/gates/coverage.rs`, BLG-029 by
+   `forwarded_headers_are_ignored_without_a_trusted_proxy` in
+   `src/tests/audit_findings_locks.rs`, and BLG-099 by
+   `constant_time_eq_str_correctness` in `src/tests/hardening_h4_locks.rs`.
+   What is missing is not a test: it is the first completed run that turns
+   these from written to green, which BLG-270 says does not exist on this
+   history yet.
 2. The reproduction branch `audit/repro-d` with the red output for every
    `open` row. It cannot be produced without a toolchain, which is recorded
    as the blocker rather than skipped.
