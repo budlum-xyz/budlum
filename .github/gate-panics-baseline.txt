@@ -21,11 +21,6 @@ xtask/gates/src/gates/ast_security_gates.rs	3	let attestation = verifier.verify_
 xtask/gates/src/gates/ast_security_gates.rs	3	let quote = runtime.quote([0u8; 32]).unwrap();
 xtask/gates/src/gates/ast_security_gates.rs	4	let attestation = verifier.verify_quote(&quote).unwrap();
 xtask/gates/src/gates/ast_security_gates.rs	4	let quote = runtime.quote([0u8; 32]).unwrap();
-xtask/gates/src/gates/coding_audit_samples_the_relationship.rs	1	column: u64::from_le_bytes(d[..8].try_into().unwrap()) % 16,
-xtask/gates/src/gates/coding_audit_samples_the_relationship.rs	1	column: u64::from_le_bytes(d[..8].try_into().unwrap()),
-xtask/gates/src/gates/coding_audit_samples_the_relationship.rs	1	let coder = ReedSolomon::for_scheme(&self.scheme).unwrap();
-xtask/gates/src/gates/coding_audit_samples_the_relationship.rs	2	column: u64::from_le_bytes(d[..8].try_into().unwrap()) % 16,
-xtask/gates/src/gates/coding_audit_samples_the_relationship.rs	2	let coder = ReedSolomon::for_scheme(&self.scheme).unwrap();
 xtask/gates/src/gates/consensus_maps_ordered.rs	1	.expect("writing to a String cannot fail");
 xtask/gates/src/gates/gates_do_not_panic.rs	1	t.contains(".unwrap()") || t.contains(".unwrap_err()") || t.contains(".expect(\"")
 xtask/gates/src/gates/no_idle_code.rs	1	let rel = f.strip_prefix(src).expect("walked file is under src");
