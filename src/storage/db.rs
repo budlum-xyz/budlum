@@ -332,7 +332,17 @@ impl Storage {
             .open(&partial)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
-        std::fs::rename(&partial, path)?;
+        drop(file);
+        // Publish the complete inode without replacing an existing backup.
+        // `rename` overwrites `path` on Unix and fails when it exists on
+        // Windows. A hard link has the required no-clobber behavior on both:
+        // the destination appears atomically and a timestamp collision keeps
+        // the earlier verified backup intact.
+        if let Err(error) = std::fs::hard_link(&partial, path) {
+            let _ = std::fs::remove_file(&partial);
+            return Err(error);
+        }
+        std::fs::remove_file(&partial)?;
         if let Err(error) = Self::verify_snapshot(path) {
             let _ = std::fs::remove_file(path);
             return Err(error);
@@ -2530,6 +2540,22 @@ mod tests {
             assert_eq!(std::fs::read(&target).unwrap(), b"protected target");
             assert_eq!(std::fs::read(&backup).unwrap(), b"existing backup");
         }
+    }
+
+    #[cfg(not(miri))]
+    #[test]
+    fn blg_202_snapshot_refuses_existing_destination_without_overwrite() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().join("db").to_str().unwrap()).unwrap();
+        let backup = dir.path().join("backup.bin");
+        let partial = dir.path().join("backup.bin.partial");
+        storage.create_snapshot(&backup).expect("first snapshot");
+        let original = std::fs::read(&backup).unwrap();
+
+        let error = storage.create_snapshot(&backup).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&backup).unwrap(), original);
+        assert!(!partial.exists(), "a refused publish leaves no new partial");
     }
 
     #[test]

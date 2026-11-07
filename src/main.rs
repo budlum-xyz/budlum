@@ -127,16 +127,9 @@ fn write_database_backup(
         .map_err(std::io::Error::other)?
         .as_millis();
     let path = backup_dir.join(format!("budlum-{timestamp_ms}.budbak"));
-    // Reserve the name rather than replacing an existing verified backup if
-    // two requests arrive in the same millisecond or the clock moves back.
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)?;
-    if let Err(error) = storage.create_snapshot(&path) {
-        let _ = std::fs::remove_file(&path);
-        return Err(error);
-    }
+    // Snapshot publication claims the final name atomically without replacing
+    // an earlier verified backup on a timestamp collision.
+    storage.create_snapshot(&path)?;
     Storage::verify_snapshot(&path)?;
 
     prune_database_backups(backup_dir, &path, retention_count)?;
