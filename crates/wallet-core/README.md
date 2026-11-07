@@ -19,7 +19,7 @@ contains **no** relayer registration/stake/whitelist code.
 ```rust
 use budlum_wallet_core::{Wallet, WalletPrivacyConfig, ML_DSA_87_SIGNATURE_LEN};
 
-let wallet = Wallet::generate(12).unwrap();
+let wallet = Wallet::generate(24).unwrap();
 println!("Mnemonic: {}", wallet.mnemonic());
 println!("Address: {}", wallet.address_hex());
 
@@ -29,7 +29,7 @@ assert_eq!(sig.len(), ML_DSA_87_SIGNATURE_LEN);
 
 ## Features
 
-- BIP39 mnemonic (12/24 word)
+- BIP39 mnemonic (24 words, 256-bit entropy; 12-word phrases are refused)
 - FIPS 204 ML-DSA-87 key derivation (Category 5, hardened seed-only)
 - Address = ML-DSA-87 pubkey → domain-separated SHA3-256 (32 byte)
 - Transaction signing (ML-DSA-87)
