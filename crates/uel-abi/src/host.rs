@@ -11,6 +11,24 @@ use crate::types::{
     EeQuery, EeRefusal, HostError, Namespace, OutOfGas, UniversalCall, UniversalResult,
 };
 
+/// Convenience: domain-separated digest an environment reports for a caught panic.
+#[must_use]
+pub fn panic_digest(ee: EeId, message: &str) -> [u8; 32] {
+    crate::transport::panic_digest(ee, message)
+}
+
+/// Convenience: extracts a deterministic message from a caught panic payload.
+#[must_use]
+pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic".to_string()
+    }
+}
+
 /// The read side of the coordinator, available to `query` and `execute`.
 pub trait HostRead {
     /// Reads one key; `None` when it is absent.

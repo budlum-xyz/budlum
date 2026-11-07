@@ -1,0 +1,10 @@
+[package]
+name = "budlum-ee-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Cross-environment conformance golden vector registry for Budlum UEL (WP-35)."
+
+[dependencies]
+budlum-uel-abi = { path = "../../crates/uel-abi" }

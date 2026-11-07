@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["mock", "evm", "wasm", "svm", "move", "budzero", "conformance"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+publish = false
+
+# Worker processes execute untrusted bytecode behind a socket boundary and
+# MUST catch panics into structured `EeFault::Internal` payloads instead of
+# aborting the process abruptly (`ee_workers_build_with_unwind` gate).
+[profile.dev]
+panic = "unwind"
+overflow-checks = true
+
+[profile.release]
+panic = "unwind"
+overflow-checks = true
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

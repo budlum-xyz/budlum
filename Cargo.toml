@@ -259,6 +259,11 @@ required-features = ["wallet-ml-dsa"]
 name = "budlum-indexer"
 path = "src/bin/budlum-indexer.rs"
 
+# Offline EVM Migration Kit verifier and bundle tool (`WP-34`, section 8.12).
+[[bin]]
+name = "bud-migrate"
+path = "src/bin/bud-migrate.rs"
+
 [[bin]]
 name = "bench_sig_verify"
 path = "benches/micro/sig_verify.rs"

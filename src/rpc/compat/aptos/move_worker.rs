@@ -12,10 +12,10 @@
 //! declared by `aptos/mod.rs`; the REST `handle` continues to answer
 //! `Answer::MoveUnavailable` with the same native door until the worker runs.
 
-use crate::execution::coordinator::foreign::aptos::{
+use crate::execution::coordinator::foreign::bcs_admission::{
     check_envelope, AptosEnvelope, AptosRefusal, BcsError, ForeignReplayCache, MAX_BCS_BYTES,
 };
-use crate::execution::coordinator::foreign::Foreign;
+use crate::execution::coordinator::foreign::bcs_admission::{AptosEnvelope as AdmEnvelope, MOVE_WORKER_DOOR};
 
 /// Why a BCS transaction was not admitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,11 +56,11 @@ impl MoveWorkerAdmission {
             return Err(MoveWorkerError::Body(BcsError::LengthTooLarge));
         }
         let envelope = AptosEnvelope::bcs_decode(body).map_err(MoveWorkerError::Body)?;
-        let foreign = Foreign::Aptos(envelope);
-        check_envelope(foreign.envelope(), now_secs, &mut self.cache)
+        let adm: &AdmEnvelope = &envelope;
+        check_envelope(adm, now_secs, &mut self.cache)
             .map_err(MoveWorkerError::Envelope)?;
         Err(MoveWorkerError::Envelope(AptosRefusal::WorkerUnavailable {
-            door: foreign.worker_door(),
+            door: MOVE_WORKER_DOOR,
         }))
     }
 
@@ -74,7 +74,7 @@ impl MoveWorkerAdmission {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::execution::coordinator::foreign::aptos::{
+    use crate::execution::coordinator::foreign::bcs_admission::{
         move_alias, APTOS_CHAIN_ID, MOVE_WORKER_DOOR,
     };
 

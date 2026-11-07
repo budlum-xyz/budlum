@@ -1,0 +1,19 @@
+[package]
+name = "budlum-ee-evm"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Isolated EVM UEL execution-environment worker (`budlum-ee-evm`, Prague fork)"
+publish = false
+
+[[bin]]
+name = "budlum-ee-evm"
+path = "src/main.rs"
+
+[dependencies]
+budlum-uel-abi = { path = "../../crates/uel-abi" }
+sha3 = "0.10"
+
+[lints]
+workspace = true

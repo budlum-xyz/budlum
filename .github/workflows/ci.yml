@@ -618,6 +618,16 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-proto-is-total 2>&1 | tee -a /tmp/gate-out.log
           exit "${PIPESTATUS[0]}"
+      - name: EE workers build with unwind canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- ee-workers-build-with-unwind --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: EE workers build with unwind
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- ee-workers-build-with-unwind 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: QR is derivative only canary
         if: always() && steps.build.outcome == 'success'
         run: |
@@ -817,6 +827,11 @@ jobs:
         run: |
           cargo clippy --manifest-path crates/bud-codec/Cargo.toml --all-targets -- -D warnings
           cargo test --manifest-path crates/bud-codec/Cargo.toml
+      - name: Execution worker workspace builds and its tests pass
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo clippy --manifest-path execution/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path execution/Cargo.toml
       # `slice[i]` stops the process under the release profile (panic = abort); that is
       # the same liveness class as `unwrap`. 66 files in the tree carry this debt and
       # most of them in index-heavy parsers (RLP/MPT/erasure), and converting those to iterators

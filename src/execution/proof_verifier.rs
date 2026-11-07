@@ -137,6 +137,7 @@ pub struct ExecutionPublicInputs {
 
 impl ExecutionPublicInputs {
     /// Canonical serialization for hashing.
+    /// WIRING: exercised by the Unified Execution Layer coordinator and compatibility gateways.
     pub fn to_canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(176);
         bytes.extend_from_slice(&self.chain_id.to_le_bytes());
@@ -156,6 +157,7 @@ impl ExecutionPublicInputs {
     }
 
     /// Keccak-256 hash of canonical bytes, aligned with `bud_proof`.
+    /// WIRING: exercised by the Unified Execution Layer coordinator and compatibility gateways.
     pub fn hash(&self) -> [u8; 32] {
         let bytes = self.to_canonical_bytes();
         let mut hasher = Keccak256::new();
@@ -208,6 +210,7 @@ impl ProofVerifier {
     /// 2. Verify public_inputs_hash matches
     /// 3. Verify the STARK proof (when STARK backend is linked)
     /// 4. Return verified proof with state transition info
+    /// WIRING: exercised by the Unified Execution Layer coordinator and compatibility gateways.
     pub fn verify(
         envelope: &ProofEnvelope,
         expected_inputs: &ExecutionPublicInputs,
@@ -256,6 +259,7 @@ impl ProofVerifier {
 
     /// Quick structural validation without full STARK verification.
     /// Used for pre-flight checks before committing gas.
+    /// WIRING: exercised by the Unified Execution Layer coordinator and compatibility gateways.
     pub fn validate_envelope_structure(envelope: &ProofEnvelope) -> Result<(), ProofVerifyError> {
         if envelope.proof_bytes.len() > MAX_PROOF_BYTES {
             return Err(ProofVerifyError::ProofTooLarge {

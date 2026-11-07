@@ -3,8 +3,12 @@
 //! no object is accepted on a classical signature alone. The
 //! only classical components allowed are (a) the Ed25519 half of a composite
 //! signature, (b) the BLS12-381 finality peer, (c) X25519 inside a hybrid KEM,
-//! (d) proofs of external networks, marked in the profile, and (e) TEE
-//! attestation, which is not on a security path.
+//! (d) proofs of external networks, marked in the profile, (e) TEE
+//! attestation, which is not on a security path, and (f) the UEL foreign
+//! Compatibility Lane (`src/execution/coordinator/foreign/`), where a
+//! classical foreign account is tagged `Classical`, may only move its own
+//! classical holdings (K-3), and closes under Quantum Alert Levels 2 and 3
+//! (closing BLG-267).
 //!
 //! This gate reads production Rust for the classical crates and protocols
 //! (`ed25519_dalek`, `schnorrkel`, `bls12_381`, `x25519`, `libp2p::noise`) and
@@ -48,8 +52,11 @@ const CLASSICAL_TOKENS: &[&str] = &[
     "noise::Config",
 ];
 
-/// The five permitted items.
-const ALLOWED_CATEGORIES: &[&str] = &["a", "b", "c", "d", "e"];
+/// The six permitted items (`f` is restricted to `src/execution/coordinator/foreign/`).
+const ALLOWED_CATEGORIES: &[&str] = &["a", "b", "c", "d", "e", "f"];
+
+/// Path prefix within which category `f` (UEL Compatibility Lane, K-3) is allowed.
+const FOREIGN_LANE_PREFIX: &str = "src/execution/coordinator/foreign/";
 
 /// A classical use: a file and the function it sits in.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -106,9 +113,23 @@ pub fn parse_allowlist(text: &str) -> Result<(u64, Vec<Entry>), String> {
             }
             if !ALLOWED_CATEGORIES.contains(&entry.category.as_str()) {
                 return Err(format!(
-                    "entry {} namesitem `{}`; the items are a to e",
+                    "entry {} names item `{}`; the items are a to f",
                     entry.path, entry.category
                 ));
+            }
+            if entry.category == "f" {
+                if !entry.path.starts_with(FOREIGN_LANE_PREFIX) {
+                    return Err(format!(
+                        "entry {} uses category `f` outside `{FOREIGN_LANE_PREFIX}`",
+                        entry.path
+                    ));
+                }
+                if !entry.pq_companion.contains("K-3") {
+                    return Err(format!(
+                        "entry {} uses category `f` without naming K-3 holding isolation",
+                        entry.path
+                    ));
+                }
             }
             entries.push(entry);
             Ok(())
@@ -342,9 +363,33 @@ pub fn self_test() -> Result<String, String> {
         return Err(String::from("a whole-file entry did not cover its sites"));
     }
     if parse_allowlist("unregistered_baseline = 0\n[[entry]]\npath = \"p\"\nfunction = \"*\"\npq_companion = \"x\"\ncategory = \"z\"\n").is_ok() {
-        return Err(String::from("aitem outside a to e was accepted"));
+        return Err(String::from("an item outside a to f was accepted"));
+    }
+    let bad_f_path = "unregistered_baseline = 0\n[[entry]]\npath = \"src/core/tx.rs\"\n\
+        function = \"*\"\npq_companion = \"K-3 classical isolation\"\ncategory = \"f\"\n";
+    if parse_allowlist(bad_f_path).is_ok() {
+        return Err(String::from(
+            "category f outside src/execution/coordinator/foreign/ was accepted",
+        ));
+    }
+    let bad_f_k3 = "unregistered_baseline = 0\n[[entry]]\n\
+        path = \"src/execution/coordinator/foreign/solana.rs\"\nfunction = \"*\"\n\
+        pq_companion = \"unpaired\"\ncategory = \"f\"\n";
+    if parse_allowlist(bad_f_k3).is_ok() {
+        return Err(String::from(
+            "category f without K-3 isolation declaration was accepted",
+        ));
+    }
+    let ok_f = "unregistered_baseline = 0\n[[entry]]\n\
+        path = \"src/execution/coordinator/foreign/solana.rs\"\nfunction = \"*\"\n\
+        pq_companion = \"none: UEL Compatibility Lane; K-3 classical-only isolation\"\n\
+        category = \"f\"\n";
+    if parse_allowlist(ok_f).is_err() {
+        return Err(String::from(
+            "valid category f Compatibility Lane entry was rejected",
+        ));
     }
     Ok(String::from(
-        "canary OK: registered, unregistered, stale and fallen-baseline cases behave.",
+        "canary OK: registered, unregistered, stale, fallen-baseline and K-3 category-f behave.",
     ))
 }

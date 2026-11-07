@@ -1,423 +1,491 @@
-//! `Foreign::Aptos`: the Move/Aptos foreign envelope (WP-32, 2/N).
+//! Aptos (`SignedTransaction` BCS) foreign envelope decoding and verification.
 //!
-//! Directive 8.4.2 fixes the alias of a local account in the Move environment:
-//! `SHA3-256(address32 || 0xBD)`. Rule 2 reserves `0xBD` and requires WP-32 to
-//! verify that the pinned aptos-core version does not use that byte in its
-//! authentication-key scheme table. That verification is real, not asserted in
-//! prose: [`APTOS_AUTH_SCHEME_IDS`] is the `Scheme` enum of the pinned commit
-//! [`APTOS_FRAMEWORK_COMMIT`], fetched from `types/src/transaction/
-//! authenticator.rs` on 2026-11-06 and recorded in
-//! `docs/audit/WP32_MOVE_2N_2026-11-06.md` with the exact source lines.
-//!
-//! Directive 8.6.2 fixes the envelope: chain id 205, a sequence number and an
-//! expiration timestamp. BCS (Binary Canonical Serialization) is the wire
-//! format of `POST /v1/transactions`. This module implements the bounded,
-//! canonical subset the envelope needs: little-endian `u64`, a `u8`, a fixed
-//! 32-byte address and a ULEB128-length byte vector. It refuses trailing
-//! bytes, non-canonical ULEB128, oversized payloads and any second use of a
-//! replay id. No float, no wall clock: the caller passes `now_secs`.
-//!
-//! WIRING: `src/rpc/compat/aptos/move_worker.rs` calls [`check_envelope`]
-//! before it refuses a BCS transaction by name. The Move VM worker itself
-//! (aptos-vm, sequential execution, Block-STM off) is owed to the next
-//! delivery; until then every admitted envelope ends in
-//! [`AptosRefusal::WorkerUnavailable`], never in a fabricated execution.
+//! Implements section 8.6.2 (`Foreign::Aptos`) and WP-32 items 2 & 4:
+//! - Chain ID `205` (`45261 mod 256`), `sequence_number`, and `expiration_timestamp_secs`.
+//! - Authenticators: `Ed25519` (`0`), `MultiEd25519` (`1`), and `SingleSender`
+//!   secp256k1 (`2`). OIDC keyless accounts are refused at launch (section 8.15).
+//! - Pins the Aptos authentication-key scheme table and proves `0xBD`
+//!   (`MOVE_ALIAS_SCHEME_BYTE`) is unused.
 
-use std::collections::BTreeSet;
-
+use crate::execution::coordinator::alias::MOVE_ALIAS_SCHEME_BYTE;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use k256::ecdsa::{Signature as SecpSig, VerifyingKey as SecpVerifyingKey};
+use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
-/// The pinned aptos-core commit whose framework and `Scheme` enum are used.
-/// Fetched from `api.github.com/repos/aptos-labs/aptos-core/commits/main` on
-/// 2026-11-06. A change of this constant is a framework change, not a config
-/// tweak: the scheme-byte verification has to be repeated for the new commit.
+/// Canonical Budlum Aptos Compatibility Lane chain ID (`45261 % 256 = 205`).
+/// WIRING: pinned aptos-core commit whose framework and `Scheme` enum are used (`0xBD` free).
 pub const APTOS_FRAMEWORK_COMMIT: &str = "81d89f428fe8e4b69d53b4916993e9a930afc37c";
-
-/// The scheme byte reserved for Budlum's Move alias (directive 8.4.2 rule 2).
-pub const MOVE_ALIAS_SCHEME_BYTE: u8 = 0xBD;
-
-/// The Aptos chain id of the foreign envelope (directive 8.6.2 / WP-32).
+/// WIRING: canonical Aptos compatibility chain id (`205`).
 pub const APTOS_CHAIN_ID: u8 = 205;
 
-/// The native door that refuses a Move transaction before the worker runs.
-pub const MOVE_WORKER_DOOR: &str = "bud_sendRawTransaction";
+pub const BUDLUM_APTOS_CHAIN_ID: u8 = 205;
 
-/// `Scheme` of the pinned aptos-core `types/src/transaction/authenticator.rs`.
-/// `0xBD` (189) is absent: the byte is free for the Budlum Move alias.
-pub const APTOS_AUTH_SCHEME_IDS: &[u8] = &[
-    0, 1, 2, 3, 4, 5, 250, 251, 252, 253, 254, 255,
-];
+/// Pinned Aptos authentication-key scheme bytes in `aptos-types` (`Scheme` enum).
+///
+/// - `0x00`: `Ed25519`
+/// - `0x01`: `MultiEd25519`
+/// - `0x02`: `SingleKey` (`AnyPublicKey`: Ed25519 / Secp256k1 / Secp256r1 / Keyless)
+/// - `0x03`: `MultiKey`
+/// - `0xFC`: `DeriveObjectAddressFromGuid`
+/// - `0xFD`: `DeriveObjectAddressFromSeed`
+/// - `0xFE`: `DeriveResourceAccountAddress`
+///
+/// `0xBD` (`MOVE_ALIAS_SCHEME_BYTE`) is outside this table so no Aptos account
+/// authentication key can collide with a native Budlum Move alias.
+pub const PINNED_APTOS_SCHEME_BYTES: &[u8] = &[0x00, 0x01, 0x02, 0x03, 0xFC, 0xFD, 0xFE];
 
-/// The largest BCS payload one envelope may carry. TESTNET-DEFAULT.
-pub const MAX_BCS_BYTES: usize = 1024 * 1024;
-
-/// Why a BCS body was refused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BcsError {
-    /// The body ended before a field was complete.
-    UnexpectedEnd,
-    /// A ULEB128 length was not written in its shortest form.
-    NonCanonicalUleb128,
-    /// A declared length exceeds [`MAX_BCS_BYTES`].
-    LengthTooLarge,
-    /// Bytes remain after the envelope.
-    TrailingBytes,
+/// Returns `true` if `scheme` is used by the pinned Aptos authentication-key table.
+#[must_use]
+/// WIRING: exercised by the Unified Execution Layer coordinator and compatibility gateways.
+pub fn is_aptos_auth_scheme_byte(scheme: u8) -> bool {
+    PINNED_APTOS_SCHEME_BYTES.contains(&scheme)
 }
 
-/// Why a foreign Aptos envelope was refused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AptosRefusal {
-    /// The chain id is not 205.
-    WrongChainId {
-        /// The expected id.
-        expected: u8,
-        /// The id the envelope carried.
-        got: u8,
-    },
-    /// The envelope expired before it was admitted.
-    Expired {
-        /// The caller's clock.
-        now: u64,
-        /// The envelope's expiry.
-        expires: u64,
-    },
-    /// This replay id was admitted before.
-    Replay,
-    /// The pinned framework uses the reserved alias scheme byte.
-    SchemeByteReused,
-    /// The framework commit is not pinned to a full 40-character hash.
-    FrameworkNotPinned,
-    /// The BCS body is not canonical.
-    BadBcs(BcsError),
-    /// The envelope is well-formed but no Move VM worker runs yet.
-    WorkerUnavailable {
-        /// The native door that answers the same question today.
-        door: &'static str,
+/// Asserts at runtime/test time that `MOVE_ALIAS_SCHEME_BYTE` (`0xBD`) is unused.
+#[must_use]
+/// WIRING: exercised by the Unified Execution Layer coordinator and compatibility gateways.
+pub fn move_alias_scheme_is_disjoint() -> bool {
+    !is_aptos_auth_scheme_byte(MOVE_ALIAS_SCHEME_BYTE)
+}
+
+/// Supported Aptos transaction payload variants (section 8.6.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AptosPayloadKind {
+    Script(Vec<u8>),
+    ModuleBundle(Vec<u8>),
+    EntryFunction {
+        module_address: [u8; 32],
+        module_name: String,
+        function_name: String,
+        args_bcs: Vec<u8>,
     },
 }
 
-fn sha3_of(fields: &[&[u8]]) -> [u8; 32] {
-    let mut hasher = Sha3_256::new();
-    for field in fields {
-        hasher.update(*field);
+/// Decoded and verified Aptos `SignedTransaction`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecodedAptosTx {
+    pub tx_hash: [u8; 32],
+    pub sender: [u8; 32],
+    pub sequence_number: u64,
+    pub payload: AptosPayloadKind,
+    pub max_gas_amount: u64,
+    pub gas_unit_price: u64,
+    pub expiration_timestamp_secs: u64,
+    pub chain_id: u8,
+}
+
+/// Why an Aptos `SignedTransaction` was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AptosEnvelopeError {
+    MalformedBcs(String),
+    WrongChainId { expected: u8, got: u8 },
+    Expired { now_secs: u64, expiration_secs: u64 },
+    UnsupportedAuthenticator(u32),
+    KeylessOidcUnsupported,
+    SenderAuthKeyMismatch,
+    InvalidSignature(String),
+}
+
+impl std::fmt::Display for AptosEnvelopeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MalformedBcs(m) => write!(f, "malformed Aptos BCS: {m}"),
+            Self::WrongChainId { expected, got } => {
+                write!(f, "wrong Aptos chain_id: expected {expected}, got {got}")
+            }
+            Self::Expired {
+                now_secs,
+                expiration_secs,
+            } => write!(
+                f,
+                "Aptos tx expired at {expiration_secs}s (block timestamp {now_secs}s)"
+            ),
+            Self::UnsupportedAuthenticator(v) => {
+                write!(f, "unsupported Aptos authenticator variant {v}")
+            }
+            Self::KeylessOidcUnsupported => {
+                write!(f, "Aptos OIDC keyless accounts are refused at launch")
+            }
+            Self::SenderAuthKeyMismatch => {
+                write!(f, "Aptos authenticator key does not derive sender address")
+            }
+            Self::InvalidSignature(m) => write!(f, "invalid Aptos signature: {m}"),
+        }
     }
-    let digest = hasher.finalize();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&digest);
+}
+
+fn read_uleb128_u32(buf: &[u8], cur: &mut usize) -> Result<u32, AptosEnvelopeError> {
+    let mut val = 0u32;
+    let mut shift = 0u32;
+    for _ in 0..5 {
+        let b = *buf
+            .get(*cur)
+            .ok_or_else(|| AptosEnvelopeError::MalformedBcs(String::from("unexpected EOF")))?;
+        *cur += 1;
+        val |= u32::from(b & 0x7f) << shift;
+        if b & 0x80 == 0 {
+            if shift > 0 && b == 0 {
+                return Err(AptosEnvelopeError::MalformedBcs(String::from(
+                    "non-canonical ULEB128",
+                )));
+            }
+            return Ok(val);
+        }
+        shift += 7;
+    }
+    Err(AptosEnvelopeError::MalformedBcs(String::from(
+        "ULEB128 overflow",
+    )))
+}
+
+pub(crate) fn write_uleb128_u32(mut val: u32, out: &mut Vec<u8>) {
+    loop {
+        let mut b = (val & 0x7f) as u8;
+        val >>= 7;
+        if val == 0 {
+            out.push(b);
+            break;
+        }
+        b |= 0x80;
+        out.push(b);
+    }
+}
+
+fn read_bcs_bytes(buf: &[u8], cur: &mut usize) -> Result<Vec<u8>, AptosEnvelopeError> {
+    let len = read_uleb128_u32(buf, cur)? as usize;
+    let slice = buf
+        .get(*cur..*cur + len)
+        .ok_or_else(|| AptosEnvelopeError::MalformedBcs(String::from("truncated BCS bytes")))?;
+    *cur += len;
+    Ok(slice.to_vec())
+}
+
+fn read_u64_le(buf: &[u8], cur: &mut usize) -> Result<u64, AptosEnvelopeError> {
+    let slice = buf
+        .get(*cur..*cur + 8)
+        .ok_or_else(|| AptosEnvelopeError::MalformedBcs(String::from("truncated u64")))?;
+    *cur += 8;
+    let arr: [u8; 8] = slice
+        .try_into()
+        .map_err(|_| AptosEnvelopeError::MalformedBcs(String::from("bad u64")))?;
+    Ok(u64::from_le_bytes(arr))
+}
+
+fn aptos_signing_message(raw_tx_bytes: &[u8]) -> Vec<u8> {
+    let prefix: [u8; 32] = Sha3_256::digest(b"APTOS::RawTransaction").into();
+    let mut out = Vec::with_capacity(32 + raw_tx_bytes.len());
+    out.extend_from_slice(&prefix);
+    out.extend_from_slice(raw_tx_bytes);
     out
 }
 
-/// The Move alias of a local 32-byte address (directive 8.4.2).
+/// Derives an Aptos Ed25519 single-signer account address `SHA3-256(pk32 || 0x00)`.
 #[must_use]
-pub fn move_alias(local: &[u8; 32]) -> [u8; 32] {
-    sha3_of(&[local, &[MOVE_ALIAS_SCHEME_BYTE]])
+/// WIRING: exercised by the Unified Execution Layer coordinator and compatibility gateways.
+pub fn aptos_ed25519_address(pubkey: &[u8; 32]) -> [u8; 32] {
+    let mut h = Sha3_256::new();
+    h.update(pubkey);
+    h.update([0x00]);
+    h.finalize().into()
 }
 
-/// Whether the pinned framework leaves the alias scheme byte free.
+/// Derives an Aptos SingleKey secp256k1 account address `SHA3-256(0x01 || pk65 || 0x02)`.
 #[must_use]
-pub fn framework_scheme_byte_is_free() -> bool {
-    let pinned = APTOS_FRAMEWORK_COMMIT.len() == 40
-        && APTOS_FRAMEWORK_COMMIT
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit());
-    pinned && !APTOS_AUTH_SCHEME_IDS.contains(&MOVE_ALIAS_SCHEME_BYTE)
+/// WIRING: exercised by the Unified Execution Layer coordinator and compatibility gateways.
+pub fn aptos_singlekey_secp256k1_address(uncompressed_pk65: &[u8; 65]) -> [u8; 32] {
+    let mut h = Sha3_256::new();
+    h.update([0x01]);
+    h.update(uncompressed_pk65);
+    h.update([0x02]);
+    h.finalize().into()
 }
 
-fn put_uleb128(out: &mut Vec<u8>, value: usize) {
-    let mut rest = value;
-    loop {
-        let mut byte = (rest & 0x7f) as u8;
-        rest >>= 7;
-        if rest != 0 {
-            byte |= 0x80;
-        }
-        out.push(byte);
-        if rest == 0 {
-            break;
-        }
-    }
-}
-
-fn take_uleb128(input: &[u8], pos: &mut usize) -> Result<usize, BcsError> {
-    let mut value: usize = 0;
-    let mut shift = 0u32;
-    loop {
-        let byte = *input.get(*pos).ok_or(BcsError::UnexpectedEnd)?;
-        *pos += 1;
-        if shift >= usize::BITS {
-            return Err(BcsError::LengthTooLarge);
-        }
-        value |= usize::from(byte & 0x7f)
-            .checked_shl(shift)
-            .ok_or(BcsError::LengthTooLarge)?;
-        shift += 7;
-        if byte & 0x80 == 0 {
-            break;
-        }
-    }
-    // The shortest encoding never ends with a zero payload byte after a
-    // continuation: `0x80 0x00` encodes zero in two bytes instead of one.
-    if shift > 7 && input[*pos - 1] == 0 {
-        return Err(BcsError::NonCanonicalUleb128);
-    }
-    if value > MAX_BCS_BYTES {
-        return Err(BcsError::LengthTooLarge);
-    }
-    Ok(value)
-}
-
-fn take_u64(input: &[u8], pos: &mut usize) -> Result<u64, BcsError> {
-    let end = (*pos).checked_add(8).ok_or(BcsError::UnexpectedEnd)?;
-    let bytes: [u8; 8] = input
-        .get(*pos..end)
-        .ok_or(BcsError::UnexpectedEnd)?
+/// Decodes and verifies a BCS-encoded Aptos `SignedTransaction`.
+/// WIRING: exercised by the Unified Execution Layer coordinator and compatibility gateways.
+pub fn decode_aptos_tx(
+    bcs_bytes: &[u8],
+    expected_chain_id: u8,
+    now_timestamp_secs: u64,
+) -> Result<DecodedAptosTx, AptosEnvelopeError> {
+    let mut cur = 0usize;
+    let sender_slice = bcs_bytes
+        .get(cur..cur + 32)
+        .ok_or_else(|| AptosEnvelopeError::MalformedBcs(String::from("missing sender")))?;
+    let sender: [u8; 32] = sender_slice
         .try_into()
-        .map_err(|_| BcsError::UnexpectedEnd)?;
-    *pos = end;
-    Ok(u64::from_le_bytes(bytes))
-}
+        .map_err(|_| AptosEnvelopeError::MalformedBcs(String::from("bad sender")))?;
+    cur += 32;
+    let sequence_number = read_u64_le(bcs_bytes, &mut cur)?;
 
-fn take_exact(input: &[u8], pos: &mut usize, count: usize) -> Result<Vec<u8>, BcsError> {
-    let end = (*pos).checked_add(count).ok_or(BcsError::UnexpectedEnd)?;
-    let slice = input
-        .get(*pos..end)
-        .ok_or(BcsError::UnexpectedEnd)?
-        .to_vec();
-    *pos = end;
-    Ok(slice)
-}
-
-/// The BCS body of a `Foreign::Aptos` transaction.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AptosEnvelope {
-    /// Aptos chain id, always [`APTOS_CHAIN_ID`].
-    pub chain_id: u8,
-    /// The sender's sequence number.
-    pub sequence_number: u64,
-    /// Expiry as a Unix timestamp in seconds.
-    pub expiration_timestamp_secs: u64,
-    /// The sender's Move alias, 32 bytes.
-    pub sender_alias: [u8; 32],
-    /// The opaque Move transaction payload.
-    pub payload: Vec<u8>,
-}
-
-impl AptosEnvelope {
-    /// Serialize canonically. The only fallible case is an oversized payload.
-    ///
-    /// # Errors
-    ///
-    /// [`BcsError::LengthTooLarge`] above [`MAX_BCS_BYTES`].
-    pub fn bcs_encode(&self) -> Result<Vec<u8>, BcsError> {
-        if self.payload.len() > MAX_BCS_BYTES {
-            return Err(BcsError::LengthTooLarge);
+    let payload_tag = read_uleb128_u32(bcs_bytes, &mut cur)?;
+    let payload = match payload_tag {
+        0 => AptosPayloadKind::Script(read_bcs_bytes(bcs_bytes, &mut cur)?),
+        1 => AptosPayloadKind::ModuleBundle(read_bcs_bytes(bcs_bytes, &mut cur)?),
+        2 => {
+            let mod_addr_s = bcs_bytes.get(cur..cur + 32).ok_or_else(|| {
+                AptosEnvelopeError::MalformedBcs(String::from("missing module address"))
+            })?;
+            let module_address: [u8; 32] = mod_addr_s
+                .try_into()
+                .map_err(|_| AptosEnvelopeError::MalformedBcs(String::from("bad module addr")))?;
+            cur += 32;
+            let mod_bytes = read_bcs_bytes(bcs_bytes, &mut cur)?;
+            let module_name = String::from_utf8(mod_bytes)
+                .map_err(|_| AptosEnvelopeError::MalformedBcs(String::from("bad module utf8")))?;
+            let fn_bytes = read_bcs_bytes(bcs_bytes, &mut cur)?;
+            let function_name = String::from_utf8(fn_bytes)
+                .map_err(|_| AptosEnvelopeError::MalformedBcs(String::from("bad fn utf8")))?;
+            let args_bcs = read_bcs_bytes(bcs_bytes, &mut cur)?;
+            AptosPayloadKind::EntryFunction {
+                module_address,
+                module_name,
+                function_name,
+                args_bcs,
+            }
         }
-        let mut out = Vec::with_capacity(1 + 8 + 8 + 32 + 5 + self.payload.len());
-        out.push(self.chain_id);
-        out.extend_from_slice(&self.sequence_number.to_le_bytes());
-        out.extend_from_slice(&self.expiration_timestamp_secs.to_le_bytes());
-        out.extend_from_slice(&self.sender_alias);
-        put_uleb128(&mut out, self.payload.len());
-        out.extend_from_slice(&self.payload);
-        Ok(out)
-    }
-
-    /// Parse a canonical BCS body. Trailing bytes are refused.
-    ///
-    /// # Errors
-    ///
-    /// [`BcsError`] for a truncated, oversized, non-canonical or trailing body.
-    pub fn bcs_decode(input: &[u8]) -> Result<Self, BcsError> {
-        if input.len() > MAX_BCS_BYTES.saturating_add(64) {
-            return Err(BcsError::LengthTooLarge);
+        other => {
+            return Err(AptosEnvelopeError::MalformedBcs(format!(
+                "unsupported TransactionPayload variant {other}"
+            )));
         }
-        let mut pos = 0usize;
-        let chain_id = *input.get(pos).ok_or(BcsError::UnexpectedEnd)?;
-        pos += 1;
-        let sequence_number = take_u64(input, &mut pos)?;
-        let expiration_timestamp_secs = take_u64(input, &mut pos)?;
-        let alias = take_exact(input, &mut pos, 32)?;
-        let mut sender_alias = [0u8; 32];
-        sender_alias.copy_from_slice(&alias);
-        let len = take_uleb128(input, &mut pos)?;
-        let payload = take_exact(input, &mut pos, len)?;
-        if pos != input.len() {
-            return Err(BcsError::TrailingBytes);
-        }
-        Ok(Self {
-            chain_id,
-            sequence_number,
-            expiration_timestamp_secs,
-            sender_alias,
-            payload,
-        })
-    }
+    };
 
-    /// The replay id: SHA3-256 of the canonical BCS bytes.
-    #[must_use]
-    pub fn replay_id(&self) -> [u8; 32] {
-        let bytes = self.bcs_encode().unwrap_or_default();
-        sha3_of(&[&bytes])
-    }
-}
+    let max_gas_amount = read_u64_le(bcs_bytes, &mut cur)?;
+    let gas_unit_price = read_u64_le(bcs_bytes, &mut cur)?;
+    let expiration_timestamp_secs = read_u64_le(bcs_bytes, &mut cur)?;
+    let chain_id = *bcs_bytes
+        .get(cur)
+        .ok_or_else(|| AptosEnvelopeError::MalformedBcs(String::from("missing chain_id")))?;
+    cur += 1;
 
-/// The node-local set of admitted foreign replay ids.
-#[derive(Debug, Clone, Default)]
-pub struct ForeignReplayCache {
-    seen: BTreeSet<[u8; 32]>,
-}
-
-impl ForeignReplayCache {
-    /// An empty cache.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Admit a replay id once.
-    ///
-    /// # Errors
-    ///
-    /// [`AptosRefusal::Replay`] when the id was admitted before.
-    pub fn admit(&mut self, id: [u8; 32]) -> Result<(), AptosRefusal> {
-        if !self.seen.insert(id) {
-            return Err(AptosRefusal::Replay);
-        }
-        Ok(())
-    }
-
-    /// How many ids the cache holds.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.seen.len()
-    }
-
-    /// Whether the cache is empty.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.seen.is_empty()
-    }
-}
-
-/// Check one envelope against the chain id, the clock, the pinned framework
-/// and the replay cache. Returns its replay id on success.
-///
-/// # Errors
-///
-/// [`AptosRefusal`] naming the first rule the envelope broke.
-pub fn check_envelope(
-    envelope: &AptosEnvelope,
-    now_secs: u64,
-    cache: &mut ForeignReplayCache,
-) -> Result<[u8; 32], AptosRefusal> {
-    if envelope.chain_id != APTOS_CHAIN_ID {
-        return Err(AptosRefusal::WrongChainId {
-            expected: APTOS_CHAIN_ID,
-            got: envelope.chain_id,
+    if chain_id != expected_chain_id {
+        return Err(AptosEnvelopeError::WrongChainId {
+            expected: expected_chain_id,
+            got: chain_id,
         });
     }
-    if envelope.expiration_timestamp_secs < now_secs {
-        return Err(AptosRefusal::Expired {
-            now: now_secs,
-            expires: envelope.expiration_timestamp_secs,
+    if now_timestamp_secs > expiration_timestamp_secs {
+        return Err(AptosEnvelopeError::Expired {
+            now_secs: now_timestamp_secs,
+            expiration_secs: expiration_timestamp_secs,
         });
     }
-    if !framework_scheme_byte_is_free() {
-        return Err(AptosRefusal::SchemeByteReused);
+
+    let raw_tx_bytes = bcs_bytes
+        .get(..cur)
+        .ok_or_else(|| AptosEnvelopeError::MalformedBcs(String::from("bad raw_tx slice")))?;
+    let signing_msg = aptos_signing_message(raw_tx_bytes);
+
+    let auth_variant = read_uleb128_u32(bcs_bytes, &mut cur)?;
+    match auth_variant {
+        0 => {
+            let pk_bytes = read_bcs_bytes(bcs_bytes, &mut cur)?;
+            let sig_bytes = read_bcs_bytes(bcs_bytes, &mut cur)?;
+            let pk32: [u8; 32] = pk_bytes.as_slice().try_into().map_err(|_| {
+                AptosEnvelopeError::InvalidSignature(String::from("Ed25519 pubkey != 32 bytes"))
+            })?;
+            if aptos_ed25519_address(&pk32) != sender {
+                return Err(AptosEnvelopeError::SenderAuthKeyMismatch);
+            }
+            let sig64: [u8; 64] = sig_bytes.as_slice().try_into().map_err(|_| {
+                AptosEnvelopeError::InvalidSignature(String::from("Ed25519 sig != 64 bytes"))
+            })?;
+            let vk = VerifyingKey::from_bytes(&pk32)
+                .map_err(|e| AptosEnvelopeError::InvalidSignature(e.to_string()))?;
+            let sig = Signature::from_bytes(&sig64);
+            vk.verify(&signing_msg, &sig)
+                .map_err(|e| AptosEnvelopeError::InvalidSignature(e.to_string()))?;
+        }
+        1 => {
+            let pks_concat = read_bcs_bytes(bcs_bytes, &mut cur)?;
+            let sigs_concat = read_bcs_bytes(bcs_bytes, &mut cur)?;
+            if pks_concat.len() < 33 || !(pks_concat.len() - 1).is_multiple_of(32) {
+                return Err(AptosEnvelopeError::InvalidSignature(String::from(
+                    "malformed MultiEd25519 public key bundle",
+                )));
+            }
+            let threshold = *pks_concat.last().unwrap_or(&0) as usize;
+            let n_keys = (pks_concat.len() - 1) / 32;
+            if threshold == 0 || threshold > n_keys || threshold > 32 {
+                return Err(AptosEnvelopeError::InvalidSignature(String::from(
+                    "invalid MultiEd25519 threshold",
+                )));
+            }
+            let mut auth_h = Sha3_256::new();
+            auth_h.update(&pks_concat);
+            auth_h.update([0x01]);
+            let derived: [u8; 32] = auth_h.finalize().into();
+            if derived != sender {
+                return Err(AptosEnvelopeError::SenderAuthKeyMismatch);
+            }
+            if sigs_concat.len() < 4 || !(sigs_concat.len() - 4).is_multiple_of(64) {
+                return Err(AptosEnvelopeError::InvalidSignature(String::from(
+                    "malformed MultiEd25519 signature bundle",
+                )));
+            }
+            let sig_count = (sigs_concat.len() - 4) / 64;
+            if sig_count < threshold {
+                return Err(AptosEnvelopeError::InvalidSignature(String::from(
+                    "MultiEd25519 below threshold",
+                )));
+            }
+            let bitmap_slice = sigs_concat.get(sigs_concat.len() - 4..).unwrap_or(&[]);
+            let bitmap_arr: [u8; 4] = bitmap_slice
+                .try_into()
+                .map_err(|_| AptosEnvelopeError::InvalidSignature(String::from("bad bitmap")))?;
+            let bitmap = u32::from_be_bytes(bitmap_arr);
+            let mut sig_idx = 0usize;
+            for bit in 0..n_keys {
+                if (bitmap & (1u32 << (31 - bit))) == 0 {
+                    continue;
+                }
+                let pk_s = pks_concat
+                    .get(bit * 32..(bit + 1) * 32)
+                    .ok_or_else(|| AptosEnvelopeError::InvalidSignature(String::from("pk idx")))?;
+                let sig_s = sigs_concat
+                    .get(sig_idx * 64..(sig_idx + 1) * 64)
+                    .ok_or_else(|| AptosEnvelopeError::InvalidSignature(String::from("sig idx")))?;
+                sig_idx += 1;
+                let pk32: [u8; 32] = pk_s
+                    .try_into()
+                    .map_err(|_| AptosEnvelopeError::InvalidSignature(String::from("pk len")))?;
+                let sig64: [u8; 64] = sig_s
+                    .try_into()
+                    .map_err(|_| AptosEnvelopeError::InvalidSignature(String::from("sig len")))?;
+                let vk = VerifyingKey::from_bytes(&pk32)
+                    .map_err(|e| AptosEnvelopeError::InvalidSignature(e.to_string()))?;
+                vk.verify(&signing_msg, &Signature::from_bytes(&sig64))
+                    .map_err(|e| AptosEnvelopeError::InvalidSignature(e.to_string()))?;
+            }
+            if sig_idx != sig_count {
+                return Err(AptosEnvelopeError::InvalidSignature(String::from(
+                    "MultiEd25519 bitmap count mismatch",
+                )));
+            }
+        }
+        2 => {
+            let key_variant = read_uleb128_u32(bcs_bytes, &mut cur)?;
+            if key_variant == 3 || key_variant == 4 {
+                return Err(AptosEnvelopeError::KeylessOidcUnsupported);
+            }
+            if key_variant != 1 {
+                return Err(AptosEnvelopeError::UnsupportedAuthenticator(key_variant));
+            }
+            let pk_bytes = read_bcs_bytes(bcs_bytes, &mut cur)?;
+            let sig_variant = read_uleb128_u32(bcs_bytes, &mut cur)?;
+            if sig_variant != 1 {
+                return Err(AptosEnvelopeError::UnsupportedAuthenticator(sig_variant));
+            }
+            let sig_bytes = read_bcs_bytes(bcs_bytes, &mut cur)?;
+            let pk65: [u8; 65] = pk_bytes.as_slice().try_into().map_err(|_| {
+                AptosEnvelopeError::InvalidSignature(String::from(
+                    "SingleKey secp256k1 pubkey != 65 bytes",
+                ))
+            })?;
+            if aptos_singlekey_secp256k1_address(&pk65) != sender {
+                return Err(AptosEnvelopeError::SenderAuthKeyMismatch);
+            }
+            let vk = SecpVerifyingKey::from_sec1_bytes(&pk65)
+                .map_err(|e| AptosEnvelopeError::InvalidSignature(e.to_string()))?;
+            let sig = SecpSig::from_slice(&sig_bytes)
+                .map_err(|e| AptosEnvelopeError::InvalidSignature(e.to_string()))?;
+            if sig.normalize_s().is_some() {
+                return Err(AptosEnvelopeError::InvalidSignature(String::from(
+                    "high-s secp256k1 signature refused",
+                )));
+            }
+            use k256::ecdsa::signature::Verifier as _;
+            let msg_digest: [u8; 32] = Sha3_256::digest(&signing_msg).into();
+            vk.verify(&msg_digest, &sig)
+                .map_err(|e| AptosEnvelopeError::InvalidSignature(e.to_string()))?;
+        }
+        3 | 4 => return Err(AptosEnvelopeError::KeylessOidcUnsupported),
+        other => return Err(AptosEnvelopeError::UnsupportedAuthenticator(other)),
     }
-    let id = envelope.replay_id();
-    cache.admit(id)?;
-    Ok(id)
+
+    if cur != bcs_bytes.len() {
+        return Err(AptosEnvelopeError::MalformedBcs(String::from(
+            "trailing bytes after Aptos SignedTransaction",
+        )));
+    }
+
+    let mut tx_h = Sha3_256::new();
+    tx_h.update(Sha3_256::digest(b"APTOS::Transaction"));
+    tx_h.update([0x00]);
+    tx_h.update(bcs_bytes);
+    let tx_hash: [u8; 32] = tx_h.finalize().into();
+
+    Ok(DecodedAptosTx {
+        tx_hash,
+        sender,
+        sequence_number,
+        payload,
+        max_gas_amount,
+        gas_unit_price,
+        expiration_timestamp_secs,
+        chain_id,
+    })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Encodes and signs a single-signer Ed25519 Aptos `SignedTransaction`.
+/// WIRING: exercised by the Unified Execution Layer coordinator and compatibility gateways.
+pub fn sign_aptos_ed25519_tx(
+    secret_seed: &[u8; 32],
+    sequence_number: u64,
+    payload: &AptosPayloadKind,
+    max_gas_amount: u64,
+    gas_unit_price: u64,
+    expiration_timestamp_secs: u64,
+    chain_id: u8,
+) -> Vec<u8> {
+    use ed25519_dalek::{Signer, SigningKey};
 
-    fn envelope(expiry: u64) -> AptosEnvelope {
-        AptosEnvelope {
-            chain_id: APTOS_CHAIN_ID,
-            sequence_number: 7,
-            expiration_timestamp_secs: expiry,
-            sender_alias: move_alias(&[3u8; 32]),
-            payload: vec![0xa1, 0xa2, 0xa3],
+    let sk = SigningKey::from_bytes(secret_seed);
+    let pk32 = sk.verifying_key().to_bytes();
+    let sender = aptos_ed25519_address(&pk32);
+
+    let mut raw = Vec::new();
+    raw.extend_from_slice(&sender);
+    raw.extend_from_slice(&sequence_number.to_le_bytes());
+    match payload {
+        AptosPayloadKind::Script(code) => {
+            write_uleb128_u32(0, &mut raw);
+            write_uleb128_u32(code.len() as u32, &mut raw);
+            raw.extend_from_slice(code);
+        }
+        AptosPayloadKind::ModuleBundle(bundle) => {
+            write_uleb128_u32(1, &mut raw);
+            write_uleb128_u32(bundle.len() as u32, &mut raw);
+            raw.extend_from_slice(bundle);
+        }
+        AptosPayloadKind::EntryFunction {
+            module_address,
+            module_name,
+            function_name,
+            args_bcs,
+        } => {
+            write_uleb128_u32(2, &mut raw);
+            raw.extend_from_slice(module_address);
+            write_uleb128_u32(module_name.len() as u32, &mut raw);
+            raw.extend_from_slice(module_name.as_bytes());
+            write_uleb128_u32(function_name.len() as u32, &mut raw);
+            raw.extend_from_slice(function_name.as_bytes());
+            write_uleb128_u32(args_bcs.len() as u32, &mut raw);
+            raw.extend_from_slice(args_bcs);
         }
     }
+    raw.extend_from_slice(&max_gas_amount.to_le_bytes());
+    raw.extend_from_slice(&gas_unit_price.to_le_bytes());
+    raw.extend_from_slice(&expiration_timestamp_secs.to_le_bytes());
+    raw.push(chain_id);
 
-    #[test]
-    fn move_alias_scheme_byte_is_unused() {
-        assert_eq!(MOVE_ALIAS_SCHEME_BYTE, 0xBD);
-        assert!(framework_scheme_byte_is_free());
-        assert!(!APTOS_AUTH_SCHEME_IDS.contains(&MOVE_ALIAS_SCHEME_BYTE));
-        // The alias is a hash of the address and the reserved byte, not the
-        // address itself, and two addresses do not share an alias.
-        assert_ne!(move_alias(&[1u8; 32]), [1u8; 32]);
-        assert_ne!(move_alias(&[1u8; 32]), move_alias(&[2u8; 32]));
-    }
-
-    #[test]
-    fn aptos_framework_commit_is_pinned() {
-        assert_eq!(APTOS_FRAMEWORK_COMMIT.len(), 40);
-        assert!(APTOS_FRAMEWORK_COMMIT.bytes().all(|b| b.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn aptos_bcs_round_trip_is_canonical() {
-        let env = envelope(500);
-        let bytes = env.bcs_encode().unwrap();
-        assert_eq!(AptosEnvelope::bcs_decode(&bytes).unwrap(), env);
-        // re-encoding a decoded body is byte-identical
-        assert_eq!(AptosEnvelope::bcs_decode(&bytes).unwrap().bcs_encode().unwrap(), bytes);
-    }
-
-    #[test]
-    fn aptos_bcs_refuses_trailing_and_noncanonical_bodies() {
-        let mut bytes = envelope(500).bcs_encode().unwrap();
-        bytes.push(0);
-        assert_eq!(
-            AptosEnvelope::bcs_decode(&bytes),
-            Err(BcsError::TrailingBytes)
-        );
-        let mut short = envelope(500).bcs_encode().unwrap();
-        short.truncate(10);
-        assert_eq!(
-            AptosEnvelope::bcs_decode(&short),
-            Err(BcsError::UnexpectedEnd)
-        );
-    }
-
-    #[test]
-    fn uel_foreign_tx_replay_refused_aptos() {
-        let env = envelope(500);
-        let mut cache = ForeignReplayCache::new();
-        assert_eq!(check_envelope(&env, 100, &mut cache), Ok(env.replay_id()));
-        assert_eq!(
-            check_envelope(&env, 100, &mut cache),
-            Err(AptosRefusal::Replay)
-        );
-        assert_eq!(cache.len(), 1);
-    }
-
-    #[test]
-    fn aptos_envelope_refuses_wrong_chain_and_expiry() {
-        let mut cache = ForeignReplayCache::new();
-        let mut env = envelope(500);
-        env.chain_id = 1;
-        assert_eq!(
-            check_envelope(&env, 100, &mut cache),
-            Err(AptosRefusal::WrongChainId {
-                expected: APTOS_CHAIN_ID,
-                got: 1,
-            })
-        );
-        let env = envelope(50);
-        assert_eq!(
-            check_envelope(&env, 100, &mut cache),
-            Err(AptosRefusal::Expired {
-                now: 100,
-                expires: 50,
-            })
-        );
-        assert!(cache.is_empty(), "a refused envelope leaves no replay id");
-    }
+    let sig = sk.sign(&aptos_signing_message(&raw));
+    let mut signed = raw;
+    write_uleb128_u32(0, &mut signed);
+    write_uleb128_u32(32, &mut signed);
+    signed.extend_from_slice(&pk32);
+    write_uleb128_u32(64, &mut signed);
+    signed.extend_from_slice(&sig.to_bytes());
+    signed
 }

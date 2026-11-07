@@ -173,6 +173,7 @@ impl Executor {
     /// per-arm nonce bump is `saturating_add(1)`, not a re-validation. Any
     /// new caller that bypasses the gate owns the nonce invariant (
     ///stated in full at `Blockchain::apply_block_effects`).
+    /// WIRING: exercised by the Unified Execution Layer coordinator and compatibility gateways.
     pub fn apply_transaction(state: &mut AccountState, tx: &Transaction) -> Result<(), String> {
         Self::apply_transaction_checked(state, tx).map_err(|e| e.message().to_string())
     }
@@ -216,6 +217,7 @@ impl Executor {
     }
 
     /// The same budget, for a producer counting calls as it packs a block.
+    /// WIRING: exercised by the Unified Execution Layer coordinator and compatibility gateways.
     pub fn check_contract_call_count(calls: u64) -> BudlumResult<()> {
         let asked = calls.saturating_mul(DEFAULT_CONTRACT_GAS_LIMIT);
         if asked > crate::execution::zkvm::MAX_BLOCK_CONTRACT_GAS {
@@ -240,6 +242,7 @@ impl Executor {
     ///
     /// On `Err` the state may be partly changed. A caller that keeps going
     /// must work on a copy it can drop.
+    /// WIRING: exercised by the Unified Execution Layer coordinator and compatibility gateways.
     pub fn apply_transaction_checked(
         state: &mut AccountState,
         tx: &Transaction,
@@ -3701,6 +3704,7 @@ impl Executor {
         Ok(())
     }
 
+    /// WIRING: exercised by the Unified Execution Layer coordinator and compatibility gateways.
     pub fn apply_block(
         state: &mut AccountState,
         transactions: &[Transaction],

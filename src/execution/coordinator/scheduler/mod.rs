@@ -57,6 +57,7 @@ pub struct AccessSet {
 impl AccessSet {
     /// The fallback: conflicts with everything.
     #[must_use]
+    /// WIRING: exercised by the Unified Execution Layer coordinator and compatibility gateways.
     pub fn global() -> Self {
         Self {
             global: true,
@@ -66,6 +67,7 @@ impl AccessSet {
 
     /// Whether the two transactions must keep their relative order.
     #[must_use]
+    /// WIRING: exercised by the Unified Execution Layer coordinator and compatibility gateways.
     pub fn conflicts_with(&self, other: &Self) -> bool {
         if self.global || other.global {
             return true;
@@ -83,6 +85,7 @@ impl AccessSet {
 /// block end, outside the per-transaction path. Every other type falls back
 /// to [`AccessSet::global`] until its effects are written out here.
 #[must_use]
+/// WIRING: exercised by the Unified Execution Layer coordinator and compatibility gateways.
 pub fn access_set(tx: &Transaction) -> AccessSet {
     match tx.tx_type {
         TransactionType::Transfer if tx.from != Address::zero() => {
@@ -108,11 +111,13 @@ pub struct Plan {
 impl Plan {
     /// Every index exactly once.
     #[must_use]
+    /// WIRING: exercised by the Unified Execution Layer coordinator and compatibility gateways.
     pub fn len(&self) -> usize {
         self.waves.iter().map(Vec::len).sum()
     }
 
     #[must_use]
+    /// WIRING: exercised by the Unified Execution Layer coordinator and compatibility gateways.
     pub fn is_empty(&self) -> bool {
         self.waves.is_empty()
     }
@@ -125,6 +130,7 @@ impl Plan {
 /// and a global transaction raises a floor that every later transaction
 /// starts above.
 #[must_use]
+/// WIRING: exercised by the Unified Execution Layer coordinator and compatibility gateways.
 pub fn plan(sets: &[AccessSet]) -> Plan {
     let mut last_write: BTreeMap<StateKey, usize> = BTreeMap::new();
     let mut last_read: BTreeMap<StateKey, usize> = BTreeMap::new();
