@@ -65,6 +65,7 @@ mod gates {
     pub mod coding_audit_samples_the_relationship;
     pub mod consensus_maps_ordered;
     pub mod consensus_state_only_changes_in_blocks;
+    pub mod concept_names;
     pub mod containment_defaults;
     pub mod content_encryption_is_declared_and_bound;
     pub mod coverage;
@@ -1067,6 +1068,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::reduction_claims::self_test,
+    },
+    Gate {
+        name: "concept-names",
+        replaces: None,
+        run: gates::concept_names::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::concept_names::self_test,
     },
     Gate {
         name: "consensus-maps-are-ordered",
