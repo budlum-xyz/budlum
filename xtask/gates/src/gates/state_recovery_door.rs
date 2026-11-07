@@ -1,16 +1,16 @@
-//! Gate: the regeneration health layer stays wired, blocked, and provable.
+//! Gate: the state-recovery health layer stays wired, blocked, and provable.
 //!
 //! What this gate promises, per the 2026-09-17 decision record (item 11):
-//! code that is incompatible with the regeneration layer's wiring is BLOCKED
+//! code that is incompatible with the state-recovery layer's wiring is BLOCKED
 //! at CI - the gate turns red and the merge cannot proceed - and the gate
 //! proves it is not vacuous by corrupting its own fixture set in
 //! `self_test` and requiring every corruption to be caught.
 //!
 //! What it checks:
 //!
-//! 1. The health layer exists and is exported (`src/domain/mod.rs` declares
+//! 1. The health layer exists and is exported (`src/chain/mod.rs` declares
 //!    it; the door cannot be deleted silently).
-//! 2. The ledger's old "unwired" doors are gone: `regeneration_stage.rs` no
+//! 2. The ledger's old "unwired" doors are gone: `state_recovery/stage.rs` no
 //!    longer marks `cheapest_target` or `reversion_beats_repair` as unwired,
 //!    and the forgery door (`revert_after_forgery` plus its two refusal
 //!    variants) exists.
@@ -25,10 +25,10 @@
 
 use std::path::Path;
 
-const MOD_RS: &str = "src/domain/mod.rs";
-const STAGE_RS: &str = "src/domain/regeneration_stage.rs";
-const HEALTH_RS: &str = "src/domain/regen_health.rs";
-const CHAOS_RS: &str = "src/tests/regeneration_recovery.rs";
+const MOD_RS: &str = "src/chain/mod.rs";
+const STAGE_RS: &str = "src/chain/state_recovery/stage.rs";
+const HEALTH_RS: &str = "src/chain/state_recovery/health.rs";
+const CHAOS_RS: &str = "src/tests/state_recovery.rs";
 
 /// The decision-order tokens inside `assess`, in the required order. Each is
 /// a code token (not a comment), so rewording prose cannot weaken the pin.
@@ -116,9 +116,9 @@ fn is_live_test(src: &str, name: &str) -> bool {
 
 /// The whole check, factored out so `self_test` can feed it tampered copies.
 fn probe(mod_rs: &str, stage: &str, health: &str, chaos: &str, problems: &mut Vec<String>) {
-    if !declares_module(mod_rs, "pub mod regen_health;") {
+    if !declares_module(mod_rs, "pub mod state_recovery;") {
         problems.push(format!(
-            "{MOD_RS}: regen_health no longer declared - the health layer was removed silently"
+            "{MOD_RS}: state_recovery no longer declared - the health layer was removed silently"
         ));
     }
     if stage.contains("WIRING: unwired") {
@@ -289,7 +289,7 @@ fn self_test_late(
     }
     {
         let mut p: Vec<String> = Vec::new();
-        let gated = "#[cfg(any())]\npub mod regen_health;\n";
+        let gated = "#[cfg(any())]\npub mod state_recovery;\n";
         probe(gated, good_stage, good_health, good_chaos, &mut p);
         if p.is_empty() {
             problems.push("canary failed: a gated module declaration not caught".into());
@@ -298,7 +298,7 @@ fn self_test_late(
 }
 
 pub fn self_test() -> Result<String, String> {
-    let good_mod = "pub mod regen_health;\npub mod regeneration_stage;\n";
+    let good_mod = "pub mod state_recovery;\n";
     let good_stage = concat!(
         "pub fn revert_after_forgery( self ) ReversionError::LedgerIsValid ",
         "ForgedTrailTargetNotPolyp { to } wired through the health layer"
@@ -325,7 +325,7 @@ pub fn self_test() -> Result<String, String> {
     {
         let mut p: Vec<String> = Vec::new();
         probe(
-            "pub mod regeneration_stage;\n",
+            "pub mod blockchain;\n",
             good_stage,
             good_health,
             good_chaos,
@@ -359,7 +359,7 @@ pub fn self_test() -> Result<String, String> {
         return Err(problems.join("\n  "));
     }
     Ok(String::from(
-        "regen-health-door gate canaries all caught: deletion, re-unwiring, forgery-door \
+        "state-recovery-door gate canaries all caught: deletion, re-unwiring, forgery-door \
          removal, order scramble, test dissolution",
     ))
 }

@@ -2569,12 +2569,12 @@ jobs:
       # assumptions go stale. If they diverge, the value written to the allowlist and
       # the value the verifier computes from the proof differ: either every honest
       # proof is refused, or a program not on the list counts as being on it.
-      # The gate REGENERATES the value with an independent Keccak-256; it does not
-      # soyledigine inanmaz.
-      - name: regeneration (canonical code regenerated, convergent) + canary
+      # The gate reproduces the value with an independent Keccak-256; it does not
+      # trust what the code claims.
+      - name: canonical-programs-reproduce (canonical code reproduced, convergent) + canary
         run: |
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- regeneration --self-test
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- regeneration
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- canonical-programs-reproduce --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- canonical-programs-reproduce
       # Relay: ships the regeneration consensus (tokens + proof-side canonical
       # set + signed relay-status.json) to external consumers. Runs after
       # regeneration because it consumes its output line; the proof-side

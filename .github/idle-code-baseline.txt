@@ -800,61 +800,6 @@ budzero/verifier-registry/src/registry.rs	const	MAX_SLASHING_HISTORY
 budzero/verifier-registry/src/registry.rs	fn	add_stake
 budzero/verifier-registry/src/registry.rs	fn	registrations_as_seq
 budzero/verifier-registry/src/registry.rs	struct	VerifierRegistry
-crates/budscan/src/arweave.rs	const	MAX_CHUNK_SIZE
-crates/budscan/src/arweave.rs	const	MIN_CHUNK_SIZE
-crates/budscan/src/arweave.rs	fn	data_root
-crates/budscan/src/bns_proof.rs	fn	partial_registry_root
-crates/budscan/src/bns_proof.rs	struct	RegistryEntry
-crates/budscan/src/ens.rs	fn	labelhash
-crates/budscan/src/ens.rs	fn	namehash
-crates/budscan/src/ens.rs	struct	MptProofRequest
-crates/budscan/src/evm_audit.rs	const	EIP1967_ADMIN_SLOT
-crates/budscan/src/evm_audit.rs	const	EIP1967_BEACON_SLOT
-crates/budscan/src/evm_audit.rs	const	EIP1967_IMPLEMENTATION_SLOT
-crates/budscan/src/evm_audit.rs	const	ERC20_EVENTS
-crates/budscan/src/evm_audit.rs	const	ERC20_FUNCS
-crates/budscan/src/evm_audit.rs	const	ERC721_EVENTS
-crates/budscan/src/evm_audit.rs	const	ERC721_FUNCS
-crates/budscan/src/evm_audit.rs	const	SELECTOR_BURN
-crates/budscan/src/evm_audit.rs	const	SELECTOR_MINT
-crates/budscan/src/evm_audit.rs	const	SELECTOR_OWNER
-crates/budscan/src/evm_audit.rs	const	SELECTOR_PAUSE
-crates/budscan/src/evm_audit.rs	const	SELECTOR_PAUSED
-crates/budscan/src/evm_audit.rs	const	SELECTOR_RENOUNCE_OWNERSHIP
-crates/budscan/src/evm_audit.rs	const	SELECTOR_SET_MINTER
-crates/budscan/src/evm_audit.rs	const	SELECTOR_TOTAL_SUPPLY
-crates/budscan/src/evm_audit.rs	const	SELECTOR_TRANSFER_OWNERSHIP
-crates/budscan/src/evm_audit.rs	const	SELECTOR_UNPAUSE
-crates/budscan/src/evm_audit.rs	enum	RiskLevel
-crates/budscan/src/evm_audit.rs	fn	rating
-crates/budscan/src/evm_audit.rs	fn	weighted_score
-crates/budscan/src/evm_audit.rs	struct	RiskItem
-crates/budscan/src/evm_audit.rs	struct	RiskReport
-crates/budscan/src/evm_audit.rs	struct	ScoreWeights
-crates/budscan/src/evm_audit.rs	trait	Scorable
-crates/budscan/src/fetch.rs	const	MAX_CONTENT_BYTES
-crates/budscan/src/light_client.rs	const	DEFAULT_CAPACITY
-crates/budscan/src/light_client.rs	const	EPOCH_LENGTH
-crates/budscan/src/light_client.rs	fn	is_epoch_boundary
-crates/budscan/src/light_client.rs	fn	knows_state_root
-crates/budscan/src/light_client.rs	fn	strength_of
-crates/budscan/src/light_client.rs	struct	HeaderStore
-crates/budscan/src/light_client.rs	struct	TrackedHeader
-crates/budscan/src/light_client.rs	trait	FinalitySource
-crates/budscan/src/name_rule.rs	fn	check_resolvable
-crates/budscan/src/patchset.rs	enum	Verdict
-crates/budscan/src/patchset.rs	fn	check_no_foreign_brand
-crates/budscan/src/patchset.rs	fn	touched_files
-crates/budscan/src/patchset.rs	struct	PatchEntry
-crates/budscan/src/query.rs	const	NEVER_OPENED_SCHEMES
-crates/budscan/src/resolve.rs	fn	address_bar
-crates/budscan/src/resolve.rs	fn	is_renderable
-crates/budscan/src/resolve.rs	struct	Page
-crates/budscan/src/search.rs	enum	Hit
-crates/budscan/src/search.rs	struct	AccountView
-crates/budscan/src/search.rs	struct	NftView
-crates/budscan/src/search.rs	struct	SearchResult
-crates/budscan/src/search.rs	trait	ChainView
 crates/ai-inference/crates/ai-core/src/dataset.rs	enum	DatasetKind
 crates/ai-inference/crates/ai-core/src/dataset.rs	fn	inference_cache
 crates/ai-inference/crates/ai-data/src/source.rs	fn	assert_closed_loop
@@ -930,9 +875,84 @@ crates/ai-inference/crates/ai-serve/src/config.rs	fn	for_consensus
 crates/ai-inference/crates/ai-serve/src/config.rs	fn	is_bitwise_reproducible
 crates/ai-inference/crates/ai-serve/src/config.rs	fn	is_consensus_safe
 crates/ai-inference/crates/ai-serve/src/config.rs	struct	DeterminismProfile
+crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	const	GIB_PER_COLD_TOKEN
+crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	const	MTP_SPEEDUP
+crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	const	OWNED_DISK_GIB
+crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	fn	compare
+crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	fn	disk_band_tokens_per_second
+crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	fn	disk_band_tokens_per_second_with_speculation
+crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	fn	footprint_reduction_ratio
+crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	fn	forecast
+crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	fn	gib_per_cold_token
+crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	fn	market_rates
+crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	fn	owned_device_budget
+crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	fn	rental_hour_savings_ratio
+crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	fn	rented_datacenter_budget
+crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	fn	savings_ratio
+crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	fn	scaled_bytes
+crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	struct	CostComparison
+crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	struct	CostForecast
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	const	BUD_2_MONTHLY_USD_PER_TB
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	const	BUD_CUSTODY_YEARS
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	const	BUD_EXPIRY_AUCTION_DAYS
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	const	BUD_MAX_CUSTODY_YEARS
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	const	BUD_RECIPE_PUBLIC_BYTES
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	const	BUD_RECIPE_SEALED_BYTES
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	const	BUD_UPLOAD_BASE_USD
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	const	BYTES_PER_TB
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	enum	BudVersion
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	enum	CustodyPhase
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	enum	TxClass
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	auction_start_usd_per_tb
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	base_usd
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	bud_extension_fee_usd_per_tb
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	bud_upload_extra_fee_usd_per_tb
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	bud_upload_fee_usd_per_tb
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	custody_phase
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	enters_open_auction
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	monthly_storage_fee_usd
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	rate_bps
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	recipes_for_content
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	three_network_bytes_per_tb
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	three_network_custody_usd_per_tb
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	three_network_monthly_usd_per_tb
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	transaction_fee_usd
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	struct	InsufficientBalance
+crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	struct	PromptWallet
 crates/ai-inference/crates/ai-serve/src/health.rs	fn	record_hash_failure
 crates/ai-inference/crates/ai-serve/src/health.rs	fn	record_rejected_closed_loop
 crates/ai-inference/crates/ai-serve/src/health.rs	struct	HealthSnapshot
+crates/ai-inference/crates/ai-serve/src/metric.rs	fn	time_to_first_token_ms
+crates/ai-inference/crates/ai-serve/src/residency.rs	fn	plan_with_heat
+crates/ai-inference/crates/ai-serve/src/residency.rs	fn	rebalance
+crates/ai-inference/crates/ai-serve/src/residency.rs	fn	total_fast_bytes
+crates/ai-inference/crates/ai-serve/src/residency.rs	struct	RoutingHeat
+crates/ai-inference/crates/ai-serve/src/staging.rs	enum	StripeError
+crates/ai-inference/crates/ai-serve/src/staging.rs	fn	is_usable
+crates/ai-inference/crates/ai-serve/src/staging.rs	fn	stripe_plan
+crates/ai-inference/crates/ai-serve/src/staging.rs	fn	weight_kib_s
+crates/ai-inference/crates/ai-serve/src/staging.rs	struct	DeviceProbe
+crates/ai-inference/crates/ai-serve/src/staging.rs	struct	StorageDevice
+crates/ai-inference/crates/ai-serve/src/staging.rs	struct	StripeChunk
+crates/ai-inference/crates/ai-serve/src/validator_cost.rs	const	STORAGE_HDD_WATTS_PER_TB
+crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	capital_dollars
+crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	core_layer
+crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	market_pricelist
+crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	measure_serving
+crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	measure_serving_at
+crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	minimum_quantized
+crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	monthly_energy_dollars
+crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	one_year_storage_cost_usd_per_tb
+crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	serving_layer
+crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	serving_layer_for
+crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	serving_layer_int4
+crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	storage_capital_per_tb_usd
+crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	storage_layer
+crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	total_capital_dollars
+crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	zkvm_layer
+crates/ai-inference/crates/ai-serve/src/validator_cost.rs	struct	LayerFootprint
+crates/ai-inference/crates/ai-serve/src/validator_cost.rs	struct	ServingMeasure
+crates/ai-inference/crates/ai-serve/src/validator_cost.rs	struct	ValidatorBudget
 crates/ai-inference/crates/ai-tune/src/lock.rs	fn	lock_output
 crates/ai-inference/crates/ai-tune/src/lock.rs	fn	verify_lock
 crates/ai-inference/crates/ai-tune/src/lock.rs	struct	OutputLock
@@ -941,6 +961,61 @@ crates/ai-inference/crates/ai-tune/src/plan.rs	fn	assert_example_range
 crates/ai-inference/crates/ai-tune/src/plan.rs	fn	full_sft
 crates/ai-inference/crates/ai-tune/src/schema.rs	const	MAX_RECORD_BYTES
 crates/ai-inference/crates/ai-tune/src/schema.rs	enum	SchemaError
+crates/budscan/src/arweave.rs	const	MAX_CHUNK_SIZE
+crates/budscan/src/arweave.rs	const	MIN_CHUNK_SIZE
+crates/budscan/src/arweave.rs	fn	data_root
+crates/budscan/src/bns_proof.rs	fn	partial_registry_root
+crates/budscan/src/bns_proof.rs	struct	RegistryEntry
+crates/budscan/src/ens.rs	fn	labelhash
+crates/budscan/src/ens.rs	fn	namehash
+crates/budscan/src/ens.rs	struct	MptProofRequest
+crates/budscan/src/evm_audit.rs	const	EIP1967_ADMIN_SLOT
+crates/budscan/src/evm_audit.rs	const	EIP1967_BEACON_SLOT
+crates/budscan/src/evm_audit.rs	const	EIP1967_IMPLEMENTATION_SLOT
+crates/budscan/src/evm_audit.rs	const	ERC20_EVENTS
+crates/budscan/src/evm_audit.rs	const	ERC20_FUNCS
+crates/budscan/src/evm_audit.rs	const	ERC721_EVENTS
+crates/budscan/src/evm_audit.rs	const	ERC721_FUNCS
+crates/budscan/src/evm_audit.rs	const	SELECTOR_BURN
+crates/budscan/src/evm_audit.rs	const	SELECTOR_MINT
+crates/budscan/src/evm_audit.rs	const	SELECTOR_OWNER
+crates/budscan/src/evm_audit.rs	const	SELECTOR_PAUSE
+crates/budscan/src/evm_audit.rs	const	SELECTOR_PAUSED
+crates/budscan/src/evm_audit.rs	const	SELECTOR_RENOUNCE_OWNERSHIP
+crates/budscan/src/evm_audit.rs	const	SELECTOR_SET_MINTER
+crates/budscan/src/evm_audit.rs	const	SELECTOR_TOTAL_SUPPLY
+crates/budscan/src/evm_audit.rs	const	SELECTOR_TRANSFER_OWNERSHIP
+crates/budscan/src/evm_audit.rs	const	SELECTOR_UNPAUSE
+crates/budscan/src/evm_audit.rs	enum	RiskLevel
+crates/budscan/src/evm_audit.rs	fn	rating
+crates/budscan/src/evm_audit.rs	fn	weighted_score
+crates/budscan/src/evm_audit.rs	struct	RiskItem
+crates/budscan/src/evm_audit.rs	struct	RiskReport
+crates/budscan/src/evm_audit.rs	struct	ScoreWeights
+crates/budscan/src/evm_audit.rs	trait	Scorable
+crates/budscan/src/fetch.rs	const	MAX_CONTENT_BYTES
+crates/budscan/src/light_client.rs	const	DEFAULT_CAPACITY
+crates/budscan/src/light_client.rs	const	EPOCH_LENGTH
+crates/budscan/src/light_client.rs	fn	is_epoch_boundary
+crates/budscan/src/light_client.rs	fn	knows_state_root
+crates/budscan/src/light_client.rs	fn	strength_of
+crates/budscan/src/light_client.rs	struct	HeaderStore
+crates/budscan/src/light_client.rs	struct	TrackedHeader
+crates/budscan/src/light_client.rs	trait	FinalitySource
+crates/budscan/src/name_rule.rs	fn	check_resolvable
+crates/budscan/src/patchset.rs	enum	Verdict
+crates/budscan/src/patchset.rs	fn	check_no_foreign_brand
+crates/budscan/src/patchset.rs	fn	touched_files
+crates/budscan/src/patchset.rs	struct	PatchEntry
+crates/budscan/src/query.rs	const	NEVER_OPENED_SCHEMES
+crates/budscan/src/resolve.rs	fn	address_bar
+crates/budscan/src/resolve.rs	fn	is_renderable
+crates/budscan/src/resolve.rs	struct	Page
+crates/budscan/src/search.rs	enum	Hit
+crates/budscan/src/search.rs	struct	AccountView
+crates/budscan/src/search.rs	struct	NftView
+crates/budscan/src/search.rs	struct	SearchResult
+crates/budscan/src/search.rs	trait	ChainView
 crates/note-packing/src/lib.rs	const	FIELD_BYTES
 crates/wallet-core/src/bip39_wordlist.rs	const	BIP39_WORDLIST
 crates/wallet-core/src/lib.rs	const	ADDRESS_VERSION_V2
@@ -1106,6 +1181,53 @@ src/ai/registry.rs	fn	update_model_spec
 src/ai/registry.rs	fn	withdraw_verifier_stake
 src/ai/types.rs	const	MAX_INFERENCE_REF_BYTES
 src/ai/types.rs	fn	calculate_signing_hash
+src/ai_inference/effort.rs	const	DEEPEST
+src/ai_inference/effort.rs	const	FASTEST
+src/ai_inference/effort.rs	const	TIER_BASELINE_TENTHS
+src/ai_inference/effort.rs	const	TIER_MAX_TENTHS
+src/ai_inference/effort.rs	const	TIER_MIN_TENTHS
+src/ai_inference/effort.rs	const	TIER_SCALE
+src/ai_inference/effort.rs	fn	as_ratio
+src/ai_inference/effort.rs	fn	servable_by
+src/ai_inference/executor.rs	fn	build_ai_transaction
+src/ai_inference/executor.rs	fn	from_inference_request
+src/ai_inference/executor.rs	struct	AiExecutorRequest
+src/ai_inference/inference.rs	fn	build_ai_result
+src/ai_inference/inference.rs	fn	register_ai_model
+src/ai_inference/metrics.rs	fn	record_fee
+src/ai_inference/metrics.rs	fn	record_query
+src/ai_inference/metrics.rs	fn	record_verified
+src/ai_inference/metrics.rs	fn	set_active_models
+src/ai_inference/metrics.rs	struct	AiMetrics
+src/ai_inference/mod.rs	const	MIN_OPERATOR_BOND
+src/ai_inference/mod.rs	fn	build_ai_inference_grant
+src/ai_inference/mod.rs	fn	consume_epoch
+src/ai_inference/mod.rs	fn	inference_cache
+src/ai_inference/mod.rs	fn	is_valid
+src/ai_inference/mod.rs	fn	operator_eligible
+src/ai_inference/mod.rs	fn	register_operator
+src/ai_inference/mod.rs	struct	TrainingDataGrant
+src/ai_inference/perception.rs	const	MAX_AUDIO_INPUT_MILLIS
+src/ai_inference/perception.rs	const	MAX_IMAGE_INPUT_PIXELS
+src/ai_inference/perception.rs	const	MAX_TEXT_INPUT_BYTES
+src/ai_inference/perception.rs	const	MAX_VIDEO_INPUT_FRAMES
+src/ai_inference/perception.rs	enum	PerceptionError
+src/ai_inference/perception.rs	fn	declared_count
+src/ai_inference/perception.rs	fn	max_units
+src/ai_inference/perception.rs	fn	needs_decoder
+src/ai_inference/perception.rs	fn	perception_commitment_tag
+src/ai_inference/perception.rs	fn	perception_unit
+src/ai_inference/perception.rs	fn	with_modality
+src/ai_inference/query.rs	fn	prepare_ai_overview
+src/ai_inference/query.rs	struct	AiModelInfo
+src/ai_inference/query.rs	struct	AiQueryResponse
+src/ai_inference/social.rs	fn	social_nft_to_data_ref
+src/ai_inference/social.rs	fn	tag_ai_nft
+src/ai_inference/storage.rs	fn	is_inference_cache
+src/ai_inference/storage.rs	fn	is_training_corpus
+src/ai_inference/storage.rs	struct	AiDatasetStorageDeal
+src/ai_inference/verify.rs	fn	generate_and_verify_proof
+src/ai_inference/verify.rs	fn	verify_inference_stark
 src/bin/budlum-relayer.rs	enum	RelayDirection
 src/bin/budlum-relayer.rs	fn	build_deposit_proof
 src/bin/budlum-relayer.rs	fn	get_block_number
@@ -1242,8 +1364,8 @@ src/core/account.rs	fn	effective_stake
 src/core/account.rs	fn	has_consensus_keys
 src/core/account.rs	fn	has_role
 src/core/account.rs	fn	init_genesis
-src/core/account.rs	fn	is_consensus_validator
 src/core/account.rs	fn	is_ai_operator
+src/core/account.rs	fn	is_consensus_validator
 src/core/account.rs	fn	is_storage_operator
 src/core/account.rs	fn	process_timed_burn
 src/core/account.rs	fn	process_timed_burn_at_time
@@ -1294,11 +1416,11 @@ src/core/transaction.rs	fn	estimate_gas_with_schedule
 src/core/transaction.rs	fn	fee_limit
 src/core/transaction.rs	fn	is_valid
 src/core/transaction.rs	fn	multisig_address
-src/core/transaction.rs	fn	new_consensus_key_registration
-src/core/transaction.rs	fn	new_contract_call
 src/core/transaction.rs	fn	new_ai_operator_bond
 src/core/transaction.rs	fn	new_ai_operator_unbond
 src/core/transaction.rs	fn	new_ai_operator_withdraw
+src/core/transaction.rs	fn	new_consensus_key_registration
+src/core/transaction.rs	fn	new_contract_call
 src/core/transaction.rs	fn	new_proposal
 src/core/transaction.rs	fn	new_vote
 src/core/transaction.rs	fn	new_with_fee
@@ -1485,53 +1607,6 @@ src/gateway/service.rs	const	MAX_GATEWAY_CONTENT_BYTES
 src/gateway/service.rs	const	MAX_GENERATION_CACHE_ENTRIES
 src/light_client/mod.rs	fn	sync_plan
 src/light_client/mod.rs	struct	LightSyncPlan
-src/ai_inference/effort.rs	const	DEEPEST
-src/ai_inference/effort.rs	const	FASTEST
-src/ai_inference/effort.rs	const	TIER_BASELINE_TENTHS
-src/ai_inference/effort.rs	const	TIER_MAX_TENTHS
-src/ai_inference/effort.rs	const	TIER_MIN_TENTHS
-src/ai_inference/effort.rs	const	TIER_SCALE
-src/ai_inference/effort.rs	fn	as_ratio
-src/ai_inference/effort.rs	fn	servable_by
-src/ai_inference/executor.rs	fn	build_ai_transaction
-src/ai_inference/executor.rs	fn	from_inference_request
-src/ai_inference/executor.rs	struct	AiExecutorRequest
-src/ai_inference/inference.rs	fn	build_ai_result
-src/ai_inference/inference.rs	fn	register_ai_model
-src/ai_inference/metrics.rs	fn	record_fee
-src/ai_inference/metrics.rs	fn	record_query
-src/ai_inference/metrics.rs	fn	record_verified
-src/ai_inference/metrics.rs	fn	set_active_models
-src/ai_inference/metrics.rs	struct	AiMetrics
-src/ai_inference/mod.rs	const	MIN_OPERATOR_BOND
-src/ai_inference/mod.rs	fn	build_ai_inference_grant
-src/ai_inference/mod.rs	fn	consume_epoch
-src/ai_inference/mod.rs	fn	inference_cache
-src/ai_inference/mod.rs	fn	is_valid
-src/ai_inference/mod.rs	fn	operator_eligible
-src/ai_inference/mod.rs	fn	register_operator
-src/ai_inference/mod.rs	struct	TrainingDataGrant
-src/ai_inference/perception.rs	const	MAX_AUDIO_INPUT_MILLIS
-src/ai_inference/perception.rs	const	MAX_IMAGE_INPUT_PIXELS
-src/ai_inference/perception.rs	const	MAX_TEXT_INPUT_BYTES
-src/ai_inference/perception.rs	const	MAX_VIDEO_INPUT_FRAMES
-src/ai_inference/perception.rs	enum	PerceptionError
-src/ai_inference/perception.rs	fn	declared_count
-src/ai_inference/perception.rs	fn	max_units
-src/ai_inference/perception.rs	fn	needs_decoder
-src/ai_inference/perception.rs	fn	perception_commitment_tag
-src/ai_inference/perception.rs	fn	perception_unit
-src/ai_inference/perception.rs	fn	with_modality
-src/ai_inference/query.rs	fn	prepare_ai_overview
-src/ai_inference/query.rs	struct	AiModelInfo
-src/ai_inference/query.rs	struct	AiQueryResponse
-src/ai_inference/social.rs	fn	social_nft_to_data_ref
-src/ai_inference/social.rs	fn	tag_ai_nft
-src/ai_inference/storage.rs	fn	is_inference_cache
-src/ai_inference/storage.rs	fn	is_training_corpus
-src/ai_inference/storage.rs	struct	AiDatasetStorageDeal
-src/ai_inference/verify.rs	fn	generate_and_verify_proof
-src/ai_inference/verify.rs	fn	verify_inference_stark
 src/network/gossip_dedup.rs	const	DEFAULT_DEDUP_WINDOW
 src/network/gossip_dedup.rs	const	MAX_DUPLICATE_COUNT
 src/network/gossip_dedup.rs	const	MAX_PEER_SCORE
@@ -1607,6 +1682,13 @@ src/network/peer_manager.rs	fn	tracked_peer_count
 src/network/peer_manager.rs	struct	PeerScore
 src/network/protocol.rs	const	MAX_TX_SIZE
 src/network/protocol.rs	enum	MessageError
+src/persistence/db.rs	fn	apply_migrations
+src/persistence/db.rs	fn	put_content
+src/persistence/db.rs	fn	recover_interrupted_commit
+src/persistence/pruning.rs	fn	archive_node_default
+src/persistence/pruning.rs	fn	full_node_default
+src/persistence/state_trie.rs	fn	bulk_insert
+src/persistence/state_trie.rs	fn	root_ref
 src/pollen/content_gate.rs	enum	ContentGateError
 src/pollen/content_gate.rs	fn	authorize_read
 src/pollen/content_gate.rs	fn	is_protected
@@ -1702,9 +1784,6 @@ src/storage/assignment.rs	enum	AssignmentError
 src/storage/assignment.rs	fn	displaced_shards
 src/storage/content_id.rs	const	DEFAULT_CHUNK_SIZE_BYTES
 src/storage/content_id.rs	fn	of_subrange
-src/storage/db.rs	fn	apply_migrations
-src/storage/db.rs	fn	put_content
-src/storage/db.rs	fn	recover_interrupted_commit
 src/storage/derived.rs	const	DERIVED_BLOCK_PIXELS
 src/storage/derived.rs	const	DERIVED_MAX_BLOCKS_PER_SIDE
 src/storage/derived.rs	const	DERIVED_PREFIX_SPEC_BYTES
@@ -1783,16 +1862,32 @@ src/storage/manifest.rs	fn	manifest_id_from_parts_stored
 src/storage/manifest.rs	fn	manifest_id_from_shards
 src/storage/manifest.rs	fn	overhead_per_mille
 src/storage/manifest.rs	fn	replication
-src/storage/merkle_trie.rs	fn	bulk_insert
-src/storage/merkle_trie.rs	fn	root_ref
 src/storage/mobile_self.rs	enum	ReplicaRecommendation
+src/storage/mobile_self.rs	enum	UploadCustodyRefusal
 src/storage/mobile_self.rs	fn	availability_label
+src/storage/mobile_self.rs	fn	decide_upload_custody
+src/storage/mobile_self.rs	fn	put_user_content
 src/storage/mobile_self.rs	fn	recommendation_for_content
+src/storage/mobile_self.rs	fn	record_network_default_attempt
+src/storage/mobile_self.rs	fn	record_network_held
+src/storage/mobile_self.rs	fn	user_held_items
 src/storage/msr.rs	const	TRAFFIC_SCALE
 src/storage/msr.rs	enum	MsrError
 src/storage/msr.rs	fn	lrc_repair_traffic_scaled
 src/storage/msr.rs	fn	msr_repair_traffic_scaled
 src/storage/msr.rs	fn	msr_speedup_over_lrc_scaled
+src/storage/one_share.rs	enum	ShareRefusal
+src/storage/one_share.rs	fn	admit_as_server
+src/storage/one_share.rs	fn	all_user_held
+src/storage/one_share.rs	fn	endpoint_refs
+src/storage/one_share.rs	fn	screen
+src/storage/one_share.rs	fn	storage_fee_owed_usd
+src/storage/one_share.rs	struct	OneShareRegistry
+src/storage/one_share.rs	struct	Share
+src/storage/one_view.rs	fn	contract_digest
+src/storage/one_view.rs	fn	honest_custody
+src/storage/one_view.rs	fn	network_held_bytes
+src/storage/one_view.rs	struct	ScreenItem
 src/storage/pact_binding.rs	fn	add_pact
 src/storage/pact_binding.rs	fn	is_pure_production
 src/storage/pact_binding.rs	fn	is_residual_only
@@ -1808,12 +1903,23 @@ src/storage/provider.rs	struct	PutReceipt
 src/storage/provider.rs	struct	StorageProof
 src/storage/provider.rs	type	ChallengeId
 src/storage/provider.rs	type	DealId
-src/storage/pruning.rs	fn	archive_node_default
-src/storage/pruning.rs	fn	full_node_default
 src/storage/render.rs	enum	RenderError
 src/storage/render.rs	fn	format_tag
 src/storage/render.rs	fn	qr_stream_content_id
 src/storage/render.rs	fn	render_and_verify
+src/storage/three_nft.rs	enum	ThreeNftRegistryError
+src/storage/three_nft.rs	fn	drop_validator
+src/storage/three_nft.rs	fn	reemit_video_from_pin
+src/storage/three_nft.rs	fn	with_body
+src/storage/three_nft.rs	struct	PinRow
+src/storage/three_nft.rs	struct	ThreeNftRegistry
+src/storage/three_regime.rs	enum	AccountingRefusal
+src/storage/three_regime.rs	enum	ContentRegime
+src/storage/three_regime.rs	enum	RentBasis
+src/storage/three_regime.rs	fn	held_bytes_for
+src/storage/three_regime.rs	fn	refuse_rent_without_held_bytes
+src/storage/three_regime.rs	fn	regime_of
+src/storage/three_regime.rs	fn	rent_basis_for
 src/tokenomics/mod.rs	const	BUD_DECIMALS
 src/tokenomics/mod.rs	enum	Allocation
 src/tokenomics/mod.rs	fn	address_of
@@ -1829,155 +1935,3 @@ src/tokenomics/reward_pool.rs	enum	RewardPoolError
 src/tokenomics/reward_pool.rs	fn	per_epoch_budget
 src/tokenomics/reward_pool.rs	fn	reward_for_epoch
 src/tokenomics/reward_pool.rs	fn	total_epoch_payout
-#
-# 2026-08-31 (user-approved hybrid): the ai-serve economics modules
-# (fee_scenario, cost_forecast, validator_cost, staging, metric) are the
-# published fee schedule and cost model as code - the single source every
-# doc number quotes. Their consumer (the settlement/serving runtime) does
-# not exist in any crate yet; these lines are the debt record for that
-# wiring, and they come out when the settlement layer starts calling them.
-
-#
-# 2026-08-31 (user-approved hybrid): the ai-serve economics modules
-# (fee_scenario, cost_forecast, validator_cost, staging, metric) are the
-# published fee schedule and cost model as code - the single source every
-# doc number quotes. Their consumer (the settlement/serving runtime) does
-# not exist in any crate yet; these lines are the debt record for that
-# wiring, and they come out when the settlement layer starts calling them.
-
-#
-# 2026-08-31 (user-approved hybrid, recorded in budlum-xyz/workspace
-# DENETIM-PLANI-3.0.md): the ai-serve economics modules (fee_scenario,
-# cost_forecast, validator_cost, staging, metric) are the published fee
-# schedule and cost model as code, the single source every doc number
-# quotes. Their consumer (the settlement/serving runtime) does not exist
-# in any crate yet; these lines are the debt record for that wiring and
-# come out when the settlement layer starts calling them.
-
-#
-# 2026-08-31 (user-approved hybrid, recorded in budlum-xyz/workspace
-# DENETIM-PLANI-3.0.md): the ai-serve economics modules (fee_scenario,
-# cost_forecast, validator_cost, staging, metric, residency) are the
-# published fee schedule and cost model as code, the single source every
-# doc number quotes. Their consumer (the settlement/serving runtime) does
-# not exist in any crate yet; these lines are the debt record for that
-# wiring and come out when the settlement layer starts calling them.
-crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	const	GIB_PER_COLD_TOKEN
-crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	const	MTP_SPEEDUP
-crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	const	OWNED_DISK_GIB
-crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	fn	compare
-crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	fn	disk_band_tokens_per_second
-crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	fn	disk_band_tokens_per_second_with_speculation
-crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	fn	footprint_reduction_ratio
-crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	fn	forecast
-crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	fn	gib_per_cold_token
-crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	fn	market_rates
-crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	fn	owned_device_budget
-crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	fn	rental_hour_savings_ratio
-crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	fn	rented_datacenter_budget
-crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	fn	savings_ratio
-crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	fn	scaled_bytes
-crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	struct	CostComparison
-crates/ai-inference/crates/ai-serve/src/cost_forecast.rs	struct	CostForecast
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	const	BUD_2_MONTHLY_USD_PER_TB
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	const	BUD_CUSTODY_YEARS
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	const	BUD_EXPIRY_AUCTION_DAYS
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	const	BUD_MAX_CUSTODY_YEARS
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	const	BUD_RECIPE_PUBLIC_BYTES
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	const	BUD_RECIPE_SEALED_BYTES
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	const	BUD_UPLOAD_BASE_USD
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	const	BYTES_PER_TB
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	enum	BudVersion
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	enum	CustodyPhase
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	enum	TxClass
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	auction_start_usd_per_tb
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	base_usd
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	bud_extension_fee_usd_per_tb
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	bud_upload_extra_fee_usd_per_tb
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	bud_upload_fee_usd_per_tb
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	custody_phase
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	enters_open_auction
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	monthly_storage_fee_usd
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	rate_bps
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	recipes_for_content
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	three_network_bytes_per_tb
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	three_network_custody_usd_per_tb
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	three_network_monthly_usd_per_tb
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	transaction_fee_usd
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	struct	InsufficientBalance
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	struct	PromptWallet
-crates/ai-inference/crates/ai-serve/src/metric.rs	fn	time_to_first_token_ms
-crates/ai-inference/crates/ai-serve/src/residency.rs	fn	plan_with_heat
-crates/ai-inference/crates/ai-serve/src/residency.rs	fn	rebalance
-crates/ai-inference/crates/ai-serve/src/residency.rs	fn	total_fast_bytes
-crates/ai-inference/crates/ai-serve/src/residency.rs	struct	RoutingHeat
-crates/ai-inference/crates/ai-serve/src/staging.rs	enum	StripeError
-crates/ai-inference/crates/ai-serve/src/staging.rs	fn	is_usable
-crates/ai-inference/crates/ai-serve/src/staging.rs	fn	stripe_plan
-crates/ai-inference/crates/ai-serve/src/staging.rs	fn	weight_kib_s
-crates/ai-inference/crates/ai-serve/src/staging.rs	struct	DeviceProbe
-crates/ai-inference/crates/ai-serve/src/staging.rs	struct	StorageDevice
-crates/ai-inference/crates/ai-serve/src/staging.rs	struct	StripeChunk
-crates/ai-inference/crates/ai-serve/src/validator_cost.rs	const	STORAGE_HDD_WATTS_PER_TB
-crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	capital_dollars
-crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	core_layer
-crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	market_pricelist
-crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	measure_serving
-crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	measure_serving_at
-crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	minimum_quantized
-crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	monthly_energy_dollars
-crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	one_year_storage_cost_usd_per_tb
-crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	serving_layer
-crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	serving_layer_for
-crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	serving_layer_int4
-crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	storage_capital_per_tb_usd
-crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	storage_layer
-crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	total_capital_dollars
-crates/ai-inference/crates/ai-serve/src/validator_cost.rs	fn	zkvm_layer
-crates/ai-inference/crates/ai-serve/src/validator_cost.rs	struct	LayerFootprint
-crates/ai-inference/crates/ai-serve/src/validator_cost.rs	struct	ServingMeasure
-crates/ai-inference/crates/ai-serve/src/validator_cost.rs	struct	ValidatorBudget
-#
-# 2026-08-31 (user-approved hybrid, second slice): seams waiting on a real
-# production path, recorded as debt with the path named. Each line comes
-# OUT when its consumer lands:
-#   one_share/one_view  -> the 1.0 device-screen RPC surface (needs a share
-#                          registry in chain state; consensus-surface work).
-#   three_rpc           -> the reveal RPC endpoint (serving surface).
-#   three_regime        -> the rent/settlement path (none exists yet).
-#   mobile_self upload  -> the custody-aware upload flow.
-#   three_nft registry  -> the mint/pin chain transactions (in flight with
-#                          the teammate working the same PR).
-#   ScreenItem/contract_digest/honest_custody/network_held_bytes ride the
-#   screen surface above.
-src/storage/mobile_self.rs	enum	UploadCustodyRefusal
-src/storage/mobile_self.rs	fn	decide_upload_custody
-src/storage/mobile_self.rs	fn	put_user_content
-src/storage/mobile_self.rs	fn	record_network_default_attempt
-src/storage/mobile_self.rs	fn	record_network_held
-src/storage/mobile_self.rs	fn	user_held_items
-src/storage/one_share.rs	enum	ShareRefusal
-src/storage/one_share.rs	fn	admit_as_server
-src/storage/one_share.rs	fn	all_user_held
-src/storage/one_share.rs	fn	endpoint_refs
-src/storage/one_share.rs	fn	screen
-src/storage/one_share.rs	fn	storage_fee_owed_usd
-src/storage/one_share.rs	struct	OneShareRegistry
-src/storage/one_share.rs	struct	Share
-src/storage/one_view.rs	fn	contract_digest
-src/storage/one_view.rs	fn	honest_custody
-src/storage/one_view.rs	fn	network_held_bytes
-src/storage/one_view.rs	struct	ScreenItem
-src/storage/three_nft.rs	enum	ThreeNftRegistryError
-src/storage/three_nft.rs	fn	drop_validator
-src/storage/three_nft.rs	fn	reemit_video_from_pin
-src/storage/three_nft.rs	fn	with_body
-src/storage/three_nft.rs	struct	PinRow
-src/storage/three_nft.rs	struct	ThreeNftRegistry
-src/storage/three_regime.rs	enum	AccountingRefusal
-src/storage/three_regime.rs	enum	ContentRegime
-src/storage/three_regime.rs	enum	RentBasis
-src/storage/three_regime.rs	fn	held_bytes_for
-src/storage/three_regime.rs	fn	refuse_rent_without_held_bytes
-src/storage/three_regime.rs	fn	regime_of
-src/storage/three_regime.rs	fn	rent_basis_for

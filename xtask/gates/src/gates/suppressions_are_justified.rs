@@ -502,7 +502,7 @@ const BUDGETS: &[Budget] = &[
         reason: "the reseal envelope tuple mirrors the wire format field for field",
     },
     Budget {
-        file: "src/storage/db.rs",
+        file: "src/persistence/db.rs",
         lint: "dead_code",
         count: 1,
         reason: "the cfg-gated reader exists for the on-disk format migration and no other cfg reaches it; removing it would strand rows written by the previous format",

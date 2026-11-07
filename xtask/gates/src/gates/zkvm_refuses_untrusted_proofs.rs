@@ -1,12 +1,12 @@
 //! The execution proof path refuses rather than trusting.
 //!
-//! Gate code: `K-ZKVM-IMMUNE-REGENERATION`. A finding or a document that names this code resolves here.
+//! Gate code: `K-ZKVM-REFUSES-UNTRUSTED-PROOFS`. A finding or a document that names this code resolves here.
 //!
-//! The invention text promises that a regenerated artifact cannot bring a
-//! proof with it: what the chain accepts is the check, not the claim. This
-//! gate pins the five fail-closed checks the executor runs on an AI
-//! execution proof, the size bound that precedes deserialization, and the
-//! fact that the un-gated executor entry point has no production caller.
+//! A state-recovery artifact cannot bring a proof with it: what the chain
+//! accepts is the check, not the claim. This gate pins the five fail-closed
+//! checks the executor runs on an AI execution proof, the size bound that
+//! precedes deserialization, and the fact that the un-gated executor entry
+//! point has no production caller.
 //!
 //! Each item is a claim about code, not prose: the error codes have to sit
 //! inside a `BudlumError::validation(` call, the bound has to be compared
@@ -168,7 +168,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         return Err(msg);
     }
     Ok(format!(
-        "ZKVM regeneration containment OK: {checked} checks, all five proof rejections \
+        "ZKVM untrusted-proof containment OK: {checked} checks, all five proof rejections \
          present, the size bound precedes decoding, and no production path reaches the \
          un-gated executor"
     ))
