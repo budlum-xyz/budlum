@@ -104,6 +104,7 @@ const ALLOWED_FILES: &[&str] = &[
     // file can say what it bans in English.
     "config/naming/concept_map.toml",
     ".github/concept-names-baseline.txt",
+    "xtask/gates/src/gates/bud3_forbidden_phrases.rs",
     "docs/NAMING.md",
 ];
 

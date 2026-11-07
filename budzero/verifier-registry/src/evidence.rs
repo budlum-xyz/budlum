@@ -204,9 +204,12 @@ impl SlashingReport {
                 }
             }
             SlashingProof::Liveness {
-                missed, expected, ..
+                window_start_epoch,
+                window_end_epoch,
+                missed,
+                expected,
             } => {
-                if missed > expected {
+                if window_start_epoch > window_end_epoch || missed > expected {
                     return Err(EvidenceError::ImpossibleLivenessWindow);
                 }
                 // `0 of 0` and `0 of N` are not a fault: without this a report
@@ -482,5 +485,25 @@ mod tests {
             None,
         );
         assert_eq!(r.validate_shape(), Err(EvidenceError::ZeroOffender));
+    }
+
+    #[test]
+    fn inverted_liveness_window_is_rejected() {
+        let r = SlashingReport::new(
+            addr(1),
+            roles::RELAYER,
+            SlashingProof::Liveness {
+                window_start_epoch: 12,
+                window_end_epoch: 5,
+                missed: 3,
+                expected: 10,
+            },
+            ProofProvenance::ConsensusVerified,
+            None,
+        );
+        assert_eq!(
+            r.validate_shape(),
+            Err(EvidenceError::ImpossibleLivenessWindow)
+        );
     }
 }

@@ -73,13 +73,26 @@ pub fn chunk_document(
         } else {
             chunk_content
         };
-        let hash = crate::content_hash(chunk_content.as_bytes())?;
+        let start_line = start + 1;
+        let hash = chunk_content_hash(
+            project_id,
+            document_id,
+            path,
+            start_line,
+            end,
+            &chunk_content,
+        )?;
         chunks.push(Chunk {
-            id: format!("{document_id}:{}-{}", start + 1, end),
+            id: format!(
+                "{}:{}:{}:{start_line}-{end}",
+                escape_id_part(project_id),
+                escape_id_part(document_id),
+                escape_id_part(path),
+            ),
             project_id: project_id.to_string(),
             document_id: document_id.to_string(),
             path: path.to_string(),
-            start_line: start + 1,
+            start_line,
             end_line: end,
             content: chunk_content,
             content_hash: hash,
@@ -95,6 +108,44 @@ pub fn chunk_document(
         }
     }
     Ok(chunks)
+}
+
+fn escape_id_part(part: &str) -> String {
+    let mut out = String::with_capacity(part.len());
+    for ch in part.chars() {
+        match ch {
+            '%' => out.push_str("%25"),
+            ':' => out.push_str("%3A"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn chunk_content_hash(
+    project_id: &str,
+    document_id: &str,
+    path: &str,
+    start_line: usize,
+    end_line: usize,
+    content: &str,
+) -> Result<[u8; 32], String> {
+    let mut preimage = Vec::with_capacity(128 + content.len());
+    preimage.extend_from_slice(b"ai-knowledge/chunk/v1\0");
+    let fields = [
+        project_id.as_bytes(),
+        document_id.as_bytes(),
+        path.as_bytes(),
+    ];
+    for field in fields {
+        preimage.extend_from_slice(&(field.len() as u64).to_le_bytes());
+        preimage.extend_from_slice(field);
+    }
+    preimage.extend_from_slice(&(start_line as u64).to_le_bytes());
+    preimage.extend_from_slice(&(end_line as u64).to_le_bytes());
+    preimage.extend_from_slice(&(content.len() as u64).to_le_bytes());
+    preimage.extend_from_slice(content.as_bytes());
+    crate::content_hash(&preimage)
 }
 
 /// Formats the evidence reference as `path:Lx-Ly`.
@@ -199,5 +250,19 @@ mod tests {
         let doc = "alpha: 1\nbeta: 2\n";
         let chunks = chunk_document("p", "d", "x.md", doc, None, None).unwrap();
         assert_eq!(chunks[0].content, "alpha: 1\nbeta: 2");
+    }
+
+    #[test]
+    fn blg_145_chunks_across_projects_or_paths_do_not_collide() {
+        let a = chunk_document("proj-a", "doc", "src/a.rs", "same\nlines\n", None, None).unwrap();
+        let b = chunk_document("proj-b", "doc", "src/a.rs", "same\nlines\n", None, None).unwrap();
+        let c = chunk_document("proj-a", "doc", "src/b.rs", "same\nlines\n", None, None).unwrap();
+        let colon_left = chunk_document("a:b", "c", "x.rs", "same\nlines\n", None, None).unwrap();
+        let colon_right = chunk_document("a", "b:c", "x.rs", "same\nlines\n", None, None).unwrap();
+        assert_ne!(a[0].id, b[0].id);
+        assert_ne!(a[0].id, c[0].id);
+        assert_ne!(colon_left[0].id, colon_right[0].id);
+        assert_ne!(a[0].content_hash, b[0].content_hash);
+        assert_ne!(a[0].content_hash, c[0].content_hash);
     }
 }

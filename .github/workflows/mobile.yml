@@ -1,0 +1,76 @@
+name: Mobile Android & Field Harness
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "mobile/android/**"
+      - "mobile/tools/**"
+      - ".github/workflows/mobile.yml"
+  push:
+    branches: [main]
+    paths:
+      - "mobile/android/**"
+      - "mobile/tools/**"
+      - ".github/workflows/mobile.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android-validator-and-log-analyzer:
+    name: Mobile Log Analyzer & Android Validator Suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+          components: clippy, rustfmt
+
+      - name: Format, clippy, and golden tests for budlum-mobile-log-analyzer (WP-37)
+        run: |
+          set -euo pipefail
+          cargo fmt --manifest-path mobile/tools/log-analyzer/Cargo.toml --all -- --check
+          cargo clippy --locked --manifest-path mobile/tools/log-analyzer/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path mobile/tools/log-analyzer/Cargo.toml
+
+      - name: Verify Android manifest & Play policy invariants (WP-36)
+        run: |
+          set -euo pipefail
+          manifest="mobile/android/app/src/main/AndroidManifest.xml"
+          gradle_file="mobile/android/app/build.gradle.kts"
+          grep -q 'android:foregroundServiceType="specialUse"' "$manifest"
+          grep -q 'android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE' "$manifest"
+          if grep -q 'REQUEST_IGNORE_BATTERY_OPTIMIZATIONS' "$manifest"; then
+            echo "ERROR: REQUEST_IGNORE_BATTERY_OPTIMIZATIONS is forbidden" >&2
+            exit 1
+          fi
+          grep -q 'compileSdk = 36' "$gradle_file"
+          grep -q 'targetSdk = 36' "$gradle_file"
+          grep -q 'minSdk = 29' "$gradle_file"
+          test -s mobile/android/PLAY_DECLARATION.md
+
+      - name: Compile and run WP-36 Android Kotlin core & unit test suite
+        run: |
+          set -euo pipefail
+          kotlinc \
+            mobile/android/app/src/main/java/network/budlum/validator/core/MobileCoreBridge.kt \
+            mobile/android/app/src/main/java/network/budlum/validator/core/KeystoreKeyVault.kt \
+            mobile/android/app/src/main/java/network/budlum/validator/core/OemBatteryGuide.kt \
+            mobile/android/devicetests/DeviceFieldHarness.kt \
+            mobile/android/app/src/test/java/network/budlum/validator/MobileValidatorUnitTest.kt \
+            -include-runtime -d /tmp/budlum-mobile-android-tests.jar
+          java -ea -cp /tmp/budlum-mobile-android-tests.jar network.budlum.validator.MobileValidatorUnitTest

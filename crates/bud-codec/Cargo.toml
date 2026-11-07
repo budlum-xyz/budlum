@@ -23,3 +23,7 @@ unused_import_braces = "deny"
 [lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
+
+[profile.release]
+overflow-checks = true
+panic = "abort"

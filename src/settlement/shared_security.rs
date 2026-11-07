@@ -930,4 +930,20 @@ mod tests {
             "1d4cf8803bf3fbf7ec0ac2dc3bd646223ffae6bd5a90caf226a8fcb80ac54b3e"
         );
     }
+
+    #[test]
+    fn shared_security_is_closed_on_testnet() {
+        let operator = Address::from([0x21; 32]);
+        let mut state = state_with_registrar(operator);
+        let testnet = crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value();
+        let tx = SharedSecurityTx::SetRegistrar {
+            domain_key: DOMAIN,
+            registrar: REGISTRAR.to_vec(),
+        };
+        let err = execute_shared_security_tx(&mut state, &ctx(operator, testnet), &tx)
+            .expect_err("shared security must be closed on testnet");
+        assert!(err.to_string().contains("not enabled"));
+    }
 }

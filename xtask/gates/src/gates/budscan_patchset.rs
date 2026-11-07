@@ -73,6 +73,15 @@ fn parse_list(text: &str) -> Result<Vec<(String, bool)>, String> {
         if path.is_empty() {
             return Err(format!("patches.txt:{}: the path is empty", lineno + 1));
         }
+        let bad_seg = path
+            .split('/')
+            .any(|seg| seg.is_empty() || seg == "." || seg == "..");
+        if path.starts_with('/') || path.contains('\\') || bad_seg {
+            return Err(format!(
+                "patches.txt:{}: {path} leaves the patch tree or uses a non-canonical separator",
+                lineno + 1
+            ));
+        }
         if !seen.insert(path.to_string()) {
             return Err(format!(
                 "patches.txt:{}: {path} is listed twice",

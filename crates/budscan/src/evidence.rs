@@ -67,10 +67,20 @@ pub struct Claim {
 impl Claim {
     #[must_use]
     pub fn new(layer: &str, strength: Strength, reason: &str) -> Self {
-        debug_assert!(
-            !reason.is_empty(),
-            "a claim without a reason cannot be written"
-        );
+        let clean_layer = layer.trim();
+        let clean_reason = reason.trim();
+        if clean_layer.is_empty() || clean_reason.is_empty() {
+            let fallback_layer = if clean_layer.is_empty() {
+                "evidence"
+            } else {
+                clean_layer
+            };
+            return Self {
+                layer: fallback_layer.to_string(),
+                strength: Strength::Refused,
+                reason: String::from("claim omitted its layer or reason"),
+            };
+        }
         Self {
             layer: layer.to_string(),
             strength,
@@ -106,9 +116,17 @@ impl Evidence {
     /// With no claims at all the answer is `Refused`: something unmeasured does
     /// not count as verified. That stops an empty `Evidence` from passing by
     /// accident, and it is a decision about which way the default points -
-    /// silence does not say `verified`.
+    /// silence does not say `verified`. Any claim whose `layer` or `reason` is
+    /// blank (including via deserialization) also collapses to `Refused`.
     #[must_use]
     pub fn weakest(&self) -> Strength {
+        if self
+            .claims
+            .iter()
+            .any(|c| c.layer.trim().is_empty() || c.reason.trim().is_empty())
+        {
+            return Strength::Refused;
+        }
         self.claims
             .iter()
             .map(|c| c.strength)
@@ -132,8 +150,24 @@ impl Evidence {
         let reason = self
             .claims
             .iter()
-            .filter(|c| c.strength == w)
-            .map(|c| format!("{}: {}", c.layer, c.reason))
+            .filter(|c| {
+                c.strength == w
+                    || (w == Strength::Refused
+                        && (c.layer.trim().is_empty() || c.reason.trim().is_empty()))
+            })
+            .map(|c| {
+                let layer = if c.layer.trim().is_empty() {
+                    "evidence"
+                } else {
+                    c.layer.as_str()
+                };
+                let why = if c.reason.trim().is_empty() {
+                    "claim omitted its reason"
+                } else {
+                    c.reason.as_str()
+                };
+                format!("{layer}: {why}")
+            })
             .collect::<Vec<_>>()
             .join("; ");
         if reason.is_empty() {
@@ -147,6 +181,35 @@ impl Evidence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blg_143_empty_or_whitespace_claim_reason_cannot_verify() {
+        let empty = Evidence::new().with(Claim::new(
+            "bud-fetcher",
+            Strength::Verified,
+            "",
+        ));
+        assert_eq!(empty.weakest(), Strength::Refused);
+        assert!(!empty.is_displayable());
+
+        let ws = Evidence::new().with(Claim::new(
+            "bud-fetcher",
+            Strength::Verified,
+            "   ",
+        ));
+        assert_eq!(ws.weakest(), Strength::Refused);
+
+        let bypassed = Evidence {
+            claims: vec![Claim {
+                layer: String::from("bud-fetcher"),
+                strength: Strength::Verified,
+                reason: String::from(" \t "),
+            }],
+        };
+        assert_eq!(bypassed.weakest(), Strength::Refused);
+        assert!(!bypassed.is_displayable());
+        assert!(bypassed.badge().contains("omitted"));
+    }
 
     #[test]
     fn no_measurement_is_not_verified() {

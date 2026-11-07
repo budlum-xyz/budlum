@@ -197,7 +197,7 @@ fn plan<R: NameResolver>(resolver: &R, raw: &str) -> Result<Plan, String> {
 /// looked for.
 fn plan_bud<R: NameResolver>(resolver: &R, raw: &str, name: &str) -> Result<Plan, String> {
     let (record, proof) = resolver.resolve_bud(name)?;
-    let evidence = bns_proof::evaluate(
+    let mut evidence = bns_proof::evaluate(
         &record,
         &proof,
         resolver.bns_root(),
@@ -211,7 +211,17 @@ fn plan_bud<R: NameResolver>(resolver: &R, raw: &str, name: &str) -> Result<Plan
             evidence,
         }));
     }
-    let Some(id) = record.content_id.or(record.storage_root.map(ContentId)) else {
+    let id = if let Some(cid) = record.content_id {
+        cid
+    } else if let Some(sr) = record.storage_root {
+        evidence.push(Claim::new(
+            "bns-storage-fallback",
+            Strength::RpcClaimOnly,
+            "content_id is absent; falling back to storage_root, which is not a verified \
+             content manifest commitment",
+        ));
+        ContentId(sr)
+    } else {
         return Ok(Plan::stop(refusal(
             raw,
             "bns-resolution",
@@ -575,5 +585,61 @@ mod tests {
         let page = open(&r, &table(&[]), "ayaz.bud").unwrap();
         assert!(!page.is_renderable());
         assert!(page.evidence.badge().contains("has expired"));
+    }
+
+    #[test]
+    fn blg_068_storage_root_fallback_never_receives_verified_badge() {
+        let bytes = b"<html>fallback</html>";
+        let id = bud_id(bytes);
+        let resolved = ResolvedName {
+            name: String::from("ayaz.bud"),
+            owner: [1u8; 32],
+            storage_root: Some(id.0),
+            content_id: None,
+            is_expired: false,
+        };
+        let entries = vec![bns_proof::RegistryEntry {
+            name: String::from("ayaz.bud"),
+            owner: [1u8; 32],
+            expires_at: 100,
+            content_id: None,
+            storage_root: Some(id.0),
+        }];
+        let root = bns_proof::partial_registry_root(100, &entries);
+        let r = Resolver {
+            bud: Some((
+                resolved,
+                BnsInclusionProof::Registry {
+                    base_cost: 100,
+                    entries,
+                },
+            )),
+            root: Some(root),
+            eth: None,
+            epoch: 0,
+        };
+        let t = bud_table(bytes, bytes);
+        let page = open(&r, &t, "ayaz.bud").unwrap();
+        assert!(page.is_renderable());
+        assert_eq!(page.evidence.weakest(), Strength::RpcClaimOnly);
+    }
+
+    #[test]
+    fn blg_121_ens_arweave_ns_32b_tx_id_renders_with_honest_badge() {
+        // EIP-1577 `arweave-ns` codec 0xb29910 as unsigned varint: 0x90 0xb2 0x2c
+        let mut ch = vec![0x90, 0xb2, 0x2c];
+        let tx_id = [0x55u8; 32];
+        ch.extend_from_slice(&tx_id);
+        let key = hex::encode(tx_id);
+        let t = table(&[(&key, b"<html>permaweb</html>")]);
+        let r = Resolver {
+            bud: None,
+            root: None,
+            eth: Some((ch, true)),
+            epoch: 0,
+        };
+        let page = open(&r, &t, "x1.eth").unwrap();
+        assert!(page.is_renderable());
+        assert_eq!(page.evidence.weakest(), Strength::RpcClaimOnly);
     }
 }

@@ -130,6 +130,12 @@ pub fn parse_list(text: &str) -> Result<Vec<PatchEntry>, String> {
         if path.is_empty() {
             return Err(format!("{}: the path is empty", lineno + 1));
         }
+        if !path_stays_in_tree(path) || path.contains('\\') {
+            return Err(format!(
+                "{}: {path} leaves the patch tree or uses a non-canonical separator",
+                lineno + 1
+            ));
+        }
         if !seen.insert(path.to_string()) {
             return Err(format!(
                 "{}: {path} appears twice in the list; whether it is applied twice is \
@@ -147,8 +153,17 @@ pub fn parse_list(text: &str) -> Result<Vec<PatchEntry>, String> {
 pub fn render_list(entries: &[PatchEntry]) -> String {
     let mut sorted = entries.to_vec();
     sorted.sort();
+    render_in_order(&sorted)
+}
+
+/// Convenience: render the list back to text in its exact application order.
+///
+/// Dependent patches must be applied in list order rather than alphabetical
+/// order; callers writing an ordered series use this function.
+#[must_use]
+pub fn render_in_order(entries: &[PatchEntry]) -> String {
     let mut out = String::new();
-    for e in sorted {
+    for e in entries {
         if !e.enabled {
             out.push('!');
         }
@@ -604,5 +619,25 @@ mod tests {
             check_no_foreign_brand("x", ""),
             Verdict::Vacuous(_)
         ));
+    }
+
+    #[test]
+    fn blg_121_patchset_rejects_parent_traversal_and_preserves_order() {
+        for bad in [
+            "../escape.patch\n",
+            "a/../../etc/passwd\n",
+            "/abs/root.patch\n",
+            "a//b.patch\n",
+            "a\\b.patch\n",
+        ] {
+            assert!(parse_list(bad).is_err(), "{bad:?} must be rejected");
+        }
+        let ordered = parse_list("02-second.patch\n!01-first.patch\n").unwrap();
+        assert_eq!(ordered[0].path, "02-second.patch");
+        assert_eq!(ordered[1].path, "01-first.patch");
+        assert_eq!(
+            render_in_order(&ordered),
+            "02-second.patch\n!01-first.patch\n"
+        );
     }
 }

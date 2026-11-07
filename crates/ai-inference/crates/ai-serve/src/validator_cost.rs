@@ -32,6 +32,22 @@ pub struct HardwarePricelist {
     pub dollar_per_kwh: f64,
 }
 
+impl HardwarePricelist {
+    /// Convenience: true iff every component rate is finite and strictly positive (`BLG-157`).
+    #[must_use]
+    pub fn is_valid(self) -> bool {
+        [
+            self.dollar_per_gib_ram,
+            self.dollar_per_gib_nvme,
+            self.dollar_per_gib_hdd,
+            self.dollar_per_core,
+            self.dollar_per_kwh,
+        ]
+        .into_iter()
+        .all(|v| v.is_finite() && v > 0.0)
+    }
+}
+
 #[must_use]
 pub const fn market_pricelist() -> HardwarePricelist {
     HardwarePricelist {
@@ -273,6 +289,30 @@ pub fn measure_serving_at(
     speculation: f64,
     rates: HardwareCostModel,
 ) -> Result<ServingMeasure, PlanError> {
+    if weight_bits == 0 {
+        return Err(PlanError::InvalidParameter {
+            detail: "weight_bits must be >= 1",
+        });
+    }
+    if !disk_gib_per_second.is_finite() || disk_gib_per_second <= 0.0 {
+        return Err(PlanError::InvalidParameter {
+            detail: "disk_gib_per_second must be finite and > 0",
+        });
+    }
+    if !speculation.is_finite() || speculation <= 0.0 {
+        return Err(PlanError::InvalidParameter {
+            detail: "speculation must be finite and > 0",
+        });
+    }
+    if !rates.dollar_per_accelerator_gb_hour.is_finite()
+        || rates.dollar_per_accelerator_gb_hour < 0.0
+        || !rates.dollar_per_system_gb_hour.is_finite()
+        || rates.dollar_per_system_gb_hour < 0.0
+    {
+        return Err(PlanError::InvalidParameter {
+            detail: "hardware rental rates must be finite and >= 0",
+        });
+    }
     let model = frontier_model(weight_bits);
     let plan = ResidencyPlan::plan_bounded_by_disk(
         &model,
@@ -445,5 +485,33 @@ mod validator_cost_tests {
             (speculative_cost - greedy_cost / MTP_SPEEDUP).abs() < 1e-6,
             "speculation divides the per-token cost by its speedup"
         );
+    }
+
+    #[test]
+    fn blg_157_validator_cost_refuses_nonpositive_or_nan_inputs() {
+        assert!(market_pricelist().is_valid());
+        let mut bad_prices = market_pricelist();
+        bad_prices.dollar_per_kwh = -0.01;
+        assert!(!bad_prices.is_valid());
+        bad_prices.dollar_per_kwh = f64::NAN;
+        assert!(!bad_prices.is_valid());
+
+        let r = market_rates();
+        assert!(matches!(
+            measure_serving_at(0, 10.0, 1.0, r),
+            Err(PlanError::InvalidParameter { .. })
+        ));
+        assert!(matches!(
+            measure_serving_at(16, 0.0, 1.0, r),
+            Err(PlanError::InvalidParameter { .. })
+        ));
+        assert!(matches!(
+            measure_serving_at(16, f64::NAN, 1.0, r),
+            Err(PlanError::InvalidParameter { .. })
+        ));
+        assert!(matches!(
+            measure_serving_at(16, 10.0, -1.0, r),
+            Err(PlanError::InvalidParameter { .. })
+        ));
     }
 }

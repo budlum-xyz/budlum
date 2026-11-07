@@ -663,6 +663,24 @@ impl RegenerationLedger {
         if target.stage != Stage::Polyp {
             return Err(ReversionError::ForgedTrailTargetNotPolyp { to: target.stage });
         }
+        if let Err(rule) = policy.validate() {
+            return Err(ReversionError::InvalidPolicy { rule });
+        }
+        let wanted = match self.stage.reversions_to(target.stage) {
+            Some(steps) if steps > 0 => steps,
+            _ => {
+                return Err(ReversionError::TargetNotEarlier {
+                    from: self.stage,
+                    to: target.stage,
+                });
+            }
+        };
+        if wanted > policy.max_stages_per_event {
+            return Err(ReversionError::TooManyStages {
+                wanted,
+                limit: policy.max_stages_per_event,
+            });
+        }
         // The only legal target here is Polyp, so this is always a full
         // reversion. The policy switch applies to this door like any other
         // The lifetime budget is not checked: the counters of a
@@ -1555,6 +1573,50 @@ mod tests {
                 )
                 .expect("re-growth onto the canonical line");
             assert_eq!(ledger.stage, Stage::Ephyra);
+        }
+
+        #[test]
+        fn blg_131_forgery_door_enforces_policy_depth_and_refuses_polyp_self_stage() {
+            let mut medusa = with_forged_trail();
+            medusa.stage = Stage::Medusa;
+            let shallow_policy = ReversionPolicy {
+                max_stages_per_event: 1,
+                ..ReversionPolicy::default()
+            };
+            let target = StageSnapshot {
+                stage: Stage::Polyp,
+                height: 0,
+                commitment: [0x11; 32],
+                carried: Default::default(),
+                seal: Some(crate::domain::pq_canonical::test_seal(Stage::Polyp, 0)),
+            };
+            assert!(matches!(
+                medusa.revert_after_forgery(
+                    &target,
+                    Stress::RepairFailed,
+                    &shallow_policy,
+                    &canonical,
+                ),
+                Err(ReversionError::TooManyStages {
+                    wanted: 2,
+                    limit: 1
+                })
+            ));
+
+            let mut polyp = with_forged_trail();
+            polyp.stage = Stage::Polyp;
+            assert!(matches!(
+                polyp.revert_after_forgery(
+                    &target,
+                    Stress::RepairFailed,
+                    &ReversionPolicy::default(),
+                    &canonical,
+                ),
+                Err(ReversionError::TargetNotEarlier {
+                    from: Stage::Polyp,
+                    to: Stage::Polyp
+                })
+            ));
         }
     }
 }

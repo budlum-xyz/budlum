@@ -19,7 +19,7 @@ contains **no** relayer registration/stake/whitelist code.
 ```rust
 use budlum_wallet_core::{Wallet, WalletPrivacyConfig, ML_DSA_87_SIGNATURE_LEN};
 
-let wallet = Wallet::generate(12).unwrap();
+let wallet = Wallet::generate(24).unwrap();
 println!("Mnemonic: {}", wallet.mnemonic());
 println!("Address: {}", wallet.address_hex());
 

@@ -1,0 +1,28 @@
+[package]
+name = "budlum-mobile-log-analyzer"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+description = "Field-test log analyzer for the Budlum mobile validator device matrix (WP-37)."
+publish = false
+
+[workspace]
+
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unused_import_braces = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+
+[profile.release]
+overflow-checks = true
+panic = "abort"

@@ -19,7 +19,9 @@
 
 use crate::bns::types::BnsResolved;
 use crate::core::address::Address;
-use crate::pollen::{AccessGrant, DataAsset, SaleAuthorization};
+use crate::pollen::{
+    AccessGrant, AccessGrantStatus, DataAsset, DataAssetStatus, SaleAuthorization,
+};
 use crate::storage::{ContentId, ContentManifest};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -151,6 +153,7 @@ pub struct PassportProofBundle {
 
 impl PassportProofBundle {
     pub fn validate_against_profile(&self, profile: &DwebPassportProfile) -> Result<(), String> {
+        profile.validate_public()?;
         validate_passport_name(&self.name)?;
         if self.name != profile.name || self.exists != profile.exists || self.owner != profile.owner
         {
@@ -159,7 +162,9 @@ impl PassportProofBundle {
         if self.items.len() > MAX_PASSPORT_EVIDENCE_ITEMS {
             return Err("PassportProofBundle item limit exceeded".into());
         }
-        if self.evidence_count as usize != self.items.len() {
+        if self.evidence_count as usize != self.items.len()
+            || profile.evidence.len() != self.items.len()
+        {
             return Err("PassportProofBundle evidence_count mismatch".into());
         }
         let expected = build_passport_proof_bundle(profile, self.generated_at_block);
@@ -227,6 +232,61 @@ pub fn build_passport_proof_bundle(
             hasher.update(owner.as_bytes());
         }
         None => hasher.update([0]),
+    }
+    match profile.address {
+        Some(address) => {
+            hasher.update([1]);
+            hasher.update(address.as_bytes());
+        }
+        None => hasher.update([0]),
+    }
+    match &profile.storage_root {
+        Some(sr) => {
+            hasher.update([1]);
+            update_str(&mut hasher, sr);
+        }
+        None => hasher.update([0]),
+    }
+    match profile.storage_domain_id {
+        Some(did) => {
+            hasher.update([1]);
+            hasher.update(did.to_le_bytes());
+        }
+        None => hasher.update([0]),
+    }
+    match &profile.content_id {
+        Some(cid) => {
+            hasher.update([1]);
+            update_str(&mut hasher, cid);
+        }
+        None => hasher.update([0]),
+    }
+    hasher.update([u8::from(profile.is_expired)]);
+    match &profile.manifest {
+        Some(m) => {
+            hasher.update([1]);
+            update_str(&mut hasher, &m.manifest_id);
+            hasher.update([u8::from(m.found)]);
+            match m.shard_count {
+                Some(sc) => {
+                    hasher.update([1]);
+                    hasher.update(sc.to_le_bytes());
+                }
+                None => hasher.update([0]),
+            }
+            match m.total_size {
+                Some(ts) => {
+                    hasher.update([1]);
+                    hasher.update(ts.to_le_bytes());
+                }
+                None => hasher.update([0]),
+            }
+        }
+        None => hasher.update([0]),
+    }
+    if let Ok(encoded_profile) = serde_json::to_vec(profile) {
+        hasher.update((encoded_profile.len() as u64).to_le_bytes());
+        hasher.update(&encoded_profile);
     }
     hasher.update(generated_at_block.to_le_bytes());
     hasher.update((items.len() as u32).to_le_bytes());
@@ -326,19 +386,30 @@ pub fn build_passport_profile(
 
     let assets_owned = data_assets
         .iter()
-        .filter(|asset| owned_by(&owner, asset))
+        .filter(|asset| owned_by(&owner, asset) && asset.is_active())
         .count();
     let grants_as_owner = access_grants
         .iter()
-        .filter(|grant| grant.owner == owner)
+        .filter(|grant| {
+            grant.owner == owner
+                && grant.status == AccessGrantStatus::Active
+                && grant.reads_used < grant.max_reads
+        })
         .count();
     let grants_as_grantee = access_grants
         .iter()
-        .filter(|grant| grant.grantee == owner)
+        .filter(|grant| {
+            grant.grantee == owner
+                && grant.status == AccessGrantStatus::Active
+                && grant.reads_used < grant.max_reads
+        })
         .count();
     let sale_authorizations = sale_authorizations
         .iter()
-        .filter(|authorization| authorization.seller == owner)
+        .filter(|authorization| {
+            authorization.seller == owner
+                && authorization.grants_issued < authorization.max_grants
+        })
         .count();
 
     let manifest_summary = manifest_id.map(|id| {
@@ -538,5 +609,44 @@ mod tests {
         assert!(try_build_passport_proof_bundle(&profile, 1)
             .unwrap_err()
             .contains("evidence"));
+        let truncated = build_passport_proof_bundle(&profile, 1);
+        assert!(truncated.validate_against_profile(&profile).is_err());
+    }
+
+    #[test]
+    fn blg_129_proof_bundle_binds_all_profile_fields_and_ignores_revoked_assets() {
+        let owner = addr(3);
+        let cid = ContentId::of(b"doc");
+        let resolved = BnsResolved {
+            name: "doc.bud".into(),
+            owner,
+            address: Some(owner),
+            storage_root: Some(*cid.as_bytes()),
+            storage_domain_id: Some(5),
+            content_id: Some(cid),
+            is_expired: false,
+        };
+        let mut revoked_asset = DataAsset::new(owner, cid, [9u8; 32], true);
+        revoked_asset.status = DataAssetStatus::Revoked;
+        let profile = build_passport_profile(
+            "doc.bud".into(),
+            Some(resolved.clone()),
+            None,
+            &[revoked_asset],
+            &[],
+            &[],
+        );
+        let baseline_profile =
+            build_passport_profile("doc.bud".into(), Some(resolved), None, &[], &[], &[]);
+        assert_eq!(profile, baseline_profile);
+
+        let bundle = try_build_passport_proof_bundle(&profile, 50).unwrap();
+        let mut forged = profile.clone();
+        forged.address = Some(addr(9));
+        assert!(bundle.validate_against_profile(&forged).is_err());
+
+        let mut forged_exp = profile;
+        forged_exp.is_expired = true;
+        assert!(bundle.validate_against_profile(&forged_exp).is_err());
     }
 }

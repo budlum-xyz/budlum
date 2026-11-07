@@ -44,6 +44,9 @@ impl FromStr for NodeMode {
     }
 }
 
+/// Minimum finalized checkpoint retention window for pruned full nodes (`BLG-155`).
+pub const MIN_PRUNING_RETENTION_BLOCKS: u64 = 64;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PruningPolicy {
     pub mode: NodeMode,
@@ -93,6 +96,11 @@ impl PruningPolicy {
         }
         if self.pruning_enabled && self.retention_blocks == 0 {
             return Err("pruning retention_blocks must be non-zero".into());
+        }
+        if self.pruning_enabled && self.retention_blocks < MIN_PRUNING_RETENTION_BLOCKS {
+            return Err(format!(
+                "pruning retention_blocks must be at least {MIN_PRUNING_RETENTION_BLOCKS}"
+            ));
         }
         Ok(())
     }
@@ -206,5 +214,16 @@ mod tests {
     fn node_prune_decision_distinguishes_full_and_archive() {
         assert!(PruningPolicy::full_node_default().should_prune_historical_state());
         assert!(!PruningPolicy::archive_node_default().should_prune_historical_state());
+    }
+
+    #[test]
+    fn blg_155_pruning_rejects_in_reorg_single_block_retention() {
+        let mut policy = PruningPolicy::full_node_default();
+        policy.retention_blocks = 1;
+        assert!(policy.validate().is_err());
+        assert!(!policy.should_prune_historical_state());
+        policy.retention_blocks = MIN_PRUNING_RETENTION_BLOCKS;
+        assert!(policy.validate().is_ok());
+        assert!(policy.should_prune_historical_state());
     }
 }

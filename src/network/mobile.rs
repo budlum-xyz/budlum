@@ -121,9 +121,9 @@ pub struct NetworkStatus {
     pub connection_type: ConnectionType,
     /// Estimated bandwidth, in Kbps.
     pub bandwidth_kbps: u64,
-    /// Gecikme (ms).
+    /// Latency, in milliseconds.
     pub latency_ms: u32,
-    /// NAT tipi.
+    /// NAT classification.
     pub nat_type: NatType,
     /// Is there public IP reachability?
     pub public_ip: bool,
@@ -139,10 +139,10 @@ pub enum ConnectionType {
     Unknown,
 }
 
-/// NAT tipi.
+/// NAT classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NatType {
-    /// NAT yok - genel IP.
+    /// No NAT: public IP.
     None,
     /// Full cone NAT: the most permissive.
     FullCone,
@@ -196,7 +196,7 @@ impl StorageStatus {
         Ok(())
     }
 
-    /// Space available to B.U.D., in bytes.
+/// Space available to B.U.D., in bytes.
     pub fn bud_available(&self) -> u64 {
         self.bud_reserved_bytes.min(self.available_bytes)
     }
@@ -204,6 +204,94 @@ impl StorageStatus {
     /// Is there enough storage, meaning at least 1 GB for B.U.D.?
     pub fn is_sufficient_for_bud(&self) -> bool {
         self.bud_available() >= 1_073_741_824 // 1 GB
+    }
+
+    /// Convenience: R-34 threshold (2 GiB free) below which mobile custody releases shares.
+    #[must_use]
+    pub const fn must_release_shares(&self) -> bool {
+        self.available_bytes < MOBILE_LOW_SPACE_RELEASE_BYTES
+    }
+}
+
+/// Convenience: Android 15+ 24-hour runtime cap on `dataSync` foreground services (6h).
+pub const ANDROID_15_DATASYNC_LIMIT_MINUTES_PER_24H: u32 = 360;
+
+/// Convenience: WorkManager unmetered fallback period when foreground service stops.
+pub const MOBILE_WORKMANAGER_PERIOD_MINUTES: u32 = 15;
+
+/// Convenience: free-space floor (2 GiB, R-34) triggering `ReleaseShares`.
+pub const MOBILE_LOW_SPACE_RELEASE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Convenience: Android foreground service type modeled for mobile validator duty (BLG-265).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum AndroidForegroundKind {
+    /// Persistent `specialUse` service paired with WorkManager fallback.
+    SpecialUse,
+    /// Legacy `dataSync` service capped to 6 hours per 24 hours on Android 15+.
+    DataSync,
+}
+
+impl AndroidForegroundKind {
+    /// Convenience: maximum continuous foreground minutes per 24h window on Android 15+.
+    #[must_use]
+    pub const fn max_foreground_minutes_per_24h(self) -> u32 {
+        match self {
+            Self::SpecialUse => 24 * 60,
+            Self::DataSync => ANDROID_15_DATASYNC_LIMIT_MINUTES_PER_24H,
+        }
+    }
+
+    /// Convenience: only `SpecialUse` sustains 24-hour mobile validator duty (BLG-265).
+    #[must_use]
+    pub const fn supports_24h_validator_duty(self) -> bool {
+        matches!(self, Self::SpecialUse)
+    }
+}
+
+/// Convenience: platform-aware mobile validator policy (R-33, R-34, R-35, BLG-265).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileValidatorRuntimePolicy {
+    pub wifi_only: bool,
+    pub foreground_kind: AndroidForegroundKind,
+    pub workmanager_period_minutes: u32,
+}
+
+impl Default for MobileValidatorRuntimePolicy {
+    fn default() -> Self {
+        Self {
+            wifi_only: true,
+            foreground_kind: AndroidForegroundKind::SpecialUse,
+            workmanager_period_minutes: MOBILE_WORKMANAGER_PERIOD_MINUTES,
+        }
+    }
+}
+
+impl MobileValidatorRuntimePolicy {
+    /// Convenience: R-35 invariant - thermal pause is non-disablable in every policy.
+    #[must_use]
+    pub const fn thermal_pause_enabled(&self) -> bool {
+        true
+    }
+
+    /// Convenience: validates Android 15+ foreground service & WorkManager bounds.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.foreground_kind.supports_24h_validator_duty() {
+            return Err(
+                "Android 15+ dataSync foreground service is capped at 6h/24h; \
+                 mobile validators must run under specialUse"
+                    .into(),
+            );
+        }
+        if self.workmanager_period_minutes < MOBILE_WORKMANAGER_PERIOD_MINUTES
+            || self.workmanager_period_minutes > 60
+        {
+            return Err(format!(
+                "WorkManager period {} min outside Android [15, 60] min bounds",
+                self.workmanager_period_minutes
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -781,5 +869,31 @@ mod peer_budget_tests {
             "the profile already declined every task at this level, which is \
              why the peer budget had to move with it"
         );
+    }
+
+    #[test]
+    fn blg_265_android_15_datasync_rejected_for_24h_validator_duty() {
+        let default_policy = MobileValidatorRuntimePolicy::default();
+        assert!(default_policy.wifi_only, "R-33 default must be Wi-Fi only");
+        assert!(default_policy.thermal_pause_enabled(), "R-35 thermal pause");
+        assert!(default_policy.validate().is_ok());
+
+        let datasync_policy = MobileValidatorRuntimePolicy {
+            wifi_only: true,
+            foreground_kind: AndroidForegroundKind::DataSync,
+            workmanager_period_minutes: MOBILE_WORKMANAGER_PERIOD_MINUTES,
+        };
+        assert_eq!(
+            AndroidForegroundKind::DataSync.max_foreground_minutes_per_24h(),
+            360
+        );
+        assert!(datasync_policy.validate().is_err());
+
+        let low_space = StorageStatus {
+            total_bytes: 64 * 1_073_741_824,
+            available_bytes: MOBILE_LOW_SPACE_RELEASE_BYTES - 1,
+            bud_reserved_bytes: 4 * 1_073_741_824,
+        };
+        assert!(low_space.must_release_shares());
     }
 }

@@ -289,7 +289,7 @@ pub fn lock(
     // The owner is debited, so the balance is checked before the transfer
     // row exists: a refusal after the insert would leave a lock that never
     // debited anyone, and the expiry sweep would refund units never locked.
-    let owner_balance = state.get_balance(&owner);
+    let owner_balance = state.spendable_balance(&owner);
     let needed = params.amount.saturating_add(reserve);
     if owner_balance < needed {
         return Err(format!(
@@ -478,7 +478,7 @@ pub fn burn_with_event(
     .map_err(|e| e.to_string())?;
     let amount = held.get();
     let burner = transfer.recipient;
-    let burner_balance = state.get_balance(&burner);
+    let burner_balance = state.spendable_balance(&burner);
     let needed = amount.saturating_add(reserve);
     if burner_balance < needed {
         return Err(format!(
@@ -833,7 +833,7 @@ pub fn execute_bridge_tx(
             register_asset(state, *asset_id, *domain).map_err(refused)
         }
         BridgeTx::Lock(request) => {
-            let balance = state.get_balance(&ctx.sender);
+            let balance = state.spendable_balance(&ctx.sender);
             let needed = request.amount.saturating_add(ctx.fee);
             if balance < needed {
                 return Err(BridgeTxError::Unfunded { needed, balance });
@@ -1061,5 +1061,169 @@ mod tests {
             root_before,
             "a pending relay must move the settlement root"
         );
+    }
+
+    #[test]
+    fn blg_105_bridge_lock_refuses_vesting_locked_balance() {
+        let (mut state, _) = bridged();
+        let team = Address::from([0x77; 32]);
+        state.add_balance(&team, 5_000);
+        state.team_vesting = Some((
+            team,
+            crate::tokenomics::VestingSchedule {
+                total: 5_000,
+                start_epoch: 0,
+                cliff_epochs: 10,
+                duration_epochs: 100,
+            },
+        ));
+        assert_eq!(state.spendable_balance(&team), 0);
+
+        let err = execute_bridge_tx(
+            &mut state,
+            &ctx(team),
+            &BridgeTx::Lock(lock_request(1_000)),
+        )
+        .unwrap_err();
+        assert!(matches!(err, BridgeTxError::Unfunded { .. }));
+        let req = lock_request(1_000);
+        let direct = lock(&mut state, team, &req, FEE, 5);
+        assert!(direct.is_err());
+    }
+
+    #[test]
+    fn bridge_e2e_lock_mint_burn_unlock() {
+        use crate::cross_domain::event_tree::DomainEventTree;
+        use crate::domain::types::DomainCommitment;
+        use crate::registry::role::roles::RELAYER;
+        use crate::settlement::domains::accept_verified_commitment;
+
+        let mut state = AccountState::new();
+        let d10 = default_domain(10, ConsensusKind::PoW, 45262, POW_HEADER_CHAIN_ADAPTER, 1);
+        let d11 = default_domain(11, ConsensusKind::PoW, 45263, POW_HEADER_CHAIN_ADAPTER, 1);
+        crate::settlement::domains::register_domain(&mut state, d10).unwrap();
+        crate::settlement::domains::register_domain(&mut state, d11).unwrap();
+        register_asset(&mut state, ASSET, 10).unwrap();
+
+        let owner = Address::from([0x41; 32]);
+        let recipient = Address::from([0x22; 32]);
+        let carrier = Address::from([0xCA; 32]);
+        let min_stake = state.registry.params().min_stake;
+        state.add_balance(&owner, 10_000 + FEE);
+        state.add_balance(&recipient, FEE);
+        state.add_balance(&carrier, min_stake.saturating_add(1_000));
+        state
+            .registry
+            .register(carrier, RELAYER, min_stake, 0)
+            .unwrap();
+
+        // 1. Lock 1_000 on domain 10 -> domain 11 at domain_height 1.
+        let lock_req = LockRequest {
+            source_domain: 10,
+            target_domain: 11,
+            source_height: 1,
+            event_index: 0,
+            asset_id: ASSET,
+            recipient,
+            amount: 1_000,
+            expiry_height: 500,
+        };
+        let locked = lock(&mut state, owner, &lock_req, FEE, 1).unwrap();
+        let lock_event = locked.1;
+        let lock_id = lock_event.message.as_ref().unwrap().message_id;
+        assert_eq!(state.get_balance(&owner), 9_000 + FEE);
+
+        // Anchor domain 10 commitment at height 1 with lock_event in its tree.
+        let mut d10_tree = DomainEventTree::new();
+        let d10_idx = d10_tree.push(lock_event.clone());
+        let d10_proof = d10_tree.proof(d10_idx).unwrap();
+        let d10_hash = [0xD1; 32];
+        let d10_comm = DomainCommitment {
+            domain_id: 10,
+            domain_height: 1,
+            domain_block_hash: d10_hash,
+            parent_domain_block_hash: [0u8; 32],
+            state_root: [0x11; 32],
+            tx_root: [0u8; 32],
+            event_root: d10_tree.root(),
+            validator_set_hash: [0u8; 32],
+            consensus_kind: ConsensusKind::PoW,
+            finality_proof_hash: [0x22; 32],
+            timestamp_ms: 1_000,
+            sequence: 0,
+            producer: None,
+            state_updates: vec![],
+        };
+        accept_verified_commitment(&mut state, d10_comm).unwrap();
+
+        // 2. Mint via execute_bridge_tx on target domain.
+        let proven_lock = ProvenBridgeEvent {
+            domain: 10,
+            height: 1,
+            sequence: 0,
+            expected_block_hash: d10_hash,
+            event: lock_event,
+            proof: d10_proof,
+        };
+        execute_bridge_tx(
+            &mut state,
+            &ctx(carrier),
+            &BridgeTx::Mint(Box::new(proven_lock)),
+        )
+        .unwrap();
+        let minted_balance = state.get_balance(&recipient) - FEE;
+        assert!(minted_balance > 0 && minted_balance <= 1_000);
+
+        // 3. Burn on domain 11 at domain_height 1 naming an Ethereum destination.
+        let burn_req = BurnRequest {
+            message_id: lock_id,
+            domain: 11,
+            domain_height: 1,
+            event_index: 0,
+            expiry_height: 600,
+            recipient_eth: [0xAB; 20],
+        };
+        let burn_event = burn_with_event(&mut state, &burn_req, FEE, 2).unwrap();
+        assert_eq!(state.get_balance(&recipient), FEE);
+
+        // Anchor domain 11 commitment at height 1 with burn_event in its tree.
+        let mut d11_tree = DomainEventTree::new();
+        let d11_idx = d11_tree.push(burn_event.clone());
+        let d11_proof = d11_tree.proof(d11_idx).unwrap();
+        let d11_hash = [0xD2; 32];
+        let d11_comm = DomainCommitment {
+            domain_id: 11,
+            domain_height: 1,
+            domain_block_hash: d11_hash,
+            parent_domain_block_hash: [0u8; 32],
+            state_root: [0x33; 32],
+            tx_root: [0u8; 32],
+            event_root: d11_tree.root(),
+            validator_set_hash: [0u8; 32],
+            consensus_kind: ConsensusKind::PoW,
+            finality_proof_hash: [0x44; 32],
+            timestamp_ms: 2_000,
+            sequence: 0,
+            producer: None,
+            state_updates: vec![],
+        };
+        accept_verified_commitment(&mut state, d11_comm).unwrap();
+
+        // 4. Unlock back to owner on source domain.
+        let proven_burn = ProvenBridgeEvent {
+            domain: 11,
+            height: 1,
+            sequence: 0,
+            expected_block_hash: d11_hash,
+            event: burn_event,
+            proof: d11_proof,
+        };
+        execute_bridge_tx(
+            &mut state,
+            &ctx(carrier),
+            &BridgeTx::Unlock(Box::new(proven_burn)),
+        )
+        .unwrap();
+        assert_eq!(state.get_balance(&owner), 9_000 + FEE + minted_balance);
     }
 }

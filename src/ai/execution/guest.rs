@@ -300,7 +300,7 @@ pub fn program_hash_from_words(words: &[u64]) -> [u8; 32] {
 /// compared the two and failed every time:
 ///
 /// ```text
-/// SONUC: Err("execution proof program_hash != public_inputs.program_hash")
+/// RESULT: Err("execution proof program_hash != public_inputs.program_hash")
 /// ```
 ///
 /// Everything else in that measurement lined up, the verifier rebuilt the

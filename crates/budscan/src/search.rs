@@ -119,7 +119,17 @@ fn proven_claim(layer: &str, proven: bool, what: &str) -> Claim {
 /// [`crate::resolve`].
 pub fn run<V: ChainView>(view: &V, query: &Query) -> SearchResult {
     match query {
-        Query::BudAddress(address) | Query::ContentId(address) => account_hit(view, address),
+        Query::BudAddress(address) => account_hit(view, address),
+        Query::ContentId(id) => openable(
+            format!("bud://0x{}", hex::encode(id)),
+            "B.U.D. content manifest id: verified once its manifest and shards are fetched",
+            Claim::new(
+                "bud-content",
+                Strength::RpcClaimOnly,
+                "the content id was classified, but no manifest or shard bytes have been \
+                 fetched yet",
+            ),
+        ),
         Query::EvmAddress(address) => evm_hit(address),
         Query::NftId(id) => nft_hit(view, *id),
         Query::Name { name, suffix } => name_hit(view, name, suffix),
@@ -465,6 +475,28 @@ mod tests {
         match r.hit {
             Hit::Name { content_id, .. } => assert_eq!(content_id, Some(ContentId([7u8; 32]))),
             other => panic!("{other:?}"),
+        }
+        assert_eq!(r.evidence.weakest(), Strength::RpcClaimOnly);
+    }
+
+    #[test]
+    fn blg_068_bud_content_id_search_does_not_query_wallet_account() {
+        let view = Fake {
+            account: Some(AccountView {
+                address: [0x33; 32],
+                balance: 999,
+                nonce: 4,
+                proven: true,
+            }),
+            ..Fake::default()
+        };
+        let q = query::classify(&format!("bud://0x{}", "33".repeat(32)));
+        let r = run(&view, &q);
+        match r.hit {
+            Hit::Openable { ref target, .. } => {
+                assert!(target.starts_with("bud://0x"), "{target}");
+            }
+            other => panic!("expected Hit::Openable for ContentId, got {other:?}"),
         }
         assert_eq!(r.evidence.weakest(), Strength::RpcClaimOnly);
     }

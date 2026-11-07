@@ -71,10 +71,10 @@ pub fn decode_receipt(envelope: &[u8]) -> Result<EthReceipt, ReceiptError> {
     // Legacy receipt: first byte >= 0xc0 (RLP list prefix). Typed: 0x01/0x02/0x03.
     // The typed envelope type byte is CHECKED - any other
     // nonzero prefix used to be accepted and its payload decoded as a receipt.
-    let payload = if first >= 0xc0 {
-        envelope
+    let (is_typed, payload) = if first >= 0xc0 {
+        (false, envelope)
     } else if (0x01..=0x03).contains(&first) {
-        &envelope[1..]
+        (true, &envelope[1..])
     } else {
         return Err(ReceiptError::InvalidEnvelope);
     };
@@ -89,19 +89,23 @@ pub fn decode_receipt(envelope: &[u8]) -> Result<EthReceipt, ReceiptError> {
         return Err(ReceiptError::InvalidEnvelope);
     }
 
-    let status = decode_status(rlp::as_bytes(&list[0])?)?;
+    let status = decode_status(rlp::as_bytes(&list[0])?, is_typed)?;
+    let bloom = rlp::as_bytes(&list[2])?;
+    if bloom.len() != 256 {
+        return Err(ReceiptError::InvalidEnvelope);
+    }
     let logs = decode_logs(&list[3])?;
 
     Ok(EthReceipt { status, logs })
 }
 
 /// Interprets the status field: empty means failure (post-Byzantium 0x00),
-/// [0x01] means success, and 32 bytes are a pre-Byzantium postState root,
-/// which defaults to success.
-fn decode_status(b: &[u8]) -> Result<bool, ReceiptError> {
+/// [0x01] means success, and 32 bytes are a pre-Byzantium postState root
+/// (valid only on legacy receipts, never on EIP-2718 typed receipts).
+fn decode_status(b: &[u8], is_typed: bool) -> Result<bool, ReceiptError> {
     match b.len() {
-        0 => Ok(false), // status 0 (fail)
-        32 => Ok(true), // pre-Byzantium postState root
+        0 => Ok(false),                   // status 0 (fail)
+        32 if !is_typed => Ok(true),      // pre-Byzantium postState root
         // The status byte is EXACTLY 0 or 1. Any other
         // nonzero value (0x02, 0xff) used to read as "success".
         1 => match b[0] {
@@ -129,9 +133,15 @@ fn decode_logs(item: &Item) -> Result<Vec<EthLog>, ReceiptError> {
             return Err(ReceiptError::InvalidLog);
         }
         let address = rlp::as_bytes(&fields[0])?.to_vec();
+        if address.len() != 20 {
+            return Err(ReceiptError::InvalidLog);
+        }
         let mut topics = Vec::new();
         match &fields[1] {
             Item::List(tl) => {
+                if tl.len() > 4 {
+                    return Err(ReceiptError::InvalidLog);
+                }
                 for t in tl {
                     let tb = rlp::as_bytes(t)?;
                     if tb.len() != 32 {
@@ -415,5 +425,47 @@ mod tests {
             }
         }
         assert_eq!(second, 1);
+    }
+
+    #[test]
+    fn blg_053_receipt_refuses_typed_poststate_bad_bloom_and_invalid_log_shape() {
+        // Typed EIP-1559 receipt cannot carry a 32-byte pre-Byzantium postState root.
+        let bloom = Item::String(vec![0u8; 256]);
+        let typed_poststate = Item::List(vec![
+            Item::String(vec![0x77; 32]),
+            Item::String(vec![]),
+            bloom,
+            Item::List(vec![]),
+        ]);
+        let mut typed_bytes = vec![0x02];
+        typed_bytes.extend_from_slice(&encode(&typed_poststate));
+        assert_eq!(
+            decode_receipt(&typed_bytes),
+            Err(ReceiptError::InvalidEnvelope)
+        );
+
+        // logsBloom must be 256 bytes.
+        let bad_bloom = Item::List(vec![
+            rlp_status(true),
+            Item::String(vec![]),
+            Item::String(vec![0u8; 255]),
+            Item::List(vec![]),
+        ]);
+        assert_eq!(
+            decode_receipt(&encode(&bad_bloom)),
+            Err(ReceiptError::InvalidEnvelope)
+        );
+
+        // Log emitter must be 20 bytes and topics <= 4.
+        let short_addr = rlp_log(&[0xaa; 19], &[], b"");
+        assert_eq!(
+            decode_receipt(&build_legacy_receipt(true, vec![short_addr])),
+            Err(ReceiptError::InvalidLog)
+        );
+        let five_topics = rlp_log(&[0xaa; 20], &[[1u8; 32]; 5], b"");
+        assert_eq!(
+            decode_receipt(&build_legacy_receipt(true, vec![five_topics])),
+            Err(ReceiptError::InvalidLog)
+        );
     }
 }

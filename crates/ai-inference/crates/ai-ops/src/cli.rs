@@ -47,34 +47,50 @@ pub enum Command {
     Prompt,
     /// The help text.
     Help,
+    /// Unrecognised command or unexpected trailing arguments (`BLG-149`).
+    Invalid(String),
+}
+
+fn check_arity(cmd: &str, argv: &[String], max_args: usize) -> Option<Command> {
+    if argv.len() > 1 + max_args {
+        Some(Command::Invalid(format!(
+            "unexpected trailing argument(s) for '{cmd}' (expected at most {max_args}, got {})",
+            argv.len() - 1
+        )))
+    } else {
+        None
+    }
 }
 
 /// Parse the command line. `argv` does not include the program name.
 #[must_use]
 pub fn parse(argv: &[String]) -> Command {
-    let cmd = argv.first().map(String::as_str).unwrap_or("");
+    let Some(cmd) = argv.first().map(String::as_str) else {
+        return Command::Help;
+    };
     match cmd {
-        "register" => Command::Register {
+        "register" => check_arity(cmd, argv, 1).unwrap_or_else(|| Command::Register {
             model_id_hex: argv.get(1).cloned(),
-        },
-        "bond" => Command::Bond {
+        }),
+        "bond" => check_arity(cmd, argv, 1).unwrap_or_else(|| Command::Bond {
             amount: argv.get(1).and_then(|a| a.parse::<u64>().ok()),
-        },
-        "serve" => Command::Serve,
-        "tune" => Command::Tune {
+        }),
+        "serve" => check_arity(cmd, argv, 0).unwrap_or(Command::Serve),
+        "tune" => check_arity(cmd, argv, 1).unwrap_or_else(|| Command::Tune {
             dataset: argv.get(1).cloned(),
-        },
-        "status" => Command::Status,
-        "validate" => Command::Validate {
+        }),
+        "status" => check_arity(cmd, argv, 0).unwrap_or(Command::Status),
+        "validate" => check_arity(cmd, argv, 1).unwrap_or_else(|| Command::Validate {
             path: argv.get(1).cloned(),
-        },
-        "eval" => Command::Eval {
+        }),
+        "eval" => check_arity(cmd, argv, 3).unwrap_or_else(|| Command::Eval {
             dataset: argv.get(1).cloned(),
             responses: argv.get(2).cloned(),
             min_score: argv.get(3).cloned(),
-        },
-        "prompt" => Command::Prompt,
-        _ => Command::Help,
+        }),
+        "prompt" => check_arity(cmd, argv, 0).unwrap_or(Command::Prompt),
+        "help" | "--help" | "-h" => check_arity(cmd, argv, 0).unwrap_or(Command::Help),
+        other => Command::Invalid(format!("unknown subcommand '{other}'")),
     }
 }
 
@@ -151,5 +167,30 @@ mod tests {
             }
         );
         assert_eq!(parse(&["prompt".into()]), Command::Prompt);
+    }
+
+    #[test]
+    fn blg_149_ai_ops_cli_refuses_extra_or_unknown_args() {
+        assert!(matches!(
+            parse(&["unknown-cmd".into()]),
+            Command::Invalid(_)
+        ));
+        assert!(matches!(
+            parse(&["serve".into(), "--unexpected".into()]),
+            Command::Invalid(_)
+        ));
+        assert!(matches!(
+            parse(&["register".into(), "aa".repeat(32), "extra".into()]),
+            Command::Invalid(_)
+        ));
+        let eval_argv = [
+            "eval".into(),
+            "a".into(),
+            "b".into(),
+            "0.8".into(),
+            "extra".into(),
+        ];
+        assert!(matches!(parse(&eval_argv), Command::Invalid(_)));
+        assert_eq!(parse(&["help".into()]), Command::Help);
     }
 }

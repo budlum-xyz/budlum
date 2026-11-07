@@ -328,3 +328,52 @@ async fn main() -> std::process::ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gap_04_quantity_and_seed_parsers_enforce_canonical_bounds() {
+        assert_eq!(quantity(&serde_json::json!("0x2a"), "nonce").unwrap(), 42);
+        assert_eq!(quantity(&serde_json::json!("100"), "nonce").unwrap(), 100);
+        assert!(quantity(&serde_json::json!(42), "nonce").is_err());
+        assert!(quantity(&serde_json::json!("0xzz"), "nonce").is_err());
+
+        let hex32 = "11".repeat(32);
+        assert_eq!(seed::<32>(&hex32, "seed").unwrap(), [0x11; 32]);
+        assert_eq!(
+            seed::<32>(&format!("0x{hex32}"), "seed").unwrap(),
+            [0x11; 32]
+        );
+        assert!(seed::<32>("1111", "seed").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_gap_04_read_keys_refuses_group_or_world_accessible_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!(
+            "budlum_domain_producer_keys_{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let cli = Cli {
+            rpc_url: "http://127.0.0.1:8545".into(),
+            payload: None,
+            pow_spec: None,
+            bft_spec: None,
+            poa_spec: None,
+            quorum_keys: Some(path.clone()),
+            write_payload: Some(path.clone()),
+            key_file: None,
+            password_file: None,
+            fee: 1_000,
+        };
+        let err = read_keys(&cli).expect_err("0644 quorum keys file must be refused");
+        let _ = std::fs::remove_file(&path);
+        assert!(err.contains("chmod 600"), "unexpected error: {err}");
+    }
+}

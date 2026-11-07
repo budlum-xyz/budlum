@@ -12,7 +12,12 @@
 //! budscan self-test
 //! ```
 
-use budscan::evidence::Strength;
+#![forbid(unsafe_code)]
+
+use budscan::{
+    evidence::{Claim, Strength},
+    Evidence,
+};
 use budscan::patchset;
 use budscan::{name_rule, query};
 
@@ -118,9 +123,30 @@ fn self_test() -> i32 {
         ));
     }
 
+    // 7. Scheme prefixes stay intact in display_form and classify case-insensitively.
+    if name_rule::display_form("https://\u{0430}yaz.bud/") != "https://xn--yaz-5cd.bud/" {
+        problems.push(String::from(
+            "display_form corrupted a URL scheme prefix before a punycode label",
+        ));
+    }
+    if !matches!(
+        query::classify("HTTPS://example.com/"),
+        query::Query::HttpsUrl(_)
+    ) {
+        problems.push(String::from(
+            "uppercase HTTPS:// was not classified as HttpsUrl",
+        ));
+    }
+
+    // 8. A blank claim reason never yields Verified.
+    let blank_claim = Evidence::new().with(Claim::new("canary", Strength::Verified, "   "));
+    if blank_claim.weakest() != Strength::Refused {
+        problems.push(String::from("a blank-reason claim was not refused"));
+    }
+
     if problems.is_empty() {
         println!(
-            "budscan {} self-test: PASSED (6 canaries)",
+            "budscan {} self-test: PASSED (8 canaries)",
             budscan::VERSION
         );
         0

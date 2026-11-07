@@ -3,10 +3,10 @@
 //! bids, fulfilment and refunds run in block through `SettlementTx::Graft`;
 //! the Ethereum-side `GraftExecutor` contract is ().
 //!
-//! Graft: an application that lives on another network is used from
+//! Remote app binding: an application that lives on another network is used from
 //! Budlum and paid for in BUD, without moving there.
 //!
-//! A Graft row binds an application on an origin domain to one deterministic,
+//! An app-binding row binds an application on an origin domain to one deterministic,
 //! keyless Budlum mirror account. Nothing leaves the mirror except by a rule
 //! of this module; there is no administrator key.
 //!
@@ -695,6 +695,17 @@ pub fn execute_graft_tx(
     ctx: &SettlementTxContext,
     tx: &GraftTx,
 ) -> Result<(), SettlementTxError> {
+    let testnet = crate::core::chain_config::Network::Testnet
+        .chain_id()
+        .value();
+    let mainnet = crate::core::chain_config::Network::Mainnet
+        .chain_id()
+        .value();
+    if ctx.chain_id == testnet || ctx.chain_id == mainnet {
+        return Err(refused(
+            "remote app binding is closed on testnet and mainnet",
+        ));
+    }
     let block = state.current_block_height;
     match tx {
         GraftTx::Register {
@@ -1741,5 +1752,29 @@ mod tests {
             signature: hex::decode(SIGNATURE).unwrap(),
         };
         assert!(execute_graft_tx(&mut state, &ctx(registrant), &other_payout).is_err());
+    }
+
+    #[test]
+    fn app_binding_is_closed_on_testnet() {
+        let operator = Address::from([0x11; 32]);
+        let mut state = state_with_domain(operator);
+        let registrant = Address::from([0x22; 32]);
+        state.add_balance(&registrant, 1_000_000);
+        let testnet_ctx = SettlementTxContext {
+            sender: registrant,
+            chain_id: crate::core::chain_config::Network::Testnet
+                .chain_id()
+                .value(),
+            fee: FEE,
+            bls: crate::cross_domain::external::IntakeState::production_bls,
+        };
+        let tx = GraftTx::Register {
+            domain_key: DOMAIN,
+            origin_app: vec![0xAA; 20],
+            manifest_hash: [0xBB; 32],
+        };
+        let err = execute_graft_tx(&mut state, &testnet_ctx, &tx)
+            .expect_err("remote app binding must be closed on testnet");
+        assert!(err.to_string().contains("closed on testnet"));
     }
 }

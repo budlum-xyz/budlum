@@ -181,6 +181,37 @@ pub fn initial_state_root_of(memory: [u8; 32], registers: [u8; 32]) -> [u8; 32] 
     out
 }
 
+/// Convenience: number of 64-bit little-endian words carrying a 256-bit Budlum sender (`BLG-230`).
+pub const SENDER_WORDS: usize = 4;
+
+/// Convenience: split a 32-byte Budlum address into four 64-bit little-endian words (`BLG-230`).
+#[must_use]
+pub fn encode_sender_words(address: &[u8; 32]) -> [u64; SENDER_WORDS] {
+    let mut words = [0u64; SENDER_WORDS];
+    let mut idx = 0usize;
+    while idx < SENDER_WORDS {
+        let off = idx * 8;
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&address[off..off + 8]);
+        words[idx] = u64::from_le_bytes(buf);
+        idx += 1;
+    }
+    words
+}
+
+/// Convenience: reconstruct a 32-byte Budlum address from four 64-bit little-endian words (`BLG-230`).
+#[must_use]
+pub fn decode_sender_words(words: &[u64; SENDER_WORDS]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    let mut idx = 0usize;
+    while idx < SENDER_WORDS {
+        let off = idx * 8;
+        out[off..off + 8].copy_from_slice(&words[idx].to_le_bytes());
+        idx += 1;
+    }
+    out
+}
+
 impl ExecutionPublicInputs {
     pub fn to_canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(208);
@@ -209,14 +240,27 @@ impl ExecutionPublicInputs {
         res
     }
 
-    /// Reject a public-input shape that a verifier must not act on: a
-    /// `trace_len` above [`MAX_TRACE_LEN`] would overflow the degree
-    /// derivation before any proof bytes are read, and a `gas_used` above the
-    /// `gas_limit` is not a statement about any execution.
+    /// Reject a public-input shape that a verifier must not act on: non-canonical
+    /// Goldilocks scalars (`BLG-186`), a zero or oversized `trace_len`, or
+    /// `gas_used` above `gas_limit`.
     pub fn validate_shape(&self) -> Result<(), VerifyError> {
-        if self.trace_len as usize > MAX_TRACE_LEN {
+        for &scalar in &[
+            self.chain_id,
+            self.sender,
+            self.nonce,
+            self.block_height,
+            self.gas_limit,
+            self.gas_used,
+            self.exit_code,
+            self.trace_len,
+        ] {
+            if scalar >= crate::bud_stark::GOLDILOCKS_MODULUS {
+                return Err(VerifyError::PublicInputsMismatch);
+            }
+        }
+        if self.trace_len == 0 || self.trace_len as usize > MAX_TRACE_LEN {
             return Err(VerifyError::InvalidEnvelope(format!(
-                "trace_len {} exceeds the {MAX_TRACE_LEN} cap",
+                "trace_len {} outside 1..={MAX_TRACE_LEN}",
                 self.trace_len
             )));
         }
@@ -275,9 +319,10 @@ impl ProofEnvelope {
                 )));
             }
         }
-        if self.degree_bits > 64 {
+        let max_deg: u32 = 26;
+        if self.degree_bits > max_deg {
             return Err(VerifyError::InvalidEnvelope(format!(
-                "degree_bits {} exceeds the 64 cap",
+                "degree_bits {} exceeds the {max_deg} cap",
                 self.degree_bits
             )));
         }
@@ -448,6 +493,72 @@ mod envelope_bounds_tests {
             pi.validate_shape(),
             Err(VerifyError::InvalidEnvelope(_))
         ));
+    }
+
+    #[test]
+    fn blg_186_non_canonical_scalars_and_degree_bits_above_verifier_cap_rejected() {
+        let p = crate::bud_stark::GOLDILOCKS_MODULUS;
+        let base = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash: [0u8; 32],
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 42,
+            nonce: 1,
+            block_height: 100,
+            gas_limit: 1_000_000,
+            gas_used: 10,
+            exit_code: 0,
+            trace_len: 16,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+        assert!(base.validate_shape().is_ok());
+
+        let mut bad_sender = base.clone();
+        bad_sender.sender = p;
+        assert_eq!(
+            bad_sender.validate_shape(),
+            Err(VerifyError::PublicInputsMismatch)
+        );
+
+        let mut bad_gas = base.clone();
+        bad_gas.gas_used = 10 + p;
+        assert_eq!(
+            bad_gas.validate_shape(),
+            Err(VerifyError::PublicInputsMismatch)
+        );
+
+        let mut zero_trace = base;
+        zero_trace.trace_len = 0;
+        assert!(matches!(
+            zero_trace.validate_shape(),
+            Err(VerifyError::InvalidEnvelope(_))
+        ));
+
+        let mut env = valid_envelope();
+        env.degree_bits = (crate::bud_stark::MAX_VERIFIER_DEGREE_BITS as u32) + 1;
+        assert!(matches!(
+            env.validate_shape(),
+            Err(VerifyError::InvalidEnvelope(_))
+        ));
+    }
+
+    #[test]
+    fn budzero_sender_is_four_words() {
+        assert_eq!(SENDER_WORDS, 4);
+        let mut addr_a = [0u8; 32];
+        addr_a[0..8].copy_from_slice(&0xCAFE_BABE_DEAD_BEEFu64.to_le_bytes());
+        addr_a[8] = 1;
+        let mut addr_b = addr_a;
+        addr_b[31] = 0xFF;
+
+        let words_a = encode_sender_words(&addr_a);
+        let words_b = encode_sender_words(&addr_b);
+        assert_eq!(words_a[0], words_b[0]);
+        assert_ne!(words_a, words_b);
+        assert_eq!(decode_sender_words(&words_a), addr_a);
+        assert_eq!(decode_sender_words(&words_b), addr_b);
     }
 }
 

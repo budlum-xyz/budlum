@@ -312,7 +312,7 @@ pub fn verify_evm_receipt(
     // indistinguishable from one that is switched off. What it does buy is
     // that a proof which *claims* PoS finality has that claim checked rather
     // than trusted.
-    // (karar B with A interim): finality evidence is
+    // (decision B with A interim): finality evidence is
     // MANDATORY in one of two forms. B is the standing rule - a sync
     // committee attestation is verified rather than trusted. A is the
     // interim form - the chain must touch the operator's trusted

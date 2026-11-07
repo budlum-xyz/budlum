@@ -97,7 +97,7 @@ pub use shake256::Shake256Hash;
 /// Keccak permutation alone. The Poseidon2 backend is research-only and is
 /// never the hash of a long-lived signature or commitment.
 pub type CanonicalHash = Shake256Hash;
-pub use sign::{keygen_root, verify_at_height, BpqsSignature};
+pub use sign::{keygen_root, verify_at_height, BpqsSignature, BpqsVerifierLog};
 
 #[cfg(test)]
 mod tests;

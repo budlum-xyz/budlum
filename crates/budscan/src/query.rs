@@ -97,8 +97,17 @@ fn scheme_of(input: &str) -> Option<&str> {
     }
 }
 
+fn strip_ascii_prefix<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = s.get(..prefix.len())?;
+    if head.eq_ignore_ascii_case(prefix) {
+        s.get(prefix.len()..)
+    } else {
+        None
+    }
+}
+
 fn hex_bytes(s: &str) -> Option<Vec<u8>> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
+    let s = strip_ascii_prefix(s, "0x").unwrap_or(s);
     if s.is_empty() || !s.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
@@ -116,19 +125,19 @@ pub fn classify(raw: &str) -> Query {
     }
 
     // 1. Explicit prefixes. If the user said what they wanted, there is no guessing.
-    if let Some(rest) = input.strip_prefix("nft:") {
+    if let Some(rest) = strip_ascii_prefix(input, "nft:") {
         if let Ok(id) = rest.trim().parse::<u64>() {
             return Query::NftId(id);
         }
         return Query::FreeText(input.to_string());
     }
-    if let Some(rest) = input.strip_prefix("block:") {
+    if let Some(rest) = strip_ascii_prefix(input, "block:") {
         if let Ok(h) = rest.trim().parse::<u64>() {
             return Query::BlockHeight(h);
         }
         return Query::FreeText(input.to_string());
     }
-    if let Some(rest) = input.strip_prefix("tx:") {
+    if let Some(rest) = strip_ascii_prefix(input, "tx:") {
         if let Some(bytes) = hex_bytes(rest.trim()) {
             if let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) {
                 return Query::TxHash(arr);
@@ -136,10 +145,9 @@ pub fn classify(raw: &str) -> Query {
         }
         return Query::FreeText(input.to_string());
     }
-    if let Some(rest) = input
-        .strip_prefix("bud://")
-        .or_else(|| input.strip_prefix("cid:"))
-    {
+    let bud_or_cid = strip_ascii_prefix(input, "bud://");
+    let bud_or_cid = bud_or_cid.or_else(|| strip_ascii_prefix(input, "cid:"));
+    if let Some(rest) = bud_or_cid {
         let rest = rest.trim();
         if let Some(bytes) = hex_bytes(rest) {
             if let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) {
@@ -149,17 +157,25 @@ pub fn classify(raw: &str) -> Query {
         // `bud://ayaz.bud` is a valid spelling too: the scheme points at a name.
         return classify_name(rest);
     }
-    if let Some(rest) = input.strip_prefix("ipfs://") {
+    if let Some(rest) = strip_ascii_prefix(input, "ipfs://") {
         return Query::Cid(rest.trim().to_string());
     }
 
     // 2. HTTPS must be written out. Someone typing `evil.com` may have wanted
     //    HTTPS, but `evil.com` also looks like a name; we do not guess, we
-    //    return `Ambiguous` (below).
-    if input.starts_with("https://") {
-        return Query::HttpsUrl(input.to_string());
+    //    return `Ambiguous` (below). RFC 3986 section 3.1 defines schemes as
+    //    ASCII case-insensitive, so `HTTPS://` normalizes to `https://`.
+    if let Some(rest) = strip_ascii_prefix(input, "https://") {
+        let has_ws = rest.chars().any(char::is_whitespace);
+        if rest.is_empty() || rest.starts_with('/') || has_ws {
+            return Query::RefusedScheme {
+                input: input.to_string(),
+                scheme: String::from("https"),
+            };
+        }
+        return Query::HttpsUrl(format!("https://{rest}"));
     }
-    if input.starts_with("http://") {
+    if strip_ascii_prefix(input, "http://").is_some() {
         // Plain HTTP: neither the content nor the transport is verified. It is
         // not refused outright, but it is named for what it is; the verdict is
         // not `Target::Https`, because even that assumes TLS.
@@ -174,13 +190,13 @@ pub fn classify(raw: &str) -> Query {
     if let Some(scheme) = scheme_of(input) {
         return Query::RefusedScheme {
             input: input.to_string(),
-            scheme: scheme.to_string(),
+            scheme: scheme.to_ascii_lowercase(),
         };
     }
 
     // 4. Hex addresses.
     if let Some(bytes) = hex_bytes(input) {
-        if input.starts_with("0x") {
+        if strip_ascii_prefix(input, "0x").is_some() {
             if let Ok(arr) = <[u8; 20]>::try_from(bytes.as_slice()) {
                 return Query::EvmAddress(arr);
             }
@@ -406,5 +422,26 @@ mod tests {
             classify("\u{202E}dub.zaya"),
             Query::RefusedName { .. }
         ));
+    }
+
+    #[test]
+    fn blg_143_uppercase_schemes_classify_consistently() {
+        assert_eq!(
+            classify("HTTPS://example.com/path"),
+            Query::HttpsUrl(String::from("https://example.com/path"))
+        );
+        assert!(matches!(
+            classify("HTTP://example.com/"),
+            Query::RefusedScheme { ref scheme, .. } if scheme == "http"
+        ));
+        assert_eq!(classify("NFT:42"), Query::NftId(42));
+        assert_eq!(classify("BLOCK:99"), Query::BlockHeight(99));
+        let hex32 = format!("0X{}", "11".repeat(32));
+        assert_eq!(
+            classify(&format!("BUD://{hex32}")),
+            Query::ContentId([0x11; 32])
+        );
+        let evm20 = format!("0X{}", "22".repeat(20));
+        assert_eq!(classify(&evm20), Query::EvmAddress([0x22; 20]));
     }
 }

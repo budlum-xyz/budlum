@@ -229,6 +229,13 @@ pub enum PlanError {
     /// reporting the shortfall separately tells the operator the overshoot is
     /// on the disk side, not the fast-memory side.
     DiskPartDoesNotFit { needed: u64, available: u64 },
+    /// A weight shard declared zero bytes (`BLG-072`).
+    ZeroByteShard { content_id: [u8; 32] },
+    /// Two shards declared the same `content_id` (`BLG-072`).
+    DuplicateShard { content_id: [u8; 32] },
+    /// A caller-supplied hardware or throughput parameter was non-finite or
+    /// non-positive (`BLG-157`).
+    InvalidParameter { detail: &'static str },
 }
 
 /// Where one shard was placed.
@@ -356,6 +363,19 @@ impl ResidencyPlan {
     ) -> Result<Self, PlanError> {
         if shards.is_empty() {
             return Err(PlanError::NothingToPlace);
+        }
+        let mut seen_ids = std::collections::BTreeSet::new();
+        for shard in shards {
+            if shard.bytes == 0 {
+                return Err(PlanError::ZeroByteShard {
+                    content_id: shard.content_id,
+                });
+            }
+            if !seen_ids.insert(shard.content_id) {
+                return Err(PlanError::DuplicateShard {
+                    content_id: shard.content_id,
+                });
+            }
         }
 
         let dense_needed: u64 = shards
@@ -1112,5 +1132,39 @@ mod heat_tests {
         heat.record(id(4));
         heat.record(id(4));
         assert_eq!(heat.count(&id(4)), 2);
+    }
+
+    #[test]
+    fn blg_072_residency_plan_refuses_zero_byte_and_duplicate_shards() {
+        let budget = DeviceBudget {
+            accelerator_bytes: 4096,
+            system_bytes: 4096,
+        };
+        let zero_shards = vec![WeightShard {
+            content_id: id(1),
+            bytes: 0,
+            demand: Demand::EveryToken,
+        }];
+        assert_eq!(
+            ResidencyPlan::plan(&zero_shards, budget, profile()),
+            Err(PlanError::ZeroByteShard { content_id: id(1) })
+        );
+
+        let dup_shards = vec![
+            WeightShard {
+                content_id: id(7),
+                bytes: 256,
+                demand: Demand::EveryToken,
+            },
+            WeightShard {
+                content_id: id(7),
+                bytes: 512,
+                demand: Demand::WhenRouted,
+            },
+        ];
+        assert_eq!(
+            ResidencyPlan::plan(&dup_shards, budget, profile()),
+            Err(PlanError::DuplicateShard { content_id: id(7) })
+        );
     }
 }

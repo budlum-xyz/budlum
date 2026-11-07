@@ -27,7 +27,7 @@ pub struct LoRaManifest {
     pub dataset_refs: Vec<Hash32>,
     /// The training framework the run used, recorded as the operator named it.
     pub framework: String,
-    /// ISO-8601 tarih.
+    /// ISO-8601 training timestamp.
     pub trained_at: String,
 }
 

@@ -290,4 +290,59 @@ proptest! {
         );
         prop_assert_eq!(seq_root, rep.state_root);
     }
+
+    /// Both default wave execution (`BlockStmConfig { enabled: false }`) and
+    /// optimistic Block-STM mode (`enabled: true`) with conflict fallback
+    /// produce the exact sequential state root on arbitrary blocks (WP-59).
+    #[test]
+    fn block_stm_and_wave_executor_equal_sequential_root(
+        ops in proptest::collection::vec((1u8..=6, 1u8..=6, 0u64..700, 0u8..10), 0..40)
+    ) {
+        let txs: Vec<Transaction> = ops
+            .iter()
+            .map(|(from, to, amount, kind)| {
+                if *kind == 0 {
+                    stake(*from, *amount % 50 + 1)
+                } else {
+                    transfer(*from, *to, *amount)
+                }
+            })
+            .collect();
+        let expected = sequential(&txs);
+
+        let mut wave_state = funded();
+        let _ = execute_planned_block(&mut wave_state, &txs, BlockStmConfig::default());
+        prop_assert_eq!(&expected, &wave_state.calculate_state_root());
+
+        let mut stm_state = funded();
+        let _ = execute_planned_block(
+            &mut stm_state,
+            &txs,
+            BlockStmConfig { enabled: true },
+        );
+        prop_assert_eq!(expected, stm_state.calculate_state_root());
+    }
+}
+
+#[test]
+fn block_stm_flag_defaults_off_and_replays_conflicts_deterministically() {
+    assert!(!BlockStmConfig::default().enabled);
+
+    // Tx 0 mutates account 2; Tx 1 reads/writes account 2 and must detect the
+    // version change under Block-STM, fall back to sequential replay, and match
+    // the sequential root.
+    let txs = [
+        transfer(1, 2, 50),
+        transfer(2, 3, 40),
+        transfer(4, 5, 25),
+        stake(6, 10),
+    ];
+    let expected = sequential(&txs);
+
+    let mut stm_state = funded();
+    let stats = execute_planned_block(&mut stm_state, &txs, BlockStmConfig { enabled: true });
+    assert_eq!(stm_state.calculate_state_root(), expected);
+    assert_eq!(stats.tx_count, 4);
+    assert_eq!(stats.fallback_barriers, 1);
+    assert_eq!(stats.block_stm_replays, 1);
 }
