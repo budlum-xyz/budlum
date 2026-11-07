@@ -1345,7 +1345,8 @@ jobs:
         run: cargo test --manifest-path crates/bpqs/Cargo.toml
       - name: Tests (note-packing)
         if: always() && steps.rust.outcome == 'success'
-        run: cargo test --manifest-path crates/note-packing/Cargo.toml
+        run: cargo test --manifest-path crates/budlum-types/Cargo.toml --locked
+          cargo test --manifest-path crates/note-packing/Cargo.toml
 
   # ============================  / Bolum 4 (BNS gate) ============================
       - name: Format

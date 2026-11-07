@@ -114,6 +114,7 @@ jobs:
             --lockfile=crates/wallet-core/Cargo.lock \
             --lockfile=crates/note-packing/Cargo.lock \
             --lockfile=crates/bpqs/Cargo.lock \
+            --lockfile=crates/budlum-types/Cargo.lock \
             --lockfile=xtask/gates/Cargo.lock \
             --lockfile=xtask/tools/Cargo.lock \
             --lockfile=crates/ai-inference/Cargo.lock \
