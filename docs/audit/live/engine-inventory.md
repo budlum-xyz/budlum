@@ -115,3 +115,13 @@ the crate and engine list is carried back verbatim.
 | cosmwasm (production vm.rs) | **absent** | WP-29 |
 | budzero (BudL interpreter + STARK) | present | see above |
 | zkVM (in-house) | present | `src/execution/zkvm.rs`, `ZkVmExecutor` |
+
+## Pinned T-Launch worker manifests (`execution/*/Cargo.toml`, WP-27..WP-33)
+
+| Worker crate | `EeId` | Engine & exact version pin | Upstream SPDX | Interpreter / determinism mode | Process isolation (`BLG-250`) |
+|---|---|---|---|---|---|
+| `execution/budzero` (`budlum-ee-budzero`) | `0x00` | `bud-vm` + `bud-isa` (in-tree `budzero/`) | `LicenseRef-PolyForm-Shield-1.0.0` | Deterministic interpreter, no floats | Standalone worker binary (`panic = "unwind"`) over `budlum-uel-abi` |
+| `execution/evm` (`budlum-ee-evm`) | `0x01` | `revm = "=43.0.3"` (`std`, `portable`, Osaka spec) | `MIT` | Portable interpreter (`portable` feature, no asm/JIT) | Standalone worker binary (`panic = "unwind"`) over `budlum-uel-abi` |
+| `execution/wasm` (`budlum-ee-wasm`) | `0x02` | `wasmi = "=2.0.0"` (`std`, `validate`, `portable-dispatch`, `prefer-btree-collections`) | `MIT OR Apache-2.0` | Interpreter only, float instructions rejected, 64 MiB memory cap, 1 fuel = 1 BGU | Standalone worker binary (`panic = "unwind"`) over `budlum-uel-abi` |
+| `execution/svm` (`budlum-ee-svm`) | `0x03` | `solana-sbpf = "=0.10.0"` (`default-features = false`) | `Apache-2.0` | Interpreter only (`jit` feature disabled) | Standalone worker binary (`panic = "unwind"`) over `budlum-uel-abi` |
+| `execution/move` (`budlum-ee-move`) | `0x04` | Sequential Aptos Move VM worker (`execution/move/deny.toml` pins `aptos-core` `81d89f428fe8e4b69d53b4916993e9a930afc37c`) | `Apache-2.0` | Sequential execution only (Block-STM disabled), `0xBD` alias scheme verified unused | Standalone worker binary (`panic = "unwind"`) over `budlum-uel-abi` |

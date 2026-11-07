@@ -3,6 +3,7 @@
 crates/ai-inference/crates/ai-serve/src/fee_scenario.rs
 docs/ARCHITECTURE.md
 src/domain/storage_deal.rs
+src/execution/coordinator/commitment.rs
 src/security/quantum_canary.rs
 src/socialfi/vault.rs
 src/storage/generated.rs

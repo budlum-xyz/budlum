@@ -1,0 +1,30 @@
+[package]
+name = "budlum-ee-budzero"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+description = "Out-of-process BudZero execution-environment worker (EeId::BUDZERO = 0x00)"
+
+[workspace]
+resolver = "2"
+
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[lints]
+workspace = true
+
+[dependencies]
+bud-isa = { path = "../../budzero/bud-isa" }
+bud-vm = { path = "../../budzero/bud-vm" }
+budlum-uel-abi = { path = "../../crates/uel-abi" }
+sha2 = "0.11"
+
+[profile.release]
+overflow-checks = true
+panic = "unwind"
+lto = true
+codegen-units = 1

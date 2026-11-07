@@ -257,6 +257,8 @@ pub struct UniversalCall {
     pub input: Vec<u8>,
     /// The gas the callee may use.
     pub gas_limit: u64,
+    /// True when state writes and transfers are forbidden (`Section 8.7.3` item 7).
+    pub is_static: bool,
 }
 
 /// What a Universal Call returned.

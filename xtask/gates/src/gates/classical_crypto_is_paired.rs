@@ -41,6 +41,7 @@ const CLASSICAL_TOKENS: &[&str] = &[
     "ed25519_dalek",
     "schnorrkel",
     "bls12_381",
+    "k256",
     "x25519",
     "x25519_dalek",
     "libp2p::noise",
@@ -48,8 +49,11 @@ const CLASSICAL_TOKENS: &[&str] = &[
     "noise::Config",
 ];
 
-/// The five permitted items.
-const ALLOWED_CATEGORIES: &[&str] = &["a", "b", "c", "d", "e"];
+/// The six permitted items (`f` is the UEL foreign-account lane, `K-3` / `BLG-267`).
+const ALLOWED_CATEGORIES: &[&str] = &["a", "b", "c", "d", "e", "f"];
+
+/// Required prefix for category `f` UEL foreign-account lane entries (`Section 8.6.2`).
+const FOREIGN_LANE_PREFIX: &str = "src/execution/coordinator/foreign/";
 
 /// A classical use: a file and the function it sits in.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -79,13 +83,52 @@ impl Entry {
     }
 }
 
+fn validate_foreign_lane_entry(entry: &Entry) -> Result<(), String> {
+    if entry.category != "f" {
+        return Ok(());
+    }
+    if !entry.path.starts_with(FOREIGN_LANE_PREFIX) {
+        return Err(format!(
+            "entry {} uses category `f` outside `{FOREIGN_LANE_PREFIX}`",
+            entry.path
+        ));
+    }
+    if !entry.pq_companion.contains("QuantumClass::Classical")
+        || !entry.pq_companion.contains("K-3")
+    {
+        return Err(format!(
+            "entry {} uses category `f` without naming `QuantumClass::Classical` and `K-3`",
+            entry.path
+        ));
+    }
+    Ok(())
+}
+
+fn check_foreign_lane_custody_guard(root: &Path, entries: &[Entry]) -> Result<(), String> {
+    if !entries.iter().any(|e| e.category == "f") {
+        return Ok(());
+    }
+    let guard_file = root.join("src/execution/coordinator/foreign/mod.rs");
+    let text = std::fs::read_to_string(&guard_file)
+        .map_err(|e| format!("cannot read foreign custody guard {}: {e}", guard_file.display()))?;
+    let prod = super::capability_modules_are_wired::strip_test_mods(&text);
+    if !prod.contains("QuantumClass::PostQuantum")
+        || !prod.contains("ClassicalCannotTouchPqHoldings")
+    {
+        return Err(String::from(
+            "category `f` foreign lane lacks `QuantumClass::PostQuantum` custody refusal (`K-3`)",
+        ));
+    }
+    Ok(())
+}
+
 /// Read the allow list: `unregistered_baseline = N` and `[[entry]]` tables.
 ///
 /// # Errors
 ///
 /// A line that is not a comment, a table header or `key = value`, an unknown
-/// key, an entry missing a field, a item outside `a` to `e`, or a missing
-/// baseline.
+/// key, an entry missing a field, an item outside `a` to `f`, a category `f`
+/// entry violating `K-3`, or a missing baseline.
 pub fn parse_allowlist(text: &str) -> Result<(u64, Vec<Entry>), String> {
     let mut baseline: Option<u64> = None;
     let mut entries: Vec<Entry> = Vec::new();
@@ -101,15 +144,16 @@ pub fn parse_allowlist(text: &str) -> Result<(u64, Vec<Entry>), String> {
                 pq_companion: pq_companion.ok_or("an entry has no `pq_companion`")?,
                 category: category.ok_or("an entry has no `category`")?,
             };
-            if entry.pq_companion.trim().is_empty() {
+            if entry.pq_companion.trim().trim_matches('"').is_empty() {
                 return Err(format!("entry {} has an empty `pq_companion`", entry.path));
             }
             if !ALLOWED_CATEGORIES.contains(&entry.category.as_str()) {
                 return Err(format!(
-                    "entry {} namesitem `{}`; the items are a to e",
+                    "entry {} names item `{}`; the items are a to f",
                     entry.path, entry.category
                 ));
             }
+            validate_foreign_lane_entry(&entry)?;
             entries.push(entry);
             Ok(())
         };
@@ -280,6 +324,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     let list = std::fs::read_to_string(root.join(ALLOWLIST))
         .map_err(|e| format!("cannot read {ALLOWLIST}: {e}"))?;
     let (baseline, entries) = parse_allowlist(&list)?;
+    check_foreign_lane_custody_guard(root, &entries)?;
     let files = super::pq_scan::rust_files(root, SCAN_ROOTS);
     if files.len() < 100 {
         return Err(format!(
@@ -342,9 +387,25 @@ pub fn self_test() -> Result<String, String> {
         return Err(String::from("a whole-file entry did not cover its sites"));
     }
     if parse_allowlist("unregistered_baseline = 0\n[[entry]]\npath = \"p\"\nfunction = \"*\"\npq_companion = \"x\"\ncategory = \"z\"\n").is_ok() {
-        return Err(String::from("aitem outside a to e was accepted"));
+        return Err(String::from("an item outside a to f was accepted"));
+    }
+    let bad_f = concat!(
+        "unregistered_baseline = 0\n[[entry]]\n",
+        "path = \"src/outside.rs\"\nfunction = \"*\"\n",
+        "pq_companion = \"QuantumClass::Classical (K-3)\"\ncategory = \"f\"\n",
+    );
+    if parse_allowlist(bad_f).is_ok() {
+        return Err(String::from("category f outside foreign lane was accepted"));
+    }
+    let good_f = concat!(
+        "unregistered_baseline = 0\n[[entry]]\n",
+        "path = \"src/execution/coordinator/foreign/ethereum.rs\"\nfunction = \"*\"\n",
+        "pq_companion = \"QuantumClass::Classical (K-3)\"\ncategory = \"f\"\n",
+    );
+    if parse_allowlist(good_f).is_err() {
+        return Err(String::from("valid category f foreign lane entry failed"));
     }
     Ok(String::from(
-        "canary OK: registered, unregistered, stale and fallen-baseline cases behave.",
+        "canary OK: registered, unregistered, stale, K-3 and fallen-baseline cases behave.",
     ))
 }

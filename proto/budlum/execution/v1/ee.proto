@@ -151,6 +151,7 @@ message UniversalCall {
   Amount value = 4;
   bytes input = 5;
   uint64 gas_limit = 6;
+  bool is_static = 7;
 }
 
 message UniversalResult {

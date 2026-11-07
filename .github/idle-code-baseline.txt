@@ -1129,7 +1129,6 @@ crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	three_network_bytes_p
 crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	three_network_custody_usd_per_tb
 crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	three_network_monthly_usd_per_tb
 crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	fn	transaction_fee_usd
-crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	struct	InsufficientBalance
 crates/ai-inference/crates/ai-serve/src/fee_scenario.rs	struct	PromptWallet
 crates/ai-inference/crates/ai-serve/src/metric.rs	fn	time_to_first_token_ms
 crates/ai-inference/crates/ai-serve/src/residency.rs	fn	plan_with_heat

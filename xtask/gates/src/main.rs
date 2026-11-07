@@ -77,6 +77,7 @@ mod gates {
     pub mod docker_toolchain;
     pub mod domain_tags;
     pub mod economy_invariants;
+    pub mod ee_workers_build_with_unwind;
     pub mod every_fuzz_target_is_run;
     pub mod every_opcode_forgery;
     pub mod evidence_provenance;
@@ -1431,6 +1432,14 @@ const GATES: &[Gate] = &[
         run_log: Some(gates::pq_core_gate::run),
         run_args: None,
         self_test: gates::pq_core_gate::self_test,
+    },
+    Gate {
+        name: "ee-workers-build-with-unwind",
+        replaces: None,
+        run: gates::ee_workers_build_with_unwind::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::ee_workers_build_with_unwind::self_test,
     },
 ];
 

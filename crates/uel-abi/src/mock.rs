@@ -130,6 +130,7 @@ impl MockEe {
                     value: BudAmount(0),
                     input: data.to_vec(),
                     gas_limit: call.gas_limit,
+                    is_static: false,
                 })?;
                 Ok(EeOutcome {
                     status: if result.success {

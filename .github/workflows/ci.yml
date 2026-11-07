@@ -758,6 +758,16 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- nightly-workflows-are-required 2>&1 | tee -a /tmp/gate-out.log
           exit "${PIPESTATUS[0]}"
+      - name: EE worker unwind profile gate canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- ee-workers-build-with-unwind --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: EE workers build with unwind while node builds with abort
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- ee-workers-build-with-unwind 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: No-legacy-storage gate canary
         if: always() && steps.build.outcome == 'success'
         run: |
@@ -1372,26 +1382,108 @@ jobs:
         with:
           shared-key: standalone-crates
           workspaces: |
+            contracts/object-layer/cosmwasm
+            contracts/object-layer/svm
             crates/bpqs
             crates/note-packing
+            crates/uel-abi
+            execution/budzero
+            execution/conformance
+            execution/evm
+            execution/move
+            execution/svm
+            execution/wasm
+      - id: protoc
+        name: Install protoc
+        if: always() && steps.rust.outcome == 'success'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Format (bpqs)
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --manifest-path crates/bpqs/Cargo.toml --all -- --check
       - name: Format (note-packing)
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --manifest-path crates/note-packing/Cargo.toml --all -- --check
+      - name: Format (uel-abi)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path crates/uel-abi/Cargo.toml --all -- --check
+      - name: Format (ee-budzero)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path execution/budzero/Cargo.toml --all -- --check
+      - name: Format (ee-conformance)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path execution/conformance/Cargo.toml --all -- --check
+      - name: Format (ee-evm)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path execution/evm/Cargo.toml --all -- --check
+      - name: Format (ee-move)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path execution/move/Cargo.toml --all -- --check
+      - name: Format (ee-svm)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path execution/svm/Cargo.toml --all -- --check
+      - name: Format (ee-wasm)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path execution/wasm/Cargo.toml --all -- --check
       - name: Clippy (bpqs)
         if: always() && steps.rust.outcome == 'success'
         run: cargo clippy --manifest-path crates/bpqs/Cargo.toml --all-targets -- -D warnings
       - name: Clippy (note-packing)
         if: always() && steps.rust.outcome == 'success'
         run: cargo clippy --manifest-path crates/note-packing/Cargo.toml --all-targets -- -D warnings
+      - name: Clippy (uel-abi)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo clippy --manifest-path crates/uel-abi/Cargo.toml --all-targets -- -D warnings
+      - name: Clippy (ee-budzero)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo clippy --manifest-path execution/budzero/Cargo.toml --all-targets -- -D warnings
+      - name: Clippy (ee-conformance)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo clippy --manifest-path execution/conformance/Cargo.toml --all-targets -- -D warnings
+      - name: Clippy (ee-evm)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo clippy --manifest-path execution/evm/Cargo.toml --all-targets -- -D warnings
+      - name: Clippy (ee-move)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo clippy --manifest-path execution/move/Cargo.toml --all-targets -- -D warnings
+      - name: Clippy (ee-svm)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo clippy --manifest-path execution/svm/Cargo.toml --all-targets -- -D warnings
+      - name: Clippy (ee-wasm)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo clippy --manifest-path execution/wasm/Cargo.toml --all-targets -- -D warnings
+      - name: Tests (object-layer-cosmwasm)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo test --manifest-path contracts/object-layer/cosmwasm/Cargo.toml
+      - name: Tests (object-layer-svm)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo test --manifest-path contracts/object-layer/svm/Cargo.toml
       - name: Tests (bpqs)
         if: always() && steps.rust.outcome == 'success'
         run: cargo test --manifest-path crates/bpqs/Cargo.toml
       - name: Tests (note-packing)
         if: always() && steps.rust.outcome == 'success'
         run: cargo test --manifest-path crates/note-packing/Cargo.toml
+      - name: Tests (uel-abi)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo test --manifest-path crates/uel-abi/Cargo.toml
+      - name: Tests (ee-budzero)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo test --manifest-path execution/budzero/Cargo.toml
+      - name: Tests (ee-conformance)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo test --manifest-path execution/conformance/Cargo.toml
+      - name: Tests (ee-evm)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo test --manifest-path execution/evm/Cargo.toml
+      - name: Tests (ee-move)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo test --manifest-path execution/move/Cargo.toml
+      - name: Tests (ee-svm)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo test --manifest-path execution/svm/Cargo.toml
+      - name: Tests (ee-wasm)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo test --manifest-path execution/wasm/Cargo.toml
 
   # ============================  / Bolum 4 (BNS gate) ============================
       - name: Format

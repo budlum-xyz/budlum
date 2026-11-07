@@ -8,6 +8,13 @@ use serde::{Deserialize, Serialize};
 /// Fixed-point scale factor (1_000_000 == 100%).
 pub const FIXED_POINT_SCALE: u64 = 1_000_000;
 
+/// Maximum parameter stake ceiling (`10^18` base units, matching `src/registry/params.rs`).
+pub const MAX_PARAM_AMOUNT: u64 = 1_000_000_000_000_000_000;
+
+/// Maximum unbonding delay in epochs (matching `src/registry/params.rs`).
+/// Convenience: governance upper bound for verifier unbonding delay validation.
+pub const MAX_UNBONDING_EPOCHS: u64 = 100_000;
+
 /// The penalty a slash of `slash_ratio_fixed` takes from `stake`, capped at
 /// the bond.
 ///
@@ -71,8 +78,14 @@ impl RegistryParams {
         if self.min_stake == 0 {
             return Err("min_stake must be > 0".into());
         }
+        if self.min_stake > MAX_PARAM_AMOUNT {
+            return Err("min_stake exceeds MAX_PARAM_AMOUNT".into());
+        }
         if self.unbonding_epochs == 0 {
             return Err("unbonding_epochs must be > 0".into());
+        }
+        if self.unbonding_epochs > MAX_UNBONDING_EPOCHS {
+            return Err("unbonding_epochs exceeds MAX_UNBONDING_EPOCHS".into());
         }
         // A deterrent configured to zero is no deterrent: equivocation and
         // provable malice must cost something.

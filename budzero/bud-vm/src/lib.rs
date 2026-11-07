@@ -95,6 +95,8 @@ pub struct Vm {
 
 pub struct Context {
     pub sender: u64,
+    /// Full 256-bit (4 x 64-bit little-endian words) caller identity (`BLG-230` execution leg).
+    pub sender_words: [u64; 4],
     pub nonce: u64,
     pub block_height: u64,
     /// (security audit) initial state root.
@@ -102,6 +104,37 @@ pub struct Context {
     /// Externally), but the prover trace records it on the first row
     /// So the AIR can bind `public_inputs.initial_state_root`.
     pub initial_state_root: [u8; 32],
+}
+
+impl Context {
+    /// Populate all four 64-bit words of `sender_words` and legacy `sender` from 32 LE bytes.
+    pub fn set_sender_bytes(&mut self, addr: &[u8; 32]) {
+        let mut words = [0u64; 4];
+        for (slot, chunk) in words.iter_mut().zip(addr.chunks_exact(8)) {
+            if let Ok(arr) = chunk.try_into() {
+                *slot = u64::from_le_bytes(arr);
+            }
+        }
+        self.sender = words.first().copied().unwrap_or(0);
+        self.sender_words = words;
+    }
+
+    /// Populate all four 64-bit words directly.
+    pub fn set_sender_words(&mut self, words: [u64; 4]) {
+        self.sender = words.first().copied().unwrap_or(0);
+        self.sender_words = words;
+    }
+
+    /// Effective 256-bit caller words (`[sender, 0, 0, 0]` when only legacy `sender` was set).
+    #[must_use]
+    /// Convenience: 256-bit caller identity accessor used by `budlum-ee-budzero` and VM suites.
+    pub const fn effective_sender_words(&self) -> [u64; 4] {
+        if matches!(self.sender_words, [0, 0, 0, 0]) && self.sender != 0 {
+            [self.sender, 0, 0, 0]
+        } else {
+            self.sender_words
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -242,6 +275,7 @@ impl Vm {
             events: Vec::new(),
             context: Context {
                 sender: 0,
+                sender_words: [0u64; 4],
                 nonce: 0,
                 block_height: 0,
                 initial_state_root: [0u8; 32],
@@ -638,6 +672,11 @@ impl Vm {
                         self.events.push(0x00A1_00A1);
                         self.events.push(src1_val);
                         self.context.block_height.saturating_add(src1_val)
+                    }
+                    10..=13 if self.mainnet_mode || self.context.sender_words != [0u64; 4] => {
+                        let words = self.context.effective_sender_words();
+                        let idx = (inst.imm - 10) as usize;
+                        words.get(idx).copied().unwrap_or(0)
                     }
                     _ => 0,
                 };
@@ -2021,6 +2060,66 @@ mod poseidon_parameter_tests {
         assert_eq!(
             distinct, 4,
             "the four lanes of a node are four different elements"
+        );
+    }
+
+    #[test]
+    fn budzero_sender_is_four_words() {
+        let mut addr = [0u8; 32];
+        addr[0..8].copy_from_slice(&0x1111_2222_3333_4444u64.to_le_bytes());
+        addr[8..16].copy_from_slice(&0x5555_6666_7777_8888u64.to_le_bytes());
+        addr[16..24].copy_from_slice(&0x9999_AAAA_BBBB_CCCCu64.to_le_bytes());
+        addr[24..32].copy_from_slice(&0xDDDD_EEEE_FFFF_0001u64.to_le_bytes());
+
+        let mut vm = Vm::with_mainnet_mode(256, 100_000, true);
+        vm.context.set_sender_bytes(&addr);
+
+        let program: Vec<u64> = [10i32, 11, 12, 13]
+            .into_iter()
+            .enumerate()
+            .flat_map(|(idx, imm)| {
+                let r = (idx + 1) as u8;
+                [
+                    Instruction {
+                        opcode: Opcode::Syscall,
+                        rd: r,
+                        rs1: 0,
+                        rs2: 0,
+                        imm,
+                    }
+                    .encode(),
+                    Instruction {
+                        opcode: Opcode::Log,
+                        rd: 0,
+                        rs1: r,
+                        rs2: 0,
+                        imm: 0,
+                    }
+                    .encode(),
+                ]
+            })
+            .chain(std::iter::once(
+                Instruction {
+                    opcode: Opcode::Halt,
+                    rd: 0,
+                    rs1: 0,
+                    rs2: 0,
+                    imm: 0,
+                }
+                .encode(),
+            ))
+            .collect();
+
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(
+            receipt.events,
+            vec![
+                0x1111_2222_3333_4444,
+                0x5555_6666_7777_8888,
+                0x9999_AAAA_BBBB_CCCC,
+                0xDDDD_EEEE_FFFF_0001,
+            ]
         );
     }
 }

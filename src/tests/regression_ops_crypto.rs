@@ -245,6 +245,12 @@ fn ci_runs_every_standalone_package_test_suite() {
         "crates/budscan",
         "crates/note-packing",
         "crates/wallet-core",
+        "execution/budzero",
+        "execution/conformance",
+        "execution/evm",
+        "execution/move",
+        "execution/svm",
+        "execution/wasm",
         "xtask/tools",
     ] {
         assert!(

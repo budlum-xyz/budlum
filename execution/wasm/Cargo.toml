@@ -1,0 +1,40 @@
+[package]
+name = "budlum-ee-wasm"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+description = "Out-of-process CosmWasm execution-environment worker on wasmi (EeId::WASM = 0x02)"
+
+[workspace]
+resolver = "2"
+
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[lints]
+workspace = true
+
+[dependencies]
+budlum-uel-abi = { path = "../../crates/uel-abi" }
+hex = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.11"
+wasmi = { version = "=2.0.0", default-features = false, features = [
+    "std",
+    "validate",
+    "portable-dispatch",
+    "prefer-btree-collections",
+] }
+
+[dev-dependencies]
+wat = "1.228.0"
+
+[profile.release]
+overflow-checks = true
+panic = "unwind"
+lto = true
+codegen-units = 1
