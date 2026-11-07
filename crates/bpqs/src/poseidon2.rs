@@ -707,7 +707,7 @@ mod poseidon2_tests {
     }
 
     #[test]
-    fn blg_146_permute16_canonicalizes_non_canonical_lanes() {
+    fn permute16_canonicalizes_non_canonical_lanes() {
         let mut unreduced = [0u64; WIDTH];
         unreduced[0] = GOLDILOCKS_P;
         unreduced[1] = GOLDILOCKS_P + 7;

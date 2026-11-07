@@ -758,7 +758,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_039_142_degree_bits_ceiling_guards_goldilocks_two_adicity() {
+    fn degree_bits_ceiling_guards_goldilocks_two_adicity() {
         let ceiling = std::hint::black_box(MAX_VERIFIER_DEGREE_BITS);
         assert!(ceiling <= 26);
     }

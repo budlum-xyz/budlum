@@ -311,7 +311,7 @@ fn redact_key_value(line: &str, report: &mut RedactionReport) -> String {
 
         // Otherwise the value runs until the next unquoted field delimiter
         // (comma, semicolon, closing bracket, or whitespace), and scanning
-        // continues across the rest of the line (`BLG-070`).
+        // continues across the rest of the line ().
         let value_end = body
             .char_indices()
             .find(|(_, c)| matches!(c, ',' | ';' | ')' | '}' | ']' | ' ' | '\t'))
@@ -887,7 +887,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_070_multi_field_unquoted_and_escaped_json_keys_are_masked() {
+    fn multi_field_unquoted_and_escaped_json_keys_are_masked() {
         let r1 = redact_text("api_key=alpha_secret, password=bravo_secret");
         assert!(!r1.text().contains("alpha_secret"), "{}", r1.text());
         assert!(!r1.text().contains("bravo_secret"), "{}", r1.text());

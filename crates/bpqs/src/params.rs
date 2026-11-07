@@ -36,7 +36,7 @@ pub trait BpqsParams:
     const Q_MAX: u32 = 1;
     /// True only on full-height ceremony rows (`ParamsL5`, `ParamsL3`).
     /// Small-tree test and benchmark rows inherit `false` so production
-    /// verifiers refuse them fail-closed (`BLG-164`).
+    /// verifiers refuse them fail-closed ().
     const IS_PRODUCTION: bool = false;
     /// Human name, for test vectors and error strings.
     const NAME: &'static str;

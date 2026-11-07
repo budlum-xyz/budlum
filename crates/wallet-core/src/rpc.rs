@@ -220,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_371_error_is_not_masked_by_error_null_inside_string_or_spaces() {
+    fn error_is_not_masked_by_error_null_inside_string_or_spaces() {
         // Pretty-printed `"error": null` must succeed rather than false-rejecting.
         let ok_ans = "{\"jsonrpc\": \"2.0\", \"error\": null, \"result\": \"0x10\", \"id\": 1}";
         assert_eq!(quantity_result(ok_ans), Ok(16));
@@ -234,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_371_address_param_escapes_json_injection_payloads() {
+    fn address_param_escapes_json_injection_payloads() {
         let injected = "0x11\"],\"method\":\"bud_admin\",\"params\":[\"";
         let body = get_balance(injected);
         assert!(

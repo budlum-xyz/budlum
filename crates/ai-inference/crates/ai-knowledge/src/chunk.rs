@@ -253,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_145_chunks_across_projects_or_paths_do_not_collide() {
+    fn chunks_across_projects_or_paths_do_not_collide() {
         let a = chunk_document("proj-a", "doc", "src/a.rs", "same\nlines\n", None, None).unwrap();
         let b = chunk_document("proj-b", "doc", "src/a.rs", "same\nlines\n", None, None).unwrap();
         let c = chunk_document("proj-a", "doc", "src/b.rs", "same\nlines\n", None, None).unwrap();

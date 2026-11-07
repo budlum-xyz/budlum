@@ -327,7 +327,7 @@ impl VerifierRegistry {
     }
 
     /// Like [`Self::with_params`], but refuses parameters that fail
-    /// [`RegistryParams::validate`] or exceed protocol ceilings (`BLG-148`).
+    /// [`RegistryParams::validate`] or exceed protocol ceilings ().
     pub fn try_with_params(params: RegistryParams) -> Result<Self, String> {
         validate_registry_params(&params)?;
         Ok(Self::with_params(params))
@@ -1736,7 +1736,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_148_and_blg_069_param_ceilings_and_reporter_root_binding() {
+    fn param_ceilings_and_reporter_root_binding() {
         use crate::evidence::ProofProvenance;
 
         let bad_stake = RegistryParams {

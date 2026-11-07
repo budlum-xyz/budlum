@@ -135,7 +135,7 @@ mod hash_tests {
 
     #[test]
     #[should_panic(expected = "BPQS domain tag exceeds u16::MAX")]
-    fn blg_146_frame_bytes_rejects_domain_length_u16_truncation() {
+    fn frame_bytes_rejects_domain_length_u16_truncation() {
         let overlong = alloc::vec![b'A'; usize::from(u16::MAX) + 1];
         let _ = Sha3_256Hash::digest32(&overlong, &[b"x"]);
     }

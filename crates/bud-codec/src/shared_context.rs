@@ -1,8 +1,8 @@
-//! WP-54 domain-specific reversible transforms (Codecs 3, 15, 18, 19),
+//!  domain-specific reversible transforms (Codecs 3, 15, 18, 19),
 //! immutable shared `CompressionContext` lifecycle, and convergent cross-owner
 //! private deduplication envelopes.
 //!
-//! WIRING: unwired - staged for WP-54 codec registry activation.
+//! WIRING: unwired - staged for  codec registry activation.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -12,7 +12,7 @@ use crate::{decode, CodecError, STORE_LEVEL, ZSTD, ZSTD_WINDOW_LOG};
 /// Maximum object size eligible for small-object context compression (Codec 3: 16 KiB).
 pub const SMALL_OBJECT_MAX_BYTES: usize = 16 * 1024;
 
-/// Lifecycle state of an immutable shared [`CompressionContext`] (WP-54 Step 10).
+/// Lifecycle state of an immutable shared [`CompressionContext`] ( Step 10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextStatus {
     /// Open for both new object writes and historical reads.
@@ -23,7 +23,7 @@ pub enum ContextStatus {
     Retired,
 }
 
-/// Immutable registered compression dictionary / context (WP-54 Step 10).
+/// Immutable registered compression dictionary / context ( Step 10).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompressionContext {
     pub context_id: u32,
@@ -85,7 +85,7 @@ fn zstd_compress(bytes: &[u8]) -> Result<Vec<u8>, CodecError> {
     enc.finish().map_err(|e| CodecError::Encode(e.to_string()))
 }
 
-/// Registry of immutable shared [`CompressionContext`] entries (WP-54 Steps 10-12).
+/// Registry of immutable shared [`CompressionContext`] entries ( Steps 10-12).
 #[derive(Debug, Default, Clone)]
 pub struct ContextRegistry {
     contexts: BTreeMap<u32, CompressionContext>,
@@ -123,7 +123,7 @@ impl ContextRegistry {
         Ok(dict_tag)
     }
 
-    /// Deprecate a context so no new objects may bind to it (WP-54 Step 10).
+    /// Deprecate a context so no new objects may bind to it ( Step 10).
     ///
     /// # Errors
     ///
@@ -139,7 +139,7 @@ impl ContextRegistry {
         Ok(())
     }
 
-    /// Retire a deprecated context once `ref_count == 0` (WP-54 Step 10).
+    /// Retire a deprecated context once `ref_count == 0` ( Step 10).
     ///
     /// # Errors
     ///
@@ -158,7 +158,7 @@ impl ContextRegistry {
         Ok(())
     }
 
-    /// Encode a `< 16 KiB` object against an `Active` context (Codec 3, WP-54 Step 4).
+    /// Encode a `< 16 KiB` object against an `Active` context (Codec 3,  Step 4).
     ///
     /// Prepends the immutable dictionary inside the compression window, compresses
     /// with `zstd`, and strips the known dictionary prefix on decode via `ruzstd`.
@@ -381,7 +381,7 @@ pub fn decode_fp32_exponent_split(
     Ok(out)
 }
 
-/// Per-owner wrapped content key inside a convergent private dedup envelope (WP-54 Step 13).
+/// Per-owner wrapped content key inside a convergent private dedup envelope ( Step 13).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnerKeyWrap {
     pub owner_id: [u8; 32],
@@ -395,7 +395,7 @@ struct SharedCipherRecord {
     wraps: BTreeMap<[u8; 32], OwnerKeyWrap>,
 }
 
-/// Convergent private deduplication store (WP-54 Steps 13-15).
+/// Convergent private deduplication store ( Steps 13-15).
 ///
 /// When `convergent_mode == true`, `k_content` is derived deterministically from
 /// the plaintext digest so identical content across distinct owners stores a

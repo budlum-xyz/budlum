@@ -220,7 +220,7 @@ pub const BIP39_WORDLIST: &[&str] = &[
 ];
 
 /// Look up a word's index in the BIP39 wordlist using a constant-time scan
-/// across all 2048 entries (`BLG-164`).
+/// across all 2048 entries ().
 ///
 /// Every canonical BIP39 English word is 3..=8 ASCII bytes. Scanning the full
 /// table with fixed-width 8-byte XOR folding avoids position-dependent early
@@ -288,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_164_bip39_word_lookup_scans_full_table_accurately() {
+    fn bip39_word_lookup_scans_full_table_accurately() {
         for (idx, &w) in BIP39_WORDLIST.iter().enumerate() {
             assert_eq!(word_to_index(w), Some(idx), "mismatch at {idx} ({w})");
         }

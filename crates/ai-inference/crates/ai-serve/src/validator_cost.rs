@@ -33,7 +33,7 @@ pub struct HardwarePricelist {
 }
 
 impl HardwarePricelist {
-    /// Convenience: true iff every component rate is finite and strictly positive (`BLG-157`).
+    /// Convenience: true iff every component rate is finite and strictly positive ().
     #[must_use]
     pub fn is_valid(self) -> bool {
         [
@@ -488,7 +488,7 @@ mod validator_cost_tests {
     }
 
     #[test]
-    fn blg_157_validator_cost_refuses_nonpositive_or_nan_inputs() {
+    fn validator_cost_refuses_nonpositive_or_nan_inputs() {
         assert!(market_pricelist().is_valid());
         let mut bad_prices = market_pricelist();
         bad_prices.dollar_per_kwh = -0.01;

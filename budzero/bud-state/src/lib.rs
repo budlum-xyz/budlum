@@ -616,7 +616,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_115_smt_domain_separates_leaves_and_internal_nodes() {
+    fn smt_domain_separates_leaves_and_internal_nodes() {
         let acc = Account {
             nonce: 0,
             balance: 0,

@@ -1,4 +1,4 @@
-//! AI Verification Layer types and deterministic verifiers (WP-57):
+//! AI Verification Layer types and deterministic verifiers ():
 //! - `VL-0..VL-3` verification levels and non-decreasing status (`TAI8`),
 //! - `e + 1` delayed committee seed & `n = 5, k = 4` parameters (`TAI1`, `TAI7`),
 //! - Deterministic Inference Profile (`DIP`) and `64 x 64` integer tile check
@@ -6,19 +6,19 @@
 //! - Answer Proof Bundle (`APB`) sentence typing, consent-gated citations, and
 //!   single-Markdown `apb` block rendering (`TY1`..`TY6`).
 //!
-//! WIRING: unwired - staged for WP-57 AI verification layer activation.
+//! WIRING: unwired - staged for  AI verification layer activation.
 
 use sha2::{Digest, Sha256};
 
-/// Testnet default committee size (`n = 5`, WP-57).
+/// Testnet default committee size (`n = 5`,).
 pub const DEFAULT_COMMITTEE_N: u8 = 5;
-/// Testnet default quorum threshold (`k = 4`, WP-57).
+/// Testnet default quorum threshold (`k = 4`,).
 pub const DEFAULT_COMMITTEE_K: u8 = 4;
-/// Testnet default optimistic challenge window in blocks (`100`, WP-57).
+/// Testnet default optimistic challenge window in blocks (`100`,).
 pub const DEFAULT_CHALLENGE_WINDOW_BLOCKS: u64 = 100;
 /// Testnet default secondary audit sampling rate in basis points (`1% = 100 bps`).
 pub const DEFAULT_SAMPLING_BPS: u16 = 100;
-/// Canonical single-step MatMul tile dimension (`64 x 64`, WP-57 TAI6).
+/// Canonical single-step MatMul tile dimension (`64 x 64`,  TAI6).
 pub const TILE_DIM: usize = 64;
 /// Elements in one `64 x 64` tile (`4096`).
 pub const TILE_LEN: usize = TILE_DIM * TILE_DIM;
@@ -34,7 +34,7 @@ fn sha256_prefixed(tag: &[u8], parts: &[&[u8]]) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// AI verification level (`VL-0` through `VL-3`, WP-57 Step 2).
+/// AI verification level (`VL-0` through `VL-3`,  Step 2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 pub enum VerificationLevel {
@@ -112,7 +112,7 @@ pub enum QuantizationMode {
     Int4Group128,
 }
 
-/// Deterministic Inference Profile (`DIP`, WP-57 TAI3 / TAI4 / TAI10).
+/// Deterministic Inference Profile (`DIP`,  TAI3 / TAI4 / TAI10).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeterministicInferenceProfile {
     pub model_id: [u8; 32],
@@ -337,7 +337,7 @@ pub struct ApbSentence {
     pub kind: Option<ApbSentenceKind>,
 }
 
-/// Answer Proof Bundle (`APB`, WP-57 Step 7 / `TY1`..`TY6`).
+/// Answer Proof Bundle (`APB`,  Step 7 / `TY1`..`TY6`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnswerProofBundle {
     pub request_id: [u8; 32],

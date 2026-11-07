@@ -229,12 +229,12 @@ pub enum PlanError {
     /// reporting the shortfall separately tells the operator the overshoot is
     /// on the disk side, not the fast-memory side.
     DiskPartDoesNotFit { needed: u64, available: u64 },
-    /// A weight shard declared zero bytes (`BLG-072`).
+    /// A weight shard declared zero bytes ().
     ZeroByteShard { content_id: [u8; 32] },
-    /// Two shards declared the same `content_id` (`BLG-072`).
+    /// Two shards declared the same `content_id` ().
     DuplicateShard { content_id: [u8; 32] },
     /// A caller-supplied hardware or throughput parameter was non-finite or
-    /// non-positive (`BLG-157`).
+    /// non-positive ().
     InvalidParameter { detail: &'static str },
 }
 
@@ -1135,7 +1135,7 @@ mod heat_tests {
     }
 
     #[test]
-    fn blg_072_residency_plan_refuses_zero_byte_and_duplicate_shards() {
+    fn residency_plan_refuses_zero_byte_and_duplicate_shards() {
         let budget = DeviceBudget {
             accelerator_bytes: 4096,
             system_bytes: 4096,

@@ -369,7 +369,7 @@ mod tests {
             on_disk.contains("<SECRET:MASKED>"),
             "nothing was masked: {on_disk}"
         );
-        // Neither the in-memory copy nor a reopened copy retains plaintext (`BLG-070`).
+        // Neither the in-memory copy nor a reopened copy retains plaintext ().
         let in_mem = mem.commands[0].output.as_deref().unwrap_or("");
         assert!(!in_mem.contains(&secret), "{in_mem}");
         assert!(in_mem.contains("<SECRET:MASKED>"), "{in_mem}");

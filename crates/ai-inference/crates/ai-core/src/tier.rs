@@ -113,7 +113,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_169_served_model_name_blocks_multiplier_and_control_injection() {
+    fn served_model_name_blocks_multiplier_and_control_injection() {
         let prefix = ModelTier::Light.served_model_name("");
         assert_eq!(prefix, "ai_inference-light-");
         for bad in [

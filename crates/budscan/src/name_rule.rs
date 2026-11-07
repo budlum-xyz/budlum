@@ -378,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_169_display_form_preserves_scheme_and_lowercases_punycode() {
+    fn display_form_preserves_scheme_and_lowercases_punycode() {
         assert_eq!(
             display_form("https://\u{0430}yaz.bud/index.html"),
             "https://xn--yaz-5cd.bud/index.html"

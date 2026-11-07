@@ -75,7 +75,7 @@ impl QuarantineReason {
     }
 
     /// Severe canonical-program offences that must not be evicted by
-    /// permissionless `NonCanonicalProgram` floods (BLG-139).
+    /// permissionless `NonCanonicalProgram` floods ().
     #[must_use]
     ///
     /// Convenience: classifies canonical-program bans whose audit trail is
@@ -334,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_139_non_canonical_flood_cannot_evict_canonical_bans() {
+    fn non_canonical_flood_cannot_evict_canonical_bans() {
         let mut ledger = QuarantineLedger::new();
         let canonical_offender = hash_of(1);
         ledger.ban(canonical_offender, QuarantineReason::TransferViolation);

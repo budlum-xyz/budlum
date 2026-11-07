@@ -214,8 +214,8 @@ mod tests {
     }
 
     #[test]
-    fn blg_070_open_masks_preexisting_cache_entries() {
-        let p = tmp_path("blg070.jsonl");
+    fn open_masks_preexisting_cache_entries() {
+        let p = tmp_path("redaction.jsonl");
         let _ = std::fs::remove_file(&p);
         let k = LlmCache::key("m", "v", "t", &[9u8; 32]);
         let raw_secret = format!("ghp_{}", "0123456789abcdefghij0123456789");

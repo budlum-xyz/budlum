@@ -95,7 +95,7 @@ pub struct Vm {
 
 pub struct Context {
     pub sender: u64,
-    /// Full 256-bit (4 x 64-bit little-endian words) caller identity (`BLG-230` execution leg).
+    /// Full 256-bit (4 x 64-bit little-endian words) caller identity ( execution leg).
     pub sender_words: [u64; 4],
     pub nonce: u64,
     pub block_height: u64,

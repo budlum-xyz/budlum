@@ -425,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_143_uppercase_schemes_classify_consistently() {
+    fn uppercase_schemes_classify_consistently() {
         assert_eq!(
             classify("HTTPS://example.com/path"),
             Query::HttpsUrl(String::from("https://example.com/path"))

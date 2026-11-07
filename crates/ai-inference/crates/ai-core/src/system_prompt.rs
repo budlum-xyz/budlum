@@ -338,7 +338,7 @@ const EXCEPTION_ESCAPES: &[&str] = &[
     " on request",
 ];
 
-/// Normalise wrapped prose while preserving hard clause breaks (`BLG-151`).
+/// Normalise wrapped prose while preserving hard clause breaks ().
 ///
 /// Single newlines inside wrapped prose collapse to spaces so line-wrapped
 /// phrases (`"generate\nimages"`) cannot evade marker matching, while blank
@@ -495,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_151_system_prompt_refusal_gate_closes_four_bypasses() {
+    fn system_prompt_refusal_gate_closes_four_bypasses() {
         // 1. Semicolon clause borrowing negation from an earlier clause.
         let semi = "You cannot mislead users; you generate images quickly.";
         assert!(generation_phrases_are_all_refusals(semi).is_err());

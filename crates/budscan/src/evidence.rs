@@ -183,7 +183,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn blg_143_empty_or_whitespace_claim_reason_cannot_verify() {
+    fn empty_or_whitespace_claim_reason_cannot_verify() {
         let empty = Evidence::new().with(Claim::new(
             "bud-fetcher",
             Strength::Verified,

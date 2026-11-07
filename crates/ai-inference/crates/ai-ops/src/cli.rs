@@ -47,7 +47,7 @@ pub enum Command {
     Prompt,
     /// The help text.
     Help,
-    /// Unrecognised command or unexpected trailing arguments (`BLG-149`).
+    /// Unrecognised command or unexpected trailing arguments ().
     Invalid(String),
 }
 
@@ -170,7 +170,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_149_ai_ops_cli_refuses_extra_or_unknown_args() {
+    fn ai_ops_cli_refuses_extra_or_unknown_args() {
         assert!(matches!(
             parse(&["unknown-cmd".into()]),
             Command::Invalid(_)
