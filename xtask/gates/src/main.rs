@@ -53,6 +53,7 @@ mod gates {
     pub mod bns_gate;
     pub mod bns_names_are_safe_in_an_address_bar;
     pub mod bridge_dual_tree;
+    pub mod bud3_forbidden_phrases;
     pub mod bud_e2e;
     pub mod budscan_parity;
     pub mod budscan_patchset;
@@ -63,6 +64,7 @@ mod gates {
     pub mod classical_crypto_is_paired;
     pub mod clippy_extra;
     pub mod coding_audit_samples_the_relationship;
+    pub mod concept_names;
     pub mod consensus_maps_ordered;
     pub mod consensus_state_only_changes_in_blocks;
     pub mod containment_defaults;
@@ -111,7 +113,9 @@ mod gates {
     pub mod network_hardening_gate;
     pub mod no_conflict_markers;
     pub mod no_constant_security_verdicts;
+    pub mod no_float_in_consensus_paths;
     pub mod no_idle_code;
+    pub mod no_legacy_storage;
     pub mod no_new_shell_gates;
     pub mod no_orphan_source_files;
     pub mod no_out_of_block_consensus_writes;
@@ -143,6 +147,7 @@ mod gates {
     pub mod repair_fires;
     pub mod required_tests;
     pub mod rust_literals;
+    pub mod rust_syntax_is_parseable;
     pub mod scheme_is_never_inferred;
     pub mod security_parameters;
     pub mod security_scans_can_fail;
@@ -174,6 +179,7 @@ mod gates {
     pub mod wallet_core_gate;
     pub mod wallet_node_address_agree;
     pub mod wire_fields_are_signed;
+    pub mod workflows_cover_every_workspace;
     pub mod workflows_produce_jobs;
     pub mod zero_address_sender_is_verified;
     pub mod zero_storage_frozen;
@@ -542,6 +548,14 @@ const GATES: &[Gate] = &[
         run: gates::tree_is_english::run,
         run_args: None,
         self_test: gates::tree_is_english::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "bud3-forbidden-phrases",
+        replaces: None,
+        run: gates::bud3_forbidden_phrases::run,
+        run_args: None,
+        self_test: gates::bud3_forbidden_phrases::self_test,
         run_log: None,
     },
     Gate {
@@ -949,6 +963,14 @@ const GATES: &[Gate] = &[
         self_test: gates::badges_current::self_test,
     },
     Gate {
+        name: "concept-names",
+        replaces: None,
+        run: gates::concept_names::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::concept_names::self_test,
+    },
+    Gate {
         name: "containment-defaults",
         replaces: Some("check-containment-defaults.sh"),
         run: gates::containment_defaults::run,
@@ -1327,6 +1349,38 @@ const GATES: &[Gate] = &[
         self_test: gates::no_out_of_block_consensus_writes::self_test,
     },
     Gate {
+        name: "rust-syntax-is-parseable",
+        replaces: None,
+        run: gates::rust_syntax_is_parseable::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::rust_syntax_is_parseable::self_test,
+    },
+    Gate {
+        name: "no-float-in-consensus-paths",
+        replaces: None,
+        run: gates::no_float_in_consensus_paths::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::no_float_in_consensus_paths::self_test,
+    },
+    Gate {
+        name: "workflows-cover-every-workspace",
+        replaces: None,
+        run: gates::workflows_cover_every_workspace::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::workflows_cover_every_workspace::self_test,
+    },
+    Gate {
+        name: "no-legacy-storage",
+        replaces: None,
+        run: gates::no_legacy_storage::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::no_legacy_storage::self_test,
+    },
+    Gate {
         name: "release-profile-pins",
         replaces: None,
         run: gates::release_profile_pins::run,
@@ -1379,6 +1433,27 @@ const GATES: &[Gate] = &[
         self_test: gates::pq_core_gate::self_test,
     },
 ];
+
+/// Gates that take extra arguments but whose plain run (no arguments) is a
+/// complete verification. `--all` runs them: leaving `tree-pin` out meant the
+/// aggregate run, the one CI relies on, never checked the budzero tree pins.
+const RUNS_WITHOUT_ARGUMENTS: &[&str] = &["tree-pin"];
+
+/// The gates `--all` runs.
+///
+/// On the run path the gates that take a log path or positional roots are left
+/// out: they cannot run without their argument, and their CI steps call them
+/// directly. A canary takes no argument, so the self-test path keeps them all.
+fn all_selection(self_test: bool) -> Vec<&'static Gate> {
+    GATES
+        .iter()
+        .filter(|g| {
+            self_test
+                || RUNS_WITHOUT_ARGUMENTS.contains(&g.name)
+                || (g.run_log.is_none() && g.run_args.is_none())
+        })
+        .collect()
+}
 
 fn usage() -> String {
     let mut s = String::from(
@@ -1448,10 +1523,7 @@ fn main() {
         // directly. A canary takes no argument, so the self-test path keeps
         // them; filtered there too, `--all --self-test` reported success
         // while about twenty gates had proven nothing.
-        Some(&"--all" | &"--self-test") => GATES
-            .iter()
-            .filter(|g| self_test || (g.run_log.is_none() && g.run_args.is_none()))
-            .collect(),
+        Some(&"--all" | &"--self-test") => all_selection(self_test),
         Some(name) => {
             if let Some(g) = GATES.iter().find(|g| g.name == *name) {
                 vec![g]
@@ -1493,5 +1565,21 @@ fn main() {
             failed.join(", ")
         );
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod all_selection_tests {
+    use super::*;
+
+    /// `budlum-gates --all` must run `tree-pin`, whose plain run
+    /// (no `--pin`) is a verification that needs no argument.
+    #[test]
+    fn all_runs_tree_pin() {
+        let names: Vec<&str> = all_selection(false).iter().map(|g| g.name).collect();
+        assert!(names.contains(&"tree-pin"), "`--all` skips tree-pin");
+        let canaries: Vec<&str> = all_selection(true).iter().map(|g| g.name).collect();
+        assert!(canaries.contains(&"tree-pin"));
+        assert_eq!(canaries.len(), GATES.len(), "every canary runs");
     }
 }

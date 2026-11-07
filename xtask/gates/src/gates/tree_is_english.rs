@@ -98,6 +98,14 @@ const ALLOWED_FILES: &[&str] = &[
     // forbids and the scope words it looks for have to be written in
     // Turkish in its lists. The lists are the only Turkish in the file.
     "xtask/gates/src/gates/pq_claims_are_backed.rs",
+    "xtask/gates/src/gates/bud3_forbidden_phrases.rs",
+    // The concept map names the retired Turkish architecture names (and their
+    // Turkish replacement terms) so the concept-names gate can find them. The
+    // baseline repeats the first old name of each entry as its key. Neither
+    // file can say what it bans in English.
+    "config/naming/concept_map.toml",
+    "docs/NAMING.md",
+    ".github/concept-names-baseline.txt",
 ];
 
 /// Path fragments whose contents are a Turkish localisation.
