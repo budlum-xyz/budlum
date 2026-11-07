@@ -11,6 +11,9 @@ docs/ARCHITECTURE.md
 docs/BUD_CONTENT_ENCRYPTION.md
 docs/BUD_STORAGE_ROADMAP.md
 docs/NAMING.md
+docs/audit/LIVE_STATUS.md
+docs/audit/live/lane-b.md
+docs/audit/live/legacy-storage-inventory.md
 src/account_abstraction/quantum_account.rs
 src/chain/blockchain.rs
 src/chain/chain_actor.rs
