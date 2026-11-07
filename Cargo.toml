@@ -203,6 +203,10 @@ budlum-note-packing = { path = "crates/note-packing" }
 budlum-uel-abi = { path = "crates/uel-abi" }
 # B.U.D. 3.0 A0 codec registry.
 bud-codec = { path = "crates/bud-codec" }
+# The wire types the node and the mobile core both bind (K-4). The phone must
+# not link the whole node to read an address (7.9.5), so the shared definitions
+# live below both and `core::address` re-exports them.
+budlum-types = { path = "crates/budlum-types" }
 # In-tree, feature-gated (2026-09-19 user decision: no separate repository).
 budlum-bpqs = { path = "crates/bpqs", optional = true }
 
