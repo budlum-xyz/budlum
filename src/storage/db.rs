@@ -385,7 +385,8 @@ impl Storage {
     }
 
     /// Restore an offline backup into a new, empty sled directory and run the
-    /// Normal migration/integrity checks before reporting success.
+    /// normal migration/integrity checks before reporting success. The target
+    /// leaf must be a real directory, not a symbolic link.
     /// # Errors
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
@@ -396,16 +397,36 @@ impl Storage {
     ) -> std::io::Result<()> {
         let snapshot_path = snapshot_path.as_ref();
         let target_db_path = target_db_path.as_ref();
-        if target_db_path.exists()
-            && std::fs::read_dir(target_db_path)?
-                .next()
-                .transpose()?
-                .is_some()
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                format!("restore target {} is not empty", target_db_path.display()),
-            ));
+        match std::fs::symlink_metadata(target_db_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "restore target {} must not be a symbolic link",
+                        target_db_path.display()
+                    ),
+                ));
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    format!("restore target {} is not a directory", target_db_path.display()),
+                ));
+            }
+            Ok(_) => {
+                if std::fs::read_dir(target_db_path)?
+                    .next()
+                    .transpose()?
+                    .is_some()
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        format!("restore target {} is not empty", target_db_path.display()),
+                    ));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
 
         let bytes = std::fs::read(snapshot_path)?;
@@ -2755,6 +2776,33 @@ mod tests {
         );
     }
 
+    #[cfg(all(not(miri), unix))]
+    #[test]
+    fn restore_snapshot_refuses_a_symlink_target_directory() {
+        let root = tempdir().unwrap();
+        let source_dir = root.path().join("source-db");
+        let source = Storage::new(source_dir.to_str().unwrap()).unwrap();
+        let genesis = Block::genesis();
+        source.commit_block(&genesis, &genesis.state_root).unwrap();
+
+        let backup = root.path().join("node.backup");
+        source.create_snapshot(&backup).unwrap();
+        drop(source);
+
+        let actual_target = root.path().join("actual-target");
+        std::fs::create_dir(&actual_target).unwrap();
+        let symlink_target = root.path().join("restore-target");
+        std::os::unix::fs::symlink(&actual_target, &symlink_target).unwrap();
+
+        let error = Storage::restore_snapshot(&backup, &symlink_target).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(std::fs::symlink_metadata(&symlink_target)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_dir(&actual_target).unwrap().count(), 0);
+    }
+
     #[test]
     fn backup_restore_roundtrip_is_integrity_checked_and_non_destructive() {
         let source_dir = tempdir().unwrap();
@@ -2771,6 +2819,7 @@ mod tests {
         drop(source);
 
         let restored_path = restore_parent.path().join("restored.db");
+        std::fs::create_dir(&restored_path).unwrap();
         Storage::restore_snapshot(&backup, &restored_path).unwrap();
         let restored = Storage::new(restored_path.to_str().unwrap()).unwrap();
         assert_eq!(
