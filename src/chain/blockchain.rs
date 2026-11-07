@@ -485,6 +485,23 @@ impl Blockchain {
         }
     }
 
+    fn checked_replay_prefix(chain: &[Block], position: usize) -> Result<&[Block], String> {
+        let block = chain
+            .get(position)
+            .ok_or_else(|| format!("block position {position} is outside the stored chain"))?;
+        let expected_index = u64::try_from(position)
+            .map_err(|_| format!("block position {position} exceeds the chain index range"))?;
+        if block.index != expected_index {
+            return Err(format!(
+                "block at position {position} declares index {}",
+                block.index
+            ));
+        }
+        chain
+            .get(..position)
+            .ok_or_else(|| format!("block position {position} has no valid replay prefix"))
+    }
+
     fn snapshot_trusted_signers_from_state(state: &AccountState) -> Vec<[u8; 32]> {
         state
             .validators
@@ -877,8 +894,17 @@ impl Blockchain {
             }
         }
 
-        for block in chain_vec.iter().skip(start_index) {
-            let preceding = &chain_vec[..block.index as usize];
+        for (position, block) in chain_vec.iter().enumerate().skip(start_index) {
+            let preceding = match Self::checked_replay_prefix(&chain_vec, position) {
+                Ok(prefix) => prefix,
+                Err(error) => {
+                    error!("Corrupted persisted chain: {error}. Refusing startup.");
+                    #[cfg(not(test))]
+                    std::process::exit(1);
+                    #[cfg(test)]
+                    panic!("Corrupted persisted chain: {error}");
+                }
+            };
             state = match Self::apply_block_effects(&state, block, preceding) {
                 Ok(mut next_state) => {
                     // Startup replay must reconstruct exactly the same state
@@ -8363,6 +8389,20 @@ mod tests {
         // The idempotent branch returns Ok, and the anchor must stay at root2.
         bc.accept_verified_domain_commitment(c1).unwrap();
         assert_eq!(bc.state.external_roots.get(&1), Some(&root2));
+    }
+
+    #[test]
+    fn persisted_chain_replay_refuses_an_out_of_position_block_index() {
+        let genesis = Block::new_with_chain_id(0, String::new(), vec![], 45262);
+        let next = Block::new_with_chain_id(1, genesis.hash.clone(), vec![], 45262);
+        let chain = vec![genesis, next];
+        assert_eq!(Blockchain::checked_replay_prefix(&chain, 1).unwrap().len(), 1);
+
+        let mut malformed = chain.clone();
+        malformed[1].index = u64::MAX;
+        let error = Blockchain::checked_replay_prefix(&malformed, 1).unwrap_err();
+        assert!(error.contains("declares index"));
+        assert!(Blockchain::checked_replay_prefix(&chain, 2).is_err());
     }
 
     /// A snapshot that is ahead of the stored chain must not stay
