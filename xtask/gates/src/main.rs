@@ -116,6 +116,7 @@ mod gates {
     pub mod no_constant_security_verdicts;
     pub mod no_float_in_consensus_paths;
     pub mod no_idle_code;
+    pub mod no_legacy_storage;
     pub mod no_new_shell_gates;
     pub mod no_orphan_source_files;
     pub mod no_out_of_block_consensus_writes;
@@ -1379,6 +1380,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::nightly_workflows_are_required::self_test,
+    },
+    Gate {
+        name: "no-legacy-storage",
+        replaces: None,
+        run: gates::no_legacy_storage::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::no_legacy_storage::self_test,
     },
     Gate {
         name: "release-profile-pins",
