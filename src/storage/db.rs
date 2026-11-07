@@ -2796,7 +2796,7 @@ mod tests {
 
     #[cfg(all(not(miri), unix))]
     #[test]
-    fn restore_snapshot_refuses_a_symlink_target_directory() {
+    fn blg_374_restore_snapshot_refuses_a_symlink_target_directory() {
         let root = tempdir().unwrap();
         let source_dir = root.path().join("source-db");
         let source = Storage::new(source_dir.to_str().unwrap()).unwrap();
