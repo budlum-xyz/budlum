@@ -284,6 +284,30 @@ The deletion therefore waits for WP-07, and WP-07 waits for the replacement gate
 Recorded here rather than in a comment on a pull request because the next reader of
 this file is the agent that starts WP-07.
 
+## Wiring audit
+
+A gate that no workflow runs is a comment. The suite has four ways to fail that
+check, and all four were measured.
+
+| Check | Measurement | Result |
+|---|---|---|
+| Every module is a gate or a declared helper | modules against `GATES` entries | 140 modules: 136 gates, 4 helpers |
+| A gate's replaced shell script is gone | the 74 `replaces:` values against `scripts/` | 74 of 74 scripts are gone; the directory no longer exists |
+| A gate name a workflow calls exists in the table | 105 distinct names across `.github/workflows/*.yml` against the table | 0 unknown names |
+| A gate that needs an argument is called with one | 21 gates have `run_log` or `run_args` | 21 of 21 are called with their argument |
+
+The last check matters because `--all` deliberately skips those 21: a gate that
+cannot run without a log path is left out of the walk rather than handed an empty
+argument, and `--all --self-test` keeps them because a canary needs no argument. A
+gate that needed one and was called by neither path would never run, and the suite
+would report success over it.
+
+The remaining 34 gates are not named by any workflow step. They run through `--all`
+in the `gates` and `repo-lint` jobs, which walks the table in order and reports every
+failing gate in one line at the end rather than stopping at the first. Naming a gate
+in a step buys it a separate job and its own surface, not a verdict: `--all` already
+gives the verdict.
+
 ## What a green suite would mean today
 
 Two facts about the suite as it stands, both measured rather than inferred.
