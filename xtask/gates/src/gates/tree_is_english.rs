@@ -98,6 +98,23 @@ const ALLOWED_FILES: &[&str] = &[
     // forbids and the scope words it looks for have to be written in
     // Turkish in its lists. The lists are the only Turkish in the file.
     "xtask/gates/src/gates/pq_claims_are_backed.rs",
+    // The concept map names the retired Turkish architecture names (and their
+    // Turkish replacement terms) so the concept-names gate can find them. The
+    // baseline repeats the first old name of each entry as its key. Neither
+    // file can say what it bans in English.
+    "config/naming/concept_map.toml",
+    ".github/concept-names-baseline.txt",
+    // The B.U.D. 3.0 forbidden-phrase gate lists the Turkish form of every
+    // phrase it refuses, because a translated document is exactly where the
+    // wrong model comes back. The list is what the gate bans; it is not prose.
+    // The same exemption is written into the concept map's
+    // `global_allow_paths`, so the name counter stays honest about it.
+    "xtask/gates/src/gates/bud3_forbidden_phrases.rs",
+    // The English naming document writes the retired name and its English
+    // replacement in the same row. The Turkish name in that row is the thing
+    // being retired; deleting it would delete the mapping it documents, and
+    // the concept map already exempts the same file for the same reason.
+    "docs/NAMING.md",
 ];
 
 /// Path fragments whose contents are a Turkish localisation.
