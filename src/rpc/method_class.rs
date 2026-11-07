@@ -407,6 +407,14 @@ mod tests {
     }
 
     #[test]
+    fn method_class_rows_have_unique_names() {
+        let mut names = BTreeSet::new();
+        for row in METHOD_CLASSES {
+            assert!(names.insert(row.name), "duplicate method class: {}", row.name);
+        }
+    }
+
+    #[test]
     fn the_startup_check_refuses_a_gap_in_either_direction() {
         let all: Vec<&str> = METHOD_CLASSES.iter().map(|row| row.name).collect();
         assert!(check_served_methods(all.iter().copied()).is_ok());

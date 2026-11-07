@@ -249,3 +249,7 @@ pub mod validator_classes;
 // The B.U.D. 3.0 storage door end to end.
 #[cfg(test)]
 pub mod bud3_door;
+mod audit_lane_a;
+mod audit_lane_b;
+mod audit_lane_c;
+mod audit_lane_d;
