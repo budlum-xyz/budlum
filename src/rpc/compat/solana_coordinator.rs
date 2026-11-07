@@ -1,4 +1,5 @@
 //! Solana JSON-RPC compatibility gateway (`127.0.0.1:18548`, WP-31 & section 8.11.3).
+//! WIRING: Solana JSON-RPC compatibility gateway wired into compat RPC.
 
 use crate::core::account::AccountState;
 use crate::execution::coordinator::alias::{derive_foreign_account, ForeignScheme};

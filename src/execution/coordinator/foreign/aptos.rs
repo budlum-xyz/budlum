@@ -1,3 +1,4 @@
+//! WIRING: Foreign::Aptos BCS envelope constants and helpers wired into foreign admission.
 //! Aptos (`SignedTransaction` BCS) foreign envelope decoding and verification.
 //!
 //! Implements section 8.6.2 (`Foreign::Aptos`) and WP-32 items 2 & 4:

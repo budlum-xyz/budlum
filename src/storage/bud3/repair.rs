@@ -1,4 +1,3 @@
-use std::collections::{BTreeMap, BTreeSet};
 //! Repair: the repairer side of §6.10.
 //!
 //! The registry holds what the chain knows - which segments need repair, which
@@ -33,6 +32,7 @@ use std::collections::{BTreeMap, BTreeSet};
 //! the repairer cannot predict, because the seed is consensus state rather
 //! than anything the repairer supplies.
 
+use std::collections::{BTreeMap, BTreeSet};
 use super::custody::symbol_leaf;
 use super::fountain::SegmentEncoder;
 use super::placement::{rank, segment_key, Candidate, Class};
@@ -303,7 +303,7 @@ pub const REPAIR_TASK_HANDOVER_BLOCKS: u64 = 20;
 
 /// One scheduled segment repair task.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ScheduledScheduledRepairTask {
+pub struct ScheduledRepairTask {
     /// Object commitment.
     pub object_key: ObjectKey,
     /// Segment index within the object.
@@ -318,7 +318,7 @@ pub struct ScheduledScheduledRepairTask {
     pub timed_out: BTreeSet<Address>,
 }
 
-impl ScheduledScheduledRepairTask {
+impl ScheduledRepairTask {
     /// Convenience: whether this task has exceeded [`REPAIR_TASK_HANDOVER_BLOCKS`]
     /// at `current_height` without completing `RecordRepair`.
     #[must_use]

@@ -19,6 +19,8 @@
 //! | [`repair`] | Repair assignment, the 1% verification draw and the bad-repair report |
 //! | [`tx`] | `StorageTx` v3 and its one apply door |
 //! | [`volume`] | Aggregation volumes: small objects share one placed segment |
+//! | [`fees`] | The storage fee and its renewal price, the endowment and gateway split, custody rewards with the presence multiplier, the Mobile floor charge |
+//! | [`upload`] | Gateway streaming upload session: bounded deadlines, per-account session caps, and content-id check |
 //! | [`custody`] | Sub-block tree, symbol root, the audit draw and custody proofs |
 //! | [`pipeline`] | Upload (content to record and symbols) and view (symbols to checked content) |
 //! | [`fountain`] | RFC 6330 per-segment encoder and decoder, and the streaming encoder |
@@ -41,6 +43,7 @@ pub mod content_id;
 pub mod content_ref;
 pub mod custody;
 pub mod dedup_index;
+pub mod fees;
 pub mod fountain;
 pub mod grants;
 pub mod limits;
@@ -54,9 +57,10 @@ pub mod repair;
 pub mod segment;
 pub mod tx;
 pub mod types;
+pub mod upload;
 pub mod varint;
-pub mod volume;
 pub mod view;
+pub mod volume;
 
 pub use bof1::{Bof1Error, Flags, Header, Object};
 pub use content_id::{ContentId, ContentKey};

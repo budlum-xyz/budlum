@@ -9,6 +9,7 @@
 //!   `ERC20 -> CW20`, `ERC721 -> CW721`).
 //! - Pointer contracts hold zero balance storage and zero local allowance ledger:
 //!   every balance and approval operation executes at home via `UniversalCall`.
+//! WIRING: Unified Asset Registry pointer constants and records wired into UEL coordinator execution.
 
 use crate::core::account::AccountState;
 use crate::execution::coordinator::alias::bech32_contract_addr;

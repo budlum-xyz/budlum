@@ -64,6 +64,7 @@ pub struct PendingPoaCompliance {
 /// carries into `Account.balance`.
 pub const ATTOS_PER_ATOM: u64 = 1_000_000_000_000;
 /// Number of attoBUD in one whole BUD (`10^18`).
+/// WIRING: 10^18 atto-BUD scale constant exposed for UEL coordinator gas conversion.
 pub const ATTOS_PER_BUD: u128 = 1_000_000_000_000_000_000;
 /// Number of attoBUD in one SVM lamport (`10^-9` BUD).
 pub const ATTOS_PER_LAMPORT: u128 = 1_000_000_000;

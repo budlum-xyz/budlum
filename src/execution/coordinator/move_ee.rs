@@ -7,6 +7,7 @@
 //!   `0x1::randomness` (bound to `BlockContext.randao`, Budlum epoch randomness),
 //!   and native `0x1::budlum_universal::call` (`1 octa = 10^10 attoBUD`).
 //! - Aptos staking and governance modules are explicitly refused (section 8.15).
+//! WIRING: Move execution environment bundle limits and runtime config wired into UEL coordinator.
 
 use crate::execution::coordinator::state::NS_MOVE_STATE;
 use crate::execution::coordinator::universal_call::wrap_static_universal_input;

@@ -3,6 +3,7 @@ use crate::crypto::signer::ConsensusSigner;
 use std::sync::Mutex;
 
 /// The compiled-in BLS data label, used when the operator sets none.
+/// WIRING: default PKCS#11 CKA_LABEL for consensus BLS keys when config omits an explicit label.
 pub const DEFAULT_BLS_KEY_LABEL: &str = "BUD_BLS_KEY";
 const BLS_DATA_LABEL: &str = DEFAULT_BLS_KEY_LABEL;
 const PQ_DATA_LABEL: &str = "BUD_PQ_KEY";

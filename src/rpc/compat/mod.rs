@@ -7,6 +7,7 @@
 //! Every gateway follows the `method_class.rs` discipline: each method's listener
 //! and effect are declared in a single table, and no method mutates consensus
 //! state outside block execution.
+//! WIRING: Compatibility RPC shared configuration and JSON-RPC error envelopes.
 
 pub mod aptos;
 pub mod aptos_coordinator;

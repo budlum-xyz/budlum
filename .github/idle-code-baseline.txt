@@ -534,7 +534,6 @@ src/core/chain_config.rs	const	MAX_VOTES_PER_MSG
 src/core/chain_config.rs	const	PROTOCOL_VERSION
 src/core/chain_config.rs	const	SLOT_MS
 src/core/chain_config.rs	fn	finality_quorum
-src/core/chain_config.rs	struct	ChainId
 src/core/chain_config.rs	struct	ConsensusParams
 src/core/constitution.rs	enum	ConstitutionParameterKey
 src/core/constitution.rs	enum	ConstitutionValue
@@ -571,7 +570,6 @@ src/core/transaction.rs	fn	new_proposal
 src/core/transaction.rs	fn	new_vote
 src/core/transaction.rs	fn	new_with_fee
 src/core/transaction.rs	fn	sign_v6
-src/cross_domain/bridge_relayer.rs	enum	PipelineError
 src/cross_domain/bridge_relayer.rs	fn	event_proof
 src/cross_domain/chain_adapter.rs	fn	supports
 src/cross_domain/evm/adapter.rs	const	DEFAULT_DEPOSIT_TOPIC0
@@ -585,9 +583,6 @@ src/cross_domain/evm/header.rs	enum	HeaderError
 src/cross_domain/evm/mpt.rs	const	EMPTY_TRIE_ROOT
 src/cross_domain/evm/mpt.rs	const	MAX_WALK_DEPTH
 src/cross_domain/evm/mpt.rs	fn	hp_decode
-src/cross_domain/evm/mpt.rs	fn	hp_encode
-src/cross_domain/evm/mpt.rs	fn	to_nibbles
-src/cross_domain/evm/rlp.rs	fn	encode_uint
 src/cross_domain/evm/rlp.rs	fn	from_item
 src/cross_domain/evm/rlp.rs	struct	RlpBytes
 src/cross_domain/evm/sync_committee.rs	const	BLS_PUBKEY_LEN
@@ -627,7 +622,6 @@ src/crypto/primitives.rs	struct	ValidatorKeyPolicy
 src/crypto/signer.rs	fn	with_pq
 src/crypto/signer.rs	struct	KeyPairSigner
 src/deed/mod.rs	enum	ArtifactKind
-src/deed/mod.rs	enum	Visibility
 src/developer_os.rs	enum	DeveloperOsError
 src/developer_os.rs	enum	DevnetTopology
 src/developer_os.rs	enum	SdkFeature
@@ -706,7 +700,6 @@ src/domain/types.rs	fn	normalize_hash32
 src/execution/executor.rs	fn	apply_block
 src/execution/executor.rs	fn	apply_transaction
 src/execution/proof_verifier.rs	const	GAS_PER_DEGREE_BIT
-src/execution/proof_verifier.rs	const	MAX_DEGREE_BITS
 src/execution/proof_verifier.rs	const	MIN_PROOF_FORMAT_VERSION
 src/execution/proof_verifier.rs	enum	ProofVerifyError
 src/execution/proof_verifier.rs	struct	VerifiedProof

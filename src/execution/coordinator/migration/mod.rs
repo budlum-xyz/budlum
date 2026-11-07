@@ -9,6 +9,7 @@
 //!    the complete storage trie, refuses occupied targets, charges the migration fee to
 //!    the migrator, leaves native ETH balance at `0`, and installs the contract at its
 //!    exact 20-byte address into `ee/evm/{account,code,storage}` with `imported_from`.
+//! WIRING: Chunked migration limits wired into UEL migration verification.
 
 use std::collections::BTreeMap;
 

@@ -8,6 +8,7 @@
 //!   Account, Memo, BPF Loader, and the UEL Universal Call program
 //!   (`SHA256("BDLM_SVM_UNIVERSAL_PROGRAM_V1")`).
 //! - Solana Vote and Stake programs are absent and explicitly refused (section 8.15).
+//! WIRING: SVM program IDs, account layout, and runtime bounds wired into UEL coordinator.
 
 use crate::core::account::ATTOS_PER_ATOM;
 use crate::execution::coordinator::alias::is_ed25519_on_curve;

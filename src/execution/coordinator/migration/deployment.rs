@@ -5,6 +5,7 @@
 //! deriving the created contract address. Supports both direct `CREATE` and
 //! factory deployments (`FactoryCreationEvidence`, where migration authority
 //! belongs to the account that deployed the factory).
+//! WIRING: EVM state-root deployment proof limits wired into UEL migration verification.
 
 use super::DeploymentEvidence;
 use crate::cross_domain::evm::mpt::{self, MptError};

@@ -1,3 +1,4 @@
+//! WIRING: validator secret key-file permission enforcement called during node startup.
 //! Atomic, owner-only key-file writes (BLG-004).
 //!
 //! A key file is secret material on disk. Two properties are not optional:
@@ -69,6 +70,7 @@ pub fn write_atomic_owner_only(path: &Path, bytes: &[u8]) -> Result<(), std::io:
 }
 
 /// The mode a key file is allowed to have: owner read/write, nothing else.
+/// WIRING: required Unix mode for validator secret key files checked on startup.
 pub const KEY_FILE_MODE: u32 = 0o600;
 
 /// The bits of a key file's mode that may be set. Anything outside this mask is

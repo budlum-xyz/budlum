@@ -5,6 +5,7 @@
 //! - Chain ID `budlum-testnet-1`, `account_number`, and `sequence` replay checks.
 //! - Secp256k1 ECDSA verification (`k256`, EIP-2 low-`s`) and canonical 20-byte
 //!   Cosmos address derivation `RIPEMD160(SHA256(compressed_pubkey_33))`.
+//! WIRING: Foreign::Cosmos SignDoc and TxRaw protobuf wire structs wired into foreign admission.
 
 use crate::execution::coordinator::alias::derive_foreign_cosmos_bech32;
 use k256::ecdsa::{Signature, VerifyingKey};

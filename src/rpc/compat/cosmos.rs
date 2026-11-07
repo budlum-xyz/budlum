@@ -1,5 +1,6 @@
 //! CometBFT RPC (`127.0.0.1:18550`) & Cosmos LCD (`127.0.0.1:18551`) gateway
 //! (`WP-29` & section 8.11.5) supporting CosmJS `SigningCosmWasmClient`.
+//! WIRING: CometBFT/Cosmos compatibility RPC gateway wired into compat RPC.
 
 use crate::core::account::{AccountState, ATTOS_PER_ATOM};
 use crate::execution::coordinator::foreign::cosmos::BUDLUM_COSMOS_CHAIN_ID;

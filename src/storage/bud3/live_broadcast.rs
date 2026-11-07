@@ -147,6 +147,7 @@ impl LiveGateway {
     ///
     /// [`LiveGatewayRefusal::NotLive`] when bit1 is absent, or the activation
     /// refusals of [`Self::admit_object`].
+    /// WIRING: live-stream object admission door wired into T-Expansion broadcast service.
     pub fn admit_live_object(
         &self,
         object: &Object,

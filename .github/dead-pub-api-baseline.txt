@@ -59,7 +59,6 @@ src/budlumxyz/mod.rs:update_app
 src/chain/blockchain.rs:emit_mempool_cleanup
 src/chain/blockchain.rs:emit_mempool_eviction
 src/chain/blockchain.rs:emit_reorg
-src/chain/blockchain.rs:is_valid_chain
 src/chain/blockchain.rs:mine_pending_transactions
 src/chain/blockchain.rs:print_info
 src/chain/blockchain.rs:sovereign_template_root
@@ -98,12 +97,6 @@ src/core/transaction.rs:new_contract_call
 src/core/transaction.rs:sign_v6
 src/cross_domain/evm/bud_to_eth.rs:build_bud_to_eth_claim
 src/cross_domain/evm/rlp.rs:from_item
-src/crypto/pkcs11.rs:bls_signing_available
-src/crypto/pkcs11.rs:pq_signing_available
-src/crypto/pkcs11.rs:store_bls_key
-src/crypto/pkcs11.rs:store_pq_key
-src/crypto/primitives.rs:devnet_default
-src/crypto/signer.rs:with_pq
 src/domain/commitment_registry.rs:get_by_block_hash
 src/domain/plugin_registry.rs:domain_ids
 src/domain/sovereign.rs:transition_lifecycle
@@ -185,7 +178,6 @@ src/storage/pact_binding.rs:kq_pact_registry
 src/storage/pact_binding.rs:kq_storage_pact
 src/persistence/pruning.rs:archive_node_default
 src/persistence/pruning.rs:full_node_default
-src/storage/qr_reemit.rs:recipe_digest
 src/tokenomics/mod.rs:address_of
 src/tokenomics/mod.rs:amount_of
 src/tokenomics/mod.rs:calculate_epoch_reward

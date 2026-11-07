@@ -11,6 +11,7 @@
 //! - Non-deterministic worker deaths / socket EOFs / timeouts return
 //!   `WorkerError::Transport`, causing the coordinator to discard the block
 //!   overlay, restart the worker, and retry up to 3 times before halting.
+//! WIRING: Out-of-process EE worker resource limits and factory types wired into UEL worker pool.
 
 use budlum_uel_abi::{
     panic_digest, panic_message, BlockContext, CodeInfo, EeCall, EeFault, EeId, EeOutcome,

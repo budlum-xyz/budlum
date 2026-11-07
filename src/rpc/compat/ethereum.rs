@@ -4,6 +4,7 @@
 //! `debug_traceTransaction` and `debug_traceCall`. `eth_getProof` explicitly
 //! returns `-32601` (`Method not found; use bud_getExecutionProof`, section 8.10.6),
 //! and block headers expose `execution_root` as `stateRoot` (section 8.10.5).
+//! WIRING: Ethereum JSON-RPC compatibility gateway wired into compat RPC.
 
 use crate::core::account::AccountState;
 use crate::execution::coordinator::alias::{derive_foreign_account, ForeignScheme};

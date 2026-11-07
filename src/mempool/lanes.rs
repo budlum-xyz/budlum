@@ -8,6 +8,7 @@
 //!   lanes; recent-blockhash signature deduplication for Solana).
 //! - Deterministic cross-lane proposer selection by effective priority fee per
 //!   BGU descending, then `tx_id` ascending.
+//! WIRING: Per-envelope mempool lane budgets and ordering rules wired into pool admission.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};

@@ -9,6 +9,7 @@
 //! - Refuses `StakingMsg`, `DistributionMsg`, `GovMsg`, and `IbcMsg` messages.
 //! - Supports `BudlumMsg::UniversalCall` (`SubMsg` reply model), `BudlumQuery::UniversalView`,
 //!   CW20 (`cw20-base`), CW721 (`cw721-base`), and zero-balance UEL pointers to EVM.
+//! WIRING: CosmWasm export/submessage filters and memory limits wired into UEL coordinator.
 
 use crate::execution::coordinator::assets::{
     decode_pointer_bytecode, AssetStandard, PointerDescriptor,

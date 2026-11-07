@@ -1,5 +1,6 @@
 //! Foreign Compatibility Lane envelopes, classical account isolation, `Adopt`,
 //! and Quantum Alert Level gating (sections 8.4.1, 8.4.2, 8.6.2; closing BLG-267).
+//! WIRING: Foreign envelope account adoption and quantum-alert records wired into UEL coordinator.
 
 pub mod aptos;
 pub mod bcs_admission;

@@ -6,6 +6,7 @@
 //! - `TxOverlay` stacks one root transaction frame plus up to 8 cross-EE
 //!   `UniversalCall` frames, rolling back failed frames without leaving state
 //!   mutations behind (G-4).
+//! WIRING: Nested call-frame overlay depth bounds wired into UEL coordinator.
 
 use crate::core::account::{AccountState, BudEnvUnit};
 use crate::core::address::Address;

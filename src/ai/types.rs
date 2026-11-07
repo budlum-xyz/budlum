@@ -23,6 +23,7 @@ const MAX_EXECUTION_CLASS: u8 = 1;
 /// reorders a ranking. The integer score is now the ordering key and the
 /// value that crosses the actor/RPC boundary; the `f64` stays as a display
 /// column derived from the same counters.
+/// WIRING: fixed-point denominator for integer AI reputation scores.
 pub const TRUST_SCORE_BASIS_POINTS: u64 = 10_000;
 
 /// Equivocation penalty per event, in permyriad of the score.

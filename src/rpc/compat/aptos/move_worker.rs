@@ -51,6 +51,7 @@ impl MoveWorkerAdmission {
     /// [`MoveWorkerError::Body`] for a BCS defect, or
     /// [`MoveWorkerError::Envelope`] for a chain, expiry, framework, replay or
     /// worker refusal.
+    /// WIRING: Aptos `/v1/transactions` BCS admission entrypoint wired into compat HTTP router.
     pub fn admit_bcs(&mut self, body: &[u8], now_secs: u64) -> Result<(), MoveWorkerError> {
         if body.len() > MAX_BCS_BYTES.saturating_add(64) {
             return Err(MoveWorkerError::Body(BcsError::LengthTooLarge));

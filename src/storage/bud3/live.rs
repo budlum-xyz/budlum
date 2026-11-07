@@ -202,6 +202,7 @@ impl LiveStream {
     }
 
     /// The end of the newest segment, if any.
+    /// WIRING: live-stream head timestamp query wired into T-Expansion live gateway.
     #[must_use]
     pub fn head_end_ms(&self) -> Option<u64> {
         self.segments.last().map(|segment| segment.end_ms)
@@ -226,6 +227,7 @@ impl LiveStream {
     /// [`LiveError::EmptySegment`] for empty content,
     /// [`LiveError::NonContiguous`] when `start_ms` does not continue the
     /// timeline.
+    /// WIRING: live-stream segment append entrypoint wired into T-Expansion live gateway.
     pub fn push_segment(
         &mut self,
         start_ms: u64,

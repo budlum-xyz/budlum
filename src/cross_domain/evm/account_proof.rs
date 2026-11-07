@@ -12,6 +12,7 @@ use crate::cross_domain::evm::rlp::{self, Item, RlpError};
 use serde::{Deserialize, Serialize};
 
 /// Maximum RLP proof nodes accepted in one MPT descent.
+/// WIRING: MPT proof depth cap exposed for cross-domain EVM proof verifiers.
 pub const MAX_PROOF_NODES: usize = 64;
 
 /// An Ethereum account decoded from a verified state-trie leaf.

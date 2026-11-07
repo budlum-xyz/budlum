@@ -2,6 +2,7 @@
 //! guards, 256-bit 4-word `sender` context (`BLG-230`), verifier DoS ceilings
 //! (`BLG-039`, `BLG-142`, `BLG-154`, `BLG-159`), and testnet proof-opcode
 //! closures (`VerifyMerkle`, `VerifyInference`, `BLG-223`, `BLG-226`; `WP-33`).
+//! WIRING: BudZero execution environment host constants and receipt helpers invoked via UEL coordinator.
 
 use crate::core::address::Address;
 use crate::execution::proof_verifier::MAX_DEGREE_BITS;

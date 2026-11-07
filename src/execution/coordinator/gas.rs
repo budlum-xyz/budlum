@@ -9,6 +9,7 @@
 //!   max 12.5% (`1/8`) adjustment per block.
 //! - Base fee split: 10% burned, 90% credited to the Network Security Pool
 //!   (`reward_pool_account`). Priority fee: 100% credited to block proposer.
+//! WIRING: Unified BGU gas constants and soft limits wired into UEL block scheduling.
 
 use crate::core::account::{AccountState, BudEnvUnit, ATTOS_PER_ATOM};
 use crate::core::address::Address;

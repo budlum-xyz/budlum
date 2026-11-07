@@ -14,6 +14,7 @@
 //! *behavior semantics* the proof backend cannot.
 
 /// A single grading rule applied to a model response.
+/// WIRING: grading rule variants consumed by `EvalCase` and `run_eval` in this crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Check {
     /// The response must equal `0` exact.

@@ -31,6 +31,7 @@
 //!
 //! The class is inside the signed bytes on purpose: two signatures for one
 //! window under two classes are a provable double sign (section 7.8 item 8).
+//! WIRING: shared presence preimage and window rules consumed by validator gossip and mobile duty batches.
 
 use crate::{Address, ValidatorClass};
 use serde::{Deserialize, Serialize};

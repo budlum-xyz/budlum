@@ -9,6 +9,7 @@
 //!   fields (`core::hash::hash_fields_bytes`).
 //! - Permissionless Universal Asset ID derivation (`BDLM_UEL_ASSET_V1`) and
 //!   per-environment deploy feature flags (R-21).
+//! WIRING: Namespace state roots and execution proof types wired into UEL state commitment.
 
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;

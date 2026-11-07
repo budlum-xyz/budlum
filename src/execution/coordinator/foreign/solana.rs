@@ -5,6 +5,7 @@
 //!   including `v0` address lookup tables.
 //! - Strict Ed25519 signature verification over the serialized message.
 //! - Recent 150-Budlum-blockhash replay window and signature replay cache.
+//! WIRING: Foreign::Solana v0 message lookup and instruction structs wired into foreign admission.
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};

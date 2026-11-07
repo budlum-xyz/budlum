@@ -172,6 +172,7 @@ impl SchemeStatus {
     }
 
     /// Whether an object of this scheme may still be verified.
+    /// WIRING: signature-capability predicate exposed for envelope admission.
     #[must_use]
     pub const fn verifies(self) -> bool {
         matches!(self, Self::Active | Self::Deprecated)

@@ -225,6 +225,7 @@ impl Network {
     ///
     /// Enabled on devnet (`45262`) for integration verification; closed on
     /// testnet (`45261`) and mainnet (`45260`) per the launch feature matrix.
+    /// WIRING: chain feature query exposed for transaction admission and RPC inspection.
     #[must_use]
     pub const fn app_binding_enabled(&self) -> bool {
         matches!(self, Network::Devnet)
@@ -244,6 +245,10 @@ impl Network {
                 tx_ttl_secs: 1_800,
                 rbf_bump_percent: 15,
                 max_pool_bytes: 512 * 1024 * 1024,
+                // The duty lane's share follows the block budget, and the
+                // block budget is one constant for every network, so it is
+                // the same here as on the testnet.
+                duty_block_bytes: crate::mempool::pool::DEFAULT_DUTY_BLOCK_BYTES,
             },
             Network::Testnet => crate::mempool::pool::MempoolConfig {
                 max_size: 50_000,
@@ -252,6 +257,7 @@ impl Network {
                 tx_ttl_secs: 3_600,
                 rbf_bump_percent: 10,
                 max_pool_bytes: crate::mempool::pool::DEFAULT_MAX_POOL_BYTES,
+                duty_block_bytes: crate::mempool::pool::DEFAULT_DUTY_BLOCK_BYTES,
             },
             Network::Devnet => crate::mempool::pool::MempoolConfig::default(),
         }

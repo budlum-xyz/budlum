@@ -12,6 +12,7 @@
 //! - Precompile `0x000000000000000000000000000000000000B001` (`IBudlumUniversal`)
 //!   emitting `UniversalCallExecuted(uint8 ee, bytes target, bool ok)`.
 //! - Zero-balance ERC-20 / ERC-721 UEL pointers forwarding to home WASM contracts.
+//! WIRING: EVM execution environment gas and bytecode bounds wired into UEL coordinator.
 
 use crate::cross_domain::evm::rlp::{self, Item};
 use crate::execution::coordinator::alias::{derive_foreign_cosmos_bech32, ALIAS_NAMESPACE};

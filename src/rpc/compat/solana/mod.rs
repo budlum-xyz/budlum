@@ -259,6 +259,7 @@ fn row(name: &str) -> Option<&'static MethodRow> {
 /// a future name that is not in the table yet: it is treated as in the
 /// namespace so the startup check refuses it rather than letting it through
 /// unclassified.
+/// WIRING: Solana JSON-RPC namespace router predicate wired into compat HTTP dispatcher.
 pub fn owns_method(name: &str) -> bool {
     namespace_of(name)
 }
@@ -285,6 +286,7 @@ pub fn dedicated_methods(
 }
 
 /// Whether this name is one of the five generated unsubscribe doors.
+/// WIRING: Solana WebSocket unsubscribe classifier wired into compat WS dispatcher.
 #[must_use]
 pub fn is_unsubscribe(name: &str) -> bool {
     row(name).is_some_and(|entry| entry.answer == Answer::Unsubscribe)

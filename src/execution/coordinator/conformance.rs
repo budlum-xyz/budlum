@@ -4,6 +4,7 @@
 //! - Per-environment conformance suites across EVM, WASM, SVM, Move, and BudZero.
 //! - P95 (`top 5%` worst-case) nanoseconds-per-BGU calibration (`<= 16 ns / BGU`).
 //! - Deterministic multi-environment golden block state-root verification.
+//! WIRING: BGU calibration and conformance report types wired into UEL conformance runner.
 
 use crate::core::account::AccountState;
 use crate::core::address::Address;

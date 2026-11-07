@@ -450,6 +450,7 @@ impl PermissionlessRegistry {
         }
     }
 
+    /// WIRING: parameterized permissionless registry constructor exposed for genesis configuration.
     pub fn with_params(params: RegistryParams) -> Self {
         Self {
             registrations: BTreeMap::new(),

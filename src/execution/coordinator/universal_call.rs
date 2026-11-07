@@ -6,6 +6,7 @@
 //! - WASM `BudlumMsg::UniversalCall` and `BudlumQuery::UniversalView`.
 //! - BudZero syscall `UNIVERSAL_CALL` (`0x40`).
 //! - Static-call envelope tagging enforced as read-only by `TxOverlay`.
+//! WIRING: 0xB001 Universal Call precompile decode types wired into UEL coordinator.
 
 use budlum_uel_abi::{EeId, EeLog};
 use serde::{Deserialize, Serialize};

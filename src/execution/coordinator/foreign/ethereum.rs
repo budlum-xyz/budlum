@@ -5,6 +5,7 @@
 //! - EIP-155 chain ID `45261` strictly required across types `0`, `1`, `2`, `4`.
 //! - Type `3` (EIP-4844 blob transactions) explicitly refused (section 8.15).
 //! - Low-`s` (EIP-2) secp256k1 sender recovery (`crypto::secp256k1_recover`).
+//! WIRING: Foreign::Ethereum typed RLP envelope structs and helpers wired into foreign admission.
 
 use crate::cross_domain::evm::rlp::{self, Item};
 use crate::crypto::secp256k1_recover::recover_address;

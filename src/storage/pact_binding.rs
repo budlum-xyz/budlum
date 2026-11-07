@@ -17,6 +17,7 @@
 
 use sha3::{Digest, Sha3_256};
 
+/// WIRING: storage pact descriptor retained for state migration readers.
 #[derive(Debug, Clone)]
 pub struct Pact {
     pub id: [u8; 32],

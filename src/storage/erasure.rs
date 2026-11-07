@@ -334,6 +334,7 @@ impl ReedSolomon {
         self.k
     }
 
+    /// WIRING: Reed-Solomon parity shard count accessor exposed for storage diagnostics.
     #[must_use]
     pub const fn parity_shards(&self) -> usize {
         self.m

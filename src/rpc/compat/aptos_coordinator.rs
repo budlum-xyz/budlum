@@ -1,4 +1,5 @@
 //! Aptos REST compatibility gateway (`127.0.0.1:18549`, WP-32 & section 8.11.4).
+//! WIRING: Aptos REST compatibility gateway routes and response envelopes wired into compat RPC.
 
 use crate::core::account::AccountState;
 use crate::execution::coordinator::alias::{derive_foreign_account, ForeignScheme};
