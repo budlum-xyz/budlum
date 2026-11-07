@@ -970,6 +970,6 @@ mod conformance_tests;
 #[cfg(test)]
 mod review_2_attack_tests;
 #[cfg(test)]
-mod uel_wp27_wp29_wp30_tests;
+mod evm_wasm_universal_call_tests;
 #[cfg(test)]
-mod uel_wp31_wp32_tests;
+mod svm_move_tests;
