@@ -1489,6 +1489,8 @@ impl AccountState {
             .get(address, roles::AI_OPERATOR)
             .map(|registration| registration.stake)
             .ok_or_else(|| "AI inference layer operator is not registered".to_string())?;
+        // Preflight makes the nonce increment below infallible.
+        self.get_nonce(address).checked_add(1).ok_or("nonce exhausted".to_string())?;
         let final_balance = self
             .get_balance(address)
             .checked_add(stake)
