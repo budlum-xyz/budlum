@@ -178,7 +178,6 @@ Work to do from this point:
 * recursive proof aggregation,
 * WASM/EVM verifier targets,
 * struct, mapping and standard library support in the BudL language,
-* the `bud-node` network layer and JSON-RPC API.
 
 ## Next hardening steps
 

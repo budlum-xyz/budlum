@@ -37,6 +37,15 @@ pub struct ContentId {
     pub len: u64,
 }
 
+impl core::fmt::Display for ContentId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for b in &self.digest {
+            write!(f, "{b:02x}")?;
+        }
+        Ok(())
+    }
+}
+
 /// A 32-byte content key. It never leaves the owner's devices in the clear.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ContentKey(pub [u8; 32]);
@@ -48,6 +57,21 @@ impl core::fmt::Debug for ContentKey {
 }
 
 impl ContentId {
+    /// Convenience: reference a content digest before length is resolved (`WP-07`).
+    #[must_use]
+    pub const fn referenced(digest: [u8; 32]) -> Self {
+        Self {
+            kind: ContentIdKind::Public,
+            digest,
+            len: 0,
+        }
+    }
+
+    /// Convenience: borrow the 32-byte digest (`WP-07`).
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.digest
+    }
     /// The id of public content held in memory.
     #[must_use]
     pub fn public(content: &[u8]) -> Self {

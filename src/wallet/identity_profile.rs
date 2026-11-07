@@ -20,7 +20,7 @@
 use crate::bns::types::BnsResolved;
 use crate::core::address::Address;
 use crate::pollen::{AccessGrant, DataAsset, SaleAuthorization};
-use crate::storage::{ContentId, ContentManifest};
+use crate::storage::bud3::content_id::ContentId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -81,14 +81,6 @@ impl EvidenceCard {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PassportManifestSummary {
-    pub manifest_id: String,
-    pub found: bool,
-    pub shard_count: Option<u32>,
-    pub total_size: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PollenLineageSummary {
     pub assets_owned: usize,
     pub grants_as_owner: usize,
@@ -106,7 +98,6 @@ pub struct DwebPassportProfile {
     pub storage_domain_id: Option<u32>,
     pub content_id: Option<String>,
     pub is_expired: bool,
-    pub manifest: Option<PassportManifestSummary>,
     pub pollen: PollenLineageSummary,
     pub evidence: Vec<EvidenceCard>,
 }
@@ -277,7 +268,7 @@ fn hex32(bytes: &[u8; 32]) -> String {
 }
 
 fn content_hex(id: &ContentId) -> String {
-    format!("0x{}", hex::encode(id.0))
+    format!("0x{}", hex::encode(id.digest))
 }
 
 fn owned_by(address: &Address, asset: &DataAsset) -> bool {
@@ -287,7 +278,6 @@ fn owned_by(address: &Address, asset: &DataAsset) -> bool {
 pub fn build_passport_profile(
     name: String,
     resolved: Option<BnsResolved>,
-    manifest: Option<ContentManifest>,
     data_assets: &[DataAsset],
     access_grants: &[AccessGrant],
     sale_authorizations: &[SaleAuthorization],
@@ -302,7 +292,6 @@ pub fn build_passport_profile(
             storage_domain_id: None,
             content_id: None,
             is_expired: false,
-            manifest: None,
             pollen: PollenLineageSummary {
                 assets_owned: 0,
                 grants_as_owner: 0,
@@ -322,7 +311,7 @@ pub fn build_passport_profile(
     let owner = resolved.owner;
     let content_id = resolved.content_id;
     let storage_root = resolved.storage_root;
-    let manifest_id = content_id.or(storage_root.map(ContentId));
+    let content_link = content_id.or(storage_root.map(ContentId::referenced));
 
     let assets_owned = data_assets
         .iter()
@@ -341,24 +330,6 @@ pub fn build_passport_profile(
         .filter(|authorization| authorization.seller == owner)
         .count();
 
-    let manifest_summary = manifest_id.map(|id| {
-        if let Some(ref manifest) = manifest {
-            PassportManifestSummary {
-                manifest_id: content_hex(&id),
-                found: true,
-                shard_count: Some(manifest.shard_count),
-                total_size: Some(manifest.total_size),
-            }
-        } else {
-            PassportManifestSummary {
-                manifest_id: content_hex(&id),
-                found: false,
-                shard_count: None,
-                total_size: None,
-            }
-        }
-    });
-
     let mut evidence = Vec::new();
     evidence.push(EvidenceCard {
         subject: "bns".into(),
@@ -374,22 +345,17 @@ pub fn build_passport_profile(
             .then(|| "BNS record is expired; do not treat profile as active".into()),
     });
     evidence.push(EvidenceCard {
-        subject: "manifest".into(),
-        status: match (&manifest_summary, &manifest) {
-            (Some(_), Some(_)) => EvidenceStatus::Verified,
-            (Some(_), None) => EvidenceStatus::Pending,
-            (None, _) => EvidenceStatus::Unavailable,
+        subject: "content".into(),
+        status: match &content_link {
+            Some(_) => EvidenceStatus::Pending,
+            None => EvidenceStatus::Unavailable,
         },
-        source: "B.U.D. manifest registry".into(),
-        root: manifest_summary.as_ref().map(|m| m.manifest_id.clone()),
-        warning: if manifest_summary.is_some() && manifest.is_none() {
-            Some(
-                "Manifest commitment exists but full manifest bytes are not available in this node"
-                    .into(),
-            )
-        } else {
-            None
-        },
+        source: "B.U.D. content reference".into(),
+        root: content_link.as_ref().map(content_hex),
+        warning: content_link.as_ref().map(|_| {
+            "Content resolution rides the rebuilt content flow; the reference is the link"
+                .to_string()
+        }),
     });
     evidence.push(EvidenceCard {
         subject: "pollen".into(),
@@ -409,9 +375,8 @@ pub fn build_passport_profile(
         address: resolved.address,
         storage_root: storage_root.as_ref().map(hex32),
         storage_domain_id: resolved.storage_domain_id,
-        content_id: content_id.as_ref().map(content_hex),
+        content_id: content_link.as_ref().map(content_hex),
         is_expired: resolved.is_expired,
-        manifest: manifest_summary,
         pollen: PollenLineageSummary {
             assets_owned,
             grants_as_owner,
@@ -432,7 +397,7 @@ mod tests {
 
     #[test]
     fn missing_name_is_unavailable_not_verified() {
-        let profile = build_passport_profile("missing.bud".into(), None, None, &[], &[], &[]);
+        let profile = build_passport_profile("missing.bud".into(), None, &[], &[], &[]);
         assert!(!profile.exists);
         assert_eq!(profile.evidence[0].status, EvidenceStatus::Unavailable);
     }
@@ -440,19 +405,19 @@ mod tests {
     #[test]
     fn profile_counts_pollen_without_exposing_plaintext() {
         let owner = addr(1);
-        let manifest_id = ContentId::of(b"site");
+        let manifest_id = ContentId::public(b"site");
         let resolved = BnsResolved {
             name: "ayaz.bud".into(),
             owner,
             address: Some(owner),
-            storage_root: Some(*manifest_id.as_bytes()),
+            storage_root: Some(manifest_id.digest),
             storage_domain_id: Some(5),
             content_id: Some(manifest_id),
             is_expired: false,
         };
         let asset = DataAsset::new(owner, manifest_id, [7u8; 32], true);
         let profile =
-            build_passport_profile("ayaz.bud".into(), Some(resolved), None, &[asset], &[], &[]);
+            build_passport_profile("ayaz.bud".into(), Some(resolved), &[asset], &[], &[]);
         assert!(profile.exists);
         assert_eq!(profile.pollen.assets_owned, 1);
         assert!(profile.evidence.iter().any(|card| card.subject == "pollen"));
@@ -463,7 +428,7 @@ mod tests {
 
     #[test]
     fn proof_bundle_hashes_warnings_without_plaintext() {
-        let profile = build_passport_profile("missing.bud".into(), None, None, &[], &[], &[]);
+        let profile = build_passport_profile("missing.bud".into(), None, &[], &[], &[]);
         let bundle = build_passport_proof_bundle(&profile, 77);
         assert_eq!(bundle.evidence_count, profile.evidence.len() as u32);
         assert!(bundle.items.iter().any(|item| item.warning_hash.is_some()));
@@ -474,7 +439,7 @@ mod tests {
 
     #[test]
     fn proof_bundle_root_changes_when_evidence_changes() {
-        let mut profile = build_passport_profile("missing.bud".into(), None, None, &[], &[], &[]);
+        let mut profile = build_passport_profile("missing.bud".into(), None, &[], &[], &[]);
         let first = build_passport_proof_bundle(&profile, 77);
         profile.evidence.push(EvidenceCard {
             subject: "extra".into(),
@@ -496,7 +461,7 @@ mod tests {
 
     #[test]
     fn proof_bundle_validate_binds_profile_root() {
-        let profile = build_passport_profile("missing.bud".into(), None, None, &[], &[], &[]);
+        let profile = build_passport_profile("missing.bud".into(), None, &[], &[], &[]);
         let bundle = try_build_passport_proof_bundle(&profile, 77).unwrap();
         assert!(bundle.validate_against_profile(&profile).is_ok());
         let mut tampered = bundle.clone();
@@ -508,7 +473,7 @@ mod tests {
     /// compared against the profile, not trusted because the root matches.
     #[test]
     fn proof_bundle_validate_binds_the_items_too() {
-        let profile = build_passport_profile("missing.bud".into(), None, None, &[], &[], &[]);
+        let profile = build_passport_profile("missing.bud".into(), None, &[], &[], &[]);
         let bundle = try_build_passport_proof_bundle(&profile, 77).unwrap();
         assert!(
             !bundle.items.is_empty(),
@@ -525,7 +490,7 @@ mod tests {
 
     #[test]
     fn profile_evidence_limit_is_enforced_for_try_bundle() {
-        let mut profile = build_passport_profile("missing.bud".into(), None, None, &[], &[], &[]);
+        let mut profile = build_passport_profile("missing.bud".into(), None, &[], &[], &[]);
         for idx in 0..=MAX_PASSPORT_EVIDENCE_ITEMS {
             profile.evidence.push(EvidenceCard {
                 subject: format!("extra-{idx}"),

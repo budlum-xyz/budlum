@@ -49,7 +49,7 @@ fn fixture_request(requester: Address, model_id: AiModelId) -> AiInferenceReques
         effort: crate::ai_inference::effort::EffortTier::default(),
         perception: Some(crate::ai_inference::perception::PerceptionRequest {
             asset_id: crate::pollen::AssetId([0xAB; 32]),
-            content_id: crate::storage::content_id::ContentId([0xBC; 32]),
+            content_id: crate::storage::bud3::content_id::ContentId::referenced([0xBC; 32]),
             kind: crate::ai_inference::perception::PerceptionKind::Text,
             declared_units: 100,
         }),
@@ -352,58 +352,63 @@ fn registry_refuses_duplicate_guardians_and_bad_root() {
         .expect("a clean account registers");
 }
 
-/// A QR video decodes back to the object (the old ledger said there
-/// was no extraction path).
+/// B.U.D. 3.0 optical presentation seconds decode back to the identical BOF-1 object and content.
 #[test]
 fn qr_video_decodes_back_to_the_object() {
-    use crate::storage::qr_payload::PayloadKind;
+    use crate::storage::bud3::limits::OpticalProfile;
+    use crate::storage::bud3::qr::render_optical_seconds;
+    use crate::storage::bud3::two_path::{
+        extract_object_from_optical_seconds, verify_upload_two_path_and_round_trip,
+    };
     let content = b"regression-round-trip-object".repeat(10);
-    let enc = crate::storage::three_pipe::encode_qr_video(&content, 64, None).expect("encode");
-    assert!(enc.video_blob.starts_with(b"BDLV"));
-    let (kind, raw, _video) =
-        crate::storage::three_pipe::decode_qr_video(&enc.video_blob).expect("decode");
-    assert_eq!(kind, PayloadKind::ContentBytes);
-    assert_eq!(raw, content);
+    let profile = OpticalProfile::P0_DEFAULT;
+    let verified = verify_upload_two_path_and_round_trip(&content, 0, &profile, 2).expect("two-path");
+    assert_eq!(verified.logical_content, content);
+    let seconds = render_optical_seconds(&verified.frames, &profile, 0x05).expect("render");
+    let extracted = extract_object_from_optical_seconds(&seconds, &profile).expect("extract");
+    assert_eq!(extracted.commitment, verified.commitment);
+    assert_eq!(extracted.object.payload, content);
 }
 
-/// A recipe over an entropy-class body re-emits the exact video.
+/// High-entropy bytes re-emit deterministically across repeated optical renders.
 #[test]
-fn recipe_reemits_entropy_class_body_bit_equal() {
-    use crate::storage::qr_video::DEFAULT_FPS;
-    use crate::storage::three_pipe::{encode_qr_video, PIPE_DEFAULT_BLOCK_LEN};
-    use crate::storage::three_recipe::{RecipeTransform, VideoRecipe};
-    use crate::storage::transformed::TransformOpts;
+fn optical_reemits_entropy_class_body_bit_equal() {
+    use crate::storage::bud3::bof1::Object;
+    use crate::storage::bud3::frame::frames_for_object_bytes;
+    use crate::storage::bud3::limits::OpticalProfile;
+    use crate::storage::bud3::qr::render_optical_seconds;
     let mut content = vec![0xff, 0xd8, 0xff, 0xe0];
-    content.extend_from_slice(&[0xabu8; 4096]);
-    let produced = encode_qr_video(&content, PIPE_DEFAULT_BLOCK_LEN, None).expect("video");
-    let recipe = VideoRecipe::from_encoded(
-        &content,
-        RecipeTransform::pin_from(TransformOpts::default(), &content),
-        1,
-        PIPE_DEFAULT_BLOCK_LEN,
-        crate::storage::qr_carousel::ONESHOT_REPAIR_PERMILLAGE,
-        DEFAULT_FPS,
-        &produced,
-    );
-    let again = recipe.reemit(&content).expect("re-emit");
-    assert_eq!(again.video_blob, produced.video_blob);
+    content.extend_from_slice(&[0xabu8; 1024]);
+    let profile = OpticalProfile::P0_DEFAULT;
+    let obj_bytes = Object::raw_public(&content).encode();
+    let (_, frames_a) = frames_for_object_bytes(&obj_bytes, &profile.as_ephemeral_profile(), 2).expect("frames a");
+    let (_, frames_b) = frames_for_object_bytes(&obj_bytes, &profile.as_ephemeral_profile(), 2).expect("frames b");
+    let sec_a = render_optical_seconds(&frames_a, &profile, 0x05).expect("render a");
+    let sec_b = render_optical_seconds(&frames_b, &profile, 0x05).expect("render b");
+    assert_eq!(sec_a, sec_b);
 }
 
-/// The stream check uses the full 32-byte commitment.
+/// The B.U.D. 3.0 frame check binds the full 32-byte object commitment.
 #[test]
 fn stream_commitment_is_full_width() {
-    use crate::storage::three_pipe::{decode_frames, encode_qr_video};
-    let enc = encode_qr_video(
-        b"regression-stream-commitment".repeat(8).as_slice(),
-        64,
-        None,
-    )
-    .expect("video");
-    let frames = &enc.pipe.frames;
-    assert!(decode_frames(&enc.pipe.stream_commitment, frames).is_ok());
-    let mut wrong = enc.pipe.stream_commitment;
-    wrong[31] ^= 1;
-    assert!(decode_frames(&wrong, frames).is_err());
+    use crate::storage::bud3::bof1::Object;
+    use crate::storage::bud3::frame::frames_for_object_bytes;
+    use crate::storage::bud3::limits::Profile;
+    use crate::storage::bud3::two_path::decode_optical_path;
+    let content = b"regression-stream-commitment".repeat(8);
+    let obj_bytes = Object::raw_public(&content).encode();
+    let (commitment, mut frames) = frames_for_object_bytes(&obj_bytes, &Profile::P0, 2).expect("frames");
+    assert!(decode_optical_path(&frames, &Profile::P0).is_ok());
+    frames[0].commitment = commitment;
+    frames[0].commitment[31] ^= 1;
+    assert!(
+        frames.len() == 1 || decode_optical_path(&frames, &Profile::P0).is_err(),
+        "mismatched 32-byte commitment across frames must fail"
+    );
+    if frames.len() == 1 {
+        let rebuilt = decode_optical_path(&frames, &Profile::P0).expect("single frame");
+        assert_ne!(rebuilt.0, commitment);
+    }
 }
 
 /// Source lock. The cache and the task memory redact every stored

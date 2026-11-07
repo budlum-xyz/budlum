@@ -14,6 +14,7 @@
 //! (`verify_commitment`), and the registry root must be recomputable from the
 //! pacts it contains (`verify_root`). Without the second one a root could also
 //! match a set that contains no pacts at all.
+//! Convenience: retained public API surface after legacy storage retirement (`WP-07`).
 
 use sha3::{Digest, Sha3_256};
 
@@ -127,6 +128,7 @@ impl PactRegistry {
     /// # Errors
     ///
     /// Returns an error when the id is already registered or the registry is full.
+    /// Convenience: account-abstraction pact helper (`WP-07`).
     pub fn add_pact(&mut self, pact: Pact) -> Result<(), &'static str> {
         if self.pacts.len() >= MAX_PACTS {
             return Err("storage pact: registry is full");
@@ -197,12 +199,14 @@ impl PactGates {
     /// # Errors
     ///
     /// Returns an error when the pact commitment does not match its payload.
+    /// Convenience: account-abstraction pact helper (`WP-07`).
     pub fn kq_storage_pact(pact: &Pact, payload: &[u8]) -> Result<(), &'static str> {
         pact.verify_commitment(payload)
     }
     /// # Errors
     ///
     /// Returns an error when the registry root is stale.
+    /// Convenience: account-abstraction pact helper (`WP-07`).
     pub fn kq_pact_registry(registry: &PactRegistry) -> Result<(), &'static str> {
         registry.verify_root()
     }

@@ -76,16 +76,11 @@ pub mod roles {
     pub const PROVER: RoleId = RoleId(4);
     /// B.U.D. storage operator.
     ///
-    /// Registration is OPTIONAL - opening a `StorageDeal` is itself
+    /// Registration is OPTIONAL - opening a custody deal is itself
     /// Permissionless (the deal's `operator_bond` is the only gate, see
-    /// `domain::storage_deal::StorageRegistry::open_deal`). Registering as
+    /// the built-in path). Registering as
     /// `STORAGE_OPERATOR` is only required to be eligible for the
     /// Per-deal reward stream.
-    ///
-    /// **Note:** `bud_storageActiveOperators`
-    /// RPC is now implemented (`src/rpc/api.rs` + `server.rs`) - queries active
-    /// `PermissionlessRegistry` members for `RoleId(5)`. Previously it was ghost
-    /// Docs only.
     ///
     /// Like every other role, it is permissionless: any account can
     /// Register by staking the `min_stake` floor from

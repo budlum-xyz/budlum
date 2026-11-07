@@ -15,6 +15,7 @@
 //! exists to record rather than to cause. It persists through the storage
 //! layer (`QUARANTINE_LEDGER`) instead, like the bridge state and the
 //! universal relayer.
+//! Convenience: retained public API surface after legacy storage retirement (`WP-07`).
 
 use crate::domain::types::{DomainId, Hash32};
 use serde::{Deserialize, Serialize};
@@ -69,6 +70,7 @@ impl QuarantineLedger {
 
     /// The ledger key a frozen domain is recorded under.
     #[must_use]
+    /// Convenience: retained public API surface (`WP-07`).
     pub fn domain_target(domain_id: DomainId) -> Hash32 {
         let mut hasher = Sha3_256::new();
         hasher.update(b"quarantine_domain_v1");

@@ -207,7 +207,6 @@ mod tests {
             hash_ser!(&s.nft_registry);
             hash_ser!(&s.marketplace);
             hash_ser!(&s.budlumxyz);
-            hash_ser!(&s.storage_registry);
             hash_ser!(&s.ai_registry);
             hash_ser!(&s.bridge_state);
             hash_ser!(&s.message_registry);

@@ -3,6 +3,7 @@
 //!
 //! The permission rules are not copied here; they are queried from the chain
 //! state.
+//! Convenience: retained public API surface after legacy storage retirement (`WP-07`).
 
 use crate::model::Hash32;
 
@@ -15,7 +16,7 @@ pub enum DatasetKind {
     InferenceCache,
 }
 
-/// AI dataset metadata bound to a B.U.D. StorageDeal.
+/// AI dataset metadata bound to a B.U.D. stored content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatasetMetadata {
     pub kind: DatasetKind,
@@ -45,10 +46,10 @@ impl DatasetMetadata {
         }
     }
 
-    /// Validate the metadata before it labels a B.U.D. StorageDeal.
+    /// Validate the metadata before it labels a B.U.D. stored content.
     ///
     /// A dataset label is a claim in the closed circuit: it is what tells the
-    /// chain "this StorageDeal is safe for AI inference layer to read as a training corpus".
+    /// chain "this stored content is safe for AI inference layer to read as a training corpus".
     /// A label that does not hold together is not a harmless decoration - it is
     /// the thing an operator would lean on to justify reading data that should
     /// not have been labelled. Two conditions are checked:
@@ -90,12 +91,12 @@ pub enum DatasetError {
 ///
 /// - `PollenGrant`  - an authorised read through a Pollen `AccessGrant` /
 ///   `TrainingDataGrant`
-/// - `StorageDeal`  - content labelled as an AI dataset in B.U.D. storage
+/// - `StoredContent` - content labelled as an AI dataset in B.U.D. storage
 /// - `SocialRef`    - in-network content coming over the SocialFi bridge
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
     PollenGrant,
-    StorageDeal,
+    StoredContent,
     SocialRef,
 }
 
@@ -111,9 +112,9 @@ pub struct SourceRef {
 
 impl SourceRef {
     #[must_use]
-    pub fn storage_deal(content_id: Hash32) -> Self {
+    pub fn stored_content(content_id: Hash32) -> Self {
         Self {
-            kind: SourceKind::StorageDeal,
+            kind: SourceKind::StoredContent,
             content_id,
             grant_epochs_remaining: None,
         }
@@ -188,7 +189,7 @@ mod tests {
 
     #[test]
     fn only_grant_carries_epochs() {
-        let deal = SourceRef::storage_deal([1; 32]);
+        let deal = SourceRef::stored_content([1; 32]);
         assert!(deal.grant_epochs_remaining.is_none());
 
         let grant = SourceRef::pollen_grant([1; 32], 3);

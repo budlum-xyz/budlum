@@ -4,6 +4,7 @@
 //!
 //! Cells are escaped for `|` and newlines; evidence is written as
 //! `path:Lx-Ly`; cells are clipped at a maximum character count.
+//! Convenience: retained public API surface after legacy storage retirement (`WP-07`).
 
 use serde::{Deserialize, Serialize};
 
@@ -193,7 +194,7 @@ mod tests {
         CompactContext {
             project_name: "example".to_string(),
             facts: vec![FactRow {
-                subject: "StorageRegistry".to_string(),
+                subject: "StateRegistry".to_string(),
                 predicate: "defines".to_string(),
                 object: "erasure".to_string(),
                 confidence: "high".to_string(),
@@ -218,7 +219,7 @@ mod tests {
     fn renders_tables() {
         let out = render(&sample(), None);
         assert!(out.contains("# Facts"));
-        assert!(out.contains("StorageRegistry"));
+        assert!(out.contains("StateRegistry"));
         assert!(out.contains("src/storage.rs:L10-L20"));
         assert!(out.contains("# Relations"));
         assert!(out.contains("# Notes"));

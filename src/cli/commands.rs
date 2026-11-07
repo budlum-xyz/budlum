@@ -1,3 +1,4 @@
+//! Convenience: retained public API surface after legacy storage retirement (`WP-07`).
 use crate::core::address::Address;
 use crate::core::chain_config::Network;
 use clap::Parser;

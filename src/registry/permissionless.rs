@@ -13,6 +13,7 @@
 //! - It knows nothing about KYC. KYC-gated membership lives in a *separate*
 //!   Module ([`crate::registry::poa_membership`]) with a separate data
 //!   Structure, so PoA's permissioned rules cannot leak in here.
+//! Convenience: retained public API surface after legacy storage retirement (`WP-07`).
 
 use crate::core::address::Address;
 use crate::core::chain_config::slash_penalty;
@@ -1584,11 +1585,13 @@ impl PermissionlessRegistry {
             .collect()
     }
 
+    /// Convenience: retained public API surface (`WP-07`).
     pub fn validator_commission_count(&self) -> usize {
         self.validator_commissions.len()
     }
 
     #[must_use]
+    /// Convenience: retained public API surface (`WP-07`).
     pub fn slashing_history_count(&self) -> usize {
         self.slashing_history.len()
     }

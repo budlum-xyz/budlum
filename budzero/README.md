@@ -40,7 +40,7 @@ repository commit.
 | `bud-proof` | Plonky3 AIR, prover, verifier, public inputs |
 | `bud-compiler` | BudL → bytecode |
 | `bud-state` | Account state + nested transaction backup stack |
-| `bud-cli` / `bud-node` | Tooling |
+| `bud-cli` | Tooling |
 
 ---
 

@@ -41,7 +41,7 @@
 
 use crate::core::hash::hash_fields_bytes;
 use crate::pollen::AssetId;
-use crate::storage::content_id::ContentId;
+use crate::storage::bud3::content_id::ContentId;
 
 /// The largest text input a model may be asked to read, in bytes.
 ///
@@ -333,7 +333,7 @@ impl PerceptionRequest {
         hash_fields_bytes(&[
             b"BDLM_AI_PERCEPTION_V1",
             &self.asset_id.0,
-            &self.content_id.0,
+            &self.content_id.digest,
             &[self.kind.perception_tag()],
             &self.declared_units.to_le_bytes(),
         ])
@@ -347,7 +347,7 @@ mod tests {
     fn req(kind: PerceptionKind, units: u32) -> PerceptionRequest {
         PerceptionRequest {
             asset_id: AssetId([1; 32]),
-            content_id: ContentId([2; 32]),
+            content_id: ContentId::referenced([2; 32]),
             kind,
             declared_units: units,
         }
@@ -487,7 +487,7 @@ mod tests {
         assert_ne!(other_asset.perception_commitment_tag(), base, "asset_id");
 
         let mut other_content = req(PerceptionKind::Text, 100);
-        other_content.content_id = ContentId([9; 32]);
+        other_content.content_id = ContentId::referenced([9; 32]);
         assert_ne!(
             other_content.perception_commitment_tag(),
             base,

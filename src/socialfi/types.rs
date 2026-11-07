@@ -1,5 +1,5 @@
 use crate::core::address::Address;
-use crate::storage::content_id::ContentId;
+use crate::storage::bud3::content_id::ContentId;
 use serde::{Deserialize, Serialize};
 
 /// Budlum NFT - Native support for SocialFi posts and D-Web content.

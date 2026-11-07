@@ -28,7 +28,7 @@
 //!    and its own gates. Measured (2026-09-02): `bud/` has no domain-tag
 //!    gate of its own, it carries 55 distinct tags, and one of them,
 //!    `BDLM_CONTENT_V1`, is also used by `src/storage/content_id.rs` and
-//!    `budzero/bud-node/src/store.rs`. A tag shared across trees is the
+//!    `budzero/bud-proof/src/lib.rs`. A tag shared across trees is the
 //!    collision case the inventory exists to review, and it sat outside the
 //!    review surface. The scan is `src` + `budzero` + `crates` + `bud` now.
 

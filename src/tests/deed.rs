@@ -9,13 +9,13 @@ fn test_addr_from_byte(byte: u8) -> crate::core::address::Address {
 }
 
 use crate::deed::{roles, ArtifactKind, Manifest, Visibility};
-use crate::storage::content_id::ContentId;
+use crate::storage::bud3::content_id::ContentId;
 
 #[test]
 fn deed_manifest_validate_id_binding_and_roles() {
     let m = Manifest {
         contributor: test_addr_from_byte(7u8),
-        content_id: ContentId([8u8; 32]),
+        content_id: ContentId::referenced([8u8; 32]),
         artifact_kind: ArtifactKind::Research,
         visibility: Visibility::EducatorOnly,
         metadata_hash: [9u8; 32],

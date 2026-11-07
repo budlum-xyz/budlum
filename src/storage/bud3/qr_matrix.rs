@@ -1,10 +1,7 @@
-//! Real ISO QR module matrix for Three optical frames.
+//! Deterministic ISO/IEC 18004 QR module matrix for B.U.D. 3.0 optical frames.
 //!
-//! Pin: byte mode, EC=L, deterministic mask order 0..=7 - matrices come from
-//! our own `qr_encode`, so a recipe regenerates the exact same modules on every
-//! machine and every future dependency bump.
-//! `block_len` 200 lab default stays on the carousel side; here we encode one
-//! A3 optical frame wire into one QR symbol.
+//! Pin: byte mode, EC=L, deterministic mask order `0..=7` - matrices come from
+//! `super::qr_encode` so every machine produces identical modules for a frame wire.
 //!
 //! No external QR library is linked into this module; only the measured rules are used.
 
@@ -19,6 +16,7 @@ pub const QUIET_ZONE: u32 = 4;
 /// Pixels per module in the deterministic PNG raster.
 pub const MODULE_PX: u32 = 4;
 /// Hard cap on optical frame bytes stuffed into one QR (version 40 ~2.9KB EC-L).
+/// Convenience: ISO QR optical presentation bound/helper (`WP-19`).
 pub const MAX_QR_PAYLOAD: usize = 2953;
 
 /// Errors building or reading a QR matrix.
@@ -155,7 +153,7 @@ impl QrMatrix {
         })
     }
 
-    /// Level this symbol carries.
+    /// Convenience: level this symbol carries.
     #[must_use]
     pub const fn ec_level(&self) -> EcLevel {
         self.ec
@@ -185,7 +183,7 @@ impl QrMatrix {
         self.width.saturating_add(QUIET_ZONE.saturating_mul(2))
     }
 
-    /// Pixel side of the deterministic PNG.
+    /// Convenience: pixel side of the deterministic PNG.
     #[must_use]
     pub const fn pixel_side(&self) -> u32 {
         self.raster_modules().saturating_mul(MODULE_PX)

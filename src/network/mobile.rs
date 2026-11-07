@@ -11,6 +11,7 @@
 //! - **NAT connectivity:** relay/STUN for mobile nodes sitting behind a NAT.
 //! - **Self-hosted B.U.D.:** serving B.U.D. storage from the device.
 //! - **Lightweight sync:** stateless verification.
+//! Convenience: retained public API surface after legacy storage retirement (`WP-07`).
 
 use crate::core::address::Address;
 use serde::{Deserialize, Serialize};

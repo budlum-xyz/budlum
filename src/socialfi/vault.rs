@@ -113,7 +113,7 @@ impl VaultRegistry {
         Self::default()
     }
 
-    /// A folder that exists and holds nothing is still a folder.
+    /// A folder that exists with zero entries is still a folder.
     pub fn register_folder(&mut self, folder: u64) -> Result<(), VaultError> {
         if self.folders.len() >= Self::MAX_FOLDERS && !self.folders.contains(&folder) {
             return Err(VaultError::TooManyFolders);
@@ -610,10 +610,10 @@ mod tests {
     // - the transaction door: ids must be the sender's own, read from
     //   NftRegistry, checked on every operation.
 
-    use crate::storage::content_id::ContentId;
+    use crate::storage::bud3::content_id::ContentId;
 
     fn minted(nfts: &mut crate::socialfi::NftRegistry, owner: &Address, tag: &str) -> u64 {
-        nfts.mint(*owner, ContentId::of(tag.as_bytes()), 0, None)
+        nfts.mint(*owner, ContentId::public(tag.as_bytes()), 0, None)
             .expect("mint on a fresh registry")
     }
 

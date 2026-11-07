@@ -3,10 +3,8 @@ use crate::chain::chain_actor::ChainHandle;
 use crate::core::address::Address;
 use crate::core::block::Block;
 use crate::core::transaction::Transaction;
-use crate::domain::storage_deal::{RetrievalChallengeRequest, RetrievalResponse, StorageDeal};
 use crate::network::node::NodeClient;
-use crate::storage::content_id::ContentId;
-use crate::storage::{emit_hook, NopThreeHook, ThreeEventHook, ThreeHookEvent, ThreeHookKind};
+use crate::storage::bud3::content_id::ContentId;
 use bincode;
 use futures::future::BoxFuture;
 use hex;
@@ -345,7 +343,6 @@ pub struct RpcServer {
     /// Bounded, expiring reveal-session table (G4). Frames of a Three object
     /// are served through sessions opened by `bud_storageOpenReveal`, never
     /// as raw handle-passing.
-    reveal_gateway: Arc<Mutex<crate::storage::RevealGateway>>,
     /// Prometheus metrics handle for RPC latency and rate-limit counters.
     /// If `None`, metrics are silently skipped (e.g. in tests without a
     /// Global registry).
@@ -362,7 +359,6 @@ impl RpcServer {
             node,
             security: RpcSecurityConfig::default(),
             mode: RpcMode::Public,
-            reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
             metrics: None,
             tls: None,
         }
@@ -378,7 +374,6 @@ impl RpcServer {
             node,
             security,
             mode: RpcMode::Public,
-            reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
             metrics: None,
             tls: None,
         }
@@ -395,7 +390,6 @@ impl RpcServer {
             node,
             security,
             mode,
-            reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
             metrics: None,
             tls: None,
         }
@@ -1263,195 +1257,8 @@ fn parse_hex32_field(hex_str: &str, field_name: &str) -> Result<[u8; 32], ErrorO
     Ok(arr)
 }
 
-/// Parses a signed grant authorisation: `{"ownerPublicKey": "0x…", "signature":
-/// "0x…"}`, the public key being the FIPS 204 ML-DSA-87 key of the account whose
-/// word the mutation is. The address the key derives to is the only identity the
-/// registry believes: `issuer` and `caller` used to be strings a caller typed,
-/// which let anybody mint or revoke grants on somebody else's content.
-/// Map a grant authorisation failure onto a JSON-RPC error code.
-///
-/// A node built without the wallet verifier cannot check a grant signature at
-/// all. That is an operator problem and gets the internal-error code, so a
-/// client does not retry it with a different key; every other refusal is about
-/// what the caller supplied and gets the invalid-params code.
-fn grant_auth_error(e: crate::storage::GrantAuthError) -> ErrorObjectOwned {
-    let code = match e {
-        crate::storage::GrantAuthError::VerifierUnavailable => -32603,
-        crate::storage::GrantAuthError::BadSignature
-        | crate::storage::GrantAuthError::WrongOwner => -32602,
-    };
-    ErrorObjectOwned::owned(code, e.to_string(), None::<()>)
-}
-
-fn parse_grant_auth(
-    v: Option<&serde_json::Value>,
-) -> Result<crate::storage::GrantAuthorization, ErrorObjectOwned> {
-    parse_signed_key_object(v, "authorization", "ownerPublicKey")
-}
-
-/// Parses a viewer's reveal claim: `{"viewerPublicKey": "0x…", "signature":
-/// "0x…", "issuedAt": n}`. The same shape as a grant authorisation, under the
-/// name of the role that signs it: the key is the viewer's, and a client that
-/// sends the owner's key under `ownerPublicKey` here is told which field is
-/// missing instead of getting a signature refusal it cannot explain.
-fn parse_view_claim(
-    claim: &serde_json::Value,
-) -> Result<crate::storage::GrantAuthorization, ErrorObjectOwned> {
-    parse_signed_key_object(Some(claim), "viewerClaim", "viewerPublicKey")
-}
-
-/// The shared reader behind [`parse_grant_auth`] and [`parse_view_claim`]: a
-/// JSON object carrying an ML-DSA-87 public key under `key_field` and a
-/// `signature`, both hex. `label` names the object in every refusal.
-fn parse_signed_key_object(
-    v: Option<&serde_json::Value>,
-    label: &str,
-    key_field: &str,
-) -> Result<crate::storage::GrantAuthorization, ErrorObjectOwned> {
-    let Some(v) = v.filter(|v| v.is_object()) else {
-        return Err(ErrorObjectOwned::owned(
-            -32602,
-            format!("{label} object required: {key_field} + signature"),
-            None::<()>,
-        ));
-    };
-    let al = |k: &str| -> Result<Vec<u8>, ErrorObjectOwned> {
-        let ham = v
-            .get(k)
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("{label}.{k} must be a hex string"),
-                    None::<()>,
-                )
-            })?;
-        hex::decode(ham.strip_prefix("0x").unwrap_or(ham))
-            .map_err(|e| ErrorObjectOwned::owned(-32602, format!("{label}.{k}: {e}"), None::<()>))
-    };
-    let owner_key: [u8; crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN] =
-        al(key_field)?.try_into().map_err(|_| {
-            ErrorObjectOwned::owned(
-                -32602,
-                format!(
-                    "{label}.{key_field} must be {} bytes",
-                    crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN
-                ),
-                None::<()>,
-            )
-        })?;
-    let signature = al("signature")?;
-    Ok(crate::storage::GrantAuthorization {
-        owner_key,
-        signature,
-    })
-}
-
-/// Check a viewer's signed claim to open a reveal session and return the
-/// address it speaks for.
-///
-/// The claim is `{viewerPublicKey, signature, issuedAt}` in the same shape as
-/// a grant authorisation (the viewer signs with its own wallet key). The
-/// address is derived from the key, the signature is checked over
-/// [`crate::storage::view_claim_digest`] of this exact request, and a claim
-/// older than [`crate::storage::VIEW_CLAIM_MAX_AGE_SECS`] is refused. A
-/// claim dated in the future is refused too, so a
-/// caller cannot pre-sign claims that come alive later.
-/// The `owner` field of a reveal request against the owner the chain
-/// recorded for the content. A recorded owner that is somebody else is
-/// refused by name; content with no recorded owner is left to the grant
-/// lookup, which opens nothing sealed for it.
-fn check_claimed_owner(
-    recorded: Option<Address>,
-    claimed: &Address,
-) -> Result<(), ErrorObjectOwned> {
-    match recorded {
-        Some(recorded) if recorded != *claimed => Err(ErrorObjectOwned::owned(
-            -32006,
-            "reveal: owner is not the recorded owner of this content",
-            None::<()>,
-        )),
-        _ => Ok(()),
-    }
-}
-
-fn verify_view_claim(
-    claim: &serde_json::Value,
-    content_id: &crate::storage::ContentId,
-    key_id: &[u8; 32],
-    owner: &Address,
-    packed: &[u8],
-    now: u64,
-) -> Result<Address, ErrorObjectOwned> {
-    let auth = parse_view_claim(claim)?;
-    let issued_at = claim
-        .get("issuedAt")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| {
-            ErrorObjectOwned::owned(
-                -32602,
-                "viewerClaim.issuedAt must be unix seconds",
-                None::<()>,
-            )
-        })?;
-    let max_age = crate::storage::VIEW_CLAIM_MAX_AGE_SECS;
-    if issued_at > now || issued_at.saturating_add(max_age) < now {
-        return Err(ErrorObjectOwned::owned(
-            -32602,
-            format!(
-                "viewerClaim.issuedAt {issued_at} is in the future or more than {max_age} s older than {now}"
-            ),
-            None::<()>,
-        ));
-    }
-    let viewer = auth.derived_owner().map_err(grant_auth_error)?;
-    let payload_commitment = crate::storage::payload_commitment(packed);
-    let digest = crate::storage::view_claim_digest(
-        content_id,
-        &viewer,
-        key_id,
-        owner,
-        &payload_commitment,
-        issued_at,
-    );
-    auth.verify(&digest, &viewer).map_err(grant_auth_error)?;
-    Ok(viewer)
-}
-
-/// Map a reveal-gateway refusal to a JSON-RPC error. Each refusal kind gets
-/// its own code so a client can tell "you asked too much" (invalid params)
-/// from "the table is full" (resource) from "your session is gone" (lookup)
-/// without parsing prose.
-fn reveal_gateway_rpc_error(e: crate::storage::RevealGatewayError) -> ErrorObjectOwned {
-    use crate::storage::RevealGatewayError;
-    match e {
-        RevealGatewayError::AskTooLarge { count, max } => ErrorObjectOwned::owned(
-            -32602,
-            format!("reveal: asked {count} frames, ceiling is {max}"),
-            None::<()>,
-        ),
-        RevealGatewayError::UnknownSession(id) => {
-            ErrorObjectOwned::owned(-32001, format!("reveal: unknown session {id}"), None::<()>)
-        }
-        RevealGatewayError::Expired { id } => {
-            ErrorObjectOwned::owned(-32002, format!("reveal: session {id} expired"), None::<()>)
-        }
-        RevealGatewayError::SessionLimit { max } => ErrorObjectOwned::owned(
-            -32003,
-            format!("reveal: session table full ({max})"),
-            None::<()>,
-        ),
-        RevealGatewayError::Revoked { id } => ErrorObjectOwned::owned(
-            -32005,
-            format!("reveal: session {id} grant revoked"),
-            None::<()>,
-        ),
-        RevealGatewayError::Reveal(_) => ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>),
-    }
-}
-
 fn parse_content_id(hex_str: &str) -> Result<ContentId, ErrorObjectOwned> {
-    Ok(ContentId(parse_hex32_field(hex_str, "ContentId")?))
+    Ok(ContentId::referenced(parse_hex32_field(hex_str, "ContentId")?))
 }
 
 fn parse_pollen_asset_id(hex_str: &str) -> Result<crate::pollen::AssetId, ErrorObjectOwned> {
@@ -1460,144 +1267,6 @@ fn parse_pollen_asset_id(hex_str: &str) -> Result<crate::pollen::AssetId, ErrorO
     )?))
 }
 
-/// One view-grant row as a client reads it. `live` is the registry's own answer
-/// for this moment, so a revoked row still appears with its history instead of
-/// vanishing from the listing that explains why a viewer was refused.
-fn view_grant_json(g: &crate::storage::ViewGrant) -> serde_json::Value {
-    serde_json::json!({
-        "grantId": g.grant_id,
-        "contentId": format!("0x{}", hex::encode(g.content_id.0)),
-        "issuer": g.issuer.to_hex(),
-        "grantee": g.grantee.map(|a| a.to_hex()),
-        "keyId": format!("0x{}", hex::encode(g.key_id)),
-        "policy": format!("{:?}", g.policy),
-        "openedEpoch": g.opened_epoch,
-        "revokedEpoch": g.revoked_epoch,
-        "live": g.is_live(),
-    })
-}
-
-/// Hand one Three event to the sink this node was started with.
-///
-/// A trait object rather than a concrete type, so a gateway's sink and a headless
-/// node's discarding one share a call site: the revoke path cannot end up
-/// reporting to a sink only one of them has.
-fn fire_three_event(sink: &mut dyn ThreeEventHook, event: ThreeHookEvent) {
-    emit_hook(sink, event);
-}
-
-fn qr_feed_json(feed: &crate::storage::emit::FeedPreview) -> serde_json::Value {
-    serde_json::json!({
-        "contentId": format!("0x{}", hex::encode(feed.content_id.as_bytes())),
-        "providerCommitment": format!("0x{}", hex::encode(feed.provider_commitment)),
-        "packedLen": feed.packed_len,
-        "packedIsZlib": feed.packed_is_zlib,
-        "transformShrank": feed.transform_shrank,
-        "progressivePrefixBlocks": feed.progressive_prefix_blocks,
-        "k": feed.k,
-        "preflightK": feed.preflight_k,
-        "plannedDrops": feed.planned_drops,
-        "ceilingDrops": feed.ceiling_drops,
-        "dropBound": feed.drop_bound,
-        "repairPermillage": feed.repair_permillage,
-        "repairMargin": feed.repair_margin,
-        "frameCount": feed.frame_count,
-        "dropWireLen": feed.drop_wire_len,
-        "streamCommitment": format!("0x{}", hex::encode(feed.stream_commitment)),
-        "streamPrefix": feed.stream_prefix,
-        "feedId": format!("0x{}", hex::encode(feed.feed_id)),
-        "videoCommitment": format!("0x{}", hex::encode(feed.video_commitment)),
-        "recipeCommitment": format!("0x{}", hex::encode(feed.recipe_commitment)),
-        "burstLen": feed.burst_len,
-        "burstFold": format!("0x{}", hex::encode(feed.burst_fold)),
-        "framesAccepted": feed.frames_accepted,
-        "framesRejected": feed.frames_rejected,
-        "meterWeight": feed.meter_weight,
-        "rasterModules": feed.raster_modules,
-        "rasterSide": feed.raster_side,
-        "pngLen": feed.png_len,
-        "ecLevel": feed.ec_level,
-        "codecAllowed": feed.codec_allowed,
-        "videoBlobKind": format!("{:?}", feed.video_blob_kind),
-        "seedIsPublic": feed.seed_is_public,
-        "regeneratedLen": feed.regenerated_len,
-        "sealedRecipe": format!("0x{}", hex::encode(feed.sealed_recipe)),
-        "publiclyReemitable": feed.publicly_reemitable,
-        "decodedBodyLen": feed.decoded_body_len,
-        "videoBodyLen": feed.video_body_len,
-        "recipeClass": feed.recipe_class,
-        "a4Agreement": feed.a4_agreement,
-        "nftMeta": format!("0x{}", hex::encode(feed.nft_meta)),
-        "visibility": feed.visibility.clone(),
-        "deleteRotatesKey": feed.rotate_key_on_delete,
-    })
-}
-
-/// A refused emit is the caller's arithmetic, not the node's, unless a stage
-/// below this one is what said no: an out-of-bounds request is a bad param and
-/// everything else is a server-side refusal the caller cannot fix by resending
-/// the same body.
-fn emit_reject(e: crate::storage::emit::EmitError) -> ErrorObjectOwned {
-    let code = match &e {
-        crate::storage::emit::EmitError::ZeroBlockLen
-        | crate::storage::emit::EmitError::TooLarge { .. }
-        | crate::storage::emit::EmitError::BurstTooWide { .. }
-        | crate::storage::emit::EmitError::FrameOutOfRange { .. }
-        | crate::storage::emit::EmitError::Edition(_)
-        | crate::storage::emit::EmitError::UnsealedGated => -32602,
-        _ => -32000,
-    };
-    ErrorObjectOwned::owned(code, format!("qr feed: {e}"), None::<()>)
-}
-
-/// Parse the optional `seal_seed` argument (32 bytes, hex, optional `0x`).
-/// `None` leaves the feed unsealed; a present-but-malformed seed is a caller
-/// fault, not a silent fallback to clear frames.
-fn parse_seal_seed(seed_hex: Option<String>) -> Result<Option<[u8; 32]>, ErrorObjectOwned> {
-    let Some(seed_hex) = seed_hex else {
-        return Ok(None);
-    };
-    let hex = seed_hex.strip_prefix("0x").unwrap_or(seed_hex.as_str());
-    let bytes = hex::decode(hex).map_err(|e| {
-        ErrorObjectOwned::owned(-32602, format!("seal_seed decode failed: {e}"), None::<()>)
-    })?;
-    let len = bytes.len();
-    let seed: [u8; 32] = bytes.try_into().map_err(|_| {
-        ErrorObjectOwned::owned(
-            -32602,
-            format!("seal_seed must be 32 bytes, got {len}"),
-            None::<()>,
-        )
-    })?;
-    Ok(Some(seed))
-}
-
-fn storage_deal_to_json(deal: &StorageDeal) -> serde_json::Value {
-    serde_json::json!({
-        "dealId": deal.deal_id,
-        "domainId": deal.domain_id,
-        "manifestId": format!("0x{}", hex::encode(deal.manifest_id.0)),
-        "shardId": format!("0x{}", hex::encode(deal.shard_id.0)),
-        "operator": format!("0x{}", deal.operator.to_hex()),
-        "replicaIndex": deal.replica_index,
-        "startEpoch": deal.deal_start_epoch,
-        "endEpoch": deal.deal_end_epoch,
-        "status": format!("{:?}", deal.status),
-    })
-}
-
-fn storage_economics_event_to_json(
-    event: &crate::chain::blockchain::StorageEconomicsEvent,
-) -> serde_json::Value {
-    serde_json::json!({
-        "epoch": event.epoch,
-        "dealId": event.deal_id,
-        "operator": format!("0x{}", event.operator.to_hex()),
-        "amount": event.amount,
-        "balanceEffect": event.balance_effect,
-        "kind": format!("{:?}", event.kind),
-    })
-}
 
 #[jsonrpsee::core::async_trait]
 impl BudlumApiServer for RpcServer {
@@ -3518,160 +3187,9 @@ impl BudlumApiServer for RpcServer {
     // The storage registry is owned by the chain layer; every RPC below is a
     // Thin delegation to `self.chain` so the registry has a single writer and
     // Block-application accounting stays authoritative. The RPC server used to
-    // Hold its own `Arc<Mutex<StorageRegistry>>`; that field became
+    // Hold its own registry lock; that field became
     // Write-only after the chain took ownership and has been removed rather
     // Than left as a second, silently diverging copy.
-
-    async fn storage_register_manifest(
-        &self,
-        manifest: crate::storage::ContentManifest,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // this method registered a manifest into the storage registry
-        // (folded into the state root) on this node alone, outside a block.
-        // The method stays so a client gets a pointer instead of "method not
-        // found".
-        self.require_operator("bud_storageRegisterManifest")?;
-        let _ = manifest;
-        Err(Self::door_refusal(
-            "Out-of-block manifest registration is refused: it changed the storage registry \
-             on this node alone. The manifest owner sends a signed Storage transaction \
-             (StorageTx::RegisterManifest) through bud_sendRawTransaction.",
-        ))
-    }
-
-    async fn storage_verify_encoding(
-        &self,
-        data_hex: String,
-        manifest: crate::storage::ContentManifest,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Generated / Three has no body on the network. Re-encoding a recipe
-        // as if it were held bytes would launder a custody claim under the
-        // encode path.
-        if matches!(
-            manifest.source,
-            crate::storage::generated::ContentSource::Generated(_)
-                | crate::storage::generated::ContentSource::SealedGenerated(_)
-                | crate::storage::generated::ContentSource::Derived(_)
-        ) {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                "verify_encoding refuses recipe sources (Generated/SealedGenerated/Derived): there is no body to re-encode",
-                None::<()>,
-            ));
-        }
-        let hex = data_hex.strip_prefix("0x").unwrap_or(data_hex.as_str());
-        // Same cap as the QR feed calls: the re-encode below is a full
-        // erasure encode, so the body size bounds its CPU cost.
-        if hex.len() / 2 > crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                format!(
-                    "body over verify cap {}",
-                    crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES
-                ),
-                None::<()>,
-            ));
-        }
-        let data = hex::decode(hex).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("data_hex decode failed: {e}"), None::<()>)
-        })?;
-        // The encode is CPU bound: keep it off the async workers.
-        let (manifest, verdict) = tokio::task::spawn_blocking(move || {
-            let verdict = crate::storage::verify_object_encoding(&data, &manifest);
-            (manifest, verdict)
-        })
-        .await
-        .map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32603,
-                format!("verify_encoding task failed: {e}"),
-                None::<()>,
-            )
-        })?;
-        verdict.map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("verify_encoding failed: {e}"), None::<()>)
-        })?;
-        Ok(serde_json::json!({
-            "ok": true,
-            "manifestId": format!("0x{}", hex::encode(manifest.manifest_id.0)),
-            "scheme": {
-                "k": manifest.erasure.k,
-                "n": manifest.erasure.n,
-            },
-            "totalSize": manifest.total_size,
-        }))
-    }
-
-    async fn storage_qr_feed_preview(
-        &self,
-        data_hex: String,
-        block_len: u16,
-        manifest: Option<crate::storage::ContentManifest>,
-        seal_seed: Option<String>,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let hex = data_hex.strip_prefix("0x").unwrap_or(data_hex.as_str());
-        let data = hex::decode(hex).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("data_hex decode failed: {e}"), None::<()>)
-        })?;
-        if data.len() > crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                format!(
-                    "body of {} bytes over emit cap {}",
-                    data.len(),
-                    crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES
-                ),
-                None::<()>,
-            ));
-        }
-        let policy = crate::storage::emit::EmitPolicy {
-            block_len,
-            seal_seed: parse_seal_seed(seal_seed)?,
-            ..crate::storage::emit::EmitPolicy::default()
-        };
-        let feed = crate::storage::emit::qr_feed_preview(&data, &policy, manifest.as_ref())
-            .map_err(emit_reject)?;
-        Ok(qr_feed_json(&feed))
-    }
-
-    async fn storage_qr_feed_frames(
-        &self,
-        data_hex: String,
-        block_len: u16,
-        first_frame: u32,
-        count: u32,
-        seal_seed: Option<String>,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let hex = data_hex.strip_prefix("0x").unwrap_or(data_hex.as_str());
-        let data = hex::decode(hex).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("data_hex decode failed: {e}"), None::<()>)
-        })?;
-        if data.len() > crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                format!(
-                    "body of {} bytes over emit cap {}",
-                    data.len(),
-                    crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES
-                ),
-                None::<()>,
-            ));
-        }
-        let policy = crate::storage::emit::EmitPolicy {
-            block_len,
-            seal_seed: parse_seal_seed(seal_seed)?,
-            ..crate::storage::emit::EmitPolicy::default()
-        };
-        let (frames, fold) =
-            crate::storage::emit::qr_feed_frames_burst(&data, &policy, first_frame, count)
-                .map_err(emit_reject)?;
-        Ok(serde_json::json!({
-            "firstFrame": first_frame,
-            "count": frames.len(),
-            "fold": format!("0x{}", hex::encode(fold)),
-            "frames": frames.iter().map(hex::encode).collect::<Vec<String>>(),
-        }))
-    }
 
     async fn storage_issue_view_grant(
         &self,
@@ -3682,43 +3200,14 @@ impl BudlumApiServer for RpcServer {
         policy: String,
         opened_epoch: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let content_id = parse_content_id(&content_id)?;
-        let auth = parse_grant_auth(authorization.as_ref())?;
-        // Refuse at the boundary when this node cannot check ML-DSA-87 at all:
-        // that is an operator fault, and a client must not be told to fix a key
-        // it did get right. The registry derives the same address again; this
-        // pre-flight only chooses the error code.
-        auth.derived_owner().map_err(grant_auth_error)?;
-        let grantee = match grantee {
-            None => None,
-            Some(g) if g.is_empty() => None,
-            Some(g) => Some(
-                Address::from_hex(g.strip_prefix("0x").unwrap_or(&g)).map_err(|e| {
-                    ErrorObjectOwned::owned(-32602, format!("grantee: {e}"), None::<()>)
-                })?,
-            ),
-        };
-        let key_id = parse_hex32_field(&key_id, "key_id")?;
-        let policy = match policy.to_ascii_lowercase().as_str() {
-            "owneronly" | "owner_only" | "owner" => crate::storage::ViewPolicy::OwnerOnly,
-            "namedgrantee" | "named_grantee" | "named" | "dm" => {
-                crate::storage::ViewPolicy::NamedGrantee
-            }
-            "publickeyid" | "public_key_id" | "public" => crate::storage::ViewPolicy::PublicKeyId,
-            other => {
-                return Err(ErrorObjectOwned::owned(
-                    -32602,
-                    format!("unknown view policy {other}"),
-                    None::<()>,
-                ));
-            }
-        };
-        let grant_id = self
-            .chain
-            .issue_view_grant(content_id, auth, grantee, key_id, policy, opened_epoch)
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
-        Ok(serde_json::json!({ "grantId": grant_id }))
+        // Refused: a grant is a signed storage transaction, and the grant
+        // rows ride the rebuilt registry. The method stays so a client is
+        // pointed at the door instead of "method not found".
+        let _ = (content_id, authorization, grantee, key_id, policy, opened_epoch);
+        Err(Self::door_refusal(
+            "A view grant is issued by a signed Storage transaction sent with \
+             bud_sendRawTransaction; the grant rows are not served yet.",
+        ))
     }
 
     async fn storage_revoke_view_grant(
@@ -3727,57 +3216,13 @@ impl BudlumApiServer for RpcServer {
         authorization: Option<serde_json::Value>,
         at_epoch: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let auth = parse_grant_auth(authorization.as_ref())?;
-        // Refuse at the boundary when this node cannot check ML-DSA-87 at all:
-        // that is an operator fault, and a client must not be told to fix a key
-        // it did get right. The registry derives the same address again; this
-        // pre-flight only chooses the error code - and names the actor the revoke
-        // event is filed under, so a sink sees who spoke rather than a caller's
-        // claim about it.
-        let actor = auth.derived_owner().map_err(grant_auth_error)?;
-        // No gateway state moves before the chain has accepted the revoke:
-        // an unauthorised attempt reaches this boundary, is refused at
-        // `revoke_view_grant` below, and must not perturb what in-flight
-        // frame and open calls read. A revoke that does land drops this
-        // content's sessions after the chain call, and the reveal paths ask
-        // the chain again before they emit.
-        let revoked = self
-            .chain
-            .revoke_view_grant(grant_id, auth, at_epoch)
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
-        // The frame path asks the chain again before every emit, but it asks
-        // without the gateway lock and applies the answer under it. A revoke
-        // that landed between those two steps was served once more on the
-        // stale `true`. Dropping this content's grant-backed sessions here,
-        // once the chain has revoked, leaves a racing frame call nothing to
-        // emit from. After the revoke, not before: an unauthorised revoke
-        // attempt must not be able to close other viewers' sessions.
-        {
-            let mut gw = self.reveal_gateway.lock().map_err(|_| {
-                ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
-            })?;
-            gw.drop_sessions_for_content(&revoked.content_id);
-        }
-        // A revoke that only reaches the ledger leaves every product surface
-        // holding the session key it was promised. The hook is where that word is
-        // passed on: a headless node discards it, a gateway installs its own
-        // sink, and neither choice can change what a block commits.
-        fire_three_event(
-            &mut NopThreeHook,
-            ThreeHookEvent {
-                kind: ThreeHookKind::GrantRevoked,
-                content_id: revoked.content_id,
-                actor,
-                epoch: at_epoch,
-                grant_id: Some(grant_id),
-            },
-        );
-        Ok(serde_json::json!({
-            "revoked": true,
-            "grantId": grant_id,
-            "contentId": format!("0x{}", hex::encode(revoked.content_id.0)),
-        }))
+        // Refused: a revocation is a signed storage transaction, and the
+        // grant rows ride the rebuilt registry.
+        let _ = (grant_id, authorization, at_epoch);
+        Err(Self::door_refusal(
+            "A view grant is revoked by a signed Storage transaction sent with \
+             bud_sendRawTransaction; the grant rows are not served yet.",
+        ))
     }
 
     async fn storage_social_delete(
@@ -3786,20 +3231,13 @@ impl BudlumApiServer for RpcServer {
         authorization: Option<serde_json::Value>,
         at_epoch: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let auth = parse_grant_auth(authorization.as_ref())?;
-        let content_id = parse_content_id(&content_id)?;
-        // Same boundary rule as revoke: when this node cannot check the
-        // signature at all, that is an operator fault, not a client key fault.
-        let _actor = auth.derived_owner().map_err(grant_auth_error)?;
-        let outcome = self
-            .chain
-            .social_delete(content_id, auth, at_epoch)
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
-        Ok(serde_json::json!({
-            "grantsRevoked": outcome.grants_revoked,
-            "keyRotated": outcome.key_rotated,
-        }))
+        // Refused: a social delete is a signed storage transaction, and the
+        // grant rows ride the rebuilt registry.
+        let _ = (content_id, authorization, at_epoch);
+        Err(Self::door_refusal(
+            "A social delete is a signed Storage transaction sent with \
+             bud_sendRawTransaction; the grant rows are not served yet.",
+        ))
     }
 
     async fn storage_list_view_grants(
@@ -3807,21 +3245,13 @@ impl BudlumApiServer for RpcServer {
         content_id: String,
         live_only: bool,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let content_id = parse_content_id(&content_id)?;
-        let (rows, live) = self
-            .chain
-            .view_grants(content_id)
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
-        let kept: Vec<serde_json::Value> = rows
-            .iter()
-            .filter(|g| !live_only || g.is_live())
-            .map(view_grant_json)
-            .collect();
+        // A read of the grant table, which is empty until grants ride
+        // block transactions. An empty listing is the honest answer.
+        let _ = (content_id, live_only);
         Ok(serde_json::json!({
-            "grants": kept,
-            "liveCount": live,
-            "count": kept.len(),
+            "grants": [],
+            "liveCount": 0,
+            "count": 0,
         }))
     }
 
@@ -3832,18 +3262,14 @@ impl BudlumApiServer for RpcServer {
         key_id: String,
         owner: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let content_id = parse_content_id(&content_id)?;
+        // Without grant rows the implicit owner policy is the only answer:
+        // the owner may view; a grantee waits for the rebuilt grant rows.
         let viewer = Address::from_hex(viewer.strip_prefix("0x").unwrap_or(&viewer))
             .map_err(|e| ErrorObjectOwned::owned(-32602, format!("viewer: {e}"), None::<()>))?;
         let owner = Address::from_hex(owner.strip_prefix("0x").unwrap_or(&owner))
             .map_err(|e| ErrorObjectOwned::owned(-32602, format!("owner: {e}"), None::<()>))?;
-        let key_id = parse_hex32_field(&key_id, "key_id")?;
-        let allowed = self
-            .chain
-            .may_view_content(content_id, viewer, key_id, owner)
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
-        Ok(serde_json::json!({ "allowed": allowed }))
+        let _ = (content_id, key_id);
+        Ok(serde_json::json!({ "allowed": viewer == owner }))
     }
 
     async fn storage_open_reveal(
@@ -3857,133 +3283,22 @@ impl BudlumApiServer for RpcServer {
         key_id: String,
         meter_budget: Option<u64>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let content_id = parse_content_id(&content_id)?;
-        let recipe: crate::storage::ThreeRecipe = serde_json::from_value(recipe)
-            .map_err(|e| ErrorObjectOwned::owned(-32602, format!("recipe: {e}"), None::<()>))?;
-        let full_public: Option<crate::storage::ThreeRecipePublic> = match full_public {
-            None => None,
-            Some(v) => Some(serde_json::from_value(v).map_err(|e| {
-                ErrorObjectOwned::owned(-32602, format!("fullPublic: {e}"), None::<()>)
-            })?),
-        };
-        let packed = hex::decode(packed.strip_prefix("0x").unwrap_or(&packed))
-            .map_err(|e| ErrorObjectOwned::owned(-32602, format!("packed: {e}"), None::<()>))?;
-        let owner = Address::from_hex(owner.strip_prefix("0x").unwrap_or(&owner))
-            .map_err(|e| ErrorObjectOwned::owned(-32602, format!("owner: {e}"), None::<()>))?;
-        let key_id = parse_hex32_field(&key_id, "key_id")?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-
-        // The viewer is whoever signed the claim, never a field. Before this,
-        // `viewer` was a string the caller typed, so any caller could name a
-        // grantee and have this node build frames for content it holds no
-        // grant on. The derived address is what the grant lookup asks about.
-        let viewer = verify_view_claim(&viewer_claim, &content_id, &key_id, &owner, &packed, now)?;
-
-        // `owner` is a claim in the request; the chain holds who owns this
-        // content. A claim naming another address is refused here by name.
-        // The registry's `may_view` refuses it too, but silently, as a
-        // `false` grant, so a caller naming itself owner of somebody else's
-        // sealed content saw a generic refusal and an honest owner with a
-        // typo in the field saw the same one. Content with no recorded
-        // owner keeps the registry's answer: no grant, sealed refused.
-        let recorded = self
-            .chain
-            .confidential_owner(content_id)
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
-        check_claimed_owner(recorded, &owner)?;
-
-        // The grant decision is the chain's; the gateway re-enforces it on the
-        // sealed path, but the authority that owns the registry answers it.
-        // Read the revoke generation first: a revoke that starts while this
-        // question is in flight invalidates the answer, and the comparison
-        // under the gateway lock below refuses the open instead of admitting
-        // a session on a pre-revoke `true`.
-        let generation = {
-            let gw = self.reveal_gateway.lock().map_err(|_| {
-                ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
-            })?;
-            gw.revoke_generation()
-        };
-        let grant_allows = self
-            .chain
-            .may_view_content(content_id, viewer, key_id, owner)
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
-
-        let req = crate::storage::RevealRequest {
+        // Refused: a reveal session opens against a live grant and an NFT
+        // reference on the rebuilt view flow; this node serves none yet.
+        let _ = (
+            content_id,
             recipe,
             full_public,
             packed,
-            content_id,
-            viewer,
+            viewer_claim,
             owner,
             key_id,
             meter_budget,
-        };
-        {
-            let mut gw = self.reveal_gateway.lock().map_err(|_| {
-                ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
-            })?;
-            if gw.revoke_generation() != generation {
-                return Err(ErrorObjectOwned::owned(
-                    -32003,
-                    "reveal: a revoke started while the grant was being checked; retry the call",
-                    None::<()>,
-                ));
-            }
-            // Reclaim TTL-dead rows before admission so a burst of opens
-            // cannot be wedged by corpses, then refuse fast at the cap with
-            // its own code instead of paying for an open that admission
-            // would refuse.
-            gw.sweep(now);
-            if gw.session_count() >= crate::storage::MAX_REVEAL_SESSIONS {
-                return Err(ErrorObjectOwned::owned(
-                    -32003,
-                    format!(
-                        "reveal: session table full ({})",
-                        crate::storage::MAX_REVEAL_SESSIONS
-                    ),
-                    None::<()>,
-                ));
-            }
-        }
-        // The emitter builds a whole one-shot pass to check the stream pin.
-        // That runs off the async workers and outside the gateway lock, so
-        // frame serving, close and revoke of other viewers do not wait on it.
-        let prepared = tokio::task::spawn_blocking(move || {
-            crate::storage::RevealGateway::prepare_prechecked(req, grant_allows)
-        })
-        .await
-        .map_err(|_| ErrorObjectOwned::owned(-32603, "reveal open task failed", None::<()>))?
-        .map_err(reveal_gateway_rpc_error)?;
-        let mut gw = self.reveal_gateway.lock().map_err(|_| {
-            ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
-        })?;
-        // A revoke may have started while the pass was built: ask again.
-        if gw.revoke_generation() != generation {
-            return Err(ErrorObjectOwned::owned(
-                -32003,
-                "reveal: a revoke started while the grant was being checked; retry the call",
-                None::<()>,
-            ));
-        }
-        let session_id = gw
-            .open_prepared(prepared, now)
-            .map_err(reveal_gateway_rpc_error)?;
-        let commit = gw
-            .stream_commitment(session_id)
-            .map_err(reveal_gateway_rpc_error)?;
-        Ok(serde_json::json!({
-            "sessionId": session_id,
-            "streamCommitment": format!("0x{}", hex::encode(commit)),
-            "expiresAt": now.saturating_add(crate::storage::REVEAL_SESSION_TTL_SECS),
-            "frameBudget": meter_budget
-                .unwrap_or(crate::storage::DEFAULT_REVEAL_BUDGET_FRAMES),
-            "activeSessions": gw.session_count(),
-        }))
+        );
+        Err(Self::door_refusal(
+            "A reveal session opens on the rebuilt view flow, against a live \
+             view grant; this node does not serve reveal sessions yet.",
+        ))
     }
 
     async fn storage_reveal_frames(
@@ -3992,601 +3307,18 @@ impl BudlumApiServer for RpcServer {
         seq_start: u32,
         count: u32,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // The gateway enforces the ceiling too; answering before touching
-        // the table keeps a malformed ask off the shared lock entirely.
-        if count > crate::storage::MAX_FRAMES_PER_CALL {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                format!(
-                    "reveal: asked {count} frames, ceiling is {}",
-                    crate::storage::MAX_FRAMES_PER_CALL
-                ),
-                None::<()>,
-            ));
-        }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        // The grant is asked again on every frame call. A session was checked
-        // once at open and then served until its TTL, so a grant revoked on
-        // chain kept serving frames for up to the whole TTL. The scope is
-        // read under the lock, the chain is asked without it, and the answer
-        // is applied under the lock again; a session closed in between is
-        // reported as unknown, which is what it is.
-        let (scope, generation, session): (
-            Option<crate::storage::GrantScope>,
-            u64,
-            std::sync::Arc<crate::storage::RevealSession>,
-        ) = {
-            let gw = self.reveal_gateway.lock().map_err(|_| {
-                ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
-            })?;
-            let scope = gw
-                .grant_scope(session_id)
-                .map_err(reveal_gateway_rpc_error)?;
-            // The session is taken OUT of the table here so the stream-pin
-            // check below can run with the lock released. That check is the
-            // only part of serving a frame that scales with the stream: a
-            // recipe pinning a frame fold makes it build the whole one-shot
-            // carousel pass. Run under the table lock, one caller's first frame
-            // stalls every other viewer for the length of an encode (CWE-407).
-            // The session is an `Arc`, so `emit_frames` still re-checks it -
-            // expiry, grant and budget - on the way back.
-            (
-                scope,
-                gw.revoke_generation(),
-                gw.session_handle(session_id)
-                    .map_err(reveal_gateway_rpc_error)?,
-            )
-        };
-        // Outside the lock. The answer is remembered on the session, so the
-        // emit below never repeats it.
-        session
-            .verify_stream_pin()
-            .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
-        let grant_allows = match scope {
-            None => true,
-            Some(scope) => self
-                .chain
-                .may_view_content(scope.content_id, scope.viewer, scope.key_id, scope.owner)
-                .await
-                .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?,
-        };
-        let mut gw = self.reveal_gateway.lock().map_err(|_| {
-            ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
-        })?;
-        // A revoke that started while the chain was being asked invalidates
-        // the answer above: the session may already be dropped and the grant
-        // it reports may be the pre-revoke one. Refuse the stale answer and
-        // make the caller retry against the new state instead of emitting
-        // frames on it.
-        if gw.revoke_generation() != generation {
-            return Err(ErrorObjectOwned::owned(
-                -32003,
-                "reveal: a revoke started while the grant was being checked; retry the call",
-                None::<()>,
-            ));
-        }
-        let (frames, fold) = gw
-            .emit_frames(session_id, seq_start, count, now, grant_allows)
-            .map_err(reveal_gateway_rpc_error)?;
-        let frames_hex: Vec<String> = frames.iter().map(hex::encode).collect();
-        Ok(serde_json::json!({
-            "frames": frames_hex,
-            "fold": format!("0x{}", hex::encode(fold)),
-        }))
+        // Refused: there are no reveal sessions to serve frames from.
+        let _ = (session_id, seq_start, count);
+        Err(Self::door_refusal(
+            "A reveal session opens on the rebuilt view flow, against a live \
+             view grant; this node does not serve reveal sessions yet.",
+        ))
     }
 
     async fn storage_close_reveal(&self, session_id: u64) -> Result<bool, ErrorObjectOwned> {
-        let mut gw = self.reveal_gateway.lock().map_err(|_| {
-            ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
-        })?;
-        Ok(gw.close(session_id))
-    }
-
-    async fn storage_register_confidential_commit(
-        &self,
-        content_id: String,
-        encryption: String,
-        ciphertext_root: String,
-        proof_kind: String,
-        authorization: Option<serde_json::Value>,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        self.require_operator("bud_storageRegisterConfidentialCommit")?;
-        let content_id = parse_content_id(&content_id)?;
-        // The recorded owner is never typed by the caller: it is derived from
-        // the key and then proven by the signature the registry checks. Handing
-        // only a derived address here is what would let a holder of somebody
-        // else's public key register a commit under that address.
-        let auth = parse_grant_auth(authorization.as_ref())?;
-        // Refuse at the boundary when this node cannot check ML-DSA-87 at all:
-        // that is an operator fault, and a client must not be told to fix a key
-        // it did get right. The registry derives the same address again; this
-        // pre-flight only chooses the error code.
-        auth.derived_owner().map_err(grant_auth_error)?;
-        let encryption = match encryption.to_ascii_lowercase().as_str() {
-            "aes-256-gcm" | "aes256gcm" => crate::storage::ContentEncryption::ClientSide(
-                crate::storage::ContentCipher::Aes256Gcm,
-            ),
-            "chacha20-poly1305" | "chacha20poly1305" => {
-                crate::storage::ContentEncryption::ClientSide(
-                    crate::storage::ContentCipher::ChaCha20Poly1305,
-                )
-            }
-            "xchacha20-poly1305" | "xchacha20poly1305" => {
-                crate::storage::ContentEncryption::ClientSide(
-                    crate::storage::ContentCipher::XChaCha20Poly1305,
-                )
-            }
-            "plaintext" => crate::storage::ContentEncryption::Plaintext,
-            other => {
-                return Err(ErrorObjectOwned::owned(
-                    -32602,
-                    format!("unknown encryption {other}"),
-                    None::<()>,
-                ));
-            }
-        };
-        let ciphertext_root = parse_hex32_field(&ciphertext_root, "ciphertext_root")?;
-        let proof_kind = match proof_kind.to_ascii_lowercase().as_str() {
-            "retrieval" | "retrievalchallenge" | "retrieval_challenge" => {
-                crate::storage::ConfidentialProofKind::RetrievalChallenge
-            }
-            "zk" | "zkstorage" | "zk_storage_proof" => {
-                crate::storage::ConfidentialProofKind::ZkStorageProof
-            }
-            "tee" | "teeattested" | "tee_attested" => {
-                crate::storage::ConfidentialProofKind::TeeAttested
-            }
-            "hybrid" | "hybridzktee" | "hybrid_zk_tee" => {
-                crate::storage::ConfidentialProofKind::HybridZkTee
-            }
-            other => {
-                return Err(ErrorObjectOwned::owned(
-                    -32602,
-                    format!("unknown proof_kind {other}"),
-                    None::<()>,
-                ));
-            }
-        };
-        let commit = crate::storage::ConfidentialBodyCommit::new(
-            content_id,
-            encryption,
-            ciphertext_root,
-            proof_kind,
-        )
-        .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
-        let commitment = self
-            .chain
-            .register_confidential_commit(commit, auth)
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
-        Ok(serde_json::json!({
-            "commitment": format!("0x{}", hex::encode(commitment)),
-            "contentId": format!("0x{}", hex::encode(content_id.0)),
-        }))
-    }
-
-    async fn storage_get_confidential_commit(
-        &self,
-        content_id: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let content_id = parse_content_id(&content_id)?;
-        let commit = self
-            .chain
-            .get_confidential_commit(content_id)
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
-        // The address whose signature opens this body, read from the registry
-        // rather than echoed back from the request. A wallet signs a grant
-        // against exactly this value, so the node that will refuse the grant has
-        // to be the node that can report it.
-        let owner = self
-            .chain
-            .confidential_owner(content_id)
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
-        match commit {
-            None => Ok(serde_json::json!({ "found": false })),
-            Some(c) => Ok(serde_json::json!({
-                "found": true,
-                "contentId": format!("0x{}", hex::encode(c.content_id.0)),
-                "encryption": c.encryption.to_string(),
-                "ciphertextRoot": format!("0x{}", hex::encode(c.ciphertext_root)),
-                "proofKind": format!("{:?}", c.proof_kind),
-                "commitment": format!("0x{}", hex::encode(c.commitment())),
-                "owner": owner.map(|a| a.to_hex()),
-            })),
-        }
-    }
-
-    async fn storage_open_deal(
-        &self,
-        domain_id: u32,
-        manifest: crate::storage::ContentManifest,
-        shard_id: String,
-        operator: String,
-        payer: String,
-        replica_index: u8,
-        start_epoch: u64,
-        end_epoch: u64,
-        economics: crate::domain::storage_deal::StorageEconomicsParams,
-        domain_params: crate::domain::storage_params::StorageDomainParams,
-        merkle_proof: Option<Vec<u8>>,
-        storage_root: Option<crate::domain::Hash32>,
-        request_id: u64,
-        payer_signature: String,
-        operator_signature: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // this method opened a deal and moved the payer escrow and the
-        // operator bond on this node alone, outside a block.
-        self.require_operator("bud_storageOpenDeal")?;
-        let _ = (
-            domain_id,
-            manifest,
-            shard_id,
-            operator,
-            payer,
-            replica_index,
-            start_epoch,
-            end_epoch,
-            economics,
-            domain_params,
-            merkle_proof,
-            storage_root,
-            request_id,
-            payer_signature,
-            operator_signature,
-        );
-        Err(Self::door_refusal(
-            "Out-of-block deal opening is refused: it moved escrow and bond on this node \
-             alone. The payer sends a signed Storage transaction (StorageTx::OpenDeal, \
-             carrying the operator's consent) through bud_sendRawTransaction.",
-        ))
-    }
-
-    async fn storage_accept_reallocation(
-        &self,
-        ticket_id: u64,
-        replacement_operator: String,
-        payer: String,
-        start_epoch: u64,
-        end_epoch: u64,
-        economics: crate::domain::storage_deal::StorageEconomicsParams,
-        domain_params: crate::domain::storage_params::StorageDomainParams,
-        merkle_proof: Option<Vec<u8>>,
-        storage_root: Option<crate::domain::Hash32>,
-        request_id: u64,
-        payer_signature: String,
-        operator_signature: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // this method filled a repair ticket and moved the payer escrow
-        // and the replacement operator bond on this node alone, outside a
-        // block.
-        self.require_operator("bud_storageAcceptReallocation")?;
-        let _ = (
-            ticket_id,
-            replacement_operator,
-            payer,
-            start_epoch,
-            end_epoch,
-            economics,
-            domain_params,
-            merkle_proof,
-            storage_root,
-            request_id,
-            payer_signature,
-            operator_signature,
-        );
-        Err(Self::door_refusal(
-            "Out-of-block repair acceptance is refused: it moved escrow and bond on this node \
-             alone. The payer sends a signed Storage transaction \
-             (StorageTx::AcceptReallocation, carrying the replacement operator's consent) \
-             through bud_sendRawTransaction.",
-        ))
-    }
-
-    async fn storage_get_manifest(
-        &self,
-        manifest_id: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let id = parse_content_id(&manifest_id)?;
-
-        // Shard ids are the handles a reader fetches bytes with, so listing
-        // them for content someone is selling hands out the content to
-        // anyone willing to skip the payment path. Pollen decides that, and
-        // it is asked before anything is serialised.
-        //
-        // The manifest's shape stays public: size and shard count leak
-        // nothing a buyer could not see in the listing, and an operator
-        // needs them to decide whether to serve. What is withheld is the
-        // shard list itself.
-        let protecting_asset = self.chain.pollen_asset_for_content(id).await;
-
-        if let Some(manifest) = self.chain.get_storage_manifest(id).await {
-            let shards: Vec<serde_json::Value> = if protecting_asset.is_some() {
-                Vec::new()
-            } else {
-                manifest
-                    .shards
-                    .iter()
-                    .map(|s| {
-                        serde_json::json!({
-                            "shardId": format!("0x{}", hex::encode(s.shard_id.0)),
-                            "size": s.size,
-                        })
-                    })
-                    .collect()
-            };
-            return Ok(serde_json::json!({
-                "manifestId": format!("0x{}", hex::encode(id.0)),
-                "found": true,
-                "totalSize": manifest.total_size,
-                "shardCount": manifest.shard_count,
-                // An operator deciding whether to serve these bytes, and a
-                // reader deciding whether a failed parse means "wrong key" or
-                // "corrupt shard", both need the declaration. Without it here
-                // the only honest answer either could give is "unknown".
-                "encryption": manifest.encryption.to_string(),
-                // Told plainly rather than by an empty list, so a caller
-                // knows to present a grant instead of concluding the object
-                // has no shards.
-                "protected": protecting_asset.is_some(),
-                "protectingAsset": protecting_asset
-                    .map(|a| format!("0x{}", hex::encode(a.0))),
-                "shards": shards,
-            }));
-        }
-
-        // The fallback path reaches the same shard ids through the deal
-        // records, so it has to answer to the same rule. Closing one and
-        // leaving the other would move the leak rather than fix it.
-        let deals = self.chain.get_storage_deals_by_manifest(id).await;
-        let shards: Vec<serde_json::Value> = if protecting_asset.is_some() {
-            Vec::new()
-        } else {
-            deals
-                .iter()
-                .map(|d| {
-                    serde_json::json!({
-                        "shardId": format!("0x{}", hex::encode(d.shard_id.0)),
-                        "size": d.shard_bytes,
-                    })
-                })
-                .collect()
-        };
-        Ok(serde_json::json!({
-            "manifestId": format!("0x{}", hex::encode(id.0)),
-            "found": !deals.is_empty(),
-            "dealsObserved": deals.len(),
-            "protected": protecting_asset.is_some(),
-            "protectingAsset": protecting_asset
-                .map(|a| format!("0x{}", hex::encode(a.0))),
-            "shards": shards,
-        }))
-    }
-
-    async fn storage_get_deals_by_manifest(
-        &self,
-        manifest_id: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let id = parse_content_id(&manifest_id)?;
-        let deals_raw = self.chain.get_storage_deals_by_manifest(id).await;
-        // A deal record carries its shard id, which is the handle bytes are
-        // fetched with, so this endpoint leaks the same thing
-        // `storage_get_manifest` does and answers to the same rule. The
-        // count stays public: how many operators hold an object is an
-        // economic fact a buyer can already read from the listing.
-        let protecting_asset = self.chain.pollen_asset_for_content(id).await;
-        let count = deals_raw.len();
-        let deals: Vec<serde_json::Value> = if protecting_asset.is_some() {
-            Vec::new()
-        } else {
-            deals_raw
-                .into_iter()
-                .map(|deal| storage_deal_to_json(&deal))
-                .collect()
-        };
-        Ok(serde_json::json!({
-            "manifestId": format!("0x{}", hex::encode(id.0)),
-            "count": count,
-            "protected": protecting_asset.is_some(),
-            "protectingAsset": protecting_asset
-                .map(|a| format!("0x{}", hex::encode(a.0))),
-            "deals": deals,
-        }))
-    }
-
-    async fn storage_get_deals_by_shard(
-        &self,
-        manifest_id: String,
-        shard_id: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let mid = parse_content_id(&manifest_id)?;
-        let sid = parse_content_id(&shard_id)?;
-        let deals_raw = self.chain.get_storage_deals_by_shard(mid, sid).await;
-        // Closed for the same reason as the two endpoints above. This one
-        // matters even though the caller already knows the shard id: the
-        // deal record names the operators holding it, which is the second
-        // half of fetching bytes without paying.
-        let protecting_asset = self.chain.pollen_asset_for_content(mid).await;
-        let count = deals_raw.len();
-        let deals: Vec<serde_json::Value> = if protecting_asset.is_some() {
-            Vec::new()
-        } else {
-            deals_raw
-                .into_iter()
-                .map(|deal| storage_deal_to_json(&deal))
-                .collect()
-        };
-        Ok(serde_json::json!({
-            "manifestId": format!("0x{}", hex::encode(mid.0)),
-            "shardId": format!("0x{}", hex::encode(sid.0)),
-            "count": count,
-            "protected": protecting_asset.is_some(),
-            "protectingAsset": protecting_asset
-                .map(|a| format!("0x{}", hex::encode(a.0))),
-            "deals": deals,
-        }))
-    }
-
-    async fn storage_get_challenges(
-        &self,
-        deal_id: u64,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let mut challenges: Vec<_> = self
-            .chain
-            .get_storage_challenges()
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))?
-            .into_iter()
-            .filter(|challenge| challenge.deal_id == deal_id)
-            .collect();
-        challenges.sort_by_key(|challenge| challenge.challenge_id);
-        Ok(serde_json::json!({
-            "dealId": deal_id,
-            "count": challenges.len(),
-            "challenges": challenges
-                .iter()
-                .map(|challenge| serde_json::json!({
-                    "challengeId": challenge.challenge_id,
-                    "byteStart": challenge.byte_start,
-                    "byteEnd": challenge.byte_end,
-                    "challengeEpoch": challenge.challenge_epoch,
-                    "deadlineEpoch": challenge.deadline_epoch,
-                    "opener": format!("0x{}", challenge.opener.to_hex()),
-                    "openerBond": challenge.opener_bond,
-                }))
-                .collect::<Vec<_>>(),
-        }))
-    }
-
-    async fn storage_open_challenge(
-        &self,
-        request: RetrievalChallengeRequest,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // this method opened a challenge and debited the opener bond on
-        // this node alone, outside a block, with a range drawn from this
-        // node's tip.
-        self.require_operator("bud_storageOpenChallenge")?;
-        let _ = request;
-        Err(Self::door_refusal(
-            "Out-of-block challenge opening is refused: it changed the storage registry and \
-             a balance on this node alone. The opener sends a signed Storage transaction \
-             (StorageTx::OpenChallenge) through bud_sendRawTransaction; the block draws the \
-             byte range.",
-        ))
-    }
-
-    async fn storage_answer_challenge(
-        &self,
-        response: RetrievalResponse,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // this method settled a challenge (and its slash) on this node
-        // alone, outside a block.
-        self.require_operator("bud_storageAnswerChallenge")?;
-        let _ = response;
-        Err(Self::door_refusal(
-            "Out-of-block challenge answers are refused: they settled a challenge and its \
-             slash on this node alone. The deal's operator sends a signed Storage transaction \
-             (StorageTx::AnswerChallenge) through bud_sendRawTransaction.",
-        ))
-    }
-
-    async fn storage_get_economics_summary(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        self.chain
-            .get_storage_economics_summary()
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))
-    }
-
-    async fn storage_get_economics_events(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let events = self
-            .chain
-            .get_storage_economics_events()
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))?;
-        Ok(serde_json::json!({
-            "count": events.len(),
-            "events": events.iter().map(storage_economics_event_to_json).collect::<Vec<_>>(),
-        }))
-    }
-
-    async fn storage_get_operator_economics(
-        &self,
-        operator: Address,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        self.chain
-            .get_storage_operator_economics(operator)
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))
-    }
-
-    async fn storage_get_outcome(
-        &self,
-        challenge_id: u64,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        match self.chain.get_storage_outcome(challenge_id).await {
-            Some(r) => Ok(serde_json::json!({
-                "challengeId": r.challenge_id,
-                "dealId": r.deal_id,
-                "outcome": format!("{:?}", r.outcome),
-                "finalizedEpoch": r.finalized_epoch,
-                "slashedBond": r.slashed_bond,
-                "proofKind": RETRIEVAL_OUTCOME_PROOF_KIND,
-                "proof_kind": RETRIEVAL_OUTCOME_PROOF_KIND,
-            })),
-            None => Ok(serde_json::Value::Null),
-        }
-    }
-
-    async fn storage_repair_band(
-        &self,
-        margin: u32,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let band: crate::chain::chain_actor::StorageRepairBand =
-            self.chain.get_storage_repair_band(margin).await;
-        let entry = |(manifest_id, live, k): &(crate::storage::ContentId, u32, u32)| {
-            serde_json::json!({
-                "manifestId": Self::to_0x_hash(hex::encode(manifest_id.0)),
-                "liveShards": live,
-                "k": k,
-            })
-        };
-        let repairable: Vec<serde_json::Value> = band.repairable.iter().map(entry).collect();
-        let unrecoverable: Vec<serde_json::Value> = band.unrecoverable.iter().map(entry).collect();
-        Ok(serde_json::json!({
-            "margin": band.margin,
-            "repairableCount": repairable.len(),
-            "repairable": repairable,
-            // Separate on purpose: below `k` no repair can restore the object,
-            // so this list needs an operator alarm, not a replacement deal.
-            "unrecoverableCount": unrecoverable.len(),
-            "unrecoverable": unrecoverable,
-        }))
-    }
-
-    async fn storage_active_operators(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Permissionless read of active STORAGE_OPERATOR (RoleId 5) members.
-        // Same surface as bud_registryActiveMembers; no admin gate.
-        let role = crate::registry::role::roles::STORAGE_OPERATOR;
-        let members = self.chain.get_registry_active_members(role).await;
-        let list: Vec<serde_json::Value> = members
-            .iter()
-            .map(|reg| {
-                serde_json::json!({
-                    "address": Self::to_0x_hash(reg.account.to_hex()),
-                    "stake": reg.stake,
-                    "role": "storage_operator",
-                })
-            })
-            .collect();
-        Ok(serde_json::json!({
-            "roleId": role.value(),
-            "role": "storage_operator",
-            "count": list.len(),
-            "operators": list,
-        }))
+        // No sessions exist, so none can be closed early.
+        let _ = session_id;
+        Ok(false)
     }
 
     async fn bns_resolve(&self, name: String) -> Result<Option<String>, ErrorObjectOwned> {
@@ -4903,7 +3635,7 @@ impl BudlumApiServer for RpcServer {
         }
         let mut cid_arr = [0u8; 32];
         cid_arr.copy_from_slice(&cid_bytes);
-        let cid_obj = crate::storage::content_id::ContentId(cid_arr);
+        let cid_obj = crate::storage::bud3::content_id::ContentId::referenced(cid_arr);
 
         let data = bincode::serialize(&(name.clone(), cid_obj))
             .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
@@ -5051,7 +3783,7 @@ impl BudlumApiServer for RpcServer {
             Ok(serde_json::json!({
                 "id": nft.id,
                 "owner": Self::to_0x_hash(nft.owner.to_hex()),
-                "content_id": format!("0x{}", hex::encode(nft.content_id.0)),
+                "content_id": format!("0x{}", hex::encode(nft.content_id.digest)),
                 "minted_at": nft.minted_at_epoch,
                 "author": nft.author_name,
             }))
@@ -5074,7 +3806,7 @@ impl BudlumApiServer for RpcServer {
             .map(|nft| {
                 serde_json::json!({
                     "id": nft.id,
-                    "content_id": format!("0x{}", hex::encode(nft.content_id.0)),
+                    "content_id": format!("0x{}", hex::encode(nft.content_id.digest)),
                     "minted_at": nft.minted_at_epoch,
                     "author": nft.author_name,
                 })
@@ -5091,7 +3823,7 @@ impl BudlumApiServer for RpcServer {
                 serde_json::json!({
                     "id": nft.id,
                     "owner": Self::to_0x_hash(nft.owner.to_hex()),
-                    "content_id": format!("0x{}", hex::encode(nft.content_id.0)),
+                    "content_id": format!("0x{}", hex::encode(nft.content_id.digest)),
                     "minted_at": nft.minted_at_epoch,
                     "author": nft.author_name,
                 })
@@ -5124,7 +3856,7 @@ impl BudlumApiServer for RpcServer {
         }
         let mut cid_arr = [0u8; 32];
         cid_arr.copy_from_slice(&cid_bytes);
-        let cid_obj = crate::storage::content_id::ContentId(cid_arr);
+        let cid_obj = crate::storage::bud3::content_id::ContentId::referenced(cid_arr);
 
         let data = bincode::serialize(&(cid_obj, author_name.clone()))
             .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
@@ -5691,43 +4423,13 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn gateway_fetch_content(&self, name: String) -> Result<String, ErrorObjectOwned> {
-        // Security check (HIGH): Pollen-protected content must not be
-        // fetchable over this RPC without an AccessGrant. Same pattern as the
-        // storage_get_manifest and storage_get_deals_* handlers: if a
-        // protecting asset exists, access is refused.
-        //
-        // Security check (HIGH): the check used to look at storage_root only,
-        // so a record with content_id set and storage_root unset skipped the
-        // guard. The gateway serves storage_root, so the guard now checks
-        // every identity the record names (content_id and storage_root);
-        // a record with two different values cannot pick the unprotected one.
-        let resolved = self.chain.bns_resolve_full(name.clone()).await;
-        for cid in resolved
-            .as_ref()
-            .map(crate::storage::content_gateway::pollen_guard_ids)
-            .unwrap_or_default()
-        {
-            if self.chain.pollen_asset_for_content(cid).await.is_some() {
-                return Err(ErrorObjectOwned::owned(
-                    -32603,
-                    "Content is Pollen-protected; an AccessGrant is required",
-                    None::<()>,
-                ));
-            }
-        }
-        let gateway = crate::storage::content_gateway::BudGateway::new(
-            self.chain.clone(),
-            Some(self.node.clone()),
-            None,
-        );
-        let data = gateway.fetch_name_content(&name).await.map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32000,
-                format!("Gateway resolution failed: {e}"),
-                None::<()>,
-            )
-        })?;
-        Ok(hex::encode(data))
+        // Refused: the content gateway resolves names over the symbol
+        // protocol of the rebuilt content flow; this node serves no fetch yet.
+        let _ = name;
+        Err(Self::door_refusal(
+            "Name content is fetched on the rebuilt symbol-protocol gateway; \
+             this node does not serve content fetches yet.",
+        ))
     }
 
     async fn gateway_render_content(
@@ -5735,42 +4437,13 @@ impl BudlumApiServer for RpcServer {
         name: String,
         format: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // The same Pollen check. Asking for a format cannot be a way around
-        // the access rules: protected content stays protected in whatever
-        // format it is requested.
-        let resolved = self.chain.bns_resolve_full(name.clone()).await;
-        for cid in resolved
-            .as_ref()
-            .map(crate::storage::content_gateway::pollen_guard_ids)
-            .unwrap_or_default()
-        {
-            if self.chain.pollen_asset_for_content(cid).await.is_some() {
-                return Err(ErrorObjectOwned::owned(
-                    -32603,
-                    "Content is Pollen-protected; an AccessGrant is required",
-                    None::<()>,
-                ));
-            }
-        }
-        let parsed = parse_render_format(&format).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid render format: {e}"), None::<()>)
-        })?;
-        let gateway = crate::storage::content_gateway::BudGateway::new(
-            self.chain.clone(),
-            Some(self.node.clone()),
-            None,
-        );
-        let (bytes, id) = gateway
-            .render_name_content(&name, &parsed)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(-32000, format!("Render failed: {e}"), None::<()>)
-            })?;
-        Ok(serde_json::json!({
-            "bytes": hex::encode(bytes),
-            "renderId": hex::encode(id),
-            "format": format,
-        }))
+        // Refused: presentation rendering rode the removed content model;
+        // the presentation layer is rebuilt with the content flow.
+        let _ = (name, format);
+        Err(Self::door_refusal(
+            "Presentation rendering is rebuilt with the content flow; this \
+             node does not serve renders yet.",
+        ))
     }
 
     async fn passport_get_profile(
@@ -5781,22 +4454,12 @@ impl BudlumApiServer for RpcServer {
             ErrorObjectOwned::owned(-32602, format!("Invalid passport name: {e}"), None::<()>)
         })?;
         let resolved = self.chain.bns_resolve_full(name.clone()).await;
-        let manifest_id = resolved.as_ref().and_then(|r| {
-            r.content_id
-                .or(r.storage_root.map(crate::storage::ContentId))
-        });
-        let manifest = if let Some(id) = manifest_id {
-            self.chain.get_storage_manifest(id).await
-        } else {
-            None
-        };
         let data_assets = self.chain.pollen_get_data_assets().await;
         let access_grants = self.chain.pollen_get_access_grants().await;
         let sale_authorizations = self.chain.pollen_get_sale_authorizations().await;
         let profile = crate::wallet::identity_profile::build_passport_profile(
             name,
             resolved,
-            manifest,
             &data_assets,
             &access_grants,
             &sale_authorizations,
@@ -5818,22 +4481,12 @@ impl BudlumApiServer for RpcServer {
             ErrorObjectOwned::owned(-32602, format!("Invalid passport name: {e}"), None::<()>)
         })?;
         let resolved = self.chain.bns_resolve_full(name.clone()).await;
-        let manifest_id = resolved.as_ref().and_then(|r| {
-            r.content_id
-                .or(r.storage_root.map(crate::storage::ContentId))
-        });
-        let manifest = if let Some(id) = manifest_id {
-            self.chain.get_storage_manifest(id).await
-        } else {
-            None
-        };
         let data_assets = self.chain.pollen_get_data_assets().await;
         let access_grants = self.chain.pollen_get_access_grants().await;
         let sale_authorizations = self.chain.pollen_get_sale_authorizations().await;
         let profile = crate::wallet::identity_profile::build_passport_profile(
             name,
             resolved,
-            manifest,
             &data_assets,
             &access_grants,
             &sale_authorizations,
@@ -6135,7 +4788,7 @@ impl BudlumApiServer for RpcServer {
                 })?;
                 Some(crate::ai_inference::perception::PerceptionRequest {
                     asset_id: crate::pollen::AssetId(aid),
-                    content_id: crate::storage::content_id::ContentId(cid),
+                    content_id: crate::storage::bud3::content_id::ContentId::referenced(cid),
                     kind,
                     declared_units: u,
                 })
@@ -7142,38 +5795,6 @@ impl BudlumApiServer for RpcServer {
     }
 }
 
-/// Turn the on-the-wire format string into a `RenderFormat`.
-///
-/// Accepted forms: `svg`, `png:<side>`, `frame:<index>`.
-///
-/// An unknown format is **rejected**, never defaulted. Falling back would
-/// return a different object under the identity of the one that was asked
-/// for: the format is part of the commitment, so handing SVG to someone who
-/// meant `png` and typed `pngg` is the wrong answer.
-///
-/// `QrStream` is deliberately absent. It is a transport representation, not a
-/// way of reading; asking for it over RPC would mean nothing.
-///
-/// # Errors
-///
-/// When the format is unrecognised, or a numeric parameter cannot be parsed.
-fn parse_render_format(format: &str) -> Result<crate::storage::render::RenderFormat, String> {
-    use crate::storage::render::RenderFormat;
-    match format.split_once(':') {
-        None if format == "svg" => Ok(RenderFormat::Svg),
-        Some(("png", size)) => size
-            .parse::<u16>()
-            .map(|size| RenderFormat::Png { size })
-            .map_err(|_| format!("png size is not a number: {size}")),
-        Some(("frame", frame)) => frame
-            .parse::<u16>()
-            .map(|frame| RenderFormat::VideoFrame { frame })
-            .map_err(|_| format!("frame index is not a number: {frame}")),
-        _ => Err(format!(
-            "unknown render format '{format}'; expected svg, png:<size> or frame:<index>"
-        )),
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -7876,235 +6497,4 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod render_format_tests {
-    use super::parse_render_format;
-    use crate::storage::render::RenderFormat;
 
-    /// Three formats are recognised, and their parameters are carried through.
-    #[test]
-    fn the_three_read_formats_parse() {
-        assert_eq!(parse_render_format("svg"), Ok(RenderFormat::Svg));
-        assert_eq!(
-            parse_render_format("png:256"),
-            Ok(RenderFormat::Png { size: 256 })
-        );
-        assert_eq!(
-            parse_render_format("frame:17"),
-            Ok(RenderFormat::VideoFrame { frame: 17 })
-        );
-    }
-
-    /// An unknown format is rejected, not defaulted.
-    ///
-    /// Falling back would return a different object under the identity of the
-    /// one that was asked for. The format is part of the commitment
-    /// (section 72): handing SVG to someone who meant `png` and typed `pngg`
-    /// is a wrong answer, not leniency.
-    #[test]
-    fn an_unknown_format_is_refused_not_defaulted() {
-        for bad in ["", "pngg", "webp", "SVG", "svg:1", "png", "frame"] {
-            assert!(
-                parse_render_format(bad).is_err(),
-                "'{bad}' is not a format and must be rejected"
-            );
-        }
-    }
-
-    /// An unparsable numeric parameter is an error, not a zero.
-    #[test]
-    fn a_bad_number_is_an_error() {
-        assert!(parse_render_format("png:large").is_err());
-        assert!(parse_render_format("png:-1").is_err());
-        // A u16 overflow is an error too: clamping quietly would produce a
-        // different object.
-        assert!(parse_render_format("png:70000").is_err());
-        assert!(parse_render_format("frame:abc").is_err());
-    }
-
-    /// `QrStream` cannot be requested over RPC.
-    ///
-    /// It is a transport representation, not a way of reading.
-    #[test]
-    fn the_transport_frame_is_not_a_read_format() {
-        assert!(parse_render_format("qrstream:0").is_err());
-        assert!(parse_render_format("qr:0:256").is_err());
-    }
-}
-
-#[cfg(test)]
-mod view_claim_tests {
-    use super::{check_claimed_owner, parse_grant_auth, verify_view_claim};
-    use crate::core::address::Address;
-    use crate::storage::ContentId;
-
-    const NOW: u64 = 1_800_000_000;
-
-    fn parts() -> (ContentId, [u8; 32], Address, Vec<u8>) {
-        (
-            ContentId([7u8; 32]),
-            [3u8; 32],
-            Address::from([4u8; 32]),
-            b"packed-bytes".to_vec(),
-        )
-    }
-
-    /// The `owner` field is checked against the chain's record before the
-    /// grant lookup. A request naming another address as owner of recorded
-    /// content is refused by name; the recorded owner passes; content with no
-    /// record is left to the grant lookup rather than refused here.
-    #[test]
-    fn the_claimed_owner_must_be_the_recorded_owner() {
-        let recorded = Address::from([4u8; 32]);
-        let stranger = Address::from([5u8; 32]);
-        let err = check_claimed_owner(Some(recorded), &stranger).unwrap_err();
-        assert_eq!(err.code(), -32006, "{err:?}");
-        assert!(err.message().contains("recorded owner"), "{err:?}");
-        assert!(check_claimed_owner(Some(recorded), &recorded).is_ok());
-        assert!(check_claimed_owner(None, &stranger).is_ok());
-    }
-
-    /// A claim without a key or a signature is refused before any crypto.
-    #[test]
-    fn a_bare_viewer_address_is_not_a_claim() {
-        let (content, key, owner, packed) = parts();
-        let claim =
-            serde_json::json!("0x0202020202020202020202020202020202020202020202020202020202020202");
-        let err = verify_view_claim(&claim, &content, &key, &owner, &packed, NOW).unwrap_err();
-        assert_eq!(err.code(), -32602, "{err:?}");
-        assert!(err.message().contains("viewerClaim"), "{err:?}");
-    }
-
-    /// The claim's key field is the viewer's, by name. A claim that carries
-    /// the grant field `ownerPublicKey` instead is refused with the field the
-    /// viewer has to send, not with a signature error.
-    #[test]
-    fn a_view_claim_names_the_viewer_key_field() {
-        let (content, key, owner, packed) = parts();
-        let claim = serde_json::json!({
-            "ownerPublicKey": "0x00",
-            "signature": "0x00",
-            "issuedAt": NOW,
-        });
-        let err = verify_view_claim(&claim, &content, &key, &owner, &packed, NOW).unwrap_err();
-        assert_eq!(err.code(), -32602, "{err:?}");
-        assert!(
-            err.message().contains("viewerClaim.viewerPublicKey"),
-            "{err:?}"
-        );
-        let grant_err = parse_grant_auth(Some(&serde_json::json!({
-            "viewerPublicKey": "0x00",
-            "signature": "0x00",
-        })))
-        .unwrap_err();
-        assert!(
-            grant_err.message().contains("authorization.ownerPublicKey"),
-            "{grant_err:?}"
-        );
-    }
-
-    #[cfg(feature = "wallet-ml-dsa")]
-    fn signed_claim(
-        kp: &crate::crypto::primitives::WalletKeyPair,
-        content: &ContentId,
-        key: &[u8; 32],
-        owner: &Address,
-        packed: &[u8],
-        issued_at: u64,
-    ) -> serde_json::Value {
-        let digest = crate::storage::view_claim_digest(
-            content,
-            &kp.address(),
-            key,
-            owner,
-            &crate::storage::payload_commitment(packed),
-            issued_at,
-        );
-        serde_json::json!({
-            "viewerPublicKey": format!("0x{}", hex::encode(kp.public_key_bytes())),
-            "signature": format!("0x{}", hex::encode(kp.sign(crate::crypto::ctx::STORAGE_V2, &digest))),
-            "issuedAt": issued_at,
-        })
-    }
-
-    /// The viewer is the address the signing key derives to, and nothing else.
-    #[cfg(feature = "wallet-ml-dsa")]
-    #[test]
-    fn the_viewer_is_whoever_signed() {
-        use crate::crypto::primitives::WalletKeyPair;
-        let (content, key, owner, packed) = parts();
-        let kp = WalletKeyPair::generate();
-        let claim = signed_claim(&kp, &content, &key, &owner, &packed, NOW);
-        let viewer = verify_view_claim(&claim, &content, &key, &owner, &packed, NOW)
-            .expect("a claim signed by the viewer's own key is accepted");
-        assert_eq!(viewer, kp.address());
-    }
-
-    /// A claim signed for one object, key, owner or payload opens no other.
-    #[cfg(feature = "wallet-ml-dsa")]
-    #[test]
-    fn a_claim_is_bound_to_the_request_it_was_signed_for() {
-        use crate::crypto::primitives::WalletKeyPair;
-        let (content, key, owner, packed) = parts();
-        let kp = WalletKeyPair::generate();
-        let claim = signed_claim(&kp, &content, &key, &owner, &packed, NOW);
-        let other_content = ContentId([8u8; 32]);
-        let other_key = [9u8; 32];
-        let other_owner = Address::from([5u8; 32]);
-        let other_packed = b"other-bytes".to_vec();
-        for (c, k, o, p) in [
-            (&other_content, &key, &owner, &packed),
-            (&content, &other_key, &owner, &packed),
-            (&content, &key, &other_owner, &packed),
-            (&content, &key, &owner, &other_packed),
-        ] {
-            let err = verify_view_claim(&claim, c, k, o, p, NOW).unwrap_err();
-            assert_eq!(err.code(), -32602, "{err:?}");
-        }
-    }
-
-    /// A stranger's key cannot speak for a grantee: the address is derived,
-    /// so the only way to be the grantee is to hold the grantee's key.
-    #[cfg(feature = "wallet-ml-dsa")]
-    #[test]
-    fn a_stranger_cannot_name_the_grantee() {
-        use crate::crypto::primitives::WalletKeyPair;
-        let (content, key, owner, packed) = parts();
-        let grantee = WalletKeyPair::generate();
-        let stranger = WalletKeyPair::generate();
-        // The stranger signs the grantee's digest with its own key: the
-        // signature verifies under the stranger's key, but the key derives to
-        // the stranger, so the request is about the stranger, not the grantee.
-        let digest = crate::storage::view_claim_digest(
-            &content,
-            &grantee.address(),
-            &key,
-            &owner,
-            &crate::storage::payload_commitment(&packed),
-            NOW,
-        );
-        let claim = serde_json::json!({
-            "viewerPublicKey": format!("0x{}", hex::encode(stranger.public_key_bytes())),
-            "signature": format!("0x{}", hex::encode(stranger.sign(crate::crypto::ctx::STORAGE_V2, &digest))),
-            "issuedAt": NOW,
-        });
-        let err = verify_view_claim(&claim, &content, &key, &owner, &packed, NOW).unwrap_err();
-        assert_eq!(err.code(), -32602, "{err:?}");
-    }
-
-    /// A captured claim dies with the session window, and future claims are invalid.
-    #[cfg(feature = "wallet-ml-dsa")]
-    #[test]
-    fn a_claim_outside_the_window_is_refused() {
-        use crate::crypto::primitives::WalletKeyPair;
-        let (content, key, owner, packed) = parts();
-        let kp = WalletKeyPair::generate();
-        let max = crate::storage::VIEW_CLAIM_MAX_AGE_SECS;
-        let stale = signed_claim(&kp, &content, &key, &owner, &packed, NOW - max - 1);
-        assert!(verify_view_claim(&stale, &content, &key, &owner, &packed, NOW).is_err());
-        let future = signed_claim(&kp, &content, &key, &owner, &packed, NOW + 1);
-        assert!(verify_view_claim(&future, &content, &key, &owner, &packed, NOW).is_err());
-        let edge = signed_claim(&kp, &content, &key, &owner, &packed, NOW - max);
-        assert!(verify_view_claim(&edge, &content, &key, &owner, &packed, NOW).is_ok());
-    }
-}

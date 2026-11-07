@@ -8,7 +8,7 @@ info:
     finalized block, so nothing this API has returned is taken back by a
     reorg. History (blocks, transactions, address histories, block producer
     records) comes from the index; current state (domains, global headers,
-    BNS names, B.U.D. manifests) is read from the node at request time.
+    BNS names) is read from the node at request time.
 
     Facts only: the API reports what the chain recorded and computes no
     score or ranking.
@@ -194,18 +194,6 @@ paths:
       summary: A `.bud` name (from the node, `bud_bnsResolveFull`)
       parameters:
         - name: name
-          in: path
-          required: true
-          schema: { type: string }
-      responses:
-        "200": { $ref: "#/components/responses/NodeJson" }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "502": { $ref: "#/components/responses/NodeUnreachable" }
-  /v1/manifests/{id}:
-    get:
-      summary: A B.U.D. content manifest (from the node, `bud_storageGetManifest`)
-      parameters:
-        - name: id
           in: path
           required: true
           schema: { type: string }

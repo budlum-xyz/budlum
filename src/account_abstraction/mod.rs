@@ -20,6 +20,7 @@
 //! and they do not stand in for a proof system; the header of each module
 //! states separately what it does and does not claim.
 
+pub mod pact_binding;
 pub mod private_transfer_auth;
 pub mod quantum_account;
 pub mod registry;

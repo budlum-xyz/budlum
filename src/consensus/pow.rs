@@ -1,3 +1,4 @@
+//! Convenience: retained public API surface after legacy storage retirement (`WP-07`).
 use super::{ConsensusEngine, ConsensusError};
 use crate::core::account::AccountState;
 use crate::core::block::Block;

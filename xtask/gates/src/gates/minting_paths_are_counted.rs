@@ -119,18 +119,6 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
          value changing hands, not new supply.",
     ),
     (
-        "src/chain/storage_maintenance.rs",
-        3,
-        "the storage reward tick pays the operator out of the fee that \
-         `open_deal` debited from the payer, as the difference of two \
-         cumulative totals so the sum cannot pass the escrowed fee; the \
-         refund of a slashed deal returns the unserved part of that same \
-         prepaid fee to the payer the ledger took it from; and the storage \
-         deal expiry sweep returns the operator bond that `open_deal` debited \
-         when the deal's term ends unrenewed. Each line puts back money this \
-         ledger already took, so none of them creates supply.",
-    ),
-    (
         "src/cross_domain/bridge_tx.rs",
         2,
         "the verified-burn unlock returns the owner the burned amount the lock \
@@ -138,14 +126,6 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
          arriving asset, and the relay unlock of a burned bridge transfer \
          returns the owner share recorded on burn (the relayer cut was \
          already paid at mint).",
-    ),
-    (
-        "src/domain/storage_tx.rs",
-        1,
-        "the challenge settlement returns the opener's bond to the opener: the \
-         amount `answer_challenge`'s debit side took out of the opener's \
-         escrow when the challenge was opened, so the refund cannot exceed \
-         what was taken.",
     ),
     (
         "src/tokenomics/reward_pool.rs",

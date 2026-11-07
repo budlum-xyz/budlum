@@ -257,7 +257,7 @@ const BUDGETS: &[Budget] = &[
             Budget {
         file: "src/chain/blockchain.rs",
         lint: "clippy::too_many_arguments",
-        count: 4,
+        count: 2,
         reason: "the bridge lock, verified-mint and settlement evidence entry points, whose arguments are all required and none of which groups into a meaningful struct; the storage escrow wrappers that were here left when deal opening and repair acceptance became `StorageTx` transactions, and the evidence path arrived with the slashing work",
     },
         Budget {
@@ -297,12 +297,6 @@ const BUDGETS: &[Budget] = &[
         reason: "fields or helpers read only under a feature or by a subset of tests; kept beside their siblings rather than deleted and rewritten",
     },
     Budget {
-        file: "src/domain/storage_deal.rs",
-        lint: "clippy::too_many_arguments",
-        count: 5,
-        reason: "a consensus or storage entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply. The fifth is `answer_coding_audit`: the answer, the audit it answers and the clock reading are three different things, and the column, the byte and the inclusion path have to stay three slices a caller cannot confuse",
-    },
-    Budget {
         file: "src/ai_inference/executor.rs",
         lint: "clippy::too_many_arguments",
         count: 1,
@@ -319,12 +313,6 @@ const BUDGETS: &[Budget] = &[
         lint: "clippy::large_enum_variant",
         count: 1,
         reason: "the large variant is the common case; boxing it would allocate on the hot path to satisfy a size lint",
-    },
-    Budget {
-        file: "src/network/node.rs",
-        lint: "clippy::single_match",
-        count: 1,
-        reason: "a match kept single-armed on purpose because the other arms are coming and an if-let would have to be rewritten",
     },
     Budget {
         file: "src/network/proto_conversions.rs",
@@ -387,7 +375,7 @@ const BUDGETS: &[Budget] = &[
         reason: "next_checkpoint_height cannot be const: the nightly jobs (udeps, determinism) reject trait calls inside const fns with E0658, and this fn was reverted from const in c72b911 for exactly that reason",
     },
     Budget {
-        file: "src/storage/pact_binding.rs",
+        file: "src/account_abstraction/pact_binding.rs",
         lint: "clippy::missing_const_for_fn",
         count: 3,
         reason: "Pact::new, is_residual_only and PactRegistry::new cannot be const: the nightly jobs (udeps, determinism) reject trait calls inside const fns with E0658, and these fns were reverted from const in c72b911 for exactly that reason",
@@ -500,12 +488,6 @@ const BUDGETS: &[Budget] = &[
         lint: "clippy::type_complexity",
         count: 1,
         reason: "the reseal envelope tuple mirrors the wire format field for field",
-    },
-    Budget {
-        file: "src/persistence/db.rs",
-        lint: "dead_code",
-        count: 1,
-        reason: "the cfg-gated reader exists for the on-disk format migration and no other cfg reaches it; removing it would strand rows written by the previous format",
     },
     Budget {
         file: "budzero/bud-compiler/tests/regression.rs",

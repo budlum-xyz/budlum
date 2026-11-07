@@ -3,9 +3,10 @@
 //! The Data Rights and Pollen hardening adds the `DataAsset` and `AccessGrant`
 //! maps to this transitional registry. The rule: an AI cannot read a Pollen or
 //! B.U.D. data reference without a valid grant.
+//! Convenience: retained public API surface after legacy storage retirement (`WP-07`).
 
 use crate::core::address::Address;
-use crate::storage::content_id::ContentId;
+use crate::storage::bud3::content_id::ContentId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -799,6 +800,7 @@ impl MarketplaceRegistry {
 
     /// Owner of the paid `DataAsset` bound to `manifest_id`, if any.
     #[must_use]
+    /// Convenience: retained public API surface (`WP-07`).
     pub fn bound_asset_owner(&self, manifest_id: &ContentId) -> Option<Address> {
         let asset_id = self.protected_content.asset_for(manifest_id)?;
         self.data_assets.get(&asset_id).map(|a| a.owner)
@@ -855,6 +857,7 @@ impl MarketplaceRegistry {
     ///
     /// A string describing which condition failed, so a gateway can tell a
     /// caller whether to buy access or to renew it.
+    /// Convenience: retained public API surface (`WP-07`).
     pub fn authorize_content_read(
         &self,
         manifest_id: &ContentId,
@@ -914,6 +917,7 @@ impl MarketplaceRegistry {
     /// # Errors
     ///
     /// When the content is bound to an asset.
+    /// Convenience: retained public API surface (`WP-07`).
     pub fn check_content_may_be_public(&self, manifest_id: &ContentId) -> Result<(), String> {
         self.protected_content
             .check_may_be_public(manifest_id)
@@ -1087,7 +1091,7 @@ mod tests {
     fn root_changes_when_data_asset_or_grant_changes() {
         let mut registry = MarketplaceRegistry::new();
         let root0 = registry.root();
-        let asset = DataAsset::new(addr(1), ContentId::of(b"asset"), [1u8; 32], true);
+        let asset = DataAsset::new(addr(1), ContentId::public(b"asset"), [1u8; 32], true);
         registry.register_data_asset(asset.clone()).unwrap();
         let root1 = registry.root();
         assert_ne!(root0, root1);
@@ -1117,7 +1121,7 @@ mod tests {
     #[test]
     fn ai_read_ref_without_grant_is_default_deny() {
         let mut registry = MarketplaceRegistry::new();
-        let asset = DataAsset::new(addr(1), ContentId::of(b"asset"), [1u8; 32], true);
+        let asset = DataAsset::new(addr(1), ContentId::public(b"asset"), [1u8; 32], true);
         registry.register_data_asset(asset.clone()).unwrap();
         let reference = AiDataInputRef {
             asset_id: asset.asset_id,
@@ -1132,7 +1136,7 @@ mod tests {
     #[test]
     fn ai_read_ref_with_valid_grant_consumes_once() {
         let mut registry = MarketplaceRegistry::new();
-        let asset = DataAsset::new(addr(1), ContentId::of(b"asset"), [1u8; 32], true);
+        let asset = DataAsset::new(addr(1), ContentId::public(b"asset"), [1u8; 32], true);
         registry.register_data_asset(asset.clone()).unwrap();
         let grant_id = registry
             .create_access_grant(signed_grant(&asset, addr(2), 1))
@@ -1164,7 +1168,7 @@ mod tests {
                 DataOffer {
                     id: i,
                     seller: addr(1),
-                    cid: ContentId::of(b"x"),
+                    cid: ContentId::public(b"x"),
                     price: 1,
                     active: true,
                 },
@@ -1172,11 +1176,11 @@ mod tests {
         }
         registry.next_offer_id = MAX_OFFERS as u64;
         assert!(registry
-            .create_offer(addr(2), ContentId::of(b"y"), 5)
+            .create_offer(addr(2), ContentId::public(b"y"), 5)
             .is_err());
         registry.close_offer(0, &addr(1)).unwrap();
         registry
-            .create_offer(addr(2), ContentId::of(b"y"), 5)
+            .create_offer(addr(2), ContentId::public(b"y"), 5)
             .unwrap();
         assert_eq!(registry.offers.len(), MAX_OFFERS);
     }
@@ -1184,7 +1188,7 @@ mod tests {
     #[test]
     fn ai_read_ref_rejects_revoked_grant() {
         let mut registry = MarketplaceRegistry::new();
-        let asset = DataAsset::new(addr(1), ContentId::of(b"asset"), [1u8; 32], true);
+        let asset = DataAsset::new(addr(1), ContentId::public(b"asset"), [1u8; 32], true);
         registry.register_data_asset(asset.clone()).unwrap();
         let mut grant = signed_grant(&asset, addr(2), 3);
         grant.status = AccessGrantStatus::Revoked;
@@ -1202,7 +1206,7 @@ mod tests {
     #[test]
     fn sale_authorization_requires_matching_asset_owner() {
         let mut registry = MarketplaceRegistry::new();
-        let asset = DataAsset::new(addr(1), ContentId::of(b"asset"), [1u8; 32], true);
+        let asset = DataAsset::new(addr(1), ContentId::public(b"asset"), [1u8; 32], true);
         registry.register_data_asset(asset.clone()).unwrap();
         let mut authorization = signed_sale_authorization(&asset);
         authorization.seller = addr(9);
@@ -1224,7 +1228,7 @@ mod tests {
     #[test]
     fn sale_authorization_issues_grant_and_purchase_receipt() {
         let mut registry = MarketplaceRegistry::new();
-        let asset = DataAsset::new(addr(1), ContentId::of(b"asset"), [1u8; 32], true);
+        let asset = DataAsset::new(addr(1), ContentId::public(b"asset"), [1u8; 32], true);
         registry.register_data_asset(asset.clone()).unwrap();
         let authorization_id = registry
             .create_sale_authorization(signed_sale_authorization(&asset))
@@ -1293,7 +1297,7 @@ mod tests {
     #[test]
     fn dao_duration_ceiling_binds_the_marketplace_purchase_path_too() {
         let mut registry = MarketplaceRegistry::new();
-        let asset = DataAsset::new(addr(1), ContentId::of(b"asset"), [1u8; 32], true);
+        let asset = DataAsset::new(addr(1), ContentId::public(b"asset"), [1u8; 32], true);
         registry.register_data_asset(asset.clone()).unwrap();
         let authorization_id = registry
             .create_sale_authorization(signed_sale_authorization(&asset))
@@ -1387,7 +1391,7 @@ mod tests {
     #[test]
     fn sale_authorization_grant_limit_is_enforced() {
         let mut registry = MarketplaceRegistry::new();
-        let asset = DataAsset::new(addr(1), ContentId::of(b"asset"), [1u8; 32], true);
+        let asset = DataAsset::new(addr(1), ContentId::public(b"asset"), [1u8; 32], true);
         registry.register_data_asset(asset.clone()).unwrap();
         let authorization_id = registry
             .create_sale_authorization(signed_sale_authorization_with_limit(&asset, 1))
@@ -1446,7 +1450,7 @@ mod tests {
     #[test]
     fn sale_purchase_requires_payment_commitment_and_bounded_expiry() {
         let mut registry = MarketplaceRegistry::new();
-        let asset = DataAsset::new(addr(1), ContentId::of(b"asset"), [1u8; 32], true);
+        let asset = DataAsset::new(addr(1), ContentId::public(b"asset"), [1u8; 32], true);
         registry.register_data_asset(asset.clone()).unwrap();
         let authorization_id = registry
             .create_sale_authorization(signed_sale_authorization(&asset))
@@ -1548,10 +1552,10 @@ mod tests {
     #[test]
     fn binding_requires_the_asset_manifest_and_its_owner() {
         let mut registry = MarketplaceRegistry::new();
-        let manifest = ContentId::of(b"asset");
+        let manifest = ContentId::public(b"asset");
         let asset = DataAsset::new(addr(1), manifest, [1u8; 32], true);
         let asset_id = registry.register_data_asset(asset).unwrap();
-        let other = ContentId::of(b"someone else's content");
+        let other = ContentId::public(b"someone else's content");
         assert!(registry
             .bind_content_to_asset(other, asset_id, addr(1))
             .is_err());
@@ -1568,7 +1572,7 @@ mod tests {
     #[test]
     fn bound_content_needs_a_live_grant_for_the_reader() {
         let mut registry = MarketplaceRegistry::new();
-        let manifest = ContentId::of(b"asset");
+        let manifest = ContentId::public(b"asset");
         let asset = DataAsset::new(addr(1), manifest, [1u8; 32], true);
         let asset_id = registry.register_data_asset(asset.clone()).unwrap();
         registry
@@ -1577,7 +1581,7 @@ mod tests {
         let grant_id = registry
             .create_access_grant(signed_grant(&asset, addr(2), 1))
             .unwrap();
-        let free = ContentId::of(b"free content");
+        let free = ContentId::public(b"free content");
         assert!(registry
             .authorize_content_read(&free, &addr(3), None, 15)
             .is_ok());
@@ -1603,7 +1607,7 @@ mod tests {
     #[test]
     fn declared_foreign_asset_without_reference_is_denied() {
         let mut registry = MarketplaceRegistry::new();
-        let asset = DataAsset::new(addr(1), ContentId::of(b"asset"), [1u8; 32], true);
+        let asset = DataAsset::new(addr(1), ContentId::public(b"asset"), [1u8; 32], true);
         registry.register_data_asset(asset.clone()).unwrap();
         let err = registry
             .validate_ai_declared_asset(b"opaque", &asset.asset_id, &addr(2))
@@ -1644,7 +1648,7 @@ mod tests {
         let mut reg = MarketplaceRegistry::new();
         let first = Address::from([1u8; 32]);
         let second = Address::from([2u8; 32]);
-        let cid = crate::storage::content_id::ContentId([0xAB; 32]);
+        let cid = crate::storage::bud3::content_id::ContentId::referenced([0xAB; 32]);
 
         let id = reg
             .create_offer(first, cid, 100)
@@ -1671,7 +1675,7 @@ mod tests {
     fn consecutive_offers_still_work() {
         let mut reg = MarketplaceRegistry::new();
         let seller = Address::from([3u8; 32]);
-        let cid = crate::storage::content_id::ContentId([0xCD; 32]);
+        let cid = crate::storage::bud3::content_id::ContentId::referenced([0xCD; 32]);
 
         let a = reg.create_offer(seller, cid, 10).expect("first offer");
         let b = reg.create_offer(seller, cid, 20).expect("second offer");

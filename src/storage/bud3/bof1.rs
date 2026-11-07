@@ -285,8 +285,8 @@ impl Object {
             }
             return Ok(Self::raw_public(content));
         }
-        let decoded = bud_codec::decode(codec, &payload, id.len)
-            .map_err(|_| Bof1Error::ContentMismatch)?;
+        let decoded =
+            bud_codec::decode(codec, &payload, id.len).map_err(|_| Bof1Error::ContentMismatch)?;
         if decoded != content {
             return Err(Bof1Error::ContentMismatch);
         }

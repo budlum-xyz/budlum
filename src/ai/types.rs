@@ -428,7 +428,7 @@ impl AiInferenceRequest {
             Some(p) => {
                 hasher.update(b"perception");
                 hasher.update(p.asset_id.0);
-                hasher.update(p.content_id.0);
+                hasher.update(p.content_id.digest);
                 hasher.update([p.kind.perception_tag()]);
                 hasher.update(p.declared_units.to_le_bytes());
             }

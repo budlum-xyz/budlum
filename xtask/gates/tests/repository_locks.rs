@@ -94,7 +94,7 @@ fn workflows_and_dependabot_are_current() {
 
     let dependabot = read(".github/dependabot.yml");
     for lock_dir in [
-        "/bud",
+        "/crates/bud-codec",
         "/budzero",
         "/fuzz",
         "/crates/ai-inference",
@@ -119,7 +119,6 @@ fn workflows_and_dependabot_are_current() {
 fn micro_benches_do_not_clamp_to_u32_max() {
     for file in [
         "benches/micro/ratio_rayon.rs",
-        "benches/micro/erasure_rows.rs",
     ] {
         let text = read(file);
         for clamp in [
@@ -154,7 +153,7 @@ fn indexer_binary_is_registered() {
 #[test]
 fn binding_directive_stays_outside_repository() {
     assert!(
-        !repo_root().join("THE_BUDLUM_DIREKTIF.md").exists(),
+        !root().join("THE_BUDLUM_DIREKTIF.md").exists(),
         "THE_BUDLUM_DIREKTIF.md must not sit in the repository tree"
     );
     let ignore = read(".gitignore");

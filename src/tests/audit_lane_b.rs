@@ -51,27 +51,31 @@ fn blg_093_ai_inference_license_is_identifiable() {
     );
 }
 
-// Carried from pr-68 (M0 live verification locks).
 #[test]
-    fn audit_lane_b_blg_035() {
-        // BLG-035: Migration decision.
-        // Pre-corrected. Test is permanent.
-        // Source: bud/src/ (migration)
-        assert!(true, "BLG-035 pre-corrected. Test passes.");
-    }
+fn audit_lane_b_blg_035_closed_by_removal_of_bud_node() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert!(
+        !root.join("budzero/bud-node").exists(),
+        "BLG-035: budzero/bud-node must stay removed"
+    );
+}
 
 #[test]
-    fn audit_lane_b_blg_045() {
-        // BLG-045: Migration decision.
-        // Pre-corrected. Test is permanent.
-        // Source: bud/src/ (migration)
-        assert!(true, "BLG-045 pre-corrected. Test passes.");
-    }
+fn audit_lane_b_blg_045_closed_by_removal_of_legacy_challenge_provider() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert!(
+        !root.join("src/storage/provider.rs").exists()
+            && !root.join("src/domain/storage_deal.rs").exists(),
+        "BLG-045: legacy challenge provider and storage_deal must stay removed"
+    );
+}
 
 #[test]
-    fn audit_lane_b_blg_046() {
-        // BLG-046: Migration decision.
-        // Pre-corrected. Test is permanent.
-        // Source: bud/src/ (migration)
-        assert!(true, "BLG-046 pre-corrected. Test passes.");
-    }
+fn audit_lane_b_blg_046_closed_by_removal_of_legacy_deal_open() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert!(
+        !root.join("src/domain/deal_open.rs").exists()
+            && !root.join("bud").exists(),
+        "BLG-046/BLG-073: legacy deal_open and bud/ workspace must stay removed"
+    );
+}

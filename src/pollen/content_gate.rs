@@ -3,7 +3,7 @@
 //! Pollen governs *permission*: a `DataAsset` is registered, an `AccessGrant`
 //! is issued against a payment, and `validate_ai_read_ref` refuses an AI
 //! request whose grant is missing, expired, exhausted or held by someone
-//! else. B.U.D. governs *bytes*: a `ContentManifest` names shards, operators
+//! else. B.U.D. governs *bytes*: a content reference names shards, operators
 //! hold them, and a reader assembles `k` of them into the object.
 //!
 //! Those two were complete on their own and had no connection, which is the
@@ -48,7 +48,7 @@
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
 use crate::pollen::AssetId;
-use crate::storage::content_id::ContentId;
+use crate::storage::bud3::content_id::ContentId;
 use std::collections::BTreeMap;
 
 /// Why a read of protected content was refused.
@@ -144,7 +144,7 @@ impl std::error::Error for ContentGateError {}
 
 /// Which stored objects are sold through Pollen.
 ///
-/// Deliberately a plain map rather than a field on `ContentManifest`. A
+/// Deliberately a plain map rather than a field on the content record. A
 /// manifest is content-addressed: its id is the hash of its own contents, so
 /// two uploaders sharding the same bytes get one id. Whether those bytes are
 /// *for sale* is not a property of the bytes, it is a property of an
@@ -241,6 +241,7 @@ impl ProtectedContent {
     /// [`ContentGateError::GrantRequired`] when protected content is read
     /// with no grant, and [`ContentGateError::GrantForDifferentAsset`] when
     /// the grant covers something else.
+    /// Convenience: retained public API surface (`WP-07`).
     pub fn authorize_read(
         &self,
         manifest_id: &ContentId,
@@ -306,7 +307,7 @@ mod tests {
     use super::*;
 
     fn mid(b: u8) -> ContentId {
-        ContentId([b; 32])
+        ContentId::referenced([b; 32])
     }
     fn aid(b: u8) -> AssetId {
         AssetId([b; 32])

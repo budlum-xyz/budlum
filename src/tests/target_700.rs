@@ -17,14 +17,14 @@ use crate::core::address::Address;
 use crate::cross_domain::relayer::{RelayerConfig, UniversalRelayer};
 use crate::pollen::MarketplaceRegistry;
 use crate::socialfi::NftRegistry;
-use crate::storage::content_id::ContentId;
+use crate::storage::bud3::content_id::ContentId;
 
 fn addr(b: u8) -> Address {
     Address::from([b; 32])
 }
 
 fn cid(b: u8) -> ContentId {
-    ContentId([b; 32])
+    ContentId::referenced([b; 32])
 }
 
 /// Ten distinct mints must yield ten distinct, retrievable token ids

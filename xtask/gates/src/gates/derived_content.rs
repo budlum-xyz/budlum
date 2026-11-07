@@ -9,7 +9,7 @@
 use std::path::Path;
 
 fn target(root: &Path) -> Result<std::path::PathBuf, String> {
-    let f = root.join("src/storage/derived.rs");
+    let f = root.join("crates/bud-codec/src/derived.rs");
     if !f.is_file() {
         return Err(format!("derived content module missing: {}", f.display()));
     }
@@ -140,17 +140,17 @@ pub fn self_test() -> Result<String, String> {
 
     // Good module.
     let good = "pub struct DerivedSpec {\n    pub block_x: u32,\n    pub block_y: u32,\n    pub block_w: u32,\n    pub block_h: u32,\n}\npub const DERIVED_BLOCK_PIXELS: u32 = 16;\npub struct DerivationChain;\nfn check_master_is_stored() {}\nfn f() -> u32 { 1 + 2 }\n";
-    std::fs::write(dir.join("src/storage/derived.rs"), good).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("crates/bud-codec/src/derived.rs"), good).map_err(|e| e.to_string())?;
     let good_ok = run(&dir).is_ok();
 
     // Pixel-coordinate defect.
     let pixel = "pub struct DerivedSpec {\n    pub pixel_x: u32,\n}\n";
-    std::fs::write(dir.join("src/storage/derived.rs"), pixel).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("crates/bud-codec/src/derived.rs"), pixel).map_err(|e| e.to_string())?;
     let pixel_fails = run(&dir).is_err();
 
     // Float defect.
     let floaty = "pub struct DerivedSpec {\n    pub block_x: u32,\n    pub block_y: u32,\n    pub block_w: u32,\n    pub block_h: u32,\n}\npub const DERIVED_BLOCK_PIXELS: u32 = 16;\npub struct DerivationChain;\nfn check_master_is_stored() {}\nfn f() -> f64 { 1.5 }\n";
-    std::fs::write(dir.join("src/storage/derived.rs"), floaty).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("crates/bud-codec/src/derived.rs"), floaty).map_err(|e| e.to_string())?;
     let float_fails = run(&dir).is_err();
 
     let _ = std::fs::remove_dir_all(&dir);

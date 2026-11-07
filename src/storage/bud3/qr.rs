@@ -14,9 +14,8 @@ use super::bof1::Object;
 use super::frame::{frames_for_object_bytes, Bud3Frame, FrameWireError};
 use super::limits::{OpticalProfile, Profile};
 use super::meter::Meter;
-use crate::storage::qr_matrix::{QrMatrix, QrMatrixError, THREE_QR_EC};
-use crate::storage::qr_png::{frame_to_qr_png, QrPngError};
-use crate::storage::qr_video::{png_to_optical_frame, QrVideoError};
+use super::qr_matrix::{QrMatrix, QrMatrixError, THREE_QR_EC};
+use super::qr_png::{frame_to_qr_png, png_to_optical_frame, QrOpticalError, QrPngError};
 
 /// One second of ephemeral QR-PNG optical presentation frames (`fps` frames max).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,7 +36,7 @@ pub enum Bud3QrError {
     /// PNG rasterization error.
     Png(QrPngError),
     /// Optical QR decode error.
-    OpticalDecode(QrVideoError),
+    OpticalDecode(QrOpticalError),
     /// Invalid P1 optical profile envelope.
     InvalidOpticalProfile,
 }
@@ -60,8 +59,8 @@ impl From<QrPngError> for Bud3QrError {
     }
 }
 
-impl From<QrVideoError> for Bud3QrError {
-    fn from(e: QrVideoError) -> Self {
+impl From<QrOpticalError> for Bud3QrError {
+    fn from(e: QrOpticalError) -> Self {
         Self::OpticalDecode(e)
     }
 }
@@ -74,7 +73,7 @@ impl From<QrVideoError> for Bud3QrError {
 /// Returns [`Bud3QrError`] if the encoded frame wire exceeds QR v40 ECC-L capacity.
 pub fn frame_to_matrix(frame: &Bud3Frame) -> Result<QrMatrix, Bud3QrError> {
     let wire = frame.encode_wire();
-    Ok(QrMatrix::encode_with_ec(&wire, THREE_QR_EC)?)
+    Ok(QrMatrix::encode_at(&wire, THREE_QR_EC)?)
 }
 
 /// Render one [`Bud3Frame`] into a deterministic grayscale PNG image.

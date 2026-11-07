@@ -53,7 +53,7 @@ pub const NS_SVM_ACCOUNT: &str = "ee/svm/account";
 pub const NS_MOVE_STATE: &str = "ee/move/state";
 /// Convenience: namespace constant for BudZero program commitments.
 pub const NS_BUDZERO_PROGRAM: &str = "ee/budzero/program";
-/// Convenience: namespace constant for BudZero storage slots.
+/// Convenience: namespace constant for BudZero slot-storage slots.
 pub const NS_BUDZERO_STORAGE: &str = "ee/budzero/storage";
 /// Convenience: namespace constant for deterministic UEL aliases.
 pub const NS_UEL_ALIAS: &str = "uel/alias";

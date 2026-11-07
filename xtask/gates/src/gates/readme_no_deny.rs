@@ -11,7 +11,7 @@ const PAIRS: &[(&str, &str, &str, &str, &str)] = &[
     (
         "src/storage/README.md",
         "no parity shard concept",
-        "src/storage/manifest.rs",
+        "src/storage/bud3/content_ref.rs",
         "ShardKind::Parity",
         "`ShardRef` carries a `kind` and `ShardKind::Parity` exists. If parity \
          is present but unwired, say that; do not say the concept is absent.",
@@ -19,9 +19,9 @@ const PAIRS: &[(&str, &str, &str, &str, &str)] = &[
     (
         "src/storage/README.md",
         "redundancy is not erasure coding",
-        "src/storage/erasure.rs",
+        "src/storage/bud3/content_id.rs",
         "pub fn encode_object",
-        "`src/storage/erasure.rs` computes real Reed-Solomon parity. The \
+        "`src/storage/bud3/content_id.rs` computes real Reed-Solomon parity. The \
          honest warning is that nothing calls it yet, not that redundancy is \
          replication.",
     ),
@@ -114,8 +114,8 @@ pub fn self_test() -> Result<String, String> {
     let manifest = "pub enum ShardKind { Data, Parity }\n";
     let erasure = "pub fn encode_object() {}\n";
     std::fs::write(dir.join("src/storage/README.md"), denies).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("src/storage/manifest.rs"), manifest).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("src/storage/erasure.rs"), erasure).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("src/storage/bud3/content_ref.rs"), manifest).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("src/storage/bud3/content_id.rs"), erasure).map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from("canary: a denying README passed"));

@@ -1860,7 +1860,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             // an `event_digest` for events the program never emitted, with `D`
             // chosen freely.
             //
-            // That field is not decorative. `storage_deal.rs` puts its whole
+            // That field is not decorative. the storage proof path puts its whole
             // replay context in it, deal and challenge and responder and epoch
             // and chain, precisely so one shard proof cannot answer a
             // different challenge. An unconstrained starting value is a prover

@@ -27,6 +27,7 @@
 //! (`ensure_poa`): on a network that claims sovereignty, no central
 //! administrator should be able to freeze an account in a permissionless
 //! domain.
+//! Convenience: retained public API surface after legacy storage retirement (`WP-07`).
 
 use crate::core::address::Address;
 use serde::{Deserialize, Serialize};

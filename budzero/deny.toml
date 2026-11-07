@@ -17,7 +17,7 @@ allow = [
     "ISC",
     "OpenSSL",
     "Zlib",
-    # The same reason as the root: the bud-node -> libp2p -> idna_adapter chain brings in
+    # The same reason as the root: the transitive idna_adapter chain brings in
     # the icu_* crates; Unicode-3.0 is an OSI approved permissive license.
     "Unicode-3.0",
     # PolyForm Shield 1.0.0: the same as the root repository - the workspace member license.
@@ -37,7 +37,7 @@ unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # Exactly one git source, mirroring ../.quality/deny.toml.
 #
-# bud-node depends on libp2p, which comes from the rust-libp2p tree pinned by
+# libp2p comes from the rust-libp2p tree pinned by
 # revision: 0.57.0 is tagged upstream but not on crates.io, and it is the only
 # build that closes GHSA-vxx9-2994-q338 (yamux) plus GHSA-3v94-mw7p-v465 and
 # GHSA-q2qq-hmj6-3wpp (hickory-proto). Every in-registry route was measured and

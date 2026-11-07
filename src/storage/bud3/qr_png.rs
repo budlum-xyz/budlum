@@ -5,24 +5,12 @@
 //!
 //! # Why IDAT is deflated
 //!
-//! A QR raster is long runs of two colours, so deflate is nearly free on it.
-//! The stored-block writer this replaced made every frame PNG the size of its
-//! raw RGB8 buffer: measured on a 224-byte optical frame that was 203 086
-//! bytes against 2 104 with deflate, a 96.6x difference, and the whole BDLV
-//! video inherits it frame by frame.
-//!
-//! # What the determinism claim covers
-//!
-//! The PNG bytes go into the BDLV blob that `QrVideo::blob_commitment` and
-//! `VideoRecipe::video_commitment` hash, so they are committed bytes. Deflate
-//! output is fixed for one compressor implementation at one level: the
-//! `flate2` crate with its `rust_backend` (`miniz_oxide`), at the versions
-//! `Cargo.lock` pins. It is not promised across compressor versions; a
-//! dependency bump may change the bytes, and then every blob committed under
-//! the old bytes stops matching. The golden test below pins the exact digest
-//! of one frame so such a bump fails the build instead of the commitments.
+//! A QR raster is long runs of two colours, so deflate compresses cleanly.
+//! Deflate output is fixed for the `flate2` `rust_backend` (`miniz_oxide`)
+//! pinned in `Cargo.lock`, and the golden test below pins the exact digest
+//! of one rendered frame PNG while keeping PNG bytes strictly ephemeral.
 
-use crate::storage::qr_matrix::{QrMatrix, QrMatrixError, MODULE_PX, QUIET_ZONE};
+use super::qr_matrix::{QrMatrix, QrMatrixError, MODULE_PX, QUIET_ZONE};
 
 /// PNG encode errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,19 +41,20 @@ impl From<QrMatrixError> for QrPngError {
     }
 }
 
-/// Upper bound on the PNG side (px) the raster encoder emits and the BDLV
-/// decoder accepts. A QR matrix is at most 177×177 modules; at [`MODULE_PX`]
-/// per module plus quiet zone the side stays far under the cap, but the cap is
-/// what stops a hostile IHDR from declaring a geometry our encoder never
-/// produces (see `qr_video::decode_png_grey`, which re-uses this ceiling).
+/// Upper bound on the PNG side (px) the raster encoder emits and the optical
+/// PNG decoder accepts. A QR matrix is at most 177x177 modules; at [`MODULE_PX`]
+/// per module plus quiet zone the side stays far under the cap, stopping a
+/// hostile IHDR from declaring an unbounded allocation.
 /// The largest honest side is (177 + 8) * 4 = 740 px, so 1024 leaves headroom
 /// while bounding a hostile frame to a few MiB of raw pixels.
+/// Convenience: ISO QR optical presentation bound/helper (`WP-19`).
 pub const MAX_PNG_SIDE_PX: u32 = 1024;
 
 /// Render matrix to a deterministic RGB8 PNG.
 /// # Errors
 ///
 /// Propagates `QrPngError` from the step that failed; its variants name the refused conditions.
+/// Convenience: ISO QR optical presentation bound/helper (`WP-19`).
 pub fn matrix_to_png(matrix: &QrMatrix) -> Result<Vec<u8>, QrPngError> {
     let side_m = matrix.raster_modules();
     let side_px = side_m.saturating_mul(MODULE_PX);
@@ -177,6 +166,245 @@ fn crc32_png(data: &[u8]) -> u32 {
     crc ^ 0xFFFF_FFFF
 }
 
+
+/// Optical PNG-to-QR-frame decode failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QrOpticalError {
+    /// PNG grammar, chunk CRC, inflate bound, or QR grid decode failure.
+    Decode(String),
+}
+
+impl std::fmt::Display for QrOpticalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Decode(msg) => write!(f, "qr optical decode: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for QrOpticalError {}
+
+/// Decode one ephemeral QR PNG image back to raw logical frame wire bytes via `rqrr`.
+///
+/// # Errors
+///
+/// Returns [`QrOpticalError::Decode`] if the PNG is malformed, exceeds
+/// [`MAX_PNG_SIDE_PX`], or carries no readable ISO QR symbol.
+pub fn png_to_optical_frame(png: &[u8]) -> Result<Vec<u8>, QrOpticalError> {
+    let (w, h, grey) = decode_png_grey(png).map_err(QrOpticalError::Decode)?;
+    let mut img = rqrr::PreparedImage::prepare_from_greyscale(w, h, |x, y| {
+        grey.get(y * w + x).copied().unwrap_or(255)
+    });
+    let grids = img.detect_grids();
+    let grid = grids
+        .first()
+        .ok_or_else(|| QrOpticalError::Decode("no qr grid".into()))?;
+    let mut data = Vec::new();
+    grid.decode_to(&mut data)
+        .map_err(|e| QrOpticalError::Decode(format!("{e:?}")))?;
+    Ok(data)
+}
+
+fn decode_png_grey(png: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
+    if png.len() < 8 {
+        return Err("png magic".into());
+    }
+    let magic = png.get(0..8).ok_or_else(|| "png magic".to_string())?;
+    if magic != [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a] {
+        return Err("png magic".into());
+    }
+    let mut off = 8usize;
+    let mut width = 0u32;
+    let mut height = 0u32;
+    let mut channels = 0usize;
+    let mut idat = Vec::new();
+    let mut saw_ihdr = false;
+    let mut saw_idat = false;
+    let mut idat_closed = false;
+    let mut saw_plte = false;
+    let mut saw_iend = false;
+    while off < png.len() {
+        let len_bytes = png.get(off..off + 4).ok_or_else(|| "png len".to_string())?;
+        let mut lb = [0u8; 4];
+        lb.copy_from_slice(len_bytes);
+        let len = u32::from_be_bytes(lb) as usize;
+        let chunk_kind = png
+            .get(off + 4..off + 8)
+            .ok_or_else(|| "png ty".to_string())?;
+        let body_start = off.checked_add(8).ok_or("png chunk")?;
+        let crc_end = body_start
+            .checked_add(len)
+            .and_then(|end| end.checked_add(4))
+            .ok_or_else(|| "png chunk".to_string())?;
+        let chunk_body = png
+            .get(body_start..crc_end - 4)
+            .ok_or_else(|| "png chunk".to_string())?;
+        let crc_bytes = png
+            .get(crc_end - 4..crc_end)
+            .ok_or_else(|| "png chunk".to_string())?;
+        let mut crc = flate2::Crc::new();
+        crc.update(chunk_kind);
+        crc.update(chunk_body);
+        if crc.sum().to_be_bytes() != crc_bytes {
+            return Err("png crc".into());
+        }
+        off = crc_end;
+        if !saw_ihdr && chunk_kind != b"IHDR" {
+            return Err("ihdr must be first".into());
+        }
+        if chunk_kind == b"IHDR" {
+            if saw_ihdr || chunk_body.len() != 13 {
+                return Err("ihdr".into());
+            }
+            saw_ihdr = true;
+            let depth = chunk_body.get(8).copied().unwrap_or(0);
+            let color = chunk_body.get(9).copied().unwrap_or(0);
+            if depth != 8 {
+                return Err("png bit depth".into());
+            }
+            channels = match color {
+                0 => 1,
+                2 => 3,
+                4 => 2,
+                6 => 4,
+                3 => return Err("png palette".into()),
+                _ => return Err("png color type".into()),
+            };
+            if chunk_body.get(10).copied() != Some(0) || chunk_body.get(11).copied() != Some(0) {
+                return Err("png method".into());
+            }
+            if chunk_body.get(12).copied() != Some(0) {
+                return Err("png interlace".into());
+            }
+            let mut wb = [0u8; 4];
+            let mut hb = [0u8; 4];
+            wb.copy_from_slice(chunk_body.get(0..4).ok_or_else(|| "w".to_string())?);
+            hb.copy_from_slice(chunk_body.get(4..8).ok_or_else(|| "h".to_string())?);
+            width = u32::from_be_bytes(wb);
+            height = u32::from_be_bytes(hb);
+        } else if chunk_kind == b"PLTE" {
+            if saw_plte
+                || saw_idat
+                || !matches!(channels, 3 | 4)
+                || len == 0
+                || len > 768
+                || !len.is_multiple_of(3)
+            {
+                return Err("png palette placement".into());
+            }
+            saw_plte = true;
+        } else if chunk_kind == b"IDAT" {
+            if idat_closed {
+                return Err("png noncontiguous idat".into());
+            }
+            saw_idat = true;
+            idat.extend_from_slice(chunk_body);
+        } else if chunk_kind == b"IEND" {
+            if len != 0 || !saw_idat || off != png.len() {
+                return Err("png iend".into());
+            }
+            saw_iend = true;
+            break;
+        } else {
+            if chunk_kind.first().is_none_or(|byte| byte & 0x20 == 0) {
+                return Err("png unknown critical chunk".into());
+            }
+            if saw_idat {
+                idat_closed = true;
+            }
+        }
+    }
+    if !saw_iend {
+        return Err("png missing iend".into());
+    }
+    if width == 0 || height == 0 || channels == 0 {
+        return Err("no ihdr".into());
+    }
+    if width > MAX_PNG_SIDE_PX || height > MAX_PNG_SIDE_PX {
+        return Err("png side too large".into());
+    }
+    let w = width as usize;
+    let h = height as usize;
+    let row = 1 + w * channels;
+    let expected = h.checked_mul(row).ok_or("png dims overflow")?;
+    let mut raw = inflate_zlib_bounded(&idat, expected)?;
+    if raw.len() != expected {
+        return Err(format!("raw len {} != {}", raw.len(), expected));
+    }
+    unfilter_scanlines(&mut raw, h, row, channels)?;
+    let mut grey = vec![0u8; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let v = raw.get(y * row + 1 + x * channels).copied().unwrap_or(0);
+            if let Some(slot) = grey.get_mut(y * w + x) {
+                *slot = v;
+            }
+        }
+    }
+    Ok((w, h, grey))
+}
+
+fn unfilter_scanlines(raw: &mut [u8], h: usize, row: usize, bpp: usize) -> Result<(), String> {
+    for y in 0..h {
+        let base = y * row;
+        let filter = raw.get(base).copied().ok_or("filter")?;
+        if filter > 4 {
+            return Err("filter".into());
+        }
+        for i in 1..row {
+            let at = |dy: usize, back: usize| -> u8 {
+                if (dy == 1 && y == 0) || i <= back {
+                    return 0;
+                }
+                raw.get(base + i - back - dy * row).copied().unwrap_or(0)
+            };
+            let a = at(0, bpp);
+            let b = at(1, 0);
+            let c = at(1, bpp);
+            let pred = match filter {
+                0 => 0,
+                1 => a,
+                2 => b,
+                3 => ((u16::from(a) + u16::from(b)) / 2) as u8,
+                _ => paeth_predict(a, b, c),
+            };
+            if let Some(slot) = raw.get_mut(base + i) {
+                *slot = slot.wrapping_add(pred);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn paeth_predict(a: u8, b: u8, c: u8) -> u8 {
+    let p = i32::from(a) + i32::from(b) - i32::from(c);
+    let pa = (p - i32::from(a)).abs();
+    let pb = (p - i32::from(b)).abs();
+    let pc = (p - i32::from(c)).abs();
+    if pa <= pb && pa <= pc {
+        a
+    } else if pb <= pc {
+        b
+    } else {
+        c
+    }
+}
+
+fn inflate_zlib_bounded(z: &[u8], limit: usize) -> Result<Vec<u8>, String> {
+    use flate2::read::ZlibDecoder;
+    use std::io::Read;
+    let d = ZlibDecoder::new(z);
+    let mut out = Vec::new();
+    let capped = (limit as u64).saturating_add(1);
+    d.take(capped)
+        .read_to_end(&mut out)
+        .map_err(|e| e.to_string())?;
+    if out.len() > limit {
+        return Err("inflate too large".into());
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,7 +420,7 @@ mod tests {
     /// Golden bytes: the digest of one frame's PNG under the compressor
     /// `Cargo.lock` pins. Bit-equality across two runs on one machine says
     /// nothing about a compressor bump; this does. If it fails after a
-    /// dependency change, the change alters committed BDLV bytes and needs a
+    /// dependency change, the change alters rendered PNG bytes and needs a
     /// recorded decision, not a new constant.
     #[test]
     fn png_bytes_match_the_golden_digest() {

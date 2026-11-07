@@ -315,7 +315,7 @@ mod relayer_escrow_silent_failure_regression {
             effort: crate::ai_inference::effort::EffortTier::default(),
             perception: Some(crate::ai_inference::perception::PerceptionRequest {
                 asset_id: crate::pollen::AssetId([0xAB; 32]),
-                content_id: crate::storage::content_id::ContentId([0xBC; 32]),
+                content_id: crate::storage::bud3::content_id::ContentId::referenced([0xBC; 32]),
                 kind: crate::ai_inference::perception::PerceptionKind::Text,
                 declared_units: 4,
             }),

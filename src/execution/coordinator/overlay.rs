@@ -288,6 +288,7 @@ impl<'a> OverlayCore<'a> {
     }
 
     /// Push a nested child frame for `universal_call`.
+    /// Convenience: retained public API surface (`WP-07`).
     pub fn push_frame(&mut self, ee: EeId, depth: u32, gas_limit: u64) -> Result<(), HostError> {
         self.push_frame_with_mode(ee, depth, gas_limit, false)
     }

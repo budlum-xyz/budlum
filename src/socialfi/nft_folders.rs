@@ -126,9 +126,8 @@ impl NftFolderRegistry {
             return Err(SocialFiBud3Error::UnauthorizedSealedObject);
         }
 
-        let legacy_cid = crate::storage::content_id::ContentId(cid.digest);
         let id = nft_reg
-            .mint(caller, legacy_cid, epoch, author_name)
+            .mint(caller, cid, epoch, author_name)
             .map_err(|e| SocialFiBud3Error::Nft(e.to_string()))?;
         let nft_id = derive_bud3_nft_id(id);
         let content_ref = ContentRef::new(cid, object_commitment, Some(nft_id))

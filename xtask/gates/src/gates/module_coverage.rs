@@ -71,7 +71,6 @@ const MODULE_PREFIXES: &[(&str, &str)] = &[
     ("budzero:cli", "budzero/bud-cli/"),
     ("budzero:compiler", "budzero/bud-compiler/"),
     ("budzero:isa", "budzero/bud-isa/"),
-    ("budzero:node", "budzero/bud-node/"),
     ("budzero:proof", "budzero/bud-proof/"),
     ("budzero:pul", "budzero/bud-pul/"),
     ("budzero:state", "budzero/bud-state/"),

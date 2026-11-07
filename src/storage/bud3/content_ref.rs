@@ -66,6 +66,28 @@ impl ContentRef {
     }
 }
 
+
+/// Positive content-ownership lookup table held on `AccountState` (`WP-07`).
+/// Convenience: exposed for Pollen data-asset ownership checks.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ContentOwnershipBook {
+    owners: std::collections::BTreeMap<[u8; 32], crate::core::address::Address>,
+}
+
+impl ContentOwnershipBook {
+    /// Convenience: look up the recorded owner of a 32-byte content digest.
+    #[must_use]
+    pub fn owner_of(&self, cid: &ContentId) -> Option<crate::core::address::Address> {
+        self.owners.get(cid.as_bytes()).copied()
+    }
+
+    /// Record positive ownership in tests.
+    #[cfg(test)]
+    pub fn record_test_owner(&mut self, cid: ContentId, owner: crate::core::address::Address) {
+        self.owners.insert(*cid.as_bytes(), owner);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

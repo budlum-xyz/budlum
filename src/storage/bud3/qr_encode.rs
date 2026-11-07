@@ -1,7 +1,7 @@
 //! Byte-mode QR encoder pinned to EC level L with deterministic mask fallback.
 //!
-//! Budlum 3.0 renders recipes as QR video frames and every frame has to be
-//! reproducible byte-for-byte from the recipe, so the matrix must come from an
+//! B.U.D. 3.0 renders logical frames as ephemeral ISO QR symbols and every frame
+//! is reproducible byte-for-byte from its frame wire, so the matrix comes from an
 //! encoder whose every choice is fixed by us instead of a library whose mask
 //! selection or tie breaking may drift between versions. This module
 //! implements ISO/IEC 18004 for byte mode, error-correction level L and
@@ -10,6 +10,7 @@
 //! tried in order and the selected mask index is carried in the QR format word.
 
 /// Largest payload a version-40 level-L byte-mode symbol can carry.
+/// Convenience: ISO QR optical presentation bound/helper (`WP-19`).
 pub const MAX_DATA_BYTES: usize = 2953;
 
 /// Longest Reed-Solomon generator this module builds (version 40 level L).
@@ -1012,7 +1013,7 @@ mod tests {
     fn encoded_matrix_reads_back_through_an_independent_decoder() {
         for data in [
             &b"A"[..],
-            &b"Budlum 3.0 recipe frame"[..],
+            &b"Budlum 3.0 optical frame"[..],
             &vec![0xa5; 17][..],
             &vec![0x5a; 18][..],
             &vec![7; 32][..],

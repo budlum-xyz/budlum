@@ -279,7 +279,7 @@ mod tests {
         for f in &frames {
             let wire = f.encode_wire();
             assert_eq!(wire.len(), BUD3_FRAME_HEADER_LEN + 2911);
-            assert!(wire.len() <= crate::storage::qr_encode::MAX_DATA_BYTES);
+            assert!(wire.len() <= super::super::qr_encode::MAX_DATA_BYTES);
             let mut m = Meter::for_object(1 << 20);
             let parsed = Bud3Frame::decode_wire(&wire, &mut m).unwrap();
             assert_eq!(&parsed, f);

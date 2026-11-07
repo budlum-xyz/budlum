@@ -60,8 +60,6 @@ pub struct Metrics {
     pub pending_poa_freeze_rows: IntGauge,
     /// Governance PoA unfreeze requests waiting for block-end application.
     pub pending_poa_unfreeze_rows: IntGauge,
-    /// B.U.D. boost share waiting for storage-operator distribution.
-    pub pending_bud_boost_atoms: IntGauge,
     pub block_propagation_seconds: Histogram,
     pub mempool_sender_count: IntGauge,
     pub peer_connection_quality: IntGauge,
@@ -71,10 +69,6 @@ pub struct Metrics {
     /// at least 40 blocks (8 checkpoint intervals), `0` otherwise.
     pub finality_stalled: IntGauge,
     pub storage_db_size_bytes: IntGauge,
-    /// Content chunks retained by the durable B.U.D. content store.
-    pub content_store_chunks: IntGauge,
-    /// Bytes retained by the durable B.U.D. content store.
-    pub content_store_bytes: IntGauge,
     pub storage_write_seconds: Histogram,
     pub storage_read_seconds: Histogram,
     pub settlement_commitments_total: IntCounter,
@@ -163,16 +157,6 @@ pub struct Metrics {
     pub poa_compliance_frozen_accounts: IntGauge,
     /// Rows in the storage reallocation ticket map. Settled tickets leave it
     /// after `REALLOCATION_RECORD_RETENTION_EPOCHS`; a gauge that only ever
-    /// rises means the sweep is not running.
-    pub storage_reallocation_rows: IntGauge,
-    /// Content manifests retained in the B.U.D. storage registry.
-    pub storage_manifest_rows: IntGauge,
-    /// Storage deals retained in the B.U.D. storage registry.
-    pub storage_deal_rows: IntGauge,
-    /// Retrieval challenges retained in the B.U.D. storage registry.
-    pub storage_challenge_rows: IntGauge,
-    /// Challenge results retained in the B.U.D. storage registry.
-    pub storage_result_rows: IntGauge,
     pub ai_requests_total: IntCounter,
     pub ai_outcomes_finalized: IntCounter,
     /// AI models retained in the state-rooted registry.
@@ -339,10 +323,6 @@ impl Metrics {
             "budlum_pending_poa_unfreeze_rows",
             "Governance PoA unfreeze requests waiting for block-end application",
         )?;
-        let pending_bud_boost_atoms = IntGauge::new(
-            "budlum_pending_bud_boost_atoms",
-            "B.U.D. boost share waiting for storage-operator distribution",
-        )?;
         let block_propagation_seconds = Histogram::with_opts(HistogramOpts::new(
             "budlum_block_propagation_seconds",
             "Observed block propagation time in seconds",
@@ -366,14 +346,6 @@ impl Metrics {
         let storage_db_size_bytes = IntGauge::new(
             "budlum_storage_db_size_bytes",
             "Approximate storage size in bytes",
-        )?;
-        let content_store_chunks = IntGauge::new(
-            "budlum_content_store_chunks",
-            "Content chunks retained by the durable B.U.D. content store",
-        )?;
-        let content_store_bytes = IntGauge::new(
-            "budlum_content_store_bytes",
-            "Bytes retained by the durable B.U.D. content store",
         )?;
         let storage_write_seconds = Histogram::with_opts(HistogramOpts::new(
             "budlum_storage_write_seconds",
@@ -562,26 +534,6 @@ impl Metrics {
             "budlum_poa_compliance_frozen_accounts",
             "Accounts frozen by the PoA compliance registry",
         )?;
-        let storage_reallocation_rows = IntGauge::new(
-            "budlum_storage_reallocation_rows",
-            "Rows in the storage reallocation ticket map (settled tickets are swept after the retention window)",
-        )?;
-        let storage_manifest_rows = IntGauge::new(
-            "budlum_storage_manifest_rows",
-            "Content manifests retained in the B.U.D. storage registry",
-        )?;
-        let storage_deal_rows = IntGauge::new(
-            "budlum_storage_deal_rows",
-            "Storage deals retained in the B.U.D. storage registry",
-        )?;
-        let storage_challenge_rows = IntGauge::new(
-            "budlum_storage_challenge_rows",
-            "Retrieval challenges retained in the B.U.D. storage registry",
-        )?;
-        let storage_result_rows = IntGauge::new(
-            "budlum_storage_result_rows",
-            "Challenge results retained in the B.U.D. storage registry",
-        )?;
         let ai_requests_total = IntCounter::new(
             "budlum_ai_requests_total",
             "Total AI inference requests submitted",
@@ -748,7 +700,6 @@ impl Metrics {
         registry.register(Box::new(pending_domain_unfreeze_rows.clone()))?;
         registry.register(Box::new(pending_poa_freeze_rows.clone()))?;
         registry.register(Box::new(pending_poa_unfreeze_rows.clone()))?;
-        registry.register(Box::new(pending_bud_boost_atoms.clone()))?;
         registry.register(Box::new(block_propagation_seconds.clone()))?;
         registry.register(Box::new(mempool_sender_count.clone()))?;
         registry.register(Box::new(peer_connection_quality.clone()))?;
@@ -756,8 +707,6 @@ impl Metrics {
         registry.register(Box::new(finality_lag.clone()))?;
         registry.register(Box::new(finality_stalled.clone()))?;
         registry.register(Box::new(storage_db_size_bytes.clone()))?;
-        registry.register(Box::new(content_store_chunks.clone()))?;
-        registry.register(Box::new(content_store_bytes.clone()))?;
         registry.register(Box::new(storage_write_seconds.clone()))?;
         registry.register(Box::new(storage_read_seconds.clone()))?;
         registry.register(Box::new(settlement_commitments_total.clone()))?;
@@ -806,11 +755,6 @@ impl Metrics {
         registry.register(Box::new(poa_admission_domains.clone()))?;
         registry.register(Box::new(poa_admitted_authorities.clone()))?;
         registry.register(Box::new(poa_compliance_frozen_accounts.clone()))?;
-        registry.register(Box::new(storage_reallocation_rows.clone()))?;
-        registry.register(Box::new(storage_manifest_rows.clone()))?;
-        registry.register(Box::new(storage_deal_rows.clone()))?;
-        registry.register(Box::new(storage_challenge_rows.clone()))?;
-        registry.register(Box::new(storage_result_rows.clone()))?;
         registry.register(Box::new(ai_requests_total.clone()))?;
         registry.register(Box::new(ai_outcomes_finalized.clone()))?;
         registry.register(Box::new(ai_model_rows.clone()))?;
@@ -874,7 +818,6 @@ impl Metrics {
             pending_domain_unfreeze_rows,
             pending_poa_freeze_rows,
             pending_poa_unfreeze_rows,
-            pending_bud_boost_atoms,
             block_propagation_seconds,
             mempool_sender_count,
             peer_connection_quality,
@@ -882,8 +825,6 @@ impl Metrics {
             finality_lag,
             finality_stalled,
             storage_db_size_bytes,
-            content_store_chunks,
-            content_store_bytes,
             storage_write_seconds,
             storage_read_seconds,
             settlement_commitments_total,
@@ -933,11 +874,6 @@ impl Metrics {
             poa_admission_domains,
             poa_admitted_authorities,
             poa_compliance_frozen_accounts,
-            storage_reallocation_rows,
-            storage_manifest_rows,
-            storage_deal_rows,
-            storage_challenge_rows,
-            storage_result_rows,
             ai_requests_total,
             ai_outcomes_finalized,
             ai_model_rows,
@@ -1043,7 +979,6 @@ mod tests {
             "budlum_pending_domain_unfreeze_rows",
             "budlum_pending_poa_freeze_rows",
             "budlum_pending_poa_unfreeze_rows",
-            "budlum_pending_bud_boost_atoms",
             "budlum_mempool_size",
             "budlum_mempool_bytes",
             "budlum_mempool_sender_count",
@@ -1068,14 +1003,7 @@ mod tests {
             "budlum_poa_admission_domains",
             "budlum_poa_admitted_authorities",
             "budlum_poa_compliance_frozen_accounts",
-            "budlum_storage_reallocation_rows",
-            "budlum_storage_manifest_rows",
-            "budlum_storage_deal_rows",
-            "budlum_storage_challenge_rows",
-            "budlum_storage_result_rows",
             "budlum_storage_db_size_bytes",
-            "budlum_content_store_chunks",
-            "budlum_content_store_bytes",
             "budlum_p2p_peers_connected",
             "budlum_p2p_gossip_duplicates",
             "budlum_p2p_sync_requests",

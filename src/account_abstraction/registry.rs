@@ -21,7 +21,7 @@
 //! schema, not here.
 
 use super::quantum_account::QuantumAccount;
-use crate::storage::pact_binding::PactRegistry;
+use crate::account_abstraction::pact_binding::PactRegistry;
 use std::collections::BTreeMap;
 
 /// Registry errors.
@@ -429,7 +429,7 @@ mod tests {
     /// An account carrying a real pact set must be registrable.
     #[test]
     fn an_account_bound_to_its_pact_set_registers() {
-        use crate::storage::pact_binding::Pact;
+        use crate::account_abstraction::pact_binding::Pact;
         use sha3::{Digest, Sha3_256};
 
         let payload = b"tarif";
@@ -484,7 +484,7 @@ mod tests {
     /// A pact registry with a stale root must not be accepted.
     #[test]
     fn a_pact_registry_with_a_stale_root_is_refused() {
-        use crate::storage::pact_binding::Pact;
+        use crate::account_abstraction::pact_binding::Pact;
 
         let mut pacts = PactRegistry::new();
         pacts

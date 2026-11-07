@@ -32,6 +32,71 @@ fn address(byte: u8) -> Address {
     Address::from(bytes)
 }
 
+/// BLG-020: `collect_block_transactions` validates against a candidate-state
+/// clone and only promotes it on success, so a refused transaction cannot
+/// leak a half-applied `temp_state` into the block.
+#[test]
+fn blg_020_rejected_transactions_do_not_mutate_the_block_state() {
+    let chain = production_part(include_str!("../chain/blockchain.rs"));
+    let at = chain
+        .find("let mut candidate_state = temp_state.clone();")
+        .expect("the candidate-state clone must exist in collect_block_transactions");
+    let apply = chain[at..(at + 2_000).min(chain.len())]
+        .find("Executor::apply_transaction_checked(&mut candidate_state, tx)")
+        .expect("the candidate state must be what the executor applies against");
+    let promote = chain[at..(at + 4_000).min(chain.len())]
+        .find("temp_state = candidate_state;")
+        .expect("the candidate state must be promoted only after a successful apply");
+    // The executor applies against the clone first; the promotion happens later.
+    assert!(apply < 4_000);
+    assert!(promote > apply);
+}
+
+/// BLG-266: the single `min_stake` parameter no longer exists as the only
+/// floor. Full and mobile classes have their own floors and the class floor
+/// is what the profile exposes (`TESTNET-DEFAULT`: 1,000 / 10 BUD).
+#[test]
+fn blg_266_min_stake_is_split_per_class() {
+    let config = production_part(include_str!("../core/chain_config.rs"));
+    assert!(config.contains("pub fn min_stake_full("));
+    assert!(config.contains("pub fn min_stake_mobile("));
+    assert!(config.contains("pub fn class_floor("));
+    // The testnet profile ships the phone floor far below the full floor.
+    let testnet = config
+        .find("Network::Testnet")
+        .expect("the testnet arm must exist");
+    let window = &config[testnet..(testnet + 2_000).min(config.len())];
+    assert!(window.contains("min_stake: crate::tokenomics::bud(1_000)"));
+    assert!(window.contains("min_stake_mobile: crate::tokenomics::bud(10)"));
+}
+
+#[test]
+fn audit_lane_a_blg_001_leader_round_surface_present() {
+    let src = include_str!("../consensus/leader.rs");
+    assert!(
+        src.contains("MAX_LEADER_ROUNDS"),
+        "BLG-001: bounded leader-round fallback constant must remain present"
+    );
+}
+
+#[test]
+fn audit_lane_a_blg_006_reward_pool_epoch_surface_present() {
+    let src = include_str!("../tokenomics/reward_pool.rs");
+    assert!(
+        src.contains("pay_epoch"),
+        "BLG-006: epoch reward settlement entrypoint must remain present"
+    );
+}
+
+#[test]
+fn audit_lane_a_blg_018_finalized_height_tracked_in_blockchain() {
+    let src = include_str!("../chain/blockchain.rs");
+    assert!(
+        src.contains("finalized_height"),
+        "BLG-018: finalized_height tracking must remain present in blockchain"
+    );
+}
+
 #[test]
 fn audit_lane_a_blg_019_retired_state_update_preserves_accounts() {
     // Exercise the executor's structured refusal on both testnet and devnet,
