@@ -233,11 +233,11 @@ fn parse_atom(text: &[char], start: usize, source: &str) -> Result<(Atom, usize)
         '^' => Ok((Atom::Start, start + 1)),
         '$' => Ok((Atom::End, start + 1)),
         ')' | '*' | '?' | '+' => Err(format!(
-            "`{source}` uses `{c}` where the pattern language does not allow it"
+            "`{source}` uses `{c}` where the pattern language does not allow it",
         )),
         '.' => Err(format!(
             "`{source}` uses `.`, and the pattern language has no wildcard. Write the \
-             character to look for, or `\\.` for a full stop."
+             character to look for, or `\\.` for a full stop.",
         )),
         _ => Ok((Atom::Literal(*c), start + 1)),
     }
@@ -275,7 +275,7 @@ fn parse_alts(
                 return Err(format!(
                     "`{source}` uses `{quantifier}`, which the map's pattern language does \
                      not support. A repeated or wildcard pattern needs a decision, not a \
-                     silently different count."
+                     silently different count.",
                 ));
             }
         }
@@ -299,7 +299,7 @@ fn compile_pattern(source: &str) -> Result<Pattern, String> {
     if body.contains("(?") {
         return Err(format!(
             "`{source}` carries an inline flag the pattern language does not model; \
-             `(?i)` at the start of a pattern is the only flag the map uses"
+             `(?i)` at the start of a pattern is the only flag the map uses",
         ));
     }
     let chars: Vec<char> = body.chars().collect();
@@ -595,7 +595,7 @@ fn validate_paths(paths: &[String], key: &str, who: &str) -> Result<(), String> 
                 .any(|part| part.is_empty() || part == "." || part == "..");
         if bad {
             return Err(format!(
-                "{who}: `{key}` holds `{path}`, which is not a repository-relative path"
+                "{who}: `{key}` holds `{path}`, which is not a repository-relative path",
             ));
         }
     }
@@ -620,7 +620,7 @@ fn build_concept(record: &BTreeMap<String, Value>, index: usize) -> Result<Conce
     let old = list_of(record.get("old"), "old", &unknown)?;
     let Some(name) = old.first().cloned() else {
         return Err(format!(
-            "{unknown}: `old` is empty, so the record names no concept"
+            "{unknown}: `old` is empty, so the record names no concept",
         ));
     };
     let who = format!("concept `{name}`");
@@ -632,13 +632,13 @@ fn build_concept(record: &BTreeMap<String, Value>, index: usize) -> Result<Conce
         let last = LAST_PACKAGE;
         return Err(format!(
             "{who}: owner `{owner}` is not a package the directive defines \
-             (`WP-01` to `WP-{last}`)"
+             (`WP-01` to `WP-{last}`)",
         ));
     }
     let sources = list_of(record.get("patterns"), "patterns", &who)?;
     if sources.is_empty() {
         return Err(format!(
-            "{who}: `patterns` is empty, so the record bans nothing"
+            "{who}: `patterns` is empty, so the record bans nothing",
         ));
     }
     let mut patterns = Vec::new();
@@ -671,7 +671,7 @@ fn load_map(root: &Path) -> Result<Map, String> {
         }
         if statement.starts_with('[') {
             return Err(format!(
-                "{MAP_PATH}: `{statement}` is not a `[[concept]]` table"
+                "{MAP_PATH}: `{statement}` is not a `[[concept]]` table",
             ));
         }
         let Some((key, value)) = statement.split_once('=') else {
@@ -700,7 +700,7 @@ fn load_map(root: &Path) -> Result<Map, String> {
         "absolute" => true,
         other => {
             return Err(format!(
-                "{MAP_PATH}: `mode` must be `count` or `absolute`, found `{other}`"
+                "{MAP_PATH}: `mode` must be `count` or `absolute`, found `{other}`",
             ))
         }
     };
@@ -708,7 +708,7 @@ fn load_map(root: &Path) -> Result<Map, String> {
     validate_paths(&global_allow, "global_allow_paths", MAP_PATH)?;
     if records.is_empty() {
         return Err(format!(
-            "{MAP_PATH}: no `[[concept]]` records, so the gate would ban nothing"
+            "{MAP_PATH}: no `[[concept]]` records, so the gate would ban nothing",
         ));
     }
     let mut concepts = Vec::new();
@@ -835,7 +835,7 @@ fn measure(root: &Path, map: &Map) -> Result<BTreeMap<String, Count>, String> {
     if scanned == 0 {
         return Err(format!(
             "no source file was readable under {}; the gate would be vacuous",
-            root.display()
+            root.display(),
         ));
     }
     Ok(counts)
@@ -856,13 +856,13 @@ fn parse_baseline(root: &Path) -> Result<BTreeMap<String, Count>, String> {
         if parts.len() != 3 {
             return Err(format!(
                 "{BASELINE_PATH}:{line_number}: expected `<concept>` TAB `<files>` TAB \
-                 `<matches>`"
+                 `<matches>`",
             ));
         }
         let name = parts.first().copied().unwrap_or_default().trim();
         if name.is_empty() {
             return Err(format!(
-                "{BASELINE_PATH}:{line_number}: the concept name is empty"
+                "{BASELINE_PATH}:{line_number}: the concept name is empty",
             ));
         }
         let mut numbers = [0usize; 2];
@@ -878,7 +878,7 @@ fn parse_baseline(root: &Path) -> Result<BTreeMap<String, Count>, String> {
         };
         if out.insert(name.to_string(), count).is_some() {
             return Err(format!(
-                "{BASELINE_PATH}:{line_number}: `{name}` is listed twice"
+                "{BASELINE_PATH}:{line_number}: `{name}` is listed twice",
             ));
         }
     }
@@ -897,14 +897,14 @@ fn judgement(concept: &Concept, measured: Count, baseline: Count) -> Result<(), 
         return Err(format!(
             "{name} ({owner}): the count rose to {now_files} file(s) / {now_matches} \
              match(es), above the baseline {recorded_files} / {recorded_matches}. A legacy \
-             name was added; use the code name the map gives."
+             name was added; use the code name the map gives.",
         ));
     }
     if measured != baseline {
         return Err(format!(
             "{name} ({owner}): the count fell to {now_files} file(s) / {now_matches} \
              match(es) and the baseline still says {recorded_files} / {recorded_matches}. \
-             Lower it with {WRITE_ENV}=1."
+             Lower it with {WRITE_ENV}=1.",
         ));
     }
     Ok(())
@@ -932,7 +932,7 @@ fn write_baseline(
                 return Err(format!(
                     "refusing to raise `{name}` from {recorded_files} file(s) / \
                      {recorded_matches} match(es) to {now_files} / {now_matches}. A rising \
-                     count is a regression, not a baseline update."
+                     count is a regression, not a baseline update.",
                 ));
             }
         }
@@ -944,7 +944,7 @@ fn write_baseline(
     fs::write(root.join(BASELINE_PATH), body).map_err(|e| format!("{BASELINE_PATH}: {e}"))?;
     let total = map.concepts.len();
     Ok(format!(
-        "{BASELINE_PATH} rewritten from the tree: {total} concept(s)."
+        "{BASELINE_PATH} rewritten from the tree: {total} concept(s).",
     ))
 }
 
@@ -971,7 +971,7 @@ pub fn run(root: &Path) -> Result<String, String> {
             let name = &concept.name;
             findings.push(format!(
                 "{name}: the concept is missing from {BASELINE_PATH}; add it with \
-                 {WRITE_ENV}=1"
+                 {WRITE_ENV}=1",
             ));
             continue;
         };
@@ -979,7 +979,7 @@ pub fn run(root: &Path) -> Result<String, String> {
             let name = &concept.name;
             let left = measured.matches;
             findings.push(format!(
-                "{name}: the map is in `absolute` mode and {left} match(es) remain"
+                "{name}: the map is in `absolute` mode and {left} match(es) remain",
             ));
             continue;
         }
@@ -990,7 +990,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     for name in baseline.keys() {
         if !map.concepts.iter().any(|concept| &concept.name == name) {
             findings.push(format!(
-                "{name}: {BASELINE_PATH} lists a concept the map does not carry"
+                "{name}: {BASELINE_PATH} lists a concept the map does not carry",
             ));
         }
     }
@@ -1008,7 +1008,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     let mode = if map.absolute { "absolute" } else { "count" };
     Ok(format!(
         "concept-names: {total} concept(s) at the baseline, {legacy_matches} legacy \
-         match(es) left, mode {mode}."
+         match(es) left, mode {mode}.",
     ))
 }
 
