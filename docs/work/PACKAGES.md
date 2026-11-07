@@ -212,4 +212,3 @@ them is closed by this pull request.
    `workflows_cover_every_workspace` (section 16.2.3) and
    `no_float_in_consensus_paths` (WP-42 item 4). Both are static scans over
    the tree, so neither needs a running node.
-
