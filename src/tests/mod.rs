@@ -270,3 +270,7 @@ pub mod bud3_types;
 // WP-17 state transition, governance, staking, and V2 snapshot locks.
 #[cfg(test)]
 pub mod wp17_state_hardening;
+
+// WP-44 domains, bridge, settlement, and testnet feature-matrix locks.
+#[cfg(test)]
+pub mod wp44_domains_bridge_settlement;

@@ -109,6 +109,18 @@ pub fn zk_program_hash(program: &[u64]) -> Hash32 {
     hasher.finalize().into()
 }
 
+/// Returns `true` when `program` is empty or consists exclusively of `Halt`
+/// instructions (`BLG-116`). Such a program performs no state or witness check
+/// and must never attest a domain state root.
+#[must_use]
+pub fn is_empty_or_halt_only_program(program: &[u64]) -> bool {
+    program.is_empty()
+        || program.iter().all(|&word| {
+            bud_isa::Instruction::decode_any(word)
+                .is_ok_and(|inst| inst.opcode == bud_isa::Opcode::Halt)
+        })
+}
+
 /// The acceptance window for `block_height` in the public inputs of a zk proof.
 ///
 /// A STARK proof says "it ran this way with these inputs"; the input claiming a

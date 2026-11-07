@@ -491,7 +491,7 @@ enum GraftAction {
         evidence: std::path::PathBuf,
     },
     /// Claim an externally owned application with its EIP-191 signature
-    /// over `eoa_claim_hash` (docs/GRAFT.md, section 4).
+    /// over `eoa_claim_hash` (docs/APP_BINDING.md, section 4).
     ClaimSigned {
         #[command(flatten)]
         signer: V5Signer,
