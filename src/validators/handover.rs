@@ -615,3 +615,61 @@ impl RecoveryTracker {
         self.entered_epoch = None;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duty_rule_table_matches_section_7_6() {
+        let expected = [
+            (
+                DutyKind::BlockProposal,
+                HandoverBound::Milliseconds(PROPOSER_ROUND_TIMEOUT_MS),
+            ),
+            (
+                DutyKind::FinalitySeat,
+                HandoverBound::Blocks(3 * TESTNET_CHECKPOINT_INTERVAL_BLOCKS),
+            ),
+            (
+                DutyKind::CustodyShareRead,
+                HandoverBound::Immediate {
+                    timeout_ms: CUSTODY_READ_TIMEOUT_MS,
+                },
+            ),
+            (
+                DutyKind::CustodyShareDurability,
+                HandoverBound::UnseenHours {
+                    full_hours: FULL_DURABILITY_UNSEEN_HOURS,
+                    mobile_hours: MOBILE_DURABILITY_UNSEEN_HOURS,
+                },
+            ),
+            (
+                DutyKind::NewCustodyAssignment,
+                HandoverBound::Epochs(CUSTODY_ASSIGNMENT_HANDOVER_EPOCHS),
+            ),
+            (
+                DutyKind::RepairTask,
+                HandoverBound::Blocks(REPAIR_TASK_HANDOVER_BLOCKS),
+            ),
+            (
+                DutyKind::UploadGateway,
+                HandoverBound::Immediate { timeout_ms: 0 },
+            ),
+            (
+                DutyKind::RelayReservation,
+                HandoverBound::Immediate { timeout_ms: 0 },
+            ),
+            (
+                DutyKind::PresenceAggregation,
+                HandoverBound::Blocks(PRESENCE_FALLBACK_MAX_BLOCKS),
+            ),
+        ];
+        assert_eq!(HANDOVER_TABLE.len(), expected.len());
+        for (spec, (duty, bound)) in HANDOVER_TABLE.iter().zip(expected.iter()) {
+            assert_eq!(spec.duty, *duty);
+            assert_eq!(spec.bound, *bound);
+            assert_eq!(handover_spec(*duty), *spec);
+        }
+    }
+}

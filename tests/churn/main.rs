@@ -541,3 +541,91 @@ fn finality_stall_enters_recovery_mode() {
     assert!(!sim.recovery.is_stalled());
     assert_eq!(sim.stalled_metric(), 0);
 }
+
+#[test]
+fn churn_runs_on_the_testnet_schedule() {
+    let mut sim = ChurnSimulator::new(
+        ChurnConfig {
+            full_count: 8,
+            mobile_count: 4,
+            active_seat_cap: 6,
+            epoch_blocks: 20,
+            drop_ppm: 0,
+        },
+        606,
+    );
+    for expected_height in 1..=40 {
+        let (round, proposer, _) = sim.step_block(false);
+        assert_eq!(sim.height, expected_height);
+        assert!(round <= 63, "the simulator's bounded successor search exhausted");
+        assert!(sim.validators.iter().any(|validator| {
+            validator.address == proposer && validator.class == ValidatorClass::Full
+        }));
+    }
+    assert_eq!(sim.finalized_height, 40);
+    assert_eq!(sim.stalled_metric(), 0);
+    assert!(sim.seat_tracker.active_seats().len() <= 6);
+    assert!(sim.seat_tracker.active_seats().iter().all(|seat| {
+        sim.validators.iter().any(|validator| {
+            validator.address == *seat && validator.class == ValidatorClass::Full
+        })
+    }));
+}
+
+#[test]
+fn churn_random_leave_and_return_keeps_finality() {
+    let mut sim = ChurnSimulator::new(
+        ChurnConfig {
+            full_count: 20,
+            mobile_count: 10,
+            active_seat_cap: 16,
+            epoch_blocks: 30,
+            drop_ppm: 0,
+        },
+        707,
+    );
+    let mut departed: Vec<([u8; 32], u64)> = Vec::new();
+
+    for height in 1..=60u64 {
+        let returning: Vec<[u8; 32]> = departed
+            .iter()
+            .filter(|(_, left_at)| height.saturating_sub(*left_at) >= 3)
+            .map(|(address, _)| *address)
+            .collect();
+        for validator in &mut sim.validators {
+            if returning.contains(&validator.address) {
+                validator.online = true;
+            }
+        }
+        departed.retain(|(address, _)| !returning.contains(address));
+
+        // At most two of twenty Full validators (10%) are away at once. The
+        // deterministic weather stream chooses who leaves; every departure is
+        // temporary and the same validator returns three blocks later.
+        if height % 6 == 0 && height <= 54 && departed.len() < 2 {
+            let candidates: Vec<[u8; 32]> = sim
+                .validators
+                .iter()
+                .filter(|validator| {
+                    validator.class == ValidatorClass::Full && validator.online
+                })
+                .map(|validator| validator.address)
+                .collect();
+            if !candidates.is_empty() {
+                let index = usize::try_from(sim.next_u32()).unwrap_or(0) % candidates.len();
+                let address = candidates[index];
+                for validator in &mut sim.validators {
+                    if validator.address == address {
+                        validator.online = false;
+                    }
+                }
+                departed.push((address, height));
+            }
+        }
+        sim.step_block(false);
+    }
+
+    assert!(departed.is_empty(), "every random departure returned");
+    assert_eq!(sim.finalized_height, 60);
+    assert_eq!(sim.stalled_metric(), 0);
+}

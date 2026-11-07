@@ -1234,6 +1234,7 @@ mod tests {
             "budlum_tokenomics_years_burned",
             "budlum_tokenomics_timed_burned_total",
             "budlum_tokenomics_team_locked",
+            "budlum_finality_stalled",
             "budlum_slashing_events_total",
             "budlum_pq_verifier_disagreement",
             "budlum_settlement_equivocations_detected",
