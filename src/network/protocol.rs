@@ -283,8 +283,25 @@ impl NetworkMessage {
     }
 }
 
+/// Whether `hash` is the canonical spelling of a 32-byte digest: exactly 64
+/// lowercase hexadecimal characters.
+///
+/// This is the one definition of the rule in the tree. It used to exist as
+/// three copies, and all three used `u8::is_ascii_hexdigit`, which accepts
+/// `A`-`F` as well, so each one documented a lowercase-only rule and enforced
+/// a mixed-case one. Every hash the tree writes is lowercase, so the looser
+/// predicate only ever admitted strings no honest producer emits: the gossip
+/// message id is a hash of the raw frame, which makes an upper-case copy of a
+/// signed vote a message the dedup table has never seen and a second trip
+/// through the signature check, and a header locator entry that no local hash
+/// can equal costs a sync round without ever naming a block.
+#[must_use]
 pub fn is_canonical_hash(hash: &str) -> bool {
-    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+    let bytes = hash.as_bytes();
+    bytes.len() == 64
+        && bytes
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 #[cfg(test)]
@@ -414,6 +431,22 @@ mod tests {
             1,
         )
         .is_err());
+    }
+
+    /// One digest has one canonical spelling. An upper-case copy is a different
+    /// string to the dedup table and to a locator lookup, so it is refused at
+    /// the door instead of being carried as a second name for the same hash.
+    #[test]
+    fn only_lowercase_hex_is_a_canonical_hash() {
+        let canonical = "ab".repeat(32);
+        assert!(is_canonical_hash(&canonical));
+        assert!(!is_canonical_hash(&canonical.to_uppercase()));
+        assert!(!is_canonical_hash(&canonical[1..]));
+        assert!(NetworkMessage::validate_header_request(&[canonical.clone()], 1).is_ok());
+        assert!(
+            NetworkMessage::validate_header_request(&[canonical.to_uppercase()], 1).is_err(),
+            "an upper-case locator entry names no block and must be refused, not answered with an empty batch"
+        );
     }
 
     #[test]

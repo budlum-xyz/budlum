@@ -3783,9 +3783,7 @@ impl Node {
                                             self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
                                             continue;
                                         }
-                                        if tx.hash.len() != 64
-                                            || !tx.hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-                                        {
+                                        if !crate::network::protocol::is_canonical_hash(&tx.hash) {
                                             warn!(
                                                 "Rejected transaction with non-canonical hash from {} (len={})",
                                                 peer_id,

@@ -29,25 +29,7 @@ use std::fmt;
 use crate::chain::finality::{FinalityCert, ValidatorSetSnapshot};
 use crate::consensus::qc::QcBlob;
 use crate::core::block::BlockHeader;
-
-/// A 64-character lowercase hex digest.
-/// A 64-character lowercase hex digest. `const fn` so the trust-anchor check
-/// can run in constant contexts; `u8::is_ascii_hexdigit` is const since Rust
-/// 1.87, which this crate's MSRV (1.97) satisfies.
-fn is_canonical_hash(hash: &str) -> bool {
-    let bytes = hash.as_bytes();
-    if bytes.len() != 64 {
-        return false;
-    }
-    let mut i = 0;
-    while i < bytes.len() {
-        if !bytes[i].is_ascii_hexdigit() {
-            return false;
-        }
-        i += 1;
-    }
-    true
-}
+use crate::network::protocol::is_canonical_hash;
 
 /// The single trust anchor a light client is bootstrapped from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -758,6 +740,22 @@ mod tests {
     use bls12_381::{G1Affine, G1Projective, Scalar};
 
     const TEST_CHAIN_ID: u64 = crate::core::transaction::DEFAULT_CHAIN_ID;
+
+    /// The trust anchor is a 64-hex digest in its one canonical spelling: an
+    /// upper-case copy names the same block to a human, and a different string
+    /// to every comparison the client makes.
+    #[test]
+    fn an_upper_case_trust_anchor_is_refused() {
+        let trusted = TrustedCheckpoint {
+            height: 7,
+            block_hash: "AA".repeat(32),
+            set_hash: "bb".repeat(32),
+        };
+        assert!(matches!(
+            LightClient::new(trusted),
+            Err(LightClientError::MalformedHash(_))
+        ));
+    }
 
     fn make_bls_key(seed: u8) -> BlsKeypair {
         let mut sk_bytes = [0u8; 64];
