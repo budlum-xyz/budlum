@@ -107,6 +107,7 @@ updates:
       - "/crates/budlum-types"
       - "/crates/uel-abi"
       - "/mobile/core"
+      - "/mobile/ffi"
       - "/crates/ai-inference"
       - "/crates/bpqs"
       - "/crates/budscan"
