@@ -2431,6 +2431,44 @@ mod tests {
         assert!(registry.is_credential_valid(&second_id, 200).is_ok());
     }
 
+    #[test]
+    fn blg_190_identity_recover_refuses_non_poa_domain() {
+        let mut registry = IdentityRegistry::new();
+        let subject = addr(1);
+        registry
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Register {
+                    record: subject_record_with_guardians(),
+                },
+                10,
+            )
+            .unwrap();
+        let before = registry.record(&subject).unwrap().clone();
+        let error = execute_identity_tx(
+            &mut registry,
+            &subject,
+            IdentityTx::Recover {
+                subject,
+                new_key: [9; 32],
+                approvals: vec![GuardianApproval {
+                    public_key: vec![0; 4],
+                    signature: vec![],
+                }],
+            },
+            &ConsensusKind::PoS,
+            20,
+            1,
+        )
+        .expect_err("identity recovery is writable only in the PoA domain");
+        assert!(matches!(error, IdentityError::NotPoaDomain { .. }), "{error}");
+        assert_eq!(
+            registry.record(&subject),
+            Some(&before),
+            "a refused recovery must leave the record unchanged"
+        );
+    }
+
     /// The happy paths that need a real wallet signature
     ///   a consented third-party Issue and a guardian-quorum Recover. They
     ///   live behind `wallet-ml-dsa`: the build that carries the wallet is the
@@ -2501,6 +2539,26 @@ mod tests {
                 signature: g2.sign(crate::crypto::ctx::IDENTITY_V2, &msg).to_vec(),
             },
         ];
+        let rejected = execute_identity_tx(
+            &mut registry,
+            &subject,
+            IdentityTx::Recover {
+                subject,
+                new_key,
+                approvals: approvals.clone(),
+            },
+            &ConsensusKind::PoS,
+            200,
+            1,
+        )
+        .expect_err("a valid guardian quorum cannot write outside the PoA domain");
+        assert!(matches!(rejected, IdentityError::NotPoaDomain { .. }));
+        assert!(registry
+            .record(&subject)
+            .unwrap()
+            .live_method(&new_key, 200)
+            .is_none());
+
         execute_identity_tx(
             &mut registry,
             &subject,
