@@ -1,0 +1,287 @@
+# Live Status of the Findings Register
+
+This file is the M0 pre-scan output (directive sections 14.1 and 15.6). It records the M0 baseline pre-scan across all 267 baseline findings (BLG-001..BLG-267) together with the lane verification notes under `docs/audit/live/`. The status column is NOT a verdict. Closing a finding requires a reproduction test that fails before the fix and passes after it (directive 14.1.5). Those tests are not written yet.
+
+## Status vocabulary (directive 14.1.3)
+
+Open, Verified (open and reproduced), Closed (fix merged), Removed (code deleted), Invalid (condition gone, shown by a test). This scan sets none of them. It only sets a pre-scan indication.
+
+## Totals
+
+- Findings scanned: 267
+- Critical: 77
+- High: 103
+- Medium: 78
+- Low: 9
+
+## Findings
+
+| ID | Severity | Closing package | Tokens present | Pre-scan | Evidence | Reproduction test | Note |
+|---|---|---|---|---|---|---|---|
+| BLG-001 | Critical | WP-12 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/consensus/mod.rs` | Not written | Directive notes a fix trace |
+| BLG-002 | High | WP-16 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-003 | High | WP-16 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-004 | Medium | WP-61 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-005 | Medium | WP-16 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-006 | Medium | WP-16 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `src/chain/blockchain.rs` | Not written | Directive notes a fix trace |
+| BLG-007 | Medium | WP-17 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-008 | Medium | WP-16 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `config/testnet.toml`; `docs/TESTNET.md` | Not written |  |
+| BLG-009 | Medium | WP-61 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-010 | Medium | WP-61 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `src/crypto/pkcs11.rs` | Not written |  |
+| BLG-011 | Medium | WP-41 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `ops/budlum-core.service` | Not written |  |
+| BLG-012 | High | WP-42 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-013 | Medium | WP-42 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-014 | Medium | WP-42 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-015 | Medium | WP-42 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-016 | High | WP-42 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-017 | Critical | WP-15 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `kani/src/lib.rs` | Not written |  |
+| BLG-018 | Critical | WP-12 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `fuzz/fuzz_targets/consensus_state_transition.rs` | Not written |  |
+| BLG-019 | Critical | WP-17 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/core/account.rs`; `src/execution/executor.rs` | Not written | Directive notes a fix trace |
+| BLG-020 | Critical | WP-17 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/chain/blockchain.rs` | Not written | Directive notes a fix trace |
+| BLG-021 | Critical | WP-17 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `src/core/account.rs` | Not written |  |
+| BLG-022 | Medium | WP-11 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `src/bin/budlum-light.rs` | Not written |  |
+| BLG-023 | Medium | WP-17 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/core/account.rs`; `fuzz/fuzz_targets/relayer_escrow.rs` | Not written |  |
+| BLG-024 | Low | WP-44 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `src/domain/finality_adapter.rs` | Not written |  |
+| BLG-025 | Low | WP-45 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `src/account_abstraction/quantum_account.rs`; `.github/workflows/ci.yml` | Not written |  |
+| BLG-026 | Medium | WP-39 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `crates/wallet-core`; `crates/ai-inference` | Not written |  |
+| BLG-027 | High | WP-12 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-028 | High | WP-17 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `benches/domain_throughput.rs`; `src/chain/blockchain.rs` | Not written |  |
+| BLG-029 | High | WP-61 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/rpc/server.rs`; `src/chain/storage_maintenance.rs` | Not written | Directive notes a fix trace |
+| BLG-030 | Critical | WP-41, WP-61 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written | Directive notes a fix trace |
+| BLG-031 | Low | WP-17 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `benches/domain_throughput.rs`; `crates/bpqs/examples/bench_differential.rs` | Not written |  |
+| BLG-032 | Medium | WP-61 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `src/gateway/mod.rs` | Not written |  |
+| BLG-033 | Critical | WP-15 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/bud-node/src/bitswap.rs`; `src/core/transaction.rs` | Not written |  |
+| BLG-034 | High | WP-15 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `.github/workflows/security-hardening.yml` | Not written |  |
+| BLG-035 | Medium | WP-07 | 2/3 | Pre-scan: partial; manual review needed | `budzero/bud-node/src/bitswap.rs` | Not written |  |
+| BLG-036 | Critical | WP-33 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/bud-proof/src/bud_stark/verifier.rs`; `.github/workflows/ci.yml` | Not written |  |
+| BLG-037 | Critical | WP-33 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/bud-cli/src/main.rs` | Not written |  |
+| BLG-038 | Critical | WP-33 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `benches/domain_throughput.rs` | Not written |  |
+| BLG-039 | Critical | WP-33 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/bud-proof/src/bud_stark/preprocessed.rs` | Not written |  |
+| BLG-040 | High | WP-33 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/bud-cli/src/main.rs`; `budzero/bud-proof/src/bud_stark/verifier.rs` | Not written |  |
+| BLG-041 | Critical | WP-17 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/chain/blockchain.rs`; `benches/domain_throughput.rs` | Not written |  |
+| BLG-042 | Critical | WP-17 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `benches/domain_throughput.rs` | Not written |  |
+| BLG-043 | Critical | WP-44 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/rpc/api.rs`; `src/core/transaction.rs` | Not written |  |
+| BLG-044 | Medium | WP-17 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `.github/workflows/ci.yml`; `src/chain/chain_actor.rs` | Not written |  |
+| BLG-045 | Critical | WP-07 | 1/2 | Pre-scan: partial; manual review needed | `src/chain/storage_economics_tests.rs` | Not written |  |
+| BLG-046 | Critical | WP-07 | 2/3 | Pre-scan: partial; manual review needed | `.github/workflows/ci.yml`; `src/chain/blockchain.rs` | Not written |  |
+| BLG-047 | High | WP-07 | 0/1 | Pre-scan: no named identifier found in code; possibly fixed, verify | - | Not written |  |
+| BLG-048 | High | WP-19 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `Cargo.toml`; `src/storage/emit.rs` | Not written |  |
+| BLG-049 | Medium | WP-22 | 4/5 | Pre-scan: partial; manual review needed | `src/storage/erasure.rs`; `src/chain/chain_actor.rs` | Not written |  |
+| BLG-050 | Critical | WP-44 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `bud/src/bud_format_fountain.rs`; `src/core/transaction.rs` | Not written |  |
+| BLG-051 | High | WP-44 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/chain/chain_actor.rs`; `bud/src/bud_format.rs` | Not written |  |
+| BLG-052 | Medium | WP-44 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `src/chain/snapshot.rs`; `.github/codeql/codeql-config.yml` | Not written |  |
+| BLG-053 | High | WP-44 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/chain/snapshot.rs`; `src/domain/pq_canonical.rs` | Not written |  |
+| BLG-054 | Critical | WP-44 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `src/cross_domain/evm/adapter.rs` | Not written |  |
+| BLG-055 | Critical | WP-44 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `src/cross_domain/external/ethereum.rs`; `src/cross_domain/evm/sync_committee.rs` | Not written |  |
+| BLG-056 | High | WP-44 | 4/4 | Pre-scan: all named identifiers found in code; not a verdict | `src/cross_domain/external/intake.rs`; `src/chain/blockchain.rs` | Not written |  |
+| BLG-057 | High | WP-44 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `benches/domain_throughput.rs`; `proto/budlum/network/protocol.proto` | Not written |  |
+| BLG-058 | High | WP-44 | 4/4 | Pre-scan: all named identifiers found in code; not a verdict | `src/chain/genesis.rs`; `src/core/transaction.rs` | Not written |  |
+| BLG-059 | Critical | WP-45 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `.github/workflows/ci.yml` | Not written |  |
+| BLG-060 | Critical | WP-45 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/ai/execution/verify.rs`; `proto/budlum/network/protocol.proto` | Not written |  |
+| BLG-061 | High | WP-45 | 4/4 | Pre-scan: all named identifiers found in code; not a verdict | `src/chain/blockchain.rs`; `src/ai/registry.rs` | Not written |  |
+| BLG-062 | High | WP-45 | 5/5 | Pre-scan: all named identifiers found in code; not a verdict | `benches/domain_throughput.rs`; `.github/workflows/ci.yml` | Not written |  |
+| BLG-063 | Critical | WP-45 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `src/execution/executor.rs`; `src/domain/finality_adapter.rs` | Not written |  |
+| BLG-064 | High | WP-23 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/pollen/content_gate.rs`; `.github/workflows/ci.yml` | Not written |  |
+| BLG-065 | High | WP-17 | 4/4 | Pre-scan: all named identifiers found in code; not a verdict | `src/core/transaction.rs`; `src/chain/blockchain.rs` | Not written |  |
+| BLG-066 | High | WP-17 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `.github/workflows/ci.yml` | Not written |  |
+| BLG-067 | High | WP-33 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/bud-vm/src/lib.rs`; `budzero/bud-cli/src/main.rs` | Not written |  |
+| BLG-068 | High | WP-40 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/bud-state/src/lib.rs`; `.github/workflows/ci.yml` | Not written |  |
+| BLG-069 | Medium | WP-33 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/verifier-registry`; `benches/domain_throughput.rs` | Not written |  |
+| BLG-070 | High | WP-45 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `crates/ai-inference/crates/ai-knowledge/src/cache.rs`; `crates/ai-inference/crates/ai-knowledge/src/memory.rs` | Not written |  |
+| BLG-071 | High | WP-45 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `.github/dependabot.yml`; `crates/ai-inference/crates/ai-data/src/verify.rs` | Not written |  |
+| BLG-072 | Medium | WP-45 | 4/4 | Pre-scan: all named identifiers found in code; not a verdict | `.github/workflows/extra-tooling.yml`; `crates/ai-inference/crates/ai-serve/src/fee_scenario.rs` | Not written |  |
+| BLG-073 | Critical | WP-07 | 4/5 | Pre-scan: partial; manual review needed | `benches/single_node/internal_pipeline_tps.rs`; `bud/fuzz/fuzz_bud_format.rs` | Not written |  |
+| BLG-074 | High | WP-07 | 2/3 | Pre-scan: partial; manual review needed | `bud/src/bud_format_engine.rs`; `bud/src/bud_format_integration.rs` | Not written |  |
+| BLG-075 | High | WP-07 | 1/2 | Pre-scan: partial; manual review needed | `bud/src/bud_format_catalog.rs` | Not written |  |
+| BLG-076 | Medium | WP-07 | 5/6 | Pre-scan: partial; manual review needed | `bud/src/bud_format_media.rs`; `bud/src/bud_format_fidelitygate.rs` | Not written |  |
+| BLG-077 | Critical | WP-07 | 4/6 | Pre-scan: partial; manual review needed | `bud/src/lib.rs`; `.github/workflows/ci.yml` | Not written |  |
+| BLG-078 | High | WP-07 | 3/4 | Pre-scan: partial; manual review needed | `bud/src/cli.rs`; `bud/src/bud_format_timeseries.rs` | Not written |  |
+| BLG-079 | High | WP-07 | 1/2 | Pre-scan: partial; manual review needed | `bud/src/bud_format_revolutionary.rs` | Not written |  |
+| BLG-080 | Medium | WP-07 | 2/3 | Pre-scan: partial; manual review needed | `bud/src/bud_format_pgm.rs`; `bud/src/bud_format_telemetry.rs` | Not written |  |
+| BLG-081 | High | WP-42 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `xtask/gates` | Not written |  |
+| BLG-082 | High | WP-42 | 4/4 | Pre-scan: all named identifiers found in code; not a verdict | `xtask/gates/src/gates/suppressions_are_justified.rs`; `xtask/gates/src/main.rs` | Not written |  |
+| BLG-083 | Medium | WP-42 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-084 | High | WP-42 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-085 | High | WP-42 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `xtask/gates` | Not written |  |
+| BLG-086 | Medium | WP-42 | 3/4 | Pre-scan: partial; manual review needed | `xtask/gates/src/gates/no_upstream_brands.rs`; `xtask/gates/src/gates/economy_invariants.rs` | Not written |  |
+| BLG-087 | High | WP-42 | 4/4 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/bud-node/src/bitswap.rs`; `.github/workflows/ci.yml` | Not written |  |
+| BLG-088 | Medium | WP-17 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/tests`; `.quality/deny.toml` | Not written |  |
+| BLG-089 | High | WP-17 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/chain/chain_actor.rs` | Not written |  |
+| BLG-090 | Medium | WP-17 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-091 | Critical | WP-44 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `contracts/external-domain/BudlumFinalityVerifier.sol` | Not written |  |
+| BLG-092 | High | WP-43 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-093 | High | WP-45 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `crates/ai-inference/LICENSE.md` | Not written |  |
+| BLG-094 | High | WP-16 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `config/archive.toml`; `ops/docker-compose.yml` | Not written |  |
+| BLG-095 | Medium | WP-41 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `.cargo/audit.toml` | Not written |  |
+| BLG-096 | High | WP-12 | 2/3 | Pre-scan: partial; manual review needed | `src/chain/blockchain.rs` | Not written |  |
+| BLG-097 | High | WP-42 | 4/4 | Pre-scan: all named identifiers found in code; not a verdict | `bud/fuzz`; `Cargo.toml` | Not written |  |
+| BLG-098 | Critical | WP-39 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `src/bin/bud.rs` | Not written |  |
+| BLG-099 | High | WP-61 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `benches/micro/timing_safe.rs` | Not written |  |
+| BLG-100 | Critical | WP-17 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `.github/workflows/ci.yml`; `src/chain/blockchain.rs` | Not written |  |
+| BLG-101 | Critical | WP-17 | 3/4 | Pre-scan: partial; manual review needed | `fuzz/fuzz_targets/snapshot_deserialize.rs`; `benches/domain_throughput.rs` | Not written |  |
+| BLG-102 | Critical | WP-17 | 6/6 | Pre-scan: all named identifiers found in code; not a verdict | `fuzz/fuzz_targets/consensus_state_transition.rs`; `src/chain/blockchain.rs` | Not written |  |
+| BLG-103 | Critical | WP-17 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-104 | Critical | WP-17 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/chain/blockchain.rs`; `src/sharding/mod.rs` | Not written |  |
+| BLG-105 | Critical | WP-44 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/chain/blockchain.rs`; `src/core/transaction.rs` | Not written |  |
+| BLG-106 | Critical | WP-45 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `src/ai/execution/verify.rs` | Not written |  |
+| BLG-107 | Critical | WP-17 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `src/core/account.rs`; `src/chain/blockchain.rs` | Not written |  |
+| BLG-108 | Critical | WP-15 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `benches/domain_throughput.rs`; `src/chain/blockchain.rs` | Not written |  |
+| BLG-109 | Critical | WP-23 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/chain/blockchain.rs` | Not written |  |
+| BLG-110 | Critical | WP-23 | 4/4 | Pre-scan: all named identifiers found in code; not a verdict | `.github/codeql/codeql-config.yml`; `src/chain/snapshot.rs` | Not written |  |
+| BLG-111 | High | WP-45 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `crates/bpqs/examples/bench_differential.rs` | Not written |  |
+| BLG-112 | Critical | WP-45 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `crates/ai-inference/crates/ai-core/src/model.rs`; `src/ai/registry.rs` | Not written |  |
+| BLG-113 | Critical | WP-17 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/storage/db.rs`; `benches/domain_throughput.rs` | Not written |  |
+| BLG-114 | Critical | WP-33 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/bud-compiler`; `budzero/bud-compiler/src/ast.rs` | Not written |  |
+| BLG-115 | Critical | WP-33 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-116 | Critical | WP-44 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `benches/domain_throughput.rs`; `src/cross_domain/external/domain_bridge.rs` | Not written |  |
+| BLG-117 | Critical | WP-39 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `crates/wallet-core/src/lib.rs` | Not written |  |
+| BLG-118 | Critical | WP-17 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `fuzz/fuzz_targets/consensus_validate.rs`; `src/chain/blockchain.rs` | Not written |  |
+| BLG-119 | Critical | WP-17 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `src/chain/blockchain.rs` | Not written |  |
+| BLG-120 | High | WP-44 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `src/chain/blockchain.rs`; `src/domain/pq_canonical.rs` | Not written |  |
+| BLG-121 | High | WP-40 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `crates/budscan/Cargo.toml`; `.github/git-dep-audit.toml` | Not written |  |
+| BLG-122 | High | WP-07 | 7/8 | Pre-scan: partial; manual review needed | `bud/fuzz/fuzz_bud_format.rs`; `.github/workflows/ci.yml` | Not written |  |
+| BLG-123 | Medium | WP-07 | 6/7 | Pre-scan: partial; manual review needed | `bud/src/bud_format_pipe.rs`; `bud/src/bud_format_model.rs` | Not written |  |
+| BLG-124 | High | WP-45 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `Cargo.toml` | Not written |  |
+| BLG-125 | Critical | WP-17 | 6/6 | Pre-scan: all named identifiers found in code; not a verdict | `benches/domain_throughput.rs`; `src/chain/blockchain.rs` | Not written |  |
+| BLG-126 | Critical | WP-45 | 6/6 | Pre-scan: all named identifiers found in code; not a verdict | `.github/workflows/ci.yml`; `crates/ai-inference/crates/ai-core/src/dataset.rs` | Not written |  |
+| BLG-127 | Critical | WP-44 | 6/7 | Pre-scan: partial; manual review needed | `src/domain/pq_canonical.rs`; `contracts/lib/BudlumHash.sol` | Not written |  |
+| BLG-128 | High | WP-17 | 5/6 | Pre-scan: partial; manual review needed | `benches/domain_throughput.rs`; `src/chain/chain_actor.rs` | Not written |  |
+| BLG-129 | High | WP-23 | 4/4 | Pre-scan: all named identifiers found in code; not a verdict | `src/gateway/mod.rs`; `src/gateway/atlas.rs` | Not written |  |
+| BLG-130 | Critical | WP-44 | 5/5 | Pre-scan: all named identifiers found in code; not a verdict | `src/cross_domain/external/intake_quorum.rs`; `src/budlumxyz/mod.rs` | Not written |  |
+| BLG-131 | High | WP-44 | 4/4 | Pre-scan: all named identifiers found in code; not a verdict | `src/domain/regen_health.rs`; `src/domain/mod.rs` | Not written |  |
+| BLG-132 | High | WP-12 | 5/6 | Pre-scan: partial; manual review needed | `fuzz/fuzz_targets/consensus_state_transition.rs`; `src/consensus/mod.rs` | Not written |  |
+| BLG-133 | Medium | WP-24 | 5/5 | Pre-scan: all named identifiers found in code; not a verdict | `src/domain/storage_deal.rs`; `src/storage/derived.rs` | Not written |  |
+| BLG-134 | Critical | WP-44 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `src/cross_domain/bridge.rs` | Not written |  |
+| BLG-135 | High | WP-24 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/core/constitution.rs`; `src/bin/bud.rs` | Not written |  |
+| BLG-136 | High | WP-33 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/bud-compiler`; `budzero/bud-compiler/src/ir/display.rs` | Not written |  |
+| BLG-137 | High | WP-19 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/bud-node/src/discovery.rs`; `bud/src/bud_format_msr.rs` | Not written |  |
+| BLG-138 | Critical | WP-44 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `src/cross_domain/bridge_relayer.rs`; `src/cross_domain/chain_adapter.rs` | Not written |  |
+| BLG-139 | Critical | WP-33 | 3/4 | Pre-scan: partial; manual review needed | `budzero/bud-state`; `budzero/bud-state/src/note.rs` | Not written |  |
+| BLG-140 | High | WP-16 | 5/5 | Pre-scan: all named identifiers found in code; not a verdict | `src/storage/emit.rs`; `benches/domain_throughput.rs` | Not written |  |
+| BLG-141 | Medium | WP-07 | 3/4 | Pre-scan: partial; manual review needed | `bud/src/bud_format_dictionary.rs`; `bud/src/bin/bud.rs` | Not written |  |
+| BLG-142 | Critical | WP-33 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/Cargo.toml`; `budzero/bud-proof/src/bud_stark/symbolic.rs` | Not written |  |
+| BLG-143 | High | WP-40 | 5/6 | Pre-scan: partial; manual review needed | `bud/src/bud_format_encpact.rs`; `crates/budscan/src/fetch.rs` | Not written |  |
+| BLG-144 | High | WP-19 | 6/6 | Pre-scan: all named identifiers found in code; not a verdict | `src/storage/mod.rs`; `src/storage/one_view.rs` | Not written |  |
+| BLG-145 | Medium | WP-45 | 5/6 | Pre-scan: partial; manual review needed | `bud/src/bud_format_crop.rs`; `bud/src/bud_format_optical_transfer.rs` | Not written |  |
+| BLG-146 | Critical | WP-44 | 2/3 | Pre-scan: partial; manual review needed | `src/cross_domain/evm/bud_to_eth.rs`; `crates/bpqs/examples/bench_differential.rs` | Not written |  |
+| BLG-147 | High | WP-17 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `src/ai/registry.rs`; `budzero/bud-cli/src/main.rs` | Not written |  |
+| BLG-148 | High | WP-07, WP-33 | 4/5 | Pre-scan: partial; manual review needed | `src/domain/storage_deal.rs`; `src/chain/chain_actor.rs` | Not written |  |
+| BLG-149 | Medium | WP-45 | 4/6 | Pre-scan: partial; manual review needed | `bud/src/bud_format_dedup.rs`; `bud/src/bud_format_bloom.rs` | Not written |  |
+| BLG-150 | Critical | WP-61 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/consensus/mod.rs`; `budzero/bud-proof/src/lib.rs` | Not written |  |
+| BLG-151 | High | WP-17 | 1/2 | Pre-scan: partial; manual review needed | `.github/dependabot.yml` | Not written |  |
+| BLG-152 | Medium | WP-07 | 4/5 | Pre-scan: partial; manual review needed | `Cargo.toml`; `bud/src/lib.rs` | Not written |  |
+| BLG-153 | Medium | WP-07 | 3/4 | Pre-scan: partial; manual review needed | `bud/src/bud_format_optical.rs`; `bud/src/lib.rs` | Not written |  |
+| BLG-154 | Critical | WP-33 | 4/6 | Pre-scan: partial; manual review needed | `budzero/Cargo.toml`; `budzero/bud-proof/src/bud_stark/proof.rs` | Not written |  |
+| BLG-155 | High | WP-44 | 5/5 | Pre-scan: all named identifiers found in code; not a verdict | `contracts/graft/BudlumPaymentReceiver.sol`; `docs/pq/classical_allowlist.toml` | Not written |  |
+| BLG-156 | Medium | WP-07 | 5/7 | Pre-scan: partial; manual review needed | `bud/src/gates.rs`; `bud/src/quantum.rs` | Not written |  |
+| BLG-157 | Medium | WP-45 | 5/6 | Pre-scan: partial; manual review needed | `bud/src/bud_format_dbdelta.rs`; `bud/src/bud_format_transpile.rs` | Not written |  |
+| BLG-158 | High | WP-12 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/consensus/mod.rs`; `.github/workflows/ci.yml` | Not written |  |
+| BLG-159 | High | WP-33 | 4/4 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/Cargo.toml`; `budzero/bud-proof/src/bud_stark/preprocessed.rs` | Not written |  |
+| BLG-160 | Medium | WP-45 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `src/ai_inference/storage.rs` | Not written |  |
+| BLG-161 | Medium | WP-21 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `bud/src/lib.rs` | Not written |  |
+| BLG-162 | High | WP-33 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/bud-compiler/src/ir/display.rs` | Not written |  |
+| BLG-163 | High | WP-19 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `src/storage/emit.rs` | Not written |  |
+| BLG-164 | High | WP-45 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `crates/bpqs/src/epoch.rs`; `crates/bpqs/src/merkle.rs` | Not written |  |
+| BLG-165 | Medium | WP-45 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-166 | Critical | WP-45 | 5/5 | Pre-scan: all named identifiers found in code; not a verdict | `crates/ai-inference/crates/ai-serve/src/config.rs`; `src/ai/mod.rs` | Not written |  |
+| BLG-167 | High | WP-17 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `src/chain/blockchain.rs` | Not written |  |
+| BLG-168 | Medium | WP-21 | 4/4 | Pre-scan: all named identifiers found in code; not a verdict | `src/storage/mod.rs`; `src/storage/three_gate.rs` | Not written |  |
+| BLG-169 | Medium | WP-40 | 5/5 | Pre-scan: all named identifiers found in code; not a verdict | `src/bin/bud.rs`; `crates/budscan/src/bin/budscan.rs` | Not written |  |
+| BLG-170 | High | WP-42 | 5/7 | Pre-scan: partial; manual review needed | `xtask/gates/src/gates/suppressions_are_justified.rs`; `xtask/gates/src/gates/accumulators_pinned.rs` | Not written |  |
+| BLG-171 | High | WP-42 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `xtask/gates/src/main.rs` | Not written |  |
+| BLG-172 | Medium | WP-42 | 1/2 | Pre-scan: partial; manual review needed | `xtask/tools/src/bin/budlum-tools.rs` | Not written |  |
+| BLG-173 | Medium | WP-45 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `crates/bpqs/Cargo.toml`; `crates/bpqs/examples/bench_differential.rs` | Not written |  |
+| BLG-174 | High | WP-42 | 5/5 | Pre-scan: all named identifiers found in code; not a verdict | `xtask/gates/src/main.rs` | Not written |  |
+| BLG-175 | High | WP-42 | 5/5 | Pre-scan: all named identifiers found in code; not a verdict | `xtask/gates/src/main.rs`; `src/crypto/domain_tags.rs` | Not written |  |
+| BLG-176 | Medium | WP-42 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `.github/workflows/benchmark.yml` | Not written |  |
+| BLG-177 | Medium | WP-42 | 4/4 | Pre-scan: all named identifiers found in code; not a verdict | `xtask/gates/src/main.rs`; `src/storage/mobile_self.rs` | Not written |  |
+| BLG-178 | High | WP-42 | 4/4 | Pre-scan: all named identifiers found in code; not a verdict | `xtask/gates/src/main.rs`; `xtask/gates/src/gates/required_tests.rs` | Not written |  |
+| BLG-179 | High | WP-42 | 4/4 | Pre-scan: all named identifiers found in code; not a verdict | `xtask/gates/src/main.rs` | Not written |  |
+| BLG-180 | Medium | WP-42 | 3/4 | Pre-scan: partial; manual review needed | `src/chain/blockchain.rs`; `xtask/gates/src/main.rs` | Not written |  |
+| BLG-181 | Medium | WP-42 | 2/3 | Pre-scan: partial; manual review needed | `.github/workflows/ci.yml`; `xtask/gates/src/main.rs` | Not written |  |
+| BLG-182 | Critical | WP-33 | 4/4 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/bud-proof/src/bud_stark/verifier.rs`; `benches/domain_throughput.rs` | Not written |  |
+| BLG-183 | Critical | WP-17 | 0/1 | Pre-scan: no named identifier found in code; possibly fixed, verify | - | Not written |  |
+| BLG-184 | Critical | WP-17 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `src/chain/blockchain.rs` | Not written |  |
+| BLG-185 | Medium | WP-45 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-186 | Critical | WP-33 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `benches/domain_throughput.rs` | Not written |  |
+| BLG-187 | High | WP-42 | 5/5 | Pre-scan: all named identifiers found in code; not a verdict | `.github/workflows/ci.yml` | Not written |  |
+| BLG-188 | High | WP-42 | 5/5 | Pre-scan: all named identifiers found in code; not a verdict | `xtask/gates/src/main.rs` | Not written |  |
+| BLG-189 | Medium | WP-42 | 7/7 | Pre-scan: all named identifiers found in code; not a verdict | `xtask/gates/src/main.rs`; `crates/bpqs/examples/bench_differential.rs` | Not written |  |
+| BLG-190 | Critical | WP-44 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `src/chain/snapshot.rs`; `bud/src/bud_format_fountain.rs` | Not written |  |
+| BLG-191 | Critical | WP-33 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/bud-cli/src/main.rs`; `budzero/bud-cli/tests/toolchain_end_to_end.rs` | Not written |  |
+| BLG-192 | High | WP-61 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `src/bin/budlum-faucet.rs`; `src/rpc/server.rs` | Not written |  |
+| BLG-193 | Medium | WP-42 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `xtask/gates` | Not written |  |
+| BLG-194 | Critical | WP-44 | 3/4 | Pre-scan: partial; manual review needed | `src/bin/budlum-relayer.rs`; `src/cross_domain/relayer.rs` | Not written |  |
+| BLG-195 | Critical | WP-44 | 4/4 | Pre-scan: all named identifiers found in code; not a verdict | `src/chain/genesis.rs`; `proto/budlum/network/protocol.proto` | Not written |  |
+| BLG-196 | High | WP-17 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `benches/domain_throughput.rs` | Not written |  |
+| BLG-197 | Critical | WP-17 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `src/chain/blockchain.rs`; `.github/workflows/ci.yml` | Not written |  |
+| BLG-198 | Critical | WP-33 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `.github/workflows/ci.yml`; `budzero/bud-compiler/src/ast.rs` | Not written |  |
+| BLG-199 | High | WP-44 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `bud/src/bud_format.rs`; `src/chain/blockchain.rs` | Not written |  |
+| BLG-200 | High | WP-61 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/chain/blockchain.rs`; `src/lib.rs` | Not written |  |
+| BLG-201 | High | WP-45 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `src/ai/execution/verify.rs`; `bud/src/bud_format_bloom.rs` | Not written |  |
+| BLG-202 | Critical | WP-17 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/main.rs`; `src/storage/db.rs` | Not written |  |
+| BLG-203 | Critical | WP-12 | 4/4 | Pre-scan: all named identifiers found in code; not a verdict | `kani/src/lib.rs`; `bud/src/bud_format_das.rs` | Not written |  |
+| BLG-204 | High | WP-44 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/chain/snapshot.rs`; `src/settlement/proof_market.rs` | Not written |  |
+| BLG-205 | Critical | WP-15, WP-44 | 5/5 | Pre-scan: all named identifiers found in code; not a verdict | `src/cross_domain/external/intake.rs`; `.github/codeql/codeql-config.yml` | Not written |  |
+| BLG-206 | Critical | WP-12 | 4/4 | Pre-scan: all named identifiers found in code; not a verdict | `src/chain/blockchain.rs`; `.github/dependabot.yml` | Not written |  |
+| BLG-207 | Critical | WP-12 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `src/consensus/block_signature.rs`; `crates/budscan/src/light_client.rs` | Not written |  |
+| BLG-208 | High | WP-07, WP-21 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `src/storage/generated.rs`; `.github/workflows/ci.yml` | Not written |  |
+| BLG-209 | High | WP-07, WP-25 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `src/storage/three_regime.rs` | Not written |  |
+| BLG-210 | High | WP-19 | 4/4 | Pre-scan: all named identifiers found in code; not a verdict | `src/storage/three_recipe.rs`; `src/storage/emit.rs` | Not written |  |
+| BLG-211 | Medium | WP-19 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `src/storage/qr_recipe.rs` | Not written |  |
+| BLG-212 | Critical | WP-21, WP-23 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `src/rpc/server.rs`; `src/rpc/api.rs` | Not written |  |
+| BLG-213 | High | WP-18 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-214 | Medium | WP-19 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-215 | High | WP-19 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-216 | High | WP-18 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-217 | Medium | WP-07 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `bud/src` | Not written |  |
+| BLG-218 | Low | WP-19 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-219 | Medium | WP-24 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-220 | Critical | WP-20 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-221 | Medium | WP-22 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-222 | Medium | WP-24 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-223 | High | WP-33, WP-45, WP-56 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/bud-proof/src/bud_stark/prover.rs` | Not written |  |
+| BLG-224 | High | WP-45, WP-56 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `crates/note-packing/src/lib.rs`; `budzero/bud-state/src/note.rs` | Not written |  |
+| BLG-225 | High | WP-45, WP-56 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/execution/executor.rs`; `src/privacy/submit.rs` | Not written |  |
+| BLG-226 | High | WP-33, WP-56 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/bud-isa/src/lib.rs`; `budzero/bud-cli/src/main.rs` | Not written |  |
+| BLG-227 | Medium | WP-33, WP-57 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/bud-isa/src/lib.rs`; `docs/AI_VERIFICATION_STATUS.md` | Not written |  |
+| BLG-228 | High | WP-45, WP-57 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `src/ai/mod.rs` | Not written |  |
+| BLG-229 | High | WP-45, WP-57 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `src/ai/registry.rs` | Not written |  |
+| BLG-230 | Medium | WP-33, WP-56 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/bud-vm/src/lib.rs`; `src/execution/zkvm.rs` | Not written |  |
+| BLG-231 | Medium | WP-43 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/bud-state/src/lib.rs`; `budzero/ARCHITECTURE.md` | Not written |  |
+| BLG-232 | Medium | WP-56 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/bud-proof/src/plonky3_air.rs` | Not written |  |
+| BLG-233 | Medium | WP-60 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/bud-proof/src/plonky3_prover.rs` | Not written |  |
+| BLG-234 | Medium | WP-60 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/bud-isa/src/lib.rs` | Not written |  |
+| BLG-235 | High | WP-44, WP-60 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/cross_domain/external/zkvm_proof.rs`; `src/cross_domain/evm/sync_committee.rs` | Not written |  |
+| BLG-236 | Medium | WP-56 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `docs/BUD_CONTENT_ENCRYPTION.md`; `src/storage/payload_crypt.rs` | Not written |  |
+| BLG-237 | High | WP-22, WP-56 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/storage/view_grant.rs`; `bud/fuzz/fuzz_bud_format.rs` | Not written |  |
+| BLG-238 | Medium | WP-22 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `src/storage/key_package.rs` | Not written |  |
+| BLG-239 | Medium | WP-60 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `docs/MAINNET_READINESS.md`; `budzero/bud-pul` | Not written |  |
+| BLG-240 | Low | WP-45, WP-57 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `src/ai/registry.rs` | Not written |  |
+| BLG-241 | Low | WP-43 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/bud-isa/src/lib.rs`; `budzero/bud-vm/src/lib.rs` | Not written |  |
+| BLG-242 | Medium | WP-56 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-243 | Medium | WP-56 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/README.md`; `docs/AI_VERIFICATION_STATUS.md` | Not written |  |
+| BLG-244 | Low | WP-57 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-245 | Medium | WP-22, WP-56 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-246 | Critical | WP-12 | 4/5 | Pre-scan: partial; manual review needed | `src/chain/finality.rs`; `src/chain/blockchain.rs` | Not written |  |
+| BLG-247 | High | WP-15 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/core/chain_config.rs` | Not written |  |
+| BLG-248 | High | WP-26, WP-33 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `src/execution/executor.rs`; `.github/workflows/ci.yml` | Not written |  |
+| BLG-249 | High | WP-28, WP-29, WP-31, WP-32 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `src/rpc/method_class.rs` | Not written |  |
+| BLG-250 | Critical | WP-26 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-251 | High | WP-13 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `src/registry/liveness.rs`; `src/chain/blockchain.rs` | Not written |  |
+| BLG-252 | Medium | WP-08 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `src/registry/role.rs` | Not written |  |
+| BLG-253 | Medium | WP-07, WP-08 | 4/4 | Pre-scan: all named identifiers found in code; not a verdict | `src/storage/mobile_self.rs`; `src/storage/server_admission.rs` | Not written |  |
+| BLG-254 | High | WP-07, WP-42 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `xtask/gates/src/gates/three_is_recipe_only.rs` | Not written |  |
+| BLG-255 | Low | WP-05, WP-43 | 0/0 | Pre-scan: no checkable token; manual review needed | - | Not written |  |
+| BLG-256 | High | WP-26 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `src/core/account.rs` | Not written |  |
+| BLG-257 | High | WP-11, WP-36 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `src/main.rs` | Not written |  |
+| BLG-258 | Medium | WP-07 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `budzero/bud-node`; `budzero/bud-node/src/bitswap.rs` | Not written |  |
+| BLG-259 | Medium | WP-11, WP-12 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/chain/finality.rs`; `src/consensus/qc.rs` | Not written |  |
+| BLG-260 | Medium | WP-26 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `src/storage/db.rs` | Not written |  |
+| BLG-261 | Low | WP-23 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/deed/mod.rs`; `.github/workflows/ci.yml` | Not written |  |
+| BLG-262 | Medium | WP-23 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `src/gateway/service.rs` | Not written |  |
+| BLG-263 | Medium | WP-16 | 3/3 | Pre-scan: all named identifiers found in code; not a verdict | `src/tokenomics/reward_pool.rs`; `src/chain/blockchain.rs` | Not written |  |
+| BLG-264 | High | WP-12 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/consensus/filiz.rs`; `src/consensus/handoff.rs` | Not written |  |
+| BLG-265 | Medium | WP-36 | 1/2 | Pre-scan: partial; manual review needed | `src/network/mobile.rs` | Not written |  |
+| BLG-266 | Medium | WP-08, WP-16 | 2/2 | Pre-scan: all named identifiers found in code; not a verdict | `src/core/chain_config.rs`; `budzero/verifier-registry/src/lib.rs` | Not written |  |
+| BLG-267 | High | WP-27 | 1/1 | Pre-scan: all named identifiers found in code; not a verdict | `xtask/gates/src/gates/classical_crypto_is_paired.rs` | Not written |  |
