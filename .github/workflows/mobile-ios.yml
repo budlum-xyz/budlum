@@ -46,21 +46,28 @@ jobs:
 
       - name: Unit tests
         working-directory: mobile/ios
-        run: swift test 2>&1 | tee /tmp/ios-tests.log
+        run: swift test --xunit-output /tmp/ios-xunit.xml 2>&1 | tee /tmp/ios-tests.log
 
       # A `swift test` that runs zero tests exits 0 and looks identical to a
       # pass, and the three names below are the acceptance tests of the WP-38
-      # card. They are matched by name so a rename cannot quietly drop one.
+      # card. Verify them from the JUnit XML output so console formatting
+      # differences across Swift versions cannot mask or break the check.
       - name: The three named tests of the WP-38 card ran and passed
         run: |
-          set -euo pipefail
-          for test in ios_bg_task_answers_audit ios_quota_cap_is_8_gib ios_class_is_opportunistic; do
-            if ! grep -qE "test_${test}\]?' passed" /tmp/ios-tests.log; then
-              echo "ERROR: ${test} did not run and pass"
-              exit 1
-            fi
-          done
-          grep -E '^Test Case ' /tmp/ios-tests.log | wc -l
+          python3 - <<'PYXML'
+          import xml.etree.ElementTree as ET
+          root = ET.parse('/tmp/ios-xunit.xml').getroot()
+          cases = list(root.iter('testcase'))
+          passed = {
+              c.attrib.get('name', ''): c
+              for c in cases
+              if c.find('failure') is None and c.find('error') is None and c.find('skipped') is None
+          }
+          for req in ['test_ios_bg_task_answers_audit', 'test_ios_quota_cap_is_8_gib', 'test_ios_class_is_opportunistic']:
+              if not any(name == req or name.endswith('.' + req) or name.startswith(req + '(') for name in passed):
+                  raise SystemExit(f'ERROR: {req} did not run and pass (seen: {sorted(passed)})')
+          print(f'Verified {len(passed)} passing XCTest cases including all 3 WP-38 acceptance tests.')
+          PYXML
 
   app-build:
     # The Xcode project that turns Sources/BudlumValidatorUI into a shippable

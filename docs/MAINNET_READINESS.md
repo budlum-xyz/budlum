@@ -52,7 +52,7 @@ repository), `external` (a third party has to deliver it).
 | Economic parameter values set for mainnet (fee profile, stake floors, unbonding, commission caps, reward schedule) | the mainnet profile in `config/mainnet.toml` | owner | decision |
 | Storage format gaps 1-3 closed (each changes the on-disk and on-wire format) | the change plus its migration note | agent | open |
 | Consensus upgrade and activation-height scheme documented | a section in this file or `docs/ARCHITECTURE.md` | agent | open |
-| Relayer trust model documented | `docs/GRAFT.md` and `docs/SETTLEMENT.md` | agent | code |
+| Relayer trust model documented | `docs/APP_BINDING.md` and `docs/SETTLEMENT.md` | agent | code |
 | On-chain governance scope documented (what a `Vote` can and cannot change) | `src/core/constitution.rs` plus a document section | agent | code |
 | Incident response runbook | `docs/OPERATIONS.md` | agent | code |
 | Finality votes travel point to point, not only by gossip relay | a vote exchange on the `/sync` protocol plus a devnet with no single hub (AF-18) | agent | open |

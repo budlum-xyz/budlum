@@ -2392,6 +2392,13 @@ impl Transaction {
         self.checked_total_cost().unwrap_or(u64::MAX)
     }
 
+    /// Convenience: checked sum of `amount + fee` for consensus debit paths so
+    /// an overflowing pair is rejected instead of saturating to `u64::MAX`.
+    #[must_use]
+    pub const fn checked_total_cost(&self) -> Option<u64> {
+        self.amount.checked_add(self.fee)
+    }
+
     /// Per-type gas cost under a `GasSchedule`.
     ///
     /// **This is not what the chain charges.** The live protocol is a flat fee:

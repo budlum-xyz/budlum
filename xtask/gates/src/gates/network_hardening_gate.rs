@@ -31,6 +31,13 @@ pub(crate) const TESTS: &[&str] = &[
     "h5_score_map_ceiling_is_load_bearing",
     "h5_ceiling_refuses_rather_than_evicting_a_ban",
     "h5_tracked_peer_still_scored_when_map_is_full",
+    // WP-15: the eclipse bound covers both address families (BLG-034) and a
+    // peer-supplied length prefix is a claim the decoder budgets for instead
+    // of trusting (BLG-033, BLG-205).
+    "eclipse_bound_covers_ipv6_peers",
+    "ipv4_mapped_address_is_not_a_new_subnet",
+    "kademlia_refuses_private_addresses_on_public_network",
+    "p2p_bincode_is_bounded",
 ];
 
 pub fn run(_root: &Path, log: &Path) -> Result<String, String> {

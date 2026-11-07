@@ -198,7 +198,7 @@ impl Network {
         }
     }
 
-    /// The Mikoriza (shared security) parameters of this profile.
+    /// The shared-security parameters of this profile.
     ///
     /// The flag is a genesis parameter. Devnet has it on so the rehearsal can
     /// run the path; testnet keeps it off until the end-to-end Sepolia test
@@ -220,6 +220,15 @@ impl Network {
         }
     }
 
+    /// Whether remote app binding (`app_binding`) is enabled on this profile.
+    ///
+    /// Enabled on devnet (`45262`) for integration verification; closed on
+    /// testnet (`45261`) and mainnet (`45260`) per the launch feature matrix.
+    #[must_use]
+    pub const fn app_binding_enabled(&self) -> bool {
+        matches!(self, Network::Devnet)
+    }
+
     pub fn mempool_config(&self) -> crate::mempool::pool::MempoolConfig {
         match self {
             // Mainnet holds five times the default entry count, so the byte
@@ -234,6 +243,10 @@ impl Network {
                 tx_ttl_secs: 1_800,
                 rbf_bump_percent: 15,
                 max_pool_bytes: 512 * 1024 * 1024,
+                // The duty lane's share follows the block budget, and the
+                // block budget is one constant for every network, so it is
+                // the same here as on the testnet.
+                duty_block_bytes: crate::mempool::pool::DEFAULT_DUTY_BLOCK_BYTES,
             },
             Network::Testnet => crate::mempool::pool::MempoolConfig {
                 max_size: 50_000,
@@ -242,6 +255,7 @@ impl Network {
                 tx_ttl_secs: 3_600,
                 rbf_bump_percent: 10,
                 max_pool_bytes: crate::mempool::pool::DEFAULT_MAX_POOL_BYTES,
+                duty_block_bytes: crate::mempool::pool::DEFAULT_DUTY_BLOCK_BYTES,
             },
             Network::Devnet => crate::mempool::pool::MempoolConfig::default(),
         }
@@ -302,8 +316,8 @@ impl std::fmt::Display for Network {
 
 pub const EPOCH_LEN: u64 = 100;
 
-/// The Mikoriza parameters of the profile `chain_id` names; an unknown chain
-/// has the feature off.
+/// The shared-security parameters of the profile `chain_id` names; an unknown
+/// chain has the feature off.
 #[must_use]
 pub fn shared_security_for_chain_id(
     chain_id: u64,
@@ -312,6 +326,13 @@ pub fn shared_security_for_chain_id(
         crate::settlement::shared_security::SharedSecurityParams::DISABLED,
         |network| network.shared_security(),
     )
+}
+
+/// Whether remote app binding (`app_binding`) is enabled for `chain_id`; an
+/// unknown chain keeps the feature closed.
+#[must_use]
+pub fn app_binding_enabled_for_chain_id(chain_id: u64) -> bool {
+    Network::from_chain_id(chain_id).is_some_and(|network| network.app_binding_enabled())
 }
 
 /// The reward pool of the profile `chain_id` names; none for an unknown chain.
