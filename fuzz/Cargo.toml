@@ -179,3 +179,10 @@ path = "fuzz_targets/bud3_symbol_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "bud3_qr_frame_decode"
+path = "fuzz_targets/bud3_qr_frame_decode.rs"
+test = false
+doc = false
+bench = false
