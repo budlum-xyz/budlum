@@ -49,6 +49,13 @@ fn bincode_payload_or_log<T: serde::Serialize + ?Sized>(what: &str, value: &T) -
 /// The only transaction wire version this node encodes and accepts.
 const TX_WIRE_VERSION: u32 = 2;
 
+/// A peer may put an arbitrarily large blob in a transaction wire payload's
+/// `data` field. bincode deserialization has no size limit by default, so an
+/// unauthenticated peer can force the node to allocate until it is killed
+/// (remote OOM, R-28 / BLG-033). Reject oversized payloads before
+/// deserialization. Legitimate payloads are far smaller than this bound.
+const MAX_TX_PAYLOAD_BYTES: usize = 1_048_576; // 1 MiB
+
 impl From<&Transaction> for pb::ProtoTransaction {
     fn from(tx: &Transaction) -> Self {
         let (tx_type_i32, type_payload) = match &tx.tx_type {
@@ -1275,6 +1282,11 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     Some(pb::proto_transaction::TypePayload::Identity(p)) => p,
                     _ => return Err("Missing or mismatched Identity payload".into()),
                 };
+                if payload.data.len() > MAX_TX_PAYLOAD_BYTES {
+                    return Err(format!(
+                        "IdentityTx payload exceeds {MAX_TX_PAYLOAD_BYTES} bytes"
+                    ));
+                }
                 TransactionType::Identity(
                     bincode::deserialize(&payload.data)
                         .map_err(|e| format!("Invalid IdentityTx payload: {e}"))?,
@@ -1285,6 +1297,11 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     Some(pb::proto_transaction::TypePayload::PoaOnboarding(p)) => p,
                     _ => return Err("Missing or mismatched PoA onboarding payload".into()),
                 };
+                if payload.data.len() > MAX_TX_PAYLOAD_BYTES {
+                    return Err(format!(
+                        "PoaOnboarding payload exceeds {MAX_TX_PAYLOAD_BYTES} bytes"
+                    ));
+                }
                 TransactionType::PoaOnboarding(
                     bincode::deserialize(&payload.data)
                         .map_err(|e| format!("Invalid PoA onboarding payload: {e}"))?,
@@ -1302,6 +1319,11 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     Some(pb::proto_transaction::TypePayload::BridgeBurn(p)) => p,
                     _ => return Err("Missing or mismatched BridgeBurn payload".into()),
                 };
+                if payload.data.len() > MAX_TX_PAYLOAD_BYTES {
+                    return Err(format!(
+                        "BridgeBurn payload exceeds {MAX_TX_PAYLOAD_BYTES} bytes"
+                    ));
+                }
                 TransactionType::BridgeBurn(
                     bincode::deserialize(&payload.data)
                         .map_err(|e| format!("Invalid bridge burn payload: {e}"))?,
@@ -1312,6 +1334,11 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     Some(pb::proto_transaction::TypePayload::CrossDomainMessage(p)) => p,
                     _ => return Err("Missing or mismatched CrossDomainMessage payload".into()),
                 };
+                if payload.data.len() > MAX_TX_PAYLOAD_BYTES {
+                    return Err(format!(
+                        "CrossDomainMessage payload exceeds {MAX_TX_PAYLOAD_BYTES} bytes"
+                    ));
+                }
                 TransactionType::CrossDomainMessage(
                     bincode::deserialize(&payload.data)
                         .map_err(|e| format!("Invalid cross-domain message payload: {e}"))?,
@@ -1376,6 +1403,11 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     Some(pb::proto_transaction::TypePayload::Vault(p)) => p,
                     _ => return Err("Missing or mismatched Vault payload".into()),
                 };
+                if payload.data.len() > MAX_TX_PAYLOAD_BYTES {
+                    return Err(format!(
+                        "VaultTx payload exceeds {MAX_TX_PAYLOAD_BYTES} bytes"
+                    ));
+                }
                 TransactionType::Vault(
                     bincode::deserialize(&payload.data)
                         .map_err(|e| format!("Invalid VaultTx payload: {e}"))?,
@@ -1386,6 +1418,11 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     Some(pb::proto_transaction::TypePayload::Storage(p)) => p,
                     _ => return Err("Missing or mismatched Storage payload".into()),
                 };
+                if payload.data.len() > MAX_TX_PAYLOAD_BYTES {
+                    return Err(format!(
+                        "StorageTx payload exceeds {MAX_TX_PAYLOAD_BYTES} bytes"
+                    ));
+                }
                 TransactionType::Storage(
                     bincode::deserialize(&payload.data)
                         .map_err(|e| format!("Invalid StorageTx payload: {e}"))?,
@@ -1396,6 +1433,11 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     Some(pb::proto_transaction::TypePayload::ExternalDomain(p)) => p,
                     _ => return Err("Missing or mismatched ExternalDomain payload".into()),
                 };
+                if payload.data.len() > MAX_TX_PAYLOAD_BYTES {
+                    return Err(format!(
+                        "ExternalDomainTx payload exceeds {MAX_TX_PAYLOAD_BYTES} bytes"
+                    ));
+                }
                 TransactionType::ExternalDomain(
                     bincode::deserialize(&payload.data)
                         .map_err(|e| format!("Invalid ExternalDomainTx payload: {e}"))?,
@@ -1406,6 +1448,11 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     Some(pb::proto_transaction::TypePayload::Settlement(p)) => p,
                     _ => return Err("Missing or mismatched Settlement payload".into()),
                 };
+                if payload.data.len() > MAX_TX_PAYLOAD_BYTES {
+                    return Err(format!(
+                        "SettlementTx payload exceeds {MAX_TX_PAYLOAD_BYTES} bytes"
+                    ));
+                }
                 TransactionType::Settlement(
                     bincode::deserialize(&payload.data)
                         .map_err(|e| format!("Invalid SettlementTx payload: {e}"))?,
@@ -1416,6 +1463,11 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     Some(pb::proto_transaction::TypePayload::Bridge(p)) => p,
                     _ => return Err("Missing or mismatched Bridge payload".into()),
                 };
+                if payload.data.len() > MAX_TX_PAYLOAD_BYTES {
+                    return Err(format!(
+                        "BridgeTx payload exceeds {MAX_TX_PAYLOAD_BYTES} bytes"
+                    ));
+                }
                 TransactionType::Bridge(
                     bincode::deserialize(&payload.data)
                         .map_err(|e| format!("Invalid BridgeTx payload: {e}"))?,
@@ -1730,6 +1782,11 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     Some(pb::proto_transaction::TypePayload::PollenRegisterDataAsset(p)) => p,
                     _ => return Err("Missing or mismatched PollenRegisterDataAsset payload".into()),
                 };
+                if payload.data.len() > MAX_TX_PAYLOAD_BYTES {
+                    return Err(format!(
+                        "DataAsset payload exceeds {MAX_TX_PAYLOAD_BYTES} bytes"
+                    ));
+                }
                 TransactionType::PollenRegisterDataAsset(
                     bincode::deserialize(&payload.data)
                         .map_err(|e| format!("Invalid DataAsset payload: {e}"))?,
@@ -1740,6 +1797,11 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     Some(pb::proto_transaction::TypePayload::PollenAuthorizeSale(p)) => p,
                     _ => return Err("Missing or mismatched PollenAuthorizeSale payload".into()),
                 };
+                if payload.data.len() > MAX_TX_PAYLOAD_BYTES {
+                    return Err(format!(
+                        "SaleAuthorization payload exceeds {MAX_TX_PAYLOAD_BYTES} bytes"
+                    ));
+                }
                 TransactionType::PollenAuthorizeSale(
                     bincode::deserialize(&payload.data)
                         .map_err(|e| format!("Invalid SaleAuthorization payload: {e}"))?,
@@ -1750,6 +1812,11 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     Some(pb::proto_transaction::TypePayload::PollenGrantAccess(p)) => p,
                     _ => return Err("Missing or mismatched PollenGrantAccess payload".into()),
                 };
+                if payload.data.len() > MAX_TX_PAYLOAD_BYTES {
+                    return Err(format!(
+                        "AccessGrant payload exceeds {MAX_TX_PAYLOAD_BYTES} bytes"
+                    ));
+                }
                 TransactionType::PollenGrantAccess(
                     bincode::deserialize(&payload.data)
                         .map_err(|e| format!("Invalid AccessGrant payload: {e}"))?,
@@ -3059,6 +3126,43 @@ mod tests {
         assert!(Transaction::try_from(proto.clone()).is_err());
 
         proto.tx_type = 999; // Unknown transaction type tag
+        assert!(Transaction::try_from(proto).is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_transaction_payload_before_deserialization() {
+        let mut proto = pb::ProtoTransaction {
+            from: "0000000000000000000000000000000000000000000000000000000000000001".into(),
+            to: "0000000000000000000000000000000000000000000000000000000000000002".into(),
+            amount: 0,
+            fee: 0,
+            max_fee: 0,
+            priority_fee: 0,
+            nonce: 0,
+            data: vec![],
+            timestamp: "1000".into(),
+            hash: "abc".into(),
+            signature: vec![],
+            chain_id: 45262,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: pb::ProtoTransactionType::Identity as i32,
+            wire_version: 2,
+            type_payload: Some(pb::proto_transaction::TypePayload::Identity(
+                pb::ProtoIdentityTx {
+                    data: vec![0u8; MAX_TX_PAYLOAD_BYTES + 1],
+                },
+            )),
+            signer_public_key: Vec::new(),
+            authorization: None,
+        };
+        assert!(Transaction::try_from(proto.clone()).is_err());
+
+        proto.tx_type = pb::ProtoTransactionType::Storage as i32;
+        proto.type_payload = Some(pb::proto_transaction::TypePayload::Storage(
+            pb::ProtoStorageTx {
+                data: vec![0u8; MAX_TX_PAYLOAD_BYTES + 1],
+            },
+        ));
         assert!(Transaction::try_from(proto).is_err());
     }
 
