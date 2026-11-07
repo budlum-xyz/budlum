@@ -212,21 +212,12 @@ impl Executor {
             _ => {}
         }
 
-        let total_cost = match tx.tx_type {
-            TransactionType::Unstake
-            | TransactionType::Vote
-            | TransactionType::Undelegate { .. }
-            | TransactionType::WithdrawDelegation { .. }
-            | TransactionType::SetValidatorCommission { .. }
-            | TransactionType::Redelegate { .. }
-            | TransactionType::ClaimRewards { .. } => tx.fee,
-            _ => tx.checked_total_cost().ok_or_else(|| {
-                BudlumError::validation(
-                    "transaction_cost_overflow",
-                    "Transaction amount plus fee overflows u64",
-                )
-            })?,
-        };
+        let total_cost = tx.checked_admission_cost().ok_or_else(|| {
+            BudlumError::validation(
+                "transaction_cost_overflow",
+                "Transaction amount plus fee overflows u64",
+            )
+        })?;
 
         {
             // The admission gate looks at the spendable balance, not the raw
@@ -3756,6 +3747,35 @@ mod tests {
         assert_eq!(state.get_balance(&sender), u64::MAX);
         assert_eq!(state.get_balance(&recipient), 0);
         assert_eq!(state.get_nonce(&sender), 0);
+    }
+
+    #[test]
+    fn blg_197_fee_only_vote_ignores_amount_overflow() {
+        use crate::core::account::AccountState;
+        use crate::core::address::Address;
+        use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
+        use crate::execution::executor::Executor;
+
+        let sender = Address::from([0x53; 32]);
+        let target = Address::from([0x54; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&sender, 1);
+        let mut tx = Transaction::new_with_chain_id(
+            sender,
+            target,
+            u64::MAX,
+            1,
+            0,
+            vec![],
+            DEFAULT_CHAIN_ID,
+            TransactionType::Vote,
+        );
+        tx.hash = tx.calculate_hash();
+
+        Executor::apply_transaction_checked(&mut state, &tx)
+            .expect("a vote spends its fee, not its vote-weight amount");
+        assert_eq!(state.get_balance(&sender), 0);
+        assert_eq!(state.get_nonce(&sender), 1);
     }
 
     /// A refused governance vote leaves the sender untouched. The

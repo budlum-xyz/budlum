@@ -3525,7 +3525,7 @@ impl Blockchain {
                 break;
             }
 
-            let Some(pending_cost) = pending.checked_total_cost() else {
+            let Some(pending_cost) = pending.checked_admission_cost() else {
                 break;
             };
             if spendable_balance < pending_cost {
@@ -3583,18 +3583,7 @@ impl Blockchain {
         } else if tx.nonce > expected_nonce {
             reasons.push("nonce_too_high".to_string());
         }
-        let precheck_cost = if matches!(
-            &tx.tx_type,
-            crate::core::transaction::TransactionType::Unstake
-                | crate::core::transaction::TransactionType::Vote
-                | crate::core::transaction::TransactionType::Undelegate { .. }
-                | crate::core::transaction::TransactionType::WithdrawDelegation { .. }
-                | crate::core::transaction::TransactionType::SetValidatorCommission { .. }
-                | crate::core::transaction::TransactionType::Redelegate { .. }
-                | crate::core::transaction::TransactionType::ClaimRewards { .. }
-        ) {
-            tx.fee
-        } else if let Some(cost) = tx.checked_total_cost() {
+        let precheck_cost = if let Some(cost) = tx.checked_admission_cost() {
             cost
         } else {
             reasons.push("transaction_cost_overflow".to_string());
