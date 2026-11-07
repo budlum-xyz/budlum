@@ -64,29 +64,81 @@ fn check_ai_exec_dims(dims: &[u16]) -> Result<(), String> {
 }
 
 fn privacy_transfers_enabled(chain_id: u64) -> bool {
-    // Allowlist, not a denylist.
-    //
-    // `PrivateTransferSubmit` reaches `note_registry.apply_transfer`, which
-    // takes the nullifier the submitter hands it: the binding check
-    // `nullifier == derive_nullifier(commitment, proof)` only runs when
-    // `apply_transfer_with_proofs` is called with proofs, and nothing in the
-    // tree calls it that way. So today a transfer proves who signed the
-    // transaction, never that the signer owns the note; value conservation and
-    // membership are unwired too. That is survivable on the two networks where
-    // the notes are worth nothing.
-    //
-    // The old test was `chain_id != Mainnet`, which answers "is this not the
-    // one network we care about" instead of "is this a network where losing the
-    // notes costs nothing". Every id nobody has claimed yet - a second mainnet,
-    // a public testnet that grows real value - came back enabled.
+    // PTP-1 ownership, membership and value-conservation proofs are not live.
+    // Submitter-supplied nullifier proofs do not establish those properties.
+    // The public testnet must refuse the surface just like mainnet.
     chain_id
         == crate::core::chain_config::Network::Devnet
             .chain_id()
             .value()
-        || chain_id
-            == crate::core::chain_config::Network::Testnet
-                .chain_id()
-                .value()
+}
+
+/// Until the verification findings and both VL-1 conditions have evidence,
+/// the on-chain AI verification layer is a devnet-only surface (KR-27).
+fn check_ai_layer(chain_id: u64) -> BudlumResult<()> {
+    if chain_id
+        != crate::core::chain_config::Network::Devnet
+            .chain_id()
+            .value()
+    {
+        return Err(BudlumError::validation(
+            "ai_layer_closed_on_testnet",
+            "the on-chain AI verification layer is closed on this network until its verification findings and VL-1 conditions are satisfied",
+        ));
+    }
+    Ok(())
+}
+
+fn is_ai_layer_tx(tx_type: &TransactionType) -> bool {
+    match tx_type {
+        TransactionType::AiModelRegister(_)
+        | TransactionType::AiInferenceRequest(_)
+        | TransactionType::AiInferenceResult(_)
+        | TransactionType::AiFeeReclaim(_)
+        | TransactionType::AiModelDeactivate(_)
+        | TransactionType::AiModelReactivate(_)
+        | TransactionType::AiRequestCancel(_)
+        | TransactionType::AiDisputeSlash { .. }
+        | TransactionType::AiAgentPayment(_)
+        | TransactionType::AiAgentPaymentRelease(_)
+        | TransactionType::AiAgentPaymentReclaim(_)
+        | TransactionType::AiAttachExecutionProof { .. }
+        | TransactionType::AiOperatorBond
+        | TransactionType::AiOperatorUnbond
+        | TransactionType::AiOperatorWithdraw => true,
+        // A generic role transaction must not reopen AI verifier admission.
+        TransactionType::RoleBond { role }
+        | TransactionType::RoleUnbond { role }
+        | TransactionType::RoleWithdraw { role } => matches!(
+            crate::registry::role::RoleId(*role),
+            crate::registry::role::roles::AI_VERIFIER | crate::registry::role::roles::AI_OPERATOR
+        ),
+        // Data-market transactions are not AI verification transactions.
+        _ => false,
+    }
+}
+
+/// The same feature boundary applies to admission, precheck and execution.
+/// Refuse before creating an account, taking a fee or touching note state.
+pub(crate) fn check_transaction_features(
+    chain_id: u64,
+    tx_type: &TransactionType,
+) -> BudlumResult<()> {
+    if matches!(
+        tx_type,
+        TransactionType::PrivateTransferSubmit(_) | TransactionType::PrivacyNoteInsert(_)
+    ) && !privacy_transfers_enabled(chain_id)
+    {
+        return Err(BudlumError::validation(
+            // Preserve the existing refusal code used by RPC clients.
+            "privacy_mainnet_disabled",
+            "private transfers and note insertion are closed on this network until ownership, value-conservation and membership proofs are wired",
+        ));
+    }
+    if is_ai_layer_tx(tx_type) {
+        check_ai_layer(chain_id)?;
+    }
+    Ok(())
 }
 
 impl Executor {
@@ -167,6 +219,8 @@ impl Executor {
         state: &mut AccountState,
         tx: &Transaction,
     ) -> BudlumResult<()> {
+        check_transaction_features(tx.chain_id, &tx.tx_type)?;
+
         // The zero address is not a sender: only the canonical genesis
         // transaction may originate from it, and it is rejected everywhere
         // but the genesis block by `validate_and_add_block`. Accepting any
@@ -807,6 +861,9 @@ impl Executor {
                     && receipt.events[0] == 0x00A1_00A1
                     && receipt.events.len() >= 4
                 {
+                    // An ordinary ContractCall can emit an inference request.
+                    // Apply the same policy before touching escrow or grants.
+                    check_ai_layer(tx.chain_id)?;
                     let mut model_id = [0u8; 32];
                     model_id[0..8].copy_from_slice(&receipt.events[1].to_le_bytes());
                     let max_fee = receipt.events[2];
@@ -2448,12 +2505,6 @@ impl Executor {
                 sender.nonce = sender.nonce.saturating_add(1);
             }
             TransactionType::PrivacyNoteInsert(commitment) => {
-                if !privacy_transfers_enabled(tx.chain_id) {
-                    return Err(BudlumError::validation(
-                        "privacy_mainnet_disabled",
-                        "privacy note insertion is disabled on mainnet until full proof verification is wired",
-                    ));
-                }
                 // The same boundary `PrivateTransferSubmit::validate_shape`
                 // holds: only a packed field element is a note.
                 if !crate::privacy::is_note_hash(commitment) {
@@ -2473,12 +2524,6 @@ impl Executor {
                 sender.nonce = sender.nonce.saturating_add(1);
             }
             TransactionType::PrivateTransferSubmit(sub) => {
-                if !privacy_transfers_enabled(tx.chain_id) {
-                    return Err(BudlumError::validation(
-                        "privacy_mainnet_disabled",
-                        "private transfers are disabled on mainnet until ownership, value-conservation, and membership proofs are wired",
-                    ));
-                }
                 sub.validate_shape()
                     .map_err(|e| BudlumError::validation("private_transfer_shape", e))?;
                 if !sub.verify_digest_matches() {
@@ -4100,7 +4145,7 @@ mod tests {
 
         assert!(!privacy_transfers_enabled(mainnet), "mainnet must stay off");
         assert!(privacy_transfers_enabled(devnet), "devnet must stay on");
-        assert!(privacy_transfers_enabled(testnet), "testnet must stay on");
+        assert!(!privacy_transfers_enabled(testnet), "testnet must stay off");
 
         for unclaimed in [1u64, 42, 1337, 45263, u64::MAX] {
             assert!(
@@ -4108,6 +4153,17 @@ mod tests {
                 "chain id {unclaimed} has no ownership proof wired; the surface must stay off"
             );
         }
+    }
+
+    #[test]
+    fn testnet_privacy_is_disabled_until_ptp1() {
+        let testnet = crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value();
+        assert!(
+            !privacy_transfers_enabled(testnet),
+            "a public testnet must not enable unproven private transfers"
+        );
     }
 
     #[test]

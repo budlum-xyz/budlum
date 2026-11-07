@@ -179,10 +179,19 @@ fn mainnet_ai_bond_rejects_devnet_sized_principal() {
             .chain_id()
             .value(),
     );
-    let err = Executor::apply_transaction(&mut state, &tx)
-        .expect_err("mainnet must reject a devnet-sized AI inference layer bond");
-
-    assert!(err.contains("network validator floor"));
+    // Keep testing the component's network floor even though the launch
+    // boundary now refuses every mainnet AI transaction before that check.
+    let floor_error = state
+        .bond_ai_operator(&operator, amount, tx.chain_id)
+        .expect_err("the component must retain its network-specific floor");
+    assert!(matches!(
+        floor_error,
+        crate::registry::RegistryError::InsufficientStake { required: minimum, provided }
+            if minimum == required && provided == amount
+    ));
+    let err = Executor::apply_transaction_checked(&mut state, &tx)
+        .expect_err("mainnet AI execution must stay closed");
+    assert_eq!(err.code(), "ai_layer_closed_on_testnet");
     assert_eq!(state.get_balance(&operator), amount + fee);
     assert!(state.registry.get(&operator, roles::AI_OPERATOR).is_none());
 }

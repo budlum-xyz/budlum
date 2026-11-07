@@ -296,7 +296,7 @@ fn private_transfer_is_refused_on_mainnet_and_unknown_chain_ids() {
         let tx = signed_tx(&kp, chain_id, TransactionType::PrivateTransferSubmit(sub));
         let err = Executor::apply_transaction(&mut state, &tx)
             .expect_err("the privacy gate must refuse this chain id");
-        assert!(err.contains("disabled on mainnet"), "got: {err}");
+        assert!(err.contains("closed on this network"), "got: {err}");
         assert!(state.note_registry.contains_commitment(&c_in));
         assert!(!state.note_registry.contains_commitment(&c_out));
     }
@@ -313,7 +313,7 @@ fn privacy_note_insert_is_refused_on_mainnet_and_unknown_chain_ids() {
         let tx = signed_tx(&kp, chain_id, TransactionType::PrivacyNoteInsert(c));
         let err = Executor::apply_transaction(&mut state, &tx)
             .expect_err("the privacy gate must refuse this chain id");
-        assert!(err.contains("disabled on mainnet"), "got: {err}");
+        assert!(err.contains("closed on this network"), "got: {err}");
         assert!(!state.note_registry.contains_commitment(&c));
     }
 }
@@ -413,4 +413,420 @@ fn private_transfer_replayed_under_another_nonce_or_bare_digest_is_refused() {
         .expect_err("nonce-0 authorization replayed at nonce 1 must be rejected");
     assert!(err.contains("authorization_sig invalid"), "got: {err}");
     assert!(state.note_registry.contains_commitment(&c_in));
+}
+
+/// Compare the persisted note registry as well as account state. A refusal
+/// must not spend a note, consume a nonce, charge a fee or create a sender.
+fn assert_feature_refusal_unchanged(state: &mut AccountState, tx: &Transaction, code: &str) {
+    let root = state.calculate_state_root();
+    let balances = state.get_all_balances();
+    let nonces = state.get_all_nonces();
+    let notes = bincode::serialize(&state.note_registry).unwrap();
+    let accounts = state.accounts.len();
+    let ai = state.ai_registry.clone();
+    let roles = bincode::serialize(&state.registry).unwrap();
+    let err = Executor::apply_transaction_checked(state, tx)
+        .expect_err("the network policy must refuse the closed feature");
+    assert_eq!(err.code(), code);
+    assert_eq!(state.ai_registry, ai);
+    assert_eq!(bincode::serialize(&state.registry).unwrap(), roles);
+    assert_eq!(state.calculate_state_root(), root);
+    assert_eq!(state.get_all_balances(), balances);
+    assert_eq!(state.get_all_nonces(), nonces);
+    assert_eq!(bincode::serialize(&state.note_registry).unwrap(), notes);
+    assert_eq!(state.accounts.len(), accounts);
+}
+
+#[test]
+fn private_transfer_is_closed_on_testnet() {
+    let chain_id = crate::core::chain_config::Network::Testnet
+        .chain_id()
+        .value();
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    let mut state = funded_state(from, 1_000_000);
+    let (mut sub, _, _) = transfer_fixture(&kp, &mut state);
+    // The inner authorization must name testnet too. A devnet authorization
+    // would test signature rejection rather than the closed-feature policy.
+    sub.authorization_sig = kp
+        .sign(&PrivateTransferSubmit::authorization_message(
+            chain_id,
+            from.as_bytes(),
+            0,
+            &sub.public_digest,
+        ))
+        .to_vec();
+    let tx = signed_tx(&kp, chain_id, TransactionType::PrivateTransferSubmit(sub));
+    assert_feature_refusal_unchanged(&mut state, &tx, "privacy_mainnet_disabled");
+}
+
+#[test]
+fn note_registry_is_closed_on_testnet() {
+    let chain_id = crate::core::chain_config::Network::Testnet
+        .chain_id()
+        .value();
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    let tx = signed_tx(
+        &kp,
+        chain_id,
+        TransactionType::PrivacyNoteInsert(hash_from_field(77)),
+    );
+    assert_feature_refusal_unchanged(
+        &mut funded_state(from, 1_000_000),
+        &tx,
+        "privacy_mainnet_disabled",
+    );
+    // In particular, the general balance check must not create this account.
+    assert_feature_refusal_unchanged(&mut AccountState::new(), &tx, "privacy_mainnet_disabled");
+}
+
+#[test]
+fn privacy_admission_and_precheck_share_the_execution_boundary() {
+    use crate::chain::blockchain::Blockchain;
+    use crate::consensus::pow::PoWEngine;
+    use crate::core::chain_config::Network;
+    use std::sync::Arc;
+
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    for chain_id in [Network::Testnet.chain_id().value(), 999_999] {
+        let mut chain = Blockchain::new(Arc::new(PoWEngine::new(1)), None, chain_id, None);
+        chain.state = funded_state(from, 1_000_000);
+        let (mut sub, _, _) = transfer_fixture(&kp, &mut chain.state);
+        sub.authorization_sig = kp
+            .sign(&PrivateTransferSubmit::authorization_message(
+                chain_id,
+                from.as_bytes(),
+                0,
+                &sub.public_digest,
+            ))
+            .to_vec();
+        for variant in [
+            TransactionType::PrivateTransferSubmit(sub),
+            TransactionType::PrivacyNoteInsert(hash_from_field(77)),
+        ] {
+            let tx = signed_tx(&kp, chain_id, variant);
+            let err = chain.state.validate_transaction(&tx).unwrap_err();
+            assert!(err.contains("privacy_mainnet_disabled"), "{err}");
+            assert_pool_feature_refusal(&mut chain, &kp, tx, "privacy_mainnet_disabled");
+        }
+    }
+}
+
+fn assert_pool_feature_refusal(
+    chain: &mut crate::chain::blockchain::Blockchain,
+    kp: &KeyPair,
+    mut tx: Transaction,
+    code: &str,
+) {
+    let root = chain.state.calculate_state_root();
+    let precheck = chain.tx_precheck(&tx);
+    assert_eq!(precheck["accepted"], false);
+    assert!(precheck["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason == code));
+    let err = chain.add_transaction(tx.clone()).unwrap_err();
+    assert!(err.contains(code), "{err}");
+    assert_eq!(
+        chain
+            .add_transaction_bundle(vec![tx.clone()])
+            .unwrap_err()
+            .index,
+        0
+    );
+
+    // A valid first member must not leak into the pool when the second
+    // member reaches the closed feature. This is not a one-member-only test.
+    let fee = chain
+        .state
+        .registry
+        .params()
+        .required_transfer_fee(1, chain.state.base_fee)
+        .max(1);
+    let mut ordinary = Transaction::new_with_chain_id(
+        tx.from,
+        test_addr_from_byte(200),
+        1,
+        fee,
+        0,
+        vec![],
+        tx.chain_id,
+        TransactionType::Transfer,
+    );
+    ordinary.sign(kp);
+    chain
+        .state
+        .validate_transaction(&ordinary)
+        .expect("the bundle prefix must be valid");
+    tx.nonce = 1;
+    tx.sign(kp);
+    let refusal = chain
+        .add_transaction_bundle(vec![ordinary, tx])
+        .unwrap_err();
+    assert_eq!(refusal.index, 1);
+    assert!(matches!(refusal.cause,
+        crate::mempool::pool::MempoolError::InvalidTransaction(reason) if reason.contains(code)));
+    assert_eq!(chain.mempool.len(), 0);
+    assert_eq!(chain.state.calculate_state_root(), root);
+}
+
+fn closure_test_model(
+    from: Address,
+    model_id: crate::ai::types::AiModelId,
+) -> crate::ai::types::AiModelSpec {
+    use crate::ai::types::AiModelSpec;
+    AiModelSpec {
+        model_id,
+        model_hash: [7; 32],
+        owner: from,
+        min_verifier_count: 5,
+        agreement_threshold: 4,
+        max_input_ref_bytes: 1024,
+        max_output_ref_bytes: 1024,
+        request_deadline_blocks: 100,
+        result_deadline_blocks: 100,
+        version: 1,
+        active: true,
+        require_execution_proof: false,
+        execution_program_hash: None,
+        execution_class: 0,
+        execution_weights_digest: None,
+        execution_dims: None,
+        modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+    }
+}
+
+fn ai_feature_variants(from: Address) -> Vec<TransactionType> {
+    use crate::ai::types::{
+        AiAgentPayment, AiExecutionProof, AiInferenceRequest, AiInferenceResult, AiModelId,
+        AiRequestId, BoundedBytes,
+    };
+    let model_id = AiModelId([7; 32]);
+    let request_id = AiRequestId([9; 32]);
+    let mut cases = vec![
+        TransactionType::AiModelRegister(closure_test_model(from, model_id)),
+        TransactionType::AiInferenceRequest(AiInferenceRequest {
+            request_id,
+            requester: from,
+            model_id,
+            input_commitment: [1; 32],
+            input_ref: BoundedBytes::try_new(vec![]).unwrap(),
+            max_fee: 1,
+            callback: None,
+            submitted_at_block: 0,
+            deadline_block: 100,
+            perception: None,
+            effort: crate::ai_inference::effort::EffortTier::BASELINE,
+        }),
+        TransactionType::AiInferenceResult(AiInferenceResult {
+            request_id,
+            verifier: from,
+            output_commitment: [2; 32],
+            output_ref: BoundedBytes::try_new(vec![]).unwrap(),
+            result_nonce: 0,
+            signature: vec![],
+            submitted_at_block: 0,
+        }),
+        TransactionType::AiFeeReclaim(request_id),
+        TransactionType::AiModelDeactivate(model_id),
+        TransactionType::AiModelReactivate(model_id),
+        TransactionType::AiRequestCancel(request_id),
+        TransactionType::AiDisputeSlash {
+            request_id,
+            verifier: from,
+        },
+        TransactionType::AiAgentPayment(AiAgentPayment {
+            payment_id: [4; 32],
+            from_agent: from,
+            to_agent: test_addr_from_byte(2),
+            amount: 1,
+            request_id: Some(request_id),
+            require_proof: true,
+            submitted_at_block: 0,
+            expiry_block: 100,
+        }),
+        TransactionType::AiAgentPaymentRelease([4; 32]),
+        TransactionType::AiAgentPaymentReclaim([4; 32]),
+        TransactionType::AiAttachExecutionProof {
+            request_id,
+            proof: AiExecutionProof {
+                model_id,
+                input_commitment: [1; 32],
+                output_commitment: [2; 32],
+                program_hash: [3; 32],
+                proof_bytes: vec![],
+                steps: 1,
+                gas_used: 1,
+                weights_digest: None,
+                public_inputs: None,
+            },
+        },
+        TransactionType::AiOperatorBond,
+        TransactionType::AiOperatorUnbond,
+        TransactionType::AiOperatorWithdraw,
+    ];
+    for role in [
+        crate::registry::role::roles::AI_VERIFIER,
+        crate::registry::role::roles::AI_OPERATOR,
+    ] {
+        cases.extend([
+            TransactionType::RoleBond { role: role.0 },
+            TransactionType::RoleUnbond { role: role.0 },
+            TransactionType::RoleWithdraw { role: role.0 },
+        ]);
+    }
+    assert_eq!(cases.len(), 21, "every AI door belongs in this fixture");
+    cases
+}
+
+#[test]
+fn ai_layer_is_closed_on_testnet() {
+    use crate::core::chain_config::Network;
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    for chain_id in [
+        Network::Testnet.chain_id().value(),
+        Network::Mainnet.chain_id().value(),
+        999_999,
+    ] {
+        for variant in ai_feature_variants(from) {
+            let tx = signed_tx(&kp, chain_id, variant);
+            let mut state = funded_state(from, 1_000_000);
+            assert_feature_refusal_unchanged(&mut state, &tx, "ai_layer_closed_on_testnet");
+            let err = state.validate_transaction(&tx).unwrap_err();
+            assert!(err.contains("ai_layer_closed_on_testnet"), "{err}");
+            assert_feature_refusal_unchanged(
+                &mut AccountState::new(),
+                &tx,
+                "ai_layer_closed_on_testnet",
+            );
+        }
+    }
+}
+
+#[test]
+fn ai_execution_proof_is_closed_on_testnet() {
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    let variant = ai_feature_variants(from)
+        .into_iter()
+        .find(|tx| matches!(tx, TransactionType::AiAttachExecutionProof { .. }))
+        .expect("the fixture must contain the execution-proof door");
+    let tx = signed_tx(
+        &kp,
+        crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value(),
+        variant,
+    );
+    assert_feature_refusal_unchanged(
+        &mut funded_state(from, 1_000_000),
+        &tx,
+        "ai_layer_closed_on_testnet",
+    );
+}
+
+#[test]
+fn ai_admission_and_precheck_share_the_execution_boundary() {
+    use crate::chain::blockchain::Blockchain;
+    use crate::consensus::pow::PoWEngine;
+    use std::sync::Arc;
+    let chain_id = crate::core::chain_config::Network::Testnet
+        .chain_id()
+        .value();
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    let mut chain = Blockchain::new(Arc::new(PoWEngine::new(1)), None, chain_id, None);
+    chain.state = funded_state(from, 1_000_000);
+    for variant in ai_feature_variants(from) {
+        let tx = signed_tx(&kp, chain_id, variant);
+        assert_pool_feature_refusal(&mut chain, &kp, tx, "ai_layer_closed_on_testnet");
+    }
+}
+
+#[test]
+fn closed_features_leave_devnet_and_the_data_market_unchanged() {
+    use crate::core::chain_config::Network;
+    use crate::execution::executor::check_transaction_features;
+    let devnet = Network::Devnet.chain_id().value();
+    for variant in ai_feature_variants(test_addr_from_byte(3)) {
+        assert!(check_transaction_features(devnet, &variant).is_ok());
+    }
+    for network in [Network::Testnet, Network::Mainnet, Network::Devnet] {
+        for variant in [
+            TransactionType::Transfer,
+            TransactionType::ContractCall,
+            TransactionType::AiPurchaseData { offer_id: 0 },
+            TransactionType::AiOfferData {
+                cid: crate::storage::content_id::ContentId::of(b"market-control"),
+                price: 1,
+            },
+            TransactionType::RoleBond {
+                role: crate::registry::role::roles::RELAYER.0,
+            },
+        ] {
+            assert!(check_transaction_features(network.chain_id().value(), &variant).is_ok());
+        }
+    }
+}
+
+#[test]
+fn contract_inference_event_is_closed_on_testnet() {
+    use bud_isa::{Instruction, Opcode};
+    let mut program = Vec::new();
+    for value in [0x00A1_00A1, 7, 1, 10] {
+        program.push(
+            Instruction {
+                opcode: Opcode::Load,
+                rd: 1,
+                rs1: 0,
+                rs2: 0,
+                imm: value,
+            }
+            .encode(),
+        );
+        program.push(
+            Instruction {
+                opcode: Opcode::Log,
+                rd: 0,
+                rs1: 1,
+                rs2: 0,
+                imm: 0,
+            }
+            .encode(),
+        );
+    }
+    program.push(
+        Instruction {
+            opcode: Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode(),
+    );
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    let mut tx = Transaction::new_with_chain_id(
+        from,
+        Address::zero(),
+        0,
+        100,
+        0,
+        program.into_iter().flat_map(u64::to_le_bytes).collect(),
+        crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value(),
+        TransactionType::ContractCall,
+    );
+    tx.sign(&kp);
+    assert_feature_refusal_unchanged(
+        &mut funded_state(from, 1_000_000),
+        &tx,
+        "ai_layer_closed_on_testnet",
+    );
 }

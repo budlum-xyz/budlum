@@ -3549,6 +3549,12 @@ impl Blockchain {
     pub fn tx_precheck(&self, tx: &Transaction) -> serde_json::Value {
         let mut reasons = Vec::new();
 
+        if let Err(error) =
+            crate::execution::executor::check_transaction_features(self.chain_id, &tx.tx_type)
+        {
+            reasons.push(error.code().to_string());
+        }
+
         if tx.chain_id != self.chain_id {
             reasons.push("invalid_chain_id".to_string());
         }
@@ -3808,16 +3814,6 @@ impl Blockchain {
                     .is_active(&tx.from, crate::registry::role::roles::AI_OPERATOR)
                 {
                     reasons.push("ai_operator_unauthorized".to_string());
-                }
-            }
-            crate::core::transaction::TransactionType::PrivateTransferSubmit(_)
-            | crate::core::transaction::TransactionType::PrivacyNoteInsert(_) => {
-                if self.chain_id
-                    == crate::core::chain_config::Network::Mainnet
-                        .chain_id()
-                        .value()
-                {
-                    reasons.push("privacy_mainnet_disabled".to_string());
                 }
             }
             crate::core::transaction::TransactionType::AiDisputeSlash {
