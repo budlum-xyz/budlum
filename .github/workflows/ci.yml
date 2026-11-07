@@ -2113,6 +2113,14 @@ jobs:
         run: cargo fmt --manifest-path xtask/gates/Cargo.toml --check
       - name: Rust gates unit tests (concept-names canary and ratchet tests included)
         run: cargo test --release --manifest-path xtask/gates/Cargo.toml
+      # Every gate's canary, in one run. A bare `--self-test` selects the whole
+      # registry, and until this step existed only the failure surface ran it:
+      # 34 of the 141 registered gates had no canary of their own in any
+      # workflow, so their self-tests proved nothing on a green build. Naming
+      # them one by one would have added 34 steps that drift from the registry;
+      # the registry itself is the list here.
+      - name: Every gate canary (the whole registry in one run)
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- --self-test
       # TLG-24 asks whether the concept ratchet is green. It is green in count
       # mode: 27 entries and 5036 matches, equal to the baseline, re-measured
       # with an independent counter and recorded in docs/audit/TLG_REPORT.md.
