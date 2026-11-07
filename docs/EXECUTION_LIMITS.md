@@ -35,8 +35,9 @@ across Budlum's execution environments.
 
 | Limit | Value | Scope | Notes |
 |---|---:|---|---|
-| Maximum block gas | `30,000,000` | Per block | Shared across native and UEL execution envelopes |
+| Maximum block gas | `60,000,000` | Per block | Shared hard BGU ceiling; `BLOCK_BGU_LIMIT` in `src/execution/coordinator/gas.rs` |
 | Maximum single-transaction gas | `15,000,000` | Per transaction | Prevents single-call block monopolization |
+| BudZero per-block soft contract gas | `60,000,000` | BudZero contract calls | `MAX_BLOCK_CONTRACT_GAS`; exactly sixty full `1,000,000`-BGU calls, with the next refused before execution |
 | Maximum cross-environment call depth | `8` | `UniversalCall` stack | Bounds nested EVM <-> WASM <-> SVM <-> Move invocations |
 | Worker linear memory ceiling | `64 MiB` | Per EE worker invocation | Enforced identically on `x86_64` and `aarch64` |
 | Maximum contract / module bytecode | `512 KiB` | Deploy / store | Applies to EVM initcode, CosmWasm `.wasm`, SVM ELF, and Move modules |
@@ -55,3 +56,21 @@ across Budlum's execution environments.
 3. **Failure-atomic call frames:** Every nested `UniversalCall` executes against a candidate
    state overlay; any frame revert rolls back its child state mutations while charging
    exact consumed gas.
+
+## 3. BudZero Block-Budget Reconciliation (`BLG-302`)
+
+The former BudZero soft budget was `64 * DEFAULT_CONTRACT_GAS_LIMIT`, or
+`64,000,000` BGU at one BudZero gas per BGU. That exceeded the `60,000,000`-BGU
+hard block limit. `MAX_BLOCK_CONTRACT_GAS` now equals that hard limit: sixty full
+contract calls are admissible and the sixty-first is refused before execution.
+A compile-time assertion prevents a per-call limit above one block, and
+`src/tests/conformance_locks.rs` locks the native coordinator, BudZero soft cap,
+external conformance-runner constant, this table and the 60/61-call boundary.
+
+PR #79 originally called this defect `BLG-280`. That identity was already assigned
+to the closed static-call prefix-confusion finding in `docs/audit/FINDINGS.md`, so
+the integration uses the next unused identity, `BLG-302`, rather than renumbering or
+reusing the earlier finding. The correction is locally reviewed; the finding stays
+open until the pinned Rust toolchain and required CI supply execution evidence.
+This budget correction is not evidence that the upstream ecosystem conformance
+packages or cross-architecture nightly matrix have passed.

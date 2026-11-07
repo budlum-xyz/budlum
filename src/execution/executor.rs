@@ -167,11 +167,6 @@ impl Executor {
         Self::apply_transaction_checked(state, tx).map_err(|e| e.message().to_string())
     }
 
-    /// Refuse a block whose `ContractCall`s exceed the proving budget.
-    ///
-    /// Counted before anything executes, at the per-call limit each, so the
-    /// refusal costs no proving work. See
-    /// [`crate::execution::zkvm::MAX_BLOCK_CONTRACT_GAS`] for the number.
     /// Splits an escrowed AI request fee among the agreeing verifiers.
     /// The first `remainder` verifiers receive one extra unit.
     fn pay_agreeing_verifiers(
@@ -197,6 +192,11 @@ impl Executor {
         Ok(())
     }
 
+    /// Refuse a block whose `ContractCall`s exceed the proving budget.
+    ///
+    /// Counted before anything executes, at the per-call limit each, so the
+    /// refusal costs no proving work. See
+    /// [`crate::execution::zkvm::MAX_BLOCK_CONTRACT_GAS`] for the number.
     pub(crate) fn check_block_contract_gas(transactions: &[Transaction]) -> BudlumResult<()> {
         let calls = transactions
             .iter()

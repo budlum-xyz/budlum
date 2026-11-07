@@ -20,6 +20,12 @@ use std::collections::BTreeMap;
 
 /// Hard block-wide BGU ceiling (section 8.9 item 2).
 pub const BLOCK_BGU_LIMIT: u64 = 60_000_000;
+
+const _: () = assert!(
+    MAX_BLOCK_CONTRACT_GAS <= BLOCK_BGU_LIMIT,
+    "the BudZero soft limit may not exceed the hard block BGU limit"
+);
+
 /// Target block utilization (50% of `BLOCK_BGU_LIMIT`).
 pub const TARGET_BLOCK_BGU: u64 = BLOCK_BGU_LIMIT / 2;
 /// Maximum EIP-1559 base-fee step denominator (`1/8` = 12.5%).

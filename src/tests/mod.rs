@@ -6,6 +6,8 @@ pub mod block_door_harness;
 pub mod global_header_sequence;
 pub mod regression_canaries;
 #[cfg(test)]
+pub mod conformance_locks;
+#[cfg(test)]
 pub mod bench_performance;
 #[cfg(test)]
 pub mod block_reward;

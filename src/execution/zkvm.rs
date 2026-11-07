@@ -22,8 +22,24 @@ const _: () = assert!(
 /// `MAX_TRANSACTIONS_PER_BLOCK` times. The budget is counted at the limit,
 /// not at `gas_used`: proving cost is committed when the call starts, and a
 /// call that runs out of gas at the limit costs the same trace as one that
-/// halts just under it. Sixty-four full calls per block.
-pub const MAX_BLOCK_CONTRACT_GAS: u64 = 64 * DEFAULT_CONTRACT_GAS_LIMIT;
+/// halts just under it. Sixty full calls per block.
+///
+/// Section 8.9 fixes the hard block limit at 60,000,000 BGU and requires every
+/// per-environment soft limit to fit inside it. At one BudZero gas per BGU,
+/// the former `64 * DEFAULT_CONTRACT_GAS_LIMIT` budget exceeded the block that
+/// carried it. Keep the BudZero soft limit equal to the hard block ceiling.
+pub const MAX_BLOCK_CONTRACT_GAS: u64 = BLOCK_GAS_LIMIT_BGU;
+
+/// Hard block gas ceiling from Section 8.9 item 2 (`TESTNET-DEFAULT`).
+///
+/// The coordinator's `BLOCK_BGU_LIMIT` and the external conformance runner are
+/// locked to this value by `src/tests/conformance_locks.rs`.
+const BLOCK_GAS_LIMIT_BGU: u64 = 60_000_000;
+
+const _: () = assert!(
+    DEFAULT_CONTRACT_GAS_LIMIT <= BLOCK_GAS_LIMIT_BGU,
+    "a contract call limit may not exceed the block gas limit (Section 8.9 item 3)"
+);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZkVmReceipt {

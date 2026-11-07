@@ -139,3 +139,9 @@ unrelated findings; references to those records include their originating PR.
 Detailed red/green output, source/toolchain caveats, scope constraints and the
 remaining integration blockers are in `MOBILE_CORE_REVIEW.md`. No performance
 measurement, package completion or testnet readiness is claimed.
+
+## PR #79 execution-budget finding
+
+| Finding | Severity | State | Evidence and correction |
+|---|---|---|---|
+| BLG-302 | High | Open; locally corrected, pinned Rust CI pending | `MAX_BLOCK_CONTRACT_GAS` was `64 * DEFAULT_CONTRACT_GAS_LIMIT` (64,000,000 BGU), exceeding the coordinator's 60,000,000-BGU hard block limit. PR #79 identified the defect as `BLG-280`, but that identity already belongs to the closed static-call prefix-confusion finding above, so it is not reused. The adapted correction makes the BudZero soft budget equal to `BLOCK_BGU_LIMIT`, adds compile-time cross-module assertions and locks the 60/61-call boundary plus the separate conformance runner in `src/tests/conformance_locks.rs`. Static source/table checks are not a Rust build or test run; closure requires the pinned toolchain and required CI evidence. |
