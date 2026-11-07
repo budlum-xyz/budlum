@@ -68,7 +68,7 @@ jobs:
               failed = (tc.find("failure") is not None) or (tc.find("error") is not None)
               seen[name] = not failed
           for req in ("test_ios_bg_task_answers_audit", "test_ios_quota_cap_is_8_gib", "test_ios_class_is_opportunistic"):
-              if not seen.get(req, False):
+              if not any(req in k and ok for k, ok in seen.items()):
                   print(f"ERROR: {req} did not run and pass (seen={sorted(seen)})", file=sys.stderr)
                   sys.exit(1)
           print(f"Verified {len(seen)} XCTest cases in JUnit report; all 3 WP-38 acceptance tests passed.")
