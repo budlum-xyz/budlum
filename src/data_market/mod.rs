@@ -1,3 +1,4 @@
+//! WIRING: unwired - B.U.D. 3.0 Data Market purchase door awaits RPC method dispatch hookup.
 //! B.U.D. 3.0 Data Market (`WP-23`, Section 5.6, `BLG-064`).
 //!
 //! Sales bind a B.U.D. 3.0 [`ContentId`] and [`ContentRef`], verify post-quantum

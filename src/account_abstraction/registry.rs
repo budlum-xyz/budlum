@@ -1,3 +1,4 @@
+//! WIRING: unwired - quantum account registry awaits multisig transaction envelope hookup.
 //! Quantum account registry: the state layer of account abstraction.
 //!
 //! # Why this module exists

@@ -104,7 +104,7 @@ fn register(
 
 fn ack_all(r: &mut Bud3Registry, key: &[u8; 32]) {
     for h in 0..4u8 {
-        r.ack(key, &addr(10 + h)).expect("ack");
+        r.ack(key, &addr(10 + h), 0).expect("ack");
     }
 }
 
@@ -375,9 +375,9 @@ fn a_repair_replaces_lost_shares_only_after_the_new_ones_hold() {
         "§6.10 item 7: the lost shares stay until the new ones hold"
     );
     // Acknowledge one of the two: still not enough.
-    r.ack(&key, &addr(20)).expect("ack");
+    r.ack(&key, &addr(20), 0).expect("ack");
     assert_eq!(r.settle_repairs(), 0);
-    r.ack(&key, &addr(21)).expect("ack");
+    r.ack(&key, &addr(21), 0).expect("ack");
     assert!(
         r.settle_repairs() > 0,
         "every new share holds, so the lost ones go"

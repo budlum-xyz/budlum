@@ -1,3 +1,4 @@
+//! WIRING: unwired - staged for BNS JSON-RPC router cutover.
 //! B.U.D. 3.0 content binding and `bud3::view` resolution for BNS (Section 5.6, WP-23).
 //!
 //! exposed for: BNS RPC handlers, `bud` CLI, and explorer resolution.

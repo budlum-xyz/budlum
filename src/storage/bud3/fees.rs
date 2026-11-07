@@ -41,7 +41,7 @@
 //! pool` at every step, in a hundred-epoch simulation as much as after one
 //! settlement. Nothing in this module can mint.
 //!
-//! WIRING: unwired - the executor's `RegisterObject`, `RenewObject` and
+//! WIRING: storage fee quote is wired into upload/RPC surfaces; executor `RegisterObject`, `RenewObject` and
 //! `BindReference` arms charge these numbers and move the splits into the
 //! endowment and the pool when the `StorageTx` v3 door reaches the transaction
 //! envelope (WP-21 owns that door). Until then the module is exercised by its

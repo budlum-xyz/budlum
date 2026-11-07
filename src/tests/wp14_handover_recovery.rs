@@ -145,7 +145,7 @@ fn custody_assignment_handover_after_3_epochs() {
     registry
         .register_object([0x01; 32], upload.record, shares, 5, 50)
         .unwrap();
-    registry.ack(&key, &v1).unwrap();
+    registry.ack(&key, &v1, 0).unwrap();
 
     let candidates = [
         (v1, StorageClass::Full),

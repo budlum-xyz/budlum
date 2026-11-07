@@ -1,3 +1,4 @@
+//! WIRING: unwired - T-Expansion live broadcast gateway is height-gated closed on testnet.
 //! WP-55, 2/N: the live broadcast driver and the gateway door.
 //!
 //! WP-55 1/N (`live.rs`) delivers the time-segment state machine, the

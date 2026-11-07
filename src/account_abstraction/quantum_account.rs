@@ -1,3 +1,4 @@
+//! WIRING: unwired - `validate_all` travels with `QuantumAccountRegistry`.
 //! Quantum-safe account abstraction V2: address derivation, the guardian
 //! policy and the storage binding.
 //!

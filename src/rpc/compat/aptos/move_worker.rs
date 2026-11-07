@@ -1,3 +1,4 @@
+//! WIRING: unwired - Aptos /v1/transactions BCS admission adapter awaits compat HTTP listener hookup.
 //! The Move worker admission boundary (WP-32, 2/N).
 //!
 //! `POST /v1/transactions` carries a BCS transaction. Delivery 1/N of WP-32

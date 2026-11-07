@@ -326,4 +326,14 @@ mod tests {
         let commit_after = video_commitment_from_frames(&frames).unwrap();
         assert_eq!(commit_before, commit_after);
     }
+
+    #[test]
+    fn bud3_chain_content_to_video_to_object() {
+        let content = b"structured content -> coded BOF-1 -> optical QR video -> extracted BOF-1 -> content".repeat(16);
+        let selected = bud_codec::select(&content);
+        let candidate = Object::public_coded(selected.codec, selected.payload, &content).unwrap();
+        let verified = verify_upload_two_path_and_round_trip(&candidate, &FAST_PROFILE, 2).unwrap();
+        assert_eq!(verified.object.encode(), candidate.encode());
+        assert_eq!(verified.object.public_content().unwrap(), content);
+    }
 }

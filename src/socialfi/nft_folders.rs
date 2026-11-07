@@ -1,3 +1,4 @@
+//! WIRING: unwired - staged for SocialFi executor cutover.
 //! SocialFi `nft_folders` and B.U.D. 3.0 NFT commitment bindings (`WP-23`, `BLG-109`).
 //!
 //! exposed for: SocialFi transaction execution, RPC handlers, and wallet SDK.

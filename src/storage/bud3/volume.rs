@@ -24,7 +24,7 @@
 //! it is effective at once; for public content the volume is recoded within
 //! [`RECODE_DEADLINE_SECS`].
 //!
-//! WIRING: unwired - [`super::pipeline`] builds and views a volume for the
+//! WIRING: wired into [`super::pipeline`] volume build and view paths; maintenance sweep follows
 //! upload and view paths. The delete path of `bud3::delete` and the reference
 //! counter (WP-22) call [`AggregationVolume::remove`],
 //! [`AggregationVolume::needs_recode`] and [`AggregationVolume::compact`] once

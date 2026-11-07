@@ -1,3 +1,4 @@
+//! WIRING: unwired - `check_envelope` awaits `move_worker` HTTP listener hookup.
 //! `Foreign::Aptos`: the Move/Aptos foreign envelope (WP-32, 2/N).
 //!
 //! Directive 8.4.2 fixes the alias of a local account in the Move environment:

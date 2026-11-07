@@ -37,16 +37,19 @@
 //! when the legacy storage code is removed; until then it is exercised by its
 //! own tests and the golden vectors under `tests/vectors/bud3/`.
 
+pub mod access_tiering;
 pub mod admission;
 pub mod bof1;
 pub mod content_id;
 pub mod content_ref;
 pub mod custody;
 pub mod dedup_index;
+pub mod delete;
 pub mod fees;
 pub mod fountain;
 pub mod frame;
 pub mod grants;
+pub mod keys;
 pub mod limits;
 pub mod live;
 pub mod live_broadcast;
@@ -56,6 +59,8 @@ pub mod placement;
 pub mod qr;
 pub mod registry;
 pub mod repair;
+pub mod replace;
+pub mod seal;
 pub mod segment;
 pub mod two_path;
 pub mod tx;

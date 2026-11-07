@@ -1,3 +1,4 @@
+//! WIRING: unwired - B.U.D. 3.0 Education Domain registration awaits RPC handler hookup.
 //! B.U.D. 3.0 Education Domain (`WP-23`, Section 5.6, `BLG-261`).
 //!
 //! Educational and research artifacts carry a B.U.D. 3.0 [`ContentId`] and

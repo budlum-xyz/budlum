@@ -1,3 +1,4 @@
+//! WIRING: unwired - staged for T-Expansion challenge-window rollout.
 //! Verification levels of an AI result.
 //!
 //! WIRING: the AI registry records a level per finalized outcome and the

@@ -1,3 +1,4 @@
+//! WIRING: unwired - BGU calibration and conformance driver runs from conformance binary and CLI.
 //! Conformance runners, BGU gas calibration, and cross-EE golden block harness (`WP-35`).
 //!
 //! Implements section 8.9 item 4, section 8.13, section 8.15, and section 8.16:

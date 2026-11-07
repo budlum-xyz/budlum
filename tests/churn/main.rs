@@ -380,7 +380,7 @@ fn custody_assignment_handover_after_3_epochs() {
         .register_object(owner, upload.record, shares, 10, 100)
         .unwrap();
     // `v1` confirms its share immediately; `v2` stays silent.
-    assert_eq!(registry.ack(&key, &v1).unwrap(), 1);
+    assert_eq!(registry.ack(&key, &v1, 0).unwrap(), 1);
 
     let candidates = [
         (v1, StorageClass::Full),
