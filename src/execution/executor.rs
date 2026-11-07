@@ -4016,6 +4016,39 @@ mod tests {
         assert_eq!(state.get_balance(&carol), 0);
     }
 
+    #[test]
+    fn an_overflowing_amount_and_fee_is_rejected_before_state_mutation() {
+        use crate::core::account::AccountState;
+        use crate::core::address::Address;
+        use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
+        use crate::execution::executor::Executor;
+
+        let sender = Address::from([0x51; 32]);
+        let recipient = Address::from([0x52; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&sender, u64::MAX);
+        let root_before = state.calculate_state_root();
+
+        let mut tx = Transaction::new_with_chain_id(
+            sender,
+            recipient,
+            u64::MAX,
+            1,
+            0,
+            vec![],
+            DEFAULT_CHAIN_ID,
+            TransactionType::Transfer,
+        );
+        tx.hash = tx.calculate_hash();
+
+        let error = Executor::apply_transaction_checked(&mut state, &tx).unwrap_err();
+        assert_eq!(error.code(), "amount_fee_overflow");
+        assert_eq!(state.calculate_state_root(), root_before);
+        assert_eq!(state.get_balance(&sender), u64::MAX);
+        assert_eq!(state.get_balance(&recipient), 0);
+        assert_eq!(state.get_nonce(&sender), 0);
+    }
+
     /// A refused governance vote leaves the sender untouched. The
     /// fee and nonce used to be taken before the voter check, and the block
     /// producer keeps the state of a transaction that returned an error.

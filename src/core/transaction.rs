@@ -2355,8 +2355,12 @@ impl Transaction {
         self.fee
     }
 
+    /// Return a compatibility estimate of the transaction debit.
+    ///
+    /// Do not use this helper for admission or state transitions. Those paths
+    /// must use `checked_total_cost` and reject overflow.
     pub fn total_cost(&self) -> u64 {
-        self.amount.saturating_add(self.fee)
+        self.checked_total_cost().unwrap_or(u64::MAX)
     }
 
     /// Convenience: checked sum of `amount + fee` for consensus debit paths so
@@ -2667,7 +2671,17 @@ mod tests {
         assert_eq!(tx.fee, 5);
         assert_eq!(tx.nonce, 1);
         assert_eq!(tx.total_cost(), 105);
+        assert_eq!(tx.checked_total_cost(), Some(105));
     }
+
+    #[test]
+    fn checked_total_cost_rejects_overflow() {
+        let recipient = test_addr_from_byte(1u8);
+        let tx = Transaction::new_with_fee(Address::zero(), recipient, u64::MAX, 1, 1, vec![]);
+        assert_eq!(tx.checked_total_cost(), None);
+        assert_eq!(tx.total_cost(), u64::MAX);
+    }
+
     #[test]
     fn test_genesis_transaction() {
         let genesis = Transaction::genesis();
