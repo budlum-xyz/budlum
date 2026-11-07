@@ -46,6 +46,28 @@ fn bincode_payload_or_log<T: serde::Serialize + ?Sized>(what: &str, value: &T) -
     }
 }
 
+/// Decode one nested payload with the encoding [`bincode_payload_or_log`]
+/// produced, bounded by the bytes the payload actually carries.
+///
+/// The peer writes both the payload bytes and the length prefixes inside them,
+/// so an unbounded reader lets a short frame declare a huge collection and have
+/// the allocation happen before any domain validator sees the value. The bound
+/// is the slice's own length: no honest encoding consumes more than it carries,
+/// and `with_limit` also caps the element count a collection header may claim.
+/// The encoding is fixint because `bincode::serialize` is, and a varint reader
+/// would refuse every honest payload before it ever reached the limit.
+fn decode_payload<T>(bytes: &[u8], what: &str) -> Result<T, String>
+where
+    T: serde::de::DeserializeOwned,
+{
+    use bincode::Options;
+    bincode::options()
+        .with_fixint_encoding()
+        .with_limit(bytes.len() as u64)
+        .deserialize(bytes)
+        .map_err(|e| format!("Invalid {what} payload: {e}"))
+}
+
 /// The only transaction wire version this node encodes and accepts.
 const TX_WIRE_VERSION: u32 = 2;
 
@@ -1275,20 +1297,14 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     Some(pb::proto_transaction::TypePayload::Identity(p)) => p,
                     _ => return Err("Missing or mismatched Identity payload".into()),
                 };
-                TransactionType::Identity(
-                    bincode::deserialize(&payload.data)
-                        .map_err(|e| format!("Invalid IdentityTx payload: {e}"))?,
-                )
+                TransactionType::Identity(decode_payload(&payload.data, "IdentityTx")?)
             }
             pb::ProtoTransactionType::PoaOnboarding => {
                 let payload = match proto.type_payload {
                     Some(pb::proto_transaction::TypePayload::PoaOnboarding(p)) => p,
                     _ => return Err("Missing or mismatched PoA onboarding payload".into()),
                 };
-                TransactionType::PoaOnboarding(
-                    bincode::deserialize(&payload.data)
-                        .map_err(|e| format!("Invalid PoA onboarding payload: {e}"))?,
-                )
+                TransactionType::PoaOnboarding(decode_payload(&payload.data, "PoA onboarding")?)
             }
             pb::ProtoTransactionType::RoleBond => {
                 let payload = match proto.type_payload {
@@ -1302,20 +1318,15 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     Some(pb::proto_transaction::TypePayload::BridgeBurn(p)) => p,
                     _ => return Err("Missing or mismatched BridgeBurn payload".into()),
                 };
-                TransactionType::BridgeBurn(
-                    bincode::deserialize(&payload.data)
-                        .map_err(|e| format!("Invalid bridge burn payload: {e}"))?,
-                )
+                TransactionType::BridgeBurn(decode_payload(&payload.data, "bridge burn")?)
             }
             pb::ProtoTransactionType::CrossDomainMessage => {
                 let payload = match proto.type_payload {
                     Some(pb::proto_transaction::TypePayload::CrossDomainMessage(p)) => p,
                     _ => return Err("Missing or mismatched CrossDomainMessage payload".into()),
                 };
-                TransactionType::CrossDomainMessage(
-                    bincode::deserialize(&payload.data)
-                        .map_err(|e| format!("Invalid cross-domain message payload: {e}"))?,
-                )
+                let message = decode_payload(&payload.data, "cross-domain message")?;
+                TransactionType::CrossDomainMessage(message)
             }
             pb::ProtoTransactionType::RelayCrossDomainMessage => {
                 let payload = match proto.type_payload {
@@ -1376,50 +1387,35 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     Some(pb::proto_transaction::TypePayload::Vault(p)) => p,
                     _ => return Err("Missing or mismatched Vault payload".into()),
                 };
-                TransactionType::Vault(
-                    bincode::deserialize(&payload.data)
-                        .map_err(|e| format!("Invalid VaultTx payload: {e}"))?,
-                )
+                TransactionType::Vault(decode_payload(&payload.data, "VaultTx")?)
             }
             pb::ProtoTransactionType::Storage => {
                 let payload = match proto.type_payload {
                     Some(pb::proto_transaction::TypePayload::Storage(p)) => p,
                     _ => return Err("Missing or mismatched Storage payload".into()),
                 };
-                TransactionType::Storage(
-                    bincode::deserialize(&payload.data)
-                        .map_err(|e| format!("Invalid StorageTx payload: {e}"))?,
-                )
+                TransactionType::Storage(decode_payload(&payload.data, "StorageTx")?)
             }
             pb::ProtoTransactionType::ExternalDomain => {
                 let payload = match proto.type_payload {
                     Some(pb::proto_transaction::TypePayload::ExternalDomain(p)) => p,
                     _ => return Err("Missing or mismatched ExternalDomain payload".into()),
                 };
-                TransactionType::ExternalDomain(
-                    bincode::deserialize(&payload.data)
-                        .map_err(|e| format!("Invalid ExternalDomainTx payload: {e}"))?,
-                )
+                TransactionType::ExternalDomain(decode_payload(&payload.data, "ExternalDomainTx")?)
             }
             pb::ProtoTransactionType::Settlement => {
                 let payload = match proto.type_payload {
                     Some(pb::proto_transaction::TypePayload::Settlement(p)) => p,
                     _ => return Err("Missing or mismatched Settlement payload".into()),
                 };
-                TransactionType::Settlement(
-                    bincode::deserialize(&payload.data)
-                        .map_err(|e| format!("Invalid SettlementTx payload: {e}"))?,
-                )
+                TransactionType::Settlement(decode_payload(&payload.data, "SettlementTx")?)
             }
             pb::ProtoTransactionType::Bridge => {
                 let payload = match proto.type_payload {
                     Some(pb::proto_transaction::TypePayload::Bridge(p)) => p,
                     _ => return Err("Missing or mismatched Bridge payload".into()),
                 };
-                TransactionType::Bridge(
-                    bincode::deserialize(&payload.data)
-                        .map_err(|e| format!("Invalid BridgeTx payload: {e}"))?,
-                )
+                TransactionType::Bridge(decode_payload(&payload.data, "BridgeTx")?)
             }
             pb::ProtoTransactionType::AiModelRegister => {
                 let payload = match proto.type_payload {
@@ -1730,30 +1726,23 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     Some(pb::proto_transaction::TypePayload::PollenRegisterDataAsset(p)) => p,
                     _ => return Err("Missing or mismatched PollenRegisterDataAsset payload".into()),
                 };
-                TransactionType::PollenRegisterDataAsset(
-                    bincode::deserialize(&payload.data)
-                        .map_err(|e| format!("Invalid DataAsset payload: {e}"))?,
-                )
+                let asset = decode_payload(&payload.data, "DataAsset")?;
+                TransactionType::PollenRegisterDataAsset(asset)
             }
             pb::ProtoTransactionType::PollenAuthorizeSale => {
                 let payload = match proto.type_payload {
                     Some(pb::proto_transaction::TypePayload::PollenAuthorizeSale(p)) => p,
                     _ => return Err("Missing or mismatched PollenAuthorizeSale payload".into()),
                 };
-                TransactionType::PollenAuthorizeSale(
-                    bincode::deserialize(&payload.data)
-                        .map_err(|e| format!("Invalid SaleAuthorization payload: {e}"))?,
-                )
+                let authorization = decode_payload(&payload.data, "SaleAuthorization")?;
+                TransactionType::PollenAuthorizeSale(authorization)
             }
             pb::ProtoTransactionType::PollenGrantAccess => {
                 let payload = match proto.type_payload {
                     Some(pb::proto_transaction::TypePayload::PollenGrantAccess(p)) => p,
                     _ => return Err("Missing or mismatched PollenGrantAccess payload".into()),
                 };
-                TransactionType::PollenGrantAccess(
-                    bincode::deserialize(&payload.data)
-                        .map_err(|e| format!("Invalid AccessGrant payload: {e}"))?,
-                )
+                TransactionType::PollenGrantAccess(decode_payload(&payload.data, "AccessGrant")?)
             }
             pb::ProtoTransactionType::PollenRevokeGrant => {
                 let payload = match proto.type_payload {
@@ -2025,7 +2014,7 @@ impl TryFrom<pb::ProtoBlockHeader> for BlockHeader {
                 return Err("Slashing report entry exceeds size limit".into());
             }
             let r: crate::registry::evidence::SlashingReport =
-                bincode::deserialize(&raw).map_err(|e| format!("Invalid slashing report: {e}"))?;
+                decode_payload(&raw, "slashing report")?;
             reports.push(r);
         }
         let slashing_reports = if reports.is_empty() {
@@ -2144,7 +2133,7 @@ impl TryFrom<pb::ProtoBlock> for Block {
                 return Err("Slashing report entry exceeds size limit".into());
             }
             let r: crate::registry::evidence::SlashingReport =
-                bincode::deserialize(&raw).map_err(|e| format!("Invalid slashing report: {e}"))?;
+                decode_payload(&raw, "slashing report")?;
             reports.push(r);
         }
         let slashing_reports = if reports.is_empty() {
@@ -2613,6 +2602,31 @@ mod tests {
             Transaction::try_from(proto_tx).expect("Failed to decode proto transaction");
 
         assert_eq!(tx, decoded_tx);
+    }
+
+    /// A peer writes the length prefix of a nested payload, so the declared
+    /// count must never buy more memory than the frame carried.
+    #[test]
+    fn p2p_bincode_is_bounded() {
+        // 2^40 entries claimed in an eight-byte frame. An unbounded reader
+        // reserves the claim before it reads a single element.
+        let claimed: u64 = 1u64 << 40;
+        let frame = claimed.to_le_bytes().to_vec();
+        assert!(decode_payload::<Vec<Vec<u8>>>(&frame, "count claim").is_err());
+
+        // The same claim inside a transaction payload: an IdentityTx whose
+        // method list advertises more entries than the frame carries.
+        let mut identity = claimed.to_le_bytes().to_vec();
+        identity.extend_from_slice(&[0u8; 4]);
+        assert!(decode_payload::<Vec<Vec<u8>>>(&identity, "methods").is_err());
+
+        // An honest payload still decodes byte for byte.
+        let honest_value: Vec<Vec<u8>> = vec![vec![7u8, 8, 9]];
+        let honest = bincode::serialize(&honest_value).expect("serializes");
+        assert_eq!(
+            decode_payload::<Vec<Vec<u8>>>(&honest, "honest").expect("decodes"),
+            honest_value
+        );
     }
 
     #[test]

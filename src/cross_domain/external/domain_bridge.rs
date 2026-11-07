@@ -19,6 +19,7 @@
 //! domain was admitted under. The registry state that feeds it and the
 //! commitment path are documented in `intake.rs`.
 
+use bincode::Options;
 use crate::cross_domain::external::spec::{
     AdapterId, ExternalFinalityAdapter, RawConsensusEvidence, SecurityBacking, VerificationPolicy,
 };
@@ -65,7 +66,13 @@ pub fn decode_external_evidence(
             "external-domain finality requires a raw evidence envelope".to_string(),
         ));
     };
-    bincode::deserialize(payload)
+    // The carrier is peer-supplied, so the collection counts declared inside
+    // it may not exceed the bytes it carries. The encoding is fixint because
+    // that is what the encode side writes.
+    bincode::options()
+        .with_fixint_encoding()
+        .with_limit(payload.len() as u64)
+        .deserialize(payload)
         .map_err(|error| FinalityError(format!("external evidence carrier is malformed: {error}")))
 }
 
