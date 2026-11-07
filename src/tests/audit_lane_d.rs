@@ -268,7 +268,7 @@ fn audit_lane_d_blg_013_prepush_runs_all_features() {
 
 #[test]
 fn audit_lane_d_blg_014_backup_drill_checks_db_integrity() {
-    let drill = include_str!("../bin/backup_drill.rs");
+    let drill = include_str!("../../xtask/tools/src/backup_drill.rs");
     assert!(
         drill.contains("--check-db"),
         "BLG-014: backup_drill must pass --check-db on restored snapshot"
