@@ -116,8 +116,6 @@ fn blg_100_ai_request_cannot_escrow_vesting_locked_balance() {
         TransactionType::AiInferenceRequest(request.clone()),
     );
 
-    // The shared amount-plus-fee gate can afford the one-unit fee. The
-    // request-specific gate must also protect the 100-unit escrow.
     let error = Executor::apply_transaction_checked(&mut state, &tx).unwrap_err();
     assert_eq!(error.code(), "ai_insufficient_balance_for_escrow");
     assert_eq!(state.calculate_state_root(), root_before);

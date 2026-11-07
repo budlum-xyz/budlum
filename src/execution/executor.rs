@@ -196,9 +196,6 @@ impl Executor {
                 "Burn reserve is schedule-controlled and cannot originate transactions",
             ));
         }
-        // Reject an exhausted sender before any transaction arm can mutate
-        // state. Equality with tx.nonce remains the caller's admission duty;
-        // overflow safety is enforced here and again at each nonce write.
         Self::checked_next_nonce(state.get_nonce(&tx.from))?;
 
         match tx.tx_type {
@@ -3516,9 +3513,7 @@ impl Executor {
             .map_err(|e| e.message().to_string())
     }
 
-    /// Check the nonce against the candidate state at the block boundary.
-    /// This remains mandatory when a stored block has pruned witnesses and
-    /// therefore skips signature-oriented transaction admission.
+    /// Enforce the candidate nonce even when pruned witnesses skip admission.
     fn check_block_transaction_nonce(
         state: &AccountState,
         tx: &Transaction,
