@@ -2,8 +2,8 @@
 # 4-node devnet with PoS consensus, metrics, and RPC, plus a fifth node
 # that joins the validator set while the chain runs
 #
-# Four validators produce blocks by VRF leadership and vote finality (testnet
-#,). Their keys and the genesis come from the same
+# Four validators produce blocks by VRF leadership and vote finality on testnet.
+# Their keys and the genesis come from the same
 # ceremony the testnet uses: the one-shot `ceremony` service runs
 # `bud validator init` four times and `bud genesis assemble`, into a shared
 # volume, before any node starts.

@@ -1,4 +1,4 @@
-//! Fuzz harness for EVM migration deployment, account, and storage MPT proofs ().
+//! Fuzz harness for EVM migration deployment, account, and storage MPT proofs.
 
 #![no_main]
 

@@ -1,5 +1,5 @@
-//! End-to-end rehearsal drill suite (`T-1`..`T-7`,) and Mobile device
-//! field-test telemetry suite ().
+//! End-to-end rehearsal drill suite (`T-1`..`T-7`) and Mobile device
+//! field-test telemetry suite.
 
 use std::collections::BTreeSet;
 

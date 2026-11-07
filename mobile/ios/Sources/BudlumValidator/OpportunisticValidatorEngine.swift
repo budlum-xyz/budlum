@@ -1,6 +1,6 @@
 import Foundation
 
-/// Validator class registered on-chain by iOS devices (Section 7.10,).
+/// Validator class registered on-chain by iOS devices (Section 7.10).
 public enum ValidatorRegistrationClass: String, Equatable, Sendable {
     case mobileOpportunistic = "MobileOpportunistic"
 }
@@ -31,7 +31,7 @@ public enum OpportunisticValidatorError: Error, Equatable {
     case missingCustodyShare(String)
 }
 
-/// iOS `MobileOpportunistic` storage custody and background audit engine (Section 7.10,).
+/// iOS `MobileOpportunistic` storage custody and background audit engine (Section 7.10).
 ///
 /// - Registers strictly as `MobileOpportunistic` (never `Mobile` or `Standard`).
 /// - Enforces `[1 GiB, 8 GiB]` custody cap under `Application Support/bud3/`

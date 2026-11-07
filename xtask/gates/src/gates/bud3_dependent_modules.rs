@@ -1,6 +1,6 @@
 //! Static gate: dependent application modules (BNS, SocialFi, Data Market, and
 //! Education Domain) bind B.U.D. 3.0 `ContentRef` / `ContentId` and never use
-//! retired 2.0 `RegisterManifest` registration (, Section 5.6).
+//! retired 2.0 `RegisterManifest` registration (Section 5.6).
 
 use std::path::Path;
 

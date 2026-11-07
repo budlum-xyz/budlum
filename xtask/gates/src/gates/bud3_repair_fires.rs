@@ -1,4 +1,4 @@
-//! B.U.D. 3.0 lazy-repair, handover, and reassignment gate (`bud3-repair-fires`,).
+//! B.U.D. 3.0 lazy-repair, handover, and reassignment gate (`bud3-repair-fires`).
 //!
 //! Enforces statically that:
 //! 1. `src/storage/bud3/repair.rs` implements 20-block Instant Task Handover

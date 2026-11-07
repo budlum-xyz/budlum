@@ -1,5 +1,5 @@
-//! Static gate: Android Mobile validator (), F-Droid reproducible APK
-//! recipe (), and iOS `MobileOpportunistic` validator ().
+//! Static gate: Android Mobile validator, F-Droid reproducible APK
+//! recipe, and iOS `MobileOpportunistic` validator.
 
 use std::path::Path;
 

@@ -1,4 +1,4 @@
-# : the RPC method coverage ratchet, read by
+# The RPC method coverage ratchet, read by
 # `rpc_every_method_has_success_and_refusal_test` in `src/rpc/method_class.rs`.
 #
 # One line per gap: `<method> missing=success` or `<method> missing=refusal`.

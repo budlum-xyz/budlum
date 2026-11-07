@@ -1,4 +1,4 @@
-//! B.U.D. 3.0 class-aware placement gate (`bud3-placement`,).
+//! B.U.D. 3.0 class-aware placement gate (`bud3-placement`).
 //!
 //! Enforces statically that:
 //! 1. `src/storage/bud3/placement.rs` uses integer-only fixed-point rendezvous

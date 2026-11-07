@@ -1,6 +1,6 @@
 //! Gate `ee-workers-build-with-unwind`: node binary builds with `panic = "abort"`,
 //! while every execution-environment worker (`execution/*/Cargo.toml`) builds with
-//! `panic = "unwind"` so engine panics are caught at `catch_unwind` ().
+//! `panic = "unwind"` so engine panics are caught at `catch_unwind`.
 
 use std::fmt::Write as _;
 use std::fs;

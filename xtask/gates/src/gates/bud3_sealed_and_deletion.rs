@@ -1,5 +1,5 @@
 //! B.U.D. 3.0 sealed-content, unlinkable view-grant, and cryptographic-erasure
-//! gate (`bud3-sealed-and-deletion`,).
+//! gate (`bud3-sealed-and-deletion`).
 //!
 //! Enforces the Section 6.8 &  invariants statically across `src/storage/bud3/`:
 //! 1. `seal.rs` applies Padme bucket padding (`padme_padded_len`), seals via

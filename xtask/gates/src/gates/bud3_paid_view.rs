@@ -1,4 +1,4 @@
-//! B.U.D. 3.0 paid-view and network-reveal gate (`bud3-paid-view`,).
+//! B.U.D. 3.0 paid-view and network-reveal gate (`bud3-paid-view`).
 //!
 //! Enforces statically that:
 //! 1. G8 server-side fallback decoding (`fallback_decode_public` in
@@ -6,7 +6,7 @@
 //!    requires a `PaidViewReceipt` (`MIN_PAID_VIEW_FEE_ATOMS`) and unconditionally
 //!    refuses `ContentIdKind::Sealed` (`SealedFallbackForbidden`).
 //! 2. Reveal sessions (`RevealSessionManager::open_reveal`) fetch symbols strictly
-//!    via `NetworkSymbolSource` rather than caller-supplied raw content bytes ().
+//!    via `NetworkSymbolSource` rather than caller-supplied raw content bytes.
 //! 3. `src/storage/bud3/content_ref.rs` carries zero `Bud3NotReady` placeholders.
 
 use std::path::Path;

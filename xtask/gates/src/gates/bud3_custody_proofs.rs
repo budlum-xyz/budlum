@@ -1,4 +1,4 @@
-//! B.U.D. 3.0 custody-proof and symbol-protocol gate (`bud3-custody-proofs`,).
+//! B.U.D. 3.0 custody-proof and symbol-protocol gate (`bud3-custody-proofs`).
 //!
 //! Enforces statically that:
 //! 1. `src/storage/bud3/custody.rs` builds 64-byte sub-block Merkle trees under

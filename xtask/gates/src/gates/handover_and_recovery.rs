@@ -1,4 +1,4 @@
-//! Static gate: `handover-and-recovery` (Section 7.6, Section 7.7,).
+//! Static gate: `handover-and-recovery` (Section 7.6, Section 7.7).
 //!
 //! Verifies:
 //! 1. `src/registry/handover.rs` implements all Section 7.6 Instant Task Handover

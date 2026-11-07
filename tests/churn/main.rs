@@ -1,4 +1,4 @@
-// Churn integration test suite (Section 7.6, Section 7.7,).
+// Churn integration test suite (Section 7.6, Section 7.7).
 
 use budlum_core::core::address::Address;
 use budlum_core::core::metrics::Metrics;
