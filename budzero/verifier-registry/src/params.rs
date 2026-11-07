@@ -74,6 +74,14 @@ impl RegistryParams {
         if self.unbonding_epochs == 0 {
             return Err("unbonding_epochs must be > 0".into());
         }
+        // A deterrent configured to zero is no deterrent: equivocation and
+        // provable malice must cost something.
+        if self.double_sign_slash_ratio_fixed == 0 {
+            return Err("double_sign_slash_ratio_fixed must be > 0".into());
+        }
+        if self.malicious_slash_ratio_fixed == 0 {
+            return Err("malicious_slash_ratio_fixed must be > 0".into());
+        }
         if self.double_sign_slash_ratio_fixed > FIXED_POINT_SCALE {
             return Err("double_sign_slash_ratio_fixed cannot exceed FIXED_POINT_SCALE".into());
         }

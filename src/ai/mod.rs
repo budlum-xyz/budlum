@@ -6,6 +6,7 @@
 pub mod execution;
 pub mod registry;
 pub mod types;
+pub mod verification_level;
 
 pub use execution::{
     build_fixed_point_mlp_guest, eval_fixed_point_mlp, input_commitment, output_commitment,
