@@ -199,7 +199,8 @@ pub fn shards_commitment(state: &AccountState, num_shards: u16) -> [u8; 32] {
 /// # Errors
 ///
 /// Returns an error when the transaction is not a cross-shard `Transfer`,
-/// when the sender cannot cover the total cost, or when the receiver balance
+/// its nonce does not match the sender's current nonce, the nonce space is
+/// exhausted, the sender cannot cover the total cost, or the receiver balance
 /// would overflow.
 ///
 /// # Panics
@@ -218,6 +219,22 @@ pub fn apply_cross_shard_transfer(
     if tx.tx_type != TransactionType::Transfer {
         return Err("apply_cross_shard_transfer requires a Transfer".into());
     }
+
+    // `apply_cross_shard_transfer` is a state-transition boundary, not just a
+    // balance helper. Refuse stale or future transactions before any account
+    // is created or balance is changed. In particular, a saturating nonce bump
+    // at `u64::MAX` would otherwise leave this signed transaction replayable.
+    let expected_nonce = state.get_nonce(&tx.from);
+    if tx.nonce != expected_nonce {
+        return Err(format!(
+            "invalid cross-shard transfer nonce: expected {expected_nonce}, got {}",
+            tx.nonce
+        ));
+    }
+    let next_nonce = tx
+        .nonce
+        .checked_add(1)
+        .ok_or_else(|| "cross-shard transfer nonce space is exhausted".to_string())?;
 
     let total_cost = tx.total_cost();
     // Read-only checks: `get_or_create` would insert empty accounts into
@@ -239,7 +256,7 @@ pub fn apply_cross_shard_transfer(
         .balance
         .checked_sub(total_cost)
         .ok_or("shard transfer: sender balance underflow")?;
-    sender.nonce = sender.nonce.saturating_add(1);
+    sender.nonce = next_nonce;
     let receiver = state.get_or_create(&tx.to);
     receiver.balance = receiver
         .balance
@@ -365,7 +382,41 @@ mod tests {
         assert_eq!(state.get_or_create(&addr(0)).nonce, 1);
     }
 
-    /// A rejected transfer must not create accounts.
+    #[test]
+    fn cross_shard_transfer_rejects_a_stale_nonce_without_mutation() {
+        let mut state = AccountState::new();
+        state.get_or_create(&addr(0)).balance = 100;
+        state.get_or_create(&addr(0)).nonce = 1;
+        state.get_or_create(&addr(1)).balance = 0;
+        let before = shards_commitment(&state, 2);
+        let stale = transfer(addr(0), addr(1), 10, 1);
+
+        let error = apply_cross_shard_transfer(&mut state, &stale, 2)
+            .expect_err("stale transfer must be refused");
+        assert!(error.contains("invalid cross-shard transfer nonce"));
+        assert_eq!(shards_commitment(&state, 2), before);
+        assert_eq!(state.get_balance(&addr(0)), 100);
+        assert_eq!(state.get_balance(&addr(1)), 0);
+    }
+
+    #[test]
+    fn cross_shard_transfer_rejects_exhausted_nonce_without_mutation() {
+        let mut state = AccountState::new();
+        state.get_or_create(&addr(0)).balance = 100;
+        state.get_or_create(&addr(0)).nonce = u64::MAX;
+        state.get_or_create(&addr(1)).balance = 0;
+        let before = shards_commitment(&state, 2);
+        let mut exhausted = transfer(addr(0), addr(1), 10, 1);
+        exhausted.nonce = u64::MAX;
+
+        let error = apply_cross_shard_transfer(&mut state, &exhausted, 2)
+            .expect_err("exhausted nonce must be refused");
+        assert!(error.contains("nonce space is exhausted"));
+        assert_eq!(shards_commitment(&state, 2), before);
+        assert_eq!(state.get_balance(&addr(0)), 100);
+        assert_eq!(state.get_balance(&addr(1)), 0);
+    }
+
     #[test]
     fn p20_f04_rejected_transfer_creates_no_accounts() {
         let mut state = AccountState::new();
