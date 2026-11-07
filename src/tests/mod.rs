@@ -262,3 +262,7 @@ pub mod audit_lane_d;
 // The persistence move is behaviour-neutral.
 #[cfg(test)]
 pub mod persistence_move;
+
+// Section 6.2 shared B.U.D. 3.0 vocabulary.
+#[cfg(test)]
+pub mod bud3_types;

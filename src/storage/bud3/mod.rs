@@ -20,6 +20,7 @@
 //! | [`custody`] | Sub-block tree, symbol root, the audit draw and custody proofs |
 //! | [`pipeline`] | Upload (content to record and symbols) and view (symbols to checked content) |
 //! | [`fountain`] | RFC 6330 per-segment encoder and decoder, and the streaming encoder |
+//! | [`types`] | The section 6.2 vocabulary as values: `Frame`, `QrVideo`, `CustodyShare`, `PlacementGroup`, `RefCount`, `AggregationVolume`, the logical and optical paths |
 //!
 //! The commitment is fixed-size (32 bytes). The object is not fixed-size: it
 //! is the header plus the payload, and it is at most the header larger than
@@ -43,6 +44,7 @@ pub mod placement;
 pub mod registry;
 pub mod segment;
 pub mod tx;
+pub mod types;
 pub mod varint;
 
 pub use bof1::{Bof1Error, Flags, Header, Object};
@@ -54,3 +56,7 @@ pub use admission::chain_admission_report;
 pub use limits::{Bud3Limits, Profile, ProfileId};
 pub use meter::{Meter, MeterError};
 pub use segment::{object_commitment, segment_digest, ObjectCommitment, Segmentation};
+pub use types::{
+    AggregationVolume, CustodyShare, Frame, LogicalPath, OpticalPath, Path, Payload,
+    PlacementGroup, QrVideo, RefCount, RepairSymbol, SourceSymbol,
+};

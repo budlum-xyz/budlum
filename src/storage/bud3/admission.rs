@@ -19,6 +19,11 @@ use super::limits::{Bud3Limits, Profile};
 use super::placement::PlacementTable;
 use super::registry::AuditParams;
 use super::segment::Segmentation;
+use super::fountain::Symbol;
+use super::types::{
+    AggregationVolume, CustodyShare, Frame, LogicalPath, OpticalPath, Path, Payload,
+    PlacementGroup, QrVideo, RefCount, RepairSymbol, SourceSymbol,
+};
 
 /// The admission parameters of this node, computed from the production
 /// constants and checked against the production guards.
@@ -27,6 +32,66 @@ use super::segment::Segmentation;
 /// number is read from an existing `TESTNET_DEFAULT` constant or derived from
 /// the registered P0 profile, and every boolean is the result of actually
 /// calling the guard it names.
+
+fn vocabulary_self_check(k: u32) -> bool {
+    let payload = Payload(b"bud3".to_vec());
+    let src_sym = SourceSymbol(Symbol {
+        segment: 0,
+        esi: 0,
+        data: payload.as_bytes().to_vec(),
+    });
+    let rep_sym = RepairSymbol(Symbol {
+        segment: 0,
+        esi: k,
+        data: payload.as_bytes().to_vec(),
+    });
+    let frame = Frame::of([0xA5; 32], Profile::P0.id, src_sym.0);
+    let repair_frame = Frame::of([0xA5; 32], Profile::P0.id, rep_sym.0);
+    let video = QrVideo {
+        fps: 30,
+        frames: vec![frame.clone(), repair_frame.clone()],
+    };
+    let share = CustodyShare {
+        commitment: [0xA5; 32],
+        segment: 0,
+        esi: vec![0, 1],
+        symbol_root: [0x11; 32],
+    };
+    let group = PlacementGroup {
+        segment: 0,
+        n_full: 8,
+        s_full: 512,
+        n_mobile: 256,
+        s_mobile: 11,
+        f: 2,
+        holder: Vec::new(),
+    };
+    let mut rc = RefCount::default();
+    rc.add_reference();
+    let total_one = rc.total() == 1 && !rc.is_zero();
+    let released_ok = rc.release_reference().is_ok() && rc.is_zero();
+    let vol = AggregationVolume::new();
+    let logical = Path::Logical(LogicalPath::Encoder);
+    let optical = Path::Optical(OpticalPath::Raster);
+    !payload.is_empty()
+        && payload.len() == 4
+        && frame.payload() == b"bud3"
+        && frame.is_source(k)
+        && !repair_frame.is_source(k)
+        && video.seconds() == 1
+        && share.len() == 2
+        && !share.is_empty()
+        && share.esi_is_ordered()
+        && group.symbols() > u64::from(k)
+        && group.covers(k)
+        && total_one
+        && released_ok
+        && vol.is_empty()
+        && vol.admits(0, AggregationVolume::DEFAULT_CAPACITY_BYTES)
+        && !logical.is_optical()
+        && optical.is_optical()
+}
+
 #[must_use]
 pub fn chain_admission_report() -> serde_json::Value {
     let limits = Bud3Limits::TESTNET_DEFAULT;
@@ -95,6 +160,7 @@ pub fn chain_admission_report() -> serde_json::Value {
             "placement_table_valid": table.validate().is_ok(),
             "row_found": row.is_some(),
             "sealed_id_rule": sealed_rule_ok,
+            "vocabulary_consistent": vocabulary_self_check(k),
             "audit_window_matches_default":
                 audit_window_epochs == AuditParams::TESTNET_DEFAULT.mobile_window,
         },
