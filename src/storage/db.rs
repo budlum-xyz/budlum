@@ -380,11 +380,12 @@ impl Storage {
             let _ = std::fs::remove_file(&partial);
             return Err(error);
         }
-        std::fs::remove_file(&partial)?;
         if let Err(error) = Self::verify_snapshot(path) {
             let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(&partial);
             return Err(error);
         }
+        std::fs::remove_file(&partial)?;
         #[cfg(unix)]
         {
             // File data and directory entries are separate durability steps.
