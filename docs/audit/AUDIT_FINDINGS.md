@@ -1024,10 +1024,14 @@ downgrade, and the count above is the tree's, not a report's.
 
 ---
 
-## Round 4 - 2026-11-07 (directive gates: workspace coverage and floats)
+## Round 4 - 2026-11-07 (directive gates, binary registration and live gate repairs)
 
-Section 16 of the binding directive names two gates this tree did not have.
-This round adds them and writes the evidence here.
+Section 16 and WP-42 of the binding directive name three gates this tree did
+not have, together with `DOC-GAP-07` (`budlum-indexer` explicit `[[bin]]`
+registration), `TEST-GAP-04` (`budlum-domain-producer` unit tests), section
+0.1.5 (keeping the non-English directive outside the repository), and three
+live gate defects on `main`. This round lands them and writes the evidence
+here.
 
 The two registers the directive also asks for - `docs/work/PACKAGES.md` and
 `docs/audit/FINDINGS.md` - are deliberately not in this round. They are
@@ -1035,23 +1039,24 @@ already written, in fuller form, on the WP-04/WP-05 branch (pull request
 #135): the 64-row package register with its lock paths and its reconciliation
 gaps, and the finding ledger with its closing protocol and its first new
 finding. A second version here would be a second register, and the directive
-allows exactly one. This round therefore adds the gates and leaves the two
-files to the branch that already carries them.
+allows exactly one. This round therefore adds the gates and WP-42 repairs and
+leaves the two files to the branch that already carries them.
 
 | Change | What it closes | Evidence |
 |---|---|---|
 | `workflows_cover_every_workspace` (`xtask/gates/src/gates/workflows_cover_every_workspace.rs`) | section 16.2 rule 3: a Cargo workspace that no workflow compiles is a blind spot. `crates/ai-inference` and `bud/` were each in that hole once and both were found by accident, not by a check. | Measured on this tree: 14 workspace roots discovered from the manifests, 14 covered by a live `run:` line. The gate refuses an uncovered root, a comment-only mention, a `continue-on-error` step, and `cargo fmt` as coverage. Canary: `workflows_cover_every_workspace_catches_injected_uncovered_workspace`. CI steps: `Workspace coverage canary`, `Every Cargo workspace is compiled by a workflow`. |
 | `no_float_in_consensus_paths` (`xtask/gates/src/gates/no_float_in_consensus_paths.rs`) | G-2 and section 15.8 WP-42 item 4: no floating point on a consensus-relevant production path. A float makes a decision depend on the rounding mode, so two honest nodes can derive different roots from the same blocks. | Measured with the AST reader (`syn`), not with text search: `src/chain`, `src/consensus`, `src/execution`, `src/settlement`, `src/validators`, `src/storage/bud3` and `budzero/` hold no float outside `#[cfg(test)]` and `benches/`. One pinned file remains, `src/ai/registry.rs`, whose agent ranking is display-only: BLG-240, owner WP-45, ceiling 6 findings (three `f64` types, two float literals, one `as f64` cast; a cast is counted once, by the cast, not again as its target type, and the `f64` that appears inside a doc comment is a string literal and is not counted). A pin whose file has no float left fails, so closing BLG-240 cannot leave a silent exemption. Canary: `no_float_in_consensus_paths_catches_injected_f64`. CI steps: `No-float canary`, `No float on the consensus path`. |
-| `xtask/gates/src/gates/ci_workflow_guards.rs` | the reader both gates use. `RunBlock` now carries the step's `working-directory:`, because a workspace-relative path in a `run:` line is relative to that directory. `run_blocks` became `pub(crate)`. | No behaviour change for the existing guards: `working_directory` is `None` when a step declares none, and nothing under `ci_workflow_guards` reads it. |
+| `nightly_workflows_are_required` (`xtask/gates/src/gates/nightly_workflows_are_required.rs`) | section 16.2 rule 1 and WP-42 required gate test: every baseline nightly workflow (`fuzz-nightly.yml`, `kani-slow.yml`, `air-mutants-nightly.yml`, `miri.yml`) and any additional `*-nightly.yml` workflow must exist, declare a live `schedule:` with a `cron:` entry, and carry at least one unsoftened verification step. | Measured on this tree: 4 baseline nightly workflows present, each scheduled and carrying a non-softened verification step. Canary: `nightly_workflows_are_required_catches_injected_unscheduled_workflow`. CI steps: `Nightly workflows canary`, `Nightly workflows carry binding verification steps`. |
+| `xtask/gates/src/gates/ci_workflow_guards.rs` | the reader the workflow gates use. `RunBlock` now carries the step's `working-directory:`, because a workspace-relative path in a `run:` line is relative to that directory. `run_blocks` became `pub(crate)`. | No behaviour change for the existing guards: `working_directory` is `None` when a step declares none, and nothing under `ci_workflow_guards` reads it. |
+| `THE_BUDLUM_DIREKTIF.md` and `.gitignore` | section 0.1.5 and `tree-is-english`: the binding directive does not enter the repository; `main` tracked 6,044 lines (3,840 Turkish lines outside `.github/turkish-baseline.txt`). | Preserved byte-identically outside the checkout at `/home/user/THE_BUDLUM_DIREKTIF.md`, removed from git, and ignored at `/THE_BUDLUM_DIREKTIF.md`. `tree-is-english` now matches all 5 baselined files (13 lines total). |
+| `src/bin/support/http.rs`, `xtask/gates/src/gates/module_coverage.rs`, `xtask/gates/src/gates/no_out_of_block_consensus_writes.rs` | three live gate regressions on `main`: `octets[8..].fill(0)` tripped `indexing-is-not-new`; `src/security/`, `src/wallet/`, and `budzero/bud-pul/` were missing from `MODULE_PREFIXES`; `get_or_create` and `*_mut` bypassed `READ_PREFIXES`. | `octets.get_mut(8..)` replaces the slice index without widening `BASELINE`; the three module prefixes are mapped (`budlum:security`, `budlum:wallet`, `budzero:sigagg`); `grants_mutable_state` refuses `get_or_create` and `*_mut` before `READ_PREFIXES` with two new canary cases and unit tests. |
+| `Cargo.toml`, `src/bin/budlum-domain-producer.rs`, `.github/workflows/ci.yml` | `DOC-GAP-07` (explicit `[[bin]]` entry for `budlum-indexer`, WP-42 item 8) and `TEST-GAP-04` (`budlum-domain-producer` unit tests). | `[[bin]] name = "budlum-indexer"` declared in `Cargo.toml`; four unit tests added to `src/bin/budlum-domain-producer.rs` covering `quantity`, `seed`, `Cli` flag validation, and mode-`0600` key-file enforcement, wired into `Public service admission tests` in `ci.yml`. |
 
-Both gates are registered in `xtask/gates/src/main.rs` with a `self_test`,
-so `--all` and `--all --self-test` include them. Neither gate adds a
-dependency: the workspace gate reads the four manifest facts it needs itself,
-rather than putting a TOML crate into the crate that decides what may enter
-the main branch. The canaries cover the cases that matter - an uncovered
-workspace, a comment-only mention, a softened step, `cargo fmt`, a
-`--manifest-path` build, a members array spread over several lines, a broken
-manifest, a pinned file at its ceiling, one above it, and a stale pin.
+All three new gates are registered in `xtask/gates/src/main.rs` with a
+`self_test`, so `--all` and `--all --self-test` include them. None of the
+three adds a dependency: the workspace gate reads the four manifest facts it
+needs itself, rather than putting a TOML crate into the crate that decides
+what may enter the main branch.
 
 ### Notes on the evidence
 
