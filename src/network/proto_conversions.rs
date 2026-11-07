@@ -69,6 +69,16 @@ fn decode_bounded_bincode<T: serde::de::DeserializeOwned>(
         .map_err(|e| format!("Invalid {what}: {e}"))
 }
 
+fn decode_bounded_json<T: serde::de::DeserializeOwned>(
+    data: &[u8],
+    what: &str,
+) -> Result<T, String> {
+    if data.len() as u64 > MAX_WIRE_BINCODE_BYTES {
+        return Err(format!("{what} exceeds size limit"));
+    }
+    serde_json::from_slice(data).map_err(|e| format!("Invalid {what}: {e}"))
+}
+
 impl From<&Transaction> for pb::ProtoTransaction {
     fn from(tx: &Transaction) -> Self {
         let (tx_type_i32, type_payload) = match &tx.tx_type {
@@ -2577,26 +2587,22 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                 })
             }
             pb::proto_network_message::Payload::DomainCommitment(c) => {
-                let commitment = serde_json::from_slice(&c.data)
-                    .map_err(|e| format!("Invalid domain commitment payload: {e}"))?;
+                let commitment = decode_bounded_json(&c.data, "domain commitment payload")?;
                 Ok(NetworkMessage::DomainCommitment(commitment))
             }
             pb::proto_network_message::Payload::VerifiedDomainCommitment(c) => {
-                let payload = serde_json::from_slice(&c.data)
-                    .map_err(|e| format!("Invalid verified domain commitment payload: {e}"))?;
+                let payload = decode_bounded_json(&c.data, "verified domain commitment payload")?;
                 Ok(NetworkMessage::VerifiedDomainCommitment(payload))
             }
             pb::proto_network_message::Payload::SlashingEvidence(e) => Ok(
                 NetworkMessage::SlashingEvidence(SlashingEvidence::try_from(e)?),
             ),
             pb::proto_network_message::Payload::GlobalHeader(h) => {
-                let header = serde_json::from_slice(&h.data)
-                    .map_err(|e| format!("Invalid global header payload: {e}"))?;
+                let header = decode_bounded_json(&h.data, "global header payload")?;
                 Ok(NetworkMessage::GlobalHeader(header))
             }
             pb::proto_network_message::Payload::CrossDomainMessage(m) => {
-                let msg = serde_json::from_slice(&m.data)
-                    .map_err(|e| format!("Invalid cross domain message payload: {e}"))?;
+                let msg = decode_bounded_json(&m.data, "cross domain message payload")?;
                 Ok(NetworkMessage::CrossDomainMessage(msg))
             }
         }
@@ -3380,6 +3386,13 @@ mod tests {
     fn nested_bincode_blobs_past_the_wire_ceiling_are_refused() {
         let oversize = vec![0u8; (MAX_WIRE_BINCODE_BYTES as usize) + 1];
         let err = decode_bounded_bincode::<u8>(&oversize, "test payload").unwrap_err();
+        assert!(err.contains("exceeds size limit"));
+    }
+
+    #[test]
+    fn nested_json_blobs_past_the_wire_ceiling_are_refused() {
+        let oversize = vec![b'{'; (MAX_WIRE_BINCODE_BYTES as usize) + 1];
+        let err = decode_bounded_json::<serde_json::Value>(&oversize, "test json").unwrap_err();
         assert!(err.contains("exceeds size limit"));
     }
 }
