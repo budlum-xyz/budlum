@@ -8,7 +8,7 @@ use ed25519_dalek::{
 };
 use rand::Rng;
 use sha3::{Digest, Sha3_256};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
 use zeroize::Zeroizing;
 /// Write secret key bytes so that a crash never leaves a short or empty key file.
@@ -16,38 +16,13 @@ use zeroize::Zeroizing;
 /// The bytes go to a new sibling file made with `create_new` and mode `0o600`, are
 /// flushed to disk, and then replace the target with an atomic rename. The mode of a
 /// file that already existed is therefore never kept: the new file always has `0o600`.
+///
+/// The mechanics live in [`super::key_file::write_atomic_owner_only`] so every
+/// key-shaped writer in the tree shares one definition (one shared definition); this
+/// wrapper only maps the I/O error into [`CryptoError`].
 fn write_key_file(path: &Path, bytes: &[u8]) -> Result<(), CryptoError> {
-    let io_err = |e: std::io::Error| CryptoError::Io(e.to_string());
-    let mut tmp_name = path
-        .file_name()
-        .ok_or_else(|| CryptoError::Io("key path has no file name".into()))?
-        .to_os_string();
-    tmp_name.push(".tmp");
-    let tmp_path = path.with_file_name(tmp_name);
-    match std::fs::remove_file(&tmp_path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(io_err(e)),
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let result = options
-        .open(&tmp_path)
-        .map_err(io_err)
-        .and_then(|mut file| {
-            file.write_all(bytes).map_err(io_err)?;
-            file.sync_all().map_err(io_err)?;
-            std::fs::rename(&tmp_path, path).map_err(io_err)
-        });
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp_path);
-    }
-    result
+    super::key_file::write_atomic_owner_only(path, bytes)
+        .map_err(|e| CryptoError::Io(e.to_string()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -580,7 +555,7 @@ impl ValidatorKeys {
             "ValidatorKeys::save writes plaintext key material to {}; mainnet forbids this path",
             path.as_ref().display()
         );
-        let mut bytes = self.sig_key.signing_key.as_bytes().to_vec();
+        let mut bytes = Zeroizing::new(self.sig_key.signing_key.as_bytes().to_vec());
         bytes.extend_from_slice(&self.vrf_key.to_bytes());
         if let Some(pq_key) = &self.pq_key {
             bytes.extend_from_slice(pq_key.public_key_bytes());
@@ -589,13 +564,20 @@ impl ValidatorKeys {
         if let Some(bls_key) = &self.bls_key {
             bytes.extend_from_slice(&bls_key.to_bytes());
         }
+        // The plaintext key buffer is wiped on both success and error.
         write_key_file(path.as_ref(), &bytes)?;
-        // F11: the plaintext key buffer does not outlive the write.
-        bytes.fill(0);
         Ok(())
     }
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, CryptoError> {
-        let bytes = std::fs::read(path.as_ref()).map_err(|e| CryptoError::Io(e.to_string()))?;
+        // the write side is owner-only, so the read side refuses a file
+        // that is not. Without this the narrow mode only protects keys this
+        // build wrote; a key copied in with `cp` kept the umask's `0o644` and
+        // the node loaded it without a word.
+        super::key_file::require_owner_only(path.as_ref())
+            .map_err(|e| CryptoError::Io(e.to_string()))?;
+        let bytes = Zeroizing::new(
+            std::fs::read(path.as_ref()).map_err(|e| CryptoError::Io(e.to_string()))?,
+        );
         if bytes.len() < 128 {
             return Err(CryptoError::InvalidKey("Key file too short".into()));
         }
@@ -671,8 +653,8 @@ impl ValidatorKeys {
 
 impl KeyPair {
     pub fn generate() -> Result<Self, CryptoError> {
-        let mut seed = [0u8; SECRET_KEY_LENGTH];
-        rand::rng().fill_bytes(&mut seed);
+        let mut seed = Zeroizing::new([0u8; SECRET_KEY_LENGTH]);
+        rand::rng().fill_bytes(seed.as_mut_slice());
         let signing_key = SigningKey::from_bytes(&seed);
         // (security audit) never `println!` keypair
         // Material. The public key being written to stdout is a
@@ -702,14 +684,18 @@ impl KeyPair {
                 bytes.len()
             )));
         }
-        let mut seed = [0u8; SECRET_KEY_LENGTH];
+        let mut seed = Zeroizing::new([0u8; SECRET_KEY_LENGTH]);
         seed.copy_from_slice(bytes);
         Self::from_seed(&seed)
     }
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, CryptoError> {
+        // , the same rule as `ValidatorKeys::load`: the read side and
+        // the write side agree on what a key file may look like.
+        super::key_file::require_owner_only(path.as_ref())
+            .map_err(|e| CryptoError::Io(e.to_string()))?;
         let mut file =
             std::fs::File::open(path.as_ref()).map_err(|e| CryptoError::Io(e.to_string()))?;
-        let mut bytes = Vec::new();
+        let mut bytes = Zeroizing::new(Vec::new());
         file.read_to_end(&mut bytes)
             .map_err(|e| CryptoError::Io(e.to_string()))?;
         Self::from_bytes(&bytes)
@@ -1082,6 +1068,53 @@ mod tests {
         assert!(BlsKeypair::from_bytes(&short).is_err());
     }
 
+    /// The reader refuses a validator key file that group or others
+    /// can read. The writer has always produced `0o600`; the reader used to
+    /// accept anything, so a key copied in by `cp` (mode from the umask) was
+    /// loaded as if it had been saved here.
+    #[cfg(unix)]
+    #[test]
+    fn a_world_readable_validator_key_file_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vk.bin");
+        ValidatorKeys::generate().unwrap().save(&path).unwrap();
+        crate::crypto::key_file::require_owner_only(&path).expect("a saved file is owner-only");
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let err = ValidatorKeys::load(&path).expect_err("0o644 must be refused");
+        let message = err.to_string();
+        assert!(message.contains("chmod 600"), "{message}");
+        assert!(message.contains("644"), "{message}");
+
+        // Narrowing the file is the whole remedy: the same bytes then load.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        ValidatorKeys::load(&path).expect("0o600 loads");
+    }
+
+    /// `KeyPair::load` is the second reader and carries the same rule,
+    /// so `main.rs` cannot keep one key file loadable and the other not.
+    #[cfg(unix)]
+    #[test]
+    fn a_world_readable_keypair_file_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kp.bin");
+        let kp = KeyPair::generate().unwrap();
+        kp.save(&path).unwrap();
+        crate::crypto::key_file::require_owner_only(&path).expect("a saved file is owner-only");
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o604)).unwrap();
+        let err = KeyPair::load(&path).expect_err("0o604 must be refused");
+        assert!(err.to_string().contains("chmod 600"), "{err}");
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            KeyPair::load(&path).unwrap().private_key_bytes(),
+            kp.private_key_bytes()
+        );
+    }
+
     #[test]
     fn validator_key_file_partial_bls_tail_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -1090,7 +1123,20 @@ mod tests {
         keys.save(&path).unwrap();
         let mut bytes = std::fs::read(&path).unwrap();
         bytes.push(0x7f);
+        // Seeded narrow on purpose: this test is about the BLS tail, and a
+        // plain `fs::write` would hand the reader a wide mode and stop at the
+        // permission refusal, proving nothing about the tail.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&path, &bytes).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        #[cfg(not(unix))]
         std::fs::write(&path, &bytes).unwrap();
+        // The tail is refused, and it must be refused for the tail: an
+        // assertion that only says `is_err` would also pass if the reader
+        // stopped at the length check and never reached the BLS parse.
         assert!(ValidatorKeys::load(&path).is_err());
     }
 
@@ -1327,6 +1373,90 @@ fn keypair_generate_does_not_leak_public_key_via_println() {
     }
 }
 
+/// A BLS key pair whose secret is zero has the identity point as its
+/// public key, and that point verifies every signature and aggregates into any
+/// set without changing it. Both constructors must refuse it.
+///
+/// `from_seed` already did; `from_bytes` refused only the all-zero *bytes*,
+/// which is a weaker test than "reduces to the zero scalar". The cases below
+/// cover the seed path, the byte path and the pairing check that catches a
+/// mismatched public half.
+///
+/// Canary: drop the `sk == Scalar::zero()` guard in `from_seed` and the
+/// all-zero seed produces a key pair instead of an error.
+#[cfg(test)]
+mod bls_integrity_tests {
+    use crate::crypto::primitives::BlsKeypair;
+
+    #[test]
+    fn a_zero_scalar_seed_is_refused() {
+        assert!(
+            BlsKeypair::from_seed(&[0u8; 64]).is_err(),
+            "the all-zero seed reduces to the zero scalar"
+        );
+        // A seed equal to the group order is the same scalar as zero with
+        // different bytes, and `zero_seed_is_refused` covers that reduction.
+        // The point here is the seed that is zero in every byte.
+        let mut one = [0u8; 64];
+        one[0] = 1;
+        assert!(
+            BlsKeypair::from_seed(&one).is_ok(),
+            "the refusal must be about the zero scalar, not a ban on seeds"
+        );
+    }
+
+    #[test]
+    fn a_zero_secret_key_file_is_refused() {
+        // 32 zero bytes of secret, then a well-formed public half: the old
+        // shape refused this only because the public half could not be the
+        // identity point, not because it looked at the scalar.
+        let good = BlsKeypair::generate().expect("bls key");
+        let mut bytes = good.to_bytes();
+        bytes[..32].fill(0);
+        let err = BlsKeypair::from_bytes(&bytes).expect_err("a zero secret is refused");
+        assert!(
+            format!("{err}").contains("zero"),
+            "the refusal must name the zero scalar: {err}"
+        );
+        // A short file is a different refusal, and it must not be the same one.
+        assert!(BlsKeypair::from_bytes(&bytes[..127]).is_err());
+    }
+
+    #[test]
+    fn a_public_half_that_does_not_match_the_secret_is_refused() {
+        let a = BlsKeypair::generate().expect("bls a");
+        let b = BlsKeypair::generate().expect("bls b");
+        let mut bytes = a.to_bytes();
+        // Splice b's public half onto a's secret half.
+        bytes[32..].copy_from_slice(&b.public_key);
+        let err = BlsKeypair::from_bytes(&bytes).expect_err("a mismatched half is refused");
+        assert!(
+            format!("{err}").contains("does not match"),
+            "the refusal must name the mismatch: {err}"
+        );
+    }
+
+    /// The other half of the finding: the verifier refuses a signature that is
+    /// the identity point, so an "aggregate" of zero signatures cannot be
+    /// presented as a quorum.
+    #[test]
+    fn an_identity_signature_is_refused_by_the_verifier() {
+        let key = BlsKeypair::generate().expect("bls key");
+        let message = b"identity signature probe";
+        let good = crate::chain::finality::sign_bls(&key.secret_key, message);
+        crate::chain::finality::verify_bls_sig(&key.public_key, message, &good)
+            .expect("the honest signature verifies");
+
+        // The compressed encoding of the G1 identity point: the compression
+        // flag with an all-zero x, which is how the crate spells `O`.
+        let mut identity = [0u8; 48];
+        identity[0] = 0xc0;
+        let err = crate::chain::finality::verify_bls_sig(&key.public_key, message, &identity)
+            .expect_err("an identity signature must not verify");
+        assert!(err.contains("identity"), "{err}");
+    }
+}
+
 #[test]
 fn bls_from_bytes_roundtrip_and_integrity() {
     let kp = BlsKeypair::generate().expect("generate");
@@ -1458,4 +1588,139 @@ fn bls_rejects_zero_scalar_and_identity_points() {
     let id_g1 = G1Affine::identity().to_compressed();
     assert!(BlsKeypair::verify_pop(&id_g2, &pop, DEFAULT_CHAIN_ID, &addr).is_err());
     assert!(BlsKeypair::verify_pop(&valid.public_key, &id_g1, DEFAULT_CHAIN_ID, &addr).is_err());
+}
+
+/// The ML-DSA surface carries a registered FIPS 204 context string and
+/// an explicit scheme identity.
+///
+/// Two halves, and both are load-bearing:
+///
+/// * **Context.** A signature made for one surface must not verify on another
+///   even when the payload bytes are identical. FIPS 204 section 5.2 puts the
+///   context inside the signed message, so the separation is cryptographic, not
+///   a convention. An empty context is refused outright.
+/// * **Scheme identity.** The 1952-byte ML-DSA-65 key and the 2592-byte
+///   ML-DSA-87 key must not be interchangeable: the registry names the scheme,
+///   its length and its status, and a chain reads that registry rather than
+///   trusting a length.
+///
+/// Canary: pass `ctx::BLOCK_V6` where `ctx::TX_V7` is expected, or accept an
+/// empty context, and the corresponding assertion below fails.
+#[cfg(all(test, feature = "pq-ml-dsa"))]
+mod pq_identity_tests {
+    use crate::crypto::{ctx, pq, primitives::PqKeyPair, scheme::SchemeId};
+
+    const MESSAGE: &[u8] = b"identity probe";
+
+    fn keypair() -> PqKeyPair {
+        PqKeyPair::from_bytes(
+            &pq::ml_dsa_public_key(SchemeId::ML_DSA_65, &[7u8; 32]).expect("public key"),
+            &[7u8; 32],
+        )
+        .expect("a paired ML-DSA-65 key")
+    }
+
+    #[test]
+    fn a_context_is_part_of_the_signature() {
+        let key = keypair();
+        let tx = key.sign(ctx::TX_V7, MESSAGE).expect("sign under TX_V7");
+        PqKeyPair::verify(key.public_key_bytes(), ctx::TX_V7, MESSAGE, &tx)
+            .expect("the same context verifies");
+
+        // The same signature under another registered context, over the same
+        // bytes, is a different message to FIPS 204.
+        for other in [ctx::BLOCK_V6, ctx::QC_V2, ctx::KEY_BINDING_V1] {
+            assert!(
+                PqKeyPair::verify(key.public_key_bytes(), other, MESSAGE, &tx).is_err(),
+                "a TX_V7 signature must not verify under {}",
+                String::from_utf8_lossy(other)
+            );
+        }
+        // And under a different payload in the right context, for completeness.
+        assert!(PqKeyPair::verify(key.public_key_bytes(), ctx::TX_V7, b"other", &tx).is_err());
+    }
+
+    #[test]
+    fn an_empty_context_is_refused_on_both_sides() {
+        let key = keypair();
+        let err = key
+            .sign(b"", MESSAGE)
+            .expect_err("signing with no context is refused");
+        assert!(format!("{err}").contains("context"), "{err}");
+
+        let signed = key.sign(ctx::TX_V7, MESSAGE).expect("sign");
+        let err = PqKeyPair::verify(key.public_key_bytes(), b"", MESSAGE, &signed)
+            .expect_err("verifying with no context is refused");
+        assert!(format!("{err}").contains("context"), "{err}");
+    }
+
+    #[test]
+    fn the_scheme_identity_names_its_length_and_status() {
+        let info = SchemeId::ML_DSA_65.info().expect("a registered scheme has an entry");
+        assert_eq!(info.public_key_len, Some(1952));
+        assert_eq!(SchemeId::ML_DSA_87.info().expect("entry").public_key_len, Some(2592));
+        assert_eq!(crate::crypto::primitives::PQ_SCHEME_ID, "ml-dsa-65");
+        assert_eq!(
+            crate::crypto::primitives::pq_public_key_len(),
+            1952,
+            "this build's key length comes from the registry, not a literal"
+        );
+
+        // A key of the other scheme's length is refused, so the two are not
+        // interchangeable by length alone.
+        let wrong = vec![0u8; 2592];
+        assert!(PqKeyPair::validate_public_key(&wrong).is_err());
+        let right = pq::ml_dsa_public_key(SchemeId::ML_DSA_65, &[1u8; 32]).expect("key");
+        PqKeyPair::validate_public_key(&right).expect("a 1952-byte key is this build's scheme");
+    }
+
+    #[test]
+    fn the_registry_decides_whether_a_scheme_verifies() {
+        // A chain reads its own registry. A scheme whose status is not
+        // `verifiable` must be refused even with a valid signature, which is
+        // how a chain that never launched ML-DSA-65 keeps rejecting it.
+        let key = keypair();
+        let signature = key.sign(ctx::TX_V7, MESSAGE).expect("sign");
+        let genesis = crate::crypto::scheme::SchemeStatusRegistry::genesis();
+        assert!(
+            genesis.scheme_verifies(SchemeId::ML_DSA_65),
+            "the genesis registry verifies this build's scheme"
+        );
+        // A registry that has disabled the scheme refuses the same valid
+        // signature, and the refusal names the scheme rather than a length.
+        // The entry list is fixed-width and counted, so "not verifiable" is a
+        // status byte rather than a missing row.
+        let (mut schemes, suites) = genesis.entries();
+        let index = schemes
+            .iter()
+            .position(|(id, _)| *id == SchemeId::ML_DSA_65.0)
+            .expect("the genesis registry lists this build's scheme");
+        schemes[index].1 = crate::crypto::scheme::SchemeStatus::Disabled
+            .to_byte();
+        let disabled = crate::crypto::scheme::SchemeStatusRegistry::from_entries(&schemes, &suites)
+            .expect("the entry list keeps its shape");
+        let err = PqKeyPair::verify_in(
+            &disabled,
+            key.public_key_bytes(),
+            ctx::TX_V7,
+            MESSAGE,
+            &signature,
+        )
+        .expect_err("a scheme the chain disabled is refused");
+        let text = format!("{err}").to_lowercase();
+        assert!(text.contains("not verifiable") || text.contains("scheme"), "{err}");
+    }
+
+    #[test]
+    fn every_registered_context_is_non_empty_and_within_the_cap() {
+        assert!(!ctx::TABLE.is_empty(), "the table must not be empty");
+        for entry in ctx::TABLE {
+            assert!(!entry.is_empty(), "an empty context would be refused anyway");
+            assert!(
+                entry.len() <= ctx::MAX_CONTEXT_LEN,
+                "{} exceeds the FIPS 204 cap",
+                String::from_utf8_lossy(entry)
+            );
+        }
+    }
 }

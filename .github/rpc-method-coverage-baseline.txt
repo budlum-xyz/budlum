@@ -23,8 +23,8 @@
 # the pull request that does it. The gate's own behaviour is locked by
 # `rpc_method_coverage_catches_an_injected_gap`.
 #
-# Measured against the tree on 2026-11-06: 183 rows, 73 rows covered
-# on both sides the rule asks for, 110 rows carrying 177 gap lines.
+# Measured against the tree on 2026-11-07: 183 rows, 82 rows covered
+# on both sides the rule asks for, 101 rows carrying 165 gap lines.
 bud_adminBanPeer missing=success
 bud_adminListBannedPeers missing=success
 bud_adminUnbanPeer missing=refusal
@@ -49,7 +49,6 @@ bud_aiGetModel missing=refusal
 bud_aiGetModel missing=success
 bud_aiGetOutcome missing=refusal
 bud_aiGetOutcome missing=success
-bud_aiInferenceStats missing=success
 bud_aiReclaimFee missing=refusal
 bud_aiReclaimFee missing=success
 bud_aiRegisterModel missing=refusal
@@ -82,13 +81,11 @@ bud_burnBridgeTransfer missing=refusal
 bud_burnBridgeTransferWithEvent missing=refusal
 bud_encodeExternalEvidence missing=refusal
 bud_encodeExternalEvidence missing=success
-bud_estimateGas missing=refusal
 bud_gatewayFetchContent missing=refusal
 bud_gatewayFetchContent missing=success
 bud_gatewayRenderContent missing=refusal
 bud_gatewayRenderContent missing=success
 bud_getAccountProof missing=success
-bud_getBalance missing=refusal
 bud_getBlockByHash missing=refusal
 bud_getBlockByNumber missing=refusal
 bud_getCrossDomainMessage missing=refusal
@@ -118,8 +115,6 @@ bud_getTransactionReceipt missing=refusal
 bud_getValidatorDelegations missing=refusal
 bud_graftPaymentProof missing=refusal
 bud_graftPaymentProof missing=success
-bud_hubGetApps missing=success
-bud_hubGetGraftApps missing=success
 bud_hubPrepareRegister missing=refusal
 bud_hubPrepareRegister missing=success
 bud_identityCredential missing=refusal
@@ -137,12 +132,6 @@ bud_passportGetProofBundle missing=refusal
 bud_passportGetProofBundle missing=success
 bud_planEvmVerification missing=refusal
 bud_planEvmVerification missing=success
-bud_pollenBuildAiInputRef missing=refusal
-bud_pollenBuildAiInputRef missing=success
-bud_pollenPreparePurchase missing=refusal
-bud_pollenPreparePurchase missing=success
-bud_pollenPrepareSaleAuthorization missing=refusal
-bud_pollenPrepareSaleAuthorization missing=success
 bud_pruneStatus missing=success
 bud_registryActiveMembers missing=refusal
 bud_registryBeginRoleBondUnbonding missing=refusal
@@ -154,7 +143,6 @@ bud_relayerPrepareExternalTx missing=success
 bud_replayExternalProbes missing=refusal
 bud_replayExternalProbes missing=success
 bud_requestPrune missing=success
-bud_sendRawTransaction missing=refusal
 bud_sendTxBundle missing=refusal
 bud_sendTxBundle missing=success
 bud_socialGetFeed missing=refusal

@@ -822,6 +822,20 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
+            // the label the vendor BLS mechanism signs through is
+            // the operator's, not the compiled-in default, so the object the
+            // startup binding test proves a pairing for is the object that
+            // signs.
+            let s = match config.pkcs11_bls_key_label.clone() {
+                Some(label) => match s.with_bls_key_label(label) {
+                    Ok(signer) => signer,
+                    Err(e) => {
+                        eprintln!("CRITICAL: invalid PKCS#11 BLS key label: {e}");
+                        std::process::exit(1);
+                    }
+                },
+                None => s,
+            };
             let signer = s.with_vendor_mechanisms(
                 config.pkcs11_bls_mechanism.clone(),
                 config.pkcs11_pq_mechanism.clone(),
