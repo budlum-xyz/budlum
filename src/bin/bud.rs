@@ -900,10 +900,10 @@ fn parse_positive_fee(value: &str) -> Result<u64, std::io::Error> {
 }
 
 /// Read the fee floor from the node. The server exposes the same value through
-/// `eth_gas_price`; no hard-coded wallet default can drift from consensus.
+/// `bud_gasPrice`; no hard-coded wallet default can drift from consensus.
 fn network_base_fee(rpc_url: &str) -> Result<u64, String> {
-    let value = rpc_call(rpc_url, "eth_gasPrice", serde_json::json!([]))?;
-    parse_rpc_u64(&value, "eth_gasPrice")
+    let value = rpc_call(rpc_url, "bud_gasPrice", serde_json::json!([]))?;
+    parse_rpc_u64(&value, "bud_gasPrice")
 }
 
 fn fee_or_network_base(requested: Option<u64>, base_fee: u64) -> u64 {
