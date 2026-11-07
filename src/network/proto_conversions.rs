@@ -46,6 +46,33 @@ fn bincode_payload_or_log<T: serde::Serialize + ?Sized>(what: &str, value: &T) -
     }
 }
 
+const MAX_TRANSACTION_TYPE_PAYLOAD_BYTES: usize = crate::network::protocol::MAX_TX_SIZE;
+const MAX_SLASHING_REPORT_BYTES: usize = crate::consensus::MAX_SLASHING_EVIDENCE_BYTES;
+
+/// Decode peer-supplied bincode without allowing its length prefixes to exceed
+/// the budget available to the containing network object. The explicit
+/// options preserve the fixed-width, little-endian and trailing-byte behavior
+/// of `bincode::deserialize`; the size limit only narrows resource use.
+fn decode_bounded_bincode<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+    max_bytes: usize,
+) -> Result<T, String> {
+    if bytes.len() > max_bytes {
+        return Err(format!(
+            "payload length {} exceeds the {max_bytes}-byte limit",
+            bytes.len()
+        ));
+    }
+    let limit = u64::try_from(max_bytes).map_err(|_| "bincode limit exceeds u64".to_string())?;
+    use bincode::Options as _;
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+        .with_limit(limit)
+        .deserialize(bytes)
+        .map_err(|error| error.to_string())
+}
+
 /// The only transaction wire version this node encodes and accepts.
 const TX_WIRE_VERSION: u32 = 2;
 
@@ -1276,7 +1303,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     _ => return Err("Missing or mismatched Identity payload".into()),
                 };
                 TransactionType::Identity(
-                    bincode::deserialize(&payload.data)
+                    decode_bounded_bincode(&payload.data, MAX_TRANSACTION_TYPE_PAYLOAD_BYTES)
                         .map_err(|e| format!("Invalid IdentityTx payload: {e}"))?,
                 )
             }
@@ -1286,7 +1313,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     _ => return Err("Missing or mismatched PoA onboarding payload".into()),
                 };
                 TransactionType::PoaOnboarding(
-                    bincode::deserialize(&payload.data)
+                    decode_bounded_bincode(&payload.data, MAX_TRANSACTION_TYPE_PAYLOAD_BYTES)
                         .map_err(|e| format!("Invalid PoA onboarding payload: {e}"))?,
                 )
             }
@@ -1303,7 +1330,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     _ => return Err("Missing or mismatched BridgeBurn payload".into()),
                 };
                 TransactionType::BridgeBurn(
-                    bincode::deserialize(&payload.data)
+                    decode_bounded_bincode(&payload.data, MAX_TRANSACTION_TYPE_PAYLOAD_BYTES)
                         .map_err(|e| format!("Invalid bridge burn payload: {e}"))?,
                 )
             }
@@ -1313,7 +1340,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     _ => return Err("Missing or mismatched CrossDomainMessage payload".into()),
                 };
                 TransactionType::CrossDomainMessage(
-                    bincode::deserialize(&payload.data)
+                    decode_bounded_bincode(&payload.data, MAX_TRANSACTION_TYPE_PAYLOAD_BYTES)
                         .map_err(|e| format!("Invalid cross-domain message payload: {e}"))?,
                 )
             }
@@ -1377,7 +1404,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     _ => return Err("Missing or mismatched Vault payload".into()),
                 };
                 TransactionType::Vault(
-                    bincode::deserialize(&payload.data)
+                    decode_bounded_bincode(&payload.data, MAX_TRANSACTION_TYPE_PAYLOAD_BYTES)
                         .map_err(|e| format!("Invalid VaultTx payload: {e}"))?,
                 )
             }
@@ -1387,7 +1414,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     _ => return Err("Missing or mismatched Storage payload".into()),
                 };
                 TransactionType::Storage(
-                    bincode::deserialize(&payload.data)
+                    decode_bounded_bincode(&payload.data, MAX_TRANSACTION_TYPE_PAYLOAD_BYTES)
                         .map_err(|e| format!("Invalid StorageTx payload: {e}"))?,
                 )
             }
@@ -1397,7 +1424,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     _ => return Err("Missing or mismatched ExternalDomain payload".into()),
                 };
                 TransactionType::ExternalDomain(
-                    bincode::deserialize(&payload.data)
+                    decode_bounded_bincode(&payload.data, MAX_TRANSACTION_TYPE_PAYLOAD_BYTES)
                         .map_err(|e| format!("Invalid ExternalDomainTx payload: {e}"))?,
                 )
             }
@@ -1407,7 +1434,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     _ => return Err("Missing or mismatched Settlement payload".into()),
                 };
                 TransactionType::Settlement(
-                    bincode::deserialize(&payload.data)
+                    decode_bounded_bincode(&payload.data, MAX_TRANSACTION_TYPE_PAYLOAD_BYTES)
                         .map_err(|e| format!("Invalid SettlementTx payload: {e}"))?,
                 )
             }
@@ -1417,7 +1444,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     _ => return Err("Missing or mismatched Bridge payload".into()),
                 };
                 TransactionType::Bridge(
-                    bincode::deserialize(&payload.data)
+                    decode_bounded_bincode(&payload.data, MAX_TRANSACTION_TYPE_PAYLOAD_BYTES)
                         .map_err(|e| format!("Invalid BridgeTx payload: {e}"))?,
                 )
             }
@@ -1731,7 +1758,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     _ => return Err("Missing or mismatched PollenRegisterDataAsset payload".into()),
                 };
                 TransactionType::PollenRegisterDataAsset(
-                    bincode::deserialize(&payload.data)
+                    decode_bounded_bincode(&payload.data, MAX_TRANSACTION_TYPE_PAYLOAD_BYTES)
                         .map_err(|e| format!("Invalid DataAsset payload: {e}"))?,
                 )
             }
@@ -1741,7 +1768,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     _ => return Err("Missing or mismatched PollenAuthorizeSale payload".into()),
                 };
                 TransactionType::PollenAuthorizeSale(
-                    bincode::deserialize(&payload.data)
+                    decode_bounded_bincode(&payload.data, MAX_TRANSACTION_TYPE_PAYLOAD_BYTES)
                         .map_err(|e| format!("Invalid SaleAuthorization payload: {e}"))?,
                 )
             }
@@ -1751,7 +1778,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     _ => return Err("Missing or mismatched PollenGrantAccess payload".into()),
                 };
                 TransactionType::PollenGrantAccess(
-                    bincode::deserialize(&payload.data)
+                    decode_bounded_bincode(&payload.data, MAX_TRANSACTION_TYPE_PAYLOAD_BYTES)
                         .map_err(|e| format!("Invalid AccessGrant payload: {e}"))?,
                 )
             }
@@ -2021,11 +2048,12 @@ impl TryFrom<pb::ProtoBlockHeader> for BlockHeader {
             return Err("Too many slashing reports in block header".into());
         }
         for raw in proto.slashing_reports {
-            if raw.len() > 65_536 {
+            if raw.len() > MAX_SLASHING_REPORT_BYTES {
                 return Err("Slashing report entry exceeds size limit".into());
             }
             let r: crate::registry::evidence::SlashingReport =
-                bincode::deserialize(&raw).map_err(|e| format!("Invalid slashing report: {e}"))?;
+                decode_bounded_bincode(&raw, MAX_SLASHING_REPORT_BYTES)
+                    .map_err(|e| format!("Invalid slashing report: {e}"))?;
             reports.push(r);
         }
         let slashing_reports = if reports.is_empty() {
@@ -2140,11 +2168,12 @@ impl TryFrom<pb::ProtoBlock> for Block {
             return Err("Too many slashing reports in block".into());
         }
         for raw in proto.slashing_reports {
-            if raw.len() > 65_536 {
+            if raw.len() > MAX_SLASHING_REPORT_BYTES {
                 return Err("Slashing report entry exceeds size limit".into());
             }
             let r: crate::registry::evidence::SlashingReport =
-                bincode::deserialize(&raw).map_err(|e| format!("Invalid slashing report: {e}"))?;
+                decode_bounded_bincode(&raw, MAX_SLASHING_REPORT_BYTES)
+                    .map_err(|e| format!("Invalid slashing report: {e}"))?;
             reports.push(r);
         }
         let slashing_reports = if reports.is_empty() {
@@ -2613,6 +2642,50 @@ mod tests {
             Transaction::try_from(proto_tx).expect("Failed to decode proto transaction");
 
         assert_eq!(tx, decoded_tx);
+    }
+
+    #[test]
+    fn validated_network_transaction_refuses_hostile_bincode_sequence_length() {
+        use prost::Message as _;
+
+        let keypair = KeyPair::generate().expect("generate keypair");
+        let from = Address::from(keypair.public_key_bytes());
+        let mut tx = Transaction::new_with_fee(from, Address::zero(), 0, 1, 0, vec![]);
+        tx.tx_type = TransactionType::Identity(crate::registry::IdentityTx::Register {
+            record: crate::registry::IdentityRecord::new(
+                from,
+                vec![crate::registry::VerificationMethod::new(
+                    [1u8; 32],
+                    crate::registry::MethodKind::MlDsa87,
+                )],
+                vec![],
+                0,
+            )
+            .expect("valid one-method record"),
+        });
+        tx.sign(&keypair);
+
+        let mut proto_tx = pb::ProtoTransaction::from(&tx);
+        let Some(pb::proto_transaction::TypePayload::Identity(payload)) =
+            proto_tx.type_payload.as_mut()
+        else {
+            panic!("identity transaction must encode as an identity payload");
+        };
+        payload.data = u64::MAX.to_le_bytes().to_vec();
+
+        let envelope = pb::ProtoNetworkMessage {
+            payload: Some(pb::proto_network_message::Payload::Transaction(proto_tx)),
+        };
+        let bytes = envelope.encode_to_vec();
+        assert!(bytes.len() <= crate::network::protocol::MAX_MESSAGE_SIZE);
+
+        let error = NetworkMessage::from_bytes_validated(&bytes)
+            .expect_err("a peer-controlled bincode length must be refused");
+        assert!(matches!(
+            error,
+            crate::network::protocol::MessageError::ParseError(message)
+                if message.contains("IdentityTx payload")
+        ));
     }
 
     #[test]
