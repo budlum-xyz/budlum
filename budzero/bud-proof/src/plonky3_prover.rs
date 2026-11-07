@@ -5321,7 +5321,7 @@ mod tests {
                 }),
             ),
             (
-                "aux trace commitment and openings stripped together (P15-F01)",
+                "aux trace commitment and openings stripped together",
                 Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
                     p.commitments.aux_trace = None;
                     p.opened_values.aux_trace_local = None;

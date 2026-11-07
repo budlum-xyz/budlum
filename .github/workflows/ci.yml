@@ -182,6 +182,17 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --lib --verbose 2>&1 | tee /tmp/libtests.log
+      - name: Database backup retention tests
+        if: always() && steps.rust.outcome == 'success'
+        run: |
+          set -euo pipefail
+          cargo test --bin budlum-core 2>&1 | tee /tmp/node-tests.log
+          for name in zero_retention_refuses_backup_without_deleting_existing_files retention_uses_numeric_timestamps_and_preserves_current_and_unknown_files backup_refuses_concurrent_writer_without_pruning backup_returns_a_verified_existing_snapshot; do
+            grep -Eq "${name} \.\.\. ok" /tmp/node-tests.log || {
+              echo "::error::backup regression $name did not pass"
+              exit 1
+            }
+          done
       - name: Public service admission tests
         if: always() && steps.rust.outcome == 'success'
         run: |
@@ -278,7 +289,7 @@ jobs:
   # The gate suite used to sit at the tail of `budlum`, after Format, Clippy and Test.
   # GitHub Actions skips every step after the first failure of a job, and run 50
   # measured what that costs on a branch carrying a formatting diff: one red `Format`,
-  # and 47 of 56 steps skipped - including all 126 gates this repository is made of, and
+  # and 47 of 56 steps skipped - including the repository gates, and
   # the canary that is supposed to prove they can fail. A protection that cannot run is
   # not a protection, and nothing about that job said so: the failing step reported its
   # own diff, which is exactly what it is for. So the gates are a job of their own; a red
@@ -457,7 +468,7 @@ jobs:
       # Every step below invokes the same binary, and until now the first one that
       # invoked it was a canary: a build failure in `xtask/gates` (its own workspace,
       # so no other job's clippy covers it) was reported as "the gate found a defect"
-      # in six jobs at once - measured on 2026-09-10, where Budscan's canary flipped
+      # in six jobs at once - measured on 2026-09-10, where Budlum Explorer's canary flipped
       # success -> exit 101 while its own Format and Clippy steps stayed green, which
       # proves nothing about this crate. A build step of its own names the real cause;
       # the surface below puts rustc's lines in annotations because the log host is
@@ -1322,14 +1333,14 @@ jobs:
           cargo build --manifest-path crates/wallet-core/Cargo.toml --lib --release \
             --target wasm32-unknown-unknown --features wasm
 
-  # ============================ Budscan (web3 tarayici cekirdegi) ============================
-  budscan:
-    # Budscan does not link against `budlum-core` and duplicates two definitions: the name rule
+  # ============================ Budlum Explorer (web3 tarayici cekirdegi) ============================
+  budlum-explorer:
+    # Budlum Explorer does not link against `budlum-core` and duplicates two definitions: the name rule
     # and ContentId. Copies can diverge silently and their divergence is a silent
     # results (the explorer accepts a name the chain does not; or
     # the explorer says a byte verified while the chain computes a different identity).
-    # `budscan-name-rule-parity` turns those two silences into noise.
-    name: Budscan (explorer core + patch layer)
+    # `explorer-name-rule-parity` turns those two silences into noise.
+    name: Budlum Explorer (explorer core + patch layer)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1343,31 +1354,34 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: budscan
-          workspaces: budscan
+          shared-key: budlum-explorer
+          workspaces: budlum-explorer
+      - name: Format
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path crates/budlum-explorer/Cargo.toml --all -- --check
       - name: Clippy (pedantic, -D warnings)
         if: always() && steps.rust.outcome == 'success'
-        run: cargo clippy --manifest-path crates/budscan/Cargo.toml --all-targets -- -D warnings
-      - name: budscan testleri
+        run: cargo clippy --manifest-path crates/budlum-explorer/Cargo.toml --all-targets -- -D warnings
+      - name: budlum-explorer testleri
         if: always() && steps.rust.outcome == 'success'
-        run: cargo test --manifest-path crates/budscan/Cargo.toml
-      - name: budscan own canaries
+        run: cargo test --manifest-path crates/budlum-explorer/Cargo.toml
+      - name: budlum-explorer own canaries
         if: always() && steps.rust.outcome == 'success'
         # The binary runs its own internal canaries: a schema never becomes a name, an empty
         # proof does not say `verified`, a dangling patch does not pass the check.
-        run: cargo run --manifest-path crates/budscan/Cargo.toml --bin budscan -- self-test
+        run: cargo run --manifest-path crates/budlum-explorer/Cargo.toml --bin budlum-explorer -- self-test
       - name: Gate canary (proof it is not vacuous)
         if: always() && steps.rust.outcome == 'success'
         run: |
           set -euo pipefail
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-name-rule-parity --self-test
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-patchset --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- explorer-name-rule-parity --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- explorer-patchset --self-test
       - name: Name rule and ContentId parity
         if: always() && steps.rust.outcome == 'success'
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-name-rule-parity
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- explorer-name-rule-parity
       - name: Patch layer (list=disk, no foreign brand)
         if: always() && steps.rust.outcome == 'success'
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-patchset
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- explorer-patchset
 
   # ============================ Standalone crates: bpqs and note-packing ============================
   standalone-crates:
@@ -1526,9 +1540,6 @@ jobs:
         run: cargo test --manifest-path execution/wasm/Cargo.toml
 
   # ============================  / Bolum 4 (BNS gate) ============================
-      - name: Format
-        if: always() && steps.rust.outcome == 'success'
-        run: cargo fmt --manifest-path crates/budscan/Cargo.toml --all -- --check
   bns-gate:
     #  Section 4 module separation: BNS has its own CI gate (the B.U.D. gate pattern).
     # Name canary: if a test is deleted or renamed the gate FAILs.
@@ -1646,7 +1657,7 @@ jobs:
           - { name: fuzz, manifest: "fuzz/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: ai-inference, manifest: "crates/ai-inference/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: bpqs, manifest: "crates/bpqs/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: budscan, manifest: "crates/budscan/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: budlum-explorer, manifest: "crates/budlum-explorer/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: note-packing, manifest: "crates/note-packing/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: wallet-core, manifest: "crates/wallet-core/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: xtask-gates, manifest: "xtask/gates/Cargo.toml", config: "--config .quality/deny.toml" }
@@ -1685,7 +1696,7 @@ jobs:
           - { name: fuzz, manifest: "fuzz/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: ai-inference, manifest: "crates/ai-inference/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: bpqs, manifest: "crates/bpqs/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: budscan, manifest: "crates/budscan/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: budlum-explorer, manifest: "crates/budlum-explorer/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: note-packing, manifest: "crates/note-packing/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: wallet-core, manifest: "crates/wallet-core/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: xtask-gates, manifest: "xtask/gates/Cargo.toml", config: "--config .quality/deny.toml" }
@@ -2633,8 +2644,8 @@ jobs:
       # was replication and there was no parity shard concept. By then
       # `ShardKind::Parity` existed, `ErasureScheme` was on the manifest and
       # `erasure.rs` was a working Reed-Solomon coder with sixteen tests;
-      # BUD_STORAGE_ROADMAP.md recorded the same gap as closed. Two documents,
-      # one tree, opposite answers. A caveat list is only useful while every
+      # docs/STORAGE.md now carries current construction status. The old pair
+      # gave one tree opposite answers. A caveat list is only useful while every
       # entry on it is true.
       - name: does the readme deny what the code owns + canary
         run: |
@@ -2872,3 +2883,23 @@ jobs:
       - name: Tests
         if: always() && steps.rust.outcome == 'success'
         run: cargo test --manifest-path crates/budlum-types/Cargo.toml
+
+# WP-04 / WP-42 continuation: the integrated tree is checked without a Rust
+  # toolchain. Several open pull requests are merged into one branch here, and
+  # a merge can break a cross-file table without breaking any single file.
+  # The self-test injects a real violation for every check, then the plain run
+  # audits this checkout.
+  integration-audit:
+    name: Integrated tree consistency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Audit canary (an injected violation must fail)
+        run: python3 ops/scripts/integration_audit.py --self-test
+      - name: Audit the integrated tree
+        run: python3 ops/scripts/integration_audit.py --root .

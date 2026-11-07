@@ -15,7 +15,7 @@ pub enum DatasetKind {
     InferenceCache,
 }
 
-/// AI dataset metadata bound to a B.U.D. StorageDeal.
+/// AI dataset metadata bound to a B.U.D. `StorageDeal`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatasetMetadata {
     pub kind: DatasetKind,
@@ -45,10 +45,10 @@ impl DatasetMetadata {
         }
     }
 
-    /// Validate the metadata before it labels a B.U.D. StorageDeal.
+    /// Validate the metadata before it labels a B.U.D. `StorageDeal`.
     ///
     /// A dataset label is a claim in the closed circuit: it is what tells the
-    /// chain "this StorageDeal is safe for AI inference layer to read as a training corpus".
+    /// chain "this `StorageDeal` is safe for AI inference layer to read as a training corpus".
     /// A label that does not hold together is not a harmless decoration - it is
     /// the thing an operator would lean on to justify reading data that should
     /// not have been labelled. Two conditions are checked:
@@ -91,7 +91,7 @@ pub enum DatasetError {
 /// - `PollenGrant`  - an authorised read through a Pollen `AccessGrant` /
 ///   `TrainingDataGrant`
 /// - `StorageDeal`  - content labelled as an AI dataset in B.U.D. storage
-/// - `SocialRef`    - in-network content coming over the SocialFi bridge
+/// - `SocialRef`    - in-network content coming over the `SocialFi` bridge
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
     PollenGrant,
@@ -104,8 +104,19 @@ pub enum SourceKind {
 pub struct SourceRef {
     pub kind: SourceKind,
     pub content_id: Hash32,
+    /// Pollen's on-chain data-asset identity. It is distinct from `content_id`:
+    /// the grant is issued to the asset, while the bytes are checked against
+    /// the content digest. `None` for `StorageDeal` and `SocialRef`.
+    pub asset_id: Option<Hash32>,
+    /// The exact on-chain Pollen grant authorising this input.
+    ///
+    /// `None` for `StorageDeal` and `SocialRef` sources. A Pollen source without
+    /// this identifier cannot be authorised: asking whether *some* grant for
+    /// this asset is active does not prove the grant named by the input is.
+    pub grant_id: Option<Hash32>,
     /// The number of epochs left on a Pollen training grant (matching the
-    /// budlum `TrainingDataGrant` epoch limit).
+    /// budlum `TrainingDataGrant` epoch limit). This is a local shape check;
+    /// the chain query remains authoritative for current activity.
     pub grant_epochs_remaining: Option<u64>,
 }
 
@@ -115,15 +126,25 @@ impl SourceRef {
         Self {
             kind: SourceKind::StorageDeal,
             content_id,
+            asset_id: None,
+            grant_id: None,
             grant_epochs_remaining: None,
         }
     }
 
+    /// Construct a Pollen source with separate asset, grant, and content identities.
     #[must_use]
-    pub fn pollen_grant(content_id: Hash32, epochs_remaining: u64) -> Self {
+    pub fn pollen_grant(
+        asset_id: Hash32,
+        grant_id: Hash32,
+        content_id: Hash32,
+        epochs_remaining: u64,
+    ) -> Self {
         Self {
             kind: SourceKind::PollenGrant,
             content_id,
+            asset_id: Some(asset_id),
+            grant_id: Some(grant_id),
             grant_epochs_remaining: Some(epochs_remaining),
         }
     }
@@ -133,40 +154,80 @@ impl SourceRef {
         Self {
             kind: SourceKind::SocialRef,
             content_id,
+            asset_id: None,
+            grant_id: None,
             grant_epochs_remaining: None,
         }
     }
 
-    /// Validate closed-circuit source identity and epoch window.
+    /// Validate source identity and the grant fields' relationship to its kind.
+    ///
+    /// The epoch count is only a structural hint. An access decision must also
+    /// query the chain with this exact `(grant_id, asset_id, content_id, consumer)` tuple.
     ///
     /// # Errors
     ///
-    /// Returns [`SourceError`] when `content_id` is all-zero, when a data-market
-    /// grant has zero remaining epochs or omits its epoch counter, or when a
-    /// non-grant source carries unexpected grant epochs.
+    /// Returns [`SourceError`] for zero identities, missing/expired Pollen
+    /// grant data, or grant fields attached to a non-Pollen source.
     pub fn validate(&self) -> Result<(), SourceError> {
         if self.content_id == [0u8; 32] {
             return Err(SourceError::ZeroContentId);
         }
-        match (self.kind, self.grant_epochs_remaining) {
-            (SourceKind::StorageDeal | SourceKind::SocialRef, None) => Ok(()),
-            (SourceKind::StorageDeal | SourceKind::SocialRef, Some(_)) => {
-                Err(SourceError::UnexpectedGrantEpochs)
+        match self.kind {
+            SourceKind::PollenGrant => {
+                let Some(asset_id) = self.asset_id else {
+                    return Err(SourceError::MissingAssetId);
+                };
+                if asset_id == [0u8; 32] {
+                    return Err(SourceError::ZeroAssetId);
+                }
+                let Some(grant_id) = self.grant_id else {
+                    return Err(SourceError::MissingGrantId);
+                };
+                if grant_id == [0u8; 32] {
+                    return Err(SourceError::ZeroGrantId);
+                }
+                match self.grant_epochs_remaining {
+                    Some(epochs) if epochs > 0 => Ok(()),
+                    _ => Err(SourceError::ExpiredOrMissingGrant),
+                }
             }
-            (_, Some(epochs)) if epochs > 0 => Ok(()),
-            (_, _) => Err(SourceError::ExpiredOrMissingGrant),
+            SourceKind::StorageDeal | SourceKind::SocialRef => {
+                if self.asset_id.is_some() {
+                    return Err(SourceError::UnexpectedAssetId);
+                }
+                if self.grant_id.is_some() {
+                    return Err(SourceError::UnexpectedGrantId);
+                }
+                if self.grant_epochs_remaining.is_some() {
+                    return Err(SourceError::UnexpectedGrantEpochs);
+                }
+                Ok(())
+            }
         }
     }
 }
 
-/// Convenience: closed-circuit source validation errors.
+/// Errors from validating a closed-circuit data source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceError {
     /// All-zero `content_id` does not identify content.
     ZeroContentId,
-    /// A data-market grant requires at least one remaining epoch.
+    /// A Pollen source did not name its data asset.
+    MissingAssetId,
+    /// All-zero `asset_id` does not identify a data asset.
+    ZeroAssetId,
+    /// A non-Pollen source carried a Pollen asset ID.
+    UnexpectedAssetId,
+    /// A Pollen source did not name its exact grant.
+    MissingGrantId,
+    /// All-zero `grant_id` does not identify an on-chain grant.
+    ZeroGrantId,
+    /// A Pollen grant is absent, expired, or has no remaining-epoch hint.
     ExpiredOrMissingGrant,
-    /// Non-grant sources do not carry grant epoch counters.
+    /// A non-Pollen source carried a Pollen grant ID.
+    UnexpectedGrantId,
+    /// A non-Pollen source carried Pollen grant epochs.
     UnexpectedGrantEpochs,
 }
 
@@ -221,23 +282,66 @@ mod tests {
     #[test]
     fn only_grant_carries_epochs() {
         let deal = SourceRef::storage_deal([1; 32]);
+        assert!(deal.asset_id.is_none());
+        assert!(deal.grant_id.is_none());
         assert!(deal.grant_epochs_remaining.is_none());
+        assert!(deal.validate().is_ok());
 
-        let mut grant = SourceRef::pollen_grant([1; 32], 3);
+        let grant = SourceRef::pollen_grant([3; 32], [2; 32], [1; 32], 3);
+        assert_eq!(grant.asset_id, Some([3; 32]));
+        assert_eq!(grant.grant_id, Some([2; 32]));
         assert_eq!(grant.grant_epochs_remaining, Some(3));
         assert!(grant.validate().is_ok());
-        grant.grant_epochs_remaining = Some(0);
-        assert_eq!(grant.validate(), Err(SourceError::ExpiredOrMissingGrant));
     }
 
     #[test]
-    fn zero_model_target_content_id_or_expired_grant_refused() {
+    fn zero_model_target_and_storage_content_id_are_refused() {
         let mut bad = DatasetMetadata::training([4; 32], 10);
         bad.model_target = Some([0u8; 32]);
         assert_eq!(bad.validate(), Err(DatasetError::MissingModelTarget));
 
         assert_eq!(
             SourceRef::storage_deal([0u8; 32]).validate(),
+            Err(SourceError::ZeroContentId)
+        );
+    }
+
+    #[test]
+    fn source_identity_and_grant_shape_are_validated() {
+        let mut source = SourceRef::pollen_grant([3; 32], [2; 32], [1; 32], 3);
+        source.asset_id = None;
+        assert_eq!(source.validate(), Err(SourceError::MissingAssetId));
+
+        source.asset_id = Some([0; 32]);
+        assert_eq!(source.validate(), Err(SourceError::ZeroAssetId));
+
+        source.asset_id = Some([3; 32]);
+        source.grant_id = None;
+        assert_eq!(source.validate(), Err(SourceError::MissingGrantId));
+
+        source.grant_id = Some([0; 32]);
+        assert_eq!(source.validate(), Err(SourceError::ZeroGrantId));
+
+        source.grant_id = Some([2; 32]);
+        source.grant_epochs_remaining = Some(0);
+        assert_eq!(source.validate(), Err(SourceError::ExpiredOrMissingGrant));
+
+        let mut non_grant = SourceRef::storage_deal([1; 32]);
+        non_grant.asset_id = Some([3; 32]);
+        assert_eq!(non_grant.validate(), Err(SourceError::UnexpectedAssetId));
+
+        non_grant.asset_id = None;
+        non_grant.grant_id = Some([2; 32]);
+        assert_eq!(non_grant.validate(), Err(SourceError::UnexpectedGrantId));
+
+        non_grant.grant_id = None;
+        non_grant.grant_epochs_remaining = Some(1);
+        assert_eq!(
+            non_grant.validate(),
+            Err(SourceError::UnexpectedGrantEpochs)
+        );
+        assert_eq!(
+            SourceRef::social([0; 32]).validate(),
             Err(SourceError::ZeroContentId)
         );
     }

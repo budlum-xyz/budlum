@@ -72,10 +72,15 @@ repository's default test run. What a test can state without that corpus is
 stated above: the ceiling, the layout and the absence of a `u32` truncation
 point are checked, and the peak memory is not claimed.
 
-## Not in the tree yet
+## Removal and execution status
 
-The upload and view paths (`pipeline.rs`), the chain state (`registry.rs`) and
-the transaction door (`tx.rs`) exist and have their own tests, but nothing on the
-block execution path reaches them: they carry a `WIRING: unwired` note. The
-legacy 2.0 storage modules are still present, so the "no legacy storage" gate
-(`no_legacy_storage`) does not exist yet. This page will say so until it does.
+The 20 legacy storage JSON-RPC methods are removed from the API declaration,
+method-class table and server. The `no_legacy_storage` gate and its shrinking
+baseline now lock the removal. The explorer's retired manifest route answers
+HTTP 410 rather than calling a deleted method.
+
+Legacy `StorageTx` content registration returns `StorageError::Bud3NotReady`.
+The separate `StorageTxV3` door reaches `src/storage/bud3/` through block
+execution; the permanent `ContentRef` binds a content id, object commitment and
+optional NFT reference. These are static wiring statements, not a claim that
+the Rust suite, nightly corpus, proof network or availability targets have run.

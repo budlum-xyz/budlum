@@ -502,6 +502,19 @@ pub struct IdentityRegistry {
     revoked: BTreeSet<String>,
 }
 
+/// Enforces the domain boundary shared by registry operations and the
+/// transaction door. Recovery verifies approvals and mutates the registry
+/// through a separate helper, so it must pass this same gate before doing
+/// any operation-specific work.
+fn require_poa_domain(domain: &ConsensusKind) -> Result<(), IdentityError> {
+    if !matches!(domain, ConsensusKind::PoA) {
+        return Err(IdentityError::NotPoaDomain {
+            domain: format!("{domain:?}"),
+        });
+    }
+    Ok(())
+}
+
 impl IdentityRegistry {
     #[must_use]
     pub fn new() -> Self {
@@ -538,9 +551,11 @@ impl IdentityRegistry {
         self.revoked.contains(hex32(id).as_str())
     }
 
-    /// The only door every mutation passes. A non-PoA `domain` refuses
-    /// anything, before any state is read or validated: the write-authority
-    /// rule does not leak even the shape of "would have been accepted".
+    /// The registry's mutation door. A non-PoA `domain` refuses anything
+    /// before any state is read or validated: the write-authority rule does
+    /// not leak even the shape of "would have been accepted". The transaction
+    /// recovery path also checks this domain before entering its signature-
+    /// verified low-level mutation helper.
     ///
     /// # Errors
     ///
@@ -552,11 +567,7 @@ impl IdentityRegistry {
         op: IdentityOp,
         now: u64,
     ) -> Result<(), IdentityError> {
-        if !matches!(domain, ConsensusKind::PoA) {
-            return Err(IdentityError::NotPoaDomain {
-                domain: format!("{domain:?}"),
-            });
-        }
+        require_poa_domain(domain)?;
         match op {
             IdentityOp::Register { record } => self.register(record),
             IdentityOp::Issue { credential } => self.issue(credential, now),
@@ -1191,8 +1202,9 @@ pub fn authorize_issue_consent_in(
 ///
 /// # Errors
 ///
-/// A `&'static str` for the three sender refusals (fixed words a test can
-/// pin), anything else delegates to the registry doors verbatim.
+/// A non-PoA domain returns [`IdentityError::NotPoaDomain`] before
+/// operation-specific checks. Sender, consent, signature, and registry
+/// refusals are otherwise returned as [`IdentityError`].
 pub fn execute_identity_tx(
     registry: &mut IdentityRegistry,
     from: &Address,
@@ -1227,6 +1239,12 @@ pub fn execute_identity_tx_in(
     epoch: u64,
     chain_id: u64,
 ) -> Result<(), IdentityError> {
+    // `Recover` validates signatures and writes through `authorize_recovery_in`
+    // rather than `IdentityRegistry::apply`. Enforce the registry's domain
+    // boundary here as well so every transaction variant, including recovery,
+    // is gated before inspecting its payload or touching registry state.
+    require_poa_domain(domain)?;
+
     match tx {
         IdentityTx::Register { record } => {
             if &record.subject != from {
@@ -2257,8 +2275,8 @@ mod tests {
                 100,
             )
             .unwrap();
-        // A wrong domain still refuses after the sender rule passes: the
-        // gate is not decoration the tx body can route around.
+        // A correct issuer still cannot write from the wrong domain: the
+        // domain gate runs before operation-specific checks.
         assert!(matches!(
             execute_identity_tx(
                 &mut registry,
@@ -2302,6 +2320,37 @@ mod tests {
             subject.live_method(addr(9).as_bytes(), 200).is_some(),
             "the original key must still be live: a refused rotation changed nothing"
         );
+    }
+
+    #[test]
+    fn recovery_transaction_cannot_bypass_the_poa_domain_gate() {
+        let mut registry = IdentityRegistry::new();
+        let subject = addr(1);
+        registry
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Register {
+                    record: subject_record_with_guardians(),
+                },
+                10,
+            )
+            .unwrap();
+        let before = registry.clone();
+        let err = execute_identity_tx(
+            &mut registry,
+            &subject,
+            IdentityTx::Recover {
+                subject,
+                new_key: [9; 32],
+                approvals: Vec::new(),
+            },
+            &ConsensusKind::PoS,
+            20,
+            1,
+        )
+        .expect_err("identity recovery must remain PoA-only");
+        assert!(matches!(err, IdentityError::NotPoaDomain { .. }), "{err}");
+        assert_eq!(registry, before, "a refused recovery must not mutate the registry");
     }
 
     #[test]
@@ -2534,6 +2583,44 @@ mod tests {
             execute_identity_tx(&mut registry, &addr(2), rec_tx, &ConsensusKind::PoA, 20, 1),
             Err(IdentityError::QuorumShort { .. })
         ));
+    }
+
+    #[test]
+    fn identity_recover_refuses_non_poa_domain_without_mutation() {
+        let mut registry = IdentityRegistry::new();
+        let subject = addr(1);
+        registry
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Register {
+                    record: subject_record_with_guardians(),
+                },
+                10,
+            )
+            .unwrap();
+        let before = registry.record(&subject).unwrap().clone();
+        let error = execute_identity_tx(
+            &mut registry,
+            &subject,
+            IdentityTx::Recover {
+                subject,
+                new_key: [9; 32],
+                approvals: vec![GuardianApproval {
+                    public_key: vec![0; 4],
+                    signature: vec![],
+                }],
+            },
+            &ConsensusKind::PoS,
+            20,
+            1,
+        )
+        .expect_err("identity recovery is writable only in the PoA domain");
+        assert!(matches!(error, IdentityError::NotPoaDomain { .. }), "{error}");
+        assert_eq!(
+            registry.record(&subject),
+            Some(&before),
+            "a refused recovery must leave the record unchanged"
+        );
     }
 
     /// The happy paths that need a real wallet signature

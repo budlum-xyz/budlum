@@ -225,6 +225,59 @@ pub fn reward_for_epoch(
     out
 }
 
+/// The consensus share of one epoch's pool budget, in parts per million.
+///
+/// The pool is split 40 / 50 / 10 between the validators that produced the
+/// epoch, the validators that held its content and the repair and relay work
+/// that kept it reachable. Parts per million keep the split in integer
+/// arithmetic: no float ever reaches a balance.
+pub const CONSENSUS_SHARE_PPM: u64 = 400_000;
+/// The storage share of one epoch's pool budget, in parts per million.
+pub const STORAGE_SHARE_PPM: u64 = 500_000;
+/// The repair and relay share of one epoch's pool budget, in parts per million.
+pub const REPAIR_SHARE_PPM: u64 = 100_000;
+/// The scale the three shares are expressed in.
+pub const SHARE_SCALE_PPM: u64 = 1_000_000;
+
+/// One epoch's pool budget, separated into the three destinations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PoolSplit {
+    consensus: u64,
+    storage: u64,
+    repair_relay: u64,
+}
+
+/// One destination's part of `budget`, in parts per million.
+fn share_of(budget: u64, ppm: u64) -> u64 {
+    (u128::from(budget) * u128::from(ppm) / u128::from(SHARE_SCALE_PPM)) as u64
+}
+
+/// Separate `budget` into the fixed shares.
+///
+/// The repair share takes the rounding remainder: a remainder that vanished
+/// would burn tokens the schedule had already committed to the pool, and that
+/// burn is not a decision any of the three destinations made.
+fn split_budget(budget: u64) -> PoolSplit {
+    let consensus = share_of(budget, CONSENSUS_SHARE_PPM);
+    let storage = share_of(budget, STORAGE_SHARE_PPM);
+    let repair_relay = budget.saturating_sub(consensus.saturating_add(storage));
+    PoolSplit {
+        consensus,
+        storage,
+        repair_relay,
+    }
+}
+
+/// The storage share of `epoch`'s pool budget.
+///
+/// WIRING: the storage custody reward path reads this; until it lands, the
+/// storage and repair shares stay in the pool account, where `pay_epoch` cannot
+/// spend them and nothing is minted.
+#[must_use]
+pub fn storage_share(schedule: RewardPoolSchedule, epoch: u64, remaining_pool: u64) -> u64 {
+    split_budget(schedule.per_epoch_budget(epoch, remaining_pool)).storage
+}
+
 pub fn total_epoch_payout(payouts: &[(Address, u64)]) -> u64 {
     payouts
         .iter()
@@ -420,6 +473,47 @@ mod tests {
         assert_eq!(payouts[0], (addr(1), 1));
         assert_eq!(payouts[1], (addr(2), 0));
         assert_eq!(payouts[2], (addr(9), 0));
+    }
+
+    /// The pool splits 40 / 50 / 10 and the three parts always add back up:
+    /// a remainder that vanished would burn supply the schedule had already
+    /// committed to the pool.
+    #[test]
+    fn pool_split_is_40_50_10() {
+        let budget = bud(10_000);
+        let split = split_budget(budget);
+        assert_eq!(split.consensus, bud(4_000));
+        assert_eq!(split.storage, bud(5_000));
+        assert_eq!(split.repair_relay, bud(1_000));
+        assert_eq!(
+            split.consensus + split.storage + split.repair_relay,
+            budget,
+            "the split must not lose a base unit"
+        );
+
+        // Seven atoms cannot be split by ten millionths without rounding:
+        // 2 and 3 are the floors, and the repair share absorbs the last two.
+        let odd = split_budget(7);
+        assert_eq!(odd.consensus, 2);
+        assert_eq!(odd.storage, 3);
+        assert_eq!(odd.repair_relay, 2);
+        assert_eq!(odd.consensus + odd.storage + odd.repair_relay, 7);
+
+        // The shares follow the schedule's per-epoch budget, capped by what
+        // the pool still holds.
+        let schedule = RewardPoolSchedule {
+            validation_reward_pool: bud(1_000),
+            validation_pool_epochs: 10,
+            treasury_pool: 0,
+            reward_pool_start_epoch: 0,
+        };
+        assert_eq!(storage_share(schedule, 0, bud(1_000)), bud(50));
+        assert_eq!(storage_share(schedule, 0, bud(60)), bud(30));
+        let before_start = RewardPoolSchedule {
+            reward_pool_start_epoch: 10,
+            ..Default::default()
+        };
+        assert_eq!(storage_share(before_start, 9, bud(1_000)), 0);
     }
 
     #[test]

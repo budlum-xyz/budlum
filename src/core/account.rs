@@ -1407,7 +1407,7 @@ impl AccountState {
     }
 
     /// Bond `amount` into the STORAGE_OPERATOR role (permissionless).
-    /// Used for B.U.D. operator reward eligibility and `bud_storageActiveOperators`.
+    /// Used for B.U.D. operator reward eligibility and the removed legacy active-operators query.
     pub fn bond_storage_operator(
         &mut self,
         address: &Address,
@@ -1670,19 +1670,19 @@ impl AccountState {
     }
 
     /// Run one epoch's liveness check on the state-level
-    /// `LivenessTracker`. Returns the canonical `SlashingReport`s produced
-    /// This epoch. `participated` is the set of validators that showed the
-    /// Expected participation; everyone else in `validators` is treated as
-    /// An absentee.
+    /// `LivenessTracker`. Returns the validators newly **suspended** this
+    /// Epoch (V-4: absence suspends, it never slashes). `participated` is
+    /// The set of validators that showed the expected participation;
+    /// Everyone else in `validators` is treated as an absentee.
     pub fn record_liveness_epoch(
         &mut self,
         epoch: u64,
         participated: &std::collections::HashSet<Address>,
-    ) -> Vec<crate::registry::evidence::SlashingReport> {
+    ) -> Vec<Address> {
         let params = *self.registry.params();
-        // Only members the registry still considers active. A slashed or
-        // Jailed validator remains in `self.validators` - that map holds
-        // `jail_until` - while `registry.is_active` has already gone false.
+        // Only validators eligible for new duty. A suspended, slashed or
+        // jailed validator remains in `self.validators` for resume/unbonding,
+        // but cannot accrue further absence for duty it may not perform.
         // Counting it absent accrues downtime for blocks it is barred from
         // Signing (Cosmos SDK #1867). `Blockchain::apply_epoch_close_liveness`
         // Has always filtered this way; the other two paths did not.
@@ -1690,7 +1690,10 @@ impl AccountState {
             .validators
             .keys()
             .filter(|addr| {
-                self.registry
+                self.validators.get(*addr).is_some_and(|validator| {
+                    validator.active && !validator.slashed && !validator.jailed
+                }) && self
+                    .registry
                     .is_active(addr, crate::registry::role::roles::VALIDATOR)
             })
             .copied()
@@ -2301,13 +2304,9 @@ impl AccountState {
                 }
             }
             TransactionType::PrivateTransferSubmit(_) | TransactionType::PrivacyNoteInsert(_) => {
-                if tx.chain_id
-                    == crate::core::chain_config::Network::Mainnet
-                        .chain_id()
-                        .value()
-                {
+                if !crate::core::chain_config::privacy_transfers_enabled(tx.chain_id) {
                     return Err(
-                        "privacy transfers are disabled on mainnet until full proof verification is wired"
+                        "privacy transfers are disabled on this network until full proof verification is wired"
                             .into(),
                     );
                 }
@@ -2858,6 +2857,26 @@ impl AccountState {
                     ));
                 }
             }
+            ValidatorTx::Resume => {
+                if tx.amount != 0 {
+                    return Err(refuse(
+                        "validator_tx_shape",
+                        "this validator transaction moves no value",
+                    ));
+                }
+                if self.validator_directory.get(&tx.from).is_none() {
+                    return Err(refuse(
+                        "validator_not_registered",
+                        "only the owner account of a validator may send this",
+                    ));
+                }
+                if !self.liveness.is_suspended(&tx.from) {
+                    return Err(refuse(
+                        "validator_not_suspended",
+                        "only a suspended validator may request resume",
+                    ));
+                }
+            }
             ValidatorTx::UpdateCustodyQuota {
                 owner,
                 new_quota_bytes,
@@ -3092,6 +3111,17 @@ impl AccountState {
         // Validator directory changes requested an epoch ago take effect here.
         self.activate_validator_changes(chain_id);
         self.advance_bud3_epoch();
+
+        // ResumeValidator requests whose epoch has come lift the suspension
+        // (section 7.8.7); the validator re-enters the active set. Absence
+        // itself never slashed (V-4).
+        for resumed in self.liveness.activate_due_resumes(self.epoch_index) {
+            if let Some(v) = self.validators.get_mut(&resumed) {
+                if !v.slashed && !v.jailed {
+                    v.active = true;
+                }
+            }
+        }
 
         // Mikoriza weights move only here, at the boundary.
         let shared_security = crate::core::chain_config::shared_security_for_chain_id(chain_id);

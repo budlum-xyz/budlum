@@ -84,7 +84,7 @@ This independent review covers the execution, mobile/validator authority, crypto
 - **Execution & state transition**: `src/execution/{executor.rs,zkvm.rs,ee.rs,coordinator/}`, `crates/uel-abi/`.
 - **Validator & mobile operator-key separation**: `src/validators/mod.rs`, `src/core/account.rs`.
 - **Post-quantum cryptography & account abstraction**: `src/crypto/{pq.rs,scheme.rs,ctx.rs,domain_tags.rs}`, `src/account_abstraction/`.
-- **RPC listener classes, rate limiting, and client proof bundles**: `src/rpc/{method_class.rs,server.rs}`, `src/gateway/{passport.rs,atlas.rs}`, `crates/wallet-core/`, `crates/budscan/`.
+- **RPC listener classes, rate limiting, and client proof bundles**: `src/rpc/{method_class.rs,server.rs}`, `src/gateway/{passport.rs,atlas.rs}`, `crates/wallet-core/`, `crates/budlum-explorer/`.
 
 Every invariant (`Y-1` through `Y-7`, `K-1` through `K-4`, `G-2`, `G-3`, `G-4`) and Section 13 pre-mortem risk (`R-01`, `R-05`, `R-07`, `R-08`, `R-11`, `R-12`, `R-15`, `R-16`, `R-18`, `R-19`, `R-20`, `R-36`) was audited directly against live repository source and regression-locked by executable tests.
 

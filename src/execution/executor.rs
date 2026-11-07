@@ -1,5 +1,6 @@
 use crate::core::account::AccountState;
 use crate::core::address::Address;
+use crate::core::chain_config::privacy_transfers_enabled;
 use crate::core::transaction::{Transaction, TransactionType};
 use crate::error::{BudlumError, BudlumResult};
 use crate::execution::zkvm::{ZkVmExecutor, DEFAULT_CONTRACT_GAS_LIMIT};
@@ -61,16 +62,6 @@ fn check_ai_exec_dims(dims: &[u16]) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-fn privacy_transfers_enabled(chain_id: u64) -> bool {
-    // This is an allowlist, not a denylist. Note ownership, value-conservation
-    // and membership proofs are not all wired, so only valueless devnet notes
-    // may move. Testnet, mainnet and unknown chain ids stay closed by default.
-    chain_id
-        == crate::core::chain_config::Network::Devnet
-            .chain_id()
-            .value()
 }
 
 /// The refusal a closed privacy door returns.
@@ -247,7 +238,7 @@ impl Executor {
         // transaction may originate from it, and it is rejected everywhere
         // but the genesis block by `validate_and_add_block`. Accepting any
         // zero-address sender here would let an attacker fill blocks with
-        // free, unsigned, fee-free transactions (BUDLUM finding #65/#171).
+        // free, unsigned, fee-free transactions.
         if tx.from == Address::zero() {
             if tx.verify_in(&state.scheme_registry) {
                 return Ok(());
@@ -2089,8 +2080,8 @@ impl Executor {
                         .consume_ai_read_grant(&grant_id, &tx.from, current_block)
                         .map_err(|e| BudlumError::validation("ai_data_access_denied", e))?;
                 }
-                // Balance check before deduction (spendable: the vesting gate -
-                // finding #356; the deduction comes from the spendable part and the lock
+                // Balance check before deduction (spendable: the vesting gate;
+                // the deduction comes from the spendable part and the lock
                 // is not broken because the first gate already verified spendable).
                 // spendable is read BEFORE the mutable borrow of `get_or_create`
                 // (E0502): if the account does not exist spendable is 0, and it is 0 after
@@ -3237,6 +3228,12 @@ impl Executor {
                             .request_quota_increase(owner, *new_quota_bytes, *seq, epoch)
                             .map_err(refuse)?;
                     }
+                    // ResumeValidator (section 7.8.7): the suspension lifts
+                    // one epoch later via `LivenessTracker::activate_due_resumes`;
+                    // absence itself never slashed (V-4).
+                    ValidatorTx::Resume => {
+                        state.liveness.request_resume(&tx.from, epoch);
+                    }
                 }
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(total_cost).ok_or_else(|| {
@@ -3954,9 +3951,9 @@ impl Executor {
 
 #[cfg(test)]
 mod tests {
+    use crate::core::chain_config::privacy_transfers_enabled;
     use super::{
         ai_execution_backend_allowed, ai_layer_enabled, check_ai_exec_dims,
-        privacy_transfers_enabled,
     };
     use crate::core::account::AccountState;
     use crate::core::address::Address;
@@ -4422,14 +4419,9 @@ mod tests {
         }
     }
 
-    /// The gate has to be an allowlist. Ownership (the nullifier binding
-    /// proof), value conservation and membership are not wired, so this
-    /// surface is only ever on where losing the notes costs nothing.
-    /// `chain_id != Mainnet` answers the wrong question: it turns the feature
-    /// ON for every id nobody has claimed yet, including a second mainnet or a
-    /// public testnet that grows real value.
+    /// The legacy privacy path is available only on the development network.
     #[test]
-    fn privacy_transfers_stay_off_for_an_unclaimed_chain_id() {
+    fn privacy_transfers_are_enabled_only_on_devnet() {
         let mainnet = crate::core::chain_config::Network::Mainnet
             .chain_id()
             .value();
@@ -4441,16 +4433,13 @@ mod tests {
             .value();
 
         assert!(!privacy_transfers_enabled(mainnet), "mainnet must stay off");
+        assert!(!privacy_transfers_enabled(testnet), "testnet must stay off");
         assert!(privacy_transfers_enabled(devnet), "devnet must stay on");
-        assert!(
-            !privacy_transfers_enabled(testnet),
-            "/: testnet left the allowlist; it stays closed until PTP-1"
-        );
 
         for unclaimed in [1u64, 42, 1337, 45263, u64::MAX] {
             assert!(
                 !privacy_transfers_enabled(unclaimed),
-                "chain id {unclaimed} has no ownership proof wired; the surface must stay off"
+                "chain id {unclaimed} must refuse the legacy privacy path"
             );
         }
     }

@@ -26,6 +26,75 @@ fn funded_state(addr: Address, balance: u64) -> AccountState {
 }
 
 #[test]
+fn private_transfer_with_composite_authorization_executes() {
+    use crate::crypto::ctx::PRIVATE_TRANSFER_V1;
+    use crate::crypto::key_derivation::RootSecret;
+
+    let account = RootSecret::derive(&[7u8; 32], "")
+        .unwrap()
+        .user_account(0, 0)
+        .unwrap();
+    let from = Address::from(account.address);
+    let mut state = funded_state(from, 1_000_000);
+    let chain_id = crate::core::transaction::DEFAULT_CHAIN_ID;
+    let commitment = hash_from_field(101);
+    let proof = hash_from_field(0xA11CE);
+    let nullifier = L1NoteRegistry::derive_nullifier(&commitment, &proof);
+    let output = hash_from_field(103);
+    state.note_registry.insert_note(commitment).unwrap();
+
+    let digest = PrivateTransferSubmit::compute_public_digest(&[nullifier], &[output]);
+    let auth_message = PrivateTransferSubmit::authorization_message(
+        chain_id,
+        from.as_bytes(),
+        0,
+        &digest,
+    );
+    let authorization_sig = account
+        .signing
+        .sign_in(
+            &state.scheme_registry,
+            PRIVATE_TRANSFER_V1,
+            &auth_message,
+            &[4u8; 32],
+        )
+        .unwrap()
+        .encode();
+    let submit = PrivateTransferSubmit {
+        spent_commitments: vec![commitment],
+        nullifiers: vec![nullifier],
+        output_commitments: vec![output],
+        nullifier_proofs: vec![proof],
+        authorization_sig,
+        public_digest: digest,
+    };
+
+    let mut tx = Transaction::new_with_chain_id(
+        from,
+        Address::zero(),
+        0,
+        100,
+        0,
+        vec![],
+        chain_id,
+        TransactionType::PrivateTransferSubmit(submit),
+    );
+    tx.sign_v7(
+        &state.scheme_registry,
+        &account.signing,
+        &account.recovery_public_key,
+        &[5u8; 32],
+    )
+    .unwrap();
+
+    assert!(tx.verify_in(&state.scheme_registry));
+    Executor::apply_transaction(&mut state, &tx).expect("composite-authorized transfer");
+    assert!(!state.note_registry.contains_commitment(&commitment));
+    assert!(state.note_registry.contains_commitment(&output));
+    assert!(state.note_registry.is_nullifier_spent(&nullifier));
+}
+
+#[test]
 fn private_transfer_submit_spend_and_create() {
     let kp = KeyPair::generate().unwrap();
     let from = Address::from(kp.public_key_bytes());
@@ -164,6 +233,33 @@ fn privacy_note_insert_tx() {
 }
 
 #[test]
+fn testnet_privacy_precheck_reports_closed_feature() {
+    use crate::chain::blockchain::Blockchain;
+    use crate::consensus::pow::PoWEngine;
+    use crate::core::chain_config::Network;
+    use std::sync::Arc;
+
+    let keypair = KeyPair::generate().unwrap();
+    let from = Address::from(keypair.public_key_bytes());
+    let chain_id = Network::Testnet.chain_id().value();
+    let mut chain = Blockchain::new(Arc::new(PoWEngine::new(1)), None, chain_id, None);
+    chain.state.add_balance(&from, 1_000_000);
+
+    let tx = signed_tx(
+        &keypair,
+        chain_id,
+        TransactionType::PrivacyNoteInsert(hash_from_field(42)),
+    );
+    let precheck = chain.tx_precheck(&tx);
+
+    assert_eq!(precheck["accepted"], false);
+    assert!(precheck["reasons"]
+        .as_array()
+        .is_some_and(|reasons| reasons.iter().any(|reason| reason == "privacy_disabled")));
+    assert!(chain.mempool.is_empty());
+}
+
+#[test]
 fn ai_mlp_guest_program_hash_stable() {
     let spec = FixedPointMlpSpec {
         dims: vec![2, 2, 1],
@@ -240,7 +336,7 @@ fn ai_require_execution_proof_blocks_finalize_without_proof() {
             modalities: crate::ai_inference::perception::ModalitySet::text_only(),
         })
         .expect_err(
-            "F-04: proof-required models cannot register while STARK verification is not live",
+            "proof-required models cannot register while STARK verification is not live",
         );
     assert!(
         err.contains("full AI STARK"),
@@ -286,34 +382,56 @@ fn signed_tx(kp: &KeyPair, chain_id: u64, tx_type: TransactionType) -> Transacti
 }
 
 #[test]
-fn private_transfer_is_refused_on_mainnet_and_unknown_chain_ids() {
+fn private_transfer_admission_and_execution_are_closed_on_public_chains() {
     use crate::core::chain_config::Network;
-    for chain_id in [Network::Mainnet.chain_id().value(), 999_999] {
+    for chain_id in [
+        Network::Mainnet.chain_id().value(),
+        Network::Testnet.chain_id().value(),
+        999_999,
+    ] {
         let kp = KeyPair::generate().unwrap();
         let from = Address::from(kp.public_key_bytes());
         let mut state = funded_state(from, 1_000_000);
         let (sub, c_in, c_out) = transfer_fixture(&kp, &mut state);
         let tx = signed_tx(&kp, chain_id, TransactionType::PrivateTransferSubmit(sub));
+        let validation_error = state
+            .validate_transaction(&tx)
+            .expect_err("the transaction admission gate must refuse this chain id");
+        assert!(validation_error.contains("privacy transfers are disabled"));
         let err = Executor::apply_transaction(&mut state, &tx)
-            .expect_err("the privacy gate must refuse this chain id");
-        assert!(err.contains("disabled on mainnet"), "got: {err}");
+            .expect_err("the execution gate must refuse this chain id");
+        assert!(
+            err.contains("closed on testnet") || err.contains("disabled on mainnet"),
+            "got: {err}"
+        );
         assert!(state.note_registry.contains_commitment(&c_in));
         assert!(!state.note_registry.contains_commitment(&c_out));
     }
 }
 
 #[test]
-fn privacy_note_insert_is_refused_on_mainnet_and_unknown_chain_ids() {
+fn note_insert_admission_and_execution_are_closed_on_public_chains() {
     use crate::core::chain_config::Network;
-    for chain_id in [Network::Mainnet.chain_id().value(), 999_999] {
+    for chain_id in [
+        Network::Mainnet.chain_id().value(),
+        Network::Testnet.chain_id().value(),
+        999_999,
+    ] {
         let kp = KeyPair::generate().unwrap();
         let from = Address::from(kp.public_key_bytes());
         let mut state = funded_state(from, 1_000_000);
         let c = hash_from_field(42);
         let tx = signed_tx(&kp, chain_id, TransactionType::PrivacyNoteInsert(c));
+        let validation_error = state
+            .validate_transaction(&tx)
+            .expect_err("the transaction admission gate must refuse this chain id");
+        assert!(validation_error.contains("privacy transfers are disabled"));
         let err = Executor::apply_transaction(&mut state, &tx)
-            .expect_err("the privacy gate must refuse this chain id");
-        assert!(err.contains("disabled on mainnet"), "got: {err}");
+            .expect_err("the execution gate must refuse this chain id");
+        assert!(
+            err.contains("closed on testnet") || err.contains("disabled on mainnet"),
+            "got: {err}"
+        );
         assert!(!state.note_registry.contains_commitment(&c));
     }
 }

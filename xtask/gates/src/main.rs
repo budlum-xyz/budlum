@@ -70,9 +70,9 @@ mod gates {
     pub mod bud3_repair_fires;
     pub mod bud3_sealed_and_deletion;
     pub mod bud_e2e;
-    pub mod budscan_parity;
-    pub mod budscan_patchset;
     pub mod canonical_programs_reproduce;
+    pub mod explorer_parity;
+    pub mod explorer_patchset;
     pub mod capability_modules_are_wired;
     pub mod cargo_vet;
     pub mod chain_id_is_not_hardcoded;
@@ -135,6 +135,7 @@ mod gates {
     pub mod no_constant_security_verdicts;
     pub mod no_float_in_consensus_paths;
     pub mod no_idle_code;
+    pub mod no_legacy_storage;
     pub mod no_new_shell_gates;
     pub mod no_orphan_source_files;
     pub mod no_out_of_block_consensus_writes;
@@ -388,19 +389,19 @@ const GATES: &[Gate] = &[
         run_log: None,
     },
     Gate {
-        name: "budscan-name-rule-parity",
+        name: "explorer-name-rule-parity",
         replaces: None,
-        run: gates::budscan_parity::run,
+        run: gates::explorer_parity::run,
         run_args: None,
-        self_test: gates::budscan_parity::self_test,
+        self_test: gates::explorer_parity::self_test,
         run_log: None,
     },
     Gate {
-        name: "budscan-patchset",
+        name: "explorer-patchset",
         replaces: None,
-        run: gates::budscan_patchset::run,
+        run: gates::explorer_patchset::run,
         run_args: None,
-        self_test: gates::budscan_patchset::self_test,
+        self_test: gates::explorer_patchset::self_test,
         run_log: None,
     },
     Gate {
@@ -545,6 +546,14 @@ const GATES: &[Gate] = &[
         run: gates::no_idle_code::run,
         run_args: None,
         self_test: gates::no_idle_code::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "no-legacy-storage",
+        replaces: None,
+        run: gates::no_legacy_storage::run,
+        run_args: None,
+        self_test: gates::no_legacy_storage::self_test,
         run_log: None,
     },
     Gate {

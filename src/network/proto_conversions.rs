@@ -1,8 +1,9 @@
 use crate::consensus::pos::SlashingEvidence;
 use crate::core::address::Address;
-
 use crate::core::block::{Block, BlockHeader};
 use crate::core::transaction::{Transaction, TransactionType};
+use crate::network::bounded_bincode::decode_bounded_bincode;
+use crate::network::protocol::NetworkMessage;
 
 fn decode_optional_hash32(bytes: Vec<u8>, field: &str) -> Result<Option<[u8; 32]>, String> {
     if bytes.is_empty() {
@@ -14,7 +15,9 @@ fn decode_optional_hash32(bytes: Vec<u8>, field: &str) -> Result<Option<[u8; 32]
         .map(Some)
         .map_err(|_| format!("Invalid {field} length: expected 32 bytes, got {actual_len}"))
 }
-use crate::network::protocol::NetworkMessage;
+
+const MAX_TRANSACTION_TYPE_PAYLOAD_BYTES: usize = crate::network::protocol::MAX_TX_SIZE;
+const MAX_SLASHING_REPORT_BYTES: usize = crate::consensus::MAX_SLASHING_EVIDENCE_BYTES;
 
 #[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 pub mod pb {
@@ -46,79 +49,50 @@ fn bincode_payload_or_log<T: serde::Serialize + ?Sized>(what: &str, value: &T) -
     }
 }
 
-/// The largest validator transaction payload a peer may send. A registration
-/// carries a few ML-DSA-65 public keys and short address strings, well under
-/// this bound; the bound is enforced inside the decoder, so a peer cannot make
-/// it allocate by lying about a length.
-const MAX_VALIDATOR_TX_BYTES: u64 = 64 * 1024;
+/// The largest validator transaction payload a peer may send. Count hints
+/// share the same payload-derived budget as the byte ceiling.
+const MAX_VALIDATOR_TX_BYTES: usize = 64 * 1024;
 
 fn decode_validator_tx(data: &[u8]) -> Result<crate::validators::ValidatorTx, String> {
-    use bincode::Options as _;
-    bincode::options()
-        .with_fixint_encoding()
-        .allow_trailing_bytes()
-        .with_limit(MAX_VALIDATOR_TX_BYTES)
-        .deserialize(data)
+    decode_bounded_bincode(data, MAX_VALIDATOR_TX_BYTES)
         .map_err(|e| format!("Invalid validator transaction payload: {e}"))
 }
 
 /// The largest StorageTx v3 payload a peer may send.
-const MAX_STORAGE_V3_TX_BYTES: u64 = 1 << 20;
+const MAX_STORAGE_V3_TX_BYTES: usize = 1 << 20;
 
 fn decode_storage_v3_tx(data: &[u8]) -> Result<crate::storage::bud3::tx::StorageTxV3, String> {
-    use bincode::Options as _;
-    bincode::options()
-        .with_fixint_encoding()
-        .allow_trailing_bytes()
-        .with_limit(MAX_STORAGE_V3_TX_BYTES)
-        .deserialize(data)
+    decode_bounded_bincode(data, MAX_STORAGE_V3_TX_BYTES)
         .map_err(|e| format!("Invalid StorageTx v3 payload: {e}"))
 }
 
-/// The largest transaction-type payload a peer may put on the wire.
-///
-/// The frame itself is already bounded by the protocol layer
-/// ([`super::protocol::MAX_MESSAGE_SIZE`]), so this is not a second frame cap:
-/// it is the budget the *decoder* may spend. A bincode length prefix is a
-/// `u64` the sender picks, and `bincode::deserialize` trusts it far enough to
-/// reserve the memory before it reads a byte. A peer allowed to send ten
-/// megabytes of frame could therefore ask a `Vec<u8>` field for a terabyte and
-/// take the node down without a block, a vote or a transaction (
-/// ). `with_limit` turns that claim into a decode error, and the
-/// explicit length check refuses an oversized frame before the decoder runs at
-/// all.
-const MAX_TX_TYPE_PAYLOAD_BYTES: u64 = 4 * 1024 * 1024;
-
-/// Decode a peer-supplied transaction-type payload under a byte budget.
-///
-/// `what` names the payload in the error, so a refusal says which arm of the
-/// wire union refused it.
+/// Decode a peer-supplied transaction-type payload under both a byte ceiling
+/// and an aggregate collection-count budget. `what` names the wire union arm
+/// in the refusal; fixint encoding and legacy trailing bytes stay compatible.
 fn decode_tx_payload<T: serde::de::DeserializeOwned>(
     data: &[u8],
     what: &str,
 ) -> Result<T, String> {
-    use bincode::Options as _;
-    if data.len() as u64 > MAX_TX_TYPE_PAYLOAD_BYTES {
-        return Err(format!(
-            "Invalid {what} payload: {} bytes exceeds the {} byte ceiling",
-            data.len(),
-            MAX_TX_TYPE_PAYLOAD_BYTES
-        ));
-    }
-    // Fixint, not the varint default: these payloads are written by
-    // `bincode::serialize`, which is fixint. Trailing bytes stay allowed
-    // because the same convention already governs the two payloads decoded
-    // above; the two decoders must not disagree about what a valid body is.
-    bincode::options()
-        .with_fixint_encoding()
-        .allow_trailing_bytes()
-        .with_limit(MAX_TX_TYPE_PAYLOAD_BYTES)
-        .deserialize(data)
+    decode_bounded_bincode(data, MAX_TRANSACTION_TYPE_PAYLOAD_BYTES)
         .map_err(|e| format!("Invalid {what} payload: {e}"))
 }
 
 /// The only transaction wire version this node encodes and accepts.
 const TX_WIRE_VERSION: u32 = 2;
+
+/// Ceiling for nested JSON blobs on the network wire. The bincode paths use
+/// the shared decoder above, which additionally bounds collection count hints.
+const MAX_WIRE_NESTED_PAYLOAD_BYTES: usize = 1024 * 1024;
+
+fn decode_bounded_json<T: serde::de::DeserializeOwned>(
+    data: &[u8],
+    what: &str,
+) -> Result<T, String> {
+    if data.len() > MAX_WIRE_NESTED_PAYLOAD_BYTES {
+        return Err(format!("{what} exceeds size limit"));
+    }
+    serde_json::from_slice(data).map_err(|e| format!("Invalid {what}: {e}"))
+}
 
 impl From<&Transaction> for pb::ProtoTransaction {
     fn from(tx: &Transaction) -> Self {
@@ -2104,7 +2078,7 @@ impl TryFrom<pb::ProtoBlockHeader> for BlockHeader {
             return Err("Too many slashing reports in block header".into());
         }
         for raw in proto.slashing_reports {
-            if raw.len() > 65_536 {
+            if raw.len() > MAX_SLASHING_REPORT_BYTES {
                 return Err("Slashing report entry exceeds size limit".into());
             }
             let r: crate::registry::evidence::SlashingReport =
@@ -2223,7 +2197,7 @@ impl TryFrom<pb::ProtoBlock> for Block {
             return Err("Too many slashing reports in block".into());
         }
         for raw in proto.slashing_reports {
-            if raw.len() > 65_536 {
+            if raw.len() > MAX_SLASHING_REPORT_BYTES {
                 return Err("Slashing report entry exceeds size limit".into());
             }
             let r: crate::registry::evidence::SlashingReport =
@@ -2652,26 +2626,22 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                 })
             }
             pb::proto_network_message::Payload::DomainCommitment(c) => {
-                let commitment = serde_json::from_slice(&c.data)
-                    .map_err(|e| format!("Invalid domain commitment payload: {e}"))?;
+                let commitment = decode_bounded_json(&c.data, "domain commitment payload")?;
                 Ok(NetworkMessage::DomainCommitment(commitment))
             }
             pb::proto_network_message::Payload::VerifiedDomainCommitment(c) => {
-                let payload = serde_json::from_slice(&c.data)
-                    .map_err(|e| format!("Invalid verified domain commitment payload: {e}"))?;
+                let payload = decode_bounded_json(&c.data, "verified domain commitment payload")?;
                 Ok(NetworkMessage::VerifiedDomainCommitment(payload))
             }
             pb::proto_network_message::Payload::SlashingEvidence(e) => Ok(
                 NetworkMessage::SlashingEvidence(SlashingEvidence::try_from(e)?),
             ),
             pb::proto_network_message::Payload::GlobalHeader(h) => {
-                let header = serde_json::from_slice(&h.data)
-                    .map_err(|e| format!("Invalid global header payload: {e}"))?;
+                let header = decode_bounded_json(&h.data, "global header payload")?;
                 Ok(NetworkMessage::GlobalHeader(header))
             }
             pb::proto_network_message::Payload::CrossDomainMessage(m) => {
-                let msg = serde_json::from_slice(&m.data)
-                    .map_err(|e| format!("Invalid cross domain message payload: {e}"))?;
+                let msg = decode_bounded_json(&m.data, "cross domain message payload")?;
                 Ok(NetworkMessage::CrossDomainMessage(msg))
             }
         }
@@ -2700,15 +2670,13 @@ mod tests {
 
     /// A declared length is not a promise.
     ///
-    /// `bincode::deserialize` reads a `u64` element count and reserves that
-    /// much before it reads a single byte, so eighteen hostile bytes inside a
-    /// perfectly legal frame were enough to ask for a terabyte (
-    /// The P2P foot). The decode budget now turns the claim into an
-    /// error, and the honest payload beside it still decodes, so the bound is
-    /// a ceiling and not a change of shape.
+    /// Bincode exposes a sender-controlled collection count to Serde before
+    /// the visitor consumes the elements. The shared decoder checks that count
+    /// against an aggregate payload-derived budget before the visitor can
+    /// reserve it, while the honest payload beside it still decodes.
     ///
-    /// Canary: go back to `bincode::deserialize` and this test either aborts
-    /// the process on the allocation or decodes a ten-exabyte vector.
+    /// Canary: removing the aggregate count guard reopens the allocation
+    /// amplification this regression refuses.
     #[test]
     fn p2p_bincode_is_bounded() {
         // `Vec<u8>` is a `u64` element count followed by that many bytes.
@@ -2724,16 +2692,116 @@ mod tests {
 
         // The ceiling is checked before the decoder is entered, so the error
         // names the size rather than whatever the decoder made of the prefix.
-        let over =
-            usize::try_from(MAX_TX_TYPE_PAYLOAD_BYTES).expect("the budget fits in usize") + 1;
+        let over = MAX_TRANSACTION_TYPE_PAYLOAD_BYTES + 1;
         let oversized = vec![0u8; over];
         let err = decode_tx_payload::<Vec<u8>>(&oversized, "probe")
             .expect_err("a payload over the ceiling must be refused");
-        assert!(err.contains("ceiling"), "{err}");
+        assert!(err.contains("limit"), "{err}");
 
         // Just under the ceiling is still the decoder's problem, not the
         // length check's: the budget is a limit, not a lower bound on size.
         assert!(decode_tx_payload::<u64>(&0u64.to_le_bytes(), "probe").is_ok());
+    }
+
+    #[test]
+    fn peer_transaction_rejects_a_collection_count_larger_than_its_payload() {
+        use prost::Message as _;
+
+        let keypair = KeyPair::generate().expect("generate keypair");
+        let from = Address::from(keypair.public_key_bytes());
+        let record = crate::registry::IdentityRecord::new(
+            from,
+            vec![crate::registry::VerificationMethod::new(
+                [1u8; 32],
+                crate::registry::MethodKind::MlDsa87,
+            )],
+            vec![],
+            0,
+        )
+        .expect("valid one-method record");
+        let identity_tx = crate::registry::IdentityTx::Register { record };
+        let mut tx = Transaction::new_with_fee(from, Address::zero(), 0, 1, 0, vec![]);
+        tx.tx_type = TransactionType::Identity(identity_tx.clone());
+        tx.sign(&keypair);
+
+        let mut proto_tx = pb::ProtoTransaction::from(&tx);
+        let Some(pb::proto_transaction::TypePayload::Identity(payload)) =
+            proto_tx.type_payload.as_mut()
+        else {
+            panic!("identity transaction must encode as an identity payload");
+        };
+        let mut hostile = bincode::serialize(&identity_tx).expect("serialize identity payload");
+        let subject_bytes = bincode::serialize(&from).expect("serialize address");
+        let methods_count_offset = std::mem::size_of::<u32>() + subject_bytes.len();
+        let methods_count_end = methods_count_offset + std::mem::size_of::<u64>();
+        let encoded_one = 1u64.to_le_bytes();
+        assert_eq!(
+            hostile.get(methods_count_offset..methods_count_end),
+            Some(&encoded_one[..]),
+            "the identity method count follows the enum tag and encoded subject"
+        );
+        hostile[methods_count_offset..methods_count_end]
+            .copy_from_slice(&4_096u64.to_le_bytes());
+        payload.data = hostile;
+
+        let envelope = pb::ProtoNetworkMessage {
+            payload: Some(pb::proto_network_message::Payload::Transaction(proto_tx)),
+        };
+        let bytes = envelope.encode_to_vec();
+        assert!(bytes.len() <= crate::network::protocol::MAX_MESSAGE_SIZE);
+
+        let error = NetworkMessage::from_bytes_validated(&bytes)
+            .expect_err("a peer-controlled collection count must be refused before allocation");
+        assert!(matches!(
+            error,
+            crate::network::protocol::MessageError::ParseError(message)
+                if message.contains("IdentityTx payload")
+                    && message.contains("sequence item count")
+        ));
+    }
+
+    #[test]
+    fn validated_network_transaction_refuses_hostile_bincode_sequence_length() {
+        use prost::Message as _;
+
+        let keypair = KeyPair::generate().expect("generate keypair");
+        let from = Address::from(keypair.public_key_bytes());
+        let mut tx = Transaction::new_with_fee(from, Address::zero(), 0, 1, 0, vec![]);
+        tx.tx_type = TransactionType::Identity(crate::registry::IdentityTx::Register {
+            record: crate::registry::IdentityRecord::new(
+                from,
+                vec![crate::registry::VerificationMethod::new(
+                    [1u8; 32],
+                    crate::registry::MethodKind::MlDsa87,
+                )],
+                vec![],
+                0,
+            )
+            .expect("valid one-method record"),
+        });
+        tx.sign(&keypair);
+
+        let mut proto_tx = pb::ProtoTransaction::from(&tx);
+        let Some(pb::proto_transaction::TypePayload::Identity(payload)) =
+            proto_tx.type_payload.as_mut()
+        else {
+            panic!("identity transaction must encode as an identity payload");
+        };
+        payload.data = u64::MAX.to_le_bytes().to_vec();
+
+        let envelope = pb::ProtoNetworkMessage {
+            payload: Some(pb::proto_network_message::Payload::Transaction(proto_tx)),
+        };
+        let bytes = envelope.encode_to_vec();
+        assert!(bytes.len() <= crate::network::protocol::MAX_MESSAGE_SIZE);
+
+        let error = NetworkMessage::from_bytes_validated(&bytes)
+            .expect_err("a peer-controlled bincode length must be refused");
+        assert!(matches!(
+            error,
+            crate::network::protocol::MessageError::ParseError(message)
+                if message.contains("IdentityTx payload")
+        ));
     }
 
     #[test]
@@ -3184,6 +3252,43 @@ mod tests {
     }
 
     #[test]
+    fn rejects_oversized_transaction_payload_before_deserialization() {
+        let mut proto = pb::ProtoTransaction {
+            from: "0000000000000000000000000000000000000000000000000000000000000001".into(),
+            to: "0000000000000000000000000000000000000000000000000000000000000002".into(),
+            amount: 0,
+            fee: 0,
+            max_fee: 0,
+            priority_fee: 0,
+            nonce: 0,
+            data: vec![],
+            timestamp: "1000".into(),
+            hash: "abc".into(),
+            signature: vec![],
+            chain_id: 45262,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: pb::ProtoTransactionType::Identity as i32,
+            wire_version: 2,
+            type_payload: Some(pb::proto_transaction::TypePayload::Identity(
+                pb::ProtoIdentityTx {
+                    data: vec![0u8; MAX_TRANSACTION_TYPE_PAYLOAD_BYTES + 1],
+                },
+            )),
+            signer_public_key: Vec::new(),
+            authorization: None,
+        };
+        assert!(Transaction::try_from(proto.clone()).is_err());
+
+        proto.tx_type = pb::ProtoTransactionType::Storage as i32;
+        proto.type_payload = Some(pb::proto_transaction::TypePayload::Storage(
+            pb::ProtoStorageTx {
+                data: vec![0u8; MAX_TRANSACTION_TYPE_PAYLOAD_BYTES + 1],
+            },
+        ));
+        assert!(Transaction::try_from(proto).is_err());
+    }
+
+    #[test]
     fn a_bincode_payload_failure_gives_an_empty_payload_after_logging() {
         struct Refuses;
         impl serde::Serialize for Refuses {
@@ -3487,5 +3592,40 @@ mod tests {
             NetworkMessage::CrossDomainMessage(decoded) => assert_eq!(decoded, msg_inner),
             _ => panic!("Expected CrossDomainMessage"),
         }
+    }
+
+    #[test]
+    fn oversized_bincode_length_prefix_is_rejected_without_allocation() {
+        // 8-byte fixint length prefix claiming 2^62 bytes followed by 4 trailing bytes.
+        let mut forged = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40];
+        forged.extend_from_slice(&[0xaa; 4]);
+        let err = decode_bounded_bincode::<Vec<u8>>(&forged, MAX_WIRE_NESTED_PAYLOAD_BYTES)
+            .expect_err("crafted multi-exabyte length prefix must be refused before allocation");
+        assert!(err.contains("payload length"), "got: {err}");
+    }
+
+    #[test]
+    fn bounded_bincode_preserves_zero_tag_option_roundtrip() {
+        let value: ([u8; 32], Option<String>) = ([7u8; 32], None);
+        let wire = bincode::serialize(&value).expect("serialize");
+        let back: ([u8; 32], Option<String>) =
+            decode_bounded_bincode(&wire, MAX_WIRE_NESTED_PAYLOAD_BYTES)
+                .expect("zero-tag Option::None must round-trip under the bounded decoder");
+        assert_eq!(back, value);
+    }
+
+    #[test]
+    fn nested_bincode_blobs_past_the_wire_ceiling_are_refused() {
+        let oversize = vec![0u8; MAX_WIRE_NESTED_PAYLOAD_BYTES + 1];
+        let err = decode_bounded_bincode::<u8>(&oversize, MAX_WIRE_NESTED_PAYLOAD_BYTES)
+            .unwrap_err();
+        assert!(err.contains("payload length"));
+    }
+
+    #[test]
+    fn nested_json_blobs_past_the_wire_ceiling_are_refused() {
+        let oversize = vec![b'{'; MAX_WIRE_NESTED_PAYLOAD_BYTES + 1];
+        let err = decode_bounded_json::<serde_json::Value>(&oversize, "test json").unwrap_err();
+        assert!(err.contains("exceeds size limit"));
     }
 }

@@ -556,6 +556,23 @@ impl Blockchain {
         }
     }
 
+    fn checked_replay_prefix(chain: &[Block], position: usize) -> Result<&[Block], String> {
+        let block = chain
+            .get(position)
+            .ok_or_else(|| format!("block position {position} is outside the stored chain"))?;
+        let expected_index = u64::try_from(position)
+            .map_err(|_| format!("block position {position} exceeds the chain index range"))?;
+        if block.index != expected_index {
+            return Err(format!(
+                "block at position {position} declares index {}",
+                block.index
+            ));
+        }
+        chain
+            .get(..position)
+            .ok_or_else(|| format!("block position {position} has no valid replay prefix"))
+    }
+
     fn snapshot_trusted_signers_from_state(state: &AccountState) -> Vec<[u8; 32]> {
         state
             .validators
@@ -948,8 +965,17 @@ impl Blockchain {
             }
         }
 
-        for block in chain_vec.iter().skip(start_index) {
-            let preceding = &chain_vec[..block.index as usize];
+        for (position, block) in chain_vec.iter().enumerate().skip(start_index) {
+            let preceding = match Self::checked_replay_prefix(&chain_vec, position) {
+                Ok(prefix) => prefix,
+                Err(error) => {
+                    error!("Corrupted persisted chain: {error}. Refusing startup.");
+                    #[cfg(not(test))]
+                    std::process::exit(1);
+                    #[cfg(test)]
+                    panic!("Corrupted persisted chain: {error}");
+                }
+            };
             state = match Self::apply_block_effects(&state, block, preceding) {
                 Ok(mut next_state) => {
                     // Startup replay must reconstruct exactly the same state
@@ -1668,7 +1694,7 @@ impl Blockchain {
     /// Derived from the chain prefix on every read, never stored. The
     /// previous `settlement_finality_hashes` field had no production
     /// writer at all, so the settlement root folded into the state root
-    /// was always the empty-tree root (F-7, dead-feature illusion). Wiring
+    /// was always the empty-tree root (dead-feature illusion). Wiring
     /// a writer that appended on finality-certificate arrival would have
     /// traded the dead input for a consensus race: two honest nodes that
     /// finalized the same checkpoint at different moments would fold
@@ -2657,16 +2683,9 @@ impl Blockchain {
         Self::build_validator_snapshot_from_state(epoch, &self.state, self.chain_id)
     }
 
-    /// Drive the liveness tracker over a synthetic epoch. Used by
-    /// Tests and by the OBSERVE-only public surface. `participated` is the set
-    /// Of validators that showed the expected participation; everyone else in
-    /// `state.validators` is treated as an absentee. Returns the number of
-    /// Slashing reports produced.
-    ///
-    /// OBSERVE ONLY: this never slashes, even when `liveness_slashing_enabled`
-    /// Is true. Real slashing is the job of `apply_epoch_close_liveness`, which
-    /// Runs on every real block at an epoch boundary. Tests asserting the
-    /// OBSERVE mode default therefore see no stake cut.
+    /// Drive the liveness tracker over a synthetic epoch. Returns the number
+    /// of newly suspended validators. This observation path never changes
+    /// stake or duty; real epoch close applies the duty suspension.
     pub fn observe_liveness_epoch(
         &mut self,
         epoch: u64,
@@ -2678,7 +2697,10 @@ impl Blockchain {
             .validators
             .keys()
             .filter(|addr| {
-                self.state
+                self.state.validators.get(*addr).is_some_and(|validator| {
+                    validator.active && !validator.slashed && !validator.jailed
+                }) && self
+                    .state
                     .registry
                     .is_active(addr, crate::registry::role::roles::VALIDATOR)
             })
@@ -2717,45 +2739,25 @@ impl Blockchain {
             .validators
             .keys()
             .filter(|addr| {
-                self.state
+                self.state.validators.get(*addr).is_some_and(|validator| {
+                    validator.active && !validator.slashed && !validator.jailed
+                }) && self
+                    .state
                     .registry
                     .is_active(addr, crate::registry::role::roles::VALIDATOR)
             })
             .copied()
             .collect();
-        let reports = self.state.liveness.record_epoch(
+        let suspended = self.state.liveness.record_epoch(
             epoch,
             &expected,
             |addr| participated.contains(addr),
             &params,
         );
-        // If liveness slashing is enabled, feed the produced reports through
-        // The canonical `slash_from_report` path (mirroring what
-        // `apply_epoch_close_liveness` does at epoch close). Tests
-        // That drive slashing explicitly via `record_liveness_epoch` therefore
-        // See the same effect.
-        if params.liveness_slashing_enabled {
-            // Same term as `apply_epoch_close_liveness`. Setting `jailed`
-            // without `jail_until` leaves a validator that `advance_epoch`
-            // releases at the next boundary, which is not a term at all.
-            let jail_until = self
-                .state
-                .epoch_index
-                .saturating_add(crate::registry::params::LIVENESS_JAIL_EPOCHS);
-            for report in &reports {
-                let _ = self.state.slash_from_report(report);
-                if let Some(v) = self.state.validators.get_mut(&report.offender) {
-                    if !v.slashed {
-                        // Timed jail, not a permanent slash (
-                        // decision B): see `apply_epoch_close_liveness`.
-                        v.active = false;
-                        v.jailed = true;
-                        v.jail_until = jail_until;
-                    }
-                }
-            }
-        }
-        reports.len()
+        // V-4 / WP-13: absence suspends, it never slashes. The tracker
+        // records the suspension; `apply_epoch_close_liveness` is the path
+        // that also removes the validator from the active set.
+        suspended.len()
     }
 
     /// The relay enqueue the lock and burn doors run.
@@ -3938,12 +3940,8 @@ impl Blockchain {
             }
             crate::core::transaction::TransactionType::PrivateTransferSubmit(_)
             | crate::core::transaction::TransactionType::PrivacyNoteInsert(_) => {
-                if self.chain_id
-                    == crate::core::chain_config::Network::Mainnet
-                        .chain_id()
-                        .value()
-                {
-                    reasons.push("privacy_mainnet_disabled".to_string());
+                if !crate::core::chain_config::privacy_transfers_enabled(self.chain_id) {
+                    reasons.push("privacy_disabled".to_string());
                 }
             }
             crate::core::transaction::TransactionType::AiDisputeSlash {
@@ -4253,49 +4251,28 @@ impl Blockchain {
             .validators
             .keys()
             .filter(|addr| {
-                state
+                state.validators.get(*addr).is_some_and(|validator| {
+                    validator.active && !validator.slashed && !validator.jailed
+                }) && state
                     .registry
                     .is_active(addr, crate::registry::role::roles::VALIDATOR)
             })
             .copied()
             .collect();
-        let reported = state.liveness.record_epoch(
+        let suspended = state.liveness.record_epoch(
             closed_epoch,
             &expected,
             |addr| participated.contains(addr),
             &params,
         );
 
-        // OBSERVE mode by default; only act when slashing is explicitly enabled.
-        if params.liveness_slashing_enabled {
-            let jail_until = state
-                .epoch_index
-                .saturating_add(crate::registry::params::LIVENESS_JAIL_EPOCHS);
-            for report in &reported {
-                let _ = state.slash_from_report(report);
-                if let Some(validator) = state.validators.get_mut(&report.offender) {
-                    if !validator.slashed {
-                        // Absence is a TIMED
-                        // jail. `slashed` stays false, or the release loop
-                        // (`!slashed`) could never bring the validator back.
-                        validator.active = false;
-                        // The term, and the flag the release loop reads.
-                        //
-                        // `AccountState::advance_epoch` releases on
-                        // `jailed && jail_until <= epoch_index`. Cutting the
-                        // stake without setting `jailed` left the offender
-                        // invisible to that loop: a liveness penalty, which
-                        // is a penalty for being absent, became permanent.
-                        // Absence is also what a partition or a failed disk
-                        // looks like, so the punishment outlived the fault
-                        // it was measuring.
-                        //
-                        // `jailed` is hashed into the state root, so the two
-                        // slashing paths also disagreed on the root they
-                        // produced from identical evidence.
-                        validator.jailed = true;
-                        validator.jail_until = jail_until;
-                    }
+        // V-4 / WP-13: absence is a suspension, never a slash. The validator
+        // takes no new duty (`active = false`); its stake is untouched and
+        // `slashed` stays false. `ResumeValidator` lifts it one epoch later.
+        for offender in &suspended {
+            if let Some(validator) = state.validators.get_mut(offender) {
+                if !validator.slashed {
+                    validator.active = false;
                 }
             }
         }
@@ -4973,8 +4950,8 @@ impl Blockchain {
         // AFTER we have committed the new state. The producer of the closing
         // Block is the one validator we know for sure participated; everyone
         // Else in the active validator set is treated as a potential absentee.
-        // This is the OBSERVE mode default; liveness_slashing_enabled controls
-        // Whether the report is actioned.
+        // The deprecated liveness-slashing flag is intentionally irrelevant:
+        // committed epoch close suspends absence and never cuts stake.
 
         let frozen_before = Self::frozen_domain_ids(&self.state);
         self.state = committed_state;
@@ -8540,6 +8517,20 @@ mod tests {
         assert_eq!(bc.state.external_roots.get(&1), Some(&root2));
     }
 
+    #[test]
+    fn persisted_chain_replay_refuses_an_out_of_position_block_index() {
+        let genesis = Block::new_with_chain_id(0, String::new(), vec![], 45262);
+        let next = Block::new_with_chain_id(1, genesis.hash.clone(), vec![], 45262);
+        let chain = vec![genesis, next];
+        assert_eq!(Blockchain::checked_replay_prefix(&chain, 1).unwrap().len(), 1);
+
+        let mut malformed = chain.clone();
+        malformed[1].index = u64::MAX;
+        let error = Blockchain::checked_replay_prefix(&malformed, 1).unwrap_err();
+        assert!(error.contains("declares index"));
+        assert!(Blockchain::checked_replay_prefix(&chain, 2).is_err());
+    }
+
     /// A snapshot that is ahead of the stored chain must not stay
     /// as the replay base. Startup falls back to the genesis state.
     #[test]
@@ -8905,7 +8896,7 @@ mod tests {
         }
     }
 
-    /// F-7: the settlement finality window is a pure function of the chain
+    /// The settlement finality window is a pure function of the chain
     /// prefix. A checkpoint enters only once it is buried a finality
     /// horizon deep, and leaves once it is older than the settled-row
     /// retention; the genesis height, non-checkpoint heights and malformed
@@ -9898,7 +9889,7 @@ mod tests {
             .expect("peer must accept a self-produced mainnet block");
     }
 
-    /// Audit 2026-09-09, F-3: an operator sealing global headers must not
+    /// Audit 2026-09-09: an operator sealing global headers must not
     /// fork the node. The last sealed header is node-local operator state;
     /// hashing it into the state root made the producer's root irreproducible
     /// by unsealed peers (and inconsistent with the reorg paths, which

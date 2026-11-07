@@ -305,7 +305,7 @@ mod tests {
     #[test]
     fn failed_commit_keeps_the_backup_for_rollback() {
         let path = std::env::temp_dir()
-            .join("bud_state_no_such_dir_p16_f16")
+            .join("bud_state_no_such_dir")
             .join("state.json");
         let path = path.to_string_lossy().to_string();
         let mut state = State::load(&path).unwrap();

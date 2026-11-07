@@ -17,3 +17,10 @@ cargo run --release --manifest-path xtask/release/Cargo.toml -- verify-release r
 The seed stays offline. The check runs in `.github/workflows/release-signature.yml`.
 Model checkpoint manifests use the same format and context; see
 `docs/pq/LUBOT_CHECKPOINTS.md`.
+
+Key generation creates both output files exclusively with owner-only permissions.
+Existing files, symbolic links, and hard links are rejected, not overwritten.
+Use a trusted, owner-controlled parent directory. If writing either output fails,
+key generation reports an error and can leave a private partial file or an orphaned
+seed. Inspect and recover these files offline before retrying with new paths;
+the tool does not remove files after a failed write.

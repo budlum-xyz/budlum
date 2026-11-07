@@ -129,9 +129,9 @@ impl L1NoteRegistry {
         Ok(())
     }
 
-    /// Apply transfer with nullifier derivation proofs.
+    /// Apply a transfer after checking every nullifier derivation proof.
     /// Each `proof[i]` must satisfy: `nullifier[i] == derive_nullifier(commitment[i], proof[i])`, a domain-separated SHA-256.
-    /// If proofs is empty, falls back to legacy behavior (no binding check).
+    /// Missing or mismatched proofs are refused; there is no legacy path.
     pub fn apply_transfer_with_proofs(
         &mut self,
         spent_commitments: &[NoteHash],

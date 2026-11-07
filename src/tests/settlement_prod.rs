@@ -1668,7 +1668,7 @@ mod settlement_prod_tests {
         assert_ne!(baseline.calculate_hash(), after.calculate_hash());
     }
 
-    /// F-7 closed the dead `settlement_finality_hashes` input by replacing
+    /// The dead `settlement_finality_hashes` input was closed by replacing
     /// the stored field with a derived window (see the twin test in
     /// `chain/blockchain.rs`). This module is still disabled pending the
     /// devnet FinalityProof rewrite, so the derivation is pinned here only

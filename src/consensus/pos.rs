@@ -1939,10 +1939,9 @@ mod tests {
         );
     }
 
-    /// F-184/185/186: the consensus penalty constants are integer
-    /// fixed-point, not f64 expressions. removed the never-read
-    /// `PoSConfig` knobs this used to assert on; the live constants are the
-    /// `RegistryParams` slash ratios, which are what is pinned now.
+    /// The consensus penalty constants are integer fixed-point, not f64
+    /// expressions. The live constants are the `RegistryParams` slash ratios,
+    /// which are what is pinned here.
     #[test]
     fn pos_default_fixed_point_constants_are_exact_integers() {
         use crate::core::chain_config::FIXED_POINT_SCALE;

@@ -44,7 +44,7 @@ use bincode::Options;
 use bud_proof::ProverAdapter;
 use serde::{Deserialize, Serialize};
 
-/// RPC-facing DTO for `bud_storageOpenChallenge`.
+/// DTO retained for the legacy challenge domain; its RPC was removed.
 ///
 /// Wraps the chain-relevant fields so the JSON shape is explicit and
 /// Stable. Decouples the on-chain `RetrievalChallenge` (which carries
@@ -1159,6 +1159,9 @@ pub enum StorageError {
     /// The primary is the copy a reader reaches first and a repair rebuilds
     /// from. A device that is online when its owner is awake cannot be it.
     MobileOperatorCannotHoldPrimary(Address),
+    /// A request arrived at the retired legacy content-registration door.
+    /// B.U.D. 3.0 uses the separate `StorageTxV3` transaction door instead.
+    Bud3NotReady,
 }
 
 impl std::fmt::Display for StorageError {
@@ -1190,6 +1193,10 @@ impl std::fmt::Display for StorageError {
                 "operator {operator} is registered as mobile and cannot hold \
                  replica_index 0; a phone is online when its owner is, which \
                  is not what a primary copy means"
+            ),
+            Self::Bud3NotReady => write!(
+                f,
+                "legacy content registration is closed; use B.U.D. 3.0 storage transactions"
             ),
             Self::ZeroOpenerBond => write!(f, "opener_bond must be > 0"),
             Self::IdSpaceExhausted => write!(f, "registry id counter is exhausted"),

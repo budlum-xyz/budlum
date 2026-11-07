@@ -878,3 +878,57 @@ fn duty_lane_budget_is_twenty_percent() {
     // out of it is a transaction the node forgets.
     assert_eq!(pool.all_pending_transactions(pool.len()).len(), 5);
 }
+
+#[test]
+fn resume_validator_is_suspension_only_and_activates_one_epoch_later() {
+    let f = fixture(0x70, DEFAULT_CHAIN_ID);
+    let mut state = funded(&f.owner, 10_000);
+    apply(
+        &mut state,
+        &tx(
+            f.owner,
+            1_000,
+            0,
+            DEFAULT_CHAIN_ID,
+            ValidatorTx::Register(Box::new(registration(&f, ValidatorClass::Full, 0x70))),
+        ),
+    )
+    .unwrap();
+
+    let resume = || {
+        tx(
+            f.owner,
+            0,
+            1,
+            DEFAULT_CHAIN_ID,
+            ValidatorTx::Resume,
+        )
+    };
+    assert_eq!(
+        apply(&mut state, &resume()).unwrap_err(),
+        "validator_not_suspended",
+        "an active validator cannot manufacture a resume request"
+    );
+    assert_eq!(state.get_nonce(&f.owner), 1, "a refusal spends no nonce");
+
+    let mut params = *state.registry.params();
+    params.liveness_max_missed_epochs = 1;
+    assert_eq!(
+        state.liveness.record_epoch(1, &[f.owner], |_| false, &params),
+        vec![f.owner]
+    );
+    // Epoch-close applies the tracker's suspension to validator duty.
+    state.validators.get_mut(&f.owner).unwrap().active = false;
+    state.epoch_index = 1;
+    let stake_before = state.validators.get(&f.owner).unwrap().stake;
+
+    apply(&mut state, &resume()).expect("the suspended owner requests resume");
+    assert!(state.liveness.is_suspended(&f.owner));
+    assert!(!state.validators.get(&f.owner).unwrap().active);
+
+    state.advance_epoch(2, DEFAULT_CHAIN_ID);
+    assert!(!state.liveness.is_suspended(&f.owner));
+    let validator = state.validators.get(&f.owner).unwrap();
+    assert!(validator.active && !validator.slashed && !validator.jailed);
+    assert_eq!(validator.stake, stake_before, "absence and resume move no stake");
+}

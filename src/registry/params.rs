@@ -105,18 +105,9 @@ pub struct RegistryParams {
     /// True, which made a passed proposal fail at execution with "governance
     /// Parameter is not whitelisted".
     pub max_invalid_votes_per_epoch: u64,
-    /// Whether the live epoch-close hook actually slashes validators for
-    /// Liveness (downtime) faults.
-    ///
-    /// DEFAULT: `false` (observe-only). Turning liveness slashing on is a
-    /// Deliberate, hard-to-reverse economic action: the underlying `slash`
-    /// Jails a validator on ANY offence, so even a light (1%) liveness penalty
-    /// Fully jails the offender. Per decision ("observe first,
-    /// Validate on live/testnet, then activate"), this stays OFF until
-    /// governance explicitly enables it - the mechanism is fully wired and
-    /// tested, but never auto-activates. Governance-settable: in
-    /// `GOVERNANCE_PARAMETER_WHITELIST`, applied by
-    /// `apply_registry_parameter_update` from the strings `true` / `false`.
+    /// Deprecated compatibility flag. Absence is suspension-only under V-4;
+    /// setting this never enables liveness slashing. It remains in the
+    /// snapshot/governance schema so historical parameter updates decode.
     pub liveness_slashing_enabled: bool,
     /// Relayer's cut of an inbound bridge transfer, in parts-per-million of the
     /// arriving amount.

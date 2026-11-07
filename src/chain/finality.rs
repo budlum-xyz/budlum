@@ -346,7 +346,7 @@ fn hash32_from_hex(s: &str) -> Option<crate::domain::Hash32> {
     Some(out)
 }
 
-/// The settlement finality window (F-7): the hashes of a chain's
+/// The settlement finality window: the hashes of a chain's
 /// checkpoint blocks that are buried at least the finality horizon
 /// ([`crate::cross_domain::nonce::FINALITY_PRUNE_DEPTH`]) deep and no
 /// deeper than the settled-row retention

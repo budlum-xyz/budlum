@@ -1865,16 +1865,9 @@ mod integration_tests {
     /// The counter has to rise on the real production path, not only when it is
     /// called by hand.
     ///
-    /// FINDING: in the whole tree `emit_tx_processed` was called only from a test
-    /// in this file; `produce_block` and `validate_and_add_block` never called
-    /// it, so `budlum_transactions_processed` stayed at 0 forever on a running
-    /// node. The difference went unnoticed because its neighbour
-    /// `emit_chain_metrics` was called from two real places.
-    ///
-    /// The test below does not call the emitter by hand: it submits a
-    /// transaction, has a block produced and reads the counter. It is the only
-    /// test measuring the metric; the other one measures the emitter itself, and
-    /// it passed while this one failed.
+    /// The counter must advance on the production path, not only when called
+    /// directly. This test submits a transaction, produces a block and reads
+    /// the counter.
     #[test]
     fn transactions_processed_counts_a_block_produced_through_the_normal_path() {
         use crate::chain::blockchain::Blockchain;

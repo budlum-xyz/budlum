@@ -51,6 +51,9 @@ pub fn encode_external_evidence(
     Ok(FinalityProof::Raw(payload))
 }
 
+/// Maximum byte budget for an encoded external-evidence carrier.
+const MAX_EXTERNAL_EVIDENCE_BYTES: usize = 2 * 1024 * 1024;
+
 /// Decodes the local carrier. It does not validate the evidence: only the
 /// bound adapter may interpret its payload or decide whether it is final.
 ///
@@ -65,8 +68,14 @@ pub fn decode_external_evidence(
             "external-domain finality requires a raw evidence envelope".to_string(),
         ));
     };
-    bincode::deserialize(payload)
-        .map_err(|error| FinalityError(format!("external evidence carrier is malformed: {error}")))
+    // The carrier is peer-supplied: bound both its bytes and every advertised
+    // collection count before a Serde visitor can reserve attacker-declared
+    // capacity. The shared decoder preserves the fixint wire encoding.
+    crate::network::bounded_bincode::decode_bounded_bincode(
+        payload,
+        MAX_EXTERNAL_EVIDENCE_BYTES,
+    )
+    .map_err(|error| FinalityError(format!("external evidence carrier is malformed: {error}")))
 }
 
 /// A consensus-facing adapter backed by one permissionless external adapter.

@@ -70,7 +70,7 @@ jobs:
       # needs recorded baseline history and lands when there is a baseline to
       # compare against; until then a run that produces no numbers is itself a
       # failure, never a silent green.
-      - name: Fail on a vacuous benchmark run (interim)
+      - name: Fail on a vacuous benchmark run
         run: |
           set -euo pipefail
           for f in /tmp/bench-micro.txt /tmp/bench-single.txt; do

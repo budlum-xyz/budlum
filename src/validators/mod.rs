@@ -163,6 +163,9 @@ pub enum ValidatorTx {
         seq: u64,
         operator_signature: Vec<u8>,
     },
+    /// `ResumeValidator` (section 7.8.7): lift a suspension. Takes effect
+    /// one epoch later. The mobile app sends it by itself.
+    Resume,
 }
 
 fn check_operator_key(key: &[u8]) -> Result<(), ValidatorError> {
@@ -340,6 +343,7 @@ impl ValidatorTx {
                 }
                 Ok(())
             }
+            Self::Resume => Ok(()),
         }
     }
 }

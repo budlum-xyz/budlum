@@ -131,6 +131,9 @@ impl std::fmt::Display for FillError {
             Self::DuplicateSlot { slot } => {
                 write!(f, "slot `{slot}` appears twice in the template")
             }
+            Self::MissingSlot { slot } if slot.is_empty() => {
+                f.write_str("presentation receipt opens no credential fields")
+            }
             Self::MissingSlot { slot } => {
                 write!(f, "no disclosure fills the template's slot `{slot}`")
             }
@@ -498,6 +501,9 @@ pub fn build_presentation(
     epoch: u64,
 ) -> Result<(String, PresentationReceipt), FillError> {
     let filled = fill_template(template, disclosures)?;
+    if disclosures.is_empty() {
+        return Err(empty_receipt_error());
+    }
     let mut entries = Vec::with_capacity(disclosures.len());
     for disclosure in disclosures {
         let credential = registry
@@ -595,6 +601,17 @@ pub fn credential_proof(
 /// The most entries `check_receipt` will verify in one receipt.
 pub const MAX_RECEIPT_ENTRIES: usize = 256;
 
+/// Reuse the existing `MissingSlot` error shape to reject a receipt with no
+/// credential disclosures without adding a public `FillError` variant (the
+/// enum is exhaustively matchable by downstream callers). An empty slot name
+/// is unconstructible through the template parser and is reserved for this
+/// receipt-level refusal.
+fn empty_receipt_error() -> FillError {
+    FillError::MissingSlot {
+        slot: String::new(),
+    }
+}
+
 /// Re-verify a receipt the way the receiving side must: bound to this
 /// requester, bound to this document, and - through the registry - backed by
 /// credentials that are still valid at the receipt's epoch. A credential
@@ -603,14 +620,19 @@ pub const MAX_RECEIPT_ENTRIES: usize = 256;
 ///
 /// # Errors
 ///
-/// [`FillError::WrongRequester`], [`FillError::WrongDocument`], or the first
-/// entry whose credential no longer stands.
+/// [`FillError::MissingSlot`] when the receipt opens no credential fields,
+/// [`FillError::TooManyEntries`], [`FillError::WrongRequester`],
+/// [`FillError::WrongDocument`], or the first entry whose credential no longer
+/// stands.
 pub fn check_receipt(
     registry: &IdentityRegistry,
     receipt: &PresentationReceipt,
     requester: &Address,
     document: &str,
 ) -> Result<(), FillError> {
+    if receipt.entries.is_empty() {
+        return Err(empty_receipt_error());
+    }
     if receipt.entries.len() > MAX_RECEIPT_ENTRIES {
         return Err(FillError::TooManyEntries {
             max: MAX_RECEIPT_ENTRIES,
@@ -747,6 +769,58 @@ mod tests {
                 max: MAX_RECEIPT_ENTRIES
             })
         );
+    }
+
+    #[test]
+    fn a_signed_empty_receipt_is_not_a_credential_presentation() {
+        let subject_key = crate::crypto::primitives::KeyPair::from_seed(&[31; 32])
+            .expect("deterministic subject keypair");
+        let subject = Address::from(subject_key.public_key_bytes());
+        let requester = Address([7u8; 32]);
+        let document = "No identity fields";
+        let mut receipt = PresentationReceipt {
+            requester,
+            subject,
+            document_digest: document_digest_of(document),
+            epoch: 5,
+            entries: Vec::new(),
+            subject_public_key: Vec::new(),
+            signature: Vec::new(),
+        };
+        receipt.sign(&subject_key);
+        receipt
+            .verify_binding()
+            .expect("the empty receipt has a valid subject signature");
+
+        let check_error = check_receipt(
+            &IdentityRegistry::new(),
+            &receipt,
+            &requester,
+            document,
+        )
+        .expect_err("an empty signed receipt must not count as credential evidence");
+        assert!(matches!(
+            &check_error,
+            FillError::MissingSlot { slot } if slot.is_empty()
+        ));
+        assert_eq!(
+            check_error.to_string(),
+            "presentation receipt opens no credential fields"
+        );
+
+        let build_error = build_presentation(
+            &IdentityRegistry::new(),
+            &requester,
+            &subject,
+            document,
+            &[],
+            5,
+        )
+        .expect_err("the builder must not create a receipt the verifier refuses");
+        assert!(matches!(
+            &build_error,
+            FillError::MissingSlot { slot } if slot.is_empty()
+        ));
     }
 
     #[test]

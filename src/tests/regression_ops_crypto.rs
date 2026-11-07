@@ -142,32 +142,32 @@ fn forwarded_for_uses_the_rightmost_entry() {
     assert!(body.contains("request_came_from_trusted_proxy(config, req)"));
 }
 
-/// Budscan refuses a resolver-supplied `storage_root` the registry
+/// Budlum Explorer refuses a resolver-supplied `storage_root` the registry
 /// does not hold, requires the explicit `bud://` mark for a content id, and
 /// refuses bidi-override and path-traversal spellings.
 #[test]
-fn budscan_does_not_badge_unproven_roots() {
-    let bns = read_repo("crates/budscan/src/bns_proof.rs");
+fn explorer_does_not_badge_unproven_roots() {
+    let bns = read_repo("crates/budlum-explorer/src/bns_proof.rs");
     assert!(bns.contains("fn a_storage_root_the_registry_does_not_hold_is_refused"));
     assert!(bns.contains("e.storage_root == resolved.storage_root"));
-    let query = read_repo("crates/budscan/src/query.rs");
+    let query = read_repo("crates/budlum-explorer/src/query.rs");
     assert!(query.contains("fn explicit_prefixes_remove_the_ambiguity"));
     assert!(query.contains("fn a_bidi_override_is_refused_not_displayed"));
     assert!(query.contains("fn path_traversal_never_becomes_a_name"));
 }
 
-/// Budscan checks the 48-byte Arweave data root, refuses a truncated
+/// Budlum Explorer checks the 48-byte Arweave data root, refuses a truncated
 /// root, treats an expired name as bound to nothing, and keeps patch paths
 /// inside their tree.
 #[test]
-fn budscan_arweave_expiry_and_patch_paths() {
-    let arweave = read_repo("crates/budscan/src/arweave.rs");
+fn explorer_arweave_expiry_and_patch_paths() {
+    let arweave = read_repo("crates/budlum-explorer/src/arweave.rs");
     assert!(arweave.contains("pub fn data_root(data: &[u8]) -> [u8; 48]"));
     assert!(arweave.contains("fn a_truncated_expected_root_is_rejected_not_verified"));
-    let bns = read_repo("crates/budscan/src/bns_proof.rs");
+    let bns = read_repo("crates/budlum-explorer/src/bns_proof.rs");
     assert!(bns.contains("if entry.expires_at <= current_epoch"));
     assert!(bns.contains("an expired name binds to no content"));
-    let patch = read_repo("crates/budscan/src/patchset.rs");
+    let patch = read_repo("crates/budlum-explorer/src/patchset.rs");
     assert!(patch.contains("segment == \"..\""));
 }
 
@@ -243,7 +243,7 @@ fn ci_runs_every_standalone_package_test_suite() {
         "crates/ai-inference",
         "crates/bpqs",
         "crates/bud-codec",
-        "crates/budscan",
+        "crates/budlum-explorer",
         "crates/note-packing",
         "crates/uel-abi",
         "crates/wallet-core",

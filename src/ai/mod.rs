@@ -69,7 +69,7 @@ mod tests {
     }
 
     /// Test helper: when the verifier stake is below MIN_VERIFIER_STAKE
-    /// stakes, then calls submit_result (the #359 auth check
+    /// stakes, then calls submit_result (the auth check
     /// afterwards: an unauthorised verifier cannot count a result).
     fn submit_result_staked(
         registry: &mut AiRegistry,
@@ -4391,7 +4391,7 @@ mod tests {
         const {
             assert!(
                 !FULL_AI_STARK_VERIFICATION_LIVE,
-                "P32-F02: STARK public inputs are not bound to the request yet"
+                "STARK public inputs are not bound to the request"
             );
         }
     }

@@ -3,7 +3,7 @@
 Date: 2026-11-06
 Scope: WP-11, WP-26..WP-41, WP-61, and cross-module verification across
 `src/execution/`, `crates/uel-abi/`, `budzero/`, `mobile/{android,ios,tools}/`,
-`crates/wallet-core/`, `crates/budscan/`, `src/bin/budlum-light.rs`, and
+`crates/wallet-core/`, `crates/budlum-explorer/`, `src/bin/budlum-light.rs`, and
 `src/core/{money,tx_bundle}.rs`.
 
 Note on path allocation: `docs/audit/REVIEW_2.md` and `docs/audit/FINDINGS.md`

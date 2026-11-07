@@ -706,7 +706,7 @@ impl MarketplaceRegistry {
             authorization.terms_hash,
         );
         // Authorization-backed grant: `create_sale_authorization` already
-        // verified the seller signature cryptographically (finding #358), so a
+        // verified the seller signature cryptographically, so a
         // grant issued from a *registered* authorization carries verified
         // owner consent. The owner_signature field is inherited from the
         // verified authorization rather than re-signed over the grant's own
@@ -1026,8 +1026,8 @@ mod tests {
     /// A deterministic test key pair: the address is the public key, and the
     /// signature comes from this pair.
     ///
-    /// Finding #358 (HIGH): signatures are now verified cryptographically, so tests
-    /// have to produce real ed25519 signatures.
+    /// Signatures are verified cryptographically, so tests have to produce
+    /// real ed25519 signatures.
     fn test_keypair(byte: u8) -> crate::crypto::primitives::KeyPair {
         crate::crypto::primitives::KeyPair::from_seed(&[byte; 32])
             .expect("deterministic test keypair")

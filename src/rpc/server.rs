@@ -3,8 +3,8 @@ use crate::chain::chain_actor::ChainHandle;
 use crate::core::address::Address;
 use crate::core::block::Block;
 use crate::core::transaction::Transaction;
-use crate::domain::storage_deal::{RetrievalChallengeRequest, RetrievalResponse, StorageDeal};
 use crate::network::node::NodeClient;
+use crate::rpc::compat::ethereum::opening as ethereum;
 use crate::storage::content_id::ContentId;
 use crate::storage::{emit_hook, NopThreeHook, ThreeEventHook, ThreeHookEvent, ThreeHookKind};
 use bincode;
@@ -346,6 +346,9 @@ pub struct RpcServer {
     /// are served through sessions opened by `bud_storageOpenReveal`, never
     /// as raw handle-passing.
     reveal_gateway: Arc<Mutex<crate::storage::RevealGateway>>,
+    /// Bounded, expiring, per-peer filter table of the Ethereum gateway
+    /// (WP-28, 2/N). It is node-local bookkeeping, never consensus state.
+    eth_filters: Arc<Mutex<ethereum::filters::FilterPool>>,
     /// Prometheus metrics handle for RPC latency and rate-limit counters.
     /// If `None`, metrics are silently skipped (e.g. in tests without a
     /// Global registry).
@@ -363,6 +366,7 @@ impl RpcServer {
             security: RpcSecurityConfig::default(),
             mode: RpcMode::Public,
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
+            eth_filters: Arc::new(Mutex::new(ethereum::filters::FilterPool::new())),
             metrics: None,
             tls: None,
         }
@@ -379,6 +383,7 @@ impl RpcServer {
             security,
             mode: RpcMode::Public,
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
+            eth_filters: Arc::new(Mutex::new(ethereum::filters::FilterPool::new())),
             metrics: None,
             tls: None,
         }
@@ -396,6 +401,7 @@ impl RpcServer {
             security,
             mode,
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
+            eth_filters: Arc::new(Mutex::new(ethereum::filters::FilterPool::new())),
             metrics: None,
             tls: None,
         }
@@ -1570,33 +1576,6 @@ fn parse_seal_seed(seed_hex: Option<String>) -> Result<Option<[u8; 32]>, ErrorOb
         )
     })?;
     Ok(Some(seed))
-}
-
-fn storage_deal_to_json(deal: &StorageDeal) -> serde_json::Value {
-    serde_json::json!({
-        "dealId": deal.deal_id,
-        "domainId": deal.domain_id,
-        "manifestId": format!("0x{}", hex::encode(deal.manifest_id.0)),
-        "shardId": format!("0x{}", hex::encode(deal.shard_id.0)),
-        "operator": format!("0x{}", deal.operator.to_hex()),
-        "replicaIndex": deal.replica_index,
-        "startEpoch": deal.deal_start_epoch,
-        "endEpoch": deal.deal_end_epoch,
-        "status": format!("{:?}", deal.status),
-    })
-}
-
-fn storage_economics_event_to_json(
-    event: &crate::chain::blockchain::StorageEconomicsEvent,
-) -> serde_json::Value {
-    serde_json::json!({
-        "epoch": event.epoch,
-        "dealId": event.deal_id,
-        "operator": format!("0x{}", event.operator.to_hex()),
-        "amount": event.amount,
-        "balanceEffect": event.balance_effect,
-        "kind": format!("{:?}", event.kind),
-    })
 }
 
 #[jsonrpsee::core::async_trait]
@@ -3515,163 +3494,8 @@ impl BudlumApiServer for RpcServer {
     }
 
     // === B.U.D. Storage RPC implementations ====================
-    // The storage registry is owned by the chain layer; every RPC below is a
-    // Thin delegation to `self.chain` so the registry has a single writer and
-    // Block-application accounting stays authoritative. The RPC server used to
-    // Hold its own `Arc<Mutex<StorageRegistry>>`; that field became
-    // Write-only after the chain took ownership and has been removed rather
-    // Than left as a second, silently diverging copy.
-
-    async fn storage_register_manifest(
-        &self,
-        manifest: crate::storage::ContentManifest,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // this method registered a manifest into the storage registry
-        // (folded into the state root) on this node alone, outside a block.
-        // The method stays so a client gets a pointer instead of "method not
-        // found".
-        self.require_operator("bud_storageRegisterManifest")?;
-        let _ = manifest;
-        Err(Self::door_refusal(
-            "Out-of-block manifest registration is refused: it changed the storage registry \
-             on this node alone. The manifest owner sends a signed Storage transaction \
-             (StorageTx::RegisterManifest) through bud_sendRawTransaction.",
-        ))
-    }
-
-    async fn storage_verify_encoding(
-        &self,
-        data_hex: String,
-        manifest: crate::storage::ContentManifest,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Generated / Three has no body on the network. Re-encoding a recipe
-        // as if it were held bytes would launder a custody claim under the
-        // encode path.
-        if matches!(
-            manifest.source,
-            crate::storage::generated::ContentSource::Generated(_)
-                | crate::storage::generated::ContentSource::SealedGenerated(_)
-                | crate::storage::generated::ContentSource::Derived(_)
-        ) {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                "verify_encoding refuses recipe sources (Generated/SealedGenerated/Derived): there is no body to re-encode",
-                None::<()>,
-            ));
-        }
-        let hex = data_hex.strip_prefix("0x").unwrap_or(data_hex.as_str());
-        // Same cap as the QR feed calls: the re-encode below is a full
-        // erasure encode, so the body size bounds its CPU cost.
-        if hex.len() / 2 > crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                format!(
-                    "body over verify cap {}",
-                    crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES
-                ),
-                None::<()>,
-            ));
-        }
-        let data = hex::decode(hex).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("data_hex decode failed: {e}"), None::<()>)
-        })?;
-        // The encode is CPU bound: keep it off the async workers.
-        let (manifest, verdict) = tokio::task::spawn_blocking(move || {
-            let verdict = crate::storage::verify_object_encoding(&data, &manifest);
-            (manifest, verdict)
-        })
-        .await
-        .map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32603,
-                format!("verify_encoding task failed: {e}"),
-                None::<()>,
-            )
-        })?;
-        verdict.map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("verify_encoding failed: {e}"), None::<()>)
-        })?;
-        Ok(serde_json::json!({
-            "ok": true,
-            "manifestId": format!("0x{}", hex::encode(manifest.manifest_id.0)),
-            "scheme": {
-                "k": manifest.erasure.k,
-                "n": manifest.erasure.n,
-            },
-            "totalSize": manifest.total_size,
-        }))
-    }
-
-    async fn storage_qr_feed_preview(
-        &self,
-        data_hex: String,
-        block_len: u16,
-        manifest: Option<crate::storage::ContentManifest>,
-        seal_seed: Option<String>,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let hex = data_hex.strip_prefix("0x").unwrap_or(data_hex.as_str());
-        let data = hex::decode(hex).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("data_hex decode failed: {e}"), None::<()>)
-        })?;
-        if data.len() > crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                format!(
-                    "body of {} bytes over emit cap {}",
-                    data.len(),
-                    crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES
-                ),
-                None::<()>,
-            ));
-        }
-        let policy = crate::storage::emit::EmitPolicy {
-            block_len,
-            seal_seed: parse_seal_seed(seal_seed)?,
-            ..crate::storage::emit::EmitPolicy::default()
-        };
-        let feed = crate::storage::emit::qr_feed_preview(&data, &policy, manifest.as_ref())
-            .map_err(emit_reject)?;
-        Ok(qr_feed_json(&feed))
-    }
-
-    async fn storage_qr_feed_frames(
-        &self,
-        data_hex: String,
-        block_len: u16,
-        first_frame: u32,
-        count: u32,
-        seal_seed: Option<String>,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let hex = data_hex.strip_prefix("0x").unwrap_or(data_hex.as_str());
-        let data = hex::decode(hex).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("data_hex decode failed: {e}"), None::<()>)
-        })?;
-        if data.len() > crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                format!(
-                    "body of {} bytes over emit cap {}",
-                    data.len(),
-                    crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES
-                ),
-                None::<()>,
-            ));
-        }
-        let policy = crate::storage::emit::EmitPolicy {
-            block_len,
-            seal_seed: parse_seal_seed(seal_seed)?,
-            ..crate::storage::emit::EmitPolicy::default()
-        };
-        let (frames, fold) =
-            crate::storage::emit::qr_feed_frames_burst(&data, &policy, first_frame, count)
-                .map_err(emit_reject)?;
-        Ok(serde_json::json!({
-            "firstFrame": first_frame,
-            "count": frames.len(),
-            "fold": format!("0x{}", hex::encode(fold)),
-            "frames": frames.iter().map(hex::encode).collect::<Vec<String>>(),
-        }))
-    }
+    // This surface keeps temporary grant and reveal operations. Legacy
+    // manifest, deal, challenge, and encoding RPCs are not registered.
 
     async fn storage_issue_view_grant(
         &self,
@@ -4082,511 +3906,6 @@ impl BudlumApiServer for RpcServer {
             ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
         })?;
         Ok(gw.close(session_id))
-    }
-
-    async fn storage_register_confidential_commit(
-        &self,
-        content_id: String,
-        encryption: String,
-        ciphertext_root: String,
-        proof_kind: String,
-        authorization: Option<serde_json::Value>,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        self.require_operator("bud_storageRegisterConfidentialCommit")?;
-        let content_id = parse_content_id(&content_id)?;
-        // The recorded owner is never typed by the caller: it is derived from
-        // the key and then proven by the signature the registry checks. Handing
-        // only a derived address here is what would let a holder of somebody
-        // else's public key register a commit under that address.
-        let auth = parse_grant_auth(authorization.as_ref())?;
-        // Refuse at the boundary when this node cannot check ML-DSA-87 at all:
-        // that is an operator fault, and a client must not be told to fix a key
-        // it did get right. The registry derives the same address again; this
-        // pre-flight only chooses the error code.
-        auth.derived_owner().map_err(grant_auth_error)?;
-        let encryption = match encryption.to_ascii_lowercase().as_str() {
-            "aes-256-gcm" | "aes256gcm" => crate::storage::ContentEncryption::ClientSide(
-                crate::storage::ContentCipher::Aes256Gcm,
-            ),
-            "chacha20-poly1305" | "chacha20poly1305" => {
-                crate::storage::ContentEncryption::ClientSide(
-                    crate::storage::ContentCipher::ChaCha20Poly1305,
-                )
-            }
-            "xchacha20-poly1305" | "xchacha20poly1305" => {
-                crate::storage::ContentEncryption::ClientSide(
-                    crate::storage::ContentCipher::XChaCha20Poly1305,
-                )
-            }
-            "plaintext" => crate::storage::ContentEncryption::Plaintext,
-            other => {
-                return Err(ErrorObjectOwned::owned(
-                    -32602,
-                    format!("unknown encryption {other}"),
-                    None::<()>,
-                ));
-            }
-        };
-        let ciphertext_root = parse_hex32_field(&ciphertext_root, "ciphertext_root")?;
-        let proof_kind = match proof_kind.to_ascii_lowercase().as_str() {
-            "retrieval" | "retrievalchallenge" | "retrieval_challenge" => {
-                crate::storage::ConfidentialProofKind::RetrievalChallenge
-            }
-            "zk" | "zkstorage" | "zk_storage_proof" => {
-                crate::storage::ConfidentialProofKind::ZkStorageProof
-            }
-            "tee" | "teeattested" | "tee_attested" => {
-                crate::storage::ConfidentialProofKind::TeeAttested
-            }
-            "hybrid" | "hybridzktee" | "hybrid_zk_tee" => {
-                crate::storage::ConfidentialProofKind::HybridZkTee
-            }
-            other => {
-                return Err(ErrorObjectOwned::owned(
-                    -32602,
-                    format!("unknown proof_kind {other}"),
-                    None::<()>,
-                ));
-            }
-        };
-        let commit = crate::storage::ConfidentialBodyCommit::new(
-            content_id,
-            encryption,
-            ciphertext_root,
-            proof_kind,
-        )
-        .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
-        let commitment = self
-            .chain
-            .register_confidential_commit(commit, auth)
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
-        Ok(serde_json::json!({
-            "commitment": format!("0x{}", hex::encode(commitment)),
-            "contentId": format!("0x{}", hex::encode(content_id.0)),
-        }))
-    }
-
-    async fn storage_get_confidential_commit(
-        &self,
-        content_id: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let content_id = parse_content_id(&content_id)?;
-        let commit = self
-            .chain
-            .get_confidential_commit(content_id)
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
-        // The address whose signature opens this body, read from the registry
-        // rather than echoed back from the request. A wallet signs a grant
-        // against exactly this value, so the node that will refuse the grant has
-        // to be the node that can report it.
-        let owner = self
-            .chain
-            .confidential_owner(content_id)
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
-        match commit {
-            None => Ok(serde_json::json!({ "found": false })),
-            Some(c) => Ok(serde_json::json!({
-                "found": true,
-                "contentId": format!("0x{}", hex::encode(c.content_id.0)),
-                "encryption": c.encryption.to_string(),
-                "ciphertextRoot": format!("0x{}", hex::encode(c.ciphertext_root)),
-                "proofKind": format!("{:?}", c.proof_kind),
-                "commitment": format!("0x{}", hex::encode(c.commitment())),
-                "owner": owner.map(|a| a.to_hex()),
-            })),
-        }
-    }
-
-    async fn storage_open_deal(
-        &self,
-        domain_id: u32,
-        manifest: crate::storage::ContentManifest,
-        shard_id: String,
-        operator: String,
-        payer: String,
-        replica_index: u8,
-        start_epoch: u64,
-        end_epoch: u64,
-        economics: crate::domain::storage_deal::StorageEconomicsParams,
-        domain_params: crate::domain::storage_params::StorageDomainParams,
-        merkle_proof: Option<Vec<u8>>,
-        storage_root: Option<crate::domain::Hash32>,
-        request_id: u64,
-        payer_signature: String,
-        operator_signature: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // this method opened a deal and moved the payer escrow and the
-        // operator bond on this node alone, outside a block.
-        self.require_operator("bud_storageOpenDeal")?;
-        let _ = (
-            domain_id,
-            manifest,
-            shard_id,
-            operator,
-            payer,
-            replica_index,
-            start_epoch,
-            end_epoch,
-            economics,
-            domain_params,
-            merkle_proof,
-            storage_root,
-            request_id,
-            payer_signature,
-            operator_signature,
-        );
-        Err(Self::door_refusal(
-            "Out-of-block deal opening is refused: it moved escrow and bond on this node \
-             alone. The payer sends a signed Storage transaction (StorageTx::OpenDeal, \
-             carrying the operator's consent) through bud_sendRawTransaction.",
-        ))
-    }
-
-    async fn storage_accept_reallocation(
-        &self,
-        ticket_id: u64,
-        replacement_operator: String,
-        payer: String,
-        start_epoch: u64,
-        end_epoch: u64,
-        economics: crate::domain::storage_deal::StorageEconomicsParams,
-        domain_params: crate::domain::storage_params::StorageDomainParams,
-        merkle_proof: Option<Vec<u8>>,
-        storage_root: Option<crate::domain::Hash32>,
-        request_id: u64,
-        payer_signature: String,
-        operator_signature: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // this method filled a repair ticket and moved the payer escrow
-        // and the replacement operator bond on this node alone, outside a
-        // block.
-        self.require_operator("bud_storageAcceptReallocation")?;
-        let _ = (
-            ticket_id,
-            replacement_operator,
-            payer,
-            start_epoch,
-            end_epoch,
-            economics,
-            domain_params,
-            merkle_proof,
-            storage_root,
-            request_id,
-            payer_signature,
-            operator_signature,
-        );
-        Err(Self::door_refusal(
-            "Out-of-block repair acceptance is refused: it moved escrow and bond on this node \
-             alone. The payer sends a signed Storage transaction \
-             (StorageTx::AcceptReallocation, carrying the replacement operator's consent) \
-             through bud_sendRawTransaction.",
-        ))
-    }
-
-    async fn storage_get_manifest(
-        &self,
-        manifest_id: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let id = parse_content_id(&manifest_id)?;
-
-        // Shard ids are the handles a reader fetches bytes with, so listing
-        // them for content someone is selling hands out the content to
-        // anyone willing to skip the payment path. Pollen decides that, and
-        // it is asked before anything is serialised.
-        //
-        // The manifest's shape stays public: size and shard count leak
-        // nothing a buyer could not see in the listing, and an operator
-        // needs them to decide whether to serve. What is withheld is the
-        // shard list itself.
-        let protecting_asset = self.chain.pollen_asset_for_content(id).await;
-
-        if let Some(manifest) = self.chain.get_storage_manifest(id).await {
-            let shards: Vec<serde_json::Value> = if protecting_asset.is_some() {
-                Vec::new()
-            } else {
-                manifest
-                    .shards
-                    .iter()
-                    .map(|s| {
-                        serde_json::json!({
-                            "shardId": format!("0x{}", hex::encode(s.shard_id.0)),
-                            "size": s.size,
-                        })
-                    })
-                    .collect()
-            };
-            return Ok(serde_json::json!({
-                "manifestId": format!("0x{}", hex::encode(id.0)),
-                "found": true,
-                "totalSize": manifest.total_size,
-                "shardCount": manifest.shard_count,
-                // An operator deciding whether to serve these bytes, and a
-                // reader deciding whether a failed parse means "wrong key" or
-                // "corrupt shard", both need the declaration. Without it here
-                // the only honest answer either could give is "unknown".
-                "encryption": manifest.encryption.to_string(),
-                // Told plainly rather than by an empty list, so a caller
-                // knows to present a grant instead of concluding the object
-                // has no shards.
-                "protected": protecting_asset.is_some(),
-                "protectingAsset": protecting_asset
-                    .map(|a| format!("0x{}", hex::encode(a.0))),
-                "shards": shards,
-            }));
-        }
-
-        // The fallback path reaches the same shard ids through the deal
-        // records, so it has to answer to the same rule. Closing one and
-        // leaving the other would move the leak rather than fix it.
-        let deals = self.chain.get_storage_deals_by_manifest(id).await;
-        let shards: Vec<serde_json::Value> = if protecting_asset.is_some() {
-            Vec::new()
-        } else {
-            deals
-                .iter()
-                .map(|d| {
-                    serde_json::json!({
-                        "shardId": format!("0x{}", hex::encode(d.shard_id.0)),
-                        "size": d.shard_bytes,
-                    })
-                })
-                .collect()
-        };
-        Ok(serde_json::json!({
-            "manifestId": format!("0x{}", hex::encode(id.0)),
-            "found": !deals.is_empty(),
-            "dealsObserved": deals.len(),
-            "protected": protecting_asset.is_some(),
-            "protectingAsset": protecting_asset
-                .map(|a| format!("0x{}", hex::encode(a.0))),
-            "shards": shards,
-        }))
-    }
-
-    async fn storage_get_deals_by_manifest(
-        &self,
-        manifest_id: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let id = parse_content_id(&manifest_id)?;
-        let deals_raw = self.chain.get_storage_deals_by_manifest(id).await;
-        // A deal record carries its shard id, which is the handle bytes are
-        // fetched with, so this endpoint leaks the same thing
-        // `storage_get_manifest` does and answers to the same rule. The
-        // count stays public: how many operators hold an object is an
-        // economic fact a buyer can already read from the listing.
-        let protecting_asset = self.chain.pollen_asset_for_content(id).await;
-        let count = deals_raw.len();
-        let deals: Vec<serde_json::Value> = if protecting_asset.is_some() {
-            Vec::new()
-        } else {
-            deals_raw
-                .into_iter()
-                .map(|deal| storage_deal_to_json(&deal))
-                .collect()
-        };
-        Ok(serde_json::json!({
-            "manifestId": format!("0x{}", hex::encode(id.0)),
-            "count": count,
-            "protected": protecting_asset.is_some(),
-            "protectingAsset": protecting_asset
-                .map(|a| format!("0x{}", hex::encode(a.0))),
-            "deals": deals,
-        }))
-    }
-
-    async fn storage_get_deals_by_shard(
-        &self,
-        manifest_id: String,
-        shard_id: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let mid = parse_content_id(&manifest_id)?;
-        let sid = parse_content_id(&shard_id)?;
-        let deals_raw = self.chain.get_storage_deals_by_shard(mid, sid).await;
-        // Closed for the same reason as the two endpoints above. This one
-        // matters even though the caller already knows the shard id: the
-        // deal record names the operators holding it, which is the second
-        // half of fetching bytes without paying.
-        let protecting_asset = self.chain.pollen_asset_for_content(mid).await;
-        let count = deals_raw.len();
-        let deals: Vec<serde_json::Value> = if protecting_asset.is_some() {
-            Vec::new()
-        } else {
-            deals_raw
-                .into_iter()
-                .map(|deal| storage_deal_to_json(&deal))
-                .collect()
-        };
-        Ok(serde_json::json!({
-            "manifestId": format!("0x{}", hex::encode(mid.0)),
-            "shardId": format!("0x{}", hex::encode(sid.0)),
-            "count": count,
-            "protected": protecting_asset.is_some(),
-            "protectingAsset": protecting_asset
-                .map(|a| format!("0x{}", hex::encode(a.0))),
-            "deals": deals,
-        }))
-    }
-
-    async fn storage_get_challenges(
-        &self,
-        deal_id: u64,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let mut challenges: Vec<_> = self
-            .chain
-            .get_storage_challenges()
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))?
-            .into_iter()
-            .filter(|challenge| challenge.deal_id == deal_id)
-            .collect();
-        challenges.sort_by_key(|challenge| challenge.challenge_id);
-        Ok(serde_json::json!({
-            "dealId": deal_id,
-            "count": challenges.len(),
-            "challenges": challenges
-                .iter()
-                .map(|challenge| serde_json::json!({
-                    "challengeId": challenge.challenge_id,
-                    "byteStart": challenge.byte_start,
-                    "byteEnd": challenge.byte_end,
-                    "challengeEpoch": challenge.challenge_epoch,
-                    "deadlineEpoch": challenge.deadline_epoch,
-                    "opener": format!("0x{}", challenge.opener.to_hex()),
-                    "openerBond": challenge.opener_bond,
-                }))
-                .collect::<Vec<_>>(),
-        }))
-    }
-
-    async fn storage_open_challenge(
-        &self,
-        request: RetrievalChallengeRequest,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // this method opened a challenge and debited the opener bond on
-        // this node alone, outside a block, with a range drawn from this
-        // node's tip.
-        self.require_operator("bud_storageOpenChallenge")?;
-        let _ = request;
-        Err(Self::door_refusal(
-            "Out-of-block challenge opening is refused: it changed the storage registry and \
-             a balance on this node alone. The opener sends a signed Storage transaction \
-             (StorageTx::OpenChallenge) through bud_sendRawTransaction; the block draws the \
-             byte range.",
-        ))
-    }
-
-    async fn storage_answer_challenge(
-        &self,
-        response: RetrievalResponse,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // this method settled a challenge (and its slash) on this node
-        // alone, outside a block.
-        self.require_operator("bud_storageAnswerChallenge")?;
-        let _ = response;
-        Err(Self::door_refusal(
-            "Out-of-block challenge answers are refused: they settled a challenge and its \
-             slash on this node alone. The deal's operator sends a signed Storage transaction \
-             (StorageTx::AnswerChallenge) through bud_sendRawTransaction.",
-        ))
-    }
-
-    async fn storage_get_economics_summary(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        self.chain
-            .get_storage_economics_summary()
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))
-    }
-
-    async fn storage_get_economics_events(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let events = self
-            .chain
-            .get_storage_economics_events()
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))?;
-        Ok(serde_json::json!({
-            "count": events.len(),
-            "events": events.iter().map(storage_economics_event_to_json).collect::<Vec<_>>(),
-        }))
-    }
-
-    async fn storage_get_operator_economics(
-        &self,
-        operator: Address,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        self.chain
-            .get_storage_operator_economics(operator)
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))
-    }
-
-    async fn storage_get_outcome(
-        &self,
-        challenge_id: u64,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        match self.chain.get_storage_outcome(challenge_id).await {
-            Some(r) => Ok(serde_json::json!({
-                "challengeId": r.challenge_id,
-                "dealId": r.deal_id,
-                "outcome": format!("{:?}", r.outcome),
-                "finalizedEpoch": r.finalized_epoch,
-                "slashedBond": r.slashed_bond,
-                "proofKind": RETRIEVAL_OUTCOME_PROOF_KIND,
-                "proof_kind": RETRIEVAL_OUTCOME_PROOF_KIND,
-            })),
-            None => Ok(serde_json::Value::Null),
-        }
-    }
-
-    async fn storage_repair_band(
-        &self,
-        margin: u32,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let band: crate::chain::chain_actor::StorageRepairBand =
-            self.chain.get_storage_repair_band(margin).await;
-        let entry = |(manifest_id, live, k): &(crate::storage::ContentId, u32, u32)| {
-            serde_json::json!({
-                "manifestId": Self::to_0x_hash(hex::encode(manifest_id.0)),
-                "liveShards": live,
-                "k": k,
-            })
-        };
-        let repairable: Vec<serde_json::Value> = band.repairable.iter().map(entry).collect();
-        let unrecoverable: Vec<serde_json::Value> = band.unrecoverable.iter().map(entry).collect();
-        Ok(serde_json::json!({
-            "margin": band.margin,
-            "repairableCount": repairable.len(),
-            "repairable": repairable,
-            // Separate on purpose: below `k` no repair can restore the object,
-            // so this list needs an operator alarm, not a replacement deal.
-            "unrecoverableCount": unrecoverable.len(),
-            "unrecoverable": unrecoverable,
-        }))
-    }
-
-    async fn storage_active_operators(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Permissionless read of active STORAGE_OPERATOR (RoleId 5) members.
-        // Same surface as bud_registryActiveMembers; no admin gate.
-        let role = crate::registry::role::roles::STORAGE_OPERATOR;
-        let members = self.chain.get_registry_active_members(role).await;
-        let list: Vec<serde_json::Value> = members
-            .iter()
-            .map(|reg| {
-                serde_json::json!({
-                    "address": Self::to_0x_hash(reg.account.to_hex()),
-                    "stake": reg.stake,
-                    "role": "storage_operator",
-                })
-            })
-            .collect();
-        Ok(serde_json::json!({
-            "roleId": role.value(),
-            "role": "storage_operator",
-            "count": list.len(),
-            "operators": list,
-        }))
     }
 
     async fn bns_resolve(&self, name: String) -> Result<Option<String>, ErrorObjectOwned> {
@@ -5737,9 +5056,8 @@ impl BudlumApiServer for RpcServer {
 
     async fn gateway_fetch_content(&self, name: String) -> Result<String, ErrorObjectOwned> {
         // Security check (HIGH): Pollen-protected content must not be
-        // fetchable over this RPC without an AccessGrant. Same pattern as the
-        // storage_get_manifest and storage_get_deals_* handlers: if a
-        // protecting asset exists, access is refused.
+        // fetchable over this RPC without an AccessGrant. If a protecting
+        // asset exists, access is refused.
         //
         // Security check (HIGH): the check used to look at storage_root only,
         // so a record with content_id set and storage_root unset skipped the
@@ -7170,6 +6488,330 @@ impl BudlumApiServer for RpcServer {
         let chain_id = self.chain.get_chain_id().await;
         Ok(Self::ai_readiness_json(chain_id, active_operators.len()))
     }
+
+    // ---- Ethereum JSON-RPC compatibility gateway (WP-28, 1/2) ----
+    //
+    // Every answer here is a chain fact or a refusal that names the
+    // Budlum door (see `src/rpc/compat/ethereum/opening.rs`).
+    async fn web3_client_version(&self) -> Result<String, ErrorObjectOwned> {
+        let chain_id = self.chain.get_chain_id().await;
+        Ok(format!("budlum-core/v{}/chain-{chain_id}", env!("CARGO_PKG_VERSION")))
+    }
+
+    async fn compat_net_version(&self) -> Result<String, ErrorObjectOwned> {
+        Ok(self.chain.get_chain_id().await.to_string())
+    }
+
+    async fn compat_net_listening(&self) -> Result<bool, ErrorObjectOwned> {
+        Ok(true)
+    }
+
+    async fn eth_chain_id(&self) -> Result<String, ErrorObjectOwned> {
+        Ok(Self::to_hex(self.chain.get_chain_id().await))
+    }
+
+    async fn eth_syncing(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Ok(serde_json::json!(self.node.is_syncing()))
+    }
+
+    async fn eth_block_number(&self) -> Result<String, ErrorObjectOwned> {
+        let height = self.chain.get_height().await;
+        Ok(Self::to_hex(height))
+    }
+
+    async fn eth_gas_price(&self) -> Result<String, ErrorObjectOwned> {
+        Ok(Self::to_hex(self.chain.get_base_fee().await))
+    }
+
+    async fn eth_max_priority_fee_per_gas(&self) -> Result<String, ErrorObjectOwned> {
+        Ok("0x0".to_string())
+    }
+
+    async fn eth_accounts(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Ok(serde_json::json!([]))
+    }
+
+    async fn eth_get_balance(
+        &self,
+        _address: String,
+        _block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getBalance", "bud_getBalance"))
+    }
+
+    async fn eth_get_code(
+        &self,
+        _address: String,
+        _block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getCode", "bud_getAccountProof"))
+    }
+
+    async fn eth_get_storage_at(
+        &self,
+        _address: String,
+        _position: String,
+        _block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getStorageAt", "bud_getAccountProof"))
+    }
+
+    async fn eth_get_transaction_count(
+        &self,
+        _address: String,
+        _block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getTransactionCount", "bud_getNonce"))
+    }
+
+    async fn eth_call(
+        &self,
+        _call: serde_json::Value,
+        _block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_call", "bud_txPrecheck"))
+    }
+
+    async fn eth_estimate_gas(
+        &self,
+        _call: serde_json::Value,
+        _block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_estimateGas", "bud_estimateGas"))
+    }
+
+    async fn eth_create_access_list(
+        &self,
+        _call: serde_json::Value,
+        _block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_createAccessList", "bud_txPrecheck"))
+    }
+
+    async fn eth_fee_history(
+        &self,
+        _block_count: String,
+        _newest_block: String,
+        _reward_percentiles: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_feeHistory", "bud_gasPrice"))
+    }
+
+    async fn eth_send_raw_transaction(
+        &self,
+        _raw: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_sendRawTransaction", "bud_sendRawTransaction"))
+    }
+
+    async fn eth_get_block_by_number(
+        &self,
+        _block: String,
+        _full: Option<bool>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getBlockByNumber", "bud_getBlockByNumber"))
+    }
+
+    async fn eth_get_block_by_hash(
+        &self,
+        _hash: String,
+        _full: Option<bool>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getBlockByHash", "bud_getBlockByHash"))
+    }
+
+    async fn eth_get_block_transaction_count_by_number(
+        &self,
+        _block: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable(
+            "eth_getBlockTransactionCountByNumber",
+            "bud_getBlockByNumber",
+        ))
+    }
+
+    async fn eth_get_block_transaction_count_by_hash(
+        &self,
+        _hash: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getBlockTransactionCountByHash", "bud_getBlockByHash"))
+    }
+
+    async fn eth_get_transaction_by_hash(
+        &self,
+        _hash: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getTransactionByHash", "bud_getTransactionByHash"))
+    }
+
+    async fn eth_get_transaction_by_block_number_and_index(
+        &self,
+        _block: String,
+        _index: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable(
+            "eth_getTransactionByBlockNumberAndIndex",
+            "bud_getBlockByNumber",
+        ))
+    }
+
+    async fn eth_get_transaction_receipt(
+        &self,
+        _hash: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getTransactionReceipt", "bud_getTransactionReceipt"))
+    }
+
+    async fn eth_get_block_receipts(
+        &self,
+        _block: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getBlockReceipts", "bud_getBlockByNumber"))
+    }
+
+    async fn eth_get_logs(
+        &self,
+        _filter: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getLogs", "bud_getTransactionReceipt"))
+    }
+
+    // WP-28, 2/N: the five filter methods use one bounded, expiring,
+    // per-connection table. The owner is the server-assigned connection id;
+    // stateful calls without it fail closed. No handler invents log data
+    // before WP-27, and foreign uninstalls are indistinguishable from misses.
+
+    async fn eth_new_filter(
+        &self,
+        ext: &jsonrpsee::Extensions,
+        filter: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let peer = ethereum::filters::peer_of(ext)
+            .map_err(|error| ethereum::filter_error("eth_newFilter", error))?;
+        let spec = serde_json::to_string(&filter).unwrap_or_default();
+        let mut pool = self
+            .eth_filters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let id = pool
+            .create(
+                &peer,
+                ethereum::filters::FilterKind::Log,
+                &spec,
+                ethereum::filters::now_secs(),
+            )
+            .map_err(|error| ethereum::filter_error("eth_newFilter", error))?;
+        Ok(serde_json::Value::String(id))
+    }
+
+    async fn eth_new_block_filter(
+        &self,
+        ext: &jsonrpsee::Extensions,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let peer = ethereum::filters::peer_of(ext)
+            .map_err(|error| ethereum::filter_error("eth_newBlockFilter", error))?;
+        let mut pool = self
+            .eth_filters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let id = pool
+            .create(
+                &peer,
+                ethereum::filters::FilterKind::Block,
+                "{}",
+                ethereum::filters::now_secs(),
+            )
+            .map_err(|error| ethereum::filter_error("eth_newBlockFilter", error))?;
+        Ok(serde_json::Value::String(id))
+    }
+
+    async fn eth_get_filter_changes(
+        &self,
+        ext: &jsonrpsee::Extensions,
+        filter_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let peer = ethereum::filters::peer_of(ext)
+            .map_err(|error| ethereum::filter_error("eth_getFilterChanges", error))?;
+        let mut pool = self
+            .eth_filters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let changes = pool
+            .changes(&peer, &filter_id, ethereum::filters::now_secs())
+            .map_err(|error| ethereum::filter_error("eth_getFilterChanges", error))?;
+        Ok(serde_json::json!(changes))
+    }
+
+    async fn eth_get_filter_logs(
+        &self,
+        ext: &jsonrpsee::Extensions,
+        filter_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let peer = ethereum::filters::peer_of(ext)
+            .map_err(|error| ethereum::filter_error("eth_getFilterLogs", error))?;
+        let mut pool = self
+            .eth_filters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let changes = pool
+            .changes(&peer, &filter_id, ethereum::filters::now_secs())
+            .map_err(|error| ethereum::filter_error("eth_getFilterLogs", error))?;
+        Ok(serde_json::json!(changes))
+    }
+
+    async fn eth_uninstall_filter(
+        &self,
+        ext: &jsonrpsee::Extensions,
+        filter_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let peer = ethereum::filters::peer_of(ext)
+            .map_err(|error| ethereum::filter_error("eth_uninstallFilter", error))?;
+        let mut pool = self
+            .eth_filters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let removed = match pool.uninstall(&peer, &filter_id, ethereum::filters::now_secs()) {
+            Ok(removed) => removed,
+            Err(
+                ethereum::filters::FilterError::UnknownFilter
+                | ethereum::filters::FilterError::ForeignFilter
+                | ethereum::filters::FilterError::Expired,
+            ) => false,
+            Err(error) => {
+                return Err(ethereum::filter_error("eth_uninstallFilter", error));
+            }
+        };
+        Ok(serde_json::Value::Bool(removed))
+    }
+
+    async fn debug_trace_transaction(
+        &self,
+        _hash: String,
+        _options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("debug_traceTransaction")?;
+        Err(ethereum::ee_unavailable("debug_traceTransaction", "bud_getTransactionReceipt"))
+    }
+
+    async fn debug_trace_call(
+        &self,
+        _call: serde_json::Value,
+        _block: Option<String>,
+        _options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("debug_traceCall")?;
+        Err(ethereum::ee_unavailable("debug_traceCall", "bud_txPrecheck"))
+    }
+
+    async fn eth_get_proof(
+        &self,
+        _address: String,
+        _keys: serde_json::Value,
+        _block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::proof_is_not_an_mpt_proof())
+    }
+
 }
 
 /// Turn the on-the-wire format string into a `RenderFormat`.
@@ -7217,7 +6859,7 @@ mod tests {
     }
 
     #[test]
-    fn p21_f01_default_config_has_a_rate_limit() {
+    fn default_config_has_a_rate_limit() {
         assert!(RpcSecurityConfig::default().rate_limit_per_minute.is_some());
     }
 
@@ -7327,22 +6969,22 @@ mod tests {
     /// the body of a header-less response from JavaScript.
     #[test]
     fn allowed_origin_is_reflected_into_the_response() {
-        let config = cors_config(&["https://budscan.example"]);
-        let req = request_from_origin("https://budscan.example");
+        let config = cors_config(&["https://budlum-explorer.example"]);
+        let req = request_from_origin("https://budlum-explorer.example");
         let outcome = cors_outcome(&config, &req);
         assert_eq!(
             outcome,
-            CorsOutcome::Allow("https://budscan.example".into())
+            CorsOutcome::Allow("https://budlum-explorer.example".into())
         );
 
         let mut response = text_response(StatusCode::OK, "ok");
-        apply_cors_headers(&mut response, "https://budscan.example");
+        apply_cors_headers(&mut response, "https://budlum-explorer.example");
         assert_eq!(
             response
                 .headers()
                 .get("access-control-allow-origin")
                 .and_then(|v| v.to_str().ok()),
-            Some("https://budscan.example")
+            Some("https://budlum-explorer.example")
         );
         // A cache must not serve one origin's response to another.
         assert_eq!(
@@ -7359,7 +7001,7 @@ mod tests {
 
     #[test]
     fn unlisted_origin_is_denied_and_gets_no_headers() {
-        let config = cors_config(&["https://budscan.example"]);
+        let config = cors_config(&["https://budlum-explorer.example"]);
         let req = request_from_origin("https://saldirgan.example");
         let outcome = cors_outcome(&config, &req);
         assert_eq!(outcome, CorsOutcome::Deny);
@@ -7382,11 +7024,11 @@ mod tests {
         let req = request_from_origin("https://saldirgan.example");
         assert_eq!(cors_outcome(&config, &req), CorsOutcome::Allow("*".into()));
         // A named origin next to `*` still gets its own name back.
-        let config = cors_config(&["*", "https://budscan.example"]);
-        let req = request_from_origin("https://budscan.example");
+        let config = cors_config(&["*", "https://budlum-explorer.example"]);
+        let req = request_from_origin("https://budlum-explorer.example");
         assert_eq!(
             cors_outcome(&config, &req),
-            CorsOutcome::Allow("https://budscan.example".into())
+            CorsOutcome::Allow("https://budlum-explorer.example".into())
         );
     }
 
@@ -7503,7 +7145,7 @@ mod tests {
             api_key: Some("secret".into()),
             ..Default::default()
         };
-        let req = request_from_origin("https://budscan.example");
+        let req = request_from_origin("https://budlum-explorer.example");
         assert_eq!(cors_outcome(&config, &req), CorsOutcome::NotApplicable);
     }
 
@@ -7514,17 +7156,17 @@ mod tests {
         let mut req = HttpRequest::builder()
             .method(hyper::Method::OPTIONS)
             .uri("/")
-            .header("origin", "https://budscan.example")
+            .header("origin", "https://budlum-explorer.example")
             .header("access-control-request-method", "POST")
             .body(())
             .unwrap();
         assert!(is_cors_preflight(&req));
 
         // No identity header, and the allow decision still has to be reachable.
-        let config = cors_config(&["https://budscan.example"]);
+        let config = cors_config(&["https://budlum-explorer.example"]);
         assert!(!is_authorized(&config, &req));
 
-        let response = preflight_response("https://budscan.example");
+        let response = preflight_response("https://budlum-explorer.example");
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert_eq!(
             response
@@ -7540,6 +7182,7 @@ mod tests {
     }
 
     async fn status_through_layer(
+        &self,
         mode: RpcMode,
         host: Option<&str>,
         origin: Option<&str>,

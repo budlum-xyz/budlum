@@ -1,6 +1,6 @@
 //! Multi-validator permissionless E2E integration test.
 //! Exercises registration via stake, multi-epoch block production,
-//! And liveness slashing under absentee validator conditions.
+//! and non-slashing liveness suspension of an absentee validator.
 
 use crate::chain::blockchain::{Blockchain, EPOCH_LENGTH};
 use crate::consensus::pow::PoWEngine;
@@ -15,7 +15,7 @@ fn addr(b: u8) -> Address {
 }
 
 #[test]
-fn test_multi_validator_permissionless_lifecycle_and_slashing() {
+fn test_multi_validator_permissionless_lifecycle_and_suspension() {
     let consensus = Arc::new(PoWEngine::new(0));
     let mut bc = Blockchain::new(consensus, None, 45262, None);
 
@@ -32,10 +32,10 @@ fn test_multi_validator_permissionless_lifecycle_and_slashing() {
     assert!(bc.state.registry.is_active(&v2, roles::VALIDATOR));
     assert!(bc.state.registry.is_active(&absentee, roles::VALIDATOR));
 
-    // Enable liveness slashing
+    // Low liveness threshold so the absentee crosses it. V-4 / WP-13:
+    // absence suspends, it never slashes.
     bc.state.registry.set_params(RegistryParams {
         liveness_max_missed_epochs: 1,
-        liveness_slashing_enabled: true,
         ..RegistryParams::default()
     });
 
@@ -47,21 +47,22 @@ fn test_multi_validator_permissionless_lifecycle_and_slashing() {
             .expect("block production succeeds");
     }
 
-    // Absentee missed epochs and should be slashed/jailed
+    // Absentee missed epochs: suspended, stake untouched.
     let absentee_reg = bc.state.registry.get(&absentee, roles::VALIDATOR).unwrap();
-    assert!(
-        absentee_reg.stake < 20_000,
-        "absentee stake must be slashed"
+    assert_eq!(
+        absentee_reg.stake, 20_000,
+        "absence must never slash the stake (V-4)"
     );
-    let jailed = bc
+    let suspended = bc
         .state
         .validators
         .get(&absentee)
         .expect("the absentee is still a validator");
     assert!(
-        jailed.jailed && !jailed.active && !jailed.slashed,
-        "absentee must be in a timed jail"
+        !suspended.active && !suspended.slashed && !suspended.jailed,
+        "absentee must be suspended: out of the active set, never slashed"
     );
+    assert!(bc.state.liveness.is_suspended(&absentee));
 
     // V1 and v2 should remain active and unslashed
     assert!(bc.state.registry.is_active(&v1, roles::VALIDATOR));

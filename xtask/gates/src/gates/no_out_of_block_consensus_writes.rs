@@ -53,7 +53,7 @@ const CALLS: &[(&str, Class)] = &[
     // Admitting a bundle touches the pool and its node-local persistence file,
     // never `self.state`: the same class as `add_transaction`, one turn for the
     // whole bundle so the all-or-none promise is the pool's and not the RPC
-    // layer's (AF-19).
+    // layer's.
     ("add_transaction_bundle", NodeLocal),
     ("apply_state_snapshot", Sync),
     ("build_global_header", Read),
@@ -131,9 +131,9 @@ const READ_PREFIXES: &[&str] = &[
 ];
 
 /// Read methods whose names no prefix above covers, matched exactly: an
-/// identity record and credential lookup, a protected-content lookup, and
-/// the coding-audit answer check (`&self`, it judges an answer and stores
-/// nothing).
+/// identity record and credential lookup, a protected-content lookup, the
+/// coding-audit answer check (`&self`, it judges an answer and stores
+/// nothing), and the admission-fee quote (`&self`, it only computes a fee).
 const READ_NAMES: &[&str] = &[
     "record",
     "credential",
@@ -518,7 +518,13 @@ mod tests {
 
     #[test]
     fn required_fee_is_a_state_read() {
-        let src = "let fee = self.blockchain.state.required_fee(&tx);";
-        assert!(check_actor_state_access(src).is_ok());
+        assert!(
+            check_actor_state_access("let fee = self.blockchain.state.required_fee(&tx);").is_ok()
+        );
+        assert!(
+            check_actor_state_access("let fee = self.blockchain.state.required_fee_override(&tx);")
+                .is_err(),
+            "the exact read exception must not cover similarly named writes"
+        );
     }
 }

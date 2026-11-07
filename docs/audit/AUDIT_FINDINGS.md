@@ -371,13 +371,13 @@ distinct defects, and the three on #97 to two.
 
 ### AF-10 - 558 lines of consensus-round tests that no `mod` declared (`ci`, `medium`)
 
-- **Where:** `src/tests/p01_consensus_rounds.rs` (558 lines), gate
+- **Where:** `src/tests/consensus_round_boundaries.rs` (558 lines), gate
   `no-orphan-source-files`.
 - **Root cause:** the file was added to the tree and never declared in
   `src/tests/mod.rs`, so rustc never read it. It compiles nowhere, is linted by
   nothing, is executed never, and reads exactly like live coverage in a grep or
   a review - the most expensive kind of test debt, because it looks paid.
-- **Fix:** `#[cfg(test)] pub mod p01_consensus_rounds;` in `src/tests/mod.rs`,
+- **Fix:** `#[cfg(test)] pub mod consensus_round_boundaries;` in `src/tests/mod.rs`,
   with a comment saying what the file is. The alternative - deleting 558 lines
   of round-rule coverage - buys a green gate by removing the coverage it was
   meant to measure.

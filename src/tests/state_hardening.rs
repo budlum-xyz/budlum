@@ -283,9 +283,8 @@ fn slashed_proposer_and_missing_proposal_vote_refuse_without_debit() {
     assert_eq!(state.get_nonce(&active), 0);
 }
 
-/// Executing `ProposalType::SlashValidator` must mirror the slash
-/// into `PermissionlessRegistry` so validator standing and burned supply remain
-/// consistent with `state.validators`.
+/// Executing `ProposalType::SlashValidator` zeroes the validator-map bond that
+/// the earlier evidence slash did not itself zero, using the exact report hash.
 #[test]
 fn governance_slash_syncs_permissionless_registry() {
     let offender = addr(0x61);
@@ -298,30 +297,32 @@ fn governance_slash_syncs_permissionless_registry() {
         .register_validator(offender, stake, 0)
         .expect("register validator in permissionless registry");
 
-    // Record a verified minor liveness slashing report so `evidence_hash`
-    // matches `registry.slashing_history` while validator stake stays positive
-    // before the governance 100% slash executes.
-    let liveness_report = SlashingReport::new_verified(
+    let evidence_report = SlashingReport::new_verified(
         offender,
         roles::VALIDATOR,
-        SlashingProof::Liveness {
-            window_start_epoch: 0,
-            window_end_epoch: 100,
-            missed: 50,
-            expected: 100,
+        SlashingProof::DoubleSign {
+            height: 100,
+            kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+            epoch: None,
+            block_hash_1: "aa".into(),
+            block_hash_2: "bb".into(),
+            signature_1: vec![1],
+            signature_2: vec![2],
         },
         Some(proposer),
     );
-    let liv_hash = liveness_report.evidence_hash;
+    let evidence_hash: [u8; 32] = {
+        use sha2::Digest as _;
+        sha2::Sha256::digest(bincode::serialize(&evidence_report).unwrap()).into()
+    };
     state
         .registry
-        .slash_from_report(&liveness_report)
-        .expect("liveness report actionable")
-        .expect("liveness report produces outcome");
-    assert!(
-        state.registry.is_active(&offender, roles::VALIDATOR),
-        "validator still active after minor liveness slash"
-    );
+        .slash_from_report(&evidence_report)
+        .expect("double-sign report actionable")
+        .expect("double-sign report produces outcome");
+    assert!(!state.registry.is_active(&offender, roles::VALIDATOR));
+    assert_eq!(state.get_validator(&offender).unwrap().stake, stake);
+    assert!(!state.get_validator(&offender).unwrap().slashed);
 
     let prop_id = state
         .governance
@@ -329,7 +330,7 @@ fn governance_slash_syncs_permissionless_registry() {
             proposer,
             ProposalType::SlashValidator {
                 address: offender,
-                evidence_hash: liv_hash,
+                evidence_hash,
             },
             0,
             10,
@@ -343,10 +344,8 @@ fn governance_slash_syncs_permissionless_registry() {
     state.execute_proposal(&prop);
 
     assert_eq!(state.get_validator(&offender).map(|v| v.stake), Some(0));
-    assert!(
-        !state.registry.is_active(&offender, roles::VALIDATOR),
-        "governance SlashValidator must also deactivate validator in PermissionlessRegistry"
-    );
+    assert!(state.get_validator(&offender).unwrap().slashed);
+    assert!(!state.registry.is_active(&offender, roles::VALIDATOR));
 }
 
 /// `checked_total_cost` and `Executor::apply_transaction_checked`

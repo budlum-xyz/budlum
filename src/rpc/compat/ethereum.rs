@@ -2,8 +2,11 @@
 //!
 //! Serves all 34 T-Launch public methods of section 8.11.2 plus operator-only
 //! `debug_traceTransaction` and `debug_traceCall`. `eth_getProof` explicitly
-//! returns `-32601` (`Method not found; use bud_getExecutionProof`, section 8.10.6),
+//! returns `-32601` (`Method not found; use bud_getAccountProof`, section 8.10.6),
 //! and block headers expose `execution_root` as `stateRoot` (section 8.10.5).
+
+pub mod filters;
+pub mod opening;
 
 use crate::core::account::AccountState;
 use crate::execution::coordinator::alias::{derive_foreign_account, ForeignScheme};
@@ -229,7 +232,7 @@ impl EthereumCompatGateway {
             return JsonRpcResponse::err(
                 req.id.clone(),
                 JSONRPC_METHOD_NOT_FOUND,
-                "eth_getProof is not supported on Budlum; use bud_getExecutionProof",
+                "eth_getProof is not supported on Budlum; use bud_getAccountProof",
             );
         }
         if class.listener == CompatListener::Operator && listener != CompatListener::Operator {

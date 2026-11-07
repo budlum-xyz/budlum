@@ -178,11 +178,6 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_adminBanPeer", Operator, LocalAdmin),
     row("bud_adminUnbanPeer", Operator, LocalAdmin),
     row("bud_adminListBannedPeers", Operator, Read),
-    // refused; manifest registration is `StorageTx::RegisterManifest`.
-    row("bud_storageRegisterManifest", Operator, Refused),
-    row("bud_storageVerifyEncoding", Public, Read),
-    row("bud_storageQrFeedPreview", Public, Read),
-    row("bud_storageQrFeedFrames", Public, Read),
     // Refused on every chain until grants ride a block transaction.
     row("bud_storageIssueViewGrant", Public, Refused),
     row("bud_storageRevokeViewGrant", Public, Refused),
@@ -192,26 +187,6 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_storageOpenReveal", Public, LocalAdmin),
     row("bud_storageRevealFrames", Public, LocalAdmin),
     row("bud_storageCloseReveal", Public, LocalAdmin),
-    row("bud_storageRegisterConfidentialCommit", Operator, Refused),
-    row("bud_storageGetConfidentialCommit", Public, Read),
-    // refused; the doors are `StorageTx::OpenDeal` and
-    // `StorageTx::AcceptReallocation`.
-    row("bud_storageOpenDeal", Operator, Refused),
-    row("bud_storageAcceptReallocation", Operator, Refused),
-    row("bud_storageGetManifest", Public, Read),
-    row("bud_storageGetDealsByManifest", Public, Read),
-    row("bud_storageGetDealsByShard", Public, Read),
-    row("bud_storageGetChallenges", Public, Read),
-    // refused; the doors are `StorageTx::OpenChallenge` and
-    // `StorageTx::AnswerChallenge`.
-    row("bud_storageOpenChallenge", Operator, Refused),
-    row("bud_storageAnswerChallenge", Operator, Refused),
-    row("bud_storageGetEconomicsSummary", Public, Read),
-    row("bud_storageGetEconomicsEvents", Public, Read),
-    row("bud_storageGetOperatorEconomics", Public, Read),
-    row("bud_storageGetOutcome", Public, Read),
-    row("bud_storageRepairBand", Public, Read),
-    row("bud_storageActiveOperators", Public, Read),
     row("bud_bnsResolve", Public, Read),
     row("bud_bnsResolveFull", Public, Read),
     row("bud_bnsResolveContent", Public, Read),
@@ -291,6 +266,51 @@ const METHOD_CLASSES: &[MethodClass] = &[
     // WebSocket subscriptions: read-only feeds (src/rpc/subscriptions.rs).
     row("bud_subscribe", Public, Read),
     row("bud_unsubscribe", Public, Read),
+    // The Ethereum JSON-RPC compatibility gateway (WP-28, 1/2). Section 8.11.2
+    // names the methods; `src/rpc/compat/ethereum/opening.rs` says what each one
+    // answers. A row here is a read of chain state or a refusal that names the
+    // Budlum door, so nothing in this namespace changes consensus state.
+    row("web3_clientVersion", Public, Read),
+    row("net_version", Public, Read),
+    row("net_listening", Public, Read),
+    row("eth_chainId", Public, Read),
+    row("eth_syncing", Public, Read),
+    row("eth_blockNumber", Public, Read),
+    row("eth_getBalance", Public, Refused),
+    row("eth_getCode", Public, Refused),
+    row("eth_getStorageAt", Public, Refused),
+    row("eth_getTransactionCount", Public, Refused),
+    row("eth_call", Public, Refused),
+    row("eth_estimateGas", Public, Refused),
+    row("eth_createAccessList", Public, Refused),
+    row("eth_gasPrice", Public, Read),
+    row("eth_maxPriorityFeePerGas", Public, Read),
+    row("eth_feeHistory", Public, Refused),
+    row("eth_sendRawTransaction", Public, Refused),
+    row("eth_getBlockByNumber", Public, Refused),
+    row("eth_getBlockByHash", Public, Refused),
+    row("eth_getBlockTransactionCountByNumber", Public, Refused),
+    row("eth_getBlockTransactionCountByHash", Public, Refused),
+    row("eth_getTransactionByHash", Public, Refused),
+    row("eth_getTransactionByBlockNumberAndIndex", Public, Refused),
+    row("eth_getTransactionReceipt", Public, Refused),
+    row("eth_getBlockReceipts", Public, Refused),
+    row("eth_getLogs", Public, Refused),
+    // WP-28, 2/N: filter creation/removal administers the bounded, expiring,
+    // per-connection table in `src/rpc/compat/ethereum/filters.rs`. The two
+    // read methods validate that table but still have no successful answer
+    // before WP-27, so they remain honest refusals rather than fake successes.
+    row("eth_newFilter", Public, LocalAdmin),
+    row("eth_newBlockFilter", Public, LocalAdmin),
+    row("eth_getFilterChanges", Public, Refused),
+    row("eth_getFilterLogs", Public, Refused),
+    row("eth_uninstallFilter", Public, LocalAdmin),
+    row("eth_accounts", Public, Read),
+    row("debug_traceTransaction", Operator, Refused),
+    row("debug_traceCall", Operator, Refused),
+    // Section 8.10.6: the Budlum state root is not an MPT root, so the MPT
+    // proof method answers `-32601` for good at the opening layer.
+    row("eth_getProof", Public, Refused),
 ];
 
 /// Check that the methods a server registers are exactly the classified
@@ -314,6 +334,13 @@ pub fn check_served_methods<'a>(
         problems.push(format!(
             "{name} has a row in METHOD_CLASSES but is not served"
         ));
+    }
+    // A compatibility gateway answers a foreign namespace. Its table is the
+    // second classification: a method there must be in the gateway table, and
+    // a method the gateway marks pending must not be served at all
+    // (`src/rpc/compat/ethereum/opening.rs`).
+    if let Err(problem) = crate::rpc::compat::ethereum::opening::check_served(registered.iter().copied()) {
+        problems.push(problem);
     }
     if problems.is_empty() {
         Ok(())
@@ -488,6 +515,38 @@ mod tests {
                     row.name
                 );
             }
+        }
+    }
+
+    #[test]
+    fn legacy_storage_rpc_methods_are_not_declared_or_classified() {
+        const REMOVED: &[&str] = &[
+            "bud_storageAcceptReallocation",
+            "bud_storageActiveOperators",
+            "bud_storageAnswerChallenge",
+            "bud_storageGetChallenges",
+            "bud_storageGetConfidentialCommit",
+            "bud_storageGetDealsByManifest",
+            "bud_storageGetDealsByShard",
+            "bud_storageGetEconomicsEvents",
+            "bud_storageGetEconomicsSummary",
+            "bud_storageGetManifest",
+            "bud_storageGetOperatorEconomics",
+            "bud_storageGetOutcome",
+            "bud_storageOpenChallenge",
+            "bud_storageOpenDeal",
+            "bud_storageRegisterConfidentialCommit",
+            "bud_storageRegisterManifest",
+            "bud_storageRepairBand",
+            "bud_storageVerifyEncoding",
+            "bud_storageQrFeedFrames",
+            "bud_storageQrFeedPreview",
+        ];
+        let declared: BTreeSet<String> = declared_methods().into_iter().collect();
+        let classified: BTreeSet<&str> = METHOD_CLASSES.iter().map(|row| row.name).collect();
+        for name in REMOVED {
+            assert!(!declared.contains(*name), "{name} remains declared in api.rs");
+            assert!(!classified.contains(name), "{name} remains in METHOD_CLASSES");
         }
     }
 
