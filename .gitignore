@@ -19,3 +19,7 @@ __pycache__/
 # Foundry build output of the Ethereum-side contracts.
 /contracts/out/
 /contracts/cache/
+# The binding directive document is planning input, not source. Section 0.1.5
+# says it never enters this English-only repository; the registry it defines
+# lives in docs/work/PACKAGES.md and docs/audit/FINDINGS.md.
+/THE_BUDLUM_DIREKTIF.md
