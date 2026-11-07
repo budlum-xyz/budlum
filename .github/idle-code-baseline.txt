@@ -1647,7 +1647,6 @@ src/network/node.rs	fn	apply_power_mode
 src/network/node.rs	fn	broadcast_domain_commitment_sync
 src/network/node.rs	fn	broadcast_slashing_evidence_sync
 src/network/node.rs	fn	broadcast_tx
-src/network/node.rs	fn	ipv4_slash24
 src/network/node.rs	fn	new_with_bootstrap
 src/network/node.rs	fn	resolve_dns_seeds
 src/network/node.rs	fn	storage_prune
