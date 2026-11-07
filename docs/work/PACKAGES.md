@@ -189,22 +189,26 @@ them is closed by this pull request.
    records closures only.
 3. **`docs/audit/live/lane-a.md`, `lane-b.md` and `lane-c.md` do not
    exist.** They are the lock paths of WP-01, WP-02 and WP-03.
-4. **33 registered gates never run in a workflow.** `xtask/gates` exposes
+4. **31 registered gates never run in a workflow.** `xtask/gates` exposes
    them and `ci.yml` invokes neither each one nor `--all`, so they are
-   registered protection that proves nothing on a commit. This is WP-42
-   work and is deliberately not wired here, because a gate that fails on
-   `main` the first time it runs turns the whole job red:
+   registered protection that proves nothing on a commit. This slice wired two
+   of the original 33, each with its canary, after reproducing the gate from its
+   source and measuring the tree: `chain-id-is-not-hardcoded` (430 files under
+   `src/`, `budzero/` and `crates/`, no literal `chain_id` outside tests) and
+   `no-new-shell-gates` (0 shell scripts in the tree, migration list empty). The
+   31 that remain are wired one at a time, because a gate that fails on `main`
+   the first time it runs turns the whole job red and this environment cannot
+   run them to find out:
    `ai-inference-prompt-is-true`, `ai-inference-zk`, `ast-security-gates`,
-   `bns-names`, `bridge-dual-tree`, `chain-id-is-not-hardcoded`,
+   `bns-names`, `bridge-dual-tree`,
    `consensus-state-only-changes-in-blocks`, `every-fuzz-target-is-run`,
    `fixture-integrity`, `fsf-import-boundaries`, `gas-calibration`,
    `gates-do-not-panic`, `gov-slash-evidence-validator-only`,
    `image-builds-the-manifest`, `mempool-mev-free`, `mermaid`,
    `minting-paths-are-counted`, `multi-ratio-consensus`,
-   `no-new-shell-gates`, `no-out-of-block-consensus-writes`,
-   `one-house-guards`, `parallel-execution`,
-   `proof-deps-are-exactly-pinned`, `quantum-account`, `regen-health-door`,
-   `release-profile-pins`, `security-scans-can-fail`,
+   `no-out-of-block-consensus-writes`, `one-house-guards`,
+   `parallel-execution`, `proof-deps-are-exactly-pinned`, `quantum-account`,
+   `regen-health-door`, `release-profile-pins`, `security-scans-can-fail`,
    `suppressions-are-justified`, `tee-trust-boundary-structural`,
    `transcript-mirrors`, `workflows-produce-jobs`,
    `zero-address-sender-verified`, `zkvm-immune-regeneration`.
