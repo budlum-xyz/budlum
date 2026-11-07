@@ -19,3 +19,10 @@ __pycache__/
 # Foundry build output of the Ethereum-side contracts.
 /contracts/out/
 /contracts/cache/
+
+# The binding directive is not part of this repository (directive 0.1 item 5):
+# it is archived outside the tree and the tree is English (0.1 item 6). It sat
+# here unlisted and unreferenced, which is a finding for `tree-is-english` on
+# every commit and a Turkish document at the root of an English repository.
+# Anchored, so a directory that happens to share the name is unaffected.
+/THE_BUDLUM_DIREKTIF.md
