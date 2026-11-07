@@ -820,7 +820,7 @@ mod integration_tests {
     #[test]
     #[should_panic(expected = "Startup Chain ID mismatch!")]
     fn test_startup_chain_id_verification_fails() {
-        use crate::storage::db::Storage;
+        use crate::persistence::db::Storage;
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();

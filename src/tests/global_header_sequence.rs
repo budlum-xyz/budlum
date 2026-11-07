@@ -9,7 +9,7 @@
 use crate::chain::blockchain::Blockchain;
 use crate::consensus::pow::PoWEngine;
 use crate::core::address::Address;
-use crate::storage::db::Storage;
+use crate::persistence::db::Storage;
 use std::sync::Arc;
 
 const CHAIN_ID: u64 = 45262;

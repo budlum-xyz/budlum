@@ -218,7 +218,7 @@ impl PoSEngine {
     pub fn add_checkpoint(
         &self,
         block: &Block,
-        storage: Option<&crate::storage::db::Storage>,
+        storage: Option<&crate::persistence::db::Storage>,
     ) -> Result<(), ConsensusError> {
         let checkpoint = Checkpoint {
             block_index: block.index,
@@ -233,7 +233,7 @@ impl PoSEngine {
     fn commit_checkpoint(
         &self,
         checkpoint: &Checkpoint,
-        storage: Option<&crate::storage::db::Storage>,
+        storage: Option<&crate::persistence::db::Storage>,
     ) -> Result<(), ConsensusError> {
         if let Some(store) = storage {
             // Not `let _ =`: a checkpoint that fails to persist is not a
@@ -1189,7 +1189,7 @@ impl ConsensusEngine for PoSEngine {
     fn record_block(
         &self,
         block: &Block,
-        storage: Option<&crate::storage::db::Storage>,
+        storage: Option<&crate::persistence::db::Storage>,
     ) -> Result<(), ConsensusError> {
         let epoch_length = self.epoch_length_checked()?;
         let producer = block
@@ -1309,7 +1309,7 @@ impl ConsensusEngine for PoSEngine {
         &self,
         height: u64,
         chain: &[Block],
-        storage: Option<&crate::storage::db::Storage>,
+        storage: Option<&crate::persistence::db::Storage>,
     ) {
         let promoted: Vec<Checkpoint> = {
             let Ok(mut pending) = self.pending_checkpoints.write() else {
@@ -1392,7 +1392,7 @@ impl ConsensusEngine for PoSEngine {
         &self,
         block: &Block,
         chain: &[Block],
-        _storage: Option<&crate::storage::db::Storage>,
+        _storage: Option<&crate::persistence::db::Storage>,
     ) {
         // The block is committed: the evidence it carried has now done its
         // job and leaves the pool. Everything the pool still holds is
@@ -1420,7 +1420,7 @@ impl ConsensusEngine for PoSEngine {
         }
     }
 
-    fn load_state(&self, storage: &crate::storage::db::Storage) -> Result<(), ConsensusError> {
+    fn load_state(&self, storage: &crate::persistence::db::Storage) -> Result<(), ConsensusError> {
         let seen = storage
             .load_all_seen_blocks()
             .map_err(|error| ConsensusError(format!("Failed to load seen PoS blocks: {error}")))?;
@@ -1709,7 +1709,7 @@ mod tests {
         };
         let engine = PoSEngine::new(config, None);
         let dir = tempfile::tempdir().unwrap();
-        let storage = crate::storage::db::Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let storage = crate::persistence::db::Storage::new(dir.path().to_str().unwrap()).unwrap();
         let alice = KeyPair::generate().unwrap();
 
         let mut old = Block::new(1, "prev".into(), vec![]);

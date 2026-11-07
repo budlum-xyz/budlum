@@ -24,7 +24,7 @@ use std::path::Path;
 
 /// The gate subcommands CI must invoke for the protection to be live.
 /// Ordered; every entry is a real gate in `main.rs`'s GATES list.
-const PROTECTED_GATES: &[&str] = &["regeneration", "relay", "tree-pin"];
+const PROTECTED_GATES: &[&str] = &["canonical-programs-reproduce", "relay", "tree-pin"];
 
 /// Workflow files that run gates.
 const WORKFLOWS: &[&str] = &[
@@ -431,12 +431,12 @@ pub fn self_test() -> Result<String, String> {
     )?;
     // 7. The `- run:` step form and the subshell form of the diverse
     //    double-compiling workflow are read.
-    let ddc = "name: ddc\njobs:\n  j:\n    steps:\n      - run: (cd xtask/gates && cargo run --release --quiet -- regeneration) > /tmp/x 2>&1\n";
+    let ddc = "name: ddc\njobs:\n  j:\n    steps:\n      - run: (cd xtask/gates && cargo run --release --quiet -- canonical-programs-reproduce) > /tmp/x 2>&1\n";
     let found = run_blocks(ddc)
         .iter()
         .flat_map(|b| b.lines.iter())
         .filter_map(|l| parse_invocation(l))
-        .any(|inv| inv.gate == "regeneration" && !inv.self_test);
+        .any(|inv| inv.gate == "canonical-programs-reproduce" && !inv.self_test);
     if !found {
         return Err(String::from(
             "ci-workflow-guards self-test: the `- run:` subshell form was not read",

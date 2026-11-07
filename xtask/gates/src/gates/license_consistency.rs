@@ -23,7 +23,7 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use super::regeneration::{hex32, keccak256};
+use super::canonical_programs_reproduce::{hex32, keccak256};
 
 /// The one licence expression every manifest must resolve to.
 const SPDX: &str = "LicenseRef-PolyForm-Shield-1.0.0";

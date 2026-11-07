@@ -16,7 +16,7 @@ use budlum_core::domain::{
 use budlum_core::network::node::Node;
 use budlum_core::network::protocol::NetworkMessage;
 use budlum_core::rpc::{RpcMode, RpcSecurityConfig, RpcServer};
-use budlum_core::storage::db::Storage;
+use budlum_core::persistence::db::Storage;
 
 use clap::Parser;
 use std::path::{Path, PathBuf};
@@ -2145,7 +2145,7 @@ mod tests {
     fn zero_retention_refuses_backup_without_deleting_existing_files() {
         let dir = tempfile::tempdir().expect("temporary directory");
         let db_path = dir.path().join("db");
-        let storage = budlum_core::storage::db::Storage::new(db_path.to_str().unwrap())
+        let storage = budlum_core::persistence::db::Storage::new(db_path.to_str().unwrap())
             .expect("open database");
         let backups = dir.path().join("backups");
         std::fs::create_dir(&backups).unwrap();
@@ -2180,7 +2180,7 @@ mod tests {
     fn backup_refuses_concurrent_writer_without_pruning() {
         let dir = tempfile::tempdir().unwrap();
         let storage =
-            budlum_core::storage::db::Storage::new(dir.path().join("db").to_str().unwrap())
+            budlum_core::persistence::db::Storage::new(dir.path().join("db").to_str().unwrap())
                 .expect("open database");
         let backups = dir.path().join("backups");
         std::fs::create_dir(&backups).unwrap();
@@ -2196,12 +2196,12 @@ mod tests {
     fn backup_returns_a_verified_existing_snapshot() {
         let dir = tempfile::tempdir().unwrap();
         let storage =
-            budlum_core::storage::db::Storage::new(dir.path().join("db").to_str().unwrap())
+            budlum_core::persistence::db::Storage::new(dir.path().join("db").to_str().unwrap())
                 .expect("open database");
         let path = write_database_backup(&storage, &dir.path().join("backups"), 1)
             .expect("write backup");
         assert!(path.is_file());
-        budlum_core::storage::db::Storage::verify_snapshot(path).expect("verify backup");
+        budlum_core::persistence::db::Storage::verify_snapshot(path).expect("verify backup");
     }
 
     #[test]

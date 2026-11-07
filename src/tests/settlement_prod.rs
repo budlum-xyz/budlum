@@ -31,7 +31,7 @@ mod settlement_prod_tests {
         ConsensusKind, DomainCommitment, DomainStatus, PoWDomainParameters,
         POW_HEADER_CHAIN_ADAPTER,
     };
-    use crate::storage::db::Storage;
+    use crate::persistence::db::Storage;
     use std::sync::Arc;
 
     fn test_chain() -> Blockchain {
