@@ -129,6 +129,24 @@ fn string_list(table: &toml::Table, key: &str) -> Result<Vec<String>, String> {
     }
 }
 
+fn validate_path_prefixes(paths: &[String], who: &str, key: &str) -> Result<(), String> {
+    for path in paths {
+        let normalized = path.strip_suffix('/').unwrap_or(path);
+        if normalized.is_empty()
+            || path.starts_with('/')
+            || path.contains('\\')
+            || normalized
+                .split('/')
+                .any(|component| component.is_empty() || component == "." || component == "..")
+        {
+            return Err(format!(
+                "{who}: `{key}` contains an invalid repository-relative path `{path}`"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn required_str<'a>(table: &'a toml::Table, key: &str, who: &str) -> Result<&'a str, String> {
     table
         .get(key)
@@ -152,6 +170,7 @@ fn parse_map(text: &str) -> Result<Map, String> {
         }
     };
     let global_allow = string_list(&table, "global_allow_paths")?;
+    validate_path_prefixes(&global_allow, MAP_PATH, "global_allow_paths")?;
     let entries = table
         .get("concept")
         .and_then(toml::Value::as_array)
@@ -183,12 +202,16 @@ fn parse_map(text: &str) -> Result<Map, String> {
             patterns
                 .push(regex::Regex::new(&p).map_err(|e| format!("{who}: bad pattern {p}: {e}"))?);
         }
+        let paths = string_list(t, "paths")?;
+        let allow_paths = string_list(t, "allow_paths")?;
+        validate_path_prefixes(&paths, &who, "paths")?;
+        validate_path_prefixes(&allow_paths, &who, "allow_paths")?;
         concepts.push(Concept {
             name,
             owner,
             patterns,
-            paths: string_list(t, "paths")?,
-            allow_paths: string_list(t, "allow_paths")?,
+            paths,
+            allow_paths,
         });
     }
     Ok(Map {
@@ -230,7 +253,13 @@ fn collect_files(dir: &Path, root: &Path, out: &mut Vec<(String, std::path::Path
 }
 
 fn under(rel: &str, prefixes: &[String]) -> bool {
-    prefixes.iter().any(|p| rel.starts_with(p.as_str()))
+    prefixes.iter().any(|prefix| {
+        if prefix.ends_with('/') {
+            rel.starts_with(prefix)
+        } else {
+            rel == prefix
+        }
+    })
 }
 
 /// Count every concept over the tree.
@@ -496,6 +525,57 @@ pub fn self_test() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_filters_distinguish_directories_from_exact_files() {
+        let prefixes = vec!["src/foo/".to_string(), "docs/NAMING.md".to_string()];
+        assert!(under("src/foo/module.rs", &prefixes));
+        assert!(under("docs/NAMING.md", &prefixes));
+        assert!(!under("src/foobar/module.rs", &prefixes));
+        assert!(!under("docs/NAMING.md.bak", &prefixes));
+        assert!(!under("docs/NAMING.md/hidden.rs", &prefixes));
+    }
+
+    #[test]
+    fn path_prefix_validation_rejects_non_repository_paths() {
+        for invalid in [
+            "", "/src", "../", "src/../", "./", "src/./", "src//", "src\\",
+        ] {
+            assert!(
+                validate_path_prefixes(&[invalid.to_string()], "test", "paths").is_err(),
+                "invalid path was accepted: {invalid:?}"
+            );
+        }
+        for valid in ["src/", "src/main.rs", "docs/NAMING.md"] {
+            assert!(validate_path_prefixes(&[valid.to_string()], "test", "paths").is_ok());
+        }
+    }
+
+    #[test]
+    fn concept_map_rejects_empty_or_escaping_paths() {
+        let empty_allow = CANARY_MAP.replace(
+            "global_allow_paths = [\"config/naming/\", \"docs/NAMING.md\"]",
+            "global_allow_paths = [\"\"]",
+        );
+        assert!(parse_map(&empty_allow).is_err());
+
+        let escaping_scope = CANARY_MAP.replace(
+            "global_allow_paths = [\"config/naming/\", \"docs/NAMING.md\"]",
+            "global_allow_paths = [\"../\"]",
+        );
+        assert!(parse_map(&escaping_scope).is_err());
+
+        let escaping_concept = CANARY_MAP
+            .replace(
+                "global_allow_paths = [\"config/naming/\", \"docs/NAMING.md\"]",
+                "global_allow_paths = []",
+            )
+            .replace(
+                "owner = \"naming\"",
+                "owner = \"naming\"\npaths = [\"src/../\"]",
+            );
+        assert!(parse_map(&escaping_concept).is_err());
+    }
 
     #[test]
     fn concept_names_gate_catches_injected_name() {
