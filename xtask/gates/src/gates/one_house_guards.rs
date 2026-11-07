@@ -1,15 +1,10 @@
 //! One house rule: siblings that do the same job must run the same checks.
 //!
-//! The audit report's dominant finding class (7 of 12 findings) was not a
-//! wrong check but a **missing sibling**: the mint path validated the fee
-//! ceiling while the unlock path narrowed it with a cast (F-8), two of the
-//! three Merkle implementations promoted an odd tail while the third
-//! duplicated it (F-6), one fork-choice family resolved equal-weight ties
-//! while its siblings refused the reorg in both directions (F-2). Every
-//! one of those is a set of functions that do the same job, where one of
-//! them stopped carrying a guard its siblings still carry.
+//! Sibling operations must enforce the same guards. Fee ceilings, Merkle
+//! odd-tail handling and fork-choice tie-breaks are shared invariants across
+//! their corresponding implementations.
 //!
-//! This gate makes that class a config entry instead of an audit finding.
+//! This gate makes that shared invariant a config entry.
 //! A *family* is a set of code slices that do the same job (a function
 //! body, a match arm - any brace-balanced slice rooted at a needle). A
 //! *guard* is a mark every member of the family must carry. The gate

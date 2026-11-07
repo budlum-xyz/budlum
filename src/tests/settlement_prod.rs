@@ -1668,11 +1668,9 @@ mod settlement_prod_tests {
         assert_ne!(baseline.calculate_hash(), after.calculate_hash());
     }
 
-    /// F-7 closed the dead `settlement_finality_hashes` input by replacing
-    /// the stored field with a derived window (see the twin test in
-    /// `chain/blockchain.rs`). This module is still disabled pending the
-    /// devnet FinalityProof rewrite, so the derivation is pinned here only
-    /// through the pure helper.
+    /// `settlement_finality_hashes` is derived from the canonical chain
+    /// rather than stored. The derivation is pinned through the pure helper
+    /// because this module's production path is disabled.
     #[test]
     fn settlement_finality_window_is_derived_not_stored() {
         let hash_of = |h: u64| {

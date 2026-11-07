@@ -171,7 +171,7 @@ impl Executor {
         // transaction may originate from it, and it is rejected everywhere
         // but the genesis block by `validate_and_add_block`. Accepting any
         // zero-address sender here would let an attacker fill blocks with
-        // free, unsigned, fee-free transactions (BUDLUM finding #65/#171).
+        // free transactions.
         if tx.from == Address::zero() {
             if tx.verify_in(&state.scheme_registry) {
                 return Ok(());

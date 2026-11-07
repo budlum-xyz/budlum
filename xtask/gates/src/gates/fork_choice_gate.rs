@@ -17,7 +17,7 @@ pub(crate) const TESTS: &[&str] = &[
     "mixed_domain_candidates_rejected",
     "domain_lifecycle_requires_freeze_before_retire",
     "retired_domain_is_terminal",
-    // F-2 tie-break locks: equal-weight forks must resolve to one
+    // Tie-breaks: equal-weight forks must resolve to one
     // deterministic winner on every consensus family, and a reorg must
     // never replace a tip with itself.
     "pow_equal_work_picks_one_side_in_both_directions",
