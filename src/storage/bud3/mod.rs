@@ -18,6 +18,7 @@
 //! | [`registry`] | Chain state: objects, dedup, references, deletion, shares, audits |
 //! | [`tx`] | `StorageTx` v3 and its one apply door |
 //! | [`custody`] | Sub-block tree, symbol root, the audit draw and custody proofs |
+//! | [`repair`] | Segment repair scheduling and 20-block Instant Duty Handover |
 //! | [`pipeline`] | Upload (content to record and symbols) and view (symbols to checked content) |
 //! | [`fountain`] | RFC 6330 per-segment encoder and decoder, and the streaming encoder |
 //!
@@ -41,6 +42,7 @@ pub mod meter;
 pub mod pipeline;
 pub mod placement;
 pub mod registry;
+pub mod repair;
 pub mod segment;
 pub mod tx;
 pub mod varint;

@@ -261,3 +261,7 @@ pub mod audit_lane_b;
 pub mod audit_lane_c;
 #[cfg(test)]
 pub mod audit_lane_d;
+
+// WP-14 Instant Duty Handover and Disaster Recovery Mode suite.
+#[cfg(test)]
+pub mod wp14_handover_recovery;

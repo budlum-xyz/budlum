@@ -1382,7 +1382,6 @@ src/domain/fork_choice.rs	trait	ConsensusDomainForkChoice
 src/domain/plugin.rs	struct	DomainContext
 src/domain/plugin.rs	struct	ZkDomainPlugin
 src/domain/plugin_registry.rs	fn	domain_ids
-src/domain/plugin_registry.rs	fn	replacements
 src/domain/plugin_registry.rs	struct	PluginReplacement
 src/domain/registry.rs	const	MAX_REGISTERED_DOMAINS
 src/domain/registry.rs	fn	domain_leaf_hash
