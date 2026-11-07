@@ -2355,8 +2355,46 @@ impl Transaction {
         self.fee
     }
 
+    /// Return the debit required for an amount-bearing transaction.
+    ///
+    /// Consensus and execution paths must reject `None`; a saturated debit
+    /// can undercharge fees and create supply when the fee is credited later.
+    #[must_use]
+    pub fn checked_total_cost(&self) -> Option<u64> {
+        self.amount.checked_add(self.fee)
+    }
+
+    /// Return the liquid balance required to admit and execute this transaction.
+    ///
+    /// These transaction kinds spend only their fee from the liquid account.
+    /// Their amount identifies vote direction or value that is already bonded;
+    /// adding it to the admission cost can reject a valid exit or vote when
+    /// amount plus fee overflows. Every other kind retains the existing
+    /// amount-plus-fee rule.
+    #[must_use]
+    pub fn checked_admission_cost(&self) -> Option<u64> {
+        if matches!(
+            &self.tx_type,
+            TransactionType::Unstake
+                | TransactionType::Vote
+                | TransactionType::Undelegate { .. }
+                | TransactionType::WithdrawDelegation { .. }
+                | TransactionType::SetValidatorCommission { .. }
+                | TransactionType::Redelegate { .. }
+                | TransactionType::ClaimRewards { .. }
+        ) {
+            Some(self.fee)
+        } else {
+            self.checked_total_cost()
+        }
+    }
+
+    /// Return a compatibility estimate of the amount-plus-fee debit.
+    ///
+    /// Do not use this helper for admission or state transitions. Those paths
+    /// must use `checked_admission_cost` and reject overflow.
     pub fn total_cost(&self) -> u64 {
-        self.amount.saturating_add(self.fee)
+        self.checked_total_cost().unwrap_or(u64::MAX)
     }
 
     /// Per-type gas cost under a `GasSchedule`.
@@ -2660,7 +2698,26 @@ mod tests {
         assert_eq!(tx.fee, 5);
         assert_eq!(tx.nonce, 1);
         assert_eq!(tx.total_cost(), 105);
+        assert_eq!(tx.checked_total_cost(), Some(105));
     }
+
+    #[test]
+    fn blg_197_checked_total_cost_rejects_overflow() {
+        let recipient = test_addr_from_byte(1u8);
+        let tx = Transaction::new_with_fee(Address::zero(), recipient, u64::MAX, 1, 1, vec![]);
+        assert_eq!(tx.checked_total_cost(), None);
+        assert_eq!(tx.total_cost(), u64::MAX);
+    }
+
+    #[test]
+    fn blg_197_fee_only_admission_cost_excludes_bonded_amount() {
+        let recipient = test_addr_from_byte(1u8);
+        let mut tx = Transaction::new_with_fee(Address::zero(), recipient, u64::MAX, 1, 1, vec![]);
+        tx.tx_type = TransactionType::Vote;
+        assert_eq!(tx.checked_total_cost(), None);
+        assert_eq!(tx.checked_admission_cost(), Some(1));
+    }
+
     #[test]
     fn test_genesis_transaction() {
         let genesis = Transaction::genesis();

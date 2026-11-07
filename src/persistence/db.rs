@@ -43,7 +43,21 @@ struct DatabaseBackupV1 {
 }
 
 fn decode_database_backup(bytes: &[u8]) -> std::io::Result<DatabaseBackupV1> {
-    let backup: DatabaseBackupV1 = decode(bytes)?;
+    use bincode::Options;
+
+    let limit = u64::try_from(bytes.len()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "backup length does not fit the decoder limit",
+        )
+    })?;
+    // Match bincode::deserialize's fixed-width format, but reject trailing
+    // bytes and never let a declared allocation exceed the supplied input.
+    let backup: DatabaseBackupV1 = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(limit)
+        .deserialize(bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     if backup.format_version != 1 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -56,6 +70,28 @@ fn decode_database_backup(bytes: &[u8]) -> std::io::Result<DatabaseBackupV1> {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "backup checksum mismatch",
+        ));
+    }
+    if backup.entries.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "backup contains no database entries",
+        ));
+    }
+    let mut keys: std::collections::HashSet<&[u8]> =
+        std::collections::HashSet::with_capacity(backup.entries.len());
+    for (key, _) in &backup.entries {
+        if !keys.insert(key.as_slice()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "backup contains duplicate database keys",
+            ));
+        }
+    }
+    if !keys.iter().any(|key| *key == b"SCHEMA_VERSION") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "backup has no schema version",
         ));
     }
     Ok(backup)
@@ -269,9 +305,11 @@ impl Storage {
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
     ///
-    /// The temporary file is written beside the destination and renamed only
-    /// After all bytes are durable, so a crash never presents a partial file as
-    /// A usable backup.
+    /// The temporary file is written and synced beside the destination, then
+    /// published with a no-clobber hard link only after all bytes are durable.
+    /// A crash therefore never presents a partial file as a usable backup.
+    /// On Unix the verified destination's parent directory is also synced
+    /// before success is returned.
     /// Reads every row twice and accepts the result only when both passes
     /// agree and no durable commit is in flight. sled offers no point in time
     /// iterator, so a commit landing mid-scan would otherwise be copied
@@ -324,17 +362,39 @@ impl Storage {
         let mut partial = path.as_os_str().to_owned();
         partial.push(".partial");
         let partial = std::path::PathBuf::from(partial);
+        // Never truncate an existing partial file or follow a pre-existing
+        // symlink. A stale partial needs operator inspection before retrying.
         let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .write(true)
             .open(&partial)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
-        std::fs::rename(&partial, path)?;
+        drop(file);
+        // Publish the complete inode without replacing an existing backup.
+        // `rename` overwrites `path` on Unix and fails when it exists on
+        // Windows. A hard link has the required no-clobber behavior on both:
+        // the destination appears atomically and a timestamp collision keeps
+        // the earlier verified backup intact.
+        if let Err(error) = std::fs::hard_link(&partial, path) {
+            let _ = std::fs::remove_file(&partial);
+            return Err(error);
+        }
+        std::fs::remove_file(&partial)?;
         if let Err(error) = Self::verify_snapshot(path) {
             let _ = std::fs::remove_file(path);
             return Err(error);
+        }
+        #[cfg(unix)]
+        {
+            // File data and directory entries are separate durability steps.
+            // Persist both the verified link and partial-file removal before
+            // the caller prunes old backups.
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| std::path::Path::new("."));
+            std::fs::File::open(parent)?.sync_all()?;
         }
         Ok(())
     }
@@ -347,34 +407,12 @@ impl Storage {
     pub fn verify_snapshot<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<usize> {
         let bytes = std::fs::read(path)?;
         let backup = decode_database_backup(&bytes)?;
-        let entries = backup.entries;
-        if entries.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "backup contains no database entries",
-            ));
-        }
-        let mut keys: std::collections::HashSet<&[u8]> =
-            std::collections::HashSet::with_capacity(entries.len());
-        for (key, _) in &entries {
-            if !keys.insert(key.as_slice()) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "backup contains duplicate database keys",
-                ));
-            }
-        }
-        if !keys.iter().any(|key| *key == b"SCHEMA_VERSION") {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "backup has no schema version",
-            ));
-        }
-        Ok(entries.len())
+        Ok(backup.entries.len())
     }
 
     /// Restore an offline backup into a new, empty sled directory and run the
-    /// Normal migration/integrity checks before reporting success.
+    /// normal migration/integrity checks before reporting success. The target
+    /// leaf must be a real directory, not a symbolic link.
     /// # Errors
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
@@ -385,27 +423,41 @@ impl Storage {
     ) -> std::io::Result<()> {
         let snapshot_path = snapshot_path.as_ref();
         let target_db_path = target_db_path.as_ref();
-        if target_db_path.exists()
-            && std::fs::read_dir(target_db_path)?
-                .next()
-                .transpose()?
-                .is_some()
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                format!("restore target {} is not empty", target_db_path.display()),
-            ));
+        match std::fs::symlink_metadata(target_db_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "restore target {} must not be a symbolic link",
+                        target_db_path.display()
+                    ),
+                ));
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    format!("restore target {} is not a directory", target_db_path.display()),
+                ));
+            }
+            Ok(_) => {
+                if std::fs::read_dir(target_db_path)?
+                    .next()
+                    .transpose()?
+                    .is_some()
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        format!("restore target {} is not empty", target_db_path.display()),
+                    ));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
 
         let bytes = std::fs::read(snapshot_path)?;
         let backup = decode_database_backup(&bytes)?;
         let entries = backup.entries;
-        if entries.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "backup contains no database entries",
-            ));
-        }
         if let Some(parent) = target_db_path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -2501,6 +2553,52 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
     }
 
+    // Sled uses libc::getrlimit, which Miri cannot execute. The normal CI
+    // storage tests exercise this regression instead.
+    #[cfg(not(miri))]
+    #[test]
+    fn blg_202_snapshot_refuses_existing_partial() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().join("db").to_str().unwrap()).unwrap();
+        let backup = dir.path().join("backup.bin");
+        let partial = dir.path().join("backup.bin.partial");
+        std::fs::write(&backup, b"existing backup").unwrap();
+        std::fs::write(&partial, b"existing partial").unwrap();
+
+        let error = storage.create_snapshot(&backup).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&partial).unwrap(), b"existing partial");
+        assert_eq!(std::fs::read(&backup).unwrap(), b"existing backup");
+
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&partial).unwrap();
+            let target = dir.path().join("target");
+            std::fs::write(&target, b"protected target").unwrap();
+            std::os::unix::fs::symlink(&target, &partial).unwrap();
+            let error = storage.create_snapshot(&backup).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+            assert_eq!(std::fs::read(&target).unwrap(), b"protected target");
+            assert_eq!(std::fs::read(&backup).unwrap(), b"existing backup");
+        }
+    }
+
+    #[cfg(not(miri))]
+    #[test]
+    fn blg_202_snapshot_refuses_existing_destination_without_overwrite() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().join("db").to_str().unwrap()).unwrap();
+        let backup = dir.path().join("backup.bin");
+        let partial = dir.path().join("backup.bin.partial");
+        storage.create_snapshot(&backup).expect("first snapshot");
+        let original = std::fs::read(&backup).unwrap();
+
+        let error = storage.create_snapshot(&backup).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&backup).unwrap(), original);
+        assert!(!partial.exists(), "a refused publish leaves no new partial");
+    }
+
     #[test]
     fn corrupt_tx_index_row_is_an_error_not_a_miss() {
         let dir = tempdir().unwrap();
@@ -2698,6 +2796,40 @@ mod tests {
         );
     }
 
+    #[cfg(all(not(miri), unix))]
+    #[test]
+    fn blg_374_restore_snapshot_refuses_a_symlink_target_directory() {
+        let root = tempdir().unwrap();
+        let source_dir = root.path().join("source-db");
+        let source = Storage::new(source_dir.to_str().unwrap()).unwrap();
+        let genesis = Block::genesis();
+        source.commit_block(&genesis, &genesis.state_root).unwrap();
+
+        let backup = root.path().join("node.backup");
+        source.create_snapshot(&backup).unwrap();
+        drop(source);
+
+        let actual_target = root.path().join("actual-target");
+        std::fs::create_dir(&actual_target).unwrap();
+        let symlink_target = root.path().join("restore-target");
+        std::os::unix::fs::symlink(&actual_target, &symlink_target).unwrap();
+
+        let error = Storage::restore_snapshot(&backup, &symlink_target).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(std::fs::symlink_metadata(&symlink_target)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_dir(&actual_target).unwrap().count(), 0);
+
+        std::fs::remove_file(&symlink_target).unwrap();
+        let dangling_target = root.path().join("dangling-target");
+        std::os::unix::fs::symlink(&dangling_target, &symlink_target).unwrap();
+        let error = Storage::restore_snapshot(&backup, &symlink_target).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(!dangling_target.exists());
+    }
+
     #[test]
     fn backup_restore_roundtrip_is_integrity_checked_and_non_destructive() {
         let source_dir = tempdir().unwrap();
@@ -2714,6 +2846,7 @@ mod tests {
         drop(source);
 
         let restored_path = restore_parent.path().join("restored.db");
+        std::fs::create_dir(&restored_path).unwrap();
         Storage::restore_snapshot(&backup, &restored_path).unwrap();
         let restored = Storage::new(restored_path.to_str().unwrap()).unwrap();
         assert_eq!(
@@ -2725,6 +2858,73 @@ mod tests {
 
         let error = Storage::restore_snapshot(&backup, &restored_path).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn blg_202_restore_rejects_duplicate_keys_and_missing_schema() {
+        let root = tempdir().unwrap();
+        let write_backup = |name: &str, entries: Vec<(Vec<u8>, Vec<u8>)>| {
+            let payload = encode(&entries).unwrap();
+            let backup = DatabaseBackupV1 {
+                format_version: 1,
+                entries_hash: crate::core::hash::calculate_hash_bytes(&payload),
+                entries,
+            };
+            let path = root.path().join(name);
+            std::fs::write(&path, encode(&backup).unwrap()).unwrap();
+            path
+        };
+
+        let duplicate = write_backup(
+            "duplicate.backup",
+            vec![
+                (b"SCHEMA_VERSION".to_vec(), b"1".to_vec()),
+                (b"SCHEMA_VERSION".to_vec(), b"1".to_vec()),
+            ],
+        );
+        let duplicate_target = root.path().join("duplicate-target");
+        let error = Storage::restore_snapshot(&duplicate, &duplicate_target).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("duplicate database keys"));
+        assert!(!duplicate_target.exists());
+
+        let missing_schema = write_backup(
+            "missing-schema.backup",
+            vec![(b"LAST".to_vec(), b"00".to_vec())],
+        );
+        let missing_schema_target = root.path().join("missing-schema-target");
+        let error =
+            Storage::restore_snapshot(&missing_schema, &missing_schema_target).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("no schema version"));
+        assert!(!missing_schema_target.exists());
+    }
+
+    #[test]
+    fn blg_202_backup_decoder_is_bounded_and_rejects_trailing_bytes() {
+        let mut excessive_allocation = 1u32.to_le_bytes().to_vec();
+        excessive_allocation.extend_from_slice(&[0; 32]);
+        excessive_allocation.extend_from_slice(&u64::MAX.to_le_bytes());
+        let error = decode_database_backup(&excessive_allocation)
+            .err()
+            .expect("an input-sized limit must reject the declared vector length");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("size limit"), "{error}");
+
+        let root = tempdir().unwrap();
+        let entries = vec![(b"SCHEMA_VERSION".to_vec(), b"1".to_vec())];
+        let payload = encode(&entries).unwrap();
+        let backup = DatabaseBackupV1 {
+            format_version: 1,
+            entries_hash: crate::core::hash::calculate_hash_bytes(&payload),
+            entries,
+        };
+        let mut bytes = encode(&backup).unwrap();
+        bytes.extend_from_slice(b"unauthenticated suffix");
+        let path = root.path().join("trailing.backup");
+        std::fs::write(&path, bytes).unwrap();
+        let error = Storage::verify_snapshot(&path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]

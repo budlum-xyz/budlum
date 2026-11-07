@@ -199,7 +199,8 @@ pub fn shards_commitment(state: &AccountState, num_shards: u16) -> [u8; 32] {
 /// # Errors
 ///
 /// Returns an error when the transaction is not a cross-shard `Transfer`,
-/// when the sender cannot cover the total cost, or when the receiver balance
+/// its nonce does not match the sender's current nonce, the nonce space is
+/// exhausted, the sender cannot cover the total cost, or the receiver balance
 /// would overflow.
 ///
 /// # Panics
@@ -219,12 +220,30 @@ pub fn apply_cross_shard_transfer(
         return Err("apply_cross_shard_transfer requires a Transfer".into());
     }
 
-    let total_cost = tx.total_cost();
+    // `apply_cross_shard_transfer` is a state-transition boundary, not just a
+    // balance helper. Refuse stale or future transactions before any account
+    // is created or balance is changed. In particular, a saturating nonce bump
+    // at `u64::MAX` would otherwise leave this signed transaction replayable.
+    let expected_nonce = state.get_nonce(&tx.from);
+    if tx.nonce != expected_nonce {
+        return Err(format!(
+            "invalid cross-shard transfer nonce: expected {expected_nonce}, got {}",
+            tx.nonce
+        ));
+    }
+    let next_nonce = tx
+        .nonce
+        .checked_add(1)
+        .ok_or_else(|| "cross-shard transfer nonce space is exhausted".to_string())?;
+
+    let total_cost = tx
+        .checked_total_cost()
+        .ok_or_else(|| "cross-shard transfer amount + fee overflows u64".to_string())?;
     // Read-only checks: `get_or_create` would insert empty accounts into
-    // the state on a rejected transfer. The sender's spendable balance is
-    // read, not its raw balance: the vesting lock holds on this path too.
+    // the state on a rejected transfer. Vesting-locked value is not a
+    // spendable balance at this state-transition boundary either.
     if state.spendable_balance(&tx.from) < total_cost {
-        return Err("insufficient balance for cross-shard transfer".into());
+        return Err("insufficient spendable balance for cross-shard transfer".into());
     }
     state
         .get_balance(&tx.to)
@@ -240,7 +259,7 @@ pub fn apply_cross_shard_transfer(
         .balance
         .checked_sub(total_cost)
         .ok_or("shard transfer: sender balance underflow")?;
-    sender.nonce = sender.nonce.saturating_add(1);
+    sender.nonce = next_nonce;
     let receiver = state.get_or_create(&tx.to);
     receiver.balance = receiver
         .balance
@@ -366,14 +385,14 @@ mod tests {
         assert_eq!(state.get_or_create(&addr(0)).nonce, 1);
     }
 
-    /// BULGU-020: the cross-shard transfer reads the spendable balance, so
-    /// the vesting lock of the team account holds on this path too.
     #[test]
-    fn cross_shard_transfer_refuses_vesting_locked_funds() {
+    fn blg_020_cross_shard_transfer_respects_vesting_lock() {
+        let sender = addr(0);
+        let recipient = addr(1);
         let mut state = AccountState::new();
-        state.get_or_create(&addr(0)).balance = 100;
+        state.get_or_create(&sender).balance = 100;
         state.team_vesting = Some((
-            addr(0),
+            sender,
             crate::tokenomics::VestingSchedule {
                 total: 100,
                 start_epoch: 0,
@@ -381,16 +400,89 @@ mod tests {
                 duration_epochs: 100,
             },
         ));
-        assert_eq!(state.spendable_balance(&addr(0)), 0);
-        let num_shards = 2;
-        let tx = transfer(addr(0), addr(1), 40, 5);
-        assert!(apply_cross_shard_transfer(&mut state, &tx, num_shards).is_err());
-        assert_eq!(state.get_or_create(&addr(0)).balance, 100);
-        assert_eq!(state.get_or_create(&addr(0)).nonce, 0);
-        assert_eq!(state.get_or_create(&addr(1)).balance, 0);
+        assert_eq!(state.spendable_balance(&sender), 0);
+        let before = shards_commitment(&state, 2);
+        let locked = transfer(sender, recipient, 1, 1);
+
+        let error = apply_cross_shard_transfer(&mut state, &locked, 2)
+            .expect_err("vesting-locked value must not fund a cross-shard transfer");
+        assert!(error.contains("insufficient spendable balance"));
+        assert_eq!(shards_commitment(&state, 2), before);
+        assert_eq!(state.get_balance(&sender), 100);
+        assert_eq!(state.get_balance(&recipient), 0);
+        assert_eq!(state.get_nonce(&sender), 0);
     }
 
-    /// A rejected transfer must not create accounts.
+    #[test]
+    fn blg_065_cross_shard_transfer_enforces_unlocked_balance_boundary() {
+        let sender = addr(0);
+        let recipient = addr(1);
+        let mut state = AccountState::new();
+        state.get_or_create(&sender).balance = 100;
+        state.team_vesting = Some((
+            sender,
+            crate::tokenomics::VestingSchedule {
+                total: 80,
+                start_epoch: 0,
+                cliff_epochs: 100,
+                duration_epochs: 200,
+            },
+        ));
+        assert_eq!(state.spendable_balance(&sender), 20);
+        let before = shards_commitment(&state, 2);
+
+        let overdraft = transfer(sender, recipient, 20, 1);
+        let error = apply_cross_shard_transfer(&mut state, &overdraft, 2)
+            .expect_err("one unit above the spendable balance must be refused");
+        assert!(error.contains("insufficient spendable balance"));
+        assert_eq!(shards_commitment(&state, 2), before);
+        assert_eq!(state.get_balance(&sender), 100);
+        assert_eq!(state.get_nonce(&sender), 0);
+        assert!(!state.accounts.contains_key(&recipient));
+
+        let exact = transfer(sender, recipient, 19, 1);
+        apply_cross_shard_transfer(&mut state, &exact, 2)
+            .expect("the exact unlocked amount must cover amount plus fee");
+        assert_eq!(state.get_balance(&sender), 80);
+        assert_eq!(state.get_balance(&recipient), 19);
+        assert_eq!(state.get_nonce(&sender), 1);
+    }
+
+    #[test]
+    fn blg_104_cross_shard_transfer_rejects_stale_nonce() {
+        let mut state = AccountState::new();
+        state.get_or_create(&addr(0)).balance = 100;
+        state.get_or_create(&addr(0)).nonce = 1;
+        state.get_or_create(&addr(1)).balance = 0;
+        let before = shards_commitment(&state, 2);
+        let stale = transfer(addr(0), addr(1), 10, 1);
+
+        let error = apply_cross_shard_transfer(&mut state, &stale, 2)
+            .expect_err("stale transfer must be refused");
+        assert!(error.contains("invalid cross-shard transfer nonce"));
+        assert_eq!(shards_commitment(&state, 2), before);
+        assert_eq!(state.get_balance(&addr(0)), 100);
+        assert_eq!(state.get_balance(&addr(1)), 0);
+    }
+
+    #[test]
+    fn blg_104_cross_shard_transfer_rejects_exhausted_nonce() {
+        let mut state = AccountState::new();
+        state.get_or_create(&addr(0)).balance = 100;
+        state.get_or_create(&addr(0)).nonce = u64::MAX;
+        state.get_or_create(&addr(1)).balance = 0;
+        let before = shards_commitment(&state, 2);
+        let mut exhausted = transfer(addr(0), addr(1), 10, 1);
+        exhausted.nonce = u64::MAX;
+
+        let error = apply_cross_shard_transfer(&mut state, &exhausted, 2)
+            .expect_err("exhausted nonce must be refused");
+        assert!(error.contains("nonce space is exhausted"));
+        assert_eq!(shards_commitment(&state, 2), before);
+        assert_eq!(state.get_balance(&addr(0)), 100);
+        assert_eq!(state.get_balance(&addr(1)), 0);
+    }
+
     #[test]
     fn p20_f04_rejected_transfer_creates_no_accounts() {
         let mut state = AccountState::new();

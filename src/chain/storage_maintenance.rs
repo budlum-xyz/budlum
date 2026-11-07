@@ -262,15 +262,21 @@ pub(crate) fn apply_bond_slash(
     // it, so the confiscation adds it to destroyed supply without taking a
     // second bond from the operator's live balance.
     let burned = slashed_bond;
-    state.burned_total = state.burned_total.saturating_add(burned);
+    state.record_destroyed(u128::from(burned));
     if burned > 0 {
         tracing::warn!(
             "Confiscated the escrowed bond {burned} of operator {operator} for {reason}"
         );
     }
     let ledger = &mut state.storage_registry.economics;
-    ledger.slashed_bond_total = ledger.slashed_bond_total.saturating_add(slashed_bond);
-    ledger.burned_bond_total = ledger.burned_bond_total.saturating_add(burned);
+    ledger.slashed_bond_total = ledger
+        .slashed_bond_total
+        .checked_add(slashed_bond)
+        .expect("slashed storage-bond accounting overflowed u64");
+    ledger.burned_bond_total = ledger
+        .burned_bond_total
+        .checked_add(burned)
+        .expect("burned storage-bond accounting overflowed u64");
     ledger.record(StorageEconomicsEvent {
         epoch,
         deal_id,
