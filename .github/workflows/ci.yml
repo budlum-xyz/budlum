@@ -1990,6 +1990,16 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- typos --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- typos
+      # The naming ratchet. `config/naming/concept_map.toml` lists every legacy
+      # architecture name with the code name that replaced it, and this gate
+      # counts the remaining matches against `.github/concept-names-baseline.txt`.
+      # The canary injects a legacy name into a scratch tree and requires the
+      # search to catch it, so a gate that silently searched nothing would be red
+      # here rather than green in the step below.
+      - name: concept names gate + canary (legacy architecture names)
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- concept-names --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- concept-names
       - name: zizmor gate + canary
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- zizmor --self-test

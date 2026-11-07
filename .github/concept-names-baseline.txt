@@ -1,0 +1,40 @@
+# Legacy concept names still in the tree: files and matches per concept,
+# counted from config/naming/concept_map.toml.
+#
+# The numbers only go DOWN. Raise one and the gate fails: a legacy name was
+# added. Lower one and the gate fails until the number here follows, so
+# progress cannot go unrecorded.
+#
+# Regenerate with BUDLUM_CONCEPT_NAMES_WRITE=1 and
+# `cargo run --release --manifest-path xtask/gates/Cargo.toml -- concept-names`.
+# The writer refuses to raise a number, so the variable cannot record a
+# regression and this file is never edited by hand.
+#
+# Format: <concept> TAB <files> TAB <matches>
+Filiz (leader election)	11	225
+Filiz (faucet)	1	14
+Kiragi	6	16
+Mikoriza	23	78
+Graft	41	895
+Pollen	70	755
+Budscan	32	258
+Atlas	7	55
+D-Web Passport	10	88
+Vault (SocialFi)	7	152
+DeEd	12	34
+budlumxyz	25	203
+Developer OS	6	50
+Universal Gateway	5	8
+Regeneration	43	316
+PUL	13	99
+Tarif	50	1433
+three_* modules	30	196
+Liquid storage	0	0
+Living Threshold	5	15
+Mobile Self	13	117
+Gonca	0	0
+GT-1	0	0
+Anaç	0	0
+Fotosentez	7	19
+Gövde	1	1
+Sera	0	0
