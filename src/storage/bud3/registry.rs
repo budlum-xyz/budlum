@@ -1252,6 +1252,89 @@ impl Bud3Registry {
         n
     }
 
+    /// Ages of currently open audits, derived without changing consensus state.
+    /// The stored deadline is `opened + class_window`, so the opening epoch is
+    /// recoverable from the canonical tuple and the same audit parameters used
+    /// by the chain.
+    #[must_use]
+    pub fn open_audit_ages(&self, epoch: u64, params: &AuditParams) -> Vec<u64> {
+        let mut ages = Vec::new();
+        for object in self.objects.values() {
+            for share in &object.shares {
+                let Some((_, deadline)) = share.open_audit else {
+                    continue;
+                };
+                let window = match share.share.class {
+                    Class::Full => params.full_window,
+                    Class::Mobile => params.mobile_window,
+                };
+                let opened = deadline.saturating_sub(window);
+                ages.push(epoch.saturating_sub(opened));
+            }
+        }
+        ages
+    }
+
+    /// Segments with at least one lost share. This deterioration signal is
+    /// intentionally earlier than the lazy repair threshold.
+    #[must_use]
+    pub fn segments_at_risk(&self, key: &ObjectKey) -> usize {
+        let Some(object) = self.objects.get(key) else {
+            return 0;
+        };
+        object
+            .shares
+            .iter()
+            .filter(|share| share.lost)
+            .map(|share| share.segment)
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+
+    /// Sum of [`Self::segments_at_risk`] over every live object.
+    #[must_use]
+    pub fn total_segments_at_risk(&self) -> usize {
+        self.objects
+            .keys()
+            .map(|key| self.segments_at_risk(key))
+            .sum()
+    }
+
+    /// Open repair duties across every live object.
+    #[must_use]
+    pub fn repair_backlog(&self) -> usize {
+        self.objects
+            .keys()
+            .map(|key| self.repairs_due(key).len())
+            .sum()
+    }
+
+    /// Physical custody required by the live placement, as `(full, mobile)`.
+    /// Lost shares remain included until repair settles because the placement
+    /// still requires those bytes; this is not an observation of remote disks.
+    #[must_use]
+    pub fn custody_bytes_by_class(&self) -> (u64, u64) {
+        let mut full = 0u64;
+        let mut mobile = 0u64;
+        for object in self.objects.values() {
+            let symbol_size = u64::from(object.record.profile.symbol_size);
+            for share in &object.shares {
+                let bytes = u64::from(share.share.symbols).saturating_mul(symbol_size);
+                match share.share.class {
+                    Class::Full => full = full.saturating_add(bytes),
+                    Class::Mobile => mobile = mobile.saturating_add(bytes),
+                }
+            }
+        }
+        (full, mobile)
+    }
+
+    /// Number of live objects in the rooted registry.
+    #[must_use]
+    pub fn object_count(&self) -> usize {
+        self.objects.len()
+    }
+
     /// The segments of `key` that need repair. Repair is lazy: a segment is
     /// due once its lost shares reach half its tolerance `f`, where `f` is the
     /// number of its largest shares it can lose and keep `k + 2` symbols.

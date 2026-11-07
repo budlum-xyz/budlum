@@ -645,14 +645,135 @@ pub fn self_test() -> Result<String, String> {
         ));
     }
 
+    labelled_case(&tmp)?;
     empty_case(&tmp)?;
 
     let _ = fs::remove_dir_all(&tmp);
     Ok(String::from(
         "metrics-are-written canary OK (written PASSes, unwritten FAILs, baseline exempts, \
          stale baseline FAILs, multi-line and start_timer count, cfg(test) does not, \
-         bodyless cfg(test) does not swallow, identity boundary holds, comment-only write FAILs, empty tree FAILs).",
+         bodyless cfg(test) does not swallow, identity boundary holds, comment-only write FAILs, \
+         labelled series count only through with_label_values, empty tree FAILs).",
     ))
+}
+
+/// A labelled series is written by `with_label_values` and by nothing else.
+///
+/// `budlum_bud3_custody_bytes` and `budlum_ee_fault_total` are `IntGaugeVec`
+/// and `IntCounterVec`: their write is `with_label_values(&[...]).set(...)`,
+/// so the vector's own name never appears directly before a mutator. Without
+/// this case the gate's `with_label_values` entry would be dead code, and a
+/// vec that no production path touched would pass by accident.
+fn labelled_case(tmp: &Path) -> Result<(), String> {
+    let mut fields = String::new();
+    let mut inits = String::new();
+    let mut registers = String::new();
+    let mut struct_init = String::new();
+    for i in 0..11 {
+        let name = format!("m{i}");
+        let _ = writeln!(fields, "    pub {name}: IntGauge");
+        let _ = writeln!(
+            inits,
+            "        let {name} = IntGauge::new(\"budlum_{name}\", \"h\")?"
+        );
+        let _ = writeln!(
+            registers,
+            "        registry.register(Box::new({name}.clone()))?"
+        );
+        let _ = writeln!(struct_init, "            {name},");
+    }
+    let _ = writeln!(fields, "    pub v0: IntGaugeVec");
+    let _ = writeln!(
+        inits,
+        "        let v0 = IntGaugeVec::new(Opts::new(\"budlum_v0\", \"h\"), LABELS)?"
+    );
+    let _ = writeln!(registers, "        registry.register(Box::new(v0.clone()))?");
+    let _ = writeln!(struct_init, "            v0,");
+    let metrics = format!(
+        "use prometheus::{{IntGauge, IntGaugeVec, Opts, Registry}};\n\
+         const LABELS: &[&str] = &[\"class\"];\n\
+         pub struct Metrics {{\n\
+         {fields}\
+         }}\n\
+         impl Metrics {{\n\
+         pub fn new() -> Result<Self, prometheus::Error> {{\n\
+         let registry = Registry::new();\n\
+         {inits}\n\
+         {registers}\n\
+         Ok(Metrics {{\n\
+         {struct_init}\n\
+         }})\n\
+         }}\n\
+         }}\n"
+    );
+    let writer = "fn emit(m: &crate::core::metrics::Metrics) {\n\
+                  m.m0.set(1); m.m1.set(1); m.m2.set(1); m.m3.set(1);\n\
+                  m.m4.set(1); m.m5.set(1); m.m6.set(1); m.m7.set(1);\n\
+                  m.m8.set(1); m.m9.set(1); m.m10.set(1);\n\
+                  m.v0.with_label_values(&[\"full\"]).set(1);\n\
+                  }\n";
+    let written = tmp.join("labelled");
+    write_tree(
+        &written,
+        &[
+            ("docs/ARCHITECTURE.md", "# a\n"),
+            ("Cargo.toml", "[package]\nname=\"x\"\nversion=\"0\"\n"),
+            ("src/core/metrics.rs", &metrics),
+            ("src/writer.rs", writer),
+        ],
+    )?;
+    if !accepts(&written)? {
+        return Err(String::from(
+            "canary: a labelled series written through with_label_values was not detected",
+        ));
+    }
+
+    // And with no write at all the vec is unwritten: the case is not passing
+    // because the parser ignored the field.
+    let unwritten = tmp.join("labelled_unwritten");
+    let no_write = "fn emit(m: &crate::core::metrics::Metrics) {\n\
+                    m.m0.set(1); m.m1.set(1); m.m2.set(1); m.m3.set(1);\n\
+                    m.m4.set(1); m.m5.set(1); m.m6.set(1); m.m7.set(1);\n\
+                    m.m8.set(1); m.m9.set(1); m.m10.set(1);\n\
+                    }\n";
+    write_tree(
+        &unwritten,
+        &[
+            ("docs/ARCHITECTURE.md", "# a\n"),
+            ("Cargo.toml", "[package]\nname=\"x\"\nversion=\"0\"\n"),
+            ("src/core/metrics.rs", &metrics),
+            ("src/writer.rs", no_write),
+        ],
+    )?;
+    if accepts(&unwritten)? {
+        return Err(String::from(
+            "canary: an untouched labelled series passed as written",
+        ));
+    }
+
+    // A field declared through a module path (`prometheus::IntCounterVec`) is
+    // not matched: the gate compares the declared type against a fixed list of
+    // bare names. That is why `src/core/metrics.rs` imports its metric types
+    // and declares the fields bare. This tree removes the vec from the struct
+    // while the writer still calls `with_label_values`; with nothing declared
+    // there is nothing to measure, and the gate must still pass.
+    let qualified = tmp.join("labelled_qualified");
+    let qualified_metrics = metrics.replace("    pub v0: IntGaugeVec\n", "");
+    write_tree(
+        &qualified,
+        &[
+            ("docs/ARCHITECTURE.md", "# a\n"),
+            ("Cargo.toml", "[package]\nname=\"x\"\nversion=\"0\"\n"),
+            ("src/core/metrics.rs", &qualified_metrics),
+            ("src/writer.rs", writer),
+        ],
+    )?;
+    if !accepts(&qualified)? {
+        return Err(String::from(
+            "canary: a tree with no vec field should satisfy the gate",
+        ));
+    }
+    Ok(())
 }
 fn timer_case(tmp: &Path) -> Result<(), String> {
     // start_timer counts as a write for histograms - use a dedicated tree.

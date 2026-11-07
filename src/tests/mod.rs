@@ -253,7 +253,21 @@ pub mod bud3_door;
 // Prometheus alert rules may only name metrics the node exports.
 #[cfg(test)]
 pub mod alert_rules_reference_existing_metrics;
+#[cfg(test)]
+pub mod alerts_have_runbook_entries;
 
 // Derived object-layer measurement rings and counters.
 #[cfg(test)]
 pub mod object_layer_metrics;
+
+// Readiness series and the operational surfaces that scrape and alert on them.
+#[cfg(test)]
+pub mod backup_covers_persisted_paths;
+#[cfg(test)]
+pub mod caddy_edges_match_the_services;
+#[cfg(test)]
+pub mod compose_topology_matches_services;
+#[cfg(test)]
+pub mod readiness_metrics;
+#[cfg(test)]
+pub mod scrape_topology_covers_the_rules;

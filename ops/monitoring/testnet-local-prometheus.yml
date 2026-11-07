@@ -27,3 +27,10 @@ scrape_configs:
         labels: { node: "validator8", network: "testnet-local" }
       - targets: ["rpc:9090"]
         labels: { node: "rpc", network: "testnet-local" }
+  # The host's node_exporter: `BudlumDiskFillingUp` reads
+  # `node_filesystem_avail_bytes`, which only exists once this job scrapes it.
+  # `host.docker.internal` is Docker's name for the host the containers run on.
+  - job_name: node
+    static_configs:
+      - targets: ["host.docker.internal:9100"]
+        labels: { node: "host", network: "testnet-local" }

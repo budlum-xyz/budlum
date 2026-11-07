@@ -1,4 +1,7 @@
-use prometheus::{Encoder, Histogram, HistogramOpts, IntCounter, IntGauge, Registry, TextEncoder};
+use prometheus::{
+    Encoder, Histogram, HistogramOpts, IntCounter, IntGauge, IntGaugeVec, Registry,
+    TextEncoder,
+};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -67,7 +70,7 @@ pub struct Metrics {
     pub peer_connection_quality: IntGauge,
     pub consensus_round_seconds: Histogram,
     pub finality_lag: IntGauge,
-    /// 1 when finality has stalled for at least 40 blocks and recovery mode is active (Section 7.7).
+    /// 1 when finality lag reaches the eight-checkpoint recovery threshold (Section 7.7).
     pub finality_stalled: IntGauge,
     pub storage_db_size_bytes: IntGauge,
     /// Content chunks retained by the durable B.U.D. content store.
@@ -241,6 +244,66 @@ pub struct Metrics {
     /// counter lives in the facade (it has no dependency on the node), and
     /// [`Metrics::encode`] folds it into this series before every scrape.
     pub pq_verifier_disagreement: IntCounter,
+    /// Head height minus finalized height, counted in finality checkpoints.
+    ///
+    /// `finality_lag` counts blocks, so the same one-checkpoint delay reads
+    /// as `5` on the testnet (5-block checkpoints) and `10` on mainnet. The
+    /// recovery threshold in Section 7.7 is stated in checkpoints, and an
+    /// operator should not have to divide by the interval at the alert. This
+    /// gauge is that division.
+    pub finality_lag_checkpoints: IntGauge,
+    /// Times a block was refused because its state root disagreed with the
+    /// state this node computed.
+    ///
+    /// A non-zero rate is a determinism split: the same chain, two
+    /// results. Counting it is what makes the divergence visible before two
+    /// nodes have forked from each other in silence.
+    pub state_root_mismatch_total: IntCounter,
+    /// Relayer requests whose result transaction is submitted but not yet
+    /// seen in a finalized block.
+    ///
+    /// These are the entries that keep a relayer restart from repeating an
+    /// external action. One that never goes down is a result the mempool
+    /// keeps dropping; the gauge is how an operator sees that without
+    /// reading the pending file by hand.
+    pub relay_reservations: IntGauge,
+    /// Relayer reservations whose external action was in flight and whose
+    /// result was never observed.
+    ///
+    /// A subset of [`Self::relay_reservations`] that needs a person: the
+    /// external transaction has to be looked up by nonce and the entry
+    /// cleared or completed. The worker logs it once per pass; this gauge is
+    /// the count an alert can page on.
+    pub relay_inflight_reservations: IntGauge,
+    /// Live B.U.D. 3.0 objects in the rooted registry.
+    pub bud3_objects: IntGauge,
+    /// Segments with at least one lost share.
+    ///
+    /// Distinct from [`Self::bud3_repair_backlog`] on purpose: repair is lazy
+    /// and fires at `f / 2` lost shares, so a segment can be deteriorating
+    /// while no task is open. The first gauge is the warning, the second is
+    /// the work.
+    pub bud3_segments_at_risk: IntGauge,
+    /// Segments that have reached the repair threshold and have an open
+    /// repair task.
+    pub bud3_repair_backlog: IntGauge,
+    /// Age of a currently open custody audit, sampled in seconds.
+    ///
+    /// The age is derived from the canonical audit deadline and class window;
+    /// no observability field enters consensus-serialized share state.
+    ///
+    /// A histogram rather than a gauge because the operator question is a
+    /// distribution: "are holders answering inside their window" is answered
+    /// by a high quantile against the window length, not by the age of the
+    /// oldest audit.
+    pub bud3_audit_latency_seconds: Histogram,
+    /// Live custody bytes per validator class (`class="full"` and
+    /// `class="mobile"`).
+    ///
+    /// The class split is the point: the mobile floor is a promise about how
+    /// much of the network's custody sits on phones, and a single total
+    /// hides it.
+    pub bud3_custody_bytes: IntGaugeVec,
 }
 
 impl Metrics {
@@ -309,10 +372,6 @@ impl Metrics {
         let liveness_tracked_validators = IntGauge::new(
             "budlum_liveness_tracked_validators",
             "Validators with retained liveness-tracker state",
-        )?;
-        let finality_stalled = IntGauge::new(
-            "budlum_finality_stalled",
-            "1 when finality has stalled for at least 40 blocks and disaster recovery mode is active",
         )?;
         let invalid_vote_tracked_validators = IntGauge::new(
             "budlum_invalid_vote_tracked_validators",
@@ -722,6 +781,50 @@ impl Metrics {
             "Total RPC requests rejected due to rate limiting",
         )?;
 
+        let finality_lag_checkpoints = IntGauge::new(
+            "budlum_finality_lag_checkpoints",
+            "Head height minus finalized height, in finality checkpoints",
+        )?;
+        let finality_stalled = IntGauge::new(
+            "budlum_finality_stalled",
+            "1 when no checkpoint has finalized for eight checkpoint intervals",
+        )?;
+        let state_root_mismatch_total = IntCounter::new(
+            "budlum_state_root_mismatch_total",
+            "Blocks refused because their state root disagreed with the state this node computed",
+        )?;
+        let relay_reservations = IntGauge::new(
+            "budlum_relay_reservations",
+            "Relayer results submitted but not yet seen in a finalized block",
+        )?;
+        let relay_inflight_reservations = IntGauge::new(
+            "budlum_relay_inflight_reservations",
+            "Relayer reservations whose external action is in flight and needs an operator",
+        )?;
+        let bud3_objects = IntGauge::new(
+            "budlum_bud3_objects",
+            "Live B.U.D. 3.0 objects in the rooted registry",
+        )?;
+        let bud3_segments_at_risk = IntGauge::new(
+            "budlum_bud3_segments_at_risk",
+            "B.U.D. 3.0 segments with at least one lost share",
+        )?;
+        let bud3_repair_backlog = IntGauge::new(
+            "budlum_bud3_repair_backlog",
+            "B.U.D. 3.0 segments past the repair threshold with an open repair task",
+        )?;
+        let bud3_audit_latency_seconds = Histogram::with_opts(HistogramOpts::new(
+            "budlum_bud3_audit_latency_seconds",
+            "Age of a currently open B.U.D. 3.0 custody audit in seconds",
+        ))?;
+        let bud3_custody_bytes = IntGaugeVec::new(
+            prometheus::Opts::new(
+                "budlum_bud3_custody_bytes",
+                "B.U.D. 3.0 custody bytes required by live placement per validator class",
+            ),
+            &["class"],
+        )?;
+
         registry.register(Box::new(chain_height.clone()))?;
         registry.register(Box::new(account_rows.clone()))?;
         registry.register(Box::new(unbonding_rows.clone()))?;
@@ -845,6 +948,15 @@ impl Metrics {
         registry.register(Box::new(slashing_events_total.clone()))?;
         registry.register(Box::new(pq_verifier_disagreement.clone()))?;
         registry.register(Box::new(rpc_rate_limited_total.clone()))?;
+        registry.register(Box::new(finality_lag_checkpoints.clone()))?;
+        registry.register(Box::new(state_root_mismatch_total.clone()))?;
+        registry.register(Box::new(relay_reservations.clone()))?;
+        registry.register(Box::new(relay_inflight_reservations.clone()))?;
+        registry.register(Box::new(bud3_objects.clone()))?;
+        registry.register(Box::new(bud3_segments_at_risk.clone()))?;
+        registry.register(Box::new(bud3_repair_backlog.clone()))?;
+        registry.register(Box::new(bud3_audit_latency_seconds.clone()))?;
+        registry.register(Box::new(bud3_custody_bytes.clone()))?;
 
         Ok(Metrics {
             registry: Arc::new(registry),
@@ -971,6 +1083,15 @@ impl Metrics {
             identity_revoked_rows,
             slashing_events_total,
             pq_verifier_disagreement,
+            finality_lag_checkpoints,
+            state_root_mismatch_total,
+            relay_reservations,
+            relay_inflight_reservations,
+            bud3_objects,
+            bud3_segments_at_risk,
+            bud3_repair_backlog,
+            bud3_audit_latency_seconds,
+            bud3_custody_bytes,
         })
     }
 
@@ -1136,6 +1257,40 @@ mod tests {
             !scrape.contains("budlum_peer_count"),
             "deleted duplicate gauge must not reappear in scrapes"
         );
+    }
+
+    /// The readiness series are registered, exported, and start at their
+    /// honest zero.
+    ///
+    /// A console that renders a missing series as "no data" looks the same as
+    /// a quiet network, so the named readiness metrics are asserted to be in
+    /// the scrape body before anything writes them. `finality_stalled` is `0`
+    /// with nothing bound and `1` once the node is eight checkpoints behind;
+    /// the second half of that is `finality_gauges_follow_the_chain`, which
+    /// drives the real emit path.
+    #[test]
+    fn readiness_series_are_exported_before_they_are_written() {
+        let metrics = Metrics::new().expect("metric names are literals");
+        let scrape = metrics.encode();
+        for name in [
+            "budlum_finality_stalled",
+            "budlum_finality_lag_checkpoints",
+            "budlum_state_root_mismatch_total",
+            "budlum_relay_reservations",
+            "budlum_relay_inflight_reservations",
+            "budlum_bud3_objects",
+            "budlum_bud3_segments_at_risk",
+            "budlum_bud3_repair_backlog",
+            "budlum_bud3_audit_latency_seconds",
+            "budlum_bud3_custody_bytes",
+        ] {
+            assert!(
+                scrape.contains(name),
+                "readiness series {name} missing from the scrape"
+            );
+        }
+        assert_eq!(metrics.finality_stalled.get(), 0);
+        assert_eq!(metrics.state_root_mismatch_total.get(), 0);
     }
 
     /// A split verdict between the two ML-DSA libraries reaches the scrape.

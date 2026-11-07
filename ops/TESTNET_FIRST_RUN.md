@@ -62,7 +62,7 @@ loads its testnet config, plus all of the following:
 No startup or hardware validation is implied by this preparation guide. After
 an operator supplies those pieces and starts the node, check `bud_chainId`,
 the signer self-test and faucet health before proceeding to
-`ops/BACKUP_DRILL.md`.
+`ops/BACKUP_AND_RESTORE.md`.
 
 A real validator does not use SoftHSM. Replace the module path, slot and PIN
 environment name with the hardware HSM's values and keep the same config

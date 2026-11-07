@@ -19,7 +19,7 @@ systemd override. The unit exports `SOFTHSM2_CONF`, but its generic mainnet
 `ExecStart` must not be started unchanged; genesis, peers and key paths remain
 operator prerequisites. The compatibility gateways and their public hosts are listed in
 `ops/Caddyfile.testnet`; the host-level startup and backup procedures are in
-`ops/TESTNET_FIRST_RUN.md` and `ops/BACKUP_DRILL.md`.
+`ops/TESTNET_FIRST_RUN.md` and `ops/BACKUP_AND_RESTORE.md`.
 
 `<TESTNET_DOMAIN>` stands for the testnet's DNS name. It is filled in when
 the operators publish it; until then no public endpoint exists, and every
