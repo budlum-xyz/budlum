@@ -597,6 +597,31 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- generated-content-is-verifiable 2>&1 | tee -a /tmp/gate-out.log
           exit "${PIPESTATUS[0]}"
+      # `bud3.proto` is not compiled by the Rust
+      # workspace, so nothing in `cargo test` reads it. This pair is what makes
+      # its "placeholder-free and exactly fielded" claim checkable: an
+      # unreachable message, a reused field number, a BOF-1 header field or a
+      # raster on the wire all fail here.
+      - name: B.U.D. 3.0 module claims do not collide canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-module-claims-do-not-collide --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: B.U.D. 3.0 module claims do not collide
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-module-claims-do-not-collide 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: B.U.D. 3.0 wire contract is total canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-proto-is-total --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: B.U.D. 3.0 wire contract is total
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud3-proto-is-total 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: QR is derivative only canary
         if: always() && steps.build.outcome == 'success'
         run: |

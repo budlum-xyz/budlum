@@ -61,9 +61,11 @@ mod gates {
     pub mod bud3_dependent_modules;
     pub mod bud3_fee_uses_physical_bytes;
     pub mod bud3_forbidden_phrases;
+    pub mod bud3_module_claims;
     pub mod bud3_object_is_universal;
     pub mod bud3_paid_view;
     pub mod bud3_placement;
+    pub mod bud3_proto_is_total;
     pub mod bud3_qr_is_presentation;
     pub mod bud3_repair_fires;
     pub mod bud3_sealed_and_deletion;
@@ -591,6 +593,22 @@ const GATES: &[Gate] = &[
         run: gates::bud3_forbidden_phrases::run,
         run_args: None,
         self_test: gates::bud3_forbidden_phrases::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "bud3-module-claims-do-not-collide",
+        replaces: None,
+        run: gates::bud3_module_claims::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_module_claims::self_test,
+    },
+    Gate {
+        name: "bud3-proto-is-total",
+        replaces: None,
+        run: gates::bud3_proto_is_total::run,
+        run_args: None,
+        self_test: gates::bud3_proto_is_total::self_test,
         run_log: None,
     },
     Gate {
