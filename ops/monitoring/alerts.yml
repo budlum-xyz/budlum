@@ -94,3 +94,24 @@ groups:
           severity: critical
         annotations:
           summary: "Less than 10% disk left on {{ $labels.instance }}"
+
+  # Public-service alerts use only metrics registered by the node. Add each
+  # further alert together with its exporter; the metric-reference test reads
+  # every expression and refuses a name missing from the inventory.
+  - name: budlum-public-services
+    rules:
+      - alert: BudlumRpcRateLimitedSpike
+        expr: increase(budlum_rpc_rate_limited_total[5m]) > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RPC rate limiter refused {{ $value }} requests in 5 minutes"
+
+      - alert: BudlumRpcRefusalRateHigh
+        expr: rate(budlum_rpc_rate_limited_total[5m]) / clamp_min(rate(budlum_rpc_requests_total[5m]), 1) > 0.10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 10% of RPC requests are being rate limited"

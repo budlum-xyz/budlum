@@ -1,16 +1,18 @@
 # Full local testnet rehearsal.
 #
-# The testnet profile (chain 45261, the mainnet distribution, the
-# four-validator ceremony) on one machine: four validators, one RPC node,
-# the faucet, the explorer API, Prometheus and Grafana. Every service uses the
-# one image ops/Dockerfile builds; the role is the entrypoint.
+# The testnet profile (chain 45261, the mainnet distribution, an
+# eight-record ceremony) on one machine: four validator containers running
+# eight independent validator processes, one RPC node, the faucet, the
+# explorer API, Prometheus and Grafana. Every service uses the one image
+# ops/Dockerfile builds; the role is the entrypoint.
 #
 #   docker compose -f ops/testnet-local.yml up -d --build
 #
-# The `ceremony` service runs once: four `bud validator init`, one
-# `budlum-faucet keygen`, and `bud genesis assemble --network testnet` with
-# the faucet as the community destination. The other
-# destinations are local stand-ins. Keys stay in the `ceremony` volume.
+# The `ceremony` service runs once: eight `bud validator init` records and
+# eight P2P identities, one `budlum-faucet keygen`, and `bud genesis assemble`
+# with the faucet as the community destination. Each of four containers runs
+# two seats, so all eight genesis seats are online and no quorum is reduced.
+# The other destinations are local stand-ins. Keys stay in the ceremony volume.
 #
 # Published on loopback only: RPC 28545 (no API key), faucet 28600,
 # explorer API 28700, Prometheus 29091, Grafana 23000.
@@ -39,12 +41,14 @@ services:
         dir=/home/budlum/ceremony
         [ -f "$$dir/genesis.json" ] && exit 0
         mkdir -p "$$dir/operators"
-        for i in 1 2 3 4; do
+        # Eight full-validator records go into the ceremony.
+        for i in 1 2 3 4 5 6 7 8; do
           bud validator init --chain-id 45261 --moniker "validator$$i" \
             --key-file "$$dir/validator$$i.key" --record-out "$$dir/operators/validator$$i.json"
         done
-        for i in 1 2 3 4; do
-          bud node identity --identity-file "$$dir/validator$$i.p2p" --host "validator$$i" --port 5001 \
+        for i in 1 2 3 4 5 6 7 8; do
+          if [ "$$i" -le 4 ]; then host="validator$$i"; port=5001; else host="validator$$(($$i - 4))"; port=5002; fi
+          bud node identity --identity-file "$$dir/validator$$i.p2p" --host "$$host" --port "$$port" \
             | sed -n 's/^bootnode (config \[p2p\] bootnodes): "\(.*\)"$$/\1/p' > "$$dir/validator$$i.bootnode"
         done
         faucet=$$(budlum-faucet keygen --out "$$dir/faucet.seed" | sed -n 's/^faucet address: 0x//p')
@@ -63,19 +67,10 @@ services:
     volumes:
       - validator1_data:/home/budlum/data
       - ceremony:/home/budlum/ceremony:ro
-    # The bootnode multiaddr (with the peer id) comes from the ceremony.
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - >-
-        exec budlum-core --network=testnet
-        --genesis-file=/home/budlum/ceremony/genesis.json
-        --consensus=pos --role=validator
-        --validator-key-file=/home/budlum/ceremony/validator1.key
-        --p2p-identity-file=/home/budlum/ceremony/validator1.p2p
-        --port=5001 --db-path=/home/budlum/data/db
-        --rpc-public-listener=127.0.0.1:8545 --rpc-operator-listener=127.0.0.1:8546
-        --metrics-listener=0.0.0.0:9090
-        --bootstrap="$$(cat /home/budlum/ceremony/validator2.bootnode)"
+      - ./testnet-local-validator.sh:/home/budlum/testnet-local-validator.sh:ro
+    # Two seats share a container, never a key, port, database, or process.
+    entrypoint: ["/bin/sh", "/home/budlum/testnet-local-validator.sh"]
+    command: ["1", "5", "validator2"]
     depends_on:
       ceremony:
         condition: service_completed_successfully
@@ -86,19 +81,10 @@ services:
     volumes:
       - validator2_data:/home/budlum/data
       - ceremony:/home/budlum/ceremony:ro
-    # The bootnode multiaddr (with the peer id) comes from the ceremony.
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - >-
-        exec budlum-core --network=testnet
-        --genesis-file=/home/budlum/ceremony/genesis.json
-        --consensus=pos --role=validator
-        --validator-key-file=/home/budlum/ceremony/validator2.key
-        --p2p-identity-file=/home/budlum/ceremony/validator2.p2p
-        --port=5001 --db-path=/home/budlum/data/db
-        --rpc-public-listener=127.0.0.1:8545 --rpc-operator-listener=127.0.0.1:8546
-        --metrics-listener=0.0.0.0:9090
-        --bootstrap="$$(cat /home/budlum/ceremony/validator1.bootnode)"
+      - ./testnet-local-validator.sh:/home/budlum/testnet-local-validator.sh:ro
+    # Two seats share a container, never a key, port, database, or process.
+    entrypoint: ["/bin/sh", "/home/budlum/testnet-local-validator.sh"]
+    command: ["2", "6", "validator1"]
     depends_on:
       ceremony:
         condition: service_completed_successfully
@@ -109,19 +95,10 @@ services:
     volumes:
       - validator3_data:/home/budlum/data
       - ceremony:/home/budlum/ceremony:ro
-    # The bootnode multiaddr (with the peer id) comes from the ceremony.
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - >-
-        exec budlum-core --network=testnet
-        --genesis-file=/home/budlum/ceremony/genesis.json
-        --consensus=pos --role=validator
-        --validator-key-file=/home/budlum/ceremony/validator3.key
-        --p2p-identity-file=/home/budlum/ceremony/validator3.p2p
-        --port=5001 --db-path=/home/budlum/data/db
-        --rpc-public-listener=127.0.0.1:8545 --rpc-operator-listener=127.0.0.1:8546
-        --metrics-listener=0.0.0.0:9090
-        --bootstrap="$$(cat /home/budlum/ceremony/validator1.bootnode)"
+      - ./testnet-local-validator.sh:/home/budlum/testnet-local-validator.sh:ro
+    # Two seats share a container, never a key, port, database, or process.
+    entrypoint: ["/bin/sh", "/home/budlum/testnet-local-validator.sh"]
+    command: ["3", "7", "validator1"]
     depends_on:
       ceremony:
         condition: service_completed_successfully
@@ -132,19 +109,10 @@ services:
     volumes:
       - validator4_data:/home/budlum/data
       - ceremony:/home/budlum/ceremony:ro
-    # The bootnode multiaddr (with the peer id) comes from the ceremony.
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - >-
-        exec budlum-core --network=testnet
-        --genesis-file=/home/budlum/ceremony/genesis.json
-        --consensus=pos --role=validator
-        --validator-key-file=/home/budlum/ceremony/validator4.key
-        --p2p-identity-file=/home/budlum/ceremony/validator4.p2p
-        --port=5001 --db-path=/home/budlum/data/db
-        --rpc-public-listener=127.0.0.1:8545 --rpc-operator-listener=127.0.0.1:8546
-        --metrics-listener=0.0.0.0:9090
-        --bootstrap="$$(cat /home/budlum/ceremony/validator1.bootnode)"
+      - ./testnet-local-validator.sh:/home/budlum/testnet-local-validator.sh:ro
+    # Two seats share a container, never a key, port, database, or process.
+    entrypoint: ["/bin/sh", "/home/budlum/testnet-local-validator.sh"]
+    command: ["4", "8", "validator1"]
     depends_on:
       ceremony:
         condition: service_completed_successfully
@@ -185,11 +153,13 @@ services:
       - "127.0.0.1:28600:18600"
     volumes:
       - ceremony:/home/budlum/ceremony:ro
+      - faucet_data:/home/budlum/data
     entrypoint: ["budlum-faucet"]
     command:
       - "serve"
       - "--rpc-url=http://rpc:8545"
       - "--key-file=/home/budlum/ceremony/faucet.seed"
+      - "--state-file=/home/budlum/data/faucet-state.json"
       - "--listen=0.0.0.0:18600"
       # Local rehearsal only; Docker's NAT can make clients share one IP.
       - "--allow-direct"
@@ -243,6 +213,7 @@ volumes:
   validator3_data:
   validator4_data:
   rpc_data:
+  faucet_data:
   indexer_data:
 
 networks:
