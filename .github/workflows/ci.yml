@@ -2113,6 +2113,17 @@ jobs:
         run: cargo fmt --manifest-path xtask/gates/Cargo.toml --check
       - name: Rust gates unit tests (concept-names canary and ratchet tests included)
         run: cargo test --release --manifest-path xtask/gates/Cargo.toml
+      # TLG-24 asks whether the concept ratchet is green. It is green in count
+      # mode: 27 entries and 5036 matches, equal to the baseline, re-measured
+      # with an independent counter and recorded in docs/audit/TLG_REPORT.md.
+      # Absolute mode (every count at zero) is a separate decision, so this step
+      # carries the reference the launch-gate row cites and an annotation so the
+      # evidence is attached to a run rather than to a commit message.
+      - name: Concept name ratchet (TLG-24 evidence) + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- concept-names --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- concept-names
+          echo "::notice title=TLG-24::concept-names is green in count mode; the measurement is in docs/audit/TLG_REPORT.md"
       # xtask/tools is its own workspace and runs five CI tools (audit-guard,
       # step-reachability, audit-deps, generate-sbom, the smoke tools). Its
       # lints are pedantic-deny and its unit tests (the committed FSF document
