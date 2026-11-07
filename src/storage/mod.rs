@@ -1,7 +1,10 @@
 //! Storage layer: B.U.D. content-addressing and object primitives.
 //!
 //! Node-local persistence (sled) lives in `crate::persistence`.
-//! This module retains only B.U.D. content types and codecs.
+//! This module retains only B.U.D. content types and codecs; the Bud3
+//! object plane lives in `crate::storage::bud3` (T-Launch IP-10..25).
+//! Legacy B.U.D. 2.0 storage primitives remain until `no_legacy_storage`
+//! is fully enforced.
 //!
 //! The domain-level deal / challenge accounting lives in
 //! `crate::domain::storage_deal::StorageRegistry` (kept under
@@ -112,6 +115,7 @@ pub use provider::{
 pub use render::{render, render_and_verify, RenderError, RenderFormat};
 pub use server_admission::{admit_device_as_server, ServerAdmission, ServerAdmissionRefusal};
 
+pub mod bud3;
 pub mod pact_binding;
 pub use view_grant::{
     confidential_commit_digest, grant_issue_digest, grant_revoke_digest, social_delete_digest,

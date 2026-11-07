@@ -1159,6 +1159,11 @@ pub enum StorageError {
     /// The primary is the copy a reader reaches first and a repair rebuilds
     /// from. A device that is online when its owner is awake cannot be it.
     MobileOperatorCannotHoldPrimary(Address),
+    /// B.U.D. 3.0 content-registration path is not wired yet (IP-07/IP-21).
+    ///
+    /// Temporary enforcement variant required by §5.7 until the real
+    /// `bud3::content_ref` registry is available.
+    Bud3NotReady,
 }
 
 impl std::fmt::Display for StorageError {
@@ -1325,6 +1330,7 @@ impl std::fmt::Display for StorageError {
                 f,
                 "replacement operator {operator} matches the slashed operator"
             ),
+            Self::Bud3NotReady => write!(f, "B.U.D. 3.0 is not ready yet (IP-07/IP-21)"),
         }
     }
 }

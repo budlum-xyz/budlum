@@ -116,6 +116,7 @@ mod gates {
     pub mod no_new_shell_gates;
     pub mod no_orphan_source_files;
     pub mod no_out_of_block_consensus_writes;
+    pub mod no_legacy_storage;
     pub mod no_pairing_snark_in_verification_path;
     pub mod no_unicode_dashes;
     pub mod no_upstream_brands;
@@ -322,6 +323,14 @@ const GATES: &[Gate] = &[
         run: gates::transcript_mirrors::run,
         run_args: None,
         self_test: gates::transcript_mirrors::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "no-legacy-storage",
+        replaces: None,
+        run: gates::no_legacy_storage::run,
+        run_args: None,
+        self_test: gates::no_legacy_storage::self_test,
         run_log: None,
     },
     Gate {
