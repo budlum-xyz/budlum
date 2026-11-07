@@ -52,28 +52,27 @@ jobs:
         working-directory: mobile/ios
         run: |
           set -euo pipefail
-          swift test --enable-xctest --disable-swift-testing --verbose --xunit-output /tmp/ios-xunit.xml 2>&1 | tee /tmp/ios-tests.log
+          swift test --enable-xctest --disable-swift-testing --verbose 2>&1 | tee /tmp/ios-tests.log
 
       # A `swift test` that runs zero tests exits 0 and looks identical to a
       # pass, and the three names below are the acceptance tests of the WP-38
-      # card. Verify via JUnit XML (and verbose XCTest output) so Swift 6 and
-      # Swift 5 formatters both report deterministic per-test execution.
+      # card. Verify directly against the verbose XCTest runner log on macOS.
       - name: The three named tests of the WP-38 card ran and passed
         run: |
           set -euo pipefail
           python3 - <<'PYCHECK'
-          import sys, xml.etree.ElementTree as ET
-          tree = ET.parse("/tmp/ios-xunit.xml")
-          seen = {}
-          for tc in tree.iter("testcase"):
-              name = tc.attrib.get("name", "")
-              failed = (tc.find("failure") is not None) or (tc.find("error") is not None)
-              seen[name] = not failed
+          import re, sys
+          log = open("/tmp/ios-tests.log", encoding="utf-8", errors="replace").read()
           for req in ("test_ios_bg_task_answers_audit", "test_ios_quota_cap_is_8_gib", "test_ios_class_is_opportunistic"):
-              if not any(req in k and ok for k, ok in seen.items()):
-                  print(f"ERROR: {req} did not run and pass (seen={sorted(seen)})", file=sys.stderr)
+              passed = re.search(rf"{req}[^
+]*passed", log, re.I)
+              failed = re.search(rf"{req}[^
+]*failed", log, re.I)
+              if not passed or failed:
+                  print(f"ERROR: {req} did not run and pass in /tmp/ios-tests.log", file=sys.stderr)
+                  print(log[-3000:], file=sys.stderr)
                   sys.exit(1)
-          print(f"Verified {len(seen)} XCTest cases in JUnit report; all 3 WP-38 acceptance tests passed.")
+          print("All 3 WP-38 acceptance tests ran and passed in /tmp/ios-tests.log.")
           PYCHECK
 
   app-build:

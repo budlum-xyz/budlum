@@ -124,7 +124,6 @@ jobs:
             --lockfile=mobile/ffi/Cargo.lock \
             --lockfile=xtask/gates/Cargo.lock \
             --lockfile=xtask/release/Cargo.lock \
-            --lockfile=xtask/tools/Cargo.lock \
             --lockfile=xtask/tools/Cargo.lock
 
       # So the list above never shrinks: every Cargo.lock in the repository must
