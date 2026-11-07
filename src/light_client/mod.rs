@@ -762,7 +762,7 @@ mod tests {
     fn make_bls_key(seed: u8) -> BlsKeypair {
         let mut sk_bytes = [0u8; 64];
         sk_bytes[0] = seed + 1;
-        BlsKeypair::from_seed(&sk_bytes)
+        BlsKeypair::from_seed(&sk_bytes).expect("a non-zero test seed")
     }
 
     fn make_bls_snapshot(n: usize, stake_each: u64) -> (ValidatorSetSnapshot, Vec<Scalar>) {

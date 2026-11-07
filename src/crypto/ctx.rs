@@ -91,6 +91,9 @@ pub const BRIDGE_V1: &[u8] = b"BDLM/BRIDGE/V1";
 /// the submitting relayer authenticates the transaction.
 pub const CROSS_DOMAIN_V1: &[u8] = b"BDLM/CROSS_DOMAIN/V1";
 
+/// Validator operator key: the custody quota update.
+pub const VALIDATOR_V1: &[u8] = b"BDLM/VALIDATOR/V1";
+
 /// table, in the order of section 6.5.
 pub const TABLE: &[&[u8]] = &[
     TX_V7,
@@ -127,6 +130,7 @@ pub const EXTRAS: &[&[u8]] = &[
     KEY_BINDING_V1,
     BRIDGE_V1,
     CROSS_DOMAIN_V1,
+    VALIDATOR_V1,
 ];
 
 /// Whether `ctx` is a registered context string.

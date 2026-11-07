@@ -447,6 +447,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bud-codec"
+version = "0.1.0"
+dependencies = [
+ "ruzstd",
+ "zstd",
+]
+
+[[package]]
 name = "bud-compiler"
 version = "0.1.0"
 dependencies = [
@@ -526,11 +534,13 @@ dependencies = [
  "async-trait",
  "bincode",
  "bls12_381",
+ "bud-codec",
  "bud-isa",
  "bud-node",
  "bud-proof",
  "bud-vm",
  "budlum-note-packing",
+ "budlum-uel-abi",
  "chacha20poly1305 0.11.0",
  "clap",
  "cryptoki",
@@ -559,6 +569,7 @@ dependencies = [
  "qrcode",
  "rand 0.10.3",
  "rand_core 0.6.4",
+ "raptorq",
  "rayon",
  "reqwest",
  "rqrr",
@@ -596,6 +607,7 @@ dependencies = [
  "bud-vm",
  "budlum-bpqs",
  "budlum-core",
+ "budlum-uel-abi",
  "libfuzzer-sys",
  "libp2p",
 ]
@@ -603,6 +615,15 @@ dependencies = [
 [[package]]
 name = "budlum-note-packing"
 version = "0.1.0"
+
+[[package]]
+name = "budlum-uel-abi"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "prost-build",
+ "sha2 0.11.1",
+]
 
 [[package]]
 name = "bumpalo"
@@ -4475,6 +4496,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "raptorq"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90b1b1fad69672f0b901b5004863ea4307f03d168a3db5f2bcba4d3dfed88e97"
+
+[[package]]
 name = "rayon"
 version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4725,6 +4752,12 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "ruzstd"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3640bec8aad418d7d03c72ea2de10d5c646a598f9883c7babc160d91e3c1b26c"
 
 [[package]]
 name = "rw-stream-sink"
@@ -6390,3 +6423,31 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[package]]
+name = "zstd"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "7.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c8ea04668f5de8d8d51051714ba560c9536519cadcdb8829bba4fe2ad159b03"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.1.2+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
+dependencies = [
+ "cc",
+ "pkg-config",
+]
