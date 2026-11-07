@@ -22,6 +22,7 @@
 //! All arithmetic is integer. The rendezvous score compares `hash * weight`
 //! cross products in `u128`, so the order is identical on every architecture
 //! and no floating point enters consensus.
+//! Convenience: public committee seat table and handover inspection helpers consumed by finality and RPC.
 
 use crate::core::address::Address;
 use serde::{Deserialize, Serialize};

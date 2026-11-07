@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 /// The number was already hardcoded in `AccountState::slash_validator`; this
 /// gives the two slashing sites one place to read it from without touching a
 /// consensus-critical layout.
+/// Convenience: retained parameter constant for snapshot deserialization compatibility.
 pub const LIVENESS_JAIL_EPOCHS: u64 = 7;
 
 /// Economic / timing parameters that gate participation and slashing.

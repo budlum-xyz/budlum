@@ -16,6 +16,7 @@
 //!
 //! The Merkle trees here hash an odd node up unchanged and bind the leaf count
 //! into the root, the same rule as the object commitment.
+//! Convenience: public custody Merkle tree and audit proof constants consumed by node and mobile custody engines.
 
 use crate::core::hash::hash_fields_bytes;
 

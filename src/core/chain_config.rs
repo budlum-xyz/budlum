@@ -117,6 +117,7 @@ impl Network {
     }
 
     /// The bond floor of a mobile validator (Android or iOS opportunistic).
+    /// Convenience: public mobile class stake floor accessor paired with min_stake_full.
     pub fn min_stake_mobile(&self) -> u64 {
         self.consensus_params().min_stake_mobile
     }

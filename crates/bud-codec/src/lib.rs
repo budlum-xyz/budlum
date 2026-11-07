@@ -23,6 +23,7 @@
 //! less, the slow candidates are not run.
 //!
 //! Every codec id, its frozen meaning and its state live in [`registry`].
+//! Convenience: public codec selection and A0 parameters consumed by budlum-core and codec transforms.
 
 use std::io::Read;
 

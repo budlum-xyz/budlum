@@ -12,6 +12,7 @@
 //! Hour-based windows are converted to epochs with
 //! `ceil(hours * 3600 / (slot_secs * epoch_slots))` (section 6.21.3), so no
 //! consensus decision depends on wall-clock time.
+//! Convenience: public validator presence window tracker and gossip signal surface wired into P2P and handover.
 
 use crate::core::address::Address;
 use crate::registry::evidence::{DoubleSignKind, SlashingProof, SlashingReport};
@@ -163,6 +164,7 @@ impl PresenceTracker {
     /// registered BLS key. A second, different signature for the same
     /// (validator, window) is a double sign and yields a consensus-verified
     /// report.
+    /// Convenience: records a verified presence signal from P2P gossip.
     pub fn record_signal(
         &mut self,
         chain_id: u64,
@@ -217,6 +219,7 @@ impl PresenceTracker {
     /// exceeds its class threshold (converted from hours to epochs) is
     /// suspended. Returns the newly suspended validators. Absence never
     /// slashes (V-4).
+    /// Convenience: advances the rolling presence window at epoch boundaries.
     pub fn advance_window(
         &mut self,
         window: u64,
@@ -271,6 +274,7 @@ impl PresenceTracker {
     /// Reward multiplier (section 7.8.9): the ratio of windows the validator
     /// was seen in, as a fixed-point fraction of `FIXED_POINT_SCALE`.
     #[must_use]
+    /// Convenience: reports validator presence ratio for RPC and duty handover.
     pub fn presence_ratio(&self, validator: &Address) -> u64 {
         if self.window_total == 0 {
             return crate::core::chain_config::FIXED_POINT_SCALE;
@@ -287,6 +291,7 @@ impl PresenceTracker {
 
     /// Drop the signature cache of windows older than `window` so the map
     /// stays bounded by one window.
+    /// Convenience: prunes expired rolling presence windows.
     pub fn retain_window(&mut self, window: u64) {
         self.seen_signatures.retain(|(_, w), _| *w >= window);
         self.window_seen.retain(|w, _| *w >= window);

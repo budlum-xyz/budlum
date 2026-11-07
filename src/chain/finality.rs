@@ -577,6 +577,7 @@ pub fn verify_bls_sig(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<(), String> {
 /// Aggregate BLS signatures over one shared message (section 7.8.4: the
 /// presence aggregate is one signature covering the whole window bitmap).
 #[must_use]
+    /// Convenience: public BLS signature aggregation helper for presence and finality callers.
 pub fn aggregate_bls(sks: &[&Scalar], msg: &[u8]) -> Vec<u8> {
     let h_msg = hash_to_g1(msg);
     let mut agg = G1Projective::identity();

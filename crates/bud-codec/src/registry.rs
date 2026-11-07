@@ -15,6 +15,7 @@
 //! [`Speed::High`] at least 50 MB/s, [`Speed::Medium`] at least 5 MB/s,
 //! [`Speed::Slow`] at least 0.5 MB/s. Rows whose speed is a target rather
 //! than a measurement stay closed until they are measured and pass.
+//! Convenience: frozen codec registry table consumed by upload admission, view decode, and codec CLI.
 
 use crate::CodecId;
 

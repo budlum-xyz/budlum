@@ -22,6 +22,7 @@
 //! The [`PlacementTable`] is a genesis parameter computed off chain from the
 //! class loss and availability rates. The consensus path only reads it, by
 //! integer comparison.
+//! Convenience: public stake-weighted rendezvous placement primitives consumed by custody scheduling and repair.
 
 use crate::core::hash::hash_fields_bytes;
 

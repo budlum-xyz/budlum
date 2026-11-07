@@ -1138,7 +1138,6 @@ src/chain/blockchain.rs	fn	enqueue_bridge_relay
 src/chain/blockchain.rs	fn	find_fork_point
 src/chain/blockchain.rs	fn	freeze_poa_account
 src/chain/blockchain.rs	fn	fund_development_account
-src/chain/blockchain.rs	fn	is_valid
 src/chain/blockchain.rs	fn	is_valid_chain
 src/chain/blockchain.rs	fn	mine_pending_transactions
 src/chain/blockchain.rs	fn	observe_liveness_epoch
@@ -1292,7 +1291,6 @@ src/core/hash.rs	fn	hash_fields
 src/core/transaction.rs	const	SIGNATURE_VERSION_V6
 src/core/transaction.rs	fn	estimate_gas_with_schedule
 src/core/transaction.rs	fn	fee_limit
-src/core/transaction.rs	fn	is_valid
 src/core/transaction.rs	fn	multisig_address
 src/core/transaction.rs	fn	new_consensus_key_registration
 src/core/transaction.rs	fn	new_contract_call
@@ -1507,7 +1505,6 @@ src/ai_inference/mod.rs	const	MIN_OPERATOR_BOND
 src/ai_inference/mod.rs	fn	build_ai_inference_grant
 src/ai_inference/mod.rs	fn	consume_epoch
 src/ai_inference/mod.rs	fn	inference_cache
-src/ai_inference/mod.rs	fn	is_valid
 src/ai_inference/mod.rs	fn	operator_eligible
 src/ai_inference/mod.rs	fn	register_operator
 src/ai_inference/mod.rs	struct	TrainingDataGrant
@@ -1729,7 +1726,6 @@ src/storage/derived.rs	fn	stored_versus_independent
 src/storage/derived.rs	struct	MasterRegistry
 src/storage/derived.rs	struct	PrefixSpan
 src/storage/dictionary.rs	const	DICTIONARY_GRACE_EPOCHS
-src/storage/dictionary.rs	const	MAX_DICTIONARY_BYTES
 src/storage/dictionary.rs	enum	DictionaryError
 src/storage/dictionary.rs	fn	check_dictionary_reference
 src/storage/dictionary.rs	fn	deletable_dictionaries
@@ -1963,7 +1959,6 @@ src/storage/one_share.rs	fn	endpoint_refs
 src/storage/one_share.rs	fn	screen
 src/storage/one_share.rs	fn	storage_fee_owed_usd
 src/storage/one_share.rs	struct	OneShareRegistry
-src/storage/one_share.rs	struct	Share
 src/storage/one_view.rs	fn	contract_digest
 src/storage/one_view.rs	fn	honest_custody
 src/storage/one_view.rs	fn	network_held_bytes

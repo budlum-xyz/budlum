@@ -47,6 +47,7 @@ const MODULE_PREFIXES: &[(&str, &str)] = &[
     ("budlum:mempool", "src/mempool/"),
     ("budlum:network", "src/network/"),
     ("budlum:object_layer", "src/object_layer/"),
+    ("budlum:persistence", "src/persistence/"),
     ("budlum:pollen", "src/pollen/"),
     ("budlum:privacy", "src/privacy/"),
     ("budlum:prover", "src/prover/"),
