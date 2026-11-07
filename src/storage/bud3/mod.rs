@@ -17,6 +17,7 @@
 //! | [`placement`] | Stake-weighted rendezvous placement, diversity caps, the placement table |
 //! | [`registry`] | Chain state: objects, dedup, references, deletion, shares, audits |
 //! | [`tx`] | `StorageTx` v3 and its one apply door |
+//! | [`volume`] | Aggregation volumes: small objects share one placed segment |
 //! | [`custody`] | Sub-block tree, symbol root, the audit draw and custody proofs |
 //! | [`repair`] | Segment repair scheduling and 20-block Instant Duty Handover |
 //! | [`pipeline`] | Upload (content to record and symbols) and view (symbols to checked content) |
@@ -52,6 +53,7 @@ pub mod segment;
 pub mod tx;
 pub mod types;
 pub mod varint;
+pub mod volume;
 
 pub use bof1::{Bof1Error, Flags, Header, Object};
 pub use content_id::{ContentId, ContentKey};
@@ -74,3 +76,5 @@ pub use types::{
     AggregationVolume, CustodyShare, Frame, LogicalPath, OpticalPath, Path, Payload,
     PlacementGroup, QrVideo, RefCount, RepairSymbol, SourceSymbol,
 };
+
+pub use volume::{AggregationVolume as PlacedAggregationVolume, Visibility, VolumeError, VolumeMember};
