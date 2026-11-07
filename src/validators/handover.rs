@@ -1,8 +1,7 @@
 //! The Instant Task Handover duty table (directive 7.6).
 //!
 //! Every duty has a trigger, a successor and a time bound, and no duty waits
-//! for a human. This module is WP-14's card path and carries the binding
-//! table; the executable rows live in
+//! for a human. This module carries the binding table; the executable rows live in
 //! [`crate::registry::handover::HandoverCoordinator`] (triggers, handover
 //! rules and the disaster-mode state of directive 7.7) and the churn
 //! simulation tool lives in `tests/churn/`. Keeping the table here separates
