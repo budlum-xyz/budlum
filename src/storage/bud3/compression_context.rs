@@ -1,4 +1,4 @@
-//! Shared compression context for public B.U.D. 3.0 objects (Section 6.20 items 1-5; ).
+//! Shared compression context for public B.U.D. 3.0 objects (Section 6.20 items 1-5).
 //! exposed for expansion-tier A0 context codecs (12 and 13), context rotation, and Context Maintenance Pool accounting.
 //!
 //! Binding invariants (`K15`..`K19`):

@@ -3956,7 +3956,7 @@ impl AccountState {
             return Err("a zero bond escrows nothing".to_string());
         }
         // The spendable balance gates the bond: the locked part of a vesting
-        // account is not collateral (). The raw balance is what the
+        // account is not collateral. The raw balance is what the
         // debit below reads.
         let balance = self.get_balance(poster);
         let spendable = self.spendable_balance(poster);

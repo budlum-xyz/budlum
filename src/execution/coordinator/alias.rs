@@ -50,7 +50,7 @@ impl AccountQuantumClass {
     /// Returns `true` when `actor` may mutate holdings of `target_owner` (K-3 / Y-7).
     ///
     /// A classical foreign account may never touch holdings owned by a PQ account.
-    /// exposed for: foreign envelope admission and UEL asset/UOL guards ().
+    /// exposed for: foreign envelope admission and UEL asset/UOL guards.
     #[must_use]
     pub const fn may_touch(self, target_owner: Self) -> bool {
         !matches!((self, target_owner), (Self::Classical, Self::PostQuantum))
@@ -60,7 +60,7 @@ impl AccountQuantumClass {
 /// Derives the 32-byte Budlum `Address` of a foreign Compatibility Lane account:
 /// `SHA3-256("BDLM_FOREIGN_ACCOUNT_V1" || scheme || len_le64 || local_id)`.
 ///
-/// exposed for: foreign transaction admission (, , , ).
+/// exposed for: foreign transaction admission.
 #[must_use]
 pub fn derive_foreign_account(scheme: ForeignScheme, local_id: &[u8]) -> Address {
     let mut h = Sha3_256::new();

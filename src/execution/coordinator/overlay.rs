@@ -2,7 +2,7 @@
 //!
 //! Implements sections 8.3.3 item 2, 8.3.4, and 8.7.3:
 //! - `BlockReadCache` caches committed `(namespace, key)` reads for one block
-//!   and invalidates keys touched by committed writes or universal calls ().
+//!   and invalidates keys touched by committed writes or universal calls.
 //! - `TxOverlay` stacks one root transaction frame plus up to 8 cross-EE
 //!   `UniversalCall` frames, rolling back failed frames without leaving state
 //!   mutations behind (G-4).
@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Maximum cross-environment `UniversalCall` nesting depth (section 8.7.3 item 5).
 pub const MAX_UNIVERSAL_CALL_DEPTH: usize = 8;
 
-/// Block-scoped read cache in front of committed `ExecutionState` ().
+/// Block-scoped read cache in front of committed `ExecutionState`.
 #[derive(Debug, Clone, Default)]
 pub struct BlockReadCache {
     entries: RefCell<BTreeMap<(String, String), Option<Vec<u8>>>>,

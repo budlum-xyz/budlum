@@ -230,7 +230,7 @@ impl ProofVerifier {
             });
         }
 
-        // 5. Public inputs hash and execution-bound consistency ()
+        // 5. Public inputs hash and execution-bound consistency
         if expected_inputs.trace_len == 0 {
             return Err(ProofVerifyError::InvalidProof(
                 "public inputs trace_len must be non-zero".into(),

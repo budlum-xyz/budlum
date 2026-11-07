@@ -222,7 +222,7 @@ pub const MOBILE_WORKMANAGER_PERIOD_MINUTES: u32 = 15;
 /// Convenience: free-space floor (2 GiB, R-34) triggering `ReleaseShares`.
 pub const MOBILE_LOW_SPACE_RELEASE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
-/// Convenience: Android foreground service type modeled for mobile validator duty ().
+/// Convenience: Android foreground service type modeled for mobile validator duty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum AndroidForegroundKind {
@@ -242,14 +242,14 @@ impl AndroidForegroundKind {
         }
     }
 
-    /// Convenience: only `SpecialUse` sustains 24-hour mobile validator duty ().
+    /// Convenience: only `SpecialUse` sustains 24-hour mobile validator duty.
     #[must_use]
     pub const fn supports_24h_validator_duty(self) -> bool {
         matches!(self, Self::SpecialUse)
     }
 }
 
-/// Convenience: platform-aware mobile validator policy (R-33, R-34, R-35, ).
+/// Convenience: platform-aware mobile validator policy (R-33, R-34, R-35).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MobileValidatorRuntimePolicy {
     pub wifi_only: bool,

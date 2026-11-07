@@ -10,7 +10,7 @@
 //! `bud_submitZkProof`), a gossip side channel that applied commitments as
 //! they arrived, and a startup pass that rewrote bootstrap domain statuses.
 //! The node that ran them held a registry no peer could reproduce (testnet
-//!,).
+//!).
 //!
 //! This module moves them into the block. The registries live in
 //! `AccountState::settlement`; the functions below are the only writers, and

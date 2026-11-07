@@ -536,8 +536,8 @@ impl QcBlob {
 
         // (security audit) return the unique-verified
         // Signer set so callers can enforce a quorum against the
-        // Post-deduplication count. The previous design only
-        // Returned ``; callers that wanted to count unique
+        // Post-deduplication count. The previous design did not
+        // return the signer set; callers that wanted to count unique
         // Signers (e.g. `import_qc_blob`'s BLS-quorum check) had to
         // Re-walk the entries themselves, which was both wasteful
         // And easy to get wrong (counting duplicates). Returning

@@ -197,7 +197,7 @@ fn fundable_bond(
     let bond =
         u64::try_from(bond_atoms).map_err(|_| ExternalDomainTxError::BondTooLarge(bond_atoms))?;
     // The spendable balance, not the raw one: a bond is a spend, and the
-    // locked part of a vesting account does not fund collateral ().
+    // locked part of a vesting account does not fund collateral.
     let balance = state.spendable_balance(&ctx.sender);
     let needed = bond.saturating_add(ctx.fee);
     if balance < needed {
@@ -504,7 +504,7 @@ mod tests {
         assert!(!state.settlement.is_empty());
     }
 
-    ///  (): the bond is collateral moved out of the
+    /// The bond is collateral moved out of the
     /// sender's balance, so it is a spend. The vesting lock of the team
     /// account holds against it: locked funds cannot be escrowed as a bond.
     #[test]

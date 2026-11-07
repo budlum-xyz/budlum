@@ -953,7 +953,7 @@ mod integration_tests {
         let epoch = bc.finality_aggregator.as_ref().unwrap().epoch;
 
         // Validly signed over the WRONG hash: passes ingest signature check, then
-        // Is rejected for hash mismatch (: sig verified before hash check).
+        // Is rejected for hash mismatch ( sig verified before hash check).
         let mut wrong_vote = Prevote {
             chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch,

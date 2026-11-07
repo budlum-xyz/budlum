@@ -44,7 +44,7 @@ impl FromStr for NodeMode {
     }
 }
 
-/// Minimum finalized checkpoint retention window for pruned full nodes ().
+/// Minimum finalized checkpoint retention window for pruned full nodes.
 pub const MIN_PRUNING_RETENTION_BLOCKS: u64 = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

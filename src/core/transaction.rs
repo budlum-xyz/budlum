@@ -665,7 +665,7 @@ pub enum TransactionType {
     /// the enum body's identifiers to resolve carried payload types.)
     PoaOnboarding(crate::registry::poa_onboarding::PoAOnboardingTx),
     /// Bond into a permissionless role (testnet
-    /// : the role id and the bond amount in the signed
+    /// The role id and the bond amount in the signed
     /// header, nothing else. The verifier family registers at the floor;
     /// the relayer, prover and storage operator roles also take a top-up of
     /// an active bond. The relayer, prover and storage operator seats were
@@ -698,8 +698,8 @@ pub enum TransactionType {
     RoleWithdraw {
         role: u32,
     },
-    /// An external-domain write, applied in block (,
-    /// : registration, evidence, a prover bond, readmission, a version
+    /// An external-domain write, applied in block:
+    /// Registration, evidence, a prover bond, readmission, a version
     /// fork or a quorum policy. The sender is `tx.from`, and a payload that
     /// names an account (the poster, the submitter) must name the sender.
     /// The signing preimage commits every field. Replaces the operator RPCs
@@ -707,8 +707,8 @@ pub enum TransactionType {
     /// types: the signing gate reads the enum body's identifiers to resolve
     /// carried payload types.)
     ExternalDomain(crate::cross_domain::external::ExternalDomainTx),
-    /// A domain settlement write, applied in block (,
-    /// : a domain registration, a commitment with its finality proof,
+    /// A domain settlement write, applied in block:
+    /// A domain registration, a commitment with its finality proof,
     /// a sovereign template, a ZK program allowlist change or a ZK proof.
     /// The sender is `tx.from`; a payload that names an account (the
     /// operator, the proof submitter) must name the sender. Replaces the

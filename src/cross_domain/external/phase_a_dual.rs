@@ -1,5 +1,5 @@
 //! Phase-A dual finality evaluation, binary segment recursion boundary checks,
-//! and block batch-proof status tracking (: TS8, TS9, TA4, TA5, TA8).
+//! and block batch-proof status tracking ( TS8, TS9, TA4, TA5, TA8).
 //!
 //! WIRING: unwired - staged for  recursion and Phase-A dual-finality activation.
 
@@ -30,7 +30,7 @@ pub struct SegmentBoundary {
 
 impl SegmentBoundary {
     /// Deterministic commitment to this segment's boundary and inner proof (`TS8`).
-    /// WIRING: folded into binary recursion tree nodes ().
+    /// WIRING: folded into binary recursion tree nodes.
     #[must_use]
     pub fn commitment(&self) -> Hash32 {
         let idx = self.segment_index.to_le_bytes();
@@ -226,7 +226,7 @@ impl BlockBatchProof {
     }
 
     /// Recompute `proof_root` and confirm integrity against any inner tamper (`TA4`).
-    /// WIRING: called by batch proof intake and light-client verification ().
+    /// WIRING: called by batch proof intake and light-client verification.
     #[must_use]
     pub fn matches_root(&self) -> bool {
         !self.inner_proof_digests.is_empty()

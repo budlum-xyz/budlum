@@ -1,6 +1,6 @@
 //! The Universal Execution Layer coordinator: account aliases, sparse Merkle
 //! namespaces, BGU gas and EIP-1559 fee accounting, nested call-frame overlays,
-//! stateful BudZero contract execution (closing ), and worker supervision.
+//! stateful BudZero contract execution, and worker supervision.
 
 pub mod alias;
 pub mod assets;
@@ -126,7 +126,7 @@ pub struct StatefulBudZeroEe;
 impl StatefulBudZeroEe {
     /// Creates the stateful BudZero execution environment adapter.
     ///
-    /// exposed for: `ExecutionCoordinator` default BudZero registration ().
+    /// exposed for: `ExecutionCoordinator` default BudZero registration.
     #[must_use]
     pub const fn new() -> Self {
         Self
@@ -412,7 +412,7 @@ impl ExecutionCoordinator {
 
     /// Applies a verified EVM contract migration transaction ( 2/3 door).
     ///
-    /// exposed for: EVM Migration Kit consensus block execution ().
+    /// exposed for: EVM Migration Kit consensus block execution.
     pub fn apply_evm_migration(
         &mut self,
         state: &mut AccountState,

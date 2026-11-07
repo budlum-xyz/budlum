@@ -275,7 +275,7 @@ pub fn validate_cosmwasm_bytecode(code: &[u8]) -> Result<(), String> {
 #[must_use]
 pub fn build_valid_cosmwasm_module(export_names: &[&str], body_ops: &[u8]) -> Vec<u8> {
     let mut wasm = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
-    // Section 1: Type `[() -> ()]`
+    // Section 1: Type `[ -> ]`
     wasm.extend_from_slice(&[0x01, 0x04, 0x01, 0x60, 0x00, 0x00]);
     // Section 3: Function (1 func of type 0)
     wasm.extend_from_slice(&[0x03, 0x02, 0x01, 0x00]);

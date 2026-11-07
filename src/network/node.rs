@@ -341,7 +341,7 @@ fn log_prefix(s: &str, max_chars: usize) -> String {
 /// `::ffff:a.b.c.d` - came back as `None`, and `None` was admitted without a
 /// bound. One host could take the whole peer table while the `/24` limit
 /// reported itself as enforced, and the profile value was measured on the one
-/// family an attacker would not use (). The bucket now covers both
+/// family an attacker would not use. The bucket now covers both
 /// families; see [`crate::network::peer_manager::SubnetKey`].
 fn subnet_bucket(addr: &Multiaddr) -> Option<crate::network::peer_manager::SubnetKey> {
     use libp2p::multiaddr::Protocol;
@@ -370,7 +370,7 @@ fn subnet_bucket(addr: &Multiaddr) -> Option<crate::network::peer_manager::Subne
 /// can therefore advertise `127.0.0.1`, `10.0.0.0/8` or `fe80::/10` and fill
 /// the routing table with addresses that mean nothing outside the process that
 /// sent them: every later dial goes nowhere and the node stops finding peers it
-/// could reach (, Kademlia poisoning).
+/// could reach (Kademlia poisoning).
 ///
 /// `private_ok` is the node's own answer to "is this a private network". On
 /// devnet the peers *are* on loopback, and a private address is the only
@@ -2399,7 +2399,7 @@ impl Node {
                 format!("./data/{network:?}/vote-history.json").to_lowercase(),
             ));
         }
-        // Kademlia poisoning (): `Identify` accepts whatever a peer
+        // Kademlia poisoning: `Identify` accepts whatever a peer
         // says its listen addresses are, and the routing table used to take
         // all of it. On a public network that lets one peer fill the table
         // with `127.0.0.1` and `10.0.0.0/8` entries, after which every dial
@@ -4662,7 +4662,7 @@ impl Node {
                             let identified = info.public_key.to_peer_id();
                             info!("Received identity from {identified:?}");
                             for addr in info.listen_addrs {
-                                // Kademlia poisoning (): an advertisement
+                                // Kademlia poisoning: an advertisement
                                 // is taken on the advertiser's word, so a
                                 // private address is only believable on a
                                 // private network.

@@ -1,5 +1,5 @@
 //! Instant Task Handover (AGD, Section 7.6), 40-block finality stall disaster
-//! recovery mode (Section 7.7), and multi-validator churn simulation ().
+//! recovery mode (Section 7.7), and multi-validator churn simulation.
 //! exposed for consensus proposer rotation, checkpoint seat handover, storage
 //! task schedulers, and churn harness (`tests/churn/main.rs`).
 //!

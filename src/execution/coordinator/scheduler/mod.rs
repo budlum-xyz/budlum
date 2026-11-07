@@ -43,7 +43,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 /// Activation and intra-EE (`Block-STM`) policy for deterministic parallel block
-/// scheduling (`Section 1.5`, ).
+/// scheduling (`Section 1.5`).
 ///
 /// Convenience: passed to `execute_block_with_policy` by coordinator and benchmarks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,7 +251,7 @@ pub fn plan(sets: &[AccessSet]) -> Plan {
 }
 
 /// Derive an [`AccessSet`] combining the sender/recipient account keys with
-/// declared UEL namespace read/write slot digests ().
+/// declared UEL namespace read/write slot digests.
 ///
 /// Convenience: used by UEL wave planners when transactions declare explicit
 /// namespace access lists; falls back to [`AccessSet::global`] if both hints
@@ -303,7 +303,7 @@ pub struct BlockStmConfig {
     pub enabled: bool,
 }
 
-/// Deterministic execution telemetry for a scheduled block ().
+/// Deterministic execution telemetry for a scheduled block.
 /// WIRING: reported by the coordinator block executor alongside block execution metrics.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ScheduleStats {
@@ -340,11 +340,11 @@ fn touched_addresses(set: &AccessSet) -> BTreeSet<Address> {
 
 /// Execute `txs` against `state` using deterministic access-set waves and,
 /// when `block_stm.enabled` is set, optimistic snapshot validation with
-/// deterministic sequential fallback on any conflict ().
+/// deterministic sequential fallback on any conflict.
 ///
 /// The resulting `AccountState` is byte-identical to sequential block-order
 /// execution.
-/// WIRING: entry point for the coordinator's parallel block execution path ().
+/// WIRING: entry point for the coordinator's parallel block execution path.
 pub fn execute_planned_block(
     state: &mut AccountState,
     txs: &[Transaction],

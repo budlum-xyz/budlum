@@ -469,7 +469,7 @@ pub struct FileConfig {
     pub compat: Option<CompatSection>,
 }
 
-/// Ecosystem compatibility RPC gateway sections (`[compat.*]`, `Section 8.11.1`, ).
+/// Ecosystem compatibility RPC gateway sections (`[compat.*]`, `Section 8.11.1`).
 #[derive(Debug, serde::Deserialize, Default, Clone)]
 #[serde(deny_unknown_fields)]
 /// Convenience: CLI config deserialization surface for compatibility RPC gateways.
@@ -480,7 +480,7 @@ pub struct CompatSection {
     pub cosmos: Option<CompatGatewayListenerSection>,
 }
 
-/// `[compat.ethereum]` TOML configuration (`127.0.0.1:18547`, ).
+/// `[compat.ethereum]` TOML configuration (`127.0.0.1:18547`).
 #[derive(Debug, serde::Deserialize, Default, Clone)]
 #[serde(deny_unknown_fields)]
 /// Convenience: parsed by `FileConfig` and consumed by `EthRpcConfig::from_section`.

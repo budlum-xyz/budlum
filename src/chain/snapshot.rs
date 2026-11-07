@@ -536,7 +536,7 @@ pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 /// byte-exact: at 6 and below the two fields cannot affect the digest.
 ///
 /// Schema 10 carries and digests the settlement registries (testnet
-/// : state that moved from `Blockchain` into the account
+/// State that moved from `Blockchain` into the account
 /// state when its writes became transaction doors. A node that dropped a
 /// registration would serve a chain that is not the chain's; at 9 and below
 /// the field cannot affect the digest.

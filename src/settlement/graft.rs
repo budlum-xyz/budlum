@@ -1,7 +1,7 @@
 //! WIRING: unwired - verify_graft_payment has no in-tree caller by design: bud_getGraftPayment returns the proof to the caller, who verifies it against their own trust anchor (documented in rpc/api.rs).
 //! WIRING: wired - registration, ownership claims, payments, solver intents,
 //! bids, fulfilment and refunds run in block through `SettlementTx::Graft`;
-//! the Ethereum-side `GraftExecutor` contract is ().
+//! the Ethereum-side `GraftExecutor` contract is.
 //!
 //! Remote app binding: an application that lives on another network is used from
 //! Budlum and paid for in BUD, without moving there.

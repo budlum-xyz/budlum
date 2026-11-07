@@ -1,9 +1,9 @@
 //! Validator presence protocol, non-slashing suspension, and single-pairing BLS
-//! aggregate verification (Section 7.8, Section 6.21.3, Section 11.7; ).
+//! aggregate verification (Section 7.8, Section 6.21.3, Section 11.7).
 //! exposed for budlum-mobile-core, consensus block proposer, and handover coordinator.
 //!
-//! Offline validators are suspended (`Suspended`), never slashed (invariant V-4,
-//! closing ). Equivocating across distinct [`PresenceClass`] tags in the
+//! Offline validators are suspended (`Suspended`), never slashed (invariant V-4).
+//! Equivocating across distinct [`PresenceClass`] tags in the
 //! same presence window is a provable double-sign slashed at 1% of stake.
 
 use bls12_381::{G1Affine, G1Projective, G2Affine, G2Projective, Scalar};
@@ -428,7 +428,7 @@ impl PresenceTracker {
     }
 
     /// Synchronize consecutive epoch-miss tracking from [`crate::registry::LivenessTracker`]
-    /// into non-slashing suspension notices (V-4, ).
+    /// into non-slashing suspension notices (V-4).
     /// Convenience: exposed for epoch-close suspension transition.
     pub fn sync_liveness_suspensions<F>(
         &mut self,

@@ -173,7 +173,7 @@ impl AptosCompatGateway {
 
 /// Evaluates an Aptos REST v1 HTTP request against read-only `state` (`18549`).
 ///
-/// exposed for: wire-level Aptos REST handler (, ).
+/// exposed for: wire-level Aptos REST handler.
 #[must_use]
 pub fn handle_aptos_rest(
     state: &AccountState,

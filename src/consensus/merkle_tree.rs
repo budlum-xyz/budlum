@@ -255,7 +255,7 @@ pub fn merkle_root_from_proof(
     for sibling in siblings {
         cur = if sibling == &odd_promotion_sentinel() {
             // Only an even-positioned tail (`idx % 2 == 0`) can ever lack a
-            // partner; an odd index always has a left sibling ().
+            // partner; an odd index always has a left sibling.
             if !idx.is_multiple_of(2) {
                 return None;
             }

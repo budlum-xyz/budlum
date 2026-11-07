@@ -203,7 +203,7 @@ fn parse_pubkey_hex(params: &serde_json::Value, idx: usize) -> Option<[u8; 32]> 
 
 /// Evaluates a raw Solana JSON-RPC 2.0 request string against read-only `state` (`18548`).
 ///
-/// exposed for: wire-level Solana JSON-RPC handler (, ).
+/// exposed for: wire-level Solana JSON-RPC handler.
 #[must_use]
 pub fn handle_solana_jsonrpc(state: &AccountState, raw_json: &str) -> String {
     if raw_json.len() > crate::rpc::compat::ethereum::MAX_COMPAT_REQUEST_BYTES {

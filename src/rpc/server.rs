@@ -1146,7 +1146,7 @@ async fn finish_template(
 
 /// Serialize one RPC result value. A value that cannot be encoded is an
 /// explicit `-32603` error naming what failed, never a silent `null`
-///: a `null` reads as "absent", which is a different answer.
+/// A `null` reads as "absent", which is a different answer.
 pub(crate) fn to_json<T: serde::Serialize>(
     what: &str,
     value: &T,
@@ -1206,7 +1206,7 @@ fn is_per_ip_rate_limited(
             //
             // The evicted client is the one with the fewest requests in its
             // window (oldest first among equals), never a busy one
-            //: evicting a client at its quota resets its window,
+            // because evicting a client at its quota resets its window,
             // so an attacker rotating addresses could buy a fresh quota for
             // its own saturated address by filling the table.
             if let Some(quietest) = rates

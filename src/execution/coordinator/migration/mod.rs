@@ -1,4 +1,4 @@
-//! EVM Migration Kit verification core and state-installing door (directive 8.12, ).
+//! EVM Migration Kit verification core and state-installing door (directive 8.12).
 //!
 //! 1. **Authorization (`8.12.2 item 2`):** Proven deployment transaction and receipt
 //!    (direct `CREATE` or factory rule) plus EIP-712 `MigrationAuthorization`.

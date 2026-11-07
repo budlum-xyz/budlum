@@ -83,7 +83,7 @@ fn decode_storage_v3_tx(data: &[u8]) -> Result<crate::storage::bud3::tx::Storage
 /// `u64` the sender picks, and `bincode::deserialize` trusts it far enough to
 /// reserve the memory before it reads a byte. A peer allowed to send ten
 /// megabytes of frame could therefore ask a `Vec<u8>` field for a terabyte and
-/// take the node down without a block, a vote or a transaction (,
+/// take the node down without a block, a vote or a transaction (
 /// ). `with_limit` turns that claim into a decode error, and the
 /// explicit length check refuses an oversized frame before the decoder runs at
 /// all.
@@ -2702,8 +2702,8 @@ mod tests {
     ///
     /// `bincode::deserialize` reads a `u64` element count and reserves that
     /// much before it reads a single byte, so eighteen hostile bytes inside a
-    /// perfectly legal frame were enough to ask for a terabyte (,
-    /// : the P2P foot). The decode budget now turns the claim into an
+    /// perfectly legal frame were enough to ask for a terabyte (
+    /// The P2P foot). The decode budget now turns the claim into an
     /// error, and the honest payload beside it still decodes, so the bound is
     /// a ceiling and not a change of shape.
     ///

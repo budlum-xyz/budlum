@@ -1,4 +1,4 @@
-//! Sui `TransactionData` + `Ed25519` intent-message foreign envelope decoder (,
+//! Sui `TransactionData` + `Ed25519` intent-message foreign envelope decoder (
 //! `Section 8.6.2`, `ForeignScheme::SuiEd25519`).
 //!
 //! Enforces `Section 1.5` launch-closure on testnet `45261` until
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::execution::coordinator::assets::BUDLUM_TESTNET_CHAIN_ID;
 
-/// Proposed activation height for Sui foreign envelopes on testnet `45261` ().
+/// Proposed activation height for Sui foreign envelopes on testnet `45261`.
 ///
 /// Convenience: shared by Sui foreign-envelope policy and RPC read/submit hooks.
 pub const PROPOSED_SUI_ACTIVATION_HEIGHT: u64 = 50_000;
@@ -216,7 +216,7 @@ pub fn sui_transaction_signing_digest(tx_data_bytes: &[u8]) -> [u8; 32] {
     blake2b_256(&intent)
 }
 
-/// Height-gated activation policy for Sui foreign envelopes (`Section 1.5`, ).
+/// Height-gated activation policy for Sui foreign envelopes (`Section 1.5`).
 ///
 /// Convenience: passed to `decode_and_recover_sui_tx`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -326,7 +326,7 @@ impl fmt::Display for SuiEnvelopeError {
 
 impl std::error::Error for SuiEnvelopeError {}
 
-/// Decode and strictly verify a [`SignedSuiEnvelope`] under `policy` ().
+/// Decode and strictly verify a [`SignedSuiEnvelope`] under `policy`.
 ///
 /// Convenience: coordinator and `sui_executeTransactionBlock` admission verifier.
 pub fn decode_and_recover_sui_tx(

@@ -9,7 +9,7 @@
 //! `epoch_transition_does_not_mint_validator_yield`. A chain pays only when
 //! its profile enables a pool (`Network::reward_pool`).
 //!
-//! # The three shares (directive section 11.4, )
+//! # The three shares (directive section 11.4)
 //!
 //! One epoch budget is split into three shares: 40 percent consensus, 50
 //! percent storage and 10 percent repair and relay ([`EpochSplit`]). The
@@ -138,7 +138,7 @@ impl RewardPoolSchedule {
 }
 
 /// The storage share of the epoch budget: what the storage reward payer
-/// () reads for `epoch`.
+///  reads for `epoch`.
 ///
 /// WIRING: read by the storage reward payer of . Until that payer
 /// lands, the share stays in the pool account and no other path moves it.
@@ -559,7 +559,7 @@ mod tests {
         assert!(balance > 0);
     }
 
-    /// : the epoch budget is split 40 percent consensus, 50 percent
+    /// The epoch budget is split 40 percent consensus, 50 percent
     /// storage and 10 percent repair and relay (directive section 11.4), and
     /// the stake weighted payout of `pay_epoch` is the consensus share only.
     /// The other two shares stay in the pool account until their payers

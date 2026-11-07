@@ -1,6 +1,6 @@
 //! B.U.D. 3.0 upload sessions (`bud_storageUploadOpen`, `bud_storageUploadAppend`,
 //! `bud_storageUploadFinish`), `/budlum/bud3/upload/1` limits, pixel-verification
-//! sampling rule, and two-segment memory ceiling (Sections 6.4 & 6.21.1, ).
+//! sampling rule, and two-segment memory ceiling (Sections 6.4 & 6.21.1).
 //! exposed for `/budlum/bud3/upload/1` stream handlers and `Bud3RpcService`.
 
 use super::bof1::{Bof1Error, Flags, Object};

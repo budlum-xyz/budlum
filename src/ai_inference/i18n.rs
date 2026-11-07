@@ -34,7 +34,7 @@ pub enum I18nError {
     /// Empty localized text/transcripts are refused so callers fail closed.
     EmptyText,
     /// Localized text/transcripts containing invisible, bidi override, or
-    /// non-printable control characters are refused ().
+    /// non-printable control characters are refused.
     ForbiddenCharacters,
     /// No exact local entry exists for `(key, locale, accessibility mode)`.
     MissingTranslation {

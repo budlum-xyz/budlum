@@ -1,4 +1,4 @@
-//! Access tiering and temperature observation log (Section 6.14 items 8-9; ).
+//! Access tiering and temperature observation log (Section 6.14 items 8-9).
 //! exposed for RPC access telemetry and archival tier monitoring.
 //!
 //! At testnet launch, `SlowY` archival codecs are closed, so [`AccessTierTracker`]

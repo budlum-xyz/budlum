@@ -227,7 +227,7 @@ fn execute_abci_query(path: &str, data: &[u8], state: &AccountState) -> Vec<u8> 
 
 /// Evaluates a Cosmos LCD gRPC-REST request against read-only `state` (`18551`).
 ///
-/// exposed for: wire-level Cosmos LCD REST handler (, ).
+/// exposed for: wire-level Cosmos LCD REST handler.
 #[must_use]
 pub fn handle_cosmos_rest(
     state: &AccountState,

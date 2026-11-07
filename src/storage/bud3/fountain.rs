@@ -22,9 +22,9 @@
 //! losses with a low-degree random XOR rule and an `u8` degree cap. That had
 //! two consequences. Past degree 255 the rule saturated, the "independent"
 //! repair symbols started repeating each other, and a large segment lost
-//! symbols it could never recover (). And its ceilings were `u32`
+//! symbols it could never recover. And its ceilings were `u32`
 //! (preview 1 MiB, package 64 MiB, `k <= 4096`, video 50 000 frames), so an
-//! object past 4 GiB was silently cut (). Here symbol identity is the
+//! object past 4 GiB was silently cut. Here symbol identity is the
 //! 24-bit ESI with no degree counter, so independence does not saturate, and
 //! every length and offset is `u64`, so the only object ceiling is the genesis
 //! parameter `Bud3Limits::max_content_bytes`.
@@ -659,7 +659,7 @@ mod tests {
         assert!(!dec.is_done());
     }
 
-    /// : the retired carousel repaired with a low-degree random XOR rule
+    /// The retired carousel repaired with a low-degree random XOR rule
     /// whose degree counter saturated at `u8::MAX`, after which its "independent"
     /// repair symbols repeated each other and a large segment could not be
     /// recovered. RFC 6330 has no degree counter: symbol identity is the 24-bit
@@ -701,7 +701,7 @@ mod tests {
         assert_eq!(dec.into_bytes().as_deref(), Some(&data[..]));
     }
 
-    /// : the old ceilings were `u32` bytes, so an object past 4 GiB was
+    /// The old ceilings were `u32` bytes, so an object past 4 GiB was
     /// silently cut. The layout, the streamer and the genesis parameter now
     /// carry `u64`, and the only ceiling is `max_content_bytes`.
     #[test]

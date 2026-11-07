@@ -40,7 +40,7 @@ impl ExecutionVerifyReport {
             && self.weights_bound
     }
 
-    /// Structural + STARK: requires `stark_ok == Some(true)` ().
+    /// Structural + STARK: requires `stark_ok == Some(true)`.
     pub fn is_fully_valid(&self) -> bool {
         self.is_structurally_valid() && self.stark_ok == Some(true)
     }

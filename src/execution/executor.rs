@@ -64,7 +64,7 @@ fn check_ai_exec_dims(dims: &[u16]) -> Result<(), String> {
 }
 
 fn privacy_transfers_enabled(chain_id: u64) -> bool {
-    // Allowlist, not a denylist, and devnet is its only member ().
+    // Allowlist, not a denylist, and devnet is its only member.
     //
     // `PrivateTransferSubmit` reaches `note_registry.apply_transfer`, which
     // takes the nullifier the submitter hands it: the binding check
@@ -72,7 +72,7 @@ fn privacy_transfers_enabled(chain_id: u64) -> bool {
     // `apply_transfer_with_proofs` is called with proofs, and nothing in the
     // tree calls it that way. So today a transfer proves who signed the
     // transaction, never that the signer owns the note; value conservation and
-    // membership are unwired too (). That is survivable only where the
+    // membership are unwired too. That is survivable only where the
     // notes are worth nothing, and a public testnet is not that place: it is
     // the network people are asked to trust before mainnet, and an unbacked
     // mint there is a real loss.
@@ -118,8 +118,8 @@ fn privacy_closed_refusal(chain_id: u64, mainnet_message: &'static str) -> Budlu
 ///
 /// The directive (1.5, 10.6) lets the layer open at VL-1 only once ,
 /// ,  and  are closed *and* both VL-1 conditions are
-/// built: a per-request lottery with commit-reveal () and integer
-/// ranking (). Integer ranking lands in this package; the lottery and
+/// built: a per-request lottery with commit-reveal  and integer
+/// ranking. Integer ranking lands in this package; the lottery and
 /// commit-reveal do not exist in the tree, and the four findings above are
 /// still open. One missing condition is enough to keep the layer shut, so the
 /// whole surface refuses on testnet rather than opening at a level nobody can
@@ -320,7 +320,7 @@ impl Executor {
             _ => {}
         }
 
-        // : the AI layer boundary. It sits here - after the cheap
+        // The AI layer boundary sits here - after the cheap
         // shape guards above and before `liquid_cost` / `get_or_create` -
         // because that probe *creates* the sender row. A refusal must leave
         // the state byte-identical (G-4), so no closed door may run after it.
@@ -4181,7 +4181,7 @@ mod tests {
         assert!(state.get_validator(&team).is_none());
     }
 
-    /// : an arm that charges only a fee still reads the spendable
+    /// An arm that charges only a fee still reads the spendable
     /// balance. The vesting-locked funds of the team account do not pay a
     /// fee, so the arm refuses at the fee gate and not later, for another
     /// reason.
@@ -4465,7 +4465,7 @@ mod tests {
         ]
     }
 
-    /// : the privacy allowlist must not contain the public testnet.
+    /// The privacy allowlist must not contain the public testnet.
     /// Ownership, value conservation and membership proofs are unwired, so a
     /// note on a network that carries value is an unbacked mint.
     #[test]

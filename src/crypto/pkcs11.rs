@@ -263,7 +263,7 @@ impl Pkcs11Signer {
     }
 
     /// Bind the validator ML-DSA-65 key stored under `label` and sign with it
-    /// through the PKCS#11 3.2 standard mechanism (: the first path; a
+    /// through the PKCS#11 3.2 standard mechanism ( the first path; a
     /// vendor mechanism is for tokens without 3.2). The key is opened with the
     /// pairing proof of [`Pkcs11PqToken::open_key`] and, when the operator
     /// configured an expected public key, must equal it.

@@ -1890,7 +1890,7 @@ impl Blockchain {
         )
     }
 
-    /// The PQ anchor emission for one committed header (Anchor V2,,
+    /// The PQ anchor emission for one committed header (Anchor V2,
     ///). An anchor is due every 360 blocks: its leaves are the
     /// headers the archive holds for the window ending at the checkpoint
     /// (header hash, which commits the storage, identity and settlement

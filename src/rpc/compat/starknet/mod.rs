@@ -1,4 +1,4 @@
-//! Starknet JSON-RPC v0.7 read-only compatibility subset (, `Section 8.11`).
+//! Starknet JSON-RPC v0.7 read-only compatibility subset (`Section 8.11`).
 //!
 //! Serves Starknet read methods (`starknet_specVersion`, `starknet_chainId`,
 //! `starknet_blockNumber`, `starknet_getNonce`, `starknet_getStorageAt`,
@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use crate::core::account::AccountState;
 use crate::execution::coordinator::assets::BUDLUM_TESTNET_CHAIN_ID;
 
-/// Proposed activation height for Cairo/Starknet on testnet `45261` ().
+/// Proposed activation height for Cairo/Starknet on testnet `45261`.
 ///
 /// Convenience: shared by Starknet RPC policy and launch-closure checks.
 pub const PROPOSED_CAIRO_ACTIVATION_HEIGHT: u64 = 55_000;
@@ -21,7 +21,7 @@ pub const PROPOSED_CAIRO_ACTIVATION_HEIGHT: u64 = 55_000;
 /// Convenience: returned by `starknet_specVersion`.
 pub const STARKNET_SPEC_VERSION: &str = "0.7.1";
 
-/// Height-gated activation policy for Starknet JSON-RPC (`Section 1.5`, ).
+/// Height-gated activation policy for Starknet JSON-RPC (`Section 1.5`).
 ///
 /// Convenience: passed to `handle_starknet_rpc`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,7 +120,7 @@ fn parse_felt_hex(raw: &str) -> Option<[u8; 32]> {
     Some(arr)
 }
 
-/// Handle a read-only Starknet JSON-RPC v0.7 request ().
+/// Handle a read-only Starknet JSON-RPC v0.7 request.
 ///
 /// Convenience: entry point for the Starknet compatibility gateway.
 pub fn handle_starknet_rpc(

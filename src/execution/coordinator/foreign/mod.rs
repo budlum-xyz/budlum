@@ -1,5 +1,5 @@
 //! Foreign Compatibility Lane envelopes, classical account isolation, `Adopt`,
-//! and Quantum Alert Level gating (sections 8.4.1, 8.4.2, 8.6.2; closing ).
+//! and Quantum Alert Level gating (sections 8.4.1, 8.4.2, and 8.6.2).
 
 pub mod aptos;
 pub mod cosmos;
@@ -59,7 +59,7 @@ pub enum QuantumAlertLevel {
 impl QuantumAlertLevel {
     /// Returns `true` when wallets and explorers must surface the advisory banner.
     ///
-    /// exposed for: wallet and explorer quantum-alert banners (, ).
+    /// exposed for: wallet and explorer quantum-alert banners.
     #[must_use]
     pub const fn requires_wallet_warning(self) -> bool {
         !matches!(self, Self::Level0Open)
@@ -176,7 +176,7 @@ pub struct ForeignLaneState {
     pub accounts: BTreeMap<Address, ForeignAccountRecord>,
     pub recent_blockhashes: VecDeque<[u8; 32]>,
     pub seen_solana_signatures: BTreeSet<[u8; 64]>,
-    /// Tracks Solana signatures per finalized blockhash for bounded eviction ().
+    /// Tracks Solana signatures per finalized blockhash for bounded eviction.
     #[serde(default)]
     pub solana_sigs_by_blockhash: BTreeMap<[u8; 32], Vec<[u8; 64]>>,
 }
@@ -274,7 +274,7 @@ impl ForeignLaneState {
     }
 
     /// Pushes a finalized Budlum block hash into the 150-block Solana window,
-    /// evicting replay-cache signatures tied to expired blockhashes ().
+    /// evicting replay-cache signatures tied to expired blockhashes.
     pub fn record_blockhash(&mut self, blockhash: [u8; 32]) {
         if self.recent_blockhashes.len() >= MAX_SOLANA_BLOCKHASH_WINDOW {
             if let Some(evicted) = self.recent_blockhashes.pop_front() {

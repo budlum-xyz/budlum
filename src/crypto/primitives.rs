@@ -951,7 +951,7 @@ pub fn wallet_address_from_ml_dsa_87_public_key(
 ///
 /// The signature must be exactly 4627 bytes and the public key exactly 2592
 /// bytes. The check runs through the dual-verifier facade (`crypto::pq`,
-/// : RustCrypto `ml-dsa` and `libcrux-ml-dsa` must both accept. This path
+/// RustCrypto `ml-dsa` and `libcrux-ml-dsa` must both accept. This path
 /// is intentionally separate from validator PQ signatures (ML-DSA-65): user
 /// wallets are pinned to ML-DSA-87 for Category 5 security.
 ///

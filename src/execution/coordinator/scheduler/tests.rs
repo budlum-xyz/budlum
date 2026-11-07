@@ -293,7 +293,7 @@ proptest! {
 
     /// Both default wave execution (`BlockStmConfig { enabled: false }`) and
     /// optimistic Block-STM mode (`enabled: true`) with conflict fallback
-    /// produce the exact sequential state root on arbitrary blocks ().
+    /// produce the exact sequential state root on arbitrary blocks.
     #[test]
     fn block_stm_and_wave_executor_equal_sequential_root(
         ops in proptest::collection::vec((1u8..=6, 1u8..=6, 0u64..700, 0u8..10), 0..40)

@@ -1,4 +1,4 @@
-//! Private cross-owner deduplication for sealed B.U.D. 3.0 objects (Section 6.20.2.6; ).
+//! Private cross-owner deduplication for sealed B.U.D. 3.0 objects (Section 6.20.2.6).
 //! exposed for expansion-tier sealed deduplication, threshold OPRF evaluation, and epoch-batched reference settlement.
 //!
 //! The cryptographic verifier and threshold OPRF are not integrated. The

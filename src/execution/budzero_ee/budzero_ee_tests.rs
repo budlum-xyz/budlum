@@ -92,7 +92,7 @@ fn verify_inference_is_closed_on_testnet() {
 #[test]
 fn budzero_sender_is_four_words() {
     // Two addresses identical in their low 8 bytes (`[0..8]`) and differing only
-    // in the upper 192 bits (`[8..32]`) MUST produce distinct 4-word VM contexts ().
+    // in the upper 192 bits (`[8..32]`) MUST produce distinct 4-word VM contexts.
     let mut raw_a = [0x11u8; 32];
     let mut raw_b = [0x11u8; 32];
     raw_a[31] = 0xAA;

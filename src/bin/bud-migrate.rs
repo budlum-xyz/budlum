@@ -1,4 +1,4 @@
-//! Offline EVM Migration Kit verifier and bundle tool (, directive 8.12).
+//! Offline EVM Migration Kit verifier and bundle tool (directive 8.12).
 //!
 //! Commands:
 //! - `bud-migrate digest --contract 0x... --chain-id <id> --source-block <n>`

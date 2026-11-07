@@ -91,7 +91,7 @@ pub enum SyncCommitteeError {
     RotationBranchRequired,
     /// The finality branch does not place the finalized header's root at
     /// `finalized_checkpoint.root` inside the attested header's state
-    ///: the committee signed a head, not a finalized block.
+    /// The committee signed a head, not a finalized block.
     NotFinalized,
 }
 
