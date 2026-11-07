@@ -243,6 +243,15 @@ impl Executor {
                         ),
                     ));
                 }
+                // Preflight the credit before the sender debit and nonce
+                // increment. A receiver overflow must not leave a partial
+                // transaction in callers that execute directly.
+                state.get_balance(&tx.to).checked_add(tx.amount).ok_or_else(|| {
+                    BudlumError::validation(
+                        "balance_overflow",
+                        "Receiver balance overflow: transfer would exceed u64::MAX",
+                    )
+                })?;
                 let sender = state.get_or_create(&tx.from);
                 // Checked arithmetic for critical
                 // Balance paths. Sender sub is safe (balance check above),
@@ -277,6 +286,17 @@ impl Executor {
                         "Slashed validators cannot add stake",
                     ));
                 }
+                // Compute the top-up before the liquid debit and nonce
+                // increment. An overflowing stake is rejected without a
+                // partially applied transaction.
+                let next_stake = state
+                    .get_validator(&tx.from)
+                    .map(|validator| {
+                        validator.stake.checked_add(tx.amount).ok_or_else(|| {
+                            BudlumError::validation("stake_overflow", "stake overflow")
+                        })
+                    })
+                    .transpose()?;
                 // Vesting gate: staking moves value
                 // out of the account exactly like a transfer; the locked
                 // team-vesting portion is not spendable. Read before the
@@ -302,7 +322,7 @@ impl Executor {
                 let validator = state.get_validator_mut(&tx.from);
 
                 if let Some(v) = validator {
-                    v.stake = v.stake.checked_add(stake_amount).ok_or_else(|| {
+                    v.stake = next_stake.ok_or_else(|| {
                         BudlumError::validation("stake_overflow", "stake overflow")
                     })?;
                     // `!v.jailed` is not decoration: a liveness-fault jail is
@@ -3747,6 +3767,71 @@ mod tests {
         assert_eq!(state.get_balance(&sender), u64::MAX);
         assert_eq!(state.get_balance(&recipient), 0);
         assert_eq!(state.get_nonce(&sender), 0);
+    }
+
+    #[test]
+    fn blg_197_receiver_overflow_is_rejected_before_state_mutation() {
+        use crate::core::account::AccountState;
+        use crate::core::address::Address;
+        use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
+        use crate::execution::executor::Executor;
+
+        let sender = Address::from([0x55; 32]);
+        let recipient = Address::from([0x56; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&sender, 2);
+        state.add_balance(&recipient, u64::MAX);
+        let root_before = state.calculate_state_root();
+        let mut tx = Transaction::new_with_chain_id(
+            sender,
+            recipient,
+            1,
+            1,
+            0,
+            vec![],
+            DEFAULT_CHAIN_ID,
+            TransactionType::Transfer,
+        );
+        tx.hash = tx.calculate_hash();
+
+        let error = Executor::apply_transaction_checked(&mut state, &tx).unwrap_err();
+        assert_eq!(error.code(), "balance_overflow");
+        assert_eq!(state.calculate_state_root(), root_before);
+        assert_eq!(state.get_balance(&sender), 2);
+        assert_eq!(state.get_balance(&recipient), u64::MAX);
+        assert_eq!(state.get_nonce(&sender), 0);
+    }
+
+    #[test]
+    fn blg_197_stake_overflow_is_rejected_before_state_mutation() {
+        use crate::core::account::AccountState;
+        use crate::core::address::Address;
+        use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
+        use crate::execution::executor::Executor;
+
+        let sender = Address::from([0x57; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&sender, 2);
+        state.add_validator(sender, u64::MAX);
+        let root_before = state.calculate_state_root();
+        let mut tx = Transaction::new_with_chain_id(
+            sender,
+            Address::zero(),
+            1,
+            1,
+            0,
+            vec![],
+            DEFAULT_CHAIN_ID,
+            TransactionType::Stake,
+        );
+        tx.hash = tx.calculate_hash();
+
+        let error = Executor::apply_transaction_checked(&mut state, &tx).unwrap_err();
+        assert_eq!(error.code(), "stake_overflow");
+        assert_eq!(state.calculate_state_root(), root_before);
+        assert_eq!(state.get_balance(&sender), 2);
+        assert_eq!(state.get_nonce(&sender), 0);
+        assert_eq!(state.get_validator(&sender).unwrap().stake, u64::MAX);
     }
 
     #[test]

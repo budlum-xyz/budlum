@@ -1851,10 +1851,19 @@ impl AccountState {
                 if tx.to == Address::zero() {
                     return Err("Transfer missing 'to' address".into());
                 }
+                if self.get_balance(&tx.to).checked_add(tx.amount).is_none() {
+                    return Err("Transfer receiver balance overflows u64".into());
+                }
             }
             TransactionType::Stake => {
                 if tx.amount == 0 {
                     return Err("Stake amount must be > 0".into());
+                }
+                if self
+                    .get_validator(&tx.from)
+                    .is_some_and(|validator| validator.stake.checked_add(tx.amount).is_none())
+                {
+                    return Err("Stake balance overflows u64".into());
                 }
             }
             TransactionType::Delegate { validator } => {
