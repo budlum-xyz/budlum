@@ -10,6 +10,31 @@ use crate::types::{
     BlockContext, BudAmount, CodeInfo, EeCall, EeFault, EeId, EeIdentity, EeLog, EeOutcome,
     EeQuery, EeRefusal, HostError, Namespace, OutOfGas, UniversalCall, UniversalResult,
 };
+use sha2::{Digest, Sha256};
+
+/// The digest an environment reports for a caught panic. Domain-separated and
+/// bound to the environment, so two environments panicking with one message
+/// still differ.
+#[must_use]
+pub fn panic_digest(ee: EeId, message: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"BDLM_UEL_PANIC_V1");
+    hasher.update([ee.0]);
+    hasher.update(message.as_bytes());
+    hasher.finalize().into()
+}
+
+/// Extracts a deterministic message from a caught panic payload.
+#[must_use]
+pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic".to_string()
+    }
+}
 
 /// The read side of the coordinator, available to `query` and `execute`.
 pub trait HostRead {

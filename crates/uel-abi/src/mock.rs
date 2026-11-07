@@ -6,7 +6,7 @@
 //! deterministically by call number.
 
 use crate::host::{ExecutionEnvironment, HostApi, HostRead};
-use crate::transport::panic_digest;
+use crate::host::panic_digest;
 use crate::types::{
     BlockContext, BudAmount, CodeInfo, EeCall, EeFault, EeId, EeIdentity, EeLog, EeOutcome,
     EeQuery, EeRefusal, HostError, Namespace, OutOfGas, OutcomeStatus, RefusalCode, UniversalCall,
@@ -129,6 +129,7 @@ impl MockEe {
                     value: BudAmount(0),
                     input: data.to_vec(),
                     gas_limit: call.gas_limit,
+                    is_static: false,
                 })?;
                 Ok(EeOutcome {
                     status: if result.success {
