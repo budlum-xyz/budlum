@@ -1,0 +1,35 @@
+# Supply-chain policy for the standalone `budlum-ee-move` worker (`WP-32`).
+#
+# Per Section 8.14 item 4 and IP-32 item 7 of THE BUDLUM DIREKTIF, any
+# `unknown-git` source exception for `aptos-core` is confined strictly to this
+# file and pinned to an exact 40-hex commit SHA.
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "CC0-1.0",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+    "https://github.com/aptos-labs/aptos-core?rev=81d89f428fe8e4b69d53b4916993e9a930afc37c",
+]

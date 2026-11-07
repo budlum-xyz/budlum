@@ -146,3 +146,57 @@ fn hex_match_pattern_matches() {
     "#;
     assert_eq!(run_events(src), vec![1, 0]);
 }
+
+#[test]
+fn blg_067_entrypoint_abi_match_bounds_and_unknown_field_refused() {
+    let bad_field = "contract T { pub fn main() { let v = 7; let z = v.nope; } }";
+    assert!(compile(bad_field, IsaProfile::Production).is_err());
+    let wide_match = r#"
+        contract T {
+            pub fn main() {
+                let x = 5000000000;
+                match (x) {
+                    5000000000 => { emit Result(9); },
+                    _ => { emit Result(0); },
+                };
+            }
+        }
+    "#;
+    assert_eq!(run_events(wide_match), vec![9]);
+}
+
+#[test]
+fn blg_114_compiler_preserves_u64_patterns_scopes_and_rejects_dup_main() {
+    arm_let_does_not_clobber_outer_variable();
+    duplicate_main_and_oversized_literal_are_refused();
+}
+
+#[test]
+fn blg_136_parser_accepts_bare_calls_and_ir_verifier_catches_bad_ssa() {
+    bare_call_statement_compiles_and_runs();
+    let trailing = "contract T { pub fn main() { } } garbage_token";
+    assert!(compile(trailing, IsaProfile::Production).is_err());
+}
+
+#[test]
+fn blg_162_lexer_handles_crlf_multistar_comments_and_hex_match() {
+    let crlf_src = concat!(
+        "contract T {\r\n",
+        "  /** multi ** star **/\r\n",
+        "  pub fn main() {\r\n",
+        "    let x = 0x2A;\r\n",
+        "    match (x) {\r\n",
+        "      0x2A => { emit Result(42); },\r\n",
+        "      _ => { emit Result(0); },\r\n",
+        "    };\r\n",
+        "  }\r\n",
+        "}\r\n",
+    );
+    assert_eq!(run_events(crlf_src), vec![42]);
+}
+
+#[test]
+fn blg_198_deep_ast_chains_refused_without_stack_overflow() {
+    long_operator_and_field_chains_return_parser_error();
+    sequential_branches_release_their_registers();
+}

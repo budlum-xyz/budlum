@@ -32,6 +32,20 @@ impl EeId {
     pub const SVM: Self = Self(0x03);
     /// Move (Aptos dialect).
     pub const MOVE: Self = Self(0x04);
+    /// Move (Sui dialect, `WP-50`).
+    pub const MOVE_SUI: Self = Self(0x05);
+    /// Cairo (Starknet, `WP-51`).
+    pub const CAIRO: Self = Self(0x06);
+    /// NEAR WASM (`WP-53`).
+    pub const NEAR_WASM: Self = Self(0x07);
+    /// PolkaVM (`WP-53`).
+    pub const POLKAVM: Self = Self(0x08);
+    /// TVM (`WP-53`).
+    pub const TVM: Self = Self(0x09);
+    /// UTXO verification script (`WP-53`).
+    pub const UTXO: Self = Self(0x0A);
+    /// Plutus UPLC (`WP-53`).
+    pub const PLUTUS: Self = Self(0x0B);
 }
 
 /// A state namespace the coordinator keeps for a worker, such as `uel/alias`.
@@ -256,6 +270,8 @@ pub struct UniversalCall {
     pub input: Vec<u8>,
     /// The gas the callee may use.
     pub gas_limit: u64,
+    /// True when state writes and transfers are forbidden (`Section 8.7.3` item 7).
+    pub is_static: bool,
 }
 
 /// What a Universal Call returned.

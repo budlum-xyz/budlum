@@ -268,6 +268,7 @@ impl From<&UniversalCall> for pb::UniversalCall {
             value: Some(value.value.into()),
             input: value.input.clone(),
             gas_limit: value.gas_limit,
+            is_static: value.is_static,
         }
     }
 }
@@ -282,6 +283,7 @@ impl TryFrom<pb::UniversalCall> for UniversalCall {
             value: need(value.value, "universal_call.value")?.into(),
             input: value.input,
             gas_limit: value.gas_limit,
+            is_static: value.is_static,
         })
     }
 }
