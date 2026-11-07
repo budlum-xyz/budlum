@@ -64,29 +64,33 @@ fn check_ai_exec_dims(dims: &[u16]) -> Result<(), String> {
 }
 
 fn privacy_transfers_enabled(chain_id: u64) -> bool {
-    // Allowlist, not a denylist.
-    //
-    // `PrivateTransferSubmit` reaches `note_registry.apply_transfer`, which
-    // takes the nullifier the submitter hands it: the binding check
-    // `nullifier == derive_nullifier(commitment, proof)` only runs when
-    // `apply_transfer_with_proofs` is called with proofs, and nothing in the
-    // tree calls it that way. So today a transfer proves who signed the
-    // transaction, never that the signer owns the note; value conservation and
-    // membership are unwired too. That is survivable on the two networks where
-    // the notes are worth nothing.
-    //
-    // The old test was `chain_id != Mainnet`, which answers "is this not the
-    // one network we care about" instead of "is this a network where losing the
-    // notes costs nothing". Every id nobody has claimed yet - a second mainnet,
-    // a public testnet that grows real value - came back enabled.
+    // PTP-1 ownership, membership and value-conservation proofs are not live.
+    // Submitter-supplied nullifier proofs do not establish those properties.
+    // The public testnet must refuse the surface just like mainnet.
     chain_id
         == crate::core::chain_config::Network::Devnet
             .chain_id()
             .value()
-        || chain_id
-            == crate::core::chain_config::Network::Testnet
-                .chain_id()
-                .value()
+}
+
+/// The same feature boundary applies to admission, precheck and execution.
+/// Refuse before creating an account, taking a fee or touching note state.
+pub(crate) fn check_transaction_features(
+    chain_id: u64,
+    tx_type: &TransactionType,
+) -> BudlumResult<()> {
+    if matches!(
+        tx_type,
+        TransactionType::PrivateTransferSubmit(_) | TransactionType::PrivacyNoteInsert(_)
+    ) && !privacy_transfers_enabled(chain_id)
+    {
+        return Err(BudlumError::validation(
+            // Preserve the existing refusal code used by RPC clients.
+            "privacy_mainnet_disabled",
+            "private transfers and note insertion are closed on this network until ownership, value-conservation and membership proofs are wired",
+        ));
+    }
+    Ok(())
 }
 
 impl Executor {
@@ -167,6 +171,8 @@ impl Executor {
         state: &mut AccountState,
         tx: &Transaction,
     ) -> BudlumResult<()> {
+        check_transaction_features(tx.chain_id, &tx.tx_type)?;
+
         // The zero address is not a sender: only the canonical genesis
         // transaction may originate from it, and it is rejected everywhere
         // but the genesis block by `validate_and_add_block`. Accepting any
@@ -3992,7 +3998,7 @@ mod tests {
 
         assert!(!privacy_transfers_enabled(mainnet), "mainnet must stay off");
         assert!(privacy_transfers_enabled(devnet), "devnet must stay on");
-        assert!(privacy_transfers_enabled(testnet), "testnet must stay on");
+        assert!(!privacy_transfers_enabled(testnet), "testnet must stay off");
 
         for unclaimed in [1u64, 42, 1337, 45263, u64::MAX] {
             assert!(
@@ -4000,6 +4006,17 @@ mod tests {
                 "chain id {unclaimed} has no ownership proof wired; the surface must stay off"
             );
         }
+    }
+
+    #[test]
+    fn testnet_privacy_is_disabled_until_ptp1() {
+        let testnet = crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value();
+        assert!(
+            !privacy_transfers_enabled(testnet),
+            "a public testnet must not enable unproven private transfers"
+        );
     }
 
     #[test]

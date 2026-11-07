@@ -1763,6 +1763,8 @@ impl AccountState {
         expected_nonce: u64,
         spendable_balance: u64,
     ) -> Result<(), String> {
+        crate::execution::executor::check_transaction_features(tx.chain_id, &tx.tx_type)
+            .map_err(|error| error.to_string())?;
         if tx.from == Address::zero() {
             if tx.verify_in(&self.scheme_registry) {
                 return Ok(());

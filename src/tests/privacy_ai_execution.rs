@@ -296,7 +296,7 @@ fn private_transfer_is_refused_on_mainnet_and_unknown_chain_ids() {
         let tx = signed_tx(&kp, chain_id, TransactionType::PrivateTransferSubmit(sub));
         let err = Executor::apply_transaction(&mut state, &tx)
             .expect_err("the privacy gate must refuse this chain id");
-        assert!(err.contains("disabled on mainnet"), "got: {err}");
+        assert!(err.contains("closed on this network"), "got: {err}");
         assert!(state.note_registry.contains_commitment(&c_in));
         assert!(!state.note_registry.contains_commitment(&c_out));
     }
@@ -313,7 +313,7 @@ fn privacy_note_insert_is_refused_on_mainnet_and_unknown_chain_ids() {
         let tx = signed_tx(&kp, chain_id, TransactionType::PrivacyNoteInsert(c));
         let err = Executor::apply_transaction(&mut state, &tx)
             .expect_err("the privacy gate must refuse this chain id");
-        assert!(err.contains("disabled on mainnet"), "got: {err}");
+        assert!(err.contains("closed on this network"), "got: {err}");
         assert!(!state.note_registry.contains_commitment(&c));
     }
 }
@@ -413,4 +413,108 @@ fn private_transfer_replayed_under_another_nonce_or_bare_digest_is_refused() {
         .expect_err("nonce-0 authorization replayed at nonce 1 must be rejected");
     assert!(err.contains("authorization_sig invalid"), "got: {err}");
     assert!(state.note_registry.contains_commitment(&c_in));
+}
+
+/// Compare the persisted note registry as well as account state. A refusal
+/// must not spend a note, consume a nonce, charge a fee or create a sender.
+fn assert_privacy_refusal_unchanged(state: &mut AccountState, tx: &Transaction) {
+    let root = state.calculate_state_root();
+    let balances = state.get_all_balances();
+    let nonces = state.get_all_nonces();
+    let notes = bincode::serialize(&state.note_registry).unwrap();
+    let accounts = state.accounts.len();
+    let err = Executor::apply_transaction_checked(state, tx)
+        .expect_err("the network policy must refuse the privacy surface");
+    assert_eq!(err.code(), "privacy_mainnet_disabled");
+    assert_eq!(state.calculate_state_root(), root);
+    assert_eq!(state.get_all_balances(), balances);
+    assert_eq!(state.get_all_nonces(), nonces);
+    assert_eq!(bincode::serialize(&state.note_registry).unwrap(), notes);
+    assert_eq!(state.accounts.len(), accounts);
+}
+
+#[test]
+fn private_transfer_is_closed_on_testnet() {
+    let chain_id = crate::core::chain_config::Network::Testnet
+        .chain_id()
+        .value();
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    let mut state = funded_state(from, 1_000_000);
+    let (mut sub, _, _) = transfer_fixture(&kp, &mut state);
+    // The inner authorization must name testnet too. A devnet authorization
+    // would test signature rejection rather than the closed-feature policy.
+    sub.authorization_sig = kp
+        .sign(&PrivateTransferSubmit::authorization_message(
+            chain_id,
+            from.as_bytes(),
+            0,
+            &sub.public_digest,
+        ))
+        .to_vec();
+    let tx = signed_tx(&kp, chain_id, TransactionType::PrivateTransferSubmit(sub));
+    assert_privacy_refusal_unchanged(&mut state, &tx);
+}
+
+#[test]
+fn note_registry_is_closed_on_testnet() {
+    let chain_id = crate::core::chain_config::Network::Testnet
+        .chain_id()
+        .value();
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    let tx = signed_tx(
+        &kp,
+        chain_id,
+        TransactionType::PrivacyNoteInsert(hash_from_field(77)),
+    );
+    assert_privacy_refusal_unchanged(&mut funded_state(from, 1_000_000), &tx);
+    // In particular, the general balance check must not create this account.
+    assert_privacy_refusal_unchanged(&mut AccountState::new(), &tx);
+}
+
+#[test]
+fn privacy_admission_and_precheck_share_the_execution_boundary() {
+    use crate::chain::blockchain::Blockchain;
+    use crate::consensus::pow::PoWEngine;
+    use crate::core::chain_config::Network;
+    use std::sync::Arc;
+
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    for chain_id in [Network::Testnet.chain_id().value(), 999_999] {
+        let mut chain = Blockchain::new(Arc::new(PoWEngine::new(1)), None, chain_id, None);
+        chain.state = funded_state(from, 1_000_000);
+        let (mut sub, _, _) = transfer_fixture(&kp, &mut chain.state);
+        sub.authorization_sig = kp
+            .sign(&PrivateTransferSubmit::authorization_message(
+                chain_id,
+                from.as_bytes(),
+                0,
+                &sub.public_digest,
+            ))
+            .to_vec();
+        for variant in [
+            TransactionType::PrivateTransferSubmit(sub),
+            TransactionType::PrivacyNoteInsert(hash_from_field(77)),
+        ] {
+            let tx = signed_tx(&kp, chain_id, variant);
+            let root = chain.state.calculate_state_root();
+            let err = chain.state.validate_transaction(&tx).unwrap_err();
+            assert!(err.contains("privacy_mainnet_disabled"), "{err}");
+            let precheck = chain.tx_precheck(&tx);
+            assert_eq!(precheck["accepted"], false);
+            assert!(precheck["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason == "privacy_mainnet_disabled"));
+            let err = chain.add_transaction(tx.clone()).unwrap_err();
+            assert!(err.contains("privacy_mainnet_disabled"), "{err}");
+            let err = chain.add_transaction_bundle(vec![tx]).unwrap_err();
+            assert_eq!(err.index, 0);
+            assert!(chain.mempool.is_empty());
+            assert_eq!(chain.state.calculate_state_root(), root);
+        }
+    }
 }
