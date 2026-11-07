@@ -98,6 +98,12 @@ const ALLOWED_FILES: &[&str] = &[
     // forbids and the scope words it looks for have to be written in
     // Turkish in its lists. The lists are the only Turkish in the file.
     "xtask/gates/src/gates/pq_claims_are_backed.rs",
+    // The README definition gate holds the Turkish definition block itself: it
+    // compares the first lines of README.tr.md byte for byte, so the block has
+    // to exist in the gate. That block is the only Turkish in the file, and
+    // exempting it is the same decision as exempting README.tr.md, for the same
+    // reason - the text is the artefact being checked.
+    "xtask/gates/src/gates/readme_definition_block_is_verbatim.rs",
     // The concept map names the retired Turkish architecture names (and their
     // Turkish replacement terms) so the concept-names gate can find them. The
     // baseline repeats the first old name of each entry as its key. Neither

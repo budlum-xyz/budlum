@@ -84,6 +84,9 @@ const FORBIDDEN_PATHS: &[&str] = &[
 ];
 
 const BASELINE_PATH: &str = ".github/no-legacy-storage-baseline.txt";
+
+/// The gate's own file, excluded from the scan for the reason in `measure`.
+const SELF_PATH: &str = "xtask/gates/src/gates/no_legacy_storage.rs";
 const WRITE_ENV: &str = "BUDLUM_NO_LEGACY_STORAGE_WRITE";
 
 /// Is this byte part of a word, for the whole-word rule?
@@ -172,7 +175,12 @@ fn measure(root: &Path) -> BTreeMap<String, usize> {
     for r in SCAN_ROOTS {
         collect_files(&root.join(r), root, &mut files);
     }
-    for (_, path) in files {
+    for (rel, path) in files {
+        // This file holds the identifier list, so counting it would count the
+        // gate itself once per name and inflate every number in the baseline.
+        if rel == SELF_PATH {
+            continue;
+        }
         let Ok(meta) = fs::metadata(&path) else { continue };
         if meta.len() > MAX_FILE_BYTES {
             continue;
