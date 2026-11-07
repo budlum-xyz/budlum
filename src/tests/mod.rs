@@ -307,3 +307,7 @@ pub mod compose_topology_matches_services;
 // (T17, T26, T34-T40) and the §11.7 penalties behind them.
 #[cfg(test)]
 pub mod bud3_custody_and_repair;
+
+// WP-44 domains, cross-domain bridge, settlement, and testnet feature-matrix locks.
+#[cfg(test)]
+pub mod wp44_domains_bridge_settlement;

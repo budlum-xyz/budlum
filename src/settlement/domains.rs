@@ -1034,6 +1034,9 @@ pub fn submit_zk_proof(
             submission.public_inputs.chain_id
         ));
     }
+    if crate::prover::is_empty_or_halt_only_program(&submission.program) {
+        return Err("empty or bare Halt program cannot attest a ZK domain state root".into());
+    }
     // The program allowlist: does this program have the right to advance
     // this domain? Empty is fail-closed.
     let claimed_domain = submission.domain();

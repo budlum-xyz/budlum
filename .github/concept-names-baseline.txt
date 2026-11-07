@@ -13,12 +13,12 @@ Filiz (leader election)|11|222
 Fotosentez|7|19
 GT-1|0|0
 Gonca|0|0
-Graft|41|895
+Graft|39|840
 Gövde|2|2
 Kiragi|6|16
 Liquid storage|0|0
 Living Threshold|5|15
-Mikoriza|23|78
+Mikoriza|21|71
 Mobile Self|14|120
 PUL|14|100
 Pollen|71|760
