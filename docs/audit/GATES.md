@@ -292,8 +292,11 @@ Two facts about the suite as it stands, both measured rather than inferred.
    directive is a 556 KB Turkish document at the repository root, it is not in
    `.github/turkish-baseline.txt`, and it is not in the gate's `ALLOWED_FILES`. Every
    line of it is a finding. Item 0.1 of the directive says the document does not
-   enter the repository, so the tree and the document agree on what to do and the
-   tree has not done it yet. This change does it.
+   enter the repository, so the tree and the document agree on what to do. The
+   file has been removed in this change. Whether the gate then passes cannot be
+   measured here: the gate is a Rust binary, this sandbox has no Rust toolchain,
+   and the newest 100 CI runs completed zero times. What is measurable is that one
+   named finding of the gate no longer has an input.
 2. A suite that runs is the only way to know the verdict. Measured with
    `gh run list --workflow ci.yml --limit 100`: 41 runs queued or in progress, 59
    cancelled, 0 completed successfully. No gate verdict exists for any commit after
