@@ -2357,26 +2357,22 @@ impl Transaction {
 
     /// Return the liquid balance required to admit and execute this transaction.
     ///
-    /// These transaction kinds spend only their fee from the liquid account.
-    /// Their amount identifies vote direction or value that is already bonded;
-    /// adding it to the admission cost can reject a valid exit or vote when
-    /// amount plus fee overflows. Every other kind retains the existing
-    /// amount-plus-fee rule.
+    /// These transaction kinds spend only their fee from the liquid account;
+    /// their amount identifies vote direction or value already bonded. AI
+    /// inference requests escrow `max_fee` plus the call fee instead. Every
+    /// other kind retains amount-plus-fee.
     #[must_use]
     pub fn checked_admission_cost(&self) -> Option<u64> {
-        if matches!(
-            &self.tx_type,
+        match &self.tx_type {
             TransactionType::Unstake
-                | TransactionType::Vote
-                | TransactionType::Undelegate { .. }
-                | TransactionType::WithdrawDelegation { .. }
-                | TransactionType::SetValidatorCommission { .. }
-                | TransactionType::Redelegate { .. }
-                | TransactionType::ClaimRewards { .. }
-        ) {
-            Some(self.fee)
-        } else {
-            self.checked_total_cost()
+            | TransactionType::Vote
+            | TransactionType::Undelegate { .. }
+            | TransactionType::WithdrawDelegation { .. }
+            | TransactionType::SetValidatorCommission { .. }
+            | TransactionType::Redelegate { .. }
+            | TransactionType::ClaimRewards { .. } => Some(self.fee),
+            TransactionType::AiInferenceRequest(request) => request.max_fee.checked_add(self.fee),
+            _ => self.checked_total_cost(),
         }
     }
 

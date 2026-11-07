@@ -116,8 +116,9 @@ fn blg_100_ai_request_cannot_escrow_vesting_locked_balance() {
         TransactionType::AiInferenceRequest(request.clone()),
     );
 
+    assert_eq!(tx.checked_admission_cost(), Some(101));
     let error = Executor::apply_transaction_checked(&mut state, &tx).unwrap_err();
-    assert_eq!(error.code(), "ai_insufficient_balance_for_escrow");
+    assert_eq!(error.code(), "insufficient_balance");
     assert_eq!(state.calculate_state_root(), root_before);
     assert_eq!(state.get_balance(&requester), 101);
     assert_eq!(state.get_nonce(&requester), 0);
@@ -145,8 +146,9 @@ fn blg_197_ai_escrow_plus_fee_overflow_is_atomic() {
         TransactionType::AiInferenceRequest(request.clone()),
     );
 
+    assert_eq!(tx.checked_admission_cost(), None);
     let error = Executor::apply_transaction_checked(&mut state, &tx).unwrap_err();
-    assert_eq!(error.code(), "ai_escrow_cost_overflow");
+    assert_eq!(error.code(), "transaction_cost_overflow");
     assert_eq!(state.calculate_state_root(), root_before);
     assert_eq!(state.get_balance(&requester), u64::MAX);
     assert_eq!(state.get_nonce(&requester), 0);
