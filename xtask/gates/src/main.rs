@@ -63,6 +63,7 @@ mod gates {
     pub mod classical_crypto_is_paired;
     pub mod clippy_extra;
     pub mod coding_audit_samples_the_relationship;
+    pub mod concept_names;
     pub mod consensus_maps_ordered;
     pub mod consensus_state_only_changes_in_blocks;
     pub mod containment_defaults;
