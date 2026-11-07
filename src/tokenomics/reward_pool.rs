@@ -9,7 +9,7 @@
 //! `epoch_transition_does_not_mint_validator_yield`. A chain pays only when
 //! its profile enables a pool (`Network::reward_pool`).
 //!
-//! # The three shares (directive section 11.4, BLG-263)
+//! # The three shares (directive section 11.4, )
 //!
 //! One epoch budget is split into three shares: 40 percent consensus, 50
 //! percent storage and 10 percent repair and relay ([`EpochSplit`]). The
@@ -138,9 +138,9 @@ impl RewardPoolSchedule {
 }
 
 /// The storage share of the epoch budget: what the storage reward payer
-/// (WP-25) reads for `epoch`.
+/// () reads for `epoch`.
 ///
-/// WIRING: read by the storage reward payer of WP-25. Until that payer
+/// WIRING: read by the storage reward payer of . Until that payer
 /// lands, the share stays in the pool account and no other path moves it.
 #[must_use]
 pub fn storage_share(schedule: &RewardPoolSchedule, epoch: u64, remaining_pool: u64) -> u64 {
@@ -559,7 +559,7 @@ mod tests {
         assert!(balance > 0);
     }
 
-    /// BLG-263: the epoch budget is split 40 percent consensus, 50 percent
+    /// : the epoch budget is split 40 percent consensus, 50 percent
     /// storage and 10 percent repair and relay (directive section 11.4), and
     /// the stake weighted payout of `pay_epoch` is the consensus share only.
     /// The other two shares stay in the pool account until their payers
@@ -626,7 +626,7 @@ mod tests {
         );
     }
 
-    /// The interface WP-25 reads: the storage share of the epoch budget, the
+    /// The interface  reads: the storage share of the epoch budget, the
     /// same value `split_epoch_budget` holds back.
     #[test]
     fn storage_share_is_half_of_the_epoch_budget() {

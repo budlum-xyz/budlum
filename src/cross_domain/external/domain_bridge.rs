@@ -476,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_116_inactive_or_mismatched_domain_is_rejected_at_bridge() {
+    fn inactive_or_mismatched_domain_is_rejected_at_bridge() {
         let (adapter, mut domain, mut commitment) = fixture();
         let proof = encode_external_evidence(&adapter.evidence).expect("encode");
         commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();

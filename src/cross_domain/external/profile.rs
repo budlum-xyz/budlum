@@ -268,7 +268,7 @@ mod tests {
     use crate::cross_domain::external::spec::AdapterId;
 
     #[test]
-    fn blg_143_domain_profile_deserializes_from_non_static_json() {
+    fn domain_profile_deserializes_from_non_static_json() {
         let profile = DomainProfile {
             domain: DomainKey::from_parts(&AdapterId::from_name("eth"), "mainnet"),
             state: DomainState::Active,

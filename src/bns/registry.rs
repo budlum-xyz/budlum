@@ -513,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_110_bns_default_matches_new_base_cost_and_root() {
+    fn bns_default_matches_new_base_cost_and_root() {
         let from_default = BnsRegistry::default();
         let from_new = BnsRegistry::new();
         assert_eq!(from_default.base_cost, 100);

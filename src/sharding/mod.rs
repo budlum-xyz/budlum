@@ -366,7 +366,7 @@ mod tests {
         assert_eq!(state.get_or_create(&addr(0)).nonce, 1);
     }
 
-    /// BULGU-020: the cross-shard transfer reads the spendable balance, so
+    /// : the cross-shard transfer reads the spendable balance, so
     /// the vesting lock of the team account holds on this path too.
     #[test]
     fn cross_shard_transfer_refuses_vesting_locked_funds() {

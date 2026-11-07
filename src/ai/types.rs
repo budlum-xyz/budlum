@@ -15,7 +15,7 @@ pub const MAX_INFERENCE_REF_BYTES: usize = 65_536;
 const MAX_EXECUTION_CLASS: u8 = 1;
 
 /// Basis of the fixed-point reputation scores: one unit of trust is
-/// `10_000` permyriad (basis points). WP-45 / BLG-240.
+/// `10_000` permyriad (basis points).  / .
 ///
 /// The scores used to exist only as `f64`, and the registry sorted on them.
 /// A float is not a safe ordering key: the last bit depends on how the node
@@ -38,7 +38,7 @@ const INFERENCE_WEIGHT_PERMYRIAD: u64 = 6_000;
 ///
 /// Widens to `u128` before multiplying: the counters are `u64` and reach
 /// `u64::MAX` in a long-lived registry, so `counter * 10_000` overflows in
-/// `u64` (BLG-062's arithmetic leg). A ratio above one saturates at the basis
+/// `u64` ('s arithmetic leg). A ratio above one saturates at the basis
 /// instead of wrapping, which keeps the score total over every counter pair.
 fn permyriad_of_ratio(numerator: u64, denominator: u64) -> u64 {
     if denominator == 0 {
@@ -866,7 +866,7 @@ impl AiVerifierQos {
     ///
     /// This is the ordering key `AiRegistry::verifiers_by_reliability` sorts
     /// on and the value a caller should carry across a process boundary
-    /// (WP-45 / BLG-240). Same factors as [`Self::reliability_score`]:
+    /// ( / ). Same factors as [`Self::reliability_score`]:
     /// finalization rate, times one minus a saturating equivocation penalty.
     /// Every step truncates toward zero and widens before it multiplies, so
     /// the result is identical on every node and total over `u64` counters.
@@ -1109,7 +1109,7 @@ impl AiAgentReputation {
     /// The trust score in permyriad (`0..=10_000`), integer only.
     ///
     /// The ordering key behind `AiRegistry::agents_by_trust_score*` and the
-    /// value the actor/RPC boundary carries (WP-45 / BLG-240). Weights and
+    /// value the actor/RPC boundary carries ( / ). Weights and
     /// penalties match [`Self::trust_score`]: 40% payment reliability, 60%
     /// inference quality, a saturating equivocation penalty, and a neutral
     /// full score for a dimension with no data. An agent with neither
@@ -1611,7 +1611,7 @@ mod tests {
 
 #[cfg(test)]
 mod permyriad_tests {
-    //! WP-45 / BLG-240: the integer scores are exact, bounded and total.
+    //!  / : the integer scores are exact, bounded and total.
     use super::{AiAgentReputation, AiVerifierQos, TRUST_SCORE_BASIS_POINTS};
     use crate::core::address::Address;
 

@@ -1,6 +1,6 @@
 //! Cosmos (`cosmos.tx.v1beta1.TxRaw`) foreign envelope decoding and verification.
 //!
-//! Implements section 8.6.2 (`Foreign::Cosmos`) and WP-29 item 4:
+//! Implements section 8.6.2 (`Foreign::Cosmos`) and  item 4:
 //! - Protobuf `TxRaw`, `TxBody`, `AuthInfo`, `SignDoc` (`SIGN_MODE_DIRECT` = 1).
 //! - Chain ID `budlum-testnet-1`, `account_number`, and `sequence` replay checks.
 //! - Secp256k1 ECDSA verification (`k256`, EIP-2 low-`s`) and canonical 20-byte

@@ -1461,12 +1461,12 @@ mod rpc_tests {
         u64::from_str_radix(estimate.trim_start_matches("0x"), 16).unwrap()
     }
 
-    /// BLG-192 lock. `bud_estimateGas` has to answer with the fee the chain
+    ///  lock. `bud_estimateGas` has to answer with the fee the chain
     /// will charge, which for a transfer is the floor PLUS the proportional
     /// cut. Quoting the floor alone under-priced every large transfer, and the
     /// wallet then sent a transaction the admission rule refused.
     #[tokio::test]
-    async fn blg_192_estimate_gas_carries_the_proportional_cut() {
+    async fn estimate_gas_carries_the_proportional_cut() {
         let (server, chain) = setup().await;
         let base_fee = chain.get_base_fee().await;
         let amount = 1_000_000_000;
@@ -1507,12 +1507,12 @@ mod rpc_tests {
         );
     }
 
-    /// BLG-030 lock, grant rows. The three grant writes change state-root
+    ///  lock, grant rows. The three grant writes change state-root
     /// bearing rows, so every call is refused and the refusal names the
     /// transaction door. Nothing is written, and the read side still answers.
     #[cfg(feature = "wallet-ml-dsa")]
     #[tokio::test]
-    async fn blg_030_view_grant_writes_refuse_and_name_their_transaction_door() {
+    async fn view_grant_writes_refuse_and_name_their_transaction_door() {
         let (server, _chain) = setup().await;
         let key = crate::crypto::primitives::WalletKeyPair::generate().public_key_bytes();
         let auth = serde_json::json!({
@@ -1604,7 +1604,7 @@ mod rpc_tests {
         );
     }
 
-    /// TEST-GAP-07. The bridge and relayer reads answer on an empty chain and
+    /// . The bridge and relayer reads answer on an empty chain and
     /// refuse a malformed id instead of answering `null`: absence is a claim,
     /// and a caller cannot tell it from a typo it should fix.
     #[tokio::test]
@@ -1645,7 +1645,7 @@ mod rpc_tests {
         );
     }
 
-    /// TEST-GAP-07, first descent: the registry and validator reads. Each row
+    /// , first descent: the registry and validator reads. Each row
     /// answers on a fresh chain, and each read that parses an address refuses a
     /// malformed one by naming the field. An empty object for a typo would read
     /// to a caller as "no such validator", which is a different answer than the
@@ -1718,7 +1718,7 @@ mod rpc_tests {
         );
     }
 
-    /// TEST-GAP-07, second descent: the name reads. An unregistered name is a
+    /// , second descent: the name reads. An unregistered name is a
     /// null answer, never an error: absence is what the caller asked about. The
     /// prepare half keeps its refusal, because a template built over a broken
     /// owner address would be signed and broadcast as is.
@@ -1778,7 +1778,7 @@ mod rpc_tests {
         );
     }
 
-    /// TEST-GAP-07, third descent: the storage deal and custody reads. A content
+    /// , third descent: the storage deal and custody reads. A content
     /// id is 32 bytes and the handler says so; a short or unpaired hex id is a
     /// refusal rather than a lookup on a truncated key, which would answer about
     /// some other object.
@@ -1845,7 +1845,7 @@ mod rpc_tests {
         );
     }
 
-    /// TEST-GAP-07, second descent: the node reads. A fresh node has a height of
+    /// , second descent: the node reads. A fresh node has a height of
     /// zero, no peers and nothing to sync, and every one of these reads says so
     /// in its own shape rather than failing. The address reads keep their
     /// refusal: an unparsable address is a client mistake, and it is answered
@@ -1947,7 +1947,7 @@ mod rpc_tests {
         );
     }
 
-    /// TEST-GAP-07, third descent: the storage deal and custody reads. A content
+    /// , third descent: the storage deal and custody reads. A content
     /// id is 32 bytes and the handler says so; a short or unpaired hex id is a
     /// refusal rather than a lookup on a truncated key, which would answer about
     /// some other object.
@@ -2014,7 +2014,7 @@ mod rpc_tests {
         );
     }
 
-    /// TEST-GAP-07, second descent: the node reads. A fresh node has a height of
+    /// , second descent: the node reads. A fresh node has a height of
     /// zero, no peers and nothing to sync, and every one of these reads says so
     /// in its own shape rather than failing. The address reads keep their
     /// refusal: an unparsable address is a client mistake, and it is answered
@@ -2127,7 +2127,7 @@ mod rpc_tests {
         }
     }
 
-    /// TEST-GAP-07, third descent: the marketplace, Pollen, AI and directory
+    /// , third descent: the marketplace, Pollen, AI and directory
     /// listings. Every one of them is a delegation to the chain actor, so on a
     /// fresh chain each answers with an empty collection. The lock worth keeping
     /// is that none of them errors and none of them collapses to a flag: a

@@ -2,7 +2,7 @@
 //! B.U.D. 3.0 storage health metrics.
 //! exposed for validator maintenance engine and `Bud3RpcService` telemetry.
 //!
-//! Per Sections 6.10, 6.13, and WP-20 items 9-13:
+//! Per Sections 6.10, 6.13, and  items 9-13:
 //! * As the validator set shrinks, repair prioritizes segments with the smallest
 //!   remaining fault margin (`f - lost_shares`) first (Section 6.13 item 6).
 //! * `DeclineContent` and `ReleaseShares` mark shares for reassignment without
@@ -103,7 +103,7 @@ pub fn select_reassignment_holders(
     out
 }
 
-/// Canonical B.U.D. 3.0 storage maintenance metrics (WP-20 item 13).
+/// Canonical B.U.D. 3.0 storage maintenance metrics ( item 13).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Bud3StorageMetrics {
     /// `budlum_bud3_segments_at_risk`: segments with `lost_shares > 0`.

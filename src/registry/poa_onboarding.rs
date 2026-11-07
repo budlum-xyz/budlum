@@ -865,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_052_zero_horizon_rejected_reapplication_allowed_and_audit_root_bound() {
+    fn zero_horizon_rejected_reapplication_allowed_and_audit_root_bound() {
         let mut onboarding = PoAOnboarding::new();
         onboarding.add_admin(0, addr(9));
         onboarding

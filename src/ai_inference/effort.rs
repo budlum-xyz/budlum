@@ -231,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_169_undocumented_sub_baseline_tenths_are_rejected() {
+    fn undocumented_sub_baseline_tenths_are_rejected() {
         for tenths in 6..TIER_BASELINE_TENTHS {
             assert!(
                 EffortTier::from_tenths(tenths).is_err(),

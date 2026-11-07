@@ -34,7 +34,7 @@ pub enum I18nError {
     /// Empty localized text/transcripts are refused so callers fail closed.
     EmptyText,
     /// Localized text/transcripts containing invisible, bidi override, or
-    /// non-printable control characters are refused (`BLG-165`).
+    /// non-printable control characters are refused ().
     ForbiddenCharacters,
     /// No exact local entry exists for `(key, locale, accessibility mode)`.
     MissingTranslation {
@@ -703,7 +703,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_165_i18n_refuses_scheme_uri_malformed_bcp47_and_bidi_invisibles() {
+    fn i18n_refuses_scheme_uri_malformed_bcp47_and_bidi_invisibles() {
         let bad_providers = [
             "mailto:ops@example",
             "file:secret",

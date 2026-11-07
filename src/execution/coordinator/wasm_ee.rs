@@ -1,6 +1,6 @@
 //! WASM (CosmWasm ABI) execution environment (`EeId::WASM` = `0x02`) over `HostApi`.
 //!
-//! Implements WP-29 items 1-3 and the WASM leg of WP-30:
+//! Implements  items 1-3 and the WASM leg of :
 //! - Deterministic WebAssembly module validation: refuses IEEE-754 floating-point
 //!   types (`f32`/`f64`) and opcodes, enforces the 64 MiB (1024-page) memory ceiling,
 //!   and refuses IBC entry-point exports (`ibc_channel_*`, `ibc_packet_*`).

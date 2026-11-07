@@ -873,12 +873,12 @@ impl ConsensusSigner for Pkcs11Signer {
 mod tests {
     use super::*;
 
-    /// BLG-010 lock: the token label is bound when the key is searched, so a
+    ///  lock: the token label is bound when the key is searched, so a
     /// slot holding more than one Ed25519 key is refused instead of guessed. The
     /// refusal names the remedy. A constructor that took the label after binding
     /// an unlabeled key would announce one identity and sign with another.
     #[test]
-    fn blg_010_a_slot_with_more_than_one_key_is_refused_not_guessed() {
+    fn a_slot_with_more_than_one_key_is_refused_not_guessed() {
         assert!(Pkcs11Signer::require_single_key("private", 1).is_ok());
         let none = Pkcs11Signer::require_single_key("private", 0).unwrap_err();
         assert!(none.contains("No Ed25519 private key found"), "{none}");
@@ -1316,7 +1316,7 @@ mod vendor_tests {
     }
 
     #[test]
-    fn blg_010_pkcs11_label_rejects_blank_and_selects_before_binding() {
+    fn pkcs11_label_rejects_blank_and_selects_before_binding() {
         assert_eq!(Pkcs11Signer::validate_key_label(None), Ok(None));
         assert_eq!(
             Pkcs11Signer::validate_key_label(Some("validator-ed25519".to_string())),

@@ -1,4 +1,4 @@
-//! Section 6.22.2 B.U.D. 3.0 JSON-RPC surface (`bud_storage*`, WP-21 item 6).
+//! Section 6.22.2 B.U.D. 3.0 JSON-RPC surface (`bud_storage*`,  item 6).
 //! exposed for `src/rpc/server.rs` `bud_storage*` dispatch.
 //!
 //! Dispatches all 17 canonical `bud_storage*` methods over [`Bud3Registry`],

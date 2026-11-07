@@ -92,7 +92,7 @@ impl RootGroup {
 
 /// Derives `asset_id = SHA3-256("BDLM_UEL_ASSET_V1" || home_ee || len_le64 || home_ref)`.
 ///
-/// exposed for: Universal Asset Registry (`WP-30`).
+/// exposed for: Universal Asset Registry ().
 #[must_use]
 pub fn derive_uel_asset_id(home_ee: EeId, home_ref: &[u8]) -> [u8; 32] {
     let mut h = Sha3_256::new();
@@ -121,7 +121,7 @@ pub struct ExecutionState {
     /// Foreign Compatibility Lane account nonces, quantum alert level, and replay window.
     #[serde(default)]
     pub foreign_lane: ForeignLaneState,
-    /// Staged multi-chunk EVM contract imports awaiting `FinalizeEvmImport` (`WP-34`).
+    /// Staged multi-chunk EVM contract imports awaiting `FinalizeEvmImport` ().
     #[serde(default)]
     pub pending_evm_migrations:
         BTreeMap<String, crate::execution::coordinator::migration::MigrationPlan>,
@@ -184,7 +184,7 @@ impl ExecutionState {
 
     /// Sets whether `ee` accepts new contract deployments without halting the chain.
     ///
-    /// exposed for: governance/operator EE feature flag control (`R-21`, `WP-26`).
+    /// exposed for: governance/operator EE feature flag control (`R-21`, ).
     pub fn set_deploy_enabled(&mut self, ee: EeId, enabled: bool) {
         if enabled {
             self.deploy_frozen_ees.remove(&ee.0);
@@ -214,7 +214,7 @@ impl ExecutionState {
     /// Refuses a secp256k1 sender or `CREATE`/`CREATE2` target that collides
     /// with any registered 20-byte EVM alias (section 8.4.2 rule 3).
     ///
-    /// exposed for: EVM worker / foreign envelope admission (`WP-27`).
+    /// exposed for: EVM worker / foreign envelope admission ().
     pub fn check_evm_alias_collision(&self, candidate_evm_addr: &[u8; 20]) -> Result<(), String> {
         if self.has_registered_alias_collision(EeId::EVM, candidate_evm_addr) {
             return Err(String::from(
@@ -226,7 +226,7 @@ impl ExecutionState {
 
     /// Returns `true` when `candidate` matches a registered native alias in `uel/alias` for `ee`.
     ///
-    /// Closes `BLG-279` across EVM, WASM, SVM, and Move foreign envelope admission.
+    /// Closes  across EVM, WASM, SVM, and Move foreign envelope admission.
     #[must_use]
     pub fn has_registered_alias_collision(&self, ee: EeId, candidate: &[u8]) -> bool {
         let Some(bucket) = self.namespaces.get(ALIAS_NAMESPACE) else {
@@ -245,7 +245,7 @@ impl ExecutionState {
 
     /// Total stored payload bytes in `ns` (for `budlum_state_bytes{ns}` metering).
     ///
-    /// exposed for: state growth metering (`R-12`, `WP-27`).
+    /// exposed for: state growth metering (`R-12`, ).
     #[must_use]
     pub fn namespace_bytes(&self, ns: &str) -> u64 {
         self.namespaces.get(ns).map_or(0, |bucket| {

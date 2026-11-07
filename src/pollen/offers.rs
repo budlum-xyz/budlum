@@ -1774,7 +1774,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_064_offer_counter_saturates_and_encryption_policy_cap_holds() {
+    fn offer_counter_saturates_and_encryption_policy_cap_holds() {
         let mut reg = MarketplaceRegistry::new();
         let seller = addr(1);
         let cid = ContentId([0xEE; 32]);

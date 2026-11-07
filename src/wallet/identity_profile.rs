@@ -614,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_129_proof_bundle_binds_all_profile_fields_and_ignores_revoked_assets() {
+    fn proof_bundle_binds_all_profile_fields_and_ignores_revoked_assets() {
         let owner = addr(3);
         let cid = ContentId::of(b"doc");
         let resolved = BnsResolved {

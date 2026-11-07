@@ -664,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_110_app_registry_rejects_xss_schemes_and_overlong_updates() {
+    fn app_registry_rejects_xss_schemes_and_overlong_updates() {
         let mut reg = BudlumxyzRegistry::new();
         let dev = Address::from([4u8; 32]);
         for bad in [

@@ -525,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_372_mixed_chain_header_after_index_zero_is_refused() {
+    fn mixed_chain_header_after_index_zero_is_refused() {
         use super::{validate_headers_chain_id, BlockHeader, Network};
         use budlum_core::core::block::Block;
 
@@ -541,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_372_duplicate_global_header_opening_for_same_height_is_refused() {
+    fn duplicate_global_header_opening_for_same_height_is_refused() {
         use super::{
             verify_global_opening, GlobalBlockHeader, GlobalHeaderOpening, VerifiedCheckpoint,
         };

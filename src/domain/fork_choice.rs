@@ -367,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_058_single_candidate_cannot_bypass_work_or_vote_weight() {
+    fn single_candidate_cannot_bypass_work_or_vote_weight() {
         let pow = DomainForkChoice {
             domain_id: 1,
             kind: ConsensusKind::PoW,

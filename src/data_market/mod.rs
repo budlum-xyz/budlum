@@ -1,10 +1,10 @@
-//! B.U.D. 3.0 Data Market (`WP-23`, Section 5.6, `BLG-064`).
+//! B.U.D. 3.0 Data Market (, Section 5.6, ).
 //!
 //! Sales bind a B.U.D. 3.0 [`ContentId`] and [`ContentRef`], verify post-quantum
 //! ML-DSA-87 buyer authorization bound to `(chain_id, listing_id, content_id, price_atoms)`,
 //! settle payment atomically, and issue unlinkable access through `bud3::grants`.
 //!
-//! exposed for: Data Market `bud_dataMarket*` RPC handlers and block execution (`WP-23`).
+//! exposed for: Data Market `bud_dataMarket*` RPC handlers and block execution ().
 
 use std::collections::BTreeMap;
 
@@ -23,10 +23,10 @@ use crate::storage::bud3::grants::{
 };
 use crate::storage::bud3::registry::{Bud3Registry, NftId, ObjectKey, RegistryError};
 
-/// Domain tag binding a Data Market purchase authorization (`BLG-064`).
+/// Domain tag binding a Data Market purchase authorization ().
 pub const DOMAIN_DATA_MARKET_PURCHASE: &[u8] = b"BDLM_BUD3_DATA_MARKET_PURCHASE_V1";
 
-/// Canonical `bud_dataMarket*` JSON-RPC method names (`WP-23` item 3).
+/// Canonical `bud_dataMarket*` JSON-RPC method names ( item 3).
 pub const DATA_MARKET_RPC_METHODS: &[&str] = &[
     "bud_dataMarketGetListing",
     "bud_dataMarketGetDataAssets",
@@ -68,7 +68,7 @@ pub struct DataMarketListing {
     pub active: bool,
 }
 
-/// Post-quantum V5 (ML-DSA-87) buyer purchase authorization (`BLG-064`).
+/// Post-quantum V5 (ML-DSA-87) buyer purchase authorization ().
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PurchaseAuthorizationV5 {
     pub chain_id: u64,
@@ -84,7 +84,7 @@ pub struct PurchaseAuthorizationV5 {
 impl PurchaseAuthorizationV5 {
     /// Domain-separated digest binding `chain_id`, `listing_id`, `content_id`, and `price_atoms`.
     ///
-    /// exposed for: wallet/CLI `bud_dataMarketPreparePurchase` signing (`WP-23`).
+    /// exposed for: wallet/CLI `bud_dataMarketPreparePurchase` signing ().
     #[must_use]
     pub fn signing_digest(&self) -> [u8; 32] {
         hash_fields_bytes(&[
@@ -99,9 +99,9 @@ impl PurchaseAuthorizationV5 {
         ])
     }
 
-    /// Verify the ML-DSA-87 signature and chain/price bindings (`BLG-064`).
+    /// Verify the ML-DSA-87 signature and chain/price bindings ().
     ///
-    /// exposed for: `DataMarketRegistry::settle_purchase_with_grant` (`WP-23`).
+    /// exposed for: `DataMarketRegistry::settle_purchase_with_grant` ().
     pub fn verify_pq(&self, expected_chain_id: u64) -> Result<(), DataMarketError> {
         if self.chain_id != expected_chain_id {
             return Err(DataMarketError::ChainIdMismatch {
@@ -153,7 +153,7 @@ pub struct DataMarketRegistry {
 impl DataMarketRegistry {
     /// Create an empty Data Market registry.
     ///
-    /// exposed for: Data Market state initialization (`WP-23`).
+    /// exposed for: Data Market state initialization ().
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -161,7 +161,7 @@ impl DataMarketRegistry {
 
     /// Register a B.U.D. 3.0 object listing in the Data Market.
     ///
-    /// exposed for: Data Market listing creation (`WP-23`).
+    /// exposed for: Data Market listing creation ().
     pub fn create_listing(
         &mut self,
         bud3: &Bud3Registry,
@@ -205,16 +205,16 @@ impl DataMarketRegistry {
 
     /// Look up a listing by `listing_id`.
     ///
-    /// exposed for: `bud_dataMarketGetListing` (`WP-23`).
+    /// exposed for: `bud_dataMarketGetListing` ().
     #[must_use]
     pub fn listing(&self, id: &[u8; 32]) -> Option<&DataMarketListing> {
         self.listings.get(id)
     }
 
     /// Atomically verify V5 PQ authorization, transfer `price_atoms` from buyer to seller,
-    /// and issue an unlinkable `bud3::grants` [`GrantRow`] (`WP-23` item 3, `BLG-064`, `G-4`).
+    /// and issue an unlinkable `bud3::grants` [`GrantRow`] ( item 3, , `G-4`).
     ///
-    /// exposed for: `bud_dataMarketPurchase` settlement (`WP-23`).
+    /// exposed for: `bud_dataMarketPurchase` settlement ().
     pub fn settle_purchase_with_grant(
         &mut self,
         accounts: &mut AccountState,
@@ -363,7 +363,7 @@ mod tests {
         )
         .expect("sign87");
 
-        // Wrong chain_id must be refused with zero balance mutation (`BLG-064`, `G-4`).
+        // Wrong chain_id must be refused with zero balance mutation (, `G-4`).
         let mut wrong_chain = auth.clone();
         wrong_chain.chain_id = 1;
         assert!(market

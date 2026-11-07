@@ -1,6 +1,6 @@
 //! B.U.D. 3.0 CLI command builders and handlers (`bud storage *`, `bud validator *`,
 //! `bud alias show`, `bud faucet request`, and network base-fee default resolution;
-//! Section 6.22, Section 7.3, WP-39, DOC-GAP-08).
+//! Section 6.22, Section 7.3, , ).
 //! exposed for CLI binary subcommands, wallet SDK scripts, and integration tests.
 
 use serde::{Deserialize, Serialize};
@@ -42,7 +42,7 @@ pub const MOBILE_MIN_CUSTODY_QUOTA_BYTES: u64 = 1 << 30;
 pub enum CliBud3Error {
     /// `--signing-chain-id` was missing or zero.
     MissingSigningChainId,
-    /// Network `base_fee` was zero or unavailable (`DOC-GAP-08`).
+    /// Network `base_fee` was zero or unavailable ().
     UnavailableNetworkBaseFee,
     /// Streaming upload session error.
     Upload(UploadError),
@@ -90,7 +90,7 @@ impl std::fmt::Display for CliBud3Error {
 
 impl std::error::Error for CliBud3Error {}
 
-/// Resolve the transaction fee for a CLI invocation (`DOC-GAP-08`).
+/// Resolve the transaction fee for a CLI invocation ().
 /// exposed for `bud` CLI transaction builders.
 ///
 /// Requires a non-zero `signing_chain_id`, uses `explicit_fee` when provided,

@@ -737,7 +737,7 @@ mod depth_bound_locks {
     }
 
     #[test]
-    fn blg_054_overlong_inline_list_ref_is_refused() {
+    fn overlong_inline_list_ref_is_refused() {
         let key = &[0x12u8];
         let overlong_leaf = Item::List(vec![
             Item::String(hp_encode(&[2], true)),

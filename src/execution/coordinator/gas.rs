@@ -51,7 +51,7 @@ pub const fn soft_limit_for_ee(ee: EeId) -> Option<u64> {
 
 /// Converts environment-native gas units to BGU (section 8.9 item 3).
 ///
-/// exposed for: UEL environment adapters and gas calibration (`WP-27`..`WP-35`).
+/// exposed for: UEL environment adapters and gas calibration (..).
 pub fn native_gas_to_bgu(ee: EeId, native_units: u64) -> Result<u64, String> {
     match ee {
         EeId::EVM | EeId::WASM | EeId::SVM | EeId::BUDZERO => Ok(native_units),

@@ -428,7 +428,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_053_receipt_refuses_typed_poststate_bad_bloom_and_invalid_log_shape() {
+    fn receipt_refuses_typed_poststate_bad_bloom_and_invalid_log_shape() {
         // Typed EIP-1559 receipt cannot carry a 32-byte pre-Byzantium postState root.
         let bloom = Item::String(vec![0u8; 256]);
         let typed_poststate = Item::List(vec![

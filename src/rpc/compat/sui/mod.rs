@@ -1,4 +1,4 @@
-//! Sui JSON-RPC compatibility read & height-gated submission subset (`WP-50`,
+//! Sui JSON-RPC compatibility read & height-gated submission subset (,
 //! `Section 8.11`).
 //!
 //! Serves read-only Sui JSON-RPC methods (`sui_getChainIdentifier`,
@@ -91,7 +91,7 @@ fn mist_balance_of(state: &AccountState, sui_addr: &[u8; 32]) -> u64 {
     u64::try_from(attos / ATTO_PER_MIST).unwrap_or(u64::MAX)
 }
 
-/// Handle a read-only or height-gated Sui JSON-RPC 2.0 request (`WP-50`).
+/// Handle a read-only or height-gated Sui JSON-RPC 2.0 request ().
 ///
 /// Convenience: entry point for the Sui compatibility gateway.
 pub fn handle_sui_rpc(

@@ -1,6 +1,6 @@
 //! EVM execution environment (`EeId::EVM` = `0x01`) over `HostApi`.
 //!
-//! Implements WP-27 and the EVM leg of WP-30:
+//! Implements  and the EVM leg of :
 //! - Stateless worker engine reading/writing exclusively via `HostApi`
 //!   (`ee/evm/account`, `ee/evm/code`, `ee/evm/storage`).
 //! - Prague-fork stack EVM bytecode execution (`PUSH0`, arithmetic, bitwise,

@@ -222,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_148_storage_domain_params_reject_u64_max_ceilings() {
+    fn storage_domain_params_reject_u64_max_ceilings() {
         let mut chunks_overflow = good_params();
         chunks_overflow.max_committed_chunks = u64::MAX;
         assert!(chunks_overflow.validate().is_err());

@@ -1144,7 +1144,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_206_poa_validate_rejects_tampered_hash_height_and_backward_timestamp() {
+    fn poa_validate_rejects_tampered_hash_height_and_backward_timestamp() {
         let alice = crate::crypto::primitives::KeyPair::generate().unwrap();
         let alice_addr = Address::from(alice.public_key_bytes());
         let state = poa_state_with(&[alice_addr]);

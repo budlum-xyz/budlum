@@ -1,4 +1,4 @@
-//! EVM Migration Kit verification core and state-installing door (directive 8.12, `WP-34`).
+//! EVM Migration Kit verification core and state-installing door (directive 8.12, ).
 //!
 //! 1. **Authorization (`8.12.2 item 2`):** Proven deployment transaction and receipt
 //!    (direct `CREATE` or factory rule) plus EIP-712 `MigrationAuthorization`.
@@ -290,7 +290,7 @@ pub struct MigrationPlan {
     proof_nodes: u64,
 }
 
-/// Consensus-level EVM migration transaction variants (`WP-34` 2/3 door).
+/// Consensus-level EVM migration transaction variants ( 2/3 door).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MigrationTx {
     /// Verifies deployment authority + account proof and stages a [`MigrationPlan`].
@@ -513,7 +513,7 @@ fn evm_storage_key(addr: &[u8; 20], slot: &[u8; 32]) -> [u8; 52] {
     k
 }
 
-/// Applies one [`MigrationTx`] atomically against `state` (`WP-34` 2/3 installation door).
+/// Applies one [`MigrationTx`] atomically against `state` ( 2/3 installation door).
 ///
 /// Charges the verified migration fee from `migrator` to `reward_pool_account()` on
 /// `FinalizeEvmImport`, installs code and storage at `record.address`, records

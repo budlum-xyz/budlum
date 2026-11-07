@@ -93,7 +93,7 @@ impl QuarantineLedger {
 
     /// Record a quarantine decision. The first recorded proof for a target is
     /// preserved until [`QuarantineLedger::release_entity`] so a later event
-    /// cannot overwrite the original equivocation or slash evidence (`BLG-147`).
+    /// cannot overwrite the original equivocation or slash evidence ().
     pub fn quarantine_entity(&mut self, target_id: Hash32, reason: QuarantineReason, height: u64) {
         self.quarantined_entities
             .entry(target_id)
@@ -125,7 +125,7 @@ impl QuarantineLedger {
 
     /// Record a security alarm and return its deterministic id.
     ///
-    /// Out-of-range severities outside `1..=4` are clamped into `1..=4` (`BLG-147`).
+    /// Out-of-range severities outside `1..=4` are clamped into `1..=4` ().
     pub fn record_alarm(&mut self, code: &str, message: &str, height: u64, severity: u8) -> Hash32 {
         let severity = severity.clamp(1, 4);
         let mut hasher = Sha3_256::new();
@@ -215,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_147_quarantine_preserves_first_proof_and_validates_severity() {
+    fn quarantine_preserves_first_proof_and_validates_severity() {
         let mut ledger = QuarantineLedger::new();
         let target = QuarantineLedger::domain_target(9);
         ledger.quarantine_entity(

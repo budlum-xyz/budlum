@@ -1,9 +1,9 @@
-//! B.U.D. 3.0 SocialFi NFT bindings and `nft_folders` registry (Section 5.6, WP-23, BLG-109).
+//! B.U.D. 3.0 SocialFi NFT bindings and `nft_folders` registry (Section 5.6, , ).
 //! exposed for SocialFi transaction execution, RPC handlers, and wallet folder organization.
 //!
 //! * Every B.U.D. 3.0 SocialFi NFT binds both its [`ContentId`] and its
 //!   `object_commitment` ([`ObjectKey`], Section 6.4 Y15).
-//! * Minting and burning strictly enforce ownership (`BLG-109`):
+//! * Minting and burning strictly enforce ownership ():
 //!   - A caller cannot mint an NFT bound to a third party's sealed object.
 //!   - Burning an NFT requires `nft.owner == caller` and decrements the
 //!     reference count in [`Bud3Registry`] via `burn_reference` / `social_delete`,
@@ -48,7 +48,7 @@ pub enum SocialFiBud3Error {
     Nft(String),
     /// Referenced `ObjectKey` does not exist in [`Bud3Registry`].
     UnknownObject,
-    /// Caller attempted to mint against another account's sealed object (`BLG-109`).
+    /// Caller attempted to mint against another account's sealed object ().
     UnauthorizedSealedObject,
     /// Underlying [`Bud3Registry`] binding or burn error.
     Registry(RegistryError),
@@ -128,7 +128,7 @@ impl NftFolderRegistry {
         self.folders.get(&folder_id)
     }
 
-    /// Mint a SocialFi NFT bound to a registered B.U.D. 3.0 object (`BLG-109`).
+    /// Mint a SocialFi NFT bound to a registered B.U.D. 3.0 object ().
     /// exposed for SocialFi mint transaction execution and RPC handlers.
     ///
     /// Enforces author-name bounds, sealed-object ownership, and increments the
@@ -185,7 +185,7 @@ impl NftFolderRegistry {
     }
 
     /// Burn a SocialFi NFT with strict owner verification and B.U.D. 3.0
-    /// reference release / cryptographic grant shredding (`BLG-109`).
+    /// reference release / cryptographic grant shredding ().
     /// exposed for SocialFi burn transaction execution and RPC handlers.
     ///
     /// # Errors

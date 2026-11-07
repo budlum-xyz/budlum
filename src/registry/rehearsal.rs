@@ -1,30 +1,30 @@
 //! Ceremony rehearsal topology verifier, T-1..T-7 drill pass-criteria evaluator,
-//! and Mobile field-test telemetry analyzer (WP-46 & WP-37; Sections 12.5, 17, 18).
+//! and Mobile field-test telemetry analyzer ( & ; Sections 12.5, 17, 18).
 //! exposed for rehearsal harness runners, mobile device field-test analyzers, and CI gates.
 
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-/// Minimum Full validators required in a ceremony rehearsal network (`WP-46`).
+/// Minimum Full validators required in a ceremony rehearsal network ().
 pub const MIN_REHEARSAL_FULL_VALIDATORS: usize = 8;
 
-/// Minimum distinct cloud regions across Full validators (`WP-46`).
+/// Minimum distinct cloud regions across Full validators ().
 pub const MIN_REHEARSAL_REGIONS: usize = 3;
 
-/// Minimum distinct cloud providers across Full validators (`WP-46`).
+/// Minimum distinct cloud providers across Full validators ().
 pub const MIN_REHEARSAL_PROVIDERS: usize = 2;
 
-/// Minimum libp2p circuit-relay v2 nodes (`WP-46`).
+/// Minimum libp2p circuit-relay v2 nodes ().
 pub const MIN_REHEARSAL_RELAYS: usize = 4;
 
-/// Minimum B.U.D. 3.0 upload gateways (`WP-46`).
+/// Minimum B.U.D. 3.0 upload gateways ().
 pub const MIN_REHEARSAL_GATEWAYS: usize = 2;
 
-/// Minimum physical Android phones participating in the rehearsal (`WP-46`).
+/// Minimum physical Android phones participating in the rehearsal ().
 pub const MIN_REHEARSAL_ANDROID_PHONES: usize = 20;
 
-/// Minimum simulated headless Mobile validators (`WP-46`).
+/// Minimum simulated headless Mobile validators ().
 pub const MIN_REHEARSAL_SIMULATED_MOBILES: usize = 1_000;
 
 /// Minimum continuous rehearsal duration before chaos drills (`72 hours = 259_200 s`).
@@ -43,7 +43,7 @@ pub const MIN_T5_TOTAL_UPLOAD_BYTES: u64 = 100_u64 << 30;
 pub const MIN_T5_SMALL_OBJECT_COUNT: u64 = 10_000;
 
 /// Maximum daily battery drain in basis points (`5.00% = 500 bps`) allowed on a
-/// Mobile validator in Wi-Fi background duty (`WP-37`).
+/// Mobile validator in Wi-Fi background duty ().
 pub const MAX_MOBILE_DAILY_BATTERY_BPS: u32 = 500;
 
 /// Maximum cellular custody-serving bytes permitted when Wi-Fi-only policy is active (`0`).
@@ -57,7 +57,7 @@ pub struct RehearsalValidatorNode {
     pub provider: String,
 }
 
-/// Complete rehearsal network topology descriptor (`WP-46` items 1-3).
+/// Complete rehearsal network topology descriptor ( items 1-3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RehearsalTopology {
     pub chain_id: u64,
@@ -95,7 +95,7 @@ impl std::fmt::Display for RehearsalError {
 
 impl std::error::Error for RehearsalError {}
 
-/// Verify all `WP-46` rehearsal network topology floors.
+/// Verify all  rehearsal network topology floors.
 /// exposed for rehearsal preflight tools and integration suites.
 ///
 /// # Errors
@@ -166,7 +166,7 @@ pub fn verify_rehearsal_topology(topo: &RehearsalTopology) -> Result<(), Rehears
     Ok(())
 }
 
-/// Measured telemetry across all seven `WP-46` chaos and load drills (`T-1`..`T-7`).
+/// Measured telemetry across all seven  chaos and load drills (`T-1`..`T-7`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RehearsalDrillReport {
     /// T-1: Simultaneous shutdown of 100% of Mobile validators.
@@ -194,7 +194,7 @@ pub struct RehearsalDrillReport {
     pub t7_unhandled_5xx_or_panics: u64,
 }
 
-/// Evaluate all seven `WP-46` rehearsal drills (`T-1`..`T-7`) against their binding pass criteria.
+/// Evaluate all seven  rehearsal drills (`T-1`..`T-7`) against their binding pass criteria.
 /// exposed for rehearsal result verification and CI drill suites.
 ///
 /// # Errors
@@ -261,7 +261,7 @@ pub fn evaluate_rehearsal_drills(r: &RehearsalDrillReport) -> Result<(), Rehears
     Ok(())
 }
 
-/// Hardware tier in the Mobile Device Matrix (`WP-37`).
+/// Hardware tier in the Mobile Device Matrix ().
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MobileDeviceTier {
@@ -270,7 +270,7 @@ pub enum MobileDeviceTier {
     Flagship12Gb,
 }
 
-/// One structured field-test telemetry sample emitted by an Android Mobile validator (`WP-37`).
+/// One structured field-test telemetry sample emitted by an Android Mobile validator ().
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MobileFieldSample {
     pub device_id: String,
@@ -284,7 +284,7 @@ pub struct MobileFieldSample {
     pub rewards_credited_atoms: u64,
 }
 
-/// Summary aggregated over a JSONL stream of [`MobileFieldSample`] records (`WP-37`).
+/// Summary aggregated over a JSONL stream of [`MobileFieldSample`] records ().
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct MobileFieldSummary {
     pub device_count: usize,
@@ -294,7 +294,7 @@ pub struct MobileFieldSummary {
     pub total_rewards_atoms: u64,
 }
 
-/// Parse and verify a newline-delimited JSON (`JSONL`) stream of Android field-test logs (`WP-37`).
+/// Parse and verify a newline-delimited JSON (`JSONL`) stream of Android field-test logs ().
 /// exposed for `mobile/tools/log-analyzer` workflows and rehearsal validation.
 ///
 /// # Errors
@@ -356,7 +356,7 @@ pub fn analyze_mobile_field_logs(jsonl: &str) -> Result<MobileFieldSummary, Rehe
 }
 
 /// Run the full rehearsal verification gate over topology, `T-1..T-7` drill
-/// results, and Android field-test JSONL logs (`WP-46` + `WP-37`).
+/// results, and Android field-test JSONL logs ( + ).
 /// exposed for ceremony rehearsal runner and release readiness checks.
 ///
 /// # Errors

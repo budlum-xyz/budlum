@@ -717,7 +717,7 @@ mod query_engine_tests {
     }
 
     #[test]
-    fn blg_129_atlas_keeps_active_domain_1_when_stale_domains_arrive() {
+    fn atlas_keeps_active_domain_1_when_stale_domains_arrive() {
         let mut engine = AtlasQueryEngine::new();
         engine
             .upsert_domain_summary(DomainSummary {

@@ -625,7 +625,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_131_assess_enforces_max_stages_per_event_and_polyp_self_stage_guard() {
+    fn assess_enforces_max_stages_per_event_and_polyp_self_stage_guard() {
         let mut policy = HealthPolicy::default();
         policy.reversion.max_stages_per_event = 1;
         let mut ledger = healthy_ledger();

@@ -230,7 +230,7 @@ impl ProofVerifier {
             });
         }
 
-        // 5. Public inputs hash and execution-bound consistency (BLG-370)
+        // 5. Public inputs hash and execution-bound consistency ()
         if expected_inputs.trace_len == 0 {
             return Err(ProofVerifyError::InvalidProof(
                 "public inputs trace_len must be non-zero".into(),
@@ -654,7 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_370_underpriced_degree_bits_below_trace_len_rejected() {
+    fn underpriced_degree_bits_below_trace_len_rejected() {
         let mut inputs = make_inputs();
         inputs.trace_len = 2048;
         let mut envelope = make_envelope(&inputs);
@@ -667,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_370_zero_trace_or_gas_overrun_in_public_inputs_rejected() {
+    fn zero_trace_or_gas_overrun_in_public_inputs_rejected() {
         let mut zero_trace = make_inputs();
         zero_trace.trace_len = 0;
         let env_zero = make_envelope(&zero_trace);

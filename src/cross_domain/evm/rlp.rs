@@ -643,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_134_non_canonical_single_byte_and_overlong_lengths_refused() {
+    fn non_canonical_single_byte_and_overlong_lengths_refused() {
         assert_eq!(decode(&[0x81, 0x00]), Err(RlpError::NonCanonical));
         assert_eq!(decode(&[0x81, 0x7f]), Err(RlpError::NonCanonical));
         assert_eq!(decode(&[0xb8, 0x00]), Err(RlpError::NonCanonical));

@@ -1,4 +1,4 @@
-//! Atomic object replacement (`StorageTxV3::ReplaceObject`, Section 6.14 items 1-7; WP-24).
+//! Atomic object replacement (`StorageTxV3::ReplaceObject`, Section 6.14 items 1-7; ).
 //! exposed for `apply_storage_tx_v3` and placement-group replacement verifiers.
 
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,7 @@ use super::repair::bad_repair_slash_amount;
 pub const MIN_REPLACE_ATTESTATIONS: usize = 3;
 
 /// Minimum fast-probe savings in basis points (`5% = 500 bps`) required before
-/// running `MediumO` generic candidates (Section 6.6.2 item 11, closing BLG-219).
+/// running `MediumO` generic candidates (Section 6.6.2 item 11, closing ).
 pub const FAST_PROBE_MIN_SAVINGS_BPS: u32 = 500;
 
 /// Entropy ceiling in millibits per byte (`7.900` bits/byte) above which generic
@@ -37,7 +37,7 @@ pub struct VerifiedCodecCandidate {
     pub roundtrip_verified: bool,
 }
 
-/// Select the winning open A0 codec under Section 6.6.2 items 3-11 (closing BLG-219):
+/// Select the winning open A0 codec under Section 6.6.2 items 3-11 (closing ):
 /// - Consults the single-source [`bud_codec::registry::REGISTER`] table (`K-4`).
 /// - Rejects any candidate that is closed on testnet or not round-trip verified.
 /// - Applies the entropy ceiling (`> 7.9` bits/byte -> codec `0`) and the **fast probe

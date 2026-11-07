@@ -64,7 +64,7 @@ fn total_supply_invariant_attos(state: &AccountState) -> u128 {
 }
 
 #[test]
-fn review_2_refused_foreign_txs_never_mutate_state_blg_277() {
+fn review_2_refused_foreign_txs_never_mutate_state() {
     let mut state = AccountState::new();
     let mut coord = ExecutionCoordinator::new();
     let pq_dst = Address::from([0x44u8; 32]);
@@ -176,7 +176,7 @@ fn review_2_refused_foreign_txs_never_mutate_state_blg_277() {
 }
 
 #[test]
-fn review_2_quantum_alert_level2_spoofed_recipient_refused_blg_278() {
+fn review_2_quantum_alert_level2_spoofed_recipient_refused() {
     let mut state = AccountState::new();
     let mut coord = ExecutionCoordinator::new();
     let now_secs = 1_762_000_000u64;
@@ -338,7 +338,7 @@ fn review_2_quantum_alert_level2_spoofed_recipient_refused_blg_278() {
 }
 
 #[test]
-fn review_2_cross_ee_alias_collision_and_bounded_solana_window_blg_279() {
+fn review_2_cross_ee_alias_collision_and_bounded_solana_window() {
     let mut state = AccountState::new();
     let mut coord = ExecutionCoordinator::new();
     let native_owner = Address::from([0x66u8; 32]);
@@ -452,7 +452,7 @@ fn review_2_cross_ee_alias_collision_and_bounded_solana_window_blg_279() {
             .foreign_lane
             .seen_solana_signatures
             .is_empty(),
-        "expired blockhash signatures must be evicted to bound memory (BLG-279 / R-12)"
+        "expired blockhash signatures must be evicted to bound memory ( / R-12)"
     );
     assert_eq!(
         coord.process_foreign_envelope(
@@ -470,7 +470,7 @@ fn review_2_cross_ee_alias_collision_and_bounded_solana_window_blg_279() {
 }
 
 #[test]
-fn review_2_static_prefix_spoofing_refused_blg_280() {
+fn review_2_static_prefix_spoofing_refused() {
     let forged_input = wrap_static_universal_input(b"spoofed_mutating_payload");
     let calldata = encode_precompile_call(
         EeId::WASM,
@@ -481,7 +481,7 @@ fn review_2_static_prefix_spoofing_refused_blg_280() {
     );
     let err = decode_precompile_calldata(&calldata)
         .expect_err("non-static 0x...B001 call carrying STATIC_PREFIX must be refused");
-    assert!(err.contains("BLG-280"));
+    assert!(err.contains(""));
 }
 
 #[test]

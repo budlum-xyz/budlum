@@ -43,7 +43,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 /// Activation and intra-EE (`Block-STM`) policy for deterministic parallel block
-/// scheduling (`Section 1.5`, `WP-59`).
+/// scheduling (`Section 1.5`, ).
 ///
 /// Convenience: passed to `execute_block_with_policy` by coordinator and benchmarks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,7 +64,7 @@ impl Default for ParallelSchedulerPolicy {
 impl ParallelSchedulerPolicy {
     /// Default `T-Acilis` launch policy on testnet `45261` (closed at launch).
     ///
-    /// Convenience: default policy before `WP-59` height activation.
+    /// Convenience: default policy before  height activation.
     #[must_use]
     pub const fn testnet_launch() -> Self {
         Self {
@@ -251,7 +251,7 @@ pub fn plan(sets: &[AccessSet]) -> Plan {
 }
 
 /// Derive an [`AccessSet`] combining the sender/recipient account keys with
-/// declared UEL namespace read/write slot digests (`WP-59`).
+/// declared UEL namespace read/write slot digests ().
 ///
 /// Convenience: used by UEL wave planners when transactions declare explicit
 /// namespace access lists; falls back to [`AccessSet::global`] if both hints
@@ -293,7 +293,7 @@ pub fn access_set_with_uel_hint(
     }
 }
 
-/// Intra-environment speculative execution flag (WP-59 Block-STM).
+/// Intra-environment speculative execution flag ( Block-STM).
 ///
 /// Disabled by default (`enabled = false`); may only be enabled when the
 /// sequential-root equality property suite passes.
@@ -303,7 +303,7 @@ pub struct BlockStmConfig {
     pub enabled: bool,
 }
 
-/// Deterministic execution telemetry for a scheduled block (WP-59).
+/// Deterministic execution telemetry for a scheduled block ().
 /// WIRING: reported by the coordinator block executor alongside block execution metrics.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ScheduleStats {
@@ -340,11 +340,11 @@ fn touched_addresses(set: &AccessSet) -> BTreeSet<Address> {
 
 /// Execute `txs` against `state` using deterministic access-set waves and,
 /// when `block_stm.enabled` is set, optimistic snapshot validation with
-/// deterministic sequential fallback on any conflict (WP-59).
+/// deterministic sequential fallback on any conflict ().
 ///
 /// The resulting `AccountState` is byte-identical to sequential block-order
 /// execution.
-/// WIRING: entry point for the coordinator's parallel block execution path (WP-59).
+/// WIRING: entry point for the coordinator's parallel block execution path ().
 pub fn execute_planned_block(
     state: &mut AccountState,
     txs: &[Transaction],

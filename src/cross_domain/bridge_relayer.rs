@@ -793,7 +793,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_138_pipeline_mint_and_unlock_refuse_unrelayed_messages() {
+    fn pipeline_mint_and_unlock_refuse_unrelayed_messages() {
         let mut rig = pipeline();
         let mut p = rig.pipeline();
         let a = asset(53);

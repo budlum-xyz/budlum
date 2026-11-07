@@ -1,10 +1,10 @@
 //! B.U.D. 3.0 view flow (G1-G8), network-backed reveal sessions (`bud_storageOpenReveal`,
 //! `bud_storageRevealFrames`, `bud_storageCloseReveal`), and paid public G8 fallback
-//! decoding (Section 6.5, WP-21, BLG-212).
+//! decoding (Section 6.5, , ).
 //! exposed for `Bud3RpcService`, `Bud3ContentGateway`, and BNS/SocialFi viewers.
 //!
 //! Security invariants enforced here:
-//! 1. **BLG-212 closure**: reveal sessions NEVER accept caller-supplied content bytes.
+//! 1. ** closure**: reveal sessions NEVER accept caller-supplied content bytes.
 //!    `open_reveal` fetches `>= k + 2` symbols strictly through [`NetworkSymbolSource`]
 //!    (querying Full holders first, then Mobile holders per G3) and verifies the
 //!    reconstructed object against `record.commitment` before emitting frames.
@@ -44,7 +44,7 @@ pub struct PaidViewReceipt {
 
 /// Abstract network symbol fetcher so reveal sessions and content gateways
 /// collect symbols strictly from custody holders (Full first, Mobile second, G3)
-/// rather than caller-supplied content bytes (BLG-212).
+/// rather than caller-supplied content bytes ().
 pub trait NetworkSymbolSource {
     /// Fetch symbols held by `holder` for `(object, segment, first_esi, count)`.
     fn fetch_holder_symbols(
@@ -211,7 +211,7 @@ struct RevealSession {
 }
 
 /// Node-local reveal session manager (`bud_storageOpenReveal`, `bud_storageRevealFrames`,
-/// `bud_storageCloseReveal`). Collects strictly from [`NetworkSymbolSource`] (BLG-212).
+/// `bud_storageCloseReveal`). Collects strictly from [`NetworkSymbolSource`] ().
 #[derive(Default)]
 pub struct RevealSessionManager {
     next_id: u64,

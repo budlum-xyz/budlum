@@ -1,4 +1,4 @@
-//! B.U.D. 3.0 content gateway (`bud3::content_gateway`, WP-21 item 8).
+//! B.U.D. 3.0 content gateway (`bud3::content_gateway`,  item 8).
 //! exposed for HTTP/RPC content gateway endpoints and symbol exchange handlers.
 //!
 //! Replaces legacy gateway serving with B.U.D. 3.0's two-mode delivery:

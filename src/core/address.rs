@@ -9,7 +9,7 @@
 //!
 //! # Looking for `from_hex`?
 //!
-//! The body moved to `crates/budlum-types/src/lib.rs`. In particular, BLG-151
+//! The body moved to `crates/budlum-types/src/lib.rs`. In particular,
 //! (#43), which tightens the accepted input spellings, now applies to that
 //! `from_hex` and not to this file.
 
@@ -37,7 +37,7 @@ mod single_definition_tests {
     /// lowercase hex, 64 characters, no prefix, and a refusal on a short string.
     ///
     /// The accepted *input* spellings are deliberately not pinned here. #43 owns
-    /// `from_hex`'s input contract under BLG-151 (it makes `"0"`/`"0x0"` errors
+    /// `from_hex`'s input contract under  (it makes `"0"`/`"0x0"` errors
     /// and adds `0X`); a move must not decide that finding either way.
     #[test]
     fn address_wire_shape_survives_the_move() {

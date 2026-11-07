@@ -315,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_256_environment_views_and_state_root_bind_frac_attos() {
+    fn environment_views_and_state_root_bind_frac_attos() {
         let acct = Account {
             public_key: addr(3),
             balance: 12,

@@ -484,7 +484,7 @@ pub mod test_adapter {
     }
 
     #[tokio::test]
-    async fn blg_138_verify_observation_refuses_failed_and_cross_chain_results() {
+    async fn verify_observation_refuses_failed_and_cross_chain_results() {
         let adapter = StubAdapter::new(ExternalChain::Ethereum);
         let valid = adapter.wait_for_confirmation("0xabc123", 1).await.unwrap();
         assert!(adapter.verify_observation(&valid).is_ok());

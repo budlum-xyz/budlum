@@ -1576,7 +1576,7 @@ mod tests {
         }
 
         #[test]
-        fn blg_131_forgery_door_enforces_policy_depth_and_refuses_polyp_self_stage() {
+        fn forgery_door_enforces_policy_depth_and_refuses_polyp_self_stage() {
             let mut medusa = with_forged_trail();
             medusa.stage = Stage::Medusa;
             let shallow_policy = ReversionPolicy {

@@ -64,7 +64,7 @@ fn check_ai_exec_dims(dims: &[u16]) -> Result<(), String> {
 }
 
 fn privacy_transfers_enabled(chain_id: u64) -> bool {
-    // Allowlist, not a denylist, and devnet is its only member (BLG-063).
+    // Allowlist, not a denylist, and devnet is its only member ().
     //
     // `PrivateTransferSubmit` reaches `note_registry.apply_transfer`, which
     // takes the nullifier the submitter hands it: the binding check
@@ -72,12 +72,12 @@ fn privacy_transfers_enabled(chain_id: u64) -> bool {
     // `apply_transfer_with_proofs` is called with proofs, and nothing in the
     // tree calls it that way. So today a transfer proves who signed the
     // transaction, never that the signer owns the note; value conservation and
-    // membership are unwired too (BLG-225). That is survivable only where the
+    // membership are unwired too (). That is survivable only where the
     // notes are worth nothing, and a public testnet is not that place: it is
     // the network people are asked to trust before mainnet, and an unbacked
     // mint there is a real loss.
     //
-    // The testnet id used to sit in this list. WP-45 removes it: the surface
+    // The testnet id used to sit in this list.  removes it: the surface
     // stays closed on testnet until PTP-1 wires ownership, value conservation
     // and membership (directive 10.4 item 7). The proof code is kept, not
     // deleted - only the door is shut (G-7).
@@ -105,7 +105,7 @@ fn privacy_closed_refusal(chain_id: u64, mainnet_message: &'static str) -> Budlu
     {
         BudlumError::validation(
             "privacy_testnet_closed",
-            "privacy transfers and note insertion are closed on testnet until ownership, value-conservation and membership proofs are wired (BLG-063)",
+            "privacy transfers and note insertion are closed on testnet until ownership, value-conservation and membership proofs are wired ()",
         )
     } else {
         BudlumError::validation("privacy_mainnet_disabled", mainnet_message)
@@ -114,12 +114,12 @@ fn privacy_closed_refusal(chain_id: u64, mainnet_message: &'static str) -> Budlu
 
 /// Whether the on-chain AI inference layer may execute on this chain.
 ///
-/// WP-45 job 5 is a decision, and this is it: **closed on testnet**.
+///  job 5 is a decision, and this is it: **closed on testnet**.
 ///
-/// The directive (1.5, 10.6) lets the layer open at VL-1 only once BLG-059,
-/// BLG-060, BLG-061 and BLG-062 are closed *and* both VL-1 conditions are
-/// built: a per-request lottery with commit-reveal (BLG-229) and integer
-/// ranking (BLG-240). Integer ranking lands in this package; the lottery and
+/// The directive (1.5, 10.6) lets the layer open at VL-1 only once ,
+/// ,  and  are closed *and* both VL-1 conditions are
+/// built: a per-request lottery with commit-reveal () and integer
+/// ranking (). Integer ranking lands in this package; the lottery and
 /// commit-reveal do not exist in the tree, and the four findings above are
 /// still open. One missing condition is enough to keep the layer shut, so the
 /// whole surface refuses on testnet rather than opening at a level nobody can
@@ -140,7 +140,7 @@ fn ai_layer_enabled(chain_id: u64) -> bool {
 /// Kept beside [`ai_layer_enabled`] so the guard and the decision cannot drift
 /// apart. The two marketplace doors (`AiOfferData`, `AiPurchaseData`) are in
 /// the list on purpose: they are the AI-to-data-market leg of the closed loop
-/// BLG-126 describes, where an inference request reads a paid asset without a
+///  describes, where an inference request reads a paid asset without a
 /// grant. Leaving them open would keep that loop reachable on testnet through
 /// the market side while the inference side was shut.
 fn is_ai_layer_transaction(tx_type: &TransactionType) -> bool {
@@ -168,7 +168,7 @@ fn is_ai_layer_transaction(tx_type: &TransactionType) -> bool {
 
 /// The doors that only settle state the layer already holds.
 ///
-/// Closing a layer's entry must not close its exit. Until WP-45 the AI layer
+/// Closing a layer's entry must not close its exit. Until  the AI layer
 /// had no chain-id gate at all, so bonds and escrows taken on testnet are
 /// legitimate existing state, and these seven doors are the only way that
 /// state is settled. Refusing them does not close a feature, it
@@ -320,7 +320,7 @@ impl Executor {
             _ => {}
         }
 
-        // WP-45: the AI layer boundary. It sits here - after the cheap
+        // : the AI layer boundary. It sits here - after the cheap
         // shape guards above and before `liquid_cost` / `get_or_create` -
         // because that probe *creates* the sender row. A refusal must leave
         // the state byte-identical (G-4), so no closed door may run after it.
@@ -337,7 +337,7 @@ impl Executor {
         {
             return Err(BudlumError::validation(
                 "ai_layer_testnet_closed",
-                "the on-chain AI inference layer is closed on this chain id until BLG-059..062 are closed and the VL-1 lottery, commit-reveal and integer ranking are wired (WP-45)",
+                "the on-chain AI inference layer is closed on this chain id until ..062 are closed and the VL-1 lottery, commit-reveal and integer ranking are wired ()",
             ));
         }
 
@@ -4181,7 +4181,7 @@ mod tests {
         assert!(state.get_validator(&team).is_none());
     }
 
-    /// BULGU-020: an arm that charges only a fee still reads the spendable
+    /// : an arm that charges only a fee still reads the spendable
     /// balance. The vesting-locked funds of the team account do not pay a
     /// fee, so the arm refuses at the fee gate and not later, for another
     /// reason.
@@ -4229,7 +4229,7 @@ mod tests {
         assert_eq!(state.get_balance(&team), 5_000);
     }
 
-    /// BULGU-020, the class: no money gate in the executor reads the raw
+    /// , the class: no money gate in the executor reads the raw
     /// balance of the sender. A raw read skips the vesting lock.
     #[test]
     fn no_executor_gate_reads_the_raw_sender_balance() {
@@ -4327,7 +4327,7 @@ mod tests {
         assert!(privacy_transfers_enabled(devnet), "devnet must stay on");
         assert!(
             !privacy_transfers_enabled(testnet),
-            "WP-45/BLG-063: testnet left the allowlist; it stays closed until PTP-1"
+            "/: testnet left the allowlist; it stays closed until PTP-1"
         );
 
         for unclaimed in [1u64, 42, 1337, 45263, u64::MAX] {
@@ -4351,7 +4351,7 @@ mod tests {
         assert!(privacy_transfers_enabled(devnet));
     }
 
-    // ===================== WP-45: testnet boundary =====================
+    // ===================== : testnet boundary =====================
 
     /// The chain ids this boundary is written against, read from the network
     /// table rather than repeated as literals.
@@ -4458,23 +4458,23 @@ mod tests {
                 },
             },
             TransactionType::AiOfferData {
-                cid: crate::storage::content_id::ContentId::of(b"wp45"),
+                cid: crate::storage::content_id::ContentId::of(b"ai-data"),
                 price: 1,
             },
             TransactionType::AiPurchaseData { offer_id: 1 },
         ]
     }
 
-    /// BLG-063: the privacy allowlist must not contain the public testnet.
+    /// : the privacy allowlist must not contain the public testnet.
     /// Ownership, value conservation and membership proofs are unwired, so a
     /// note on a network that carries value is an unbacked mint.
     #[test]
-    fn blg_063_privacy_allowlist_excludes_testnet() {
+    fn privacy_allowlist_excludes_testnet() {
         let (mainnet, testnet, devnet) = boundary_chain_ids();
         assert!(!privacy_transfers_enabled(mainnet), "mainnet stays closed");
         assert!(
             !privacy_transfers_enabled(testnet),
-            "BLG-063: testnet must leave the privacy allowlist until PTP-1 lands"
+            ": testnet must leave the privacy allowlist until PTP-1 lands"
         );
         assert!(privacy_transfers_enabled(devnet), "devnet stays open");
     }
@@ -4541,7 +4541,7 @@ mod tests {
         assert_eq!(state.get_balance(&who), 1_000, "G-4");
     }
 
-    /// BLG-228 by closure: the execution-proof door is shut on testnet, and
+    ///  by closure: the execution-proof door is shut on testnet, and
     /// the refusal happens before the arm can touch escrow or reputation.
     #[test]
     fn ai_execution_proof_is_closed_on_testnet() {
@@ -4581,7 +4581,7 @@ mod tests {
     }
 
     /// The card's named lock for the layer decision (İP-45 job 5): with
-    /// BLG-059..062 open and no per-request lottery or commit-reveal, the
+    /// ..062 open and no per-request lottery or commit-reveal, the
     /// whole on-chain AI layer stays closed on testnet. Every door refuses
     /// with one code, on testnet, mainnet and every unclaimed id alike.
     #[test]
@@ -4657,7 +4657,7 @@ mod tests {
 
     /// Closing the entry to a layer must not close its exit.
     ///
-    /// The AI layer had no chain-id gate before WP-45, so an operator bond
+    /// The AI layer had no chain-id gate before , so an operator bond
     /// taken on testnet is legitimate existing state. `bond_ai_operator`
     /// debits the balance and `AiOperatorUnbond` -> `AiOperatorWithdraw` is
     /// the only path that returns it. A boundary guard that refuses those two

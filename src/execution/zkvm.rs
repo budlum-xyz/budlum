@@ -41,7 +41,7 @@ pub struct ZkVmReceipt {
 /// not the zeros a fresh `Vm` starts with. `sender` is the first eight bytes
 /// of the address, little endian: the VM word is 64 bits wide and the public
 /// input carries the same word.
-/// Encodes a 32-byte `Address` as four little-endian 64-bit words (`BLG-230`, `WP-33`).
+/// Encodes a 32-byte `Address` as four little-endian 64-bit words (, ).
 #[must_use]
 pub fn address_to_four_words(addr: &crate::core::address::Address) -> [u64; 4] {
     let raw = addr.as_bytes();
@@ -57,7 +57,7 @@ pub fn address_to_four_words(addr: &crate::core::address::Address) -> [u64; 4] {
     out
 }
 
-/// Reconstructs a 32-byte `Address` from its four 64-bit little-endian words (`WP-33`).
+/// Reconstructs a 32-byte `Address` from its four 64-bit little-endian words ().
 #[must_use]
 pub fn four_words_to_address(words: [u64; 4]) -> crate::core::address::Address {
     let mut out = [0u8; 32];

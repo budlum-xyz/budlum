@@ -437,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_373_unauthenticated_witness_authorization_bloat_and_zero_chain_refused() {
+    fn unauthenticated_witness_authorization_bloat_and_zero_chain_refused() {
         let acct = account();
         let reg = SchemeStatusRegistry::genesis();
 

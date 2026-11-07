@@ -1,9 +1,9 @@
-//! B.U.D. 3.0 Education Domain (`WP-23`, Section 5.6, `BLG-261`).
+//! B.U.D. 3.0 Education Domain (, Section 5.6, ).
 //!
 //! Educational and research artifacts carry a B.U.D. 3.0 [`ContentId`] and
 //! register on-chain exclusively through [`StorageTxV3::RegisterObject`].
 //!
-//! exposed for: Education Domain registration handlers and SDK callers (`WP-23`).
+//! exposed for: Education Domain registration handlers and SDK callers ().
 
 use std::collections::BTreeMap;
 
@@ -69,7 +69,7 @@ pub struct EducationArtifact {
 impl EducationArtifact {
     /// Validate non-zero identity and metadata fields.
     ///
-    /// exposed for: `EducationDomainRegistry::register_artifact` (`WP-23`).
+    /// exposed for: `EducationDomainRegistry::register_artifact` ().
     pub fn validate(&self) -> Result<(), EducationDomainError> {
         if self.contributor == Address::zero() {
             return Err(EducationDomainError::InvalidArtifact(
@@ -96,7 +96,7 @@ impl EducationArtifact {
 
     /// Deterministic 32-byte artifact id bound to `ContentId` and `object_commitment`.
     ///
-    /// exposed for: Education Domain indexing and attestation checks (`WP-23`).
+    /// exposed for: Education Domain indexing and attestation checks ().
     #[must_use]
     pub fn artifact_id(&self) -> [u8; 32] {
         let kind_tag: u8 = match self.artifact_kind {
@@ -143,7 +143,7 @@ pub struct EducationDomainRegistry {
 impl EducationDomainRegistry {
     /// Create an empty Education Domain registry.
     ///
-    /// exposed for: Education Domain state initialization (`WP-23`).
+    /// exposed for: Education Domain state initialization ().
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -151,7 +151,7 @@ impl EducationDomainRegistry {
 
     /// Build the canonical [`StorageTxV3::RegisterObject`] payload for an artifact.
     ///
-    /// exposed for: Education Domain transaction construction (`WP-23`).
+    /// exposed for: Education Domain transaction construction ().
     #[must_use]
     pub fn build_register_tx(
         record: ObjectRecord,
@@ -165,9 +165,9 @@ impl EducationDomainRegistry {
         }
     }
 
-    /// Register an artifact's B.U.D. 3.0 object via [`StorageTxV3::RegisterObject`] (`BLG-261`).
+    /// Register an artifact's B.U.D. 3.0 object via [`StorageTxV3::RegisterObject`] ().
     ///
-    /// exposed for: Education Domain registration handlers (`WP-23`).
+    /// exposed for: Education Domain registration handlers ().
     pub fn register_artifact(
         &mut self,
         bud3: &mut Bud3Registry,
@@ -206,7 +206,7 @@ impl EducationDomainRegistry {
 
     /// Look up a registered Education Domain artifact by id.
     ///
-    /// exposed for: Education Domain queries (`WP-23`).
+    /// exposed for: Education Domain queries ().
     #[must_use]
     pub fn artifact(&self, id: &[u8; 32]) -> Option<&EducationArtifact> {
         self.artifacts.get(id)

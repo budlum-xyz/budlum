@@ -469,7 +469,7 @@ pub struct FileConfig {
     pub compat: Option<CompatSection>,
 }
 
-/// Ecosystem compatibility RPC gateway sections (`[compat.*]`, `Section 8.11.1`, `BLG-249`).
+/// Ecosystem compatibility RPC gateway sections (`[compat.*]`, `Section 8.11.1`, ).
 #[derive(Debug, serde::Deserialize, Default, Clone)]
 #[serde(deny_unknown_fields)]
 /// Convenience: CLI config deserialization surface for compatibility RPC gateways.
@@ -480,7 +480,7 @@ pub struct CompatSection {
     pub cosmos: Option<CompatGatewayListenerSection>,
 }
 
-/// `[compat.ethereum]` TOML configuration (`127.0.0.1:18547`, `WP-28`).
+/// `[compat.ethereum]` TOML configuration (`127.0.0.1:18547`, ).
 #[derive(Debug, serde::Deserialize, Default, Clone)]
 #[serde(deny_unknown_fields)]
 /// Convenience: parsed by `FileConfig` and consumed by `EthRpcConfig::from_section`.
@@ -1908,7 +1908,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_098_clap_parse_restores_secure_rpc_auth_and_allowlist_defaults() {
+    fn clap_parse_restores_secure_rpc_auth_and_allowlist_defaults() {
         use clap::Parser;
         let mut parsed = NodeConfig::try_parse_from(["budlum-node", "--role", "validator"])
             .expect("CLI flags must parse");
