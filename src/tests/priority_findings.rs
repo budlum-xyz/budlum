@@ -1,8 +1,4 @@
-//! Locks for the twenty highest-priority source-code review findings.
-//!
-//! Several findings were already fail-closed. These tests pin the remaining
-//! holes closed here; names the findings that remain
-//! fail-closed rather than pretending a missing AIR is now live.
+//! Regression locks for protocol, storage, key-policy, and readiness guardrails.
 
 use crate::ai::types::{AiModelId, AiModelSpec};
 use crate::ai::{AiRegistry, FULL_AI_STARK_VERIFICATION_LIVE};
@@ -33,19 +29,19 @@ fn proof_envelope() -> Vec<u8> {
 }
 
 #[test]
-fn f01_checked_in_mainnet_bootnodes_are_placeholders() {
+fn checked_in_mainnet_bootnodes_are_placeholders() {
     let peer = "/ip4/203.0.113.10/tcp/4001/p2p/12D3KooWCeremonyBootstrap1BudlumMainnetNod0001";
     let boot = vec![peer.to_string()];
     assert!(
         first_placeholder_peer(&boot).is_some(),
-        "F-01: ceremony template bootnodes must trip the placeholder guard"
+        "ceremony template bootnodes must trip the placeholder guard"
     );
     let dns = vec!["_dnsaddr.placeholder-seed-1.mainnet.budlum.network".to_string()];
     assert!(first_placeholder_peer(&dns).is_some());
 }
 
 #[test]
-fn f02_mainnet_toml_without_pkcs11_section_is_refused() {
+fn mainnet_toml_without_pkcs11_section_is_refused() {
     let cfg = MainnetValidatorKeyConfig {
         signer_backend: Some("pkcs11"),
         raw_signer_backend: Some("pkcs11"),
@@ -57,16 +53,16 @@ fn f02_mainnet_toml_without_pkcs11_section_is_refused() {
     assert_eq!(
         check_mainnet_validator_key_policy(&cfg),
         Err(MainnetKeyPolicyViolation::MissingPkcs11ModulePath),
-        "F-02: a mainnet validator with only [validator] backend=pkcs11 and no module must not start"
+        "a mainnet validator with only [validator] backend=pkcs11 and no module must not start"
     );
 }
 
 #[test]
-fn f03_f04_f07_proof_required_models_cannot_register() {
+fn proof_required_models_cannot_register() {
     const {
         assert!(
             !FULL_AI_STARK_VERIFICATION_LIVE,
-            "F-03: flipping this without an AIR that binds memory (F-08) and Fiat-Shamir (F-09) reopens the finding"
+            "full AI STARK verification requires an AIR that binds memory and Fiat-Shamir"
         );
     };
     let mut reg = AiRegistry::new();
@@ -90,28 +86,28 @@ fn f03_f04_f07_proof_required_models_cannot_register() {
             execution_weights_digest: Some([5u8; 32]),
             execution_dims: Some(vec![2, 1]),
         })
-        .expect_err("F-04");
+        .expect_err("proof-required model registration must fail");
     assert!(err.contains("full AI STARK"), "{err}");
 }
 
 #[test]
-fn f06_f13_verify_inference_and_merkle_stay_closed() {
+fn verify_inference_and_merkle_stay_closed() {
     let d = bud_isa::MainnetActivation::default();
-    assert!(!d.verify_merkle_enabled, "F-13");
-    assert!(!d.verify_inference_enabled, "F-06");
+    assert!(!d.verify_merkle_enabled, "verify_merkle must remain disabled");
+    assert!(!d.verify_inference_enabled, "verify_inference must remain disabled");
     assert!(
         !StorageRegistry::storage_challenge_proofs_are_checkable(),
-        "F-13: turning this on slashes honest operators"
+        "enabling storage challenge proofs prematurely would slash honest operators"
     );
     let toml = include_str!("../../config/mainnet.toml");
     assert!(
         toml.contains("verify_merkle = false"),
-        "F-13: checked-in mainnet profile must not advertise an open gate"
+        "checked-in mainnet profile must not advertise an open gate"
     );
 }
 
 #[test]
-fn f12_grant_builder_is_requester_bound() {
+fn grant_builder_is_requester_bound() {
     let owner = addr(2);
     let requester = addr(9);
     let grant = crate::ai_inference::build_ai_inference_grant(
@@ -124,8 +120,8 @@ fn f12_grant_builder_is_requester_bound() {
         3,
         [0; 32],
     );
-    assert_eq!(grant.grantee, requester, "F-12: grantee is the requester");
-    assert_eq!(grant.payer, requester, "F-12: payer is the requester");
+    assert_eq!(grant.grantee, requester, "grantee is the requester");
+    assert_eq!(grant.payer, requester, "payer is the requester");
     assert!(grant.is_active_for(&requester, 1));
     assert!(
         !grant.is_active_for(&addr(3), 1),
@@ -134,7 +130,7 @@ fn f12_grant_builder_is_requester_bound() {
 }
 
 #[test]
-fn f18_operator_wide_challenge_ceiling() {
+fn operator_wide_challenge_ceiling() {
     let mut reg = StorageRegistry::new();
     let params = StorageDomainParams {
         chunk_size: 256,
@@ -152,7 +148,7 @@ fn f18_operator_wide_challenge_ceiling() {
     // fires. The operator ceiling must still trip.
     let mut last_deal;
     for i in 0..=StorageRegistry::MAX_OPEN_CHALLENGES_PER_OPERATOR {
-        let mut bytes = b"f18-manifest-xxxxxxxxxxxxxxxx".to_vec();
+        let mut bytes = b"challenge-manifest-xxxxxxxxxxxx".to_vec();
         bytes.extend_from_slice(&i.to_le_bytes());
         let manifest = ContentManifest::from_bytes_sliced(&bytes, 8).unwrap();
         last_deal = reg
@@ -181,14 +177,14 @@ fn f18_operator_wide_challenge_ceiling() {
                         crate::domain::storage_deal::StorageError::TooManyOpenChallengesPerOperator { .. }
                     )
                 ),
-                "F-18: expected operator ceiling, got {result:?}"
+                "expected operator ceiling, got {result:?}"
             );
         }
     }
 }
 
 #[test]
-fn f17_mobile_class_is_enforced_once_declared() {
+fn mobile_class_is_enforced_once_declared() {
     let mut reg = StorageRegistry::new();
     assert_eq!(reg.operator_class(&addr(1)), OperatorClass::AlwaysOn);
     reg.set_operator_class(addr(1), OperatorClass::Mobile);
@@ -196,52 +192,52 @@ fn f17_mobile_class_is_enforced_once_declared() {
 }
 
 #[test]
-fn f19_mainnet_bond_floor_is_above_the_unit_rate() {
+fn mainnet_bond_floor_is_above_the_unit_rate() {
     assert!(
         StorageRegistry::MAINNET_MIN_OPENER_BOND
             > StorageRegistry::required_opener_bond(16 * 1024 * 1024),
-        "F-19: mainnet floor must dominate the uncalibrated 1-unit-per-KiB rate"
+        "mainnet floor must dominate the uncalibrated 1-unit-per-KiB rate"
     );
 }
 
 #[test]
-fn f20_dockerfile_healthcheck_is_jsonrpc() {
+fn dockerfile_healthcheck_is_jsonrpc() {
     let docker = include_str!("../../ops/Dockerfile");
     assert!(
         docker.contains("bud_netListening"),
-        "F-20: image healthcheck must POST a JSON-RPC method, not GET /"
+        "image healthcheck must POST a JSON-RPC method, not GET /"
     );
     assert!(
         !docker.contains("http://localhost:8545/"),
-        "F-20: bare GET of the public RPC path is not a health probe"
+        "bare GET of the public RPC path is not a health probe"
     );
     assert!(
         docker.contains("127.0.0.1:8545"),
-        "F-20: default image binds the public listener, not the opt-in operator port"
+        "default image binds the public listener, not the opt-in operator port"
     );
 }
 
 #[test]
-fn f15_maintenance_audit_tag_is_inventoried() {
+fn maintenance_audit_tag_is_inventoried() {
     assert!(
         crate::crypto::DOMAIN_TAGS.contains(&"BDLM_MAINTENANCE_CODING_AUDIT_V1"),
-        "F-15: a new hash domain must be listed before it ships"
+        "a new hash domain must be listed before it ships"
     );
 }
 
 #[test]
-fn f17_class_declaration_has_only_the_in_block_path() {
+fn class_declaration_has_only_the_in_block_path() {
     let tx_src = include_str!("../domain/storage_tx.rs");
     assert!(tx_src.contains("DeclareOperatorClass"));
     let actor = include_str!("../chain/chain_actor.rs");
     assert!(
         !actor.contains("SetStorageOperatorClass"),
-        "F-17: the class changes only through a signed transaction in a block"
+        "the class changes only through a signed transaction in a block"
     );
 }
 
 #[test]
-fn f05_readiness_does_not_claim_stark_verification() {
+fn readiness_does_not_claim_stark_verification() {
     let src = include_str!("../rpc/server.rs");
     assert!(src.contains("structural_envelope_checks_only"));
     assert!(src.contains("verification_level"));

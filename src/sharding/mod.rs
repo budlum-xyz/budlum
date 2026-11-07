@@ -367,7 +367,7 @@ mod tests {
 
     /// A rejected transfer must not create accounts.
     #[test]
-    fn p20_f04_rejected_transfer_creates_no_accounts() {
+    fn rejected_transfer_creates_no_accounts() {
         let mut state = AccountState::new();
         let tx = transfer(addr(0), addr(1), 40, 5);
         assert!(apply_cross_shard_transfer(&mut state, &tx, 2).is_err());

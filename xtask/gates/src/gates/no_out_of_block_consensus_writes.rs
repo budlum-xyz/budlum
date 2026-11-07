@@ -53,7 +53,7 @@ const CALLS: &[(&str, Class)] = &[
     // Admitting a bundle touches the pool and its node-local persistence file,
     // never `self.state`: the same class as `add_transaction`, one turn for the
     // whole bundle so the all-or-none promise is the pool's and not the RPC
-    // layer's (AF-19).
+    // layer's.
     ("add_transaction_bundle", NodeLocal),
     ("apply_state_snapshot", Sync),
     ("build_global_header", Read),

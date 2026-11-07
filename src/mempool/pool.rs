@@ -231,7 +231,7 @@ impl Mempool {
         // transaction (zero address, zero fields, no signature) and rejects
         // every other zero-address sender, so no special case is needed
         // here. A blanket zero-address exemption would let an attacker mint
-        // unsigned transactions from 0x00..00 (BUDLUM finding #19/#26).
+        // unsigned transactions from 0x00..00.
         let registry_commitment = self.scheme_registry.commitment();
         let authorization = bincode::serialize(&tx.authorization).unwrap_or_default();
         let digest = crate::mempool::authority_cache::authorization_digest(&[
