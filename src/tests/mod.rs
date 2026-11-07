@@ -253,3 +253,7 @@ pub mod bud3_door;
 // Prometheus alert rules may only name metrics the node exports.
 #[cfg(test)]
 pub mod alert_rules_reference_existing_metrics;
+
+// Derived object-layer measurement rings and counters.
+#[cfg(test)]
+pub mod object_layer_metrics;

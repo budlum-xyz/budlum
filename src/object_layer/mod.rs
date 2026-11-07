@@ -13,6 +13,7 @@
 //! | [`charter`] | Domain charter and its admission |
 //! | [`rule`] | Class rules, templates, interfaces, conditions |
 //! | [`registry`] | The state: classes, placements, departures, home calls |
+//! | [`metrics`] | Derived duration rings and counters, never consensus-hashed |
 //! | [`tx`] | `ObjectLayerTx` and the activation gate |
 //! | [`family`] | Everything family-specific, behind `FamilyProfile` |
 //!
@@ -42,6 +43,7 @@
 pub mod charter;
 pub mod family;
 pub mod ids;
+pub mod metrics;
 pub mod pairs;
 pub mod registry;
 pub mod rule;
@@ -50,6 +52,7 @@ pub mod tx;
 pub use charter::{CanonicalCodeHashes, CharterStatus, CodeProof, DataPolicy, DomainCharter};
 pub use family::{profile_for, AssetKind, FamilyProfile, HomeVmFamily};
 pub use ids::{AssetClassId, AssetId, DepartureId, DependencyId, HomeIdentity};
+pub use metrics::{DomainMetrics, ObjectLayerMetrics, Ring, Series};
 pub use registry::{ObjectLayerParams, ObjectLayerRegistry, Refusal};
 pub use rule::{ClassRule, Holder, TemplateId};
 pub use tx::{ObjectLayerActivation, ObjectLayerTx, ACTIVATION};
