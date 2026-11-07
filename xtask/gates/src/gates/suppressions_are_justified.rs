@@ -507,6 +507,54 @@ const BUDGETS: &[Budget] = &[
         count: 1,
         reason: "the cfg-gated reader exists for the on-disk format migration and no other cfg reaches it; removing it would strand rows written by the previous format",
     },
+    Budget {
+        file: "budzero/bud-compiler/tests/regression.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "an integration test whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` in clippy.toml does not reach them; a panic here fails the test run",
+    },
+    Budget {
+        file: "budzero/bud-compiler/tests/regression.rs",
+        lint: "clippy::unwrap_used",
+        count: 1,
+        reason: "an integration test whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` in clippy.toml does not reach them; a panic here fails the test run",
+    },
+    Budget {
+        file: "budzero/bud-proof/tests/regression.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "an integration test whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` in clippy.toml does not reach them; a panic here fails the test run",
+    },
+    Budget {
+        file: "budzero/bud-proof/tests/regression.rs",
+        lint: "clippy::unwrap_used",
+        count: 1,
+        reason: "an integration test whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` in clippy.toml does not reach them; a panic here fails the test run",
+    },
+    Budget {
+        file: "crates/uel-abi/tests/frames.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "an integration test in standalone workspace `crates/uel-abi` (`unwrap_used`/`expect_used` denied crate-wide); panicking fails the test",
+    },
+    Budget {
+        file: "crates/uel-abi/tests/frames.rs",
+        lint: "clippy::unwrap_used",
+        count: 1,
+        reason: "an integration test in standalone workspace `crates/uel-abi` (`unwrap_used`/`expect_used` denied crate-wide); panicking fails the test",
+    },
+    Budget {
+        file: "crates/uel-abi/tests/transport.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "an integration test in standalone workspace `crates/uel-abi` (`unwrap_used`/`expect_used` denied crate-wide); panicking fails the test",
+    },
+    Budget {
+        file: "crates/uel-abi/tests/transport.rs",
+        lint: "clippy::unwrap_used",
+        count: 1,
+        reason: "an integration test in standalone workspace `crates/uel-abi` (`unwrap_used`/`expect_used` denied crate-wide); panicking fails the test",
+    },
 ];
 
 /// Lints that may never be suppressed anywhere.

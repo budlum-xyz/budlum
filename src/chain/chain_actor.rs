@@ -2864,8 +2864,8 @@ impl ChainActor {
                     // estimate is node-local and drives nothing on chain;
                     // at launch tier transitions are recorded only.
                     if let crate::storage::bud3::registry::Bud3Query::Object(key) = &query {
-                        self.access_tiering
-                            .record_access(key, self.blockchain.state.epoch_index);
+                        let _ = self.access_tiering
+                            .record_access(*key, false, self.blockchain.state.epoch_index.saturating_mul(3_600));
                     }
                     let _ = tx.send(self.blockchain.state.bud3_registry.query_json(&query));
                 }

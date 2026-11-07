@@ -1,1 +1,3 @@
-Golden vectors for B.U.D. 3.0 (bof1) land here with the code that produces them.
+# `tests/vectors/bud3/bof1`
+
+BOF-1 canonical header and object commitment golden vectors (populated in WP-18).

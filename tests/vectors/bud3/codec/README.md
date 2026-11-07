@@ -1,1 +1,3 @@
-Golden vectors for B.U.D. 3.0 (codec) land here with the code that produces them.
+# `tests/vectors/bud3/codec`
+
+Canonical bud-codec dictionary and deterministic compression golden vectors (populated in WP-18).

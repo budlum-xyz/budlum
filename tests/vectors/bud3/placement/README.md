@@ -1,1 +1,3 @@
-Golden vectors for B.U.D. 3.0 (placement) land here with the code that produces them.
+# `tests/vectors/bud3/placement`
+
+Deterministic stake-weighted sticky placement golden vectors (populated in WP-19).

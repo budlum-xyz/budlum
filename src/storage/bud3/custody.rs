@@ -16,8 +16,9 @@
 //!
 //! The Merkle trees here hash an odd node up unchanged and bind the leaf count
 //! into the root, the same rule as the object commitment.
-//! Convenience: public custody Merkle tree and audit proof constants consumed by node and mobile custody engines.
+//! Convenience: public B.U.D. 3.0 storage library surface consumed by CLI, gateway, and verification harnesses.
 
+use super::placement::Share;
 use crate::core::hash::hash_fields_bytes;
 
 /// Sub-block size in bytes.
@@ -351,6 +352,35 @@ pub fn audit_for(
 pub const FULL_AUDIT_PPM: u32 = 20_000;
 /// The testnet audit probability of a Mobile share, in ppm.
 pub const MOBILE_AUDIT_PPM: u32 = 10_000;
+/// Maximum epochs a newly assigned custody holder has to submit `CustodyAck`
+/// before Instant Task Handover reassigns the share (Section 7.6: 3 epochs).
+pub const SHARE_ASSIGNMENT_ACK_DEADLINE_EPOCHS: u64 = 3;
+
+/// Reassign an unacknowledged custody share to the next eligible candidate
+/// once `SHARE_ASSIGNMENT_ACK_DEADLINE_EPOCHS` epochs have elapsed (Section 7.6).
+#[must_use]
+/// Convenience: reassign an unacknowledged share (`WP-20`).
+pub fn reassign_unacked_share(
+    share: &Share,
+    assigned_epoch: u64,
+    acked: bool,
+    current_epoch: u64,
+    ordered_candidates: &[[u8; 32]],
+) -> Option<Share> {
+    if acked || current_epoch.saturating_sub(assigned_epoch) < SHARE_ASSIGNMENT_ACK_DEADLINE_EPOCHS {
+        return None;
+    }
+    let next_validator = ordered_candidates
+        .iter()
+        .copied()
+        .find(|v| *v != share.validator)?;
+    Some(Share {
+        validator: next_validator,
+        class: share.class,
+        first_esi: share.first_esi,
+        symbols: share.symbols,
+    })
+}
 
 /// Client custody-share read timeout before immediate failover to the next
 /// share holder (Instant Duty Handover, Section 7.6).
@@ -387,6 +417,7 @@ pub fn select_next_custody_holder(
         })
         .map(|(addr, _)| *addr)
 }
+
 
 #[cfg(test)]
 mod tests {

@@ -4,7 +4,7 @@
 //! byte budget (memory the path may allocate) and a step budget (work the path
 //! may do). A path charges the meter before it allocates or loops, so an
 //! untrusted length can never make it allocate first and check later.
-//! Convenience: public deterministic decode budget meter inspection helpers.
+//! Convenience: public B.U.D. 3.0 storage library surface consumed by CLI, gateway, and verification harnesses.
 
 /// A spent budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

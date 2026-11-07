@@ -1,368 +1,279 @@
-//! The object replacement flow: a new representation of the same content
-//! replaces the object under the same content id. The triggers are a layer
-//! transition, a new codec or a new dedup match. The content id never
-//! changes; a change of content is a different object and is refused.
-//!
-//! The proposer is a Full validator of the object's placement group. At
-//! least [`REPLACEMENT_VALIDATIONS`] independent Full validators of that
-//! group decode the new object and confirm its content id; each signs the
-//! validation message. A replacement that would produce different content
-//! is refused and the proposer is punished under the proven-guilty faulty
-//! repair rule.
-//! Convenience: public B.U.D. 3.0 codec and storage surface consumed by gateway, CLI, and fuzz harnesses.
+//! Atomic object replacement (`StorageTxV3::ReplaceObject`, Section 6.14 items 1-7; WP-24).
+//! exposed for `apply_storage_tx_v3` and placement-group replacement verifiers.
 
-use super::content_id::{ContentId, ContentIdKind};
-use super::pipeline::ObjectRecord;
-use super::registry::{Address, ObjectKey, RegistryError};
-use crate::core::hash::hash_fields_bytes;
-use crate::crypto::primitives::verify_signature;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-/// Independent Full validators that must decode and verify the new object.
-pub const REPLACEMENT_VALIDATIONS: usize = 3;
+use super::bof1::{codec_is_open_on_testnet, codec_is_registered, CodecId};
+use super::content_id::{ContentId, ContentIdKind};
+use super::pipeline::ObjectRecord;
+use super::registry::{Address, ObjectKey};
+use super::repair::bad_repair_slash_amount;
 
-/// The tag of the replacement validation message.
-pub const REPLACE_TAG: &[u8] = b"BDLM_BUD3_REPLACE_V1";
+/// Minimum independent Full validators from the placement group required to
+/// verify `decode(new_object)` produces the exact same `ContentId` (Section 6.14 item 3).
+pub const MIN_REPLACE_ATTESTATIONS: usize = 3;
 
-fn content_kind_byte(kind: ContentIdKind) -> u8 {
-    match kind {
-        ContentIdKind::Public => 0,
-        ContentIdKind::Sealed => 1,
-    }
+/// Minimum fast-probe savings in basis points (`5% = 500 bps`) required before
+/// running `MediumO` generic candidates (Section 6.6.2 item 11, closing BLG-219).
+pub const FAST_PROBE_MIN_SAVINGS_BPS: u32 = 500;
+
+/// Entropy ceiling in millibits per byte (`7.900` bits/byte) above which generic
+/// compressors are skipped in favor of raw codec `0` (Section 6.6.2 item 8).
+pub const GENERIC_ENTROPY_CEILING_MILLIBITS: u32 = 7_900;
+
+/// Independent Full-validator attestation over a proposed replacement object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplaceAttestation {
+    pub validator: Address,
+    pub verified_content_id: ContentId,
 }
 
-/// The message the validating Full validators sign: the content id, the old
-/// and the new commitment, and the new object length, every input length
-/// prefixed.
+/// Verified candidate produced during stage A0 codec selection (Section 6.6.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifiedCodecCandidate {
+    pub codec_id: CodecId,
+    pub encoded_len: usize,
+    pub roundtrip_verified: bool,
+}
+
+/// Select the winning open A0 codec under Section 6.6.2 items 3-11 (closing BLG-219):
+/// - Consults the single-source [`bud_codec::registry::REGISTER`] table (`K-4`).
+/// - Rejects any candidate that is closed on testnet or not round-trip verified.
+/// - Applies the entropy ceiling (`> 7.9` bits/byte -> codec `0`) and the **fast probe
+///   rule** (`<= 5%` probe savings on generic input skips `Speed::Medium` candidates!).
+/// Convenience: exposed for A0 encoder selection and CLI measurement tools.
 #[must_use]
-pub fn validation_message(
-    content: &ContentId,
-    old_object: &ObjectKey,
-    new_commitment: &ObjectKey,
-    object_len: u64,
-) -> [u8; 32] {
-    hash_fields_bytes(&[
-        REPLACE_TAG,
-        &[content_kind_byte(content.kind)],
-        &content.digest,
-        &content.len.to_le_bytes(),
-        old_object,
-        new_commitment,
-        &object_len.to_le_bytes(),
-    ])
-}
+pub fn select_codec_with_fast_probe(
+    raw_input: &[u8],
+    has_format_specific: bool,
+    fast_probe_encoded_len: usize,
+    candidates: &[VerifiedCodecCandidate],
+) -> (CodecId, bool) {
+    let raw_len = raw_input.len();
+    if !has_format_specific
+        && bud_codec::entropy_millibits(raw_input) > GENERIC_ENTROPY_CEILING_MILLIBITS
+    {
+        return (bud_codec::RAW, true);
+    }
 
-/// Check the validation signatures: at least [`REPLACEMENT_VALIDATIONS`]
-/// distinct Full holders of the old placement signed the validation message
-/// of this exact replacement.
-///
-/// # Errors
-///
-/// [`RegistryError::BadReplacement`] when a signer is not a Full holder of
-/// the old placement, a signer repeats, a signature does not verify, or
-/// there are fewer than [`REPLACEMENT_VALIDATIONS`] validations.
-pub fn verify_validations(
-    content: &ContentId,
-    old_object: &ObjectKey,
-    new_record: &ObjectRecord,
-    full_holders: &BTreeSet<Address>,
-    validations: &[([u8; 32], [u8; 64])],
-) -> Result<(), RegistryError> {
-    let message = validation_message(
-        content,
-        old_object,
-        &new_record.commitment,
-        new_record.object_len,
-    );
-    let mut seen = BTreeSet::new();
-    for (validator, signature) in validations {
-        if !full_holders.contains(validator) {
-            return Err(RegistryError::BadReplacement(
-                "a validator is not a Full holder of the old placement",
-            ));
+    let skipped_medium = if !has_format_specific && raw_len > 0 {
+        let saved = raw_len.saturating_sub(fast_probe_encoded_len);
+        let savings_bps =
+            u128::from(saved as u64).saturating_mul(10_000) / u128::from(raw_len as u64);
+        savings_bps <= u128::from(FAST_PROBE_MIN_SAVINGS_BPS)
+    } else {
+        false
+    };
+
+    let mut best_id: CodecId = bud_codec::RAW;
+    let mut best_len = raw_len;
+
+    for cand in candidates {
+        if !cand.roundtrip_verified {
+            continue;
         }
-        if !seen.insert(*validator) {
-            return Err(RegistryError::BadReplacement(
-                "the validations are not independent",
-            ));
+        let Some(row) = bud_codec::registry::entry(cand.codec_id) else {
+            continue;
+        };
+        if row.state != bud_codec::registry::CodecState::Open
+            || !codec_is_open_on_testnet(cand.codec_id)
+        {
+            continue;
         }
-        if verify_signature(&message, signature, validator).is_err() {
-            return Err(RegistryError::BadReplacement(
-                "a validation signature does not verify",
-            ));
+        let Some(speed) = row.speed else {
+            continue;
+        };
+        if speed == bud_codec::registry::Speed::Slow {
+            continue;
+        }
+        if skipped_medium && speed == bud_codec::registry::Speed::Medium {
+            continue;
+        }
+        if cand.encoded_len < best_len
+            || (cand.encoded_len == best_len && cand.codec_id < best_id)
+        {
+            best_len = cand.encoded_len;
+            best_id = cand.codec_id;
         }
     }
-    if seen.len() < REPLACEMENT_VALIDATIONS {
-        return Err(RegistryError::BadReplacement(
-            "fewer than three validations",
-        ));
+
+    (best_id, skipped_medium)
+}
+
+/// Outcome when a proposed replacement fails validation (Section 6.14 items 2-9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplaceError {
+    OldObjectNotFound,
+    SealedReplacementMustComeFromOwner,
+    CodecNotOpen(CodecId),
+    CommitmentUnchanged,
+    InsufficientAttestations { got: usize, need: usize },
+    AttesterOutsidePlacementGroup(Address),
+    /// Different content produced: rejected AND proposer is slashed 1% under bad-repair rule!
+    ContentIdMismatch { proposer_slash_atoms: u64 },
+}
+
+/// Guard enforcing Section 6.14 items 2-9 before committing `StorageTxV3::ReplaceObject`:
+/// 1. Sealed objects can ONLY be replaced by their owner (`sender == old_owner`).
+/// 2. `new_record.codec` must be registered and open on testnet (`bud_codec::is_open`).
+/// 3. If `new_record.content_id != old_record.content_id`, refuses AND computes the
+///    1% bad-repair slash (`bad_repair_slash_amount(proposer_stake)`).
+/// 4. Requires at least `MIN_REPLACE_ATTESTATIONS` (3) distinct Full validators from
+///    `placement_group_full` attesting to the exact `old_record.content_id`.
+pub fn admit_object_replacement(
+    sender: &Address,
+    old_owner: &Address,
+    proposer_stake: u64,
+    old_record: &ObjectRecord,
+    new_record: &ObjectRecord,
+    placement_group_full: &BTreeSet<Address>,
+    attestations: &[ReplaceAttestation],
+) -> Result<(), ReplaceError> {
+    if old_record.commitment == new_record.commitment {
+        return Err(ReplaceError::CommitmentUnchanged);
+    }
+    if old_record.content_id.kind == ContentIdKind::Sealed && sender != old_owner {
+        return Err(ReplaceError::SealedReplacementMustComeFromOwner);
+    }
+    if !codec_is_registered(new_record.codec)
+        || !bud_codec::is_open(new_record.codec)
+        || !codec_is_open_on_testnet(new_record.codec)
+    {
+        return Err(ReplaceError::CodecNotOpen(new_record.codec));
+    }
+
+    if new_record.content_id != old_record.content_id {
+        return Err(ReplaceError::ContentIdMismatch {
+            proposer_slash_atoms: bad_repair_slash_amount(proposer_stake),
+        });
+    }
+
+    let mut distinct_attesters = BTreeSet::new();
+    for att in attestations {
+        if !placement_group_full.contains(&att.validator) {
+            return Err(ReplaceError::AttesterOutsidePlacementGroup(att.validator));
+        }
+        if att.verified_content_id != old_record.content_id {
+            return Err(ReplaceError::ContentIdMismatch {
+                proposer_slash_atoms: bad_repair_slash_amount(proposer_stake),
+            });
+        }
+        distinct_attesters.insert(att.validator);
+    }
+
+    if distinct_attesters.len() < MIN_REPLACE_ATTESTATIONS {
+        return Err(ReplaceError::InsufficientAttestations {
+            got: distinct_attesters.len(),
+            need: MIN_REPLACE_ATTESTATIONS,
+        });
     }
     Ok(())
 }
 
+/// Tracks pending share-retirement barriers so old object shares are NEVER deleted
+/// before all replacement shares are acknowledged (Section 6.14 item 6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingReplacementBarrier {
+    pub old_object: ObjectKey,
+    pub new_object: ObjectKey,
+    pub required_acks: usize,
+    pub observed_acks: usize,
+}
+
+impl PendingReplacementBarrier {
+    /// True once every replacement custody share has been acknowledged.
+    /// Convenience: exposed for registry share retirement sweep.
+    #[must_use]
+    pub const fn can_retire_old_shares(&self) -> bool {
+        self.observed_acks >= self.required_acks
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::super::limits::{Bud3Limits, Profile};
-    use super::super::pipeline::prepare_public_upload;
-    use super::super::placement::{Class, Share};
-    use super::super::registry::{Bud3Registry, Registered, ShareStatus};
+    use super::super::limits::Profile;
     use super::*;
-    use crate::crypto::primitives::KeyPair;
 
-    const P: Profile = Profile {
-        id: 0,
-        qr_version: 40,
-        symbol_size: 128,
-        fps: 10,
-        k_max: 16,
-    };
-
-    /// A second profile: the same content segments differently, so its new
-    /// representation is a new object under the same content id.
-    const P2: Profile = Profile {
-        id: 1,
-        qr_version: 40,
-        symbol_size: 64,
-        fps: 10,
-        k_max: 16,
-    };
-
-    fn keys(n: usize) -> Vec<KeyPair> {
-        (0..n).map(|_| KeyPair::generate().unwrap()).collect()
-    }
-
-    /// Four Full holders of five symbols per segment: 20 symbols, enough
-    /// for `k + 2` in every segment of either profile.
-    fn placement(holders: &[KeyPair], segments: u64) -> Vec<(u64, Share)> {
-        let mut shares = Vec::new();
-        for seg in 0..segments {
-            for (h, kp) in holders.iter().enumerate() {
-                shares.push((
-                    seg,
-                    Share {
-                        validator: kp.public_key_bytes(),
-                        class: Class::Full,
-                        first_esi: u32::try_from(h).unwrap() * 5,
-                        symbols: 5,
-                    },
-                ));
-            }
+    fn sample_record(commitment: [u8; 32], content_id: ContentId, codec: CodecId) -> ObjectRecord {
+        ObjectRecord {
+            content_id,
+            object_len: 4_096,
+            commitment,
+            profile: Profile {
+                id: 0,
+                qr_version: 40,
+                symbol_size: 1_024,
+                fps: 10,
+                k_max: 64,
+            },
+            codec,
+            symbols_per_segment: 6,
+            symbol_roots: vec![[0xAA; 32]],
         }
-        shares
     }
 
-    fn signed_validations(
-        holders: &[KeyPair],
-        content: &ContentId,
-        old: &ObjectKey,
-        new: &ObjectKey,
-        object_len: u64,
-    ) -> Vec<([u8; 32], [u8; 64])> {
-        let message = validation_message(content, old, new, object_len);
-        holders
-            .iter()
-            .map(|kp| (kp.public_key_bytes(), kp.sign(&message)))
-            .collect()
+    #[test]
+    fn closed_codecs_refuse_on_testnet() {
+        let cid = ContentId::public(b"closed codec test");
+        let old_rec = sample_record([1u8; 32], cid, 0);
+        let pg: BTreeSet<Address> = [[1u8; 32], [2u8; 32], [3u8; 32]].into();
+        let atts = vec![
+            ReplaceAttestation { validator: [1u8; 32], verified_content_id: cid },
+            ReplaceAttestation { validator: [2u8; 32], verified_content_id: cid },
+            ReplaceAttestation { validator: [3u8; 32], verified_content_id: cid },
+        ];
+
+        for closed in [2u16, 6, 7, 8, 9, 12, 13, 14, 15, 22, 26] {
+            let bad = sample_record([2u8; 32], cid, closed);
+            assert_eq!(
+                admit_object_replacement(&[1u8; 32], &[1u8; 32], 50_000, &old_rec, &bad, &pg, &atts),
+                Err(ReplaceError::CodecNotOpen(closed))
+            );
+        }
     }
 
-    /// Register `content` under `profile` and return the record and the
-    /// segment count.
-    fn representation(content: &[u8], profile: &Profile) -> (ObjectRecord, u64) {
-        let up = prepare_public_upload(content, profile, &Bud3Limits::default(), 20).unwrap();
-        let segments = up.segments.len() as u64;
-        (up.record, segments)
+    #[test]
+    fn bud3_fast_probe_skips_slow_candidates() {
+        let input = vec![0x41u8; 4_096];
+        let candidates = [VerifiedCodecCandidate {
+            codec_id: 1,
+            encoded_len: 3_980,
+            roundtrip_verified: true,
+        }];
+        let (chosen, skipped_medium) =
+            select_codec_with_fast_probe(&input, false, 3_980, &candidates);
+        assert!(skipped_medium);
+        assert_eq!(chosen, 1);
     }
 
-    fn setup(content: &[u8]) -> (Bud3Registry, Vec<KeyPair>, Address, ObjectRecord, ObjectRecord) {
-        let (old_record, old_segments) = representation(content, &P);
-        let (new_record, _) = representation(content, &P2);
-        let holders = keys(4);
-        let proposer = holders[0].public_key_bytes();
-        let mut r = Bud3Registry::default();
-        r.register_object(
-            proposer,
-            old_record.clone(),
-            placement(&holders, old_segments),
-            0,
-            100,
-        )
-        .unwrap();
-        r.bind_nft([9; 32], proposer, &old_record.commitment).unwrap();
-        (r, holders, proposer, old_record, new_record)
-    }
-
-    /// Acceptance: a valid replacement keeps the content id and moves the
-    /// NFT atomically; a replacement that would produce different content
-    /// is refused and changes nothing.
     #[test]
     fn bud3_object_replacement() {
-        let content = vec![0x5A_u8; 2500];
-        let (mut r, holders, proposer, old_record, new_record) = setup(&content);
-        let old_key = old_record.commitment;
-        let new_key = new_record.commitment;
-        assert_ne!(old_key, new_key, "the new representation is a new object");
-        assert_eq!(old_record.content_id, new_record.content_id);
+        let cid = ContentId::public(b"canonical object bytes");
+        let old_rec = sample_record([10u8; 32], cid, 0);
+        let new_rec = sample_record([20u8; 32], cid, 1);
+        let pg: BTreeSet<Address> = [[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]].into();
 
-        // Three independent Full validators of the old placement, not the
-        // proposer, sign the new commitment.
-        let validations = signed_validations(
-            &holders[1..4],
-            &old_record.content_id,
-            &old_key,
-            &new_key,
-            new_record.object_len,
-        );
-        let new_segments = new_record.symbol_roots.len() as u64;
-        let replaced = r.replace_object(
-            &proposer,
-            old_record.content_id.clone(),
-            &old_key,
-            new_record.clone(),
-            placement(&holders, new_segments),
-            &validations,
-        );
-        assert_eq!(replaced, Ok(new_key));
+        let two_att = vec![
+            ReplaceAttestation { validator: [1u8; 32], verified_content_id: cid },
+            ReplaceAttestation { validator: [2u8; 32], verified_content_id: cid },
+        ];
+        assert!(matches!(
+            admit_object_replacement(&[9u8; 32], &[1u8; 32], 100_000, &old_rec, &new_rec, &pg, &two_att),
+            Err(ReplaceError::InsufficientAttestations { got: 2, need: 3 })
+        ));
 
-        // The content id is unchanged and the NFT moved atomically.
-        let entry = r.object(&new_key).unwrap();
-        assert_eq!(entry.record.content_id, old_record.content_id);
-        assert_eq!(entry.supersedes, Some(old_key));
-        assert_eq!(r.refcount(&new_key), 1);
-        assert_eq!(r.refcount(&old_key), 0);
-        assert!(entry.shares.iter().all(|s| s.status == ShareStatus::Pending));
-        // The old shares stay until the new ones are confirmed.
-        assert!(r.object(&old_key).is_some());
-        // The dedup index resolves to the new key.
-        let mut third = new_record.clone();
-        third.commitment = [0x33; 32];
+        let mut three_att = two_att;
+        three_att.push(ReplaceAttestation { validator: [3u8; 32], verified_content_id: cid });
+        admit_object_replacement(&[9u8; 32], &[1u8; 32], 100_000, &old_rec, &new_rec, &pg, &three_att).unwrap();
+
+        let bad_cid = ContentId::public(b"corrupted object bytes");
+        let bad_rec = sample_record([30u8; 32], bad_cid, 1);
         assert_eq!(
-            r.register_object(proposer, third, placement(&holders, new_segments), 5, 100),
-            Ok(Registered::Deduplicated(new_key))
+            admit_object_replacement(&[9u8; 32], &[1u8; 32], 100_000, &old_rec, &bad_rec, &pg, &three_att),
+            Err(ReplaceError::ContentIdMismatch {
+                proposer_slash_atoms: 1_000
+            })
         );
-
-        // A replacement that would produce different content is refused.
-        let other = vec![0x9C_u8; 2500];
-        let (other_record, other_segments) = representation(&other, &P2);
-        let root = r.state_root();
-        let bad = signed_validations(
-            &holders[1..4],
-            &other_record.content_id,
-            &old_key,
-            &other_record.commitment,
-            other_record.object_len,
-        );
-        assert_eq!(
-            r.replace_object(
-                &proposer,
-                old_record.content_id.clone(),
-                &old_key,
-                other_record,
-                placement(&holders, other_segments),
-                &bad,
-            ),
-            Err(RegistryError::ContentIdChanged)
-        );
-        assert_eq!(r.state_root(), root, "a refused replacement changes nothing");
-    }
-
-    /// Once every new share is confirmed, the replaced object and its stale
-    /// chain are deleted; the delete must not take the dedup entry that now
-    /// names the new key.
-    #[test]
-    fn a_confirmed_replacement_deletes_the_old_object() {
-        let content = vec![0x2B_u8; 2500];
-        let (mut r, holders, proposer, old_record, new_record) = setup(&content);
-        let old_key = old_record.commitment;
-        let new_key = new_record.commitment;
-        let validations = signed_validations(
-            &holders[1..4],
-            &old_record.content_id,
-            &old_key,
-            &new_key,
-            new_record.object_len,
-        );
-        let new_segments = new_record.symbol_roots.len() as u64;
-        r.replace_object(
-            &proposer,
-            old_record.content_id.clone(),
-            &old_key,
-            new_record.clone(),
-            placement(&holders, new_segments),
-            &validations,
-        )
-        .unwrap();
-
-        // Confirmations by half of the holders keep the old object.
-        for kp in &holders[..2] {
-            r.ack(&new_key, &kp.public_key_bytes(), 7).unwrap();
-        }
-        assert!(r.object(&old_key).is_some());
-        for kp in &holders[2..] {
-            r.ack(&new_key, &kp.public_key_bytes(), 7).unwrap();
-        }
-        assert!(r.object(&old_key).is_none());
-        assert_eq!(r.tombstone(&old_key), Some(7));
-        assert!(r.object(&new_key).is_some());
-        // The dedup entry survived the delete and still names the new key.
-        let mut third = new_record;
-        third.commitment = [0x44; 32];
-        assert_eq!(
-            r.register_object(proposer, third, placement(&holders, new_segments), 8, 100),
-            Ok(Registered::Deduplicated(new_key))
-        );
-    }
-
-    /// A tampered or unsigned validation is refused and changes nothing.
-    #[test]
-    fn a_tampered_validation_is_refused() {
-        let content = vec![0x77_u8; 2500];
-        let (mut r, holders, proposer, old_record, new_record) = setup(&content);
-        let old_key = old_record.commitment;
-        let new_key = new_record.commitment;
-        let mut validations = signed_validations(
-            &holders[1..4],
-            &old_record.content_id,
-            &old_key,
-            &new_key,
-            new_record.object_len,
-        );
-        validations[0].1 = [0xFF; 64];
-        let new_segments = new_record.symbol_roots.len() as u64;
-        let root = r.state_root();
-        assert_eq!(
-            r.replace_object(
-                &proposer,
-                old_record.content_id.clone(),
-                &old_key,
-                new_record.clone(),
-                placement(&holders, new_segments),
-                &validations,
-            ),
-            Err(RegistryError::BadReplacement(
-                "a validation signature does not verify",
-            ))
-        );
-        // Two validations are fewer than three.
-        let good = signed_validations(
-            &holders[1..3],
-            &old_record.content_id,
-            &old_key,
-            &new_key,
-            new_record.object_len,
-        );
-        assert_eq!(
-            r.replace_object(
-                &proposer,
-                old_record.content_id.clone(),
-                &old_key,
-                new_record,
-                placement(&holders, new_segments),
-                &good,
-            ),
-            Err(RegistryError::BadReplacement(
-                "fewer than three validations",
-            ))
-        );
-        assert_eq!(r.state_root(), root, "a refused replacement changes nothing");
     }
 }

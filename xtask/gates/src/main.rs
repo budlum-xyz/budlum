@@ -54,6 +54,17 @@ mod gates {
     pub mod bns_names_are_safe_in_an_address_bar;
     pub mod bridge_dual_tree;
     pub mod bud3_forbidden_phrases;
+    pub mod bud3_proto_is_total;
+    pub mod bud3_codec_and_replace;
+    pub mod bud3_custody_proofs;
+    pub mod bud3_custody_rewards;
+    pub mod bud3_dependent_modules;
+    pub mod bud3_object_is_universal;
+    pub mod bud3_paid_view;
+    pub mod bud3_placement;
+    pub mod bud3_qr_is_presentation;
+    pub mod bud3_repair_fires;
+    pub mod bud3_sealed_and_deletion;
     pub mod bud_e2e;
     pub mod budscan_parity;
     pub mod budscan_patchset;
@@ -549,6 +560,94 @@ const GATES: &[Gate] = &[
         run: gates::bud3_forbidden_phrases::run,
         run_args: None,
         self_test: gates::bud3_forbidden_phrases::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "bud3-proto-is-total",
+        replaces: None,
+        run: gates::bud3_proto_is_total::run,
+        run_args: None,
+        self_test: gates::bud3_proto_is_total::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "bud3-codec-and-replace",
+        replaces: None,
+        run: gates::bud3_codec_and_replace::run,
+        run_args: None,
+        self_test: gates::bud3_codec_and_replace::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "bud3-custody-proofs",
+        replaces: None,
+        run: gates::bud3_custody_proofs::run,
+        run_args: None,
+        self_test: gates::bud3_custody_proofs::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "bud3-custody-rewards",
+        replaces: None,
+        run: gates::bud3_custody_rewards::run,
+        run_args: None,
+        self_test: gates::bud3_custody_rewards::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "bud3-dependent-modules",
+        replaces: None,
+        run: gates::bud3_dependent_modules::run,
+        run_args: None,
+        self_test: gates::bud3_dependent_modules::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "bud3-object-is-universal",
+        replaces: None,
+        run: gates::bud3_object_is_universal::run,
+        run_args: None,
+        self_test: gates::bud3_object_is_universal::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "bud3-paid-view",
+        replaces: None,
+        run: gates::bud3_paid_view::run,
+        run_args: None,
+        self_test: gates::bud3_paid_view::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "bud3-placement",
+        replaces: None,
+        run: gates::bud3_placement::run,
+        run_args: None,
+        self_test: gates::bud3_placement::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "bud3-qr-is-presentation",
+        replaces: None,
+        run: gates::bud3_qr_is_presentation::run,
+        run_args: None,
+        self_test: gates::bud3_qr_is_presentation::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "bud3-repair-fires",
+        replaces: None,
+        run: gates::bud3_repair_fires::run,
+        run_args: None,
+        self_test: gates::bud3_repair_fires::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "bud3-sealed-and-deletion",
+        replaces: None,
+        run: gates::bud3_sealed_and_deletion::run,
+        run_args: None,
+        self_test: gates::bud3_sealed_and_deletion::self_test,
         run_log: None,
     },
     Gate {

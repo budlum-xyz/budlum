@@ -1,1 +1,3 @@
-Golden vectors for B.U.D. 3.0 (custody) land here with the code that produces them.
+# `tests/vectors/bud3/custody`
+
+Validator custody share and audit proof golden vectors (populated in WP-20).

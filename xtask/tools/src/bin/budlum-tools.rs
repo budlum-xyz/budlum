@@ -35,7 +35,7 @@
 
 use budlum_tools::{
     ai_test_verifier, audit_deps, backup_drill, checked_repo_root, contracts, devnet, docker_smoke,
-    multinode_smoke, prepush, propagation, resource_sample, sbom, seed_corpus, smoke_rpc,
+    multinode_smoke, placement_table, prepush, propagation, resource_sample, sbom, seed_corpus, smoke_rpc,
     testnet_genesis, testnet_rehearsal,
 };
 use budlum_tools::{
@@ -88,7 +88,9 @@ fn run_self_tests() {
         ("contracts", contracts::self_test()),
         ("propagation-sim", propagation::self_test()),
         ("resource-sample", resource_sample::self_test()),
-        ("ai-test-verifier", ai_test_verifier::self_test()),
+        ("ai-test-verifier",
+                "placement-table", ai_test_verifier::self_test()),
+        ("placement-table", placement_table::self_test()),
     ] {
         match result {
             Ok(msg) => println!("{msg}"),
@@ -207,6 +209,9 @@ fn main() {
         Some(&"propagation-sim") => propagation::run(&root, refs.get(1..).unwrap_or_default()),
         Some(&"testnet-rehearsal") => {
             testnet_rehearsal::run(&root, refs.get(1..).unwrap_or_default())
+        }
+        Some(&"placement-table") => {
+            placement_table::run(&root, refs.get(1..).unwrap_or_default())
         }
         Some(name) => {
             eprintln!("FAIL: there is no tool named `{name}`.\n");

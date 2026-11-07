@@ -4,64 +4,14 @@
 //! signer from the transaction envelope and refuses a variant signed by
 //! anyone else. Apply is all-or-nothing: a refused transaction leaves the
 //! registry state root unchanged.
-//!
-//! WIRING: unwired - the transaction envelope reaches this door once the
-//! legacy `StorageTx` is removed from `TransactionType`; until then the door
-//! is exercised by its tests.
 
 use super::content_id::ContentId;
 use super::custody::CustodyProof;
+use super::delete::{GrantShredAuth, ShredOutcome};
+use super::grants::GrantRow;
 use super::pipeline::ObjectRecord;
 use super::placement::Share;
 use super::registry::{Address, Bud3Registry, NftId, ObjectKey, Registered, RegistryError};
-
-/// Serde for the `(validator, signature)` pairs: serde derives arrays only up
-/// to 32 elements, and a detached signature is 64 bytes, so each side is
-/// carried as one length-prefixed byte string. A wrong length is a decode
-/// error.
-mod validation_pairs {
-    use serde::ser::SerializeSeq;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    struct Bytes<'a>(&'a [u8]);
-
-    impl Serialize for Bytes<'_> {
-        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            serializer.serialize_bytes(self.0)
-        }
-    }
-
-    // The `serde(with)` hook passes exactly `&Vec<..>`, so the shape is fixed
-    // here even though a slice would be the usual parameter.
-    #[allow(clippy::ptr_arg)]
-    pub fn serialize<S: Serializer>(
-        pairs: &Vec<([u8; 32], [u8; 64])>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        let mut seq = serializer.serialize_seq(Some(pairs.len()))?;
-        for (who, sig) in pairs {
-            seq.serialize_element(&(Bytes(who.as_slice()), Bytes(sig.as_slice())))?;
-        }
-        seq.end()
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Vec<([u8; 32], [u8; 64])>, D::Error> {
-        let raw = <Vec<(Vec<u8>, Vec<u8>)>>::deserialize(deserializer)?;
-        raw.into_iter()
-            .map(|(who, sig)| {
-                let who = <[u8; 32]>::try_from(who.as_slice()).map_err(|_| {
-                    serde::de::Error::invalid_length(who.len(), &"a 32-byte validator id")
-                })?;
-                let sig = <[u8; 64]>::try_from(sig.as_slice()).map_err(|_| {
-                    serde::de::Error::invalid_length(sig.len(), &"a 64-byte signature")
-                })?;
-                Ok((who, sig))
-            })
-            .collect()
-    }
-}
 
 /// The `StorageTx` v3 transactions.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -120,22 +70,47 @@ pub enum StorageTxV3 {
         /// The content.
         content: ContentId,
     },
-    /// Replace an object with a new representation of the same content. The
-    /// content id never changes. Signed by the proposing Full validator.
+    /// Issue an unlinkable view grant for a sealed object (`IssueViewGrant`).
+    IssueViewGrant {
+        /// The unlinkable grant row (contains zero `content_id`, `issuer`, or `grantee`).
+        row: GrantRow,
+    },
+    /// Revoke a view grant using its one-time ML-DSA-65 authorization (`RevokeViewGrant`).
+    RevokeViewGrant {
+        /// Unlinkable grant tag.
+        grant_tag: [u8; 32],
+        /// One-time ML-DSA-65 signature over `BDLM_BUD3_GRANT_REVOKE_V1 || grant_tag`.
+        one_time_signature: Vec<u8>,
+    },
+    /// Atomically shred listed view-grant capsules and burn an NFT reference (`SocialDelete`).
+    SocialDelete {
+        /// NFT reference to burn.
+        nft: NftId,
+        /// One-time ML-DSA-65 shred authorizations for active view grants.
+        grant_shreds: Vec<GrantShredAuth>,
+    },
+    /// Voluntarily release shares and lower declared custody quota without penalty (`ReleaseShares`).
+    ReleaseShares {
+        /// Object holding the share(s) to release.
+        object: ObjectKey,
+        /// Specific segment index, or `None` for all segments of `object`.
+        segment: Option<u64>,
+        /// Bytes by which to lower the holder's declared custody quota.
+        lower_quota_bytes: u64,
+    },
+    /// Atomically replace an object with a new codec representation verified to
+    /// decode to the identical `ContentId` (`ReplaceObject`, Section 6.14).
     ReplaceObject {
-        /// The content id; the object's fixed identity.
-        content: ContentId,
-        /// The object being replaced, named by its old commitment.
+        /// Existing object commitment being replaced.
         old_object: ObjectKey,
-        /// The record of the new representation.
+        /// New object record carrying the identical `ContentId`.
         new_record: ObjectRecord,
-        /// The placement of the new representation: `(segment, share)`.
-        shares: Vec<(u64, Share)>,
-        /// `(validator, signature)` pairs over the replacement validation
-        /// message, from at least three independent Full holders of the old
-        /// placement.
-        #[serde(with = "validation_pairs")]
-        validations: Vec<([u8; 32], [u8; 64])>,
+        /// Placement shares for `new_record`.
+        new_shares: Vec<(u64, Share)>,
+        /// Independent Full-validator attestations (`>= 3`).
+        attestations: Vec<super::replace::ReplaceAttestation>,
+        /// Proposer stake subject to 1% slash on `ContentId` mismatch.
+        proposer_stake: u64,
     },
 }
 
@@ -150,8 +125,6 @@ pub enum Applied {
     Proved(usize),
     /// Repair recorded.
     Repaired,
-    /// Object replaced; the new object key.
-    Replaced(ObjectKey),
     /// NFT bound.
     Bound,
     /// Reference burned; `true` when the object was deleted.
@@ -160,6 +133,16 @@ pub enum Applied {
     Renewed(u64),
     /// Decline recorded.
     Declined,
+    /// Unlinkable view grant recorded.
+    GrantIssued,
+    /// View grant revoked and HPKE key package deleted.
+    GrantRevoked,
+    /// Social delete shredded grant capsules and burned the NFT reference.
+    SociallyDeleted(ShredOutcome),
+    /// Shares voluntarily released for reassignment without penalty.
+    Released(usize),
+    /// Object atomically replaced with a new commitment for the same `ContentId`.
+    Replaced(ObjectKey),
 }
 
 /// Apply one transaction signed by `signer` at `epoch`.
@@ -181,9 +164,7 @@ pub fn apply(
         } => registry
             .register_object(signer, record, shares, epoch, lifetime_epochs)
             .map(Applied::Registered),
-        StorageTxV3::CustodyAck { object } => registry
-            .ack(&object, &signer, epoch)
-            .map(Applied::Acked),
+        StorageTxV3::CustodyAck { object } => registry.ack(&object, &signer).map(Applied::Acked),
         StorageTxV3::CustodyProofBatch { proofs } => registry
             .submit_proofs(&signer, &proofs, epoch)
             .map(Applied::Proved),
@@ -214,19 +195,45 @@ pub fn apply(
             object,
             extra_epochs,
         } => registry.renew(&object, extra_epochs).map(Applied::Renewed),
-        StorageTxV3::ReplaceObject {
-            content,
-            old_object,
-            new_record,
-            shares,
-            validations,
-        } => registry
-            .replace_object(&signer, content, &old_object, new_record, shares, &validations)
-            .map(Applied::Replaced),
         StorageTxV3::DeclineContent { content } => {
             registry.decline(signer, &content);
             Ok(Applied::Declined)
         }
+        StorageTxV3::IssueViewGrant { row } => registry
+            .issue_view_grant(row, epoch)
+            .map(|()| Applied::GrantIssued),
+        StorageTxV3::RevokeViewGrant {
+            grant_tag,
+            one_time_signature,
+        } => registry
+            .revoke_view_grant(&grant_tag, &one_time_signature)
+            .map(|()| Applied::GrantRevoked),
+        StorageTxV3::SocialDelete { nft, grant_shreds } => registry
+            .social_delete(&nft, &signer, &grant_shreds, epoch)
+            .map(Applied::SociallyDeleted),
+        StorageTxV3::ReleaseShares {
+            object,
+            segment,
+            lower_quota_bytes,
+        } => registry
+            .release_shares(&signer, &object, segment, lower_quota_bytes)
+            .map(Applied::Released),
+        StorageTxV3::ReplaceObject {
+            old_object,
+            new_record,
+            new_shares,
+            attestations,
+            proposer_stake,
+        } => registry
+            .replace_object(
+                (signer, proposer_stake),
+                &old_object,
+                new_record,
+                new_shares,
+                &attestations,
+                epoch,
+            )
+            .map(Applied::Replaced),
     }
 }
 

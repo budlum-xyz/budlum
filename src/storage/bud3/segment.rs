@@ -17,7 +17,7 @@
 //!   commitment.
 //!
 //! Segment digests are not written in the object: they are computed from it.
-//! Convenience: public B.U.D. 3.0 segment domain tags and tree builders.
+//! Convenience: public B.U.D. 3.0 storage library surface consumed by CLI, gateway, and verification harnesses.
 
 use super::limits::Profile;
 use crate::core::hash::hash_fields_bytes;
@@ -92,6 +92,20 @@ impl Segmentation {
         })
     }
 
+
+    /// Byte range `offset..offset + len` of segment `index` in the object.
+    /// Convenience: exposed for `.bof1` text rendering and optical frame slicing.
+    #[must_use]
+    pub const fn byte_range(&self, index: u64) -> Option<std::ops::Range<u64>> {
+        let Some(start) = self.offset(index) else {
+            return None;
+        };
+        let Some(len) = self.len(index) else {
+            return None;
+        };
+        Some(start..(start + len))
+    }
+
     /// Source symbols of segment `index` (`k`). At least one, so an empty
     /// segment still codes to a padded symbol.
     #[must_use]
@@ -151,15 +165,135 @@ pub fn object_commitment(digests: &[[u8; 32]]) -> ObjectCommitment {
 /// The commitment of an object held in memory.
 #[must_use]
 pub fn commit_object(object: &[u8], profile: &Profile) -> Option<ObjectCommitment> {
-    let seg = Segmentation::new(object.len() as u64, profile)?;
-    let mut digests = Vec::new();
-    for index in 0..seg.count() {
-        let start = usize::try_from(seg.offset(index)?).ok()?;
-        let len = usize::try_from(seg.len(index)?).ok()?;
-        let bytes = object.get(start..start.checked_add(len)?)?;
-        digests.push(segment_digest(index, bytes));
+    let mut stream = SegmentStreamCommitter::new(object.len() as u64, profile)?;
+    stream.push(object).ok()?;
+    stream.finish().ok()
+}
+
+/// Refusal reasons for [`SegmentStreamCommitter`].
+///
+/// WIRING: streaming multi-GiB object ingestion path (WP-18 item 4; T3/T4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamCommitError {
+    /// More bytes were pushed than declared in `expected_len`.
+    LengthExceeded {
+        /// Declared byte length of the object.
+        expected: u64,
+        /// Byte count attempted after adding the chunk.
+        attempted: u64,
+    },
+    /// `finish` was called before `expected_len` bytes arrived.
+    IncompleteObject {
+        /// Declared byte length of the object.
+        expected: u64,
+        /// Bytes received so far.
+        received: u64,
+    },
+}
+
+/// Streaming B.U.D. 3.0 segment committer holding at most one active segment
+/// buffer in memory (`<= profile.segment_bytes()`, well below the two-segment
+/// ceiling of WP-18 item 4).
+///
+/// WIRING: streaming multi-GiB object ingestion path (WP-18 item 4; T3/T4).
+#[derive(Debug, Clone)]
+pub struct SegmentStreamCommitter {
+    layout: Segmentation,
+    segment_cap: usize,
+    received: u64,
+    next_segment: u64,
+    buffer: Vec<u8>,
+    peak_buffered: usize,
+    digests: Vec<[u8; 32]>,
+}
+
+impl SegmentStreamCommitter {
+    /// Create a streaming committer for an object of `expected_len` bytes.
+    ///
+    /// WIRING: streaming multi-GiB object ingestion path (WP-18 item 4; T3/T4).
+    #[must_use]
+    pub fn new(expected_len: u64, profile: &Profile) -> Option<Self> {
+        let layout = Segmentation::new(expected_len, profile)?;
+        let segment_cap = usize::try_from(profile.segment_bytes()).ok()?;
+        let initial_cap = usize::try_from(expected_len.min(profile.segment_bytes())).unwrap_or(0);
+        Some(Self {
+            layout,
+            segment_cap,
+            received: 0,
+            next_segment: 0,
+            buffer: Vec::with_capacity(initial_cap),
+            peak_buffered: 0,
+            digests: Vec::new(),
+        })
     }
-    Some(object_commitment(&digests))
+
+    /// Push the next contiguous byte chunk into the current segment buffer,
+    /// hashing and flushing any completed segment immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StreamCommitError::LengthExceeded`] if `chunk` pushes total
+    /// bytes past the declared `expected_len`.
+    ///
+    /// WIRING: streaming multi-GiB object ingestion path (WP-18 item 4; T3/T4).
+    pub fn push(&mut self, mut chunk: &[u8]) -> Result<(), StreamCommitError> {
+        let attempted = self.received.saturating_add(chunk.len() as u64);
+        if attempted > self.layout.object_len() {
+            return Err(StreamCommitError::LengthExceeded {
+                expected: self.layout.object_len(),
+                attempted,
+            });
+        }
+        while !chunk.is_empty() {
+            let room = self.segment_cap - self.buffer.len();
+            let take = room.min(chunk.len());
+            self.buffer.extend_from_slice(chunk.get(..take).unwrap_or_default());
+            chunk = chunk.get(take..).unwrap_or_default();
+            self.received += take as u64;
+            if self.buffer.len() > self.peak_buffered {
+                self.peak_buffered = self.buffer.len();
+            }
+            if self.buffer.len() == self.segment_cap {
+                self.digests
+                    .push(segment_digest(self.next_segment, &self.buffer));
+                self.buffer.clear();
+                self.next_segment += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Peak bytes held in the segment buffer across the lifetime of this stream.
+    ///
+    /// WIRING: streaming multi-GiB object ingestion path (WP-18 item 4; T3/T4).
+    #[must_use]
+    pub const fn peak_buffered_bytes(&self) -> usize {
+        self.peak_buffered
+    }
+
+    /// Finalize the trailing segment (or the single empty segment when
+    /// `expected_len == 0`) and compute the canonical [`ObjectCommitment`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StreamCommitError::IncompleteObject`] if fewer than
+    /// `expected_len` bytes were pushed.
+    ///
+    /// WIRING: streaming multi-GiB object ingestion path (WP-18 item 4; T3/T4).
+    pub fn finish(mut self) -> Result<ObjectCommitment, StreamCommitError> {
+        if self.received != self.layout.object_len() {
+            return Err(StreamCommitError::IncompleteObject {
+                expected: self.layout.object_len(),
+                received: self.received,
+            });
+        }
+        if self.layout.object_len() == 0 || !self.buffer.is_empty() {
+            self.digests
+                .push(segment_digest(self.next_segment, &self.buffer));
+            self.buffer.clear();
+        }
+        Ok(object_commitment(&self.digests))
+    }
 }
 
 #[cfg(test)]
@@ -226,5 +360,88 @@ mod tests {
         let mut tampered = obj.clone();
         tampered[150] ^= 1;
         assert_ne!(c1, commit_object(&tampered, &SMALL).unwrap());
+    }
+
+    #[test]
+    fn blg_213_stream_committer_matches_in_memory_and_crosses_old_ceilings() {
+        // Streaming across prime-sized chunk boundaries produces the exact
+        // same ObjectCommitment while holding at most one segment in memory.
+        let obj: Vec<u8> = (0..1027usize).map(|i| (i * 37 + 11) as u8).collect();
+        let expected = commit_object(&obj, &SMALL).unwrap();
+        let mut stream = SegmentStreamCommitter::new(obj.len() as u64, &SMALL).unwrap();
+        for chunk in obj.chunks(13) {
+            stream.push(chunk).unwrap();
+        }
+        assert!(stream.peak_buffered_bytes() <= SMALL.segment_bytes() as usize);
+        assert_eq!(stream.finish().unwrap(), expected);
+
+        // Old legacy ceilings (1 MiB preview, 64 MiB bundle, 50_000 frames,
+        // u32::MAX byte offset) are all ordinary in-range layouts under P0.
+        let p0 = Profile::P0;
+        for len in [
+            super::super::limits::MIB + 1,
+            64 * super::super::limits::MIB + 1,
+            4 * super::super::limits::GIB + 1,
+            super::super::limits::MAX_OBJECT_BYTES,
+        ] {
+            let layout = Segmentation::new(len, &p0).unwrap();
+            let last = layout.count() - 1;
+            let end = layout.offset(last).unwrap() + layout.len(last).unwrap();
+            assert_eq!(end, len);
+        }
+        let four_gib_plus_one = Segmentation::new(4 * super::super::limits::GIB + 1, &p0).unwrap();
+        assert!(four_gib_plus_one.total_source_symbols() > 50_000);
+        let last_offset = four_gib_plus_one
+            .offset(four_gib_plus_one.count() - 1)
+            .unwrap();
+        assert!(last_offset > u64::from(u32::MAX));
+    }
+
+    #[test]
+    #[ignore = "nightly T3: streams 64 MiB + 1 B and 4 GiB + 1 B under bounded segment buffer"]
+    fn bud3_old_ceilings_are_gone() {
+        let p0 = Profile::P0;
+        let two_segments = 2 * usize::try_from(p0.segment_bytes()).unwrap();
+        let chunk = vec![0x5Au8; 1024 * 1024];
+        for target_len in [
+            64 * super::super::limits::MIB + 1,
+            4 * super::super::limits::GIB + 1,
+        ] {
+            let mut stream = SegmentStreamCommitter::new(target_len, &p0).unwrap();
+            let mut rem = target_len;
+            while rem > 0 {
+                let n = usize::try_from(rem.min(chunk.len() as u64)).unwrap();
+                stream.push(&chunk[..n]).unwrap();
+                rem -= n as u64;
+            }
+            assert!(
+                stream.peak_buffered_bytes() <= two_segments,
+                "peak segment buffer {} exceeded two-segment cap {}",
+                stream.peak_buffered_bytes(),
+                two_segments
+            );
+            let commitment = stream.finish().unwrap();
+            assert_ne!(commitment, [0u8; 32]);
+        }
+    }
+
+    #[test]
+    #[ignore = "nightly T4: streams a 16 GiB object under bounded segment buffer"]
+    fn bud3_sixteen_gib_object() {
+        let p0 = Profile::P0;
+        let target_len = super::super::limits::MAX_OBJECT_BYTES;
+        assert_eq!(target_len, 16 * super::super::limits::GIB);
+        let two_segments = 2 * usize::try_from(p0.segment_bytes()).unwrap();
+        let chunk = vec![0xA3u8; 4 * 1024 * 1024];
+        let mut stream = SegmentStreamCommitter::new(target_len, &p0).unwrap();
+        let mut rem = target_len;
+        while rem > 0 {
+            let n = usize::try_from(rem.min(chunk.len() as u64)).unwrap();
+            stream.push(&chunk[..n]).unwrap();
+            rem -= n as u64;
+        }
+        assert!(stream.peak_buffered_bytes() <= two_segments);
+        let commitment = stream.finish().unwrap();
+        assert_ne!(commitment, [0u8; 32]);
     }
 }

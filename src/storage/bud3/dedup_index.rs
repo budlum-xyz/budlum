@@ -13,7 +13,7 @@
 //! the filter's history.
 //!
 //! The hashing is integers only, so two architectures agree bit for bit.
-//! Convenience: public node-local Bloom filter index consumed by gateway upload admission.
+//! Convenience: public B.U.D. 3.0 storage library surface consumed by CLI, gateway, and verification harnesses.
 
 use std::collections::btree_map::{BTreeMap, IntoIter};
 
@@ -49,15 +49,14 @@ pub struct BloomFilter {
 /// gives the same lanes on every architecture.
 fn two_hashes(digest: &[u8; 32]) -> [u64; 2] {
     let mut lanes = [0u64; 4];
-    // The four lanes are filled by zipping with the array, not by indexing it:
-    // a 32-byte digest has exactly four 8-byte chunks, and the shape that
-    // cannot panic is the one the release profile needs.
-    for (slot, chunk) in lanes.iter_mut().zip(digest.chunks_exact(8)) {
+    for (i, chunk) in digest.chunks_exact(8).enumerate() {
         let mut v = 0u64;
         for (j, b) in chunk.iter().enumerate() {
             v |= u64::from(*b) << (8 * j);
         }
-        *slot = v;
+        if let Some(slot) = lanes.get_mut(i) {
+                *slot = v;
+            }
     }
     [mix(lanes[0] ^ lanes[2]), mix(lanes[1] ^ lanes[3]) | 1]
 }
@@ -84,7 +83,7 @@ impl BloomFilter {
     pub fn with_expected(expected: u64) -> Self {
         let expected = expected.max(1);
         let bits = expected.saturating_mul(BITS_PER_KEY).max(MIN_BITS);
-        let words = bits.div_ceil(64) as usize;
+        let words = ((bits + 63) / 64) as usize;
         Self {
             words: vec![0u64; words],
             bits: words as u64 * 64,
