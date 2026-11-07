@@ -19,3 +19,12 @@ __pycache__/
 # Foundry build output of the Ethereum-side contracts.
 /contracts/out/
 /contracts/cache/
+
+# The binding directive (directive section 0.1.5). It is delivered to the
+# agents that work in this repository, never committed to it: the tree is
+# English and the document is not. Anchored to the root for the same reason as
+# the rules above, and ignored rather than merely untracked so that an
+# accidental `git add -A` cannot put it back. The file was re-added three times
+# before this rule existed (#111, #112, #114), each time turning
+# `tree-is-english` red for 3,840 Turkish lines.
+/THE_BUDLUM_DIREKTIF.md
