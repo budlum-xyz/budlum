@@ -1116,7 +1116,7 @@ impl AccountState {
                 provided: 0,
             });
         }
-        let balance = self.get_balance(address);
+        let balance = self.spendable_balance(address);
         if balance < amount {
             return Err(RegistryError::InsufficientStake {
                 required: amount,
@@ -2990,7 +2990,7 @@ impl AccountState {
         }
     }
 
-    fn execute_proposal(&mut self, proposal: &crate::core::governance::Proposal) {
+    pub(crate) fn execute_proposal(&mut self, proposal: &crate::core::governance::Proposal) {
         use crate::core::governance::ProposalType;
         match &proposal.p_type {
             ProposalType::ChangeBaseFee(new_fee) => {
@@ -3050,30 +3050,31 @@ impl AccountState {
                     tracing::warn!(
                         "Rejecting SlashValidator {address}: no slashing record matching the committed evidence_hash in registry history"
                     );
-                } else if let Some(v) = self.validators.get_mut(address) {
-                    v.slashed = true;
-                    v.active = false;
-                    v.jailed = true;
-                    v.jail_until = self.epoch_index.saturating_add(7);
-                    let mut destroyed = u128::from(std::mem::take(&mut v.stake));
-                    // A full governance slash also takes the stake that is
-                    // still waiting to unbond. Otherwise unstake before the
-                    // vote would keep it whole.
-                    destroyed += self
-                        .unbonding_queue
-                        .iter()
-                        .filter(|entry| entry.address == *address)
-                        .map(|entry| u128::from(entry.amount))
-                        .sum::<u128>();
-                    self.unbonding_queue
-                        .retain(|entry| entry.address != *address);
-                    // The destroyed stake was issued once. Counting it as
-                    // burned keeps it from reopening mint headroom.
-                    self.record_destroyed(destroyed);
-                    // Same tally rule as the report path: the stake this arm
-                    // just removed from the eligible set has to leave the
-                    // numerator too, or a vote cast before the slash keeps
-                    // weighing against a denominator it is no longer part of.
+                } else if self.validators.contains_key(address) {
+                    let committed_before = self.total_bud_committed();
+                    if let Some(v) = self.validators.get_mut(address) {
+                        let stake_before = v.stake;
+                        v.slashed = true;
+                        v.active = false;
+                        v.jailed = true;
+                        v.jail_until = self.epoch_index.saturating_add(7);
+                        v.stake = 0;
+                        self.unbonding_queue
+                            .retain(|entry| entry.address != *address);
+                        let _ = self.registry.slash(
+                            *address,
+                            crate::registry::role::roles::VALIDATOR,
+                            crate::registry::permissionless::SlashingCondition::DoubleSign,
+                            crate::core::chain_config::FIXED_POINT_SCALE,
+                        );
+                        self.registry
+                            .reduce_delegated_for_slash(address, stake_before, stake_before);
+                        let _ = self.registry.slash_delegation_unbonding(
+                            address,
+                            crate::core::chain_config::FIXED_POINT_SCALE,
+                        );
+                    }
+                    self.record_destroyed_since(committed_before);
                     for proposal in self.governance.proposals.iter_mut() {
                         if proposal.status == crate::core::governance::ProposalStatus::Active {
                             proposal.reduce_vote_weight(address, u64::MAX);

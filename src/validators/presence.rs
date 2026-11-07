@@ -57,7 +57,7 @@ pub fn suspension_threshold_epochs(
 }
 
 /// The canonical presence message (section 7.8 item 2), delegated directly to
-/// `budlum-types` (K-4) so every field — domain tag included — is length-prefixed
+/// `budlum-types` (K-4) so every field - domain tag included - is length-prefixed
 /// (G-5) and matches the mobile core byte for byte.
 #[must_use]
 pub fn presence_message(chain_id: u64, window: u64, class: ValidatorClass) -> Vec<u8> {

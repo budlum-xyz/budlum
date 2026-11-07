@@ -219,6 +219,9 @@ pub fn apply_cross_shard_transfer(
     if tx.tx_type != TransactionType::Transfer {
         return Err("apply_cross_shard_transfer requires a Transfer".into());
     }
+    if tx.to == Address::zero() {
+        return Err("cross-shard transfer missing non-zero recipient".into());
+    }
 
     // `apply_cross_shard_transfer` is a state-transition boundary, not just a
     // balance helper. Refuse stale or future transactions before any account
@@ -265,6 +268,8 @@ pub fn apply_cross_shard_transfer(
         .balance
         .checked_add(tx.amount)
         .ok_or("shard transfer: receiver balance overflow")?;
+    state.dirty_accounts.insert(tx.from);
+    state.dirty_accounts.insert(tx.to);
     Ok(())
 }
 

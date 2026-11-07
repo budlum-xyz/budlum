@@ -266,3 +266,7 @@ pub mod persistence_move;
 // Section 6.2 shared B.U.D. 3.0 vocabulary.
 #[cfg(test)]
 pub mod bud3_types;
+
+// WP-17 state transition, governance, staking, and V2 snapshot locks.
+#[cfg(test)]
+pub mod wp17_state_hardening;

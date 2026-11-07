@@ -276,7 +276,7 @@ impl Executor {
         {
             // The admission gate looks at the spendable balance, not the raw
             // balance: a vesting-locked or burn-reserve amount is not a spend
-            // gate bypass (BULGU-020 class, WP-17 item 4).
+            // gate bypass (BLG-020 class, WP-17 item 4).
             let sender_spendable = state.spendable_balance(&tx.from);
             if sender_spendable < total_cost {
                 return Err(BudlumError::validation(
@@ -785,28 +785,27 @@ impl Executor {
                         "Only eligible validators can vote in governance",
                     ));
                 }
-                let sender_acc = state.get_or_create(&tx.from);
-                sender_acc.balance = sender_acc.balance.checked_sub(tx.fee).ok_or_else(|| {
-                    BudlumError::validation("balance_underflow", "balance underflow")
-                })?;
-                sender_acc.nonce = sender_acc.nonce.saturating_add(1);
-
                 if tx.to != Address::zero() {
                     if let Some(target) = state.get_validator_mut(&tx.to) {
                         if tx.amount > 0 {
-                            target.votes_for += 1;
+                            target.votes_for = target.votes_for.saturating_add(1);
                         } else {
-                            target.votes_against += 1;
+                            target.votes_against = target.votes_against.saturating_add(1);
                         }
                     }
                 } else if !tx.data.is_empty() && tx.data.len() >= 9 {
                     if tx.data.len() == 9 {
-                        let vote_for = tx.data[0] != 0;
+                        let vote_for = tx.data.first().copied().unwrap_or(0) != 0;
                         let mut id_bytes = [0u8; 8];
-                        id_bytes.copy_from_slice(&tx.data[1..9]);
+                        if let Some(slice) = tx.data.get(1..9) {
+                            id_bytes.copy_from_slice(slice);
+                        }
                         let proposal_id = u64::from_le_bytes(id_bytes);
 
-                        let voter_stake = state.get_validator(&tx.from).map_or(0, |v| v.stake);
+                        let voter_stake = state
+                            .get_validator(&tx.from)
+                            .filter(|v| v.is_eligible(state.epoch_index))
+                            .map_or(0, |v| v.stake);
                         if voter_stake == 0 {
                             return Err(BudlumError::validation(
                                 "governance_voter_not_validator",
@@ -814,19 +813,27 @@ impl Executor {
                             ));
                         }
 
-                        if let Some(proposal) = state.governance.find_proposal_mut(proposal_id) {
-                            proposal
-                                .add_vote(tx.from, voter_stake, vote_for, state.epoch_index)
-                                .map_err(|e| {
-                                    BudlumError::validation("governance_vote_failed", e)
-                                })?;
-                        }
+                        let proposal = state
+                            .governance
+                            .find_proposal_mut(proposal_id)
+                            .ok_or_else(|| {
+                                BudlumError::validation(
+                                    "governance_proposal_not_found",
+                                    "Governance proposal does not exist",
+                                )
+                            })?;
+                        proposal
+                            .add_vote(tx.from, voter_stake, vote_for, state.epoch_index)
+                            .map_err(|e| BudlumError::validation("governance_vote_failed", e))?;
                     } else {
                         let mut duration_bytes = [0u8; 8];
-                        duration_bytes.copy_from_slice(&tx.data[0..8]);
+                        if let Some(slice) = tx.data.get(0..8) {
+                            duration_bytes.copy_from_slice(slice);
+                        }
                         let duration = u64::from_le_bytes(duration_bytes);
+                        let payload = tx.data.get(8..).unwrap_or(&[]);
                         let p_type: crate::core::governance::ProposalType =
-                            serde_json::from_slice(&tx.data[8..]).map_err(|e| {
+                            serde_json::from_slice(payload).map_err(|e| {
                                 BudlumError::validation(
                                     "governance_proposal_invalid",
                                     e.to_string(),
@@ -844,7 +851,10 @@ impl Executor {
                             })?;
                         }
 
-                        let proposer_stake = state.get_validator(&tx.from).map_or(0, |v| v.stake);
+                        let proposer_stake = state
+                            .get_validator(&tx.from)
+                            .filter(|v| v.is_eligible(state.epoch_index))
+                            .map_or(0, |v| v.stake);
                         if proposer_stake == 0 {
                             return Err(BudlumError::validation(
                                 "governance_proposer_not_validator",
@@ -864,6 +874,12 @@ impl Executor {
                             })?;
                     }
                 }
+
+                let sender_acc = state.get_or_create(&tx.from);
+                sender_acc.balance = sender_acc.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender_acc.nonce = sender_acc.nonce.saturating_add(1);
             }
             TransactionType::ContractCall => {
                 // The VM runs for this transaction: its sender, nonce and the
