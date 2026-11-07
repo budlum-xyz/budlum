@@ -115,6 +115,8 @@ pub enum PipelineError {
     CommitmentMismatch,
     /// The decoded content does not match the content id.
     ContentMismatch,
+    /// Two-path optical extraction or verification failed.
+    TwoPath(super::two_path::TwoPathError),
     /// The object does not fit this platform.
     TooLarge,
     /// The aggregation volume refused a member or a view.
@@ -124,6 +126,12 @@ pub enum PipelineError {
 impl From<VolumeError> for PipelineError {
     fn from(e: VolumeError) -> Self {
         Self::Volume(e)
+    }
+}
+
+impl From<super::two_path::TwoPathError> for PipelineError {
+    fn from(e: super::two_path::TwoPathError) -> Self {
+        Self::TwoPath(e)
     }
 }
 
@@ -449,6 +457,50 @@ fn check_volume_layout(members: &[VolumeMember], bytes: &[u8]) -> Result<(), Pip
         return Err(PipelineError::Volume(VolumeError::LayoutMismatch));
     }
     Ok(())
+}
+
+/// Convenience: prepare public content through the full optical two-path and
+/// round-trip gates (Y10, Y11, Y12), ensuring the registered `ObjectRecord`
+/// comes from the QR-extracted object bytes.
+///
+/// # Errors
+///
+/// Returns [`PipelineError`] if limits, coding, or two-path verification fails.
+pub fn prepare_public_upload_two_path(
+    content: &[u8],
+    profile: &Profile,
+    limits: &Bud3Limits,
+    symbols_per_segment: u32,
+) -> Result<(PreparedUpload, [u8; 32]), PipelineError> {
+    limits
+        .admit_content(content.len() as u64)
+        .map_err(PipelineError::Limit)?;
+    let selected = bud_codec::select(content);
+    let candidate = Object::public_coded(selected.codec, selected.payload, content)?;
+    let verified =
+        super::two_path::verify_upload_two_path_and_round_trip(&candidate, profile, 2)?;
+    let up = prepare_public_upload(content, profile, limits, symbols_per_segment)?;
+    if commit_object(&verified.object.encode(), profile) != Some(up.record.commitment) {
+        return Err(PipelineError::CommitmentMismatch);
+    }
+    Ok((up, verified.video_commitment))
+}
+
+/// Convenience: G5 optical view path verified against `record`.
+///
+/// # Errors
+///
+/// Returns [`PipelineError`] if pixel QR decoding or content check fails.
+pub fn view_public_optical(
+    record: &ObjectRecord,
+    seconds: &[super::qr::OpticalSecond],
+) -> Result<Vec<u8>, PipelineError> {
+    let mut meter = Meter::for_object(record.object_len.saturating_mul(8).saturating_add(1 << 20));
+    let content = super::two_path::decode_optical_path(seconds, &mut meter)?;
+    if !record.content_id.matches_public(&content) {
+        return Err(PipelineError::ContentMismatch);
+    }
+    Ok(content)
 }
 
 #[cfg(test)]

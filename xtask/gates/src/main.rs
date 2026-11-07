@@ -57,8 +57,10 @@ mod gates {
     pub mod bud3_custody_rewards;
     pub mod bud3_fee_uses_physical_bytes;
     pub mod bud3_forbidden_phrases;
-    pub mod bud3_proto_is_total;
+    pub mod bud3_object_is_universal;
     pub mod bud3_placement;
+    pub mod bud3_proto_is_total;
+    pub mod bud3_qr_is_presentation;
     pub mod bud3_repair_fires;
     pub mod bud_e2e;
     pub mod budscan_parity;
@@ -1492,6 +1494,22 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::ee_workers_build_with_unwind::self_test,
+    },
+    Gate {
+        name: "bud3-object-is-universal",
+        replaces: None,
+        run: gates::bud3_object_is_universal::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_object_is_universal::self_test,
+    },
+    Gate {
+        name: "bud3-qr-is-presentation",
+        replaces: None,
+        run: gates::bud3_qr_is_presentation::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_qr_is_presentation::self_test,
     },
 ];
 
