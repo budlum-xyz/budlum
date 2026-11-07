@@ -28,3 +28,12 @@ crates/ai-inference/crates/ai-tune/src/schema.rs	4
 # and the red-team test feeds through the walk.
 src/registry/identity_fill.rs	1
 src/tests/ported_slice_redteam.rs	5
+# Recorded 2026-11-07, with the concept-name map. These three carry Turkish
+# because Turkish is what the line is about: the map holds the Turkish term for
+# every retired architecture name, which is the datum the naming policy keeps;
+# the page renders those names in English prose and therefore quotes them; and
+# the ratchet repeats the concept names it counts. None of it is untranslated
+# prose, and a number here moves only when the map moves.
+config/naming/concept_map.toml	37
+docs/NAMING.md	6
+.github/concept-names-baseline.txt	2
