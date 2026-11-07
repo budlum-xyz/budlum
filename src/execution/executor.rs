@@ -3777,7 +3777,8 @@ impl Executor {
     /// Apply a block to a disposable candidate owned by the caller.
     ///
     /// This method can partially mutate `state` before returning an error;
-    /// callers must discard `state` on `Err`.
+    /// callers must discard it on `Err`. Use `apply_block_checked` when the
+    /// caller needs an all-or-nothing update to a live state.
     pub(crate) fn apply_block_candidate_checked(
         state: &mut AccountState,
         transactions: &[Transaction],
