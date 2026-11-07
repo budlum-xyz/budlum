@@ -573,33 +573,41 @@ fn assert_pool_feature_refusal(
     assert_eq!(chain.state.calculate_state_root(), root);
 }
 
+fn closure_test_model(
+    from: Address,
+    model_id: crate::ai::types::AiModelId,
+) -> crate::ai::types::AiModelSpec {
+    use crate::ai::types::AiModelSpec;
+    AiModelSpec {
+        model_id,
+        model_hash: [7; 32],
+        owner: from,
+        min_verifier_count: 5,
+        agreement_threshold: 4,
+        max_input_ref_bytes: 1024,
+        max_output_ref_bytes: 1024,
+        request_deadline_blocks: 100,
+        result_deadline_blocks: 100,
+        version: 1,
+        active: true,
+        require_execution_proof: false,
+        execution_program_hash: None,
+        execution_class: 0,
+        execution_weights_digest: None,
+        execution_dims: None,
+        modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+    }
+}
+
 fn ai_feature_variants(from: Address) -> Vec<TransactionType> {
     use crate::ai::types::{
         AiAgentPayment, AiExecutionProof, AiInferenceRequest, AiInferenceResult, AiModelId,
-        AiModelSpec, AiRequestId, BoundedBytes,
+        AiRequestId, BoundedBytes,
     };
     let model_id = AiModelId([7; 32]);
     let request_id = AiRequestId([9; 32]);
     let mut cases = vec![
-        TransactionType::AiModelRegister(AiModelSpec {
-            model_id,
-            model_hash: [7; 32],
-            owner: from,
-            min_verifier_count: 5,
-            agreement_threshold: 4,
-            max_input_ref_bytes: 1024,
-            max_output_ref_bytes: 1024,
-            request_deadline_blocks: 100,
-            result_deadline_blocks: 100,
-            version: 1,
-            active: true,
-            require_execution_proof: false,
-            execution_program_hash: None,
-            execution_class: 0,
-            execution_weights_digest: None,
-            execution_dims: None,
-            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
-        }),
+        TransactionType::AiModelRegister(closure_test_model(from, model_id)),
         TransactionType::AiInferenceRequest(AiInferenceRequest {
             request_id,
             requester: from,
