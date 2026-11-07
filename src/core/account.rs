@@ -3957,20 +3957,32 @@ impl AccountState {
     /// escrow, relayer-intent escrow and Graft intent escrow are counted for the
     /// same reason.
     fn non_liquid_committed_atoms(&self) -> u128 {
-        self.total_staked_supply()
-            .saturating_add(self.total_unbonding_supply())
-            .saturating_add(self.total_registry_role_bonded_supply())
-            .saturating_add(self.registry.total_delegation_unbonding_supply())
-            .saturating_add(self.total_external_bonded_supply())
-            .saturating_add(self.proof_market.total_locked_supply())
-            .saturating_add(self.settlement.relayer_policy.total_escrowed_supply())
-            .saturating_add(self.settlement.graft.total_escrowed_supply())
-            .saturating_add(self.total_storage_escrowed_supply())
+        let total = self
+            .total_staked_supply()
+            .checked_add(self.total_unbonding_supply())
+            .and_then(|v| v.checked_add(self.total_registry_role_bonded_supply()))
+            .and_then(|v| v.checked_add(self.registry.total_delegation_unbonding_supply()))
+            .and_then(|v| v.checked_add(self.total_external_bonded_supply()))
+            .and_then(|v| v.checked_add(self.proof_market.total_locked_supply()))
+            .and_then(|v| {
+                v.checked_add(self.settlement.relayer_policy.total_escrowed_supply())
+            })
+            .and_then(|v| v.checked_add(self.settlement.graft.total_escrowed_supply()))
+            .and_then(|v| v.checked_add(self.total_storage_escrowed_supply()));
+        match total {
+            Some(total) => total,
+            None => panic!("committed supply arithmetic overflowed u128"),
+        }
     }
 
     pub fn total_bud_committed(&self) -> u128 {
-        self.circulating_supply()
-            .saturating_add(self.non_liquid_committed_atoms())
+        match self
+            .circulating_supply()
+            .checked_add(self.non_liquid_committed_atoms())
+        {
+            Some(total) => total,
+            None => panic!("total committed supply overflowed u128"),
+        }
     }
 
     /// Total $BUD held in storage-deal escrow: the operator bond and the part
@@ -4127,11 +4139,17 @@ impl AccountState {
     /// Records destroyed BUD in `burned_total`. BUD was issued once;
     /// supply that leaves committed state without entering this counter
     /// would reopen the same amount as mint headroom under the cap. The
-    /// counter saturates rather than wraps: an overstated burn only closes
-    /// headroom, it never opens it.
+    /// counter is checked: corrupt arithmetic halts loudly rather than
+    /// wrapping or silently clamping the supply ledger.
     pub fn record_destroyed(&mut self, amount: u128) {
-        let total = u128::from(self.burned_total).saturating_add(amount);
-        self.burned_total = u64::try_from(total).unwrap_or(u64::MAX);
+        let total = match u128::from(self.burned_total).checked_add(amount) {
+            Some(total) => total,
+            None => panic!("burned-supply arithmetic overflowed u128"),
+        };
+        self.burned_total = match u64::try_from(total) {
+            Ok(total) => total,
+            Err(_) => panic!("burned supply no longer fits its u64 ledger"),
+        };
     }
 
     /// Records the drop in committed supply since `committed_before` as
