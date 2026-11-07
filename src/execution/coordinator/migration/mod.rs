@@ -832,6 +832,16 @@ mod tests {
     }
 
     #[test]
+    fn migration_refuses_code_the_account_does_not_hold() {
+        let (mut request, _) = request_with_code(sample_code(), [0u8; 32], 42);
+        request.code = b"contract Other {}".to_vec();
+        assert_eq!(
+            begin_import(request),
+            Err(ImportError::Proof(AccountProofError::CodeHashMismatch))
+        );
+    }
+
+    #[test]
     fn migration_refuses_occupied_address() {
         let (mut req, _) = request_with_code(sample_code(), [0u8; 32], 42);
         req.occupied = true;

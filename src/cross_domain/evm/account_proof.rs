@@ -314,5 +314,11 @@ mod tests {
             Item::String(vec![0u8; 32]),
         ]));
         assert_eq!(decode_account(&too_wide_33b), Err(AccountProofError::FieldTooWide));
+
+        let not_an_account = rlp::encode(&Item::List(vec![Item::String(uint_bytes(1))]));
+        assert_eq!(
+            decode_account(&not_an_account),
+            Err(AccountProofError::NotAnAccount)
+        );
     }
 }
