@@ -51,10 +51,11 @@ const SKIP_DIRS: &[&str] = &["target", ".git", "node_modules"];
 const SELF: &[&str] = &[
     "xtask/gates/src/gates/bud3_forbidden_phrases.rs",
     ".github/bud3-forbidden-phrases-baseline.txt",
+    "xtask/gates/src/gates/no_legacy_storage.rs",
 ];
 
 /// Historical audit records quote old claims on purpose.
-const HISTORY_DIRS: &[&str] = &["docs/audit/"];
+const HISTORY_DIRS: &[&str] = &["docs/audit/", "docs/work/"];
 
 const BASELINE: &str = ".github/bud3-forbidden-phrases-baseline.txt";
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;

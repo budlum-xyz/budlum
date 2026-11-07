@@ -1009,7 +1009,7 @@ impl Bud3Registry {
         }
     }
 
-    /// Whether the registry holds nothing.
+    /// Whether the registry has zero entries.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.objects.is_empty() && self.tombstones.is_empty() && self.declines.is_empty()
