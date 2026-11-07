@@ -186,8 +186,8 @@ jobs:
         if: always() && steps.rust.outcome == 'success'
         run: |
           set -euo pipefail
-          cargo test --bin budlum-faucet --bin budlum-indexer 2>&1 | tee /tmp/public-service-tests.log
-          for name in direct_and_proxy_modes_are_explicit_and_fail_closed a_partial_request_body_times_out incomplete_headers_expire_and_release_a_connection_slot; do
+          cargo test --bin budlum-faucet --bin budlum-indexer --bin budlum-domain-producer 2>&1 | tee /tmp/public-service-tests.log
+          for name in direct_and_proxy_modes_are_explicit_and_fail_closed a_partial_request_body_times_out incomplete_headers_expire_and_release_a_connection_slot quantity_parses_decimal_and_hex_strings_and_rejects_invalid_values; do
             grep -Eq "${name} \.\.\. ok" /tmp/public-service-tests.log || {
               echo "::error::public service regression $name did not pass"
               exit 1

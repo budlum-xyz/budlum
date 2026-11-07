@@ -327,3 +327,99 @@ async fn main() -> std::process::ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quantity_parses_decimal_and_hex_strings_and_rejects_invalid_values() {
+        let dec = serde_json::json!("45262");
+        assert_eq!(quantity(&dec, "bud_chainId"), Ok(45_262));
+        let hex = serde_json::json!("0xb0ce");
+        assert_eq!(quantity(&hex, "bud_chainId"), Ok(45_262));
+        let num = serde_json::json!(45_262);
+        assert!(quantity(&num, "bud_chainId").is_err());
+        let bad_dec = serde_json::json!("not-a-number");
+        assert!(quantity(&bad_dec, "bud_chainId").is_err());
+        let bad_hex = serde_json::json!("0xzz");
+        assert!(quantity(&bad_hex, "bud_chainId").is_err());
+    }
+
+    #[test]
+    fn seed_validates_hex_encoding_and_exact_byte_length() {
+        let hex32 = "11".repeat(32);
+        assert_eq!(seed::<32>(&hex32, "a seed"), Ok([0x11; 32]));
+        let prefixed64 = format!("0x{}", "22".repeat(64));
+        assert_eq!(seed::<64>(&prefixed64, "a BLS seed"), Ok([0x22; 64]));
+        let short = "11".repeat(31);
+        assert!(seed::<32>(&short, "a seed").is_err());
+        let bad = "zz".repeat(32);
+        assert!(seed::<32>(&bad, "a seed").is_err());
+    }
+
+    #[test]
+    fn cli_enforces_mutually_exclusive_commitment_sources_and_required_flags() {
+        assert!(Cli::try_parse_from(["budlum-domain-producer"]).is_err());
+        let both = [
+            "budlum-domain-producer",
+            "--payload",
+            "a.json",
+            "--pow-spec",
+            "b.json",
+            "--write-payload",
+            "out.json",
+        ];
+        assert!(Cli::try_parse_from(both).is_err());
+        let bft_no_keys = [
+            "budlum-domain-producer",
+            "--bft-spec",
+            "bft.json",
+            "--write-payload",
+            "out.json",
+        ];
+        assert!(Cli::try_parse_from(bft_no_keys).is_err());
+        let no_key_file = ["budlum-domain-producer", "--payload", "a.json"];
+        assert!(Cli::try_parse_from(no_key_file).is_err());
+        let write_only = [
+            "budlum-domain-producer",
+            "--payload",
+            "a.json",
+            "--write-payload",
+            "out.json",
+        ];
+        assert!(Cli::try_parse_from(write_only).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_keys_refuses_world_readable_files_and_accepts_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let keys_path = dir.path().join("quorum-keys.json");
+        std::fs::write(&keys_path, "{}").unwrap();
+
+        let open_mode = std::fs::Permissions::from_mode(0o644);
+        std::fs::set_permissions(&keys_path, open_mode).unwrap();
+        let args = [
+            "budlum-domain-producer",
+            "--bft-spec",
+            "bft.json",
+            "--quorum-keys",
+            keys_path.to_str().unwrap(),
+            "--write-payload",
+            "out.json",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+        let err = read_keys(&cli).unwrap_err();
+        assert!(err.contains("chmod 600"), "unexpected error: {err}");
+
+        let closed_mode = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(&keys_path, closed_mode).unwrap();
+        let keys = read_keys(&cli).unwrap();
+        assert!(keys.bls_seeds.is_empty());
+        assert!(keys.pq_seeds.is_empty());
+        assert!(keys.composite.is_empty());
+    }
+}

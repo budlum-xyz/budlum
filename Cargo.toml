@@ -227,6 +227,11 @@ name = "budlum-faucet"
 path = "src/bin/budlum-faucet.rs"
 required-features = ["wallet-ml-dsa"]
 
+# Read-only explorer API over a node's finalized chain (`docs/explorer-api.openapi.yaml`).
+[[bin]]
+name = "budlum-indexer"
+path = "src/bin/budlum-indexer.rs"
+
 # Domain adapters produce verified commitment payloads; these two small
 # transaction clients sign and submit them through the block-only doors.
 [[bin]]
