@@ -19,3 +19,4 @@ __pycache__/
 # Foundry build output of the Ethereum-side contracts.
 /contracts/out/
 /contracts/cache/
+/THE_BUDLUM_DIREKTIF.md
