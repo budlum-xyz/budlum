@@ -53,6 +53,7 @@ mod gates {
     pub mod bns_gate;
     pub mod bns_names_are_safe_in_an_address_bar;
     pub mod bridge_dual_tree;
+    pub mod bud3_forbidden_phrases;
     pub mod bud_e2e;
     pub mod budscan_parity;
     pub mod budscan_patchset;
@@ -63,6 +64,7 @@ mod gates {
     pub mod classical_crypto_is_paired;
     pub mod clippy_extra;
     pub mod coding_audit_samples_the_relationship;
+    pub mod concept_names;
     pub mod consensus_maps_ordered;
     pub mod consensus_state_only_changes_in_blocks;
     pub mod containment_defaults;
@@ -545,6 +547,14 @@ const GATES: &[Gate] = &[
         run_log: None,
     },
     Gate {
+        name: "bud3-forbidden-phrases",
+        replaces: None,
+        run: gates::bud3_forbidden_phrases::run,
+        run_args: None,
+        self_test: gates::bud3_forbidden_phrases::self_test,
+        run_log: None,
+    },
+    Gate {
         name: "no-unicode-dashes",
         replaces: Some("check-no-unicode-dashes.sh"),
         run: gates::no_unicode_dashes::run,
@@ -947,6 +957,14 @@ const GATES: &[Gate] = &[
         run_log: Some(gates::badges_current::run),
         run_args: None,
         self_test: gates::badges_current::self_test,
+    },
+    Gate {
+        name: "concept-names",
+        replaces: None,
+        run: gates::concept_names::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::concept_names::self_test,
     },
     Gate {
         name: "containment-defaults",
