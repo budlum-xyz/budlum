@@ -1,0 +1,25 @@
+[package]
+name = "bud-codec"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+description = "B.U.D. 3.0 A0 codec registry: the frozen decoders and the candidate encoders"
+
+[dependencies]
+# Encoder only. Compressor output may differ between versions; the decoder
+# below is the frozen side.
+zstd = { version = "=0.13.3", default-features = false }
+# Pure-Rust decoder: it runs on the viewer's phone, so no C and no unsafe in
+# our tree.
+ruzstd = { version = "=0.8.1", default-features = false, features = ["std"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unused_import_braces = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
