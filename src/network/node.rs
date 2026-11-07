@@ -334,15 +334,118 @@ fn log_prefix(s: &str, max_chars: usize) -> String {
     s.chars().take(max_chars).collect()
 }
 
-/// Extract IPv4 /24 key from a multiaddr (first 3 octets), if present.
-pub fn ipv4_slash24(addr: &Multiaddr) -> Option<[u8; 3]> {
+/// The subnet bucket a remote multiaddr is counted in.
+///
+/// The eclipse bound used to key on an IPv4 `/24` and nothing else, so an IPv6
+/// peer - or the same peer reached through a dual-stack listener as
+/// `::ffff:a.b.c.d` - came back as `None`, and `None` was admitted without a
+/// bound. One host could take the whole peer table while the `/24` limit
+/// reported itself as enforced, and the profile value was measured on the one
+/// family an attacker would not use (BLG-034). The bucket now covers both
+/// families; see [`crate::network::peer_manager::SubnetKey`].
+fn subnet_bucket(addr: &Multiaddr) -> Option<crate::network::peer_manager::SubnetKey> {
+    use libp2p::multiaddr::Protocol;
     for proto in addr.iter() {
-        if let libp2p::multiaddr::Protocol::Ip4(ip) = proto {
-            let o = ip.octets();
-            return Some([o[0], o[1], o[2]]);
+        match proto {
+            Protocol::Ip4(ip) => {
+                return Some(crate::network::peer_manager::SubnetKey::from_ip(
+                    std::net::IpAddr::V4(ip),
+                ));
+            }
+            Protocol::Ip6(ip) => {
+                return Some(crate::network::peer_manager::SubnetKey::from_ip(
+                    std::net::IpAddr::V6(ip),
+                ));
+            }
+            _ => {}
         }
     }
     None
+}
+
+/// Whether an address a peer advertised may enter the routing table.
+///
+/// `Identify` hands the node whatever listen addresses a peer claims, and every
+/// one of them used to go straight into Kademlia. On a public network a peer
+/// can therefore advertise `127.0.0.1`, `10.0.0.0/8` or `fe80::/10` and fill
+/// the routing table with addresses that mean nothing outside the process that
+/// sent them: every later dial goes nowhere and the node stops finding peers it
+/// could reach (BLG-034, Kademlia poisoning).
+///
+/// `private_ok` is the node's own answer to "is this a private network". On
+/// devnet the peers *are* on loopback, and a private address is the only
+/// address there is, so the rule has to be a profile decision rather than a
+/// global one.
+fn advertised_address_is_allowed(addr: &Multiaddr, private_ok: bool) -> bool {
+    use libp2p::multiaddr::Protocol;
+    if private_ok {
+        return true;
+    }
+    for proto in addr.iter() {
+        let ip = match proto {
+            Protocol::Ip4(ip) => std::net::IpAddr::V4(ip),
+            Protocol::Ip6(ip) => std::net::IpAddr::V6(ip),
+            // Identify advertisements are unauthenticated. A public-profile
+            // node must not turn an arbitrary DNS name into a routing-table
+            // entry whose private resolution is discovered only while dialling.
+            Protocol::Dns(_) | Protocol::Dns4(_) | Protocol::Dns6(_) | Protocol::Dnsaddr(_) => {
+                return false;
+            }
+            _ => continue,
+        };
+        if !is_globally_routable(ip) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether this profile treats a private advertisement as a poisoning attempt.
+///
+/// Devnet is the one network where the peers really are on loopback; every
+/// other profile either faces the open internet or is a rehearsal of it, and
+/// there a private address in the routing table is an address nobody can dial.
+fn profile_rejects_private_advertisements(network: crate::core::chain_config::Network) -> bool {
+    !matches!(network, crate::core::chain_config::Network::Devnet)
+}
+
+/// Whether an IP address can be dialled from anywhere on the internet.
+///
+/// The IPv4-mapped IPv6 form is judged as the IPv4 address it carries: a
+/// `::ffff:10.0.0.1` advertisement is a private address, not a routable v6 one.
+fn is_globally_routable(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_multicast()
+                || o[0] == 0
+                // 100.64.0.0/10: carrier-grade NAT. `is_private` says no
+                // because it is not RFC 1918, but nothing outside the carrier
+                // can dial it either.
+                || (o[0] == 100 && (64..128).contains(&o[1])))
+        }
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => is_globally_routable(std::net::IpAddr::V4(v4)),
+            None => {
+                let o = v6.octets();
+                !(v6.is_loopback()
+                    || v6.is_unspecified()
+                    || v6.is_multicast()
+                    // fc00::/7: unique local.
+                    || (o[0] & 0xfe) == 0xfc
+                    // fe80::/10: unicast link local.
+                    || (o[0] == 0xfe && (o[1] & 0xc0) == 0x80)
+                    // 2001:db8::/32: documentation, never a public peer.
+                    || (o[0] == 0x20 && o[1] == 0x01 && o[2] == 0x0d && o[3] == 0xb8))
+            }
+        },
+    }
 }
 
 #[derive(NetworkBehaviour)]
@@ -787,6 +890,14 @@ pub struct Node {
     pub identity_path: Option<std::path::PathBuf>,
     pub banned_peer_db: Option<std::path::PathBuf>,
     pub mdns_enabled: bool,
+    /// Whether a private address a peer advertises may enter the routing table.
+    ///
+    /// Defaults to `true`: a node that never applied a network profile is a
+    /// test or an embedded node whose peers are on loopback, and refusing them
+    /// would buy no security. [`Self::apply_network_security`] closes it for
+    /// the public networks, where a private advertisement is a poisoning
+    /// attempt rather than a description of where the peer is.
+    pub accept_private_peer_addresses: bool,
     pub metrics: Option<Arc<crate::core::metrics::Metrics>>,
     pub storage_node: Option<Arc<bud_node::BudBitswap>>,
     /// What this node is allowed to delete, and whether it may delete at all.
@@ -2151,6 +2262,7 @@ impl Node {
             identity_path: None,
             banned_peer_db: None,
             mdns_enabled,
+            accept_private_peer_addresses: true,
             metrics: None,
             storage_node,
             pruning_policy: None,
@@ -2287,6 +2399,14 @@ impl Node {
                 format!("./data/{network:?}/vote-history.json").to_lowercase(),
             ));
         }
+        // Kademlia poisoning (BLG-034): `Identify` accepts whatever a peer
+        // says its listen addresses are, and the routing table used to take
+        // all of it. On a public network that lets one peer fill the table
+        // with `127.0.0.1` and `10.0.0.0/8` entries, after which every dial
+        // goes nowhere. The public profiles therefore accept only globally
+        // routable advertisements; devnet, where loopback *is* the topology,
+        // keeps them.
+        self.accept_private_peer_addresses = !profile_rejects_private_advertisements(network);
     }
 
     pub fn with_identity(mut self, path: Option<String>) -> Self {
@@ -3267,7 +3387,7 @@ impl Node {
                         }
                         SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
                             let remote = endpoint.get_remote_address();
-                            let subnet = ipv4_slash24(remote);
+                            let subnet = subnet_bucket(remote);
                             // Security review (HIGH): a banned peer
                             // could reconnect and carry on issuing
                             // /sync requests, because the handshaked
@@ -3295,7 +3415,7 @@ impl Node {
                                 .can_admit_subnet(subnet);
                             if !admit {
                                 warn!(
-                                    "Eclipse bound: rejecting {} from {:?} (/24 limit)",
+                                    "Eclipse bound: rejecting {} from {:?} (per-subnet limit)",
                                     peer_id, subnet
                                 );
                                 let _ = self.swarm.disconnect_peer_id(peer_id);
@@ -4539,9 +4659,21 @@ impl Node {
                             }
                         }
                         SwarmEvent::Behaviour(BudlumBehaviourEvent::Identify(identify::Event::Received { info, .. })) => {
-                            info!("Received identity from {:?}", info.public_key.to_peer_id());
+                            let identified = info.public_key.to_peer_id();
+                            info!("Received identity from {identified:?}");
                             for addr in info.listen_addrs {
-                                self.swarm.behaviour_mut().kad.add_address(&info.public_key.to_peer_id(), addr);
+                                // Kademlia poisoning (BLG-034): an advertisement
+                                // is taken on the advertiser's word, so a
+                                // private address is only believable on a
+                                // private network.
+                                if !advertised_address_is_allowed(
+                                    &addr,
+                                    self.accept_private_peer_addresses,
+                                ) {
+                                    warn!("Refusing private address {addr} from {identified}");
+                                    continue;
+                                }
+                                self.swarm.behaviour_mut().kad.add_address(&identified, addr);
                             }
                         }
                         SwarmEvent::Behaviour(BudlumBehaviourEvent::Kad(KademliaEvent::RoutingUpdated { peer, .. })) => {
@@ -6033,5 +6165,104 @@ mod gossip_author_tests {
         assert!(handshake_origin_matches_peer(relay, Some(relay)));
         assert!(!handshake_origin_matches_peer(relay, Some(author)));
         assert!(!handshake_origin_matches_peer(relay, None));
+    }
+}
+
+#[cfg(test)]
+mod subnet_policy_tests {
+    use super::*;
+    use crate::network::peer_manager::SubnetKey;
+
+    fn addr(s: &str) -> Multiaddr {
+        s.parse().expect("test multiaddrs are valid")
+    }
+
+    fn v4(a: u8, b: u8, c: u8, d: u8) -> std::net::IpAddr {
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(a, b, c, d))
+    }
+
+    /// The eclipse bucket ignores the address family: the mapped form is the
+    /// IPv4 address it carries, not a second budget.
+    ///
+    /// Canary: keep the old IPv4-only extractor and the mapped assertion is
+    /// `None` against `Some` on the same host.
+    #[test]
+    fn ipv4_mapped_address_is_not_a_new_subnet() {
+        let plain = subnet_bucket(&addr("/ip4/203.0.113.7/tcp/4001"));
+        let mapped = subnet_bucket(&addr("/ip6/::ffff:203.0.113.7/tcp/4001"));
+        assert_eq!(plain, Some(SubnetKey::from_ip(v4(203, 0, 113, 7))));
+        assert_eq!(
+            mapped, plain,
+            "::ffff:203.0.113.7 must land in the 203.0.113.0/24 bucket"
+        );
+    }
+
+    /// Two addresses inside one IPv6 `/64` are one subscriber and one bucket.
+    #[test]
+    fn ipv6_peers_in_one_slash64_share_a_bucket() {
+        let first = subnet_bucket(&addr("/ip6/2001:db8:1:2::1/tcp/4001"));
+        let second = subnet_bucket(&addr("/ip6/2001:db8:1:2:ffff::2/tcp/4001"));
+        let other = subnet_bucket(&addr("/ip6/2001:db8:1:3::1/tcp/4001"));
+        assert_eq!(first, second, "one /64 is one bucket");
+        assert_ne!(first, other, "a different /64 is a different bucket");
+        assert!(first.is_some(), "an IPv6 peer must be bucketed at all");
+    }
+
+    /// Kademlia poisoning: an advertisement is the advertiser's word, so on a
+    /// public network only a globally routable address may enter the table.
+    #[test]
+    fn kademlia_refuses_private_addresses_on_public_network() {
+        for advertised in [
+            "/ip4/127.0.0.1/tcp/4001",
+            "/ip4/10.1.2.3/tcp/4001",
+            "/ip4/172.16.9.9/tcp/4001",
+            "/ip4/192.168.0.7/tcp/4001",
+            "/ip4/169.254.10.10/tcp/4001",
+            "/ip4/100.64.0.1/tcp/4001",
+            "/ip4/0.0.0.0/tcp/4001",
+            "/ip6/::1/tcp/4001",
+            "/ip6/fd00::1/tcp/4001",
+            "/ip6/fe80::1/tcp/4001",
+            "/ip6/2001:db8::1/tcp/4001",
+            "/ip6/::ffff:10.1.2.3/tcp/4001",
+            "/dns4/localhost/tcp/4001",
+            "/dns4/seed.example/tcp/4001",
+        ] {
+            assert!(
+                !advertised_address_is_allowed(&addr(advertised), false),
+                "{advertised} must be refused on a public network"
+            );
+            assert!(
+                advertised_address_is_allowed(&addr(advertised), true),
+                "{advertised} must stay usable on devnet"
+            );
+        }
+        for advertised in [
+            "/ip4/8.8.8.8/tcp/4001",
+            "/ip6/2606:4700:4700::1111/tcp/4001",
+        ] {
+            assert!(
+                advertised_address_is_allowed(&addr(advertised), false),
+                "{advertised} is dialable and must be accepted"
+            );
+        }
+    }
+
+    /// The public profiles close private advertisements; devnet keeps them,
+    /// because on devnet every peer is on loopback.
+    #[test]
+    fn public_profiles_close_private_advertisements() {
+        use crate::core::chain_config::Network;
+        assert!(profile_rejects_private_advertisements(Network::Mainnet));
+        assert!(profile_rejects_private_advertisements(Network::Testnet));
+        assert!(
+            !profile_rejects_private_advertisements(Network::Devnet),
+            "devnet peers are on loopback: private is the topology"
+        );
+        // The same decision `apply_network_security` installs on the node.
+        assert!(!advertised_address_is_allowed(
+            &addr("/ip4/127.0.0.1/tcp/4001"),
+            !profile_rejects_private_advertisements(Network::Testnet)
+        ));
     }
 }
