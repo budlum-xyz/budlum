@@ -54,6 +54,8 @@ mod gates {
     pub mod bns_names_are_safe_in_an_address_bar;
     pub mod bridge_dual_tree;
     pub mod bud3_custody_proofs;
+    pub mod bud3_custody_rewards;
+    pub mod bud3_fee_uses_physical_bytes;
     pub mod bud3_forbidden_phrases;
     pub mod bud3_placement;
     pub mod bud3_repair_fires;
@@ -1034,6 +1036,22 @@ const GATES: &[Gate] = &[
         run_args: None,
         self_test: gates::three_is_recipe_only::self_test,
         run_log: None,
+    },
+    Gate {
+        name: "bud3-fee-uses-physical-bytes",
+        replaces: None,
+        run: gates::bud3_fee_uses_physical_bytes::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_fee_uses_physical_bytes::self_test,
+    },
+    Gate {
+        name: "bud3-custody-rewards",
+        replaces: None,
+        run: gates::bud3_custody_rewards::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_custody_rewards::self_test,
     },
     Gate {
         name: "storage-is-priced-by-size",

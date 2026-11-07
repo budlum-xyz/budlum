@@ -234,6 +234,10 @@ impl Network {
                 tx_ttl_secs: 1_800,
                 rbf_bump_percent: 15,
                 max_pool_bytes: 512 * 1024 * 1024,
+                // The duty lane's share follows the block budget, and the
+                // block budget is one constant for every network, so it is
+                // the same here as on the testnet.
+                duty_block_bytes: crate::mempool::pool::DEFAULT_DUTY_BLOCK_BYTES,
             },
             Network::Testnet => crate::mempool::pool::MempoolConfig {
                 max_size: 50_000,
@@ -242,6 +246,7 @@ impl Network {
                 tx_ttl_secs: 3_600,
                 rbf_bump_percent: 10,
                 max_pool_bytes: crate::mempool::pool::DEFAULT_MAX_POOL_BYTES,
+                duty_block_bytes: crate::mempool::pool::DEFAULT_DUTY_BLOCK_BYTES,
             },
             Network::Devnet => crate::mempool::pool::MempoolConfig::default(),
         }
