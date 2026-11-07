@@ -63,14 +63,28 @@ struct Concept {
     allow_paths: Vec<String>,
 }
 
-fn is_known_package(owner: &str) -> bool {
-    let Some(digits) = owner.strip_prefix("WP-") else {
-        return false;
-    };
-    if digits.len() != 2 || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return false;
-    }
-    matches!(digits.parse::<u8>(), Ok(1..=64))
+fn is_known_owner(owner: &str) -> bool {
+    matches!(
+        owner,
+        "consensus"
+            | "operations"
+            | "settlement"
+            | "storage"
+            | "explorer"
+            | "wallet"
+            | "persistence"
+            | "budzero"
+            | "object-format"
+            | "storage-api"
+            | "placement"
+            | "codecs"
+            | "storage-migration"
+            | "privacy"
+            | "proof-recursion"
+            | "ai-privacy"
+            | "object-layer"
+            | "naming"
+    )
 }
 
 struct Map {
@@ -157,8 +171,8 @@ fn parse_map(text: &str) -> Result<Map, String> {
             required_str(t, key, &who)?;
         }
         let owner = required_str(t, "owner", &who)?.to_string();
-        if !is_known_package(&owner) {
-            return Err(format!("{who}: unknown package owner `{owner}`"));
+        if !is_known_owner(&owner) {
+            return Err(format!("{who}: unknown component owner `{owner}`"));
         }
         let raw = string_list(t, "patterns")?;
         if raw.is_empty() {
@@ -410,7 +424,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     check(root, std::env::var_os(WRITE_ENV).is_some_and(|v| v == "1"))
 }
 
-const CANARY_MAP: &str = "schema = 1\nmode = \"count\"\nglobal_allow_paths = [\"config/naming/\", \"docs/NAMING.md\"]\n\n[[concept]]\nold = [\"Canaryname\"]\npatterns = ['(?i)canary-?name']\nnew_code = \"x\"\nterm_en = \"x\"\nterm_tr = \"x\"\narea = \"x\"\nowner = \"WP-05\"\nreason = \"x\"\n";
+const CANARY_MAP: &str = "schema = 1\nmode = \"count\"\nglobal_allow_paths = [\"config/naming/\", \"docs/NAMING.md\"]\n\n[[concept]]\nold = [\"Canaryname\"]\npatterns = ['(?i)canary-?name']\nnew_code = \"x\"\nterm_en = \"x\"\nterm_tr = \"x\"\narea = \"x\"\nowner = \"naming\"\nreason = \"x\"\n";
 
 fn stage(root: &Path, map: &str, baseline: &str) -> Result<(), String> {
     let put = |rel: &str, body: &str| -> Result<(), String> {
@@ -466,9 +480,9 @@ pub fn self_test() -> Result<String, String> {
         if check(&dir, false).is_ok() {
             return Err(String::from("canary: absolute mode accepted a legacy name"));
         }
-        stage(&dir, &CANARY_MAP.replace("WP-05", "WP-00"), zero)?;
+        stage(&dir, &CANARY_MAP.replace("naming", "unknown"), zero)?;
         if check(&dir, false).is_ok() {
-            return Err(String::from("canary: accepted an unknown package owner"));
+            return Err(String::from("canary: accepted an unknown component owner"));
         }
         Ok(())
     })();
@@ -556,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn concept_map_owner_is_a_known_package() {
+    fn concept_map_owner_is_a_known_component() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let map = std::fs::read_to_string(root.join(MAP_PATH)).unwrap_or_default();
         let parsed = parse_map(&map);
@@ -564,17 +578,15 @@ mod tests {
         if let Ok(m) = parsed {
             for concept in &m.concepts {
                 assert!(
-                    is_known_package(&concept.owner),
+                    is_known_owner(&concept.owner),
                     "unknown owner {} for {}",
                     concept.owner,
                     concept.name
                 );
             }
         }
-        assert!(!is_known_package(""));
-        assert!(!is_known_package("WP-00"));
-        assert!(!is_known_package("WP-65"));
-        assert!(!is_known_package("WP-5"));
-        assert!(!is_known_package("IP-05"));
+        assert!(!is_known_owner(""));
+        assert!(!is_known_owner("unknown"));
+        assert!(is_known_owner("naming"));
     }
 }
