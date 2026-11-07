@@ -7,7 +7,7 @@
 //! aptos-vm worker is not wired yet. Every refusal names a rule; no Aptos
 //! account state is invented from the Budlum ledger.
 //!
-//! WIRING: `crate::execution::coordinator::foreign::aptos` holds the envelope,
+//! WIRING: unwired - `crate::execution::coordinator::foreign::aptos` holds the envelope,
 //! the alias, the pinned framework and the replay cache. This module is
 //! declared by `aptos/mod.rs`; the REST `handle` continues to answer
 //! `Answer::MoveUnavailable` with the same native door until the worker runs.
@@ -51,6 +51,7 @@ impl MoveWorkerAdmission {
     /// [`MoveWorkerError::Body`] for a BCS defect, or
     /// [`MoveWorkerError::Envelope`] for a chain, expiry, framework, replay or
     /// worker refusal.
+    /// exposed for: Move BCS transaction admission once worker socket connects (`WP-32`).
     pub fn admit_bcs(&mut self, body: &[u8], now_secs: u64) -> Result<(), MoveWorkerError> {
         if body.len() > MAX_BCS_BYTES.saturating_add(64) {
             return Err(MoveWorkerError::Body(BcsError::LengthTooLarge));

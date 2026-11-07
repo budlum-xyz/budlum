@@ -22,6 +22,8 @@ use crate::core::address::Address;
 use crate::crypto::primitives::WalletKeyPair;
 use serde::{Deserialize, Serialize};
 
+pub mod identity_profile;
+
 #[path = "../../crates/wallet-core/src/bip39_wordlist.rs"]
 mod bip39_wordlist;
 

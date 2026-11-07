@@ -1122,32 +1122,32 @@ pub trait BudlumApi {
         offer_id: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// List Pollen DataAsset records visible in chain state.
-    #[method(name = "bud_pollenGetDataAssets")]
+    /// List Data Market DataAsset records visible in chain state.
+    #[method(name = "bud_dataMarketGetDataAssets")]
     async fn pollen_get_data_assets(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// List Pollen AccessGrant records visible in chain state.
-    #[method(name = "bud_pollenGetAccessGrants")]
+    /// List Data Market AccessGrant records visible in chain state.
+    #[method(name = "bud_dataMarketGetAccessGrants")]
     async fn pollen_get_access_grants(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// List Pollen SaleAuthorization records visible in chain state.
-    #[method(name = "bud_pollenGetSaleAuthorizations")]
+    /// List Data Market SaleAuthorization records visible in chain state.
+    #[method(name = "bud_dataMarketGetSaleAuthorizations")]
     async fn pollen_get_sale_authorizations(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// List Pollen purchase receipts visible in chain state.
-    #[method(name = "bud_pollenGetPurchaseReceipts")]
+    /// List Data Market purchase receipts visible in chain state.
+    #[method(name = "bud_dataMarketGetPurchaseReceipts")]
     async fn pollen_get_purchase_receipts(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Build canonical AiInferenceRequest.input_ref for Pollen-gated data reads.
-    #[method(name = "bud_pollenBuildAiInputRef")]
+    /// Build canonical AiInferenceRequest.input_ref for grant-gated data reads.
+    #[method(name = "bud_dataMarketBuildAiInputRef")]
     async fn pollen_build_ai_input_ref(
         &self,
         asset_id: String,
         grant_id: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Prepare unsigned owner/seller authorization for selling DataAsset pollen.
-    #[method(name = "bud_pollenPrepareSaleAuthorization")]
+    /// Prepare unsigned owner/seller authorization for selling a DataAsset.
+    #[method(name = "bud_dataMarketPrepareSaleAuthorization")]
     async fn pollen_prepare_sale_authorization(
         &self,
         seller: String,
@@ -1158,13 +1158,13 @@ pub trait BudlumApi {
         terms_hash: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Prepare an authorization-backed Pollen purchase without mutating state.
+    /// Prepare an authorization-backed Data Market purchase without mutating state.
     ///
     /// `buyer_signature`: an ed25519 signature by the buyer bound to the whole
     /// purchase set (authorization, price, duration, max_reads,
     /// payment_commitment, expiry) - finding #358: an unsigned purchase is
     /// not accepted.
-    #[method(name = "bud_pollenPreparePurchase")]
+    #[method(name = "bud_dataMarketPreparePurchase")]
     async fn pollen_prepare_purchase(
         &self,
         authorization_id: String,

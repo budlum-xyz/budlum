@@ -25,6 +25,7 @@ pub struct PreprocessedVerifierKey<SC: StarkGenericConfig> {
 /// The largest `degree_bits` a preprocessed setup is built for: the envelope bound
 /// (`2^24` rows) the node accepts, far above the `2^22` rows the largest legal
 /// trace needs. Above it the setup is refused rather than attempted.
+/// exposed for: preprocessed trace setup degree bound checks (`WP-33`).
 pub const MAX_SETUP_DEGREE_BITS: usize = 24;
 
 /// Commits the AIR's preprocessed columns for a trace of `2^degree_bits` rows.

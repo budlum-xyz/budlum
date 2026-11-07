@@ -16,6 +16,8 @@
 //!
 //! The Merkle trees here hash an odd node up unchanged and bind the leaf count
 //! into the root, the same rule as the object commitment.
+//!
+//! exposed for: B.U.D. 3.0 sub-block Merkle custody proof generation and epoch audits (`WP-19`, `WP-20`).
 
 use crate::core::hash::hash_fields_bytes;
 

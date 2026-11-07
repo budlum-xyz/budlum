@@ -202,6 +202,7 @@ impl LiveStream {
     }
 
     /// The end of the newest segment, if any.
+    /// exposed for: T-Expansion live stream playhead inspection (`WP-55`).
     #[must_use]
     pub fn head_end_ms(&self) -> Option<u64> {
         self.segments.last().map(|segment| segment.end_ms)
@@ -226,6 +227,7 @@ impl LiveStream {
     /// [`LiveError::EmptySegment`] for empty content,
     /// [`LiveError::NonContiguous`] when `start_ms` does not continue the
     /// timeline.
+    /// exposed for: T-Expansion live stream segment append (`WP-55`).
     pub fn push_segment(
         &mut self,
         start_ms: u64,
@@ -469,13 +471,15 @@ impl Iterator for RatiolessPlan {
         for _ in 0..self.next_repair_esi.len() {
             let index = self.cursor % self.next_repair_esi.len();
             self.cursor = self.cursor.wrapping_add(1);
-            let esi = self.next_repair_esi[index];
-            if esi <= MAX_ESI {
-                self.next_repair_esi[index] = esi + 1;
-                return Some(LiveFrame::Repair {
-                    segment: index as u64,
-                    esi,
-                });
+            if let Some(slot) = self.next_repair_esi.get_mut(index) {
+                let esi = *slot;
+                if esi <= MAX_ESI {
+                    *slot = esi + 1;
+                    return Some(LiveFrame::Repair {
+                        segment: index as u64,
+                        esi,
+                    });
+                }
             }
         }
         None

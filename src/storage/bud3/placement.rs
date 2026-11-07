@@ -22,6 +22,8 @@
 //! The [`PlacementTable`] is a genesis parameter computed off chain from the
 //! class loss and availability rates. The consensus path only reads it, by
 //! integer comparison.
+//!
+//! exposed for: B.U.D. 3.0 stake-weighted rendezvous placement and wide-stripe tables (`WP-20`).
 
 use crate::core::hash::hash_fields_bytes;
 

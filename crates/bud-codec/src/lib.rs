@@ -23,6 +23,8 @@
 //! less, the slow candidates are not run.
 //!
 //! Every codec id, its frozen meaning and its state live in [`registry`].
+//!
+//! exposed for: B.U.D. 3.0 object codec selection and viewer decoding (`bud3::bof1`, `bud3::pipeline`).
 
 use std::io::Read;
 

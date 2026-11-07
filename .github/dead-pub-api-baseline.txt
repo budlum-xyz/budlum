@@ -84,7 +84,6 @@ src/core/account.rs:is_storage_operator
 src/core/account.rs:remove_role
 src/core/account.rs:save_to_storage
 src/core/account.rs:slash_all_roles
-src/core/chain_config.rs:finality_quorum
 src/core/encoding.rs:create_version_message
 src/core/encoding.rs:encode_block_header
 src/core/encoding.rs:encode_block_summary
@@ -109,12 +108,6 @@ src/crypto/signer.rs:with_pq
 src/domain/commitment_registry.rs:get_by_block_hash
 src/domain/plugin_registry.rs:domain_ids
 src/domain/sovereign.rs:transition_lifecycle
-src/gateway/atlas.rs:all_domain_summaries
-src/gateway/atlas.rs:get_domain_summary
-src/gateway/atlas.rs:insert_evidence_record
-src/gateway/atlas.rs:query_evidence_by_domain
-src/gateway/atlas.rs:query_evidence_by_height_range
-src/gateway/atlas.rs:upsert_domain_summary
 src/network/gossip_dedup.rs:get_peer_score
 src/network/gossip_dedup.rs:peer_score
 src/network/gossip_dedup.rs:peers_below_threshold

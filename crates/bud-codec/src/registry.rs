@@ -15,6 +15,8 @@
 //! [`Speed::High`] at least 50 MB/s, [`Speed::Medium`] at least 5 MB/s,
 //! [`Speed::Slow`] at least 0.5 MB/s. Rows whose speed is a target rather
 //! than a measurement stay closed until they are measured and pass.
+//!
+//! exposed for: B.U.D. 3.0 codec state registry and governance activation checks.
 
 use crate::CodecId;
 

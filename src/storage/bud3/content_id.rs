@@ -9,6 +9,8 @@
 //!
 //! A content id never changes. The object that carries the content may change
 //! (a better codec, a new dictionary); the content id does not.
+//!
+//! exposed for: B.U.D. 3.0 public and sealed content addressing (`WP-18`, `WP-22`).
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

@@ -469,7 +469,14 @@ impl AptosGateway {
                 door: None,
             }),
             RouteMatch::Found(index) => {
-                let endpoint = &ENDPOINTS[index];
+                let Some(endpoint) = ENDPOINTS.get(index) else {
+                    return error_response(RestError {
+                        status: StatusCode::NOT_FOUND,
+                        error_code: "not_found",
+                        message: format!("No Aptos REST route matches {path}"),
+                        door: None,
+                    });
+                };
                 match endpoint.answer {
                     Answer::ChainRead if endpoint.pattern == "/v1/-/healthy" => {
                         healthy_response(self.node.is_syncing())

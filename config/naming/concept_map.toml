@@ -69,6 +69,7 @@ reason = "The name states the function."
 [[concept]]
 old = ["Budscan", "BudScan"]
 patterns = ['(?i)budscan']
+allow_paths = ["xtask/gates/src/gates/geiger.rs"]
 new_code = "budlum-explorer"
 term_en = "Budlum Explorer"
 term_tr = "Budlum Gezgini"
@@ -158,7 +159,7 @@ term_en = "signature aggregation proof"
 term_tr = "İmza toplama kanıtı"
 area = "budzero"
 reason = "The name states the function."
-allow_paths = ["budzero/Cargo.lock"]
+allow_paths = ["budzero/Cargo.lock", "xtask/gates/src/gates/module_coverage.rs"]
 
 [[concept]]
 old = ["Tarif", "Recipe", "TARIF-3", "VideoRecipe"]

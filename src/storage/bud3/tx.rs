@@ -72,6 +72,24 @@ pub enum StorageTxV3 {
         /// The content.
         content: ContentId,
     },
+    /// Replace an object with a second representation of the same content
+    /// (section 6.14). Signed by a Full validator of the old placement group,
+    /// or by the owner when the content is sealed.
+    ///
+    /// Appended after every earlier variant on purpose: the variant index is
+    /// part of the signed bytes, so a new variant takes the next index and
+    /// never renumbers one a peer already signed.
+    ReplaceObject {
+        /// The object that carries the content now.
+        old: ObjectKey,
+        /// The new record: same content id, a new commitment and a codec that
+        /// is open.
+        record: ObjectRecord,
+        /// The new placement: `(segment, share)`.
+        shares: Vec<(u64, Share)>,
+        /// Paid lifetime of the new object, in epochs.
+        lifetime_epochs: u64,
+    },
 }
 
 /// What an applied transaction did.
@@ -93,6 +111,8 @@ pub enum Applied {
     Renewed(u64),
     /// Decline recorded.
     Declined,
+    /// Object replaced; the new commitment.
+    Replaced(ObjectKey),
 }
 
 /// Apply one transaction signed by `signer` at `epoch`.
@@ -149,6 +169,14 @@ pub fn apply(
             registry.decline(signer, &content);
             Ok(Applied::Declined)
         }
+        StorageTxV3::ReplaceObject {
+            old,
+            record,
+            shares,
+            lifetime_epochs,
+        } => registry
+            .propose_replacement(signer, &old, record, shares, epoch, lifetime_epochs)
+            .map(Applied::Replaced),
     }
 }
 

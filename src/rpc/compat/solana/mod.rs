@@ -39,6 +39,8 @@
 //! `src/rpc/method_class.rs` (listener and effect, checked at every server
 //! start). The tests in [`tests`] compare all three, so a method cannot be
 //! half-added.
+//!
+//! exposed for: Solana JSON-RPC and WebSocket compatibility router (`WP-28`, `WP-51`).
 
 use jsonrpsee::types::error::ErrorObjectOwned;
 
@@ -285,6 +287,7 @@ pub fn dedicated_methods(
 }
 
 /// Whether this name is one of the five generated unsubscribe doors.
+/// exposed for: Solana WebSocket unsubscribe method dispatch (`WP-51`).
 #[must_use]
 pub fn is_unsubscribe(name: &str) -> bool {
     row(name).is_some_and(|entry| entry.answer == Answer::Unsubscribe)

@@ -13,6 +13,8 @@
 //! the filter's history.
 //!
 //! The hashing is integers only, so two architectures agree bit for bit.
+//!
+//! exposed for: B.U.D. 3.0 node-local Bloom deduplication filter (`WP-19`).
 
 use std::collections::btree_map::{BTreeMap, IntoIter};
 

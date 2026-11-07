@@ -151,7 +151,9 @@ impl SubnetKey {
     fn ipv4(octets: [u8; 3]) -> Self {
         let mut key = [0u8; 16];
         key[0] = Self::FAMILY_V4;
-        key[1..4].copy_from_slice(&octets);
+        if let Some(dst) = key.get_mut(1..4) {
+            dst.copy_from_slice(&octets);
+        }
         Self(key)
     }
 
@@ -160,7 +162,9 @@ impl SubnetKey {
     fn ipv6(prefix: [u8; 8]) -> Self {
         let mut key = [0u8; 16];
         key[0] = Self::FAMILY_V6;
-        key[1..9].copy_from_slice(&prefix);
+        if let Some(dst) = key.get_mut(1..9) {
+            dst.copy_from_slice(&prefix);
+        }
         Self(key)
     }
 

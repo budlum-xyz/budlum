@@ -17,6 +17,8 @@
 //!   commitment.
 //!
 //! Segment digests are not written in the object: they are computed from it.
+//!
+//! exposed for: B.U.D. 3.0 segment digest and BOF-1 object commitment derivation (`WP-18`).
 
 use super::limits::Profile;
 use crate::core::hash::hash_fields_bytes;

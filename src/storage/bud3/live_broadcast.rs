@@ -12,7 +12,7 @@
 //! refusal is proved by `live_stream_is_closed_on_testnet`, and the refusal
 //! is checked at the object door, not in a comment.
 //!
-//! WIRING: the content gateway calls [`LiveGateway::admit_object`] for every
+//! WIRING: unwired - the content gateway calls [`LiveGateway::admit_object`] for every
 //! registered object and [`LiveGateway::admit_viewer`] for every live view;
 //! [`BroadcastDriver`] is the sender-side emission path. Like the rest of
 //! `bud3`, the executor reaches these doors once the legacy storage
@@ -147,6 +147,7 @@ impl LiveGateway {
     ///
     /// [`LiveGatewayRefusal::NotLive`] when bit1 is absent, or the activation
     /// refusals of [`Self::admit_object`].
+    /// exposed for: T-Expansion live object gateway admission (`WP-55`).
     pub fn admit_live_object(
         &self,
         object: &Object,

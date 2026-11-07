@@ -11,6 +11,8 @@
 //! The per-class windows below are written in hours where the directive writes
 //! them in hours, and converted to epochs with section 6.21.3's formula, so no
 //! consensus decision reads a wall clock (G-2, section 6.21.3 item 1).
+//!
+//! exposed for: mobile validator kits (`mobile/core`, `mobile/ffi`) and node class enforcement (`WP-11`).
 
 use serde::{Deserialize, Serialize};
 

@@ -4,6 +4,8 @@
 //! byte budget (memory the path may allocate) and a step budget (work the path
 //! may do). A path charges the meter before it allocates or loops, so an
 //! untrusted length can never make it allocate first and check later.
+//!
+//! exposed for: B.U.D. 3.0 bounded parser and decoder resource metering (`WP-18`).
 
 /// A spent budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

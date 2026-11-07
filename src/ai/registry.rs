@@ -2035,6 +2035,7 @@ impl AiRegistry {
     /// This is the form a consensus or cross-process consumer should use.
     /// One permyriad is 1/10_000 of a unit of trust; the range is
     /// `0..=10_000`.
+    /// exposed for: integer basis-point AI operator ranking queries (`WP-17`).
     #[must_use]
     pub fn agents_by_trust_score_permyriad(&self) -> Vec<(Address, u64)> {
         let mut scored: Vec<(Address, u64)> = self

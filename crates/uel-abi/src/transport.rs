@@ -10,6 +10,8 @@
 //! (a dead socket, a missed deadline, a protocol violation) is a
 //! [`TransportError`]: the non-deterministic class, on which the coordinator
 //! must not write anything.
+//!
+//! exposed for: UEL Unix-domain socket coordinator and out-of-process `budlum-ee-*` workers (`WP-09`, `WP-26`).
 
 use crate::frame::{read_frame, write_frame, FrameError, ABI_VERSION};
 pub use crate::host::{panic_digest, panic_message};

@@ -4,6 +4,8 @@
 //! Account, signature, log and program feeds are refused by name at the
 //! subscription door. The slot feed reports Budlum chain progress, not Solana's
 //! 400 ms slot clock; `docs/SOLANA_RPC.md` states that boundary.
+//!
+//! exposed for: Solana WebSocket slot/signature subscription fan-out (`WP-51`).
 
 use crate::chain::chain_actor::ChainHandle;
 use jsonrpsee::PendingSubscriptionSink;

@@ -12,6 +12,8 @@
 //! Hour-based windows are converted to epochs with
 //! `ceil(hours * 3600 / (slot_secs * epoch_slots))` (section 6.21.3), so no
 //! consensus decision depends on wall-clock time.
+//!
+//! exposed for: validator epoch presence bitmap tracking and suspension scheduling (`WP-07`, `WP-13`).
 
 use crate::core::address::Address;
 use crate::registry::evidence::{DoubleSignKind, SlashingProof, SlashingReport};
@@ -139,6 +141,7 @@ impl PresenceTracker {
     /// registered BLS key. A second, different signature for the same
     /// (validator, window) is a double sign and yields a consensus-verified
     /// report.
+    /// exposed for: validator epoch presence signal ingestion (`WP-07`).
     pub fn record_signal(
         &mut self,
         chain_id: u64,
@@ -199,6 +202,7 @@ impl PresenceTracker {
     /// exceeds its class threshold (converted from hours to epochs) is
     /// suspended. Returns the newly suspended validators. Absence never
     /// slashes (V-4).
+    /// exposed for: validator presence window rotation at epoch boundary (`WP-07`).
     pub fn advance_window(
         &mut self,
         window: u64,
@@ -252,6 +256,7 @@ impl PresenceTracker {
 
     /// Reward multiplier (section 7.8.9): the ratio of windows the validator
     /// was seen in, as a fixed-point fraction of `FIXED_POINT_SCALE`.
+    /// exposed for: validator presence ratio custody reward multiplier (`WP-07`, `WP-25`).
     #[must_use]
     pub fn presence_ratio(&self, validator: &Address) -> u64 {
         if self.window_total == 0 {
@@ -269,6 +274,7 @@ impl PresenceTracker {
 
     /// Drop the signature cache of windows older than `window` so the map
     /// stays bounded by one window.
+    /// exposed for: validator presence window pruning (`WP-07`).
     pub fn retain_window(&mut self, window: u64) {
         self.seen_signatures.retain(|_, by_win| {
             by_win.retain(|w, _| *w >= window);

@@ -13,6 +13,8 @@
 //! snapshotted. A Full validator's stake lives in `AccountState::validators`
 //! (the consensus set); a Mobile validator holds no seat, so its bond lives in
 //! the directory record itself and never enters a quorum.
+//!
+//! exposed for: validator class registry, relay/gateway directory RPCs, and duty validation (`WP-08`).
 
 pub mod presence;
 

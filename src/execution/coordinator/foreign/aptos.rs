@@ -17,7 +17,7 @@
 //! bytes, non-canonical ULEB128, oversized payloads and any second use of a
 //! replay id. No float, no wall clock: the caller passes `now_secs`.
 //!
-//! WIRING: `src/rpc/compat/aptos/move_worker.rs` calls [`check_envelope`]
+//! WIRING: unwired - `src/rpc/compat/aptos/move_worker.rs` calls [`check_envelope`]
 //! before it refuses a BCS transaction by name. The Move VM worker itself
 //! (aptos-vm, sequential execution, Block-STM off) is owed to the next
 //! delivery; until then every admitted envelope ends in
@@ -157,7 +157,7 @@ fn take_uleb128(input: &[u8], pos: &mut usize) -> Result<usize, BcsError> {
     }
     // The shortest encoding never ends with a zero payload byte after a
     // continuation: `0x80 0x00` encodes zero in two bytes instead of one.
-    if shift > 7 && input[*pos - 1] == 0 {
+    if shift > 7 && pos.checked_sub(1).and_then(|i| input.get(i)) == Some(&0) {
         return Err(BcsError::NonCanonicalUleb128);
     }
     if value > MAX_BCS_BYTES {

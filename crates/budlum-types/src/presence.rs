@@ -31,6 +31,8 @@
 //!
 //! The class is inside the signed bytes on purpose: two signatures for one
 //! window under two classes are a provable double sign (section 7.8 item 8).
+//!
+//! exposed for: mobile validator presence signing (`mobile/core`, `mobile/ffi`) and node window tracking (`WP-07`, `WP-11`).
 
 use crate::{Address, ValidatorClass};
 use serde::{Deserialize, Serialize};

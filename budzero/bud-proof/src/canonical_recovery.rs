@@ -16,6 +16,7 @@ pub const PIN_SOURCE_COUNT: usize = 4;
 /// The fewest sources a reconciliation may rest on. One source cannot agree
 /// with anything, so a lone pin is not "unanimous": it is a split, and the
 /// caller escalates instead of trusting it.
+/// exposed for: canonical pin reconciliation quorum callers (`WP-33`).
 pub const MIN_PIN_SOURCES: usize = 2;
 
 /// Outcome of reconciling the pin sources.

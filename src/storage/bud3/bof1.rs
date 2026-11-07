@@ -25,6 +25,8 @@
 //!
 //! The parser never panics, never allocates from an untrusted length before
 //! it has checked the bytes are there, and charges a [`Meter`] for the copy.
+//!
+//! exposed for: B.U.D. 3.0 object codec/header pipeline, CLI tools, and explorer inspection (`WP-18`).
 
 use super::content_id::{ContentId, ContentIdKind};
 use super::limits::{Profile, ProfileId};

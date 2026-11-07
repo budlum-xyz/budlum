@@ -117,6 +117,7 @@ impl Network {
     }
 
     /// The bond floor of a mobile validator (Android or iOS opportunistic).
+    /// exposed for: Mobile validator minimum stake admission checks (`WP-08`).
     pub fn min_stake_mobile(&self) -> u64 {
         self.consensus_params().min_stake_mobile
     }
@@ -224,6 +225,7 @@ impl Network {
     ///
     /// Enabled on devnet (`45262`) for integration verification; closed on
     /// testnet (`45261`) and mainnet (`45260`) per the launch feature matrix.
+    /// exposed for: remote app binding activation checks (`WP-44`).
     #[must_use]
     pub const fn app_binding_enabled(&self) -> bool {
         matches!(self, Network::Devnet)

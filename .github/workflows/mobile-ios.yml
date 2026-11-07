@@ -50,23 +50,39 @@ jobs:
 
       # A `swift test` that runs zero tests exits 0 and looks identical to a
       # pass, and the three names below are the acceptance tests of the WP-38
-      # card. Verify them from the JUnit XML output so console formatting
-      # differences across Swift versions cannot mask or break the check.
+      # card. Verify them across any SwiftPM JUnit XML files (`/tmp/ios-xunit*.xml`)
+      # as well as `/tmp/ios-tests.log` so Swift 5.9 and Swift 6 runner formats
+      # on macOS both resolve deterministically.
       - name: The three named tests of the WP-38 card ran and passed
         run: |
           python3 - <<'PYXML'
+          import glob
+          from pathlib import Path
           import xml.etree.ElementTree as ET
-          root = ET.parse('/tmp/ios-xunit.xml').getroot()
-          cases = list(root.iter('testcase'))
-          passed = {
-              c.attrib.get('name', ''): c
-              for c in cases
-              if c.find('failure') is None and c.find('error') is None and c.find('skipped') is None
-          }
-          for req in ['test_ios_bg_task_answers_audit', 'test_ios_quota_cap_is_8_gib', 'test_ios_class_is_opportunistic']:
-              if not any(name == req or name.endswith('.' + req) or name.startswith(req + '(') for name in passed):
-                  raise SystemExit(f'ERROR: {req} did not run and pass (seen: {sorted(passed)})')
-          print(f'Verified {len(passed)} passing XCTest cases including all 3 WP-38 acceptance tests.')
+
+          passed = set()
+          for xfile in sorted(glob.glob('/tmp/ios-xunit*.xml')):
+              root = ET.parse(xfile).getroot()
+              for c in root.iter('testcase'):
+                  if c.find('failure') is None and c.find('error') is None and c.find('skipped') is None:
+                      passed.add(c.attrib.get('name', ''))
+
+          log_text = Path('/tmp/ios-tests.log').read_text(encoding='utf-8', errors='replace')
+          for ln in log_text.splitlines():
+              if ' passed' in ln and ('Test Case ' in ln or 'Test ' in ln):
+                  passed.add(ln.strip())
+
+          required = [
+              'test_ios_bg_task_answers_audit',
+              'test_ios_quota_cap_is_8_gib',
+              'test_ios_class_is_opportunistic',
+          ]
+          for req in required:
+              if not any(req in entry for entry in passed):
+                  raise SystemExit(f'ERROR: {req} did not run and pass (entries={len(passed)})')
+          if len(passed) < 20:
+              raise SystemExit(f'ERROR: expected >= 20 passing iOS tests, saw {len(passed)}')
+          print(f'Verified {len(passed)} passing iOS XCTest entries including all 3 WP-38 acceptance tests.')
           PYXML
 
   app-build:

@@ -337,7 +337,6 @@ bud/src/bud_format_model.rs	const	MODEL_MAGIC
 bud/src/bud_format_model.rs	const	MODEL_VERSION
 bud/src/bud_format_model.rs	enum	FloatKind
 bud/src/bud_format_model.rs	struct	ModelFloatSplit
-bud/src/bud_format_msr.rs	const	K
 bud/src/bud_format_msr.rs	const	MSR_MAGIC
 bud/src/bud_format_msr.rs	fn	msr_decode
 bud/src/bud_format_msr.rs	fn	msr_digest
@@ -1138,7 +1137,6 @@ src/chain/blockchain.rs	fn	enqueue_bridge_relay
 src/chain/blockchain.rs	fn	find_fork_point
 src/chain/blockchain.rs	fn	freeze_poa_account
 src/chain/blockchain.rs	fn	fund_development_account
-src/chain/blockchain.rs	fn	is_valid
 src/chain/blockchain.rs	fn	is_valid_chain
 src/chain/blockchain.rs	fn	mine_pending_transactions
 src/chain/blockchain.rs	fn	observe_liveness_epoch
@@ -1265,7 +1263,6 @@ src/core/chain_config.rs	const	MAX_VOTES_PER_MSG
 src/core/chain_config.rs	const	PROTOCOL_VERSION
 src/core/chain_config.rs	const	SLOT_MS
 src/core/chain_config.rs	fn	finality_quorum
-src/core/chain_config.rs	struct	ChainId
 src/core/chain_config.rs	struct	ConsensusParams
 src/core/constitution.rs	enum	ConstitutionParameterKey
 src/core/constitution.rs	enum	ConstitutionValue
@@ -1292,7 +1289,6 @@ src/core/hash.rs	fn	hash_fields
 src/core/transaction.rs	const	SIGNATURE_VERSION_V6
 src/core/transaction.rs	fn	estimate_gas_with_schedule
 src/core/transaction.rs	fn	fee_limit
-src/core/transaction.rs	fn	is_valid
 src/core/transaction.rs	fn	multisig_address
 src/core/transaction.rs	fn	new_consensus_key_registration
 src/core/transaction.rs	fn	new_contract_call
@@ -1303,7 +1299,6 @@ src/core/transaction.rs	fn	new_proposal
 src/core/transaction.rs	fn	new_vote
 src/core/transaction.rs	fn	new_with_fee
 src/core/transaction.rs	fn	sign_v6
-src/cross_domain/bridge_relayer.rs	enum	PipelineError
 src/cross_domain/bridge_relayer.rs	fn	event_proof
 src/cross_domain/chain_adapter.rs	fn	supports
 src/cross_domain/evm/adapter.rs	const	DEFAULT_DEPOSIT_TOPIC0
@@ -1359,7 +1354,6 @@ src/crypto/primitives.rs	struct	ValidatorKeyPolicy
 src/crypto/signer.rs	fn	with_pq
 src/crypto/signer.rs	struct	KeyPairSigner
 src/deed/mod.rs	enum	ArtifactKind
-src/deed/mod.rs	enum	Visibility
 src/developer_os.rs	enum	DeveloperOsError
 src/developer_os.rs	enum	DevnetTopology
 src/developer_os.rs	enum	SdkFeature
@@ -1384,7 +1378,6 @@ src/domain/fork_choice.rs	trait	ConsensusDomainForkChoice
 src/domain/plugin.rs	struct	DomainContext
 src/domain/plugin.rs	struct	ZkDomainPlugin
 src/domain/plugin_registry.rs	fn	domain_ids
-src/domain/plugin_registry.rs	fn	replacements
 src/domain/plugin_registry.rs	struct	PluginReplacement
 src/domain/registry.rs	const	MAX_REGISTERED_DOMAINS
 src/domain/registry.rs	fn	domain_leaf_hash
@@ -1447,42 +1440,6 @@ src/execution/zkvm.rs	fn	execute_bytecode_mainnet
 src/execution/zkvm.rs	fn	prove_bytecode
 src/execution/zkvm.rs	fn	prove_bytecode_mainnet
 src/execution/zkvm.rs	struct	ZkVmReceipt
-src/gateway/atlas.rs	const	MAX_ATLAS_DOMAIN_SUMMARIES
-src/gateway/atlas.rs	const	MAX_ATLAS_EVIDENCE_RECORDS
-src/gateway/atlas.rs	const	MAX_WALLET_GRAPH_EDGES
-src/gateway/atlas.rs	const	MAX_WALLET_GRAPH_NODES
-src/gateway/atlas.rs	enum	AtlasEvidenceStatus
-src/gateway/atlas.rs	enum	MessageTraceStatus
-src/gateway/atlas.rs	enum	WalletEdgeType
-src/gateway/atlas.rs	enum	WalletNodeType
-src/gateway/atlas.rs	fn	all_domain_summaries
-src/gateway/atlas.rs	fn	get_domain_summary
-src/gateway/atlas.rs	fn	insert_evidence_record
-src/gateway/atlas.rs	fn	query_evidence_by_domain
-src/gateway/atlas.rs	fn	query_evidence_by_height_range
-src/gateway/atlas.rs	fn	upsert_domain_summary
-src/gateway/atlas.rs	struct	AtlasEvidenceCard
-src/gateway/atlas.rs	struct	AtlasQueryEngine
-src/gateway/atlas.rs	struct	AtlasWalletContext
-src/gateway/atlas.rs	struct	CrossDomainTrace
-src/gateway/atlas.rs	struct	DomainSummary
-src/gateway/atlas.rs	struct	EvidenceRecord
-src/gateway/atlas.rs	struct	PollenAtlasSummary
-src/gateway/atlas.rs	struct	WalletContextEdge
-src/gateway/atlas.rs	struct	WalletContextGraph
-src/gateway/atlas.rs	struct	WalletContextNode
-src/gateway/passport.rs	const	MAX_PASSPORT_EVIDENCE_ITEMS
-src/gateway/passport.rs	enum	EvidenceStatus
-src/gateway/passport.rs	fn	build_passport_proof_bundle
-src/gateway/passport.rs	fn	validate_public
-src/gateway/passport.rs	struct	DwebPassportProfile
-src/gateway/passport.rs	struct	EvidenceCard
-src/gateway/passport.rs	struct	PassportManifestSummary
-src/gateway/passport.rs	struct	PassportProofBundle
-src/gateway/passport.rs	struct	PassportProofItem
-src/gateway/passport.rs	struct	PollenLineageSummary
-src/gateway/service.rs	const	MAX_GATEWAY_CONTENT_BYTES
-src/gateway/service.rs	const	MAX_GENERATION_CACHE_ENTRIES
 src/light_client/mod.rs	fn	sync_plan
 src/light_client/mod.rs	struct	LightSyncPlan
 src/ai_inference/effort.rs	const	DEEPEST
@@ -1507,7 +1464,6 @@ src/ai_inference/mod.rs	const	MIN_OPERATOR_BOND
 src/ai_inference/mod.rs	fn	build_ai_inference_grant
 src/ai_inference/mod.rs	fn	consume_epoch
 src/ai_inference/mod.rs	fn	inference_cache
-src/ai_inference/mod.rs	fn	is_valid
 src/ai_inference/mod.rs	fn	operator_eligible
 src/ai_inference/mod.rs	fn	register_operator
 src/ai_inference/mod.rs	struct	TrainingDataGrant
@@ -1728,7 +1684,6 @@ src/storage/derived.rs	fn	stored_versus_independent
 src/storage/derived.rs	struct	MasterRegistry
 src/storage/derived.rs	struct	PrefixSpan
 src/storage/dictionary.rs	const	DICTIONARY_GRACE_EPOCHS
-src/storage/dictionary.rs	const	MAX_DICTIONARY_BYTES
 src/storage/dictionary.rs	enum	DictionaryError
 src/storage/dictionary.rs	fn	check_dictionary_reference
 src/storage/dictionary.rs	fn	deletable_dictionaries
@@ -1823,9 +1778,7 @@ src/tokenomics/mod.rs	fn	seconds_per_epoch
 src/tokenomics/mod.rs	fn	unlocked_at
 src/tokenomics/reward_pool.rs	const	DEFAULT_TREASURY_POOL
 src/tokenomics/reward_pool.rs	const	DEFAULT_VALIDATION_POOL_EPOCHS
-src/tokenomics/reward_pool.rs	const	DEFAULT_VALIDATION_REWARD_POOL
 src/tokenomics/reward_pool.rs	enum	RewardPoolError
-src/tokenomics/reward_pool.rs	fn	per_epoch_budget
 src/tokenomics/reward_pool.rs	fn	reward_for_epoch
 src/tokenomics/reward_pool.rs	fn	total_epoch_payout
 #
@@ -1962,7 +1915,6 @@ src/storage/one_share.rs	fn	endpoint_refs
 src/storage/one_share.rs	fn	screen
 src/storage/one_share.rs	fn	storage_fee_owed_usd
 src/storage/one_share.rs	struct	OneShareRegistry
-src/storage/one_share.rs	struct	Share
 src/storage/one_view.rs	fn	contract_digest
 src/storage/one_view.rs	fn	honest_custody
 src/storage/one_view.rs	fn	network_held_bytes

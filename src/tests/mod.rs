@@ -252,6 +252,11 @@ pub mod validator_classes;
 #[cfg(test)]
 pub mod bud3_door;
 
+// Object replacement: the second representation of one content id
+// (section 6.14).
+#[cfg(test)]
+pub mod bud3_replace;
+
 // WP-35: the conformance catalog and the execution limits agree with the code.
 #[cfg(test)]
 pub mod conformance_locks;

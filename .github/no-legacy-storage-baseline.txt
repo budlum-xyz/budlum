@@ -24,8 +24,6 @@ src/domain/deal_open.rs
 src/domain/mod.rs
 src/domain/storage_deal.rs
 src/domain/storage_tx.rs
-src/gateway/passport.rs
-src/gateway/service.rs
 src/main.rs
 src/network/node.rs
 src/network/proto_conversions.rs
@@ -38,6 +36,7 @@ src/rpc/server.rs
 src/rpc/tests.rs
 src/storage/README.md
 src/storage/assignment.rs
+src/storage/content_gateway.rs
 src/storage/content_id.rs
 src/storage/dictionary.rs
 src/storage/emit.rs
@@ -78,6 +77,7 @@ src/tests/pollen_ai_data_rights.rs
 src/tests/priority_findings.rs
 src/tests/socialfi.rs
 src/tests/storage_tx_door.rs
+src/wallet/identity_profile.rs
 xtask/gates/src/gates/capability_modules_are_wired.rs
 xtask/gates/src/gates/coding_audit_samples_the_relationship.rs
 xtask/gates/src/gates/content_encryption_is_declared_and_bound.rs

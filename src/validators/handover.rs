@@ -20,6 +20,8 @@
 //! derive a distinct recovery committee (`R-03`, the same residual safety/liveness
 //! trade-off as Ethereum's inactivity leak), requiring post-partition social
 //! coordination if conflicting checkpoints finalize.
+//!
+//! exposed for: Instant Duty Handover and Disaster Recovery Mode state machines (`WP-14`).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
