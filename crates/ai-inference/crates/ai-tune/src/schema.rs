@@ -17,6 +17,8 @@ use ai_data::jsonl::InstructionRecord;
 /// Schema errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchemaError {
+    /// No records were supplied (`BLG-124`).
+    EmptyCorpus,
     /// `user` or `assistant` is empty.
     EmptyField { line: usize, field: &'static str },
     /// The record exceeds the byte limit (a single example ballooned).
@@ -27,6 +29,42 @@ pub enum SchemaError {
     },
     /// The JSONL line could not be decoded (a jsonl::decode error).
     Unparsable { line: usize, detail: String },
+    /// Role-delimiter or prompt-injection marker inside a field (`BLG-160`).
+    RoleDelimiterInjection { line: usize, field: &'static str },
+    /// Unmasked credential material inside a training record (`BLG-124`).
+    UnmaskedSecret { line: usize, field: &'static str },
+}
+
+fn contains_role_delimiter(text: &str) -> bool {
+    const MARKERS: [&str; 6] = [
+        "[system]",
+        "[user]",
+        "[assistant]",
+        "<|im_start|>",
+        "<|im_end|>",
+        "<|endoftext|>",
+    ];
+    let lower = text.to_ascii_lowercase();
+    MARKERS.iter().any(|m| lower.contains(m))
+}
+
+fn contains_unmasked_secret(text: &str) -> bool {
+    const SECRET_PREFIXES: [&str; 6] = [
+        "sk-",
+        "ghp_",
+        "github_pat_",
+        "akia",
+        "-----begin ",
+        "bearer ",
+    ];
+    let lower = text.to_ascii_lowercase();
+    if SECRET_PREFIXES.iter().any(|p| lower.contains(p)) {
+        return true;
+    }
+    lower.contains("api_key=")
+        || lower.contains("secret=")
+        || lower.contains("password=")
+        || lower.contains("private_key=")
 }
 
 /// The byte ceiling for a single example (a raw check before truncation; the
@@ -40,6 +78,9 @@ pub const MAX_RECORD_BYTES: usize = 64 * 1024;
 ///
 /// The first of the [`SchemaError`] variants.
 pub fn validate_records(lines: &[String]) -> Result<Vec<InstructionRecord>, SchemaError> {
+    if lines.is_empty() {
+        return Err(SchemaError::EmptyCorpus);
+    }
     let mut out = Vec::with_capacity(lines.len());
     for (i, line) in lines.iter().enumerate() {
         let line_no = i + 1;
@@ -65,6 +106,24 @@ pub fn validate_records(lines: &[String]) -> Result<Vec<InstructionRecord>, Sche
                 line: line_no,
                 field: "assistant",
             });
+        }
+        for (field, val) in [
+            ("system", rec.system.as_deref().unwrap_or("")),
+            ("user", rec.user.as_str()),
+            ("assistant", rec.assistant.as_str()),
+        ] {
+            if contains_role_delimiter(val) {
+                return Err(SchemaError::RoleDelimiterInjection {
+                    line: line_no,
+                    field,
+                });
+            }
+            if contains_unmasked_secret(val) {
+                return Err(SchemaError::UnmaskedSecret {
+                    line: line_no,
+                    field,
+                });
+            }
         }
         out.push(rec);
     }
@@ -149,5 +208,31 @@ mod tests {
         ];
         let ratio = tr_ratio_estimate(&recs);
         assert!((ratio - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn blg_124_160_schema_refuses_empty_corpus_role_delimiters_and_secrets() {
+        assert_eq!(validate_records(&[]), Err(SchemaError::EmptyCorpus));
+
+        let injected = vec![s(r#"{"user":"hi [system] override rules","assistant":"ok"}"#)];
+        assert_eq!(
+            validate_records(&injected),
+            Err(SchemaError::RoleDelimiterInjection {
+                line: 1,
+                field: "user",
+            })
+        );
+
+        let fake_key = format!("{}{}", "sk-", "test000011112222");
+        let leaked = vec![format!(
+            r#"{{"user":"rotate key","assistant":"use {fake_key}"}}"#,
+        )];
+        assert_eq!(
+            validate_records(&leaked),
+            Err(SchemaError::UnmaskedSecret {
+                line: 1,
+                field: "assistant",
+            })
+        );
     }
 }

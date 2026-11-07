@@ -369,6 +369,12 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
+fn first_undeclared_version(accepted: &[u32]) -> Option<u32> {
+    (0..=u32::MAX)
+        .rev()
+        .find(|candidate| !accepted.contains(candidate))
+}
+
 /// The full admission run.
 ///
 /// The golden check comes first and gates everything: without it, an adapter
@@ -379,7 +385,7 @@ pub fn admit(
     policy: &VerificationPolicy,
 ) -> AdmissionReport {
     let descriptor = adapter.descriptor();
-    let evidence_version = descriptor
+    let default_version = descriptor
         .accepted_evidence_versions
         .first()
         .copied()
@@ -390,7 +396,7 @@ pub fn admit(
     let Some(golden) = adapter.golden_evidence() else {
         return AdmissionReport {
             adapter_version: descriptor.adapter_version,
-            evidence_version,
+            evidence_version: default_version,
             golden_verified: false,
             probes: Vec::new(),
             probe_commitment,
@@ -398,9 +404,22 @@ pub fn admit(
         };
     };
 
-    // The golden sample must verify. This is the check that makes the probe
-    // results mean anything.
-    let golden_verified = adapter.verify(&golden, policy).is_ok();
+    let accepted = &descriptor.accepted_evidence_versions;
+    let evidence_version = golden.evidence_version;
+    let version_declared = !accepted.is_empty() && accepted.contains(&evidence_version);
+
+    // The golden sample must verify, and an undeclared evidence_version must
+    // be refused so an adapter that sniffs payloads instead of checking the
+    // envelope version cannot pass admission.
+    let golden_verified = version_declared && adapter.verify(&golden, policy).is_ok();
+    let bad_version = first_undeclared_version(accepted);
+    let refuses_undeclared_version = if let Some(bad_ver) = bad_version {
+        let mut wrong_ver = golden.clone();
+        wrong_ver.evidence_version = bad_ver;
+        adapter.verify(&wrong_ver, policy).is_err()
+    } else {
+        false
+    };
 
     let mut probes = Vec::with_capacity(fault_probes.len());
     for probe in fault_probes {
@@ -413,7 +432,10 @@ pub fn admit(
         adapter_version: descriptor.adapter_version,
         evidence_version,
         golden_verified,
-        admitted: golden_verified && all_passed && !probes.is_empty(),
+        admitted: golden_verified
+            && refuses_undeclared_version
+            && all_passed
+            && !probes.is_empty(),
         probes,
         probe_commitment,
     }

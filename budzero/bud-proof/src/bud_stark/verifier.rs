@@ -54,23 +54,20 @@ where
     if quotient_chunks.len() != quotient_chunks_domains.len() {
         return None;
     }
-    let zps = quotient_chunks_domains
-        .iter()
-        .enumerate()
-        .map(|(i, domain)| {
-            quotient_chunks_domains
-                .iter()
-                .enumerate()
-                .filter(|(j, _)| *j != i)
-                .map(|(_, other_domain)| {
-                    other_domain.vanishing_poly_at_point(zeta)
-                        * other_domain
-                            .vanishing_poly_at_point(domain.first_point())
-                            .inverse()
-                })
-                .product::<SC::Challenge>()
-        })
-        .collect::<Vec<_>>();
+    let mut zps = Vec::with_capacity(quotient_chunks_domains.len());
+    for (i, domain) in quotient_chunks_domains.iter().enumerate() {
+        let mut prod = SC::Challenge::ONE;
+        for (j, other_domain) in quotient_chunks_domains.iter().enumerate() {
+            if j == i {
+                continue;
+            }
+            let denom = other_domain
+                .vanishing_poly_at_point(domain.first_point())
+                .try_inverse()?;
+            prod *= other_domain.vanishing_poly_at_point(zeta) * denom;
+        }
+        zps.push(prod);
+    }
 
     Some(
         quotient_chunks
@@ -123,6 +120,9 @@ where
     A: for<'a> Air<VerifierConstraintFolder<'a, SC>>,
     PcsErr: core::fmt::Debug,
 {
+    if trace_local.len() != trace_next.len() {
+        return Err(VerificationError::InvalidProofShape);
+    }
     let sels = trace_domain.selectors_at_point(zeta);
 
     let main = VerticalPair::new(
@@ -130,30 +130,36 @@ where
         RowMajorMatrixView::new_row(trace_next),
     );
 
+    let aux_next_zeros;
     let aux = match (aux_trace_local, aux_trace_next) {
-        (Some(local), Some(next)) => VerticalPair::new(
+        (Some(local), Some(next)) if local.len() == next.len() => VerticalPair::new(
             RowMajorMatrixView::new_row(local),
             RowMajorMatrixView::new_row(next),
         ),
-        (Some(local), None) => VerticalPair::new(
-            RowMajorMatrixView::new_row(local),
+        (Some(local), None) => {
+            aux_next_zeros = vec![SC::Challenge::ZERO; local.len()];
+            VerticalPair::new(
+                RowMajorMatrixView::new_row(local),
+                RowMajorMatrixView::new_row(&aux_next_zeros),
+            )
+        }
+        (None, None) => VerticalPair::new(
+            RowMajorMatrixView::new(&[], 0),
             RowMajorMatrixView::new(&[], 0),
         ),
-        _ => VerticalPair::new(
-            RowMajorMatrixView::new(&[], 0),
-            RowMajorMatrixView::new(&[], 0),
-        ),
+        _ => return Err(VerificationError::InvalidProofShape),
     };
 
     let preprocessed = match (preprocessed_local, preprocessed_next) {
-        (Some(local), Some(next)) => VerticalPair::new(
+        (Some(local), Some(next)) if local.len() == next.len() => VerticalPair::new(
             RowMajorMatrixView::new_row(local),
             RowMajorMatrixView::new_row(next),
         ),
-        _ => VerticalPair::new(
+        (None, None) => VerticalPair::new(
             RowMajorMatrixView::new(&[], 0),
             RowMajorMatrixView::new(&[], 0),
         ),
+        _ => return Err(VerificationError::InvalidProofShape),
     };
 
     let preprocessed_window =
@@ -325,7 +331,7 @@ where
 /// `1 << (degree_bits + log_num_quotient_chunks)`, so the bound has to leave
 /// room for that addition. 2^32 rows at the current trace width is already far
 /// beyond what any prover can hold in memory.
-pub const MAX_VERIFIER_DEGREE_BITS: usize = 32;
+pub const MAX_VERIFIER_DEGREE_BITS: usize = 26;
 
 #[instrument(skip_all)]
 pub fn verify_with_preprocessed<SC, A>(
@@ -348,27 +354,9 @@ where
 
     // `degree_bits` is deserialized out of the proof bytes, so it is whatever
     // the submitter sent. `1 << degree_bits` panics on a shift past the word
-    // width, and the release profile sets `overflow-checks = true` with
-    // `panic = "abort"`, so a corrupt proof takes the node down rather than
-    // being rejected.
-    //
-    // Found by CI: `invalid_proof_burns_fee_and_leaves_state_unchanged` flips
-    // one byte of a real proof and expects a rejection. It passed on main and
-    // failed here, because absorbing the FRI parameters changed the byte
-    // layout of the produced proof and moved which field that one flipped byte
-    // lands in. The panic predates this path; the test corrupts a fixed field.
-    //
-    // The envelope carries its own `degree_bits` and the chain checks that one
-    // against `MAX_DEGREE_BITS`. This is a different field, inside the
-    // serialized proof, and nothing compared the two. Bounding it here covers
-    // every caller rather than the one that remembered.
-    // The bound is not `usize::BITS` but well below it, because `degree_bits`
-    // is shifted again further down together with the quotient chunk count:
-    // `1 << (degree_bits + log_num_quotient_chunks)`. A value that only just
-    // fits the first shift overflows the second. `MAX_VERIFIER_DEGREE_BITS`
-    // leaves room for that addition and is far above any honest trace: 2^32
-    // rows at the current width is more memory than any prover has.
-    if *degree_bits > MAX_VERIFIER_DEGREE_BITS {
+    // width, and Goldilocks 2-adicity (32) plus FRI blowup / quotient chunks
+    // panics inside `TwoAdicMultiplicativeCoset` when `degree_bits >= 27`.
+    if *degree_bits > MAX_VERIFIER_DEGREE_BITS || *degree_bits < usize::from(config.is_zk()) {
         return Err(VerificationError::InvalidProofShape);
     }
 
@@ -428,6 +416,13 @@ where
         degree >> (config.is_zk() as usize),
         config.is_zk() as usize,
     );
+    if degree_bits
+        .saturating_add(log_num_quotient_chunks)
+        .saturating_add(usize::from(config.is_zk()))
+        > 30
+    {
+        return Err(VerificationError::InvalidProofShape);
+    }
     let num_quotient_chunks = 1 << (log_num_quotient_chunks + config.is_zk() as usize);
     let mut challenger = config.initialise_challenger();
     let init_trace_domain = pcs.natural_domain_for_degree(degree >> (config.is_zk() as usize));
@@ -760,5 +755,11 @@ mod tests {
             ..Default::default()
         };
         assert!(air_requires_aux::<Goldilocks, BudAir>(&air, layout));
+    }
+
+    #[test]
+    fn blg_039_142_degree_bits_ceiling_guards_goldilocks_two_adicity() {
+        let ceiling = std::hint::black_box(MAX_VERIFIER_DEGREE_BITS);
+        assert!(ceiling <= 26);
     }
 }

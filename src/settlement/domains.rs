@@ -490,6 +490,18 @@ pub fn verify_commitment_finality_observed(
                     commitment.domain_id
                 ));
             };
+            let serves = state
+                .settlement
+                .external_intake
+                .registry
+                .domain(&key)
+                .is_some_and(|reg| reg.record.state.serves());
+            if !serves {
+                return Err(format!(
+                    "Domain {} external registry entry is not in a serving state",
+                    commitment.domain_id
+                ));
+            }
             let pairing = matches!(
                 entry.spec,
                 crate::cross_domain::external::AdapterSpec::EthereumSync { .. }

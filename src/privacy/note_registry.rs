@@ -65,7 +65,9 @@ impl L1NoteRegistry {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.live_commitments.is_empty() && self.spent_nullifiers.is_empty()
+        self.live_commitments.is_empty()
+            && self.spent_nullifiers.is_empty()
+            && self.spent_commitments.is_empty()
     }
 
     pub fn live_count(&self) -> usize {
@@ -220,7 +222,11 @@ impl L1NoteRegistry {
         // rather than one input at a time: a transfer that would cross the
         // ceiling partway through must be refused before it starts, not after
         // it has consumed the inputs it had room for.
-        if self.spent_nullifiers.len().saturating_add(nullifiers.len()) > MAX_SPENT_NULLIFIERS {
+        let cur_spent = self.spent_commitments.len();
+        let spent_comm_after = cur_spent.saturating_add(spent_commitments.len());
+        if self.spent_nullifiers.len().saturating_add(nullifiers.len()) > MAX_SPENT_NULLIFIERS
+            || spent_comm_after > MAX_SPENT_NULLIFIERS
+        {
             return Err(format!(
                 "spent nullifier set full ({}/{}) - chain must compact before more private transfers",
                 self.spent_nullifiers.len(),
@@ -685,5 +691,14 @@ mod h3_tests {
         r.insert_note(note_hash(2)).unwrap();
         let root3 = r.state_root();
         assert_ne!(root1, root3, "state_root must change after mutation");
+    }
+
+    #[test]
+    fn spent_commitments_keep_registry_non_empty() {
+        let mut r = L1NoteRegistry::new();
+        assert!(r.is_empty());
+        let c = budlum_note_packing::hash_from_field(77);
+        r.spent_commitments.insert(c);
+        assert!(!r.is_empty());
     }
 }

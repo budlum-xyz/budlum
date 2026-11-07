@@ -844,4 +844,33 @@ mod tests {
             "got: {err:?}"
         );
     }
+
+    #[test]
+    fn zk_domain_refuses_empty_halt_proof() {
+        let canonical = bud_vm::syscall_context::build_syscall_context_check_program()
+            .expect("canonical build");
+        let pinned_hash = bud_proof::canonical_set::program_hash_of(&canonical);
+        let adapter = ZkVmFinalityAdapter::new("testnet", Some(pinned_hash), Some(1));
+
+        // Take a valid envelope structure and substitute a trivial 1-word Halt
+        // program (`[0]` / non-pinned program) claiming a forged state root.
+        let mut forged = honest_evidence(&adapter, canonical);
+        let mut decoded = ZkFinalityEvidence::decode(&forged.payload).expect("decode");
+        decoded.program = vec![0];
+        decoded.inputs.program_hash = bud_proof::canonical_set::program_hash_of(&decoded.program);
+        decoded.inputs.final_state_root = [0xFE; 32];
+        forged.declared_root = [0xFE; 32];
+        forged.payload = decoded.encode().expect("encode");
+
+        let err = adapter
+            .verify(&forged, &VerificationPolicy::proven(0))
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AdapterError::Crypto { .. } | AdapterError::ConsensusRule { .. }
+            ),
+            "empty Halt program must not forge a state root: {err:?}"
+        );
+    }
 }

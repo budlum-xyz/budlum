@@ -64,6 +64,21 @@ pub const FIELD_BYTES: usize = 8;
 /// behind a hash that looks fine.
 pub const GOLDILOCKS_P: u64 = 0xFFFF_FFFF_0000_0001;
 
+/// Pack a canonical Goldilocks field element into a note hash, refusing values
+/// at or above [`GOLDILOCKS_P`].
+///
+/// Convenience: checked counterpart to [`hash_from_field`] so callers cannot
+/// silently pack a non-canonical `u64` that [`field_of_packed_hash`] will later
+/// refuse.
+#[must_use]
+pub const fn try_hash_from_field(fe: u64) -> Option<NoteHash> {
+    if fe < GOLDILOCKS_P {
+        Some(hash_from_field(fe))
+    } else {
+        None
+    }
+}
+
 /// Pack a field element into a note hash.
 ///
 /// The inverse is [`field_from_hash`], exactly for hashes this produced.
@@ -251,5 +266,8 @@ mod tests {
         assert!(is_canonical_field(GOLDILOCKS_P - 1));
         assert!(!is_canonical_field(GOLDILOCKS_P));
         assert!(!is_canonical_field(u64::MAX));
+        assert!(try_hash_from_field(GOLDILOCKS_P - 1).is_some());
+        assert!(try_hash_from_field(GOLDILOCKS_P).is_none());
+        assert!(try_hash_from_field(u64::MAX).is_none());
     }
 }

@@ -1919,6 +1919,22 @@ mod tests {
         });
         assert_eq!(cfg.signer_backend.as_deref(), Some("pkcs11"));
     }
+
+    #[test]
+    fn blg_098_clap_parse_restores_secure_rpc_auth_and_allowlist_defaults() {
+        use clap::Parser;
+        let mut parsed = NodeConfig::try_parse_from(["budlum-node", "--role", "validator"])
+            .expect("CLI flags must parse");
+        // Clap's `#[arg(skip)]` initializes skipped fields with type defaults
+        // (`false` / empty Vec); `apply_secure_rpc_defaults` must restore the
+        // hardened `NodeConfig::default()` posture before file/env overlays.
+        parsed.apply_secure_rpc_defaults();
+        let expected = NodeConfig::default();
+        assert_eq!(parsed.rpc_auth_required, expected.rpc_auth_required);
+        assert!(parsed.rpc_auth_required);
+        assert_eq!(parsed.rpc_allowed_ips, expected.rpc_allowed_ips);
+        assert!(!parsed.rpc_allowed_ips.is_empty());
+    }
 }
 
 #[cfg(test)]

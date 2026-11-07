@@ -571,6 +571,11 @@ impl IdentityRegistry {
 
     fn register(&mut self, record: IdentityRecord) -> Result<(), IdentityError> {
         record.validate()?;
+        if record.credential_root.is_some() || !record.credential_roots.is_empty() {
+            return Err(IdentityError::RootMismatch {
+                did: did_of(&record.subject),
+            });
+        }
         let subject = record.subject;
         if self.records.contains_key(&subject) {
             return Err(IdentityError::AlreadyExists {
@@ -723,19 +728,37 @@ impl IdentityRegistry {
     /// what it serves would otherwise keep a state root that verifies.
     #[must_use]
     pub fn root(&self) -> [u8; 32] {
-        let mut acc = hash_fields_bytes(&[b"bud-identity-root-v1"]);
+        let mut acc = hash_fields_bytes(&[
+            b"bud-identity-root-v2",
+            &(self.records.len() as u64).to_le_bytes(),
+        ]);
         for (subject, record) in &self.records {
-            let mut methods = hash_fields_bytes(&[b"bud-identity-methods"]);
+            let mut methods = hash_fields_bytes(&[
+                b"bud-identity-methods",
+                &(record.methods.len() as u64).to_le_bytes(),
+            ]);
             for method in &record.methods {
+                let kind_tag: u8 = match method.kind {
+                    MethodKind::MlDsa87 => 1,
+                };
+                let present: u8 = u8::from(method.revoked_at.is_some());
                 let revoked = method.revoked_at.unwrap_or(u64::MAX).to_le_bytes();
-                methods = hash_fields_bytes(&[&methods, &method.key_id, &revoked]);
+                methods = hash_fields_bytes(&[
+                    &methods,
+                    &[kind_tag, present],
+                    &method.key_id,
+                    &revoked,
+                ]);
             }
-            let credential_root = record.credential_root.unwrap_or([0u8; 32]);
-            let guardians = hash_fields_bytes(&[
+            let credential_root = match record.credential_root {
+                Some(r) => hash_fields_bytes(&[b"some-root", &r]),
+                None => hash_fields_bytes(&[b"none-root"]),
+            };
+            let mut guardians = hash_fields_bytes(&[
                 b"bud-identity-guardians",
                 (record.recovery_threshold as u64).to_le_bytes().as_slice(),
+                &(record.guardians.len() as u64).to_le_bytes(),
             ]);
-            let mut guardians = guardians;
             for guardian in &record.guardians {
                 guardians = hash_fields_bytes(&[&guardians, guardian.as_bytes()]);
             }
@@ -747,8 +770,11 @@ impl IdentityRegistry {
             for root in &record.credential_roots {
                 roots_input.extend_from_slice(root);
             }
-            let credential_roots =
-                hash_fields_bytes(&[b"bud-identity-credential-roots", roots_input.as_slice()]);
+            let credential_roots = hash_fields_bytes(&[
+                b"bud-identity-credential-roots",
+                &(record.credential_roots.len() as u64).to_le_bytes(),
+                roots_input.as_slice(),
+            ]);
             acc = hash_fields_bytes(&[
                 &acc,
                 subject.as_bytes(),
@@ -758,14 +784,26 @@ impl IdentityRegistry {
                 &guardians,
             ]);
         }
+        acc = hash_fields_bytes(&[
+            &acc,
+            b"cred-count",
+            &(self.credentials.len() as u64).to_le_bytes(),
+        ]);
         // The id folds root, issuer and issued_at only,
         // yet validity reads the subject, the schema and the expiry. The
         // fold below commits every field the validity check decides on, so
         // the root and the decision can no longer disagree.
         for (id, credential) in &self.credentials {
             acc = hash_fields_bytes(&[&acc, b"cred", id.as_bytes()]);
+            acc = hash_fields_bytes(&[&acc, b"cred-issuer", credential.issuer.as_bytes()]);
             acc = hash_fields_bytes(&[&acc, b"cred-subject", credential.subject.as_bytes()]);
             acc = hash_fields_bytes(&[&acc, b"cred-schema", credential.schema.as_bytes()]);
+            acc = hash_fields_bytes(&[&acc, b"cred-root", &credential.root()]);
+            acc = hash_fields_bytes(&[
+                &acc,
+                b"cred-issued-at",
+                &credential.issued_at.to_le_bytes(),
+            ]);
             match credential.expires_at {
                 Some(expiry) => {
                     acc = hash_fields_bytes(&[&acc, b"cred-expiry", &expiry.to_le_bytes()]);
@@ -775,6 +813,11 @@ impl IdentityRegistry {
                 }
             }
         }
+        acc = hash_fields_bytes(&[
+            &acc,
+            b"revoked-count",
+            &(self.revoked.len() as u64).to_le_bytes(),
+        ]);
         for id in &self.revoked {
             acc = hash_fields_bytes(&[&acc, b"revoked", id.as_bytes()]);
         }
@@ -1239,12 +1282,22 @@ pub fn execute_identity_tx_in(
             new_key,
             approvals,
         } => {
+            if !matches!(domain, ConsensusKind::PoA) {
+                return Err(IdentityError::NotPoaDomain {
+                    domain: format!("{domain:?}"),
+                });
+            }
             if &subject != from {
-                return Err(IdentityError::BadApproval(format!(
-                    "recover: sender {} is not the rotating DID {}",
-                    did_of(from),
-                    did_of(&subject)
-                )));
+                let is_guardian = registry
+                    .record(&subject)
+                    .is_some_and(|rec| rec.guardians.contains(from));
+                if !is_guardian {
+                    return Err(IdentityError::BadApproval(format!(
+                        "recover: sender {} is neither the rotating DID {} nor a guardian",
+                        did_of(from),
+                        did_of(&subject)
+                    )));
+                }
             }
             authorize_recovery_in(
                 scheme_registry,
@@ -2428,6 +2481,58 @@ mod tests {
         );
         assert!(registry.is_credential_valid(&first_id, 200).is_ok());
         assert!(registry.is_credential_valid(&second_id, 200).is_ok());
+    }
+
+    #[test]
+    fn blg_190_recover_enforces_poa_gate_guardian_sender_and_rejects_injected_roots() {
+        let mut registry = IdentityRegistry::new();
+        let mut injected = subject_record();
+        injected.credential_root = Some([0xAA; 32]);
+        assert!(matches!(
+            registry.apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Register { record: injected },
+                10,
+            ),
+            Err(IdentityError::RootMismatch { .. })
+        ));
+
+        let record = subject_record_with_guardians();
+        registry
+            .apply(&ConsensusKind::PoA, IdentityOp::Register { record }, 10)
+            .unwrap();
+
+        let rec_tx = IdentityTx::Recover {
+            subject: addr(1),
+            new_key: [9u8; 32],
+            approvals: Vec::new(),
+        };
+        assert!(matches!(
+            execute_identity_tx(
+                &mut registry,
+                &addr(2),
+                rec_tx.clone(),
+                &ConsensusKind::PoS,
+                20,
+                1,
+            ),
+            Err(IdentityError::NotPoaDomain { .. })
+        ));
+        assert!(matches!(
+            execute_identity_tx(
+                &mut registry,
+                &addr(99),
+                rec_tx.clone(),
+                &ConsensusKind::PoA,
+                20,
+                1,
+            ),
+            Err(IdentityError::BadApproval(_))
+        ));
+        assert!(matches!(
+            execute_identity_tx(&mut registry, &addr(2), rec_tx, &ConsensusKind::PoA, 20, 1),
+            Err(IdentityError::QuorumShort { .. })
+        ));
     }
 
     /// The happy paths that need a real wallet signature

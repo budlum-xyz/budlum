@@ -27,7 +27,7 @@
 //! ```rust
 //! use budlum_wallet_core::{Wallet, WalletPrivacyConfig, ML_DSA_87_SIGNATURE_LEN};
 //!
-//! // Fixed entropy: reproducible, and never a real wallet.
+//! // Fixed 256-bit entropy: reproducible, and never a real wallet.
 //! let mut wallet = Wallet::from_entropy(&[1u8; 32]).unwrap();
 //! assert_eq!(wallet.mnemonic().split_whitespace().count(), 24);
 //! assert_eq!(wallet.address_hex().len(), 64);
@@ -80,7 +80,6 @@ use crypto::scheme::SchemeId;
 use ml_dsa::{MlDsa87, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 use sha3::Sha3_256;
-use unicode_normalization::UnicodeNormalization;
 use zeroize::Zeroize;
 
 /// ML-DSA-87 (FIPS 204, Category 5) public key length in bytes.
@@ -128,7 +127,7 @@ impl std::fmt::Display for WalletError {
         match self {
             WalletError::InvalidMnemonic(m) => write!(f, "invalid mnemonic: {m}"),
             WalletError::InvalidEntropy(n) => {
-                write!(f, "invalid entropy size: {n} bytes (expected 32)")
+                write!(f, "invalid entropy size: {n} bytes (expected 16 or 32)")
             }
             WalletError::InvalidWordCount(n) => {
                 write!(f, "invalid mnemonic word count: {n} (expected 24)")
@@ -203,9 +202,26 @@ pub fn entropy_to_mnemonic(entropy: &[u8]) -> Result<String, WalletError> {
     Ok(words.join(" "))
 }
 
+/// Normalize a BIP39 mnemonic with Unicode NFKD, ASCII lowercasing, and
+/// canonical single-space word separation (`BLG-026`).
+/// exposed for: the wallet crate's SDK and V3 surfaces.
+#[must_use]
+pub fn normalize_mnemonic_nfkd(mnemonic: &str) -> zeroize::Zeroizing<String> {
+    use unicode_normalization::UnicodeNormalization;
+    let mut decomposed: zeroize::Zeroizing<String> =
+        zeroize::Zeroizing::new(mnemonic.nfkd().collect());
+    let canonical = decomposed
+        .split_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ");
+    decomposed.zeroize();
+    zeroize::Zeroizing::new(canonical)
+}
+
 /// BIP39 mnemonic → entropy (reverse: checksum validation + entropy extraction).
 pub fn mnemonic_to_entropy(mnemonic: &str) -> Result<Vec<u8>, WalletError> {
-    let normalized = mnemonic.nfkd().collect::<String>();
+    let normalized = normalize_mnemonic_nfkd(mnemonic);
     let words: Vec<&str> = normalized.split_whitespace().collect();
     if words.len() != 12 && words.len() != 24 {
         return Err(WalletError::InvalidMnemonic(format!(
@@ -920,13 +936,14 @@ pub mod wasm_bindings {
         /// Another word count, an unknown word or a bad checksum.
         #[wasm_bindgen(constructor)]
         pub fn new(mnemonic: &str) -> Result<BrowserWallet, JsError> {
-            let words = mnemonic.split_whitespace().count();
+            let normalized = super::normalize_mnemonic_nfkd(mnemonic);
+            let words = normalized.split_whitespace().count();
             if words != 24 {
                 return Err(JsError::new(&format!(
                     "a mnemonic has 24 words; this one has {words}"
                 )));
             }
-            super::Wallet::from_mnemonic(mnemonic)
+            super::Wallet::from_mnemonic(&normalized)
                 .map(|inner| Self { inner })
                 .map_err(|e| JsError::new(&format!("{e:?}")))
         }
@@ -1090,7 +1107,8 @@ impl Wallet {
     }
     /// Create a new wallet (random entropy -> mnemonic -> seed -> keypair).
     ///
-    /// `word_count`: 24 (256-bit entropy). Twelve-word wallets are refused.
+    /// `word_count`: 24 (256-bit entropy). Twelve-word (128-bit) seeds are
+    /// refused fail-closed (`BLG-026`).
     ///
     /// **Production safety:** this function only works when the `production` feature
     /// is enabled. Without it `Wallet::generate` returns
@@ -1142,7 +1160,7 @@ impl Wallet {
             return Err(WalletError::InvalidEntropy(entropy.len()));
         }
 
-        // BIP39 mnemonic: full wordlist + SHA256 checksum
+        // BIP39 mnemonic: tam wordlist + SHA256 checksum
         let mnemonic = entropy_to_mnemonic(entropy)?;
 
         // ML-DSA-87 seed: domain-separated SHA3-256 over BIP39 entropy.
@@ -1170,12 +1188,13 @@ impl Wallet {
         })
     }
 
-    /// Restore a wallet from a 24-word, NFKD-normalized mnemonic.
+    /// Restore a wallet from a 24-word mnemonic (NFKD-normalized, with BIP39
+    /// checksum verification; 12-word seeds are refused per `BLG-026`).
     pub fn from_mnemonic(mnemonic: &str) -> Result<Self, WalletError> {
-        let normalized = mnemonic.nfkd().collect::<String>();
-        let words = normalized.split_whitespace().count();
-        if words != 24 {
-            return Err(WalletError::InvalidWordCount(words));
+        let normalized = normalize_mnemonic_nfkd(mnemonic);
+        let word_count = normalized.split_whitespace().count();
+        if word_count != 24 {
+            return Err(WalletError::InvalidWordCount(word_count));
         }
         // BIP39 reverse: mnemonic -> entropy (with checksum verification)
         let mut entropy = mnemonic_to_entropy(&normalized)?;
@@ -1193,7 +1212,7 @@ impl Wallet {
         let signing_key = signing_key_from_seed(&seed);
 
         Ok(Self {
-            mnemonic: normalized,
+            mnemonic: normalized.as_str().to_owned(),
             seed,
             signing_key,
             privacy: WalletPrivacyConfig::default(),
@@ -1726,13 +1745,7 @@ mod tests {
     }
 
     #[test]
-    fn wallet_refuses_12_word_seed() {
-        let mnemonic = entropy_to_mnemonic(&[0x42u8; 16]).unwrap();
-        assert_eq!(mnemonic.split_whitespace().count(), 12);
-        assert!(matches!(
-            Wallet::from_mnemonic(&mnemonic),
-            Err(WalletError::InvalidWordCount(12))
-        ));
+    fn generate_12_word_wallet_is_refused() {
         assert!(matches!(
             Wallet::from_entropy(&[0x42u8; 16]),
             Err(WalletError::InvalidEntropy(16))
@@ -1748,6 +1761,12 @@ mod tests {
         let wallet = Wallet::from_entropy(&[0x42u8; 32]).expect("24-word wallet must succeed");
         let words: Vec<&str> = wallet.mnemonic().split_whitespace().collect();
         assert_eq!(words.len(), 24, "must have 24 words");
+        assert_eq!(wallet.address().len(), 32, "address must be 32 bytes");
+        assert_eq!(
+            wallet.public_key().len(),
+            ML_DSA_87_PUBLIC_KEY_LEN,
+            "pubkey must be ML-DSA-87 encoded (2592 bytes)"
+        );
     }
 
     /// A restored wallet resumes the saved counter and never goes back.
@@ -1834,22 +1853,22 @@ mod tests {
     }
 
     #[test]
-    fn from_entropy_requires_256_bits() {
-        assert!(matches!(
-            Wallet::from_entropy(&[0u8; 16]),
-            Err(WalletError::InvalidEntropy(16))
-        ));
+    fn from_entropy_valid_sizes() {
+        assert!(
+            matches!(Wallet::from_entropy(&[0u8; 16]), Err(WalletError::InvalidEntropy(16))),
+            "16 bytes refused per BLG-026"
+        );
         assert!(Wallet::from_entropy(&[0u8; 32]).is_ok(), "32 bytes OK");
     }
 
     #[test]
-    fn wallet_mnemonic_is_nfkd_normalised() {
-        let wallet = Wallet::from_entropy(&[0x42u8; 32]).unwrap();
-        // NFKD maps ideographic separators to ordinary spaces before parsing.
-        let decomposed_separators = wallet.mnemonic().replace(' ', "\u{3000}");
-        let restored = Wallet::from_mnemonic(&decomposed_separators).unwrap();
-        assert_eq!(restored.mnemonic(), wallet.mnemonic());
-        assert_eq!(restored.address(), wallet.address());
+    fn entropy_size_preserves_mnemonic_word_count() {
+        assert!(matches!(
+            Wallet::from_entropy(&[0u8; 16]),
+            Err(WalletError::InvalidEntropy(16))
+        ));
+        let long = Wallet::from_entropy(&[0u8; 32]).unwrap();
+        assert_eq!(long.mnemonic().split_whitespace().count(), 24);
     }
 
     /// Production entropy fail-closed gate: Wallet::generate must fail
@@ -1888,7 +1907,7 @@ mod tests {
     /// BIP39 checksum validation: invalid mnemonic must be rejected.
     #[test]
     fn mnemonic_checksum_validation_rejects_invalid() {
-        // Valid 24-word mnemonic from from_entropy (deterministic)
+        // Valid 12-word mnemonic from from_entropy (deterministic)
         let wallet = Wallet::from_entropy(&[0x42u8; 32]).unwrap();
         let valid_mnemonic = wallet.mnemonic().to_string();
 
@@ -2878,5 +2897,96 @@ mod tests {
             .build_private_transfer(req, &w.default_tee_runtime(), 45262, 0)
             .unwrap_err();
         assert!(matches!(err, WalletError::InvalidPrivateTransfer(_)));
+    }
+
+    #[test]
+    fn wallet_refuses_12_word_seed() {
+        let twelve = entropy_to_mnemonic(&[0x33u8; 16]).expect("12-word test phrase");
+        assert_eq!(twelve.split_whitespace().count(), 12);
+        assert!(matches!(
+            Wallet::from_mnemonic(&twelve),
+            Err(WalletError::InvalidWordCount(12))
+        ));
+        assert!(matches!(
+            Wallet::generate(12),
+            Err(WalletError::InvalidWordCount(12))
+        ));
+        assert!(matches!(
+            Wallet::from_entropy(&[0x33u8; 16]),
+            Err(WalletError::InvalidEntropy(16))
+        ));
+        assert!(matches!(
+            WalletV3::from_mnemonic(&twelve, ""),
+            Err(WalletError::InvalidWordCount(12))
+        ));
+    }
+
+    #[test]
+    fn wallet_mnemonic_is_nfkd_normalised() {
+        let canonical = Wallet::from_entropy(&[0u8; 32]).expect("24-word wallet");
+        let compat = canonical
+            .mnemonic()
+            .replacen("abandon", "\u{FF41}Bandon", 4)
+            .replace(' ', "\u{3000}");
+        let restored = Wallet::from_mnemonic(&compat).expect("NFKD mnemonic must restore");
+        assert_eq!(restored.mnemonic(), canonical.mnemonic());
+        assert_eq!(restored.address(), canonical.address());
+
+        let v3_canonical = WalletV3::from_mnemonic(canonical.mnemonic(), "caf\u{00e9}")
+            .expect("v3 canonical");
+        let v3_decomposed =
+            WalletV3::from_mnemonic(&compat, "cafe\u{0301}").expect("v3 NFKD");
+        assert_eq!(
+            v3_canonical.account(0, 0).unwrap().address,
+            v3_decomposed.account(0, 0).unwrap().address
+        );
+    }
+
+    #[test]
+    fn blg_026_wallet_refuses_12_word_and_normalizes_nfkd() {
+        wallet_refuses_12_word_seed();
+        wallet_mnemonic_is_nfkd_normalised();
+    }
+
+    #[test]
+    fn blg_117_wallet_poseidon_recipient_tag_and_recovery_replay_guards() {
+        // Recipient tag keeps full Goldilocks field width (> u32::MAX), never
+        // truncated to i32.
+        let mut high_addr = [0u8; 32];
+        high_addr[..8].copy_from_slice(&0x0123_4567_89AB_CDEFu64.to_le_bytes());
+        let tag = crate::privacy_crypto::address_to_recipient_tag(&high_addr);
+        assert!(tag > u64::from(u32::MAX));
+
+        // Social recovery proposal binds chain_id and account_nonce so cross-chain
+        // and A-B-A replays are rejected.
+        let owner = Wallet::from_entropy(&[0x71u8; 32]).unwrap();
+        let new_owner = Wallet::from_entropy(&[0x72u8; 32]).unwrap();
+        let g1 = Wallet::from_entropy(&[0x73u8; 32]).unwrap();
+        let g2 = Wallet::from_entropy(&[0x74u8; 32]).unwrap();
+        let policy =
+            SocialRecoveryPolicy::new(vec![g1.public_key(), g2.public_key()], 2, 10).unwrap();
+        let prop = RecoveryProposal::new(
+            owner.public_key(),
+            new_owner.public_key(),
+            &policy,
+            100,
+            45261,
+            5,
+        )
+        .unwrap();
+        let digest = prop.digest();
+        let approvals = [
+            GuardianApproval {
+                public_key: g1.public_key(),
+                signature: g1.sign_for(RECOVERY_GUARDIAN_CTX, &digest),
+            },
+            GuardianApproval {
+                public_key: g2.public_key(),
+                signature: g2.sign_for(RECOVERY_GUARDIAN_CTX, &digest),
+            },
+        ];
+        assert!(prop.is_executable(&policy, &approvals, 110, 45261, 5));
+        assert!(!prop.is_executable(&policy, &approvals, 110, 45260, 5));
+        assert!(!prop.is_executable(&policy, &approvals, 110, 45261, 6));
     }
 }

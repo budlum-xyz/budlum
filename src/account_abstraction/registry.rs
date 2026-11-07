@@ -102,6 +102,9 @@ impl std::fmt::Display for QuantumAccountRegistryError {
 
 impl std::error::Error for QuantumAccountRegistryError {}
 
+/// Convenience: upper bound on live quantum accounts in [`QuantumAccountRegistry`].
+pub const MAX_QUANTUM_ACCOUNTS: usize = 100_000;
+
 /// The registry of quantum accounts.
 #[derive(Debug, Clone, Default)]
 pub struct QuantumAccountRegistry {
@@ -142,6 +145,12 @@ impl QuantumAccountRegistry {
         if self.accounts.contains_key(&account.address) {
             return Err(QuantumAccountRegistryError::AlreadyRegistered {
                 address: account.address,
+            });
+        }
+        if self.accounts.len() >= MAX_QUANTUM_ACCOUNTS {
+            return Err(QuantumAccountRegistryError::InvalidAccount {
+                address: account.address,
+                reason: format!("quantum account registry full ({MAX_QUANTUM_ACCOUNTS})"),
             });
         }
         self.accounts.insert(account.address, account);
@@ -517,8 +526,15 @@ mod tests {
         assert!(matches!(
             registry
                 .update(&[1u8; 32], |a| a.nonce += 1)
-                .expect_err("bilinmeyen adres"),
+                .expect_err("unknown address"),
             QuantumAccountRegistryError::NotRegistered { .. }
         ));
+    }
+
+    #[test]
+    fn quantum_account_registry_cap_is_positive_and_bounded() {
+        const { assert!(MAX_QUANTUM_ACCOUNTS == 100_000) };
+        let registry = QuantumAccountRegistry::new();
+        assert!(registry.len() < MAX_QUANTUM_ACCOUNTS);
     }
 }

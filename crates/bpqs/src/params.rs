@@ -34,8 +34,52 @@ pub trait BpqsParams:
     /// stays with the verifier: quota is a ceremony-log rule, not a
     /// property the wire can prove.
     const Q_MAX: u32 = 1;
+    /// True only on full-height ceremony rows (`ParamsL5`, `ParamsL3`).
+    /// Small-tree test and benchmark rows inherit `false` so production
+    /// verifiers refuse them fail-closed (`BLG-164`).
+    const IS_PRODUCTION: bool = false;
     /// Human name, for test vectors and error strings.
     const NAME: &'static str;
+}
+
+/// Runtime check of structural Winternitz invariants on any `BpqsParams` row.
+pub(crate) fn ensure_valid_params<P: BpqsParams>() -> Result<(), crate::error::BpqsError> {
+    if P::N < 16 || P::N > 32 {
+        return Err(crate::error::BpqsError::Malformed(
+            "BPQS lane width N must lie in 16..=32 bytes",
+        ));
+    }
+    if P::WIN != 16 {
+        return Err(crate::error::BpqsError::Malformed(
+            "BPQS Winternitz base WIN must equal 16",
+        ));
+    }
+    if P::LEN1 != 2 * P::N {
+        return Err(crate::error::BpqsError::Malformed(
+            "BPQS LEN1 must equal 2 * N",
+        ));
+    }
+    if P::LEN2 == 0 || P::LEN != P::LEN1 + P::LEN2 || P::LEN > 256 {
+        return Err(crate::error::BpqsError::Malformed(
+            "BPQS LEN / LEN2 checksum geometry is out of bounds",
+        ));
+    }
+    if P::T_LOG2 == 0 || P::T_LOG2 > 16 {
+        return Err(crate::error::BpqsError::Malformed(
+            "BPQS tree height T_LOG2 must lie in 1..=16",
+        ));
+    }
+    if P::Q_MAX != 1 {
+        return Err(crate::error::BpqsError::Malformed(
+            "BPQS one-time quota requires Q_MAX == 1",
+        ));
+    }
+    if P::IS_PRODUCTION && P::T_LOG2 < 16 {
+        return Err(crate::error::BpqsError::Malformed(
+            "production BPQS parameter rows require T_LOG2 == 16",
+        ));
+    }
+    Ok(())
 }
 
 /// Canonical set: NIST level-5 budget. Signature
@@ -56,6 +100,7 @@ impl BpqsParams for ParamsL5 {
     const LEN2: usize = 3;
     const LEN: usize = 67;
     const T_LOG2: usize = 16;
+    const IS_PRODUCTION: bool = true;
     const NAME: &'static str = "bpqs-l5-research";
 }
 
@@ -77,6 +122,7 @@ impl BpqsParams for ParamsL3 {
     const LEN2: usize = 3;
     const LEN: usize = 51;
     const T_LOG2: usize = 16;
+    const IS_PRODUCTION: bool = true;
     const NAME: &'static str = "bpqs-l3-research";
 }
 

@@ -44,7 +44,7 @@ impl ModelTier {
         }
     }
 
-    /// Whether `version` is safe to embed in a served model identifier (no
+    /// Convenience: whether `version` is safe to embed in a served model identifier (no
     /// whitespace, control characters, or multiplier labels such as `0.5x` or
     /// `10x`).
     #[must_use]
@@ -54,7 +54,7 @@ impl ModelTier {
             && !contains_multiplier_token(version)
     }
 
-    /// Validated form of [`Self::served_model_name`].
+    /// Convenience: validated form of [`Self::served_model_name`].
     ///
     /// # Errors
     ///

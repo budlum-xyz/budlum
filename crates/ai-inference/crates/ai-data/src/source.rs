@@ -5,7 +5,7 @@
 //! queried from the chain and are not copied here (the decision; the "the
 //! second copy is the worst copy" principle from budlum).
 
-use ai_core::dataset::{SourceKind, SourceRef};
+use ai_core::dataset::{SourceError, SourceKind, SourceRef};
 
 /// Data layer errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +18,8 @@ pub enum DataError {
         expected: SourceKind,
         got: SourceKind,
     },
+    /// Closed-circuit source failed identity or grant-epoch validation (`BLG-160`).
+    InvalidSource(SourceError),
     /// The SHA-256 verification failed - no data flows.
     HashMismatch { detail: String },
 }
@@ -26,8 +28,10 @@ pub enum DataError {
 ///
 /// # Errors
 ///
-/// `NotClosedLoop` when the source kind is not one of the three channels.
+/// `InvalidSource` when `content_id` is zero or a data-market grant has zero
+/// remaining epochs.
 pub fn assert_closed_loop(source: &SourceRef) -> Result<(), DataError> {
+    source.validate().map_err(DataError::InvalidSource)?;
     match source.kind {
         SourceKind::PollenGrant | SourceKind::StoredContent | SourceKind::SocialRef => Ok(()),
     }
@@ -91,7 +95,7 @@ mod tests {
 
     #[test]
     fn require_source_enforces_exact_kind() {
-        let grant = SourceRef::pollen_grant([1; 32], 1);
+        let mut grant = SourceRef::pollen_grant([1; 32], 1);
         assert!(require_source(&grant, SourceKind::PollenGrant).is_ok());
         assert_eq!(
             require_source(&grant, SourceKind::StoredContent),
@@ -99,6 +103,19 @@ mod tests {
                 expected: SourceKind::StoredContent,
                 got: SourceKind::PollenGrant
             })
+        );
+        grant.grant_epochs_remaining = Some(0);
+        assert_eq!(
+            assert_closed_loop(&grant),
+            Err(DataError::InvalidSource(SourceError::ExpiredOrMissingGrant))
+        );
+    }
+
+    #[test]
+    fn blg_160_assert_closed_loop_refuses_zero_id_and_expired_grant() {
+        assert_eq!(
+            assert_closed_loop(&SourceRef::storage_deal([0u8; 32])),
+            Err(DataError::InvalidSource(SourceError::ZeroContentId))
         );
     }
 }

@@ -239,6 +239,8 @@ impl PoAOnboarding {
     ) -> Result<(), PoaMembershipError> {
         self.registry
             .submit_application(domain, applicant, kyc_commitment)?;
+        self.kyc_expiry.remove(&(domain, applicant));
+        self.logged_expiry.remove(&(domain, applicant));
         self.audit.push(OnboardingEvent {
             domain,
             at_block,
@@ -265,7 +267,7 @@ impl PoAOnboarding {
         at_block: u64,
         validity_horizon: u64,
     ) -> Result<(), PoaMembershipError> {
-        if validity_horizon > MAX_KYC_VALIDITY_HORIZON {
+        if validity_horizon == 0 || validity_horizon > MAX_KYC_VALIDITY_HORIZON {
             return Err(PoaMembershipError::InvalidValidityHorizon {
                 requested: validity_horizon,
                 max: MAX_KYC_VALIDITY_HORIZON,
@@ -274,6 +276,7 @@ impl PoAOnboarding {
         let expiry = at_block.saturating_add(validity_horizon);
         self.registry.approve(domain, admin, applicant)?;
         self.kyc_expiry.insert((domain, applicant), expiry);
+        self.logged_expiry.remove(&(domain, applicant));
         self.audit.push(OnboardingEvent {
             domain,
             at_block,
@@ -355,7 +358,7 @@ impl PoAOnboarding {
         if new_kyc_commitment == [0u8; 32] {
             return Err(PoaMembershipError::MissingKyc);
         }
-        if validity_horizon > MAX_KYC_VALIDITY_HORIZON {
+        if validity_horizon == 0 || validity_horizon > MAX_KYC_VALIDITY_HORIZON {
             return Err(PoaMembershipError::InvalidValidityHorizon {
                 requested: validity_horizon,
                 max: MAX_KYC_VALIDITY_HORIZON,
@@ -424,7 +427,69 @@ impl PoAOnboarding {
     /// drops an admission record diverges instead of quietly unpermissioning
     /// a domain.
     pub fn root(&self) -> [u8; 32] {
-        self.registry.root_with_expiry(&self.kyc_expiry)
+        use sha3::{Digest, Sha3_256};
+        let base = self.registry.root_with_expiry(&self.kyc_expiry);
+        let mut hasher = Sha3_256::new();
+        hasher.update(b"budlum/poa/onboarding-root/v2");
+        hasher.update(base);
+        hasher.update((self.audit.len() as u64).to_le_bytes());
+        for ev in &self.audit {
+            hasher.update(ev.domain.to_le_bytes());
+            hasher.update(ev.at_block.to_le_bytes());
+            hasher.update(ev.actor.as_bytes());
+            match &ev.decision {
+                OnboardingDecision::Submitted {
+                    applicant,
+                    kyc_commitment,
+                } => {
+                    hasher.update([1u8]);
+                    hasher.update(applicant.as_bytes());
+                    hasher.update(kyc_commitment);
+                }
+                OnboardingDecision::Approved {
+                    applicant,
+                    kyc_expiry_block,
+                } => {
+                    hasher.update([2u8]);
+                    hasher.update(applicant.as_bytes());
+                    hasher.update(kyc_expiry_block.to_le_bytes());
+                }
+                OnboardingDecision::Rejected { applicant, reason } => {
+                    hasher.update([3u8]);
+                    hasher.update(applicant.as_bytes());
+                    hasher.update((reason.len() as u64).to_le_bytes());
+                    hasher.update(reason.as_bytes());
+                }
+                OnboardingDecision::Revoked { applicant, reason } => {
+                    hasher.update([4u8]);
+                    hasher.update(applicant.as_bytes());
+                    hasher.update((reason.len() as u64).to_le_bytes());
+                    hasher.update(reason.as_bytes());
+                }
+                OnboardingDecision::RenewedKyc {
+                    applicant,
+                    new_expiry_block,
+                } => {
+                    hasher.update([5u8]);
+                    hasher.update(applicant.as_bytes());
+                    hasher.update(new_expiry_block.to_le_bytes());
+                }
+                OnboardingDecision::KycExpired {
+                    applicant,
+                    at_block,
+                } => {
+                    hasher.update([6u8]);
+                    hasher.update(applicant.as_bytes());
+                    hasher.update(at_block.to_le_bytes());
+                }
+            }
+        }
+        hasher.update((self.logged_expiry.len() as u64).to_le_bytes());
+        for (domain, account) in &self.logged_expiry {
+            hasher.update(domain.to_le_bytes());
+            hasher.update(account.as_bytes());
+        }
+        hasher.finalize().into()
     }
 
     /// Is `domain` a permissioned domain at all?
@@ -797,5 +862,26 @@ mod tests {
         assert!(onboarding.remove_admin(0, addr(8)).is_ok());
         onboarding.registry_mut().force_remove_admin(0, addr(9));
         assert!(!onboarding.is_permissioned(0));
+    }
+
+    #[test]
+    fn blg_052_zero_horizon_rejected_reapplication_allowed_and_audit_root_bound() {
+        let mut onboarding = PoAOnboarding::new();
+        onboarding.add_admin(0, addr(9));
+        onboarding
+            .submit_application(0, addr(3), kyc(1), 0)
+            .unwrap();
+        assert!(matches!(
+            onboarding.approve(0, addr(9), addr(3), 1, 0),
+            Err(PoaMembershipError::InvalidValidityHorizon { .. })
+        ));
+        onboarding.reject(0, addr(9), addr(3), 2, "typo").unwrap();
+        let before_reapply = onboarding.root();
+        onboarding
+            .submit_application(0, addr(3), kyc(2), 3)
+            .unwrap();
+        assert_ne!(before_reapply, onboarding.root());
+        onboarding.approve(0, addr(9), addr(3), 4, 100).unwrap();
+        assert!(onboarding.is_authorized_now(0, &addr(3), 50));
     }
 }

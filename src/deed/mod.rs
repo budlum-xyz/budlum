@@ -104,6 +104,31 @@ impl Manifest {
             &self.created_at.to_le_bytes(),
         ])
     }
+
+    /// Build the B.U.D. 3.0 `StorageTxV3::RegisterObject` transaction for this
+    /// educational artifact after checking that `record` commits to `content_id`.
+    ///
+    /// Convenience: exposed so education domain callers register artifacts as B.U.D.
+    /// 3.0 objects (`BLG-261`) instead of legacy manifests.
+    pub fn to_register_object_tx(
+        &self,
+        record: crate::storage::bud3::pipeline::ObjectRecord,
+        shares: Vec<(u64, crate::storage::bud3::placement::Share)>,
+        lifetime_epochs: u64,
+    ) -> Result<crate::storage::bud3::tx::StorageTxV3, &'static str> {
+        self.validate()?;
+        if lifetime_epochs == 0 {
+            return Err("education object lifetime_epochs must be positive");
+        }
+        if record.content_id.digest != self.content_id.0 {
+            return Err("education record content_id digest mismatch");
+        }
+        Ok(crate::storage::bud3::tx::StorageTxV3::RegisterObject {
+            record,
+            shares,
+            lifetime_epochs,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -192,5 +217,58 @@ mod tests {
         assert_ne!(roles::INDUSTRY_SPONSOR, roles::RESEARCH_CONTRIBUTOR);
         assert_eq!(roles::INDUSTRY_SPONSOR.value(), 10);
         assert_eq!(roles::RESEARCH_CONTRIBUTOR.value(), 11);
+    }
+
+    #[test]
+    fn education_domain_registers_object() {
+        use crate::storage::bud3::limits::{Bud3Limits, Profile};
+        use crate::storage::bud3::pipeline::prepare_public_upload;
+        use crate::storage::bud3::placement::{Class, Share};
+        use crate::storage::bud3::registry::{Bud3Registry, Registered};
+        use crate::storage::bud3::tx::{apply, Applied};
+
+        let profile = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let up = prepare_public_upload(
+            b"open-courseware-lecture-notes",
+            &profile,
+            &Bud3Limits::default(),
+            8,
+        )
+        .unwrap();
+        let expected_key = up.record.commitment;
+        let contributor = Address::from([7u8; 32]);
+        let item = Manifest {
+            contributor,
+            content_id: ContentId(up.record.content_id.digest),
+            artifact_kind: ArtifactKind::Educational,
+            visibility: Visibility::Public,
+            metadata_hash: [9u8; 32],
+            created_at: 42,
+        };
+        let shares = (0..2u8)
+            .map(|h| {
+                (
+                    0,
+                    Share {
+                        validator: [10 + h; 32],
+                        class: Class::Full,
+                        first_esi: u32::from(h) * 4,
+                        symbols: 4,
+                    },
+                )
+            })
+            .collect();
+        let tx = item.to_register_object_tx(up.record, shares, 50).unwrap();
+        let mut reg = Bud3Registry::default();
+        assert_eq!(
+            apply(&mut reg, contributor.0, tx, 0),
+            Ok(Applied::Registered(Registered::New(expected_key)))
+        );
     }
 }

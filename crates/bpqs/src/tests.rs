@@ -9,11 +9,11 @@
 //! carried plainly so "regenerate & paste" is a deliberate, reviewable edit.
 
 use crate::domains;
-use crate::epoch::{prf_epoch_seed, EpochWindow};
+use crate::epoch::{epoch_of, prf_epoch_seed, EpochWindow};
 use crate::error::BpqsError;
 use crate::hash::{BpqsHash, Sha3_256Hash};
 use crate::params::{BpqsParams, ParamsL3, ParamsL5, ParamsTestFast};
-use crate::sign::{keygen_root, verify_at_height, BpqsSigner};
+use crate::sign::{keygen_root, verify_at_height, BpqsSigner, BpqsVerifierLog};
 use crate::wots;
 use sha3::{Digest, Sha3_256};
 
@@ -165,6 +165,100 @@ fn kat_freeze_digest_is_stable() {
         out, EXPECTED_KAT_DIGEST,
         "KAT freeze drifted - investigate, never update blindly"
     );
+}
+
+#[test]
+fn blg_111_bpqs_l3_noncanonical_lane_never_panics_and_verify_refuses() {
+    let mut signer = BpqsSigner::<ParamsFastL3, H>::fresh_device([0x31; 32], EpochWindow(4))
+        .unwrap_or_else(|e| panic!("l3 keygen: {e}"));
+    let mut sig = signer
+        .sign_at_height(8, b"blg-111-l3")
+        .unwrap_or_else(|e| panic!("l3 sign: {e}"));
+    // Corrupt non-meaningful tail padding (bytes 24..32 at N=24) across every
+    // used chain segment so even a `digits[i] == 15` (`remaining == 0`) lane
+    // exercises `wots::lane::<ParamsFastL3>`.
+    for lane in sig.chains.iter_mut().take(ParamsFastL3::LEN) {
+        lane[24] = 0xAA;
+        lane[31] = 0x55;
+    }
+    // Direct WOTS walk must never trip a debug assertion on untrusted bytes.
+    let _ = wots::verify_chains::<H, ParamsFastL3>(&sig.chains, &[0xFF; 32]);
+    // Public signature verification must refuse non-canonical lane padding in
+    // both debug and release builds.
+    let err = verify_at_height::<H, ParamsFastL3>(signer.public(), 8, b"blg-111-l3", &sig)
+        .expect_err("non-zero L3 lane padding must be refused");
+    assert_eq!(
+        err,
+        BpqsError::Malformed("non-zero padding in a signature lane")
+    );
+}
+
+#[test]
+fn blg_111_bpqs_stateful_verifier_refuses_second_signature_in_same_epoch() {
+    let mut signer_a = BpqsSigner::<ParamsTestFast, H>::fresh_device([0x44; 32], EpochWindow(8))
+        .unwrap_or_else(|e| panic!("keygen a: {e}"));
+    // Simulate a compromised or rolled-back cold device producing a second
+    // valid one-time signature in epoch 0 from the same root seed.
+    let mut signer_b = BpqsSigner::<ParamsTestFast, H>::fresh_device([0x44; 32], EpochWindow(8))
+        .unwrap_or_else(|e| panic!("keygen b: {e}"));
+    let sig1 = signer_a
+        .sign_at_height(1, b"anchor-msg-1")
+        .unwrap_or_else(|e| panic!("sign 1: {e}"));
+    let sig2 = signer_b
+        .sign_at_height(2, b"anchor-msg-2")
+        .unwrap_or_else(|e| panic!("sign 2: {e}"));
+
+    let mut log = BpqsVerifierLog::new_allow_test_params();
+    log.accept_at_height::<H, ParamsTestFast>(signer_a.public(), 1, b"anchor-msg-1", &sig1)
+        .expect("first signature in epoch 0 must verify and record");
+    let err = log
+        .accept_at_height::<H, ParamsTestFast>(signer_a.public(), 2, b"anchor-msg-2", &sig2)
+        .expect_err("second signature in epoch 0 for the same key must fail closed");
+    assert_eq!(
+        err,
+        BpqsError::QuotaExceeded {
+            epoch: 0,
+            attempted: 2,
+        }
+    );
+}
+
+#[test]
+fn blg_164_bpqs_epoch_overflow_and_test_params_refused_in_production() {
+    let window = EpochWindow(8);
+    let overflow_height = (u64::from(u32::MAX) + 1) * window.0;
+    assert_eq!(
+        epoch_of(overflow_height, window),
+        Err(BpqsError::Malformed(
+            "epoch does not fit the tree's u32 headroom"
+        ))
+    );
+    assert!(ParamsL5::IS_PRODUCTION);
+    assert!(ParamsL3::IS_PRODUCTION);
+    assert!(!ParamsTestFast::IS_PRODUCTION);
+    assert!(!ParamsFastL3::IS_PRODUCTION);
+
+    let mut test_signer = BpqsSigner::<ParamsTestFast, H>::fresh_device([0x52; 32], window)
+        .unwrap_or_else(|e| panic!("keygen: {e}"));
+    let sig = test_signer
+        .sign_at_height(0, b"test-row")
+        .unwrap_or_else(|e| panic!("sign: {e}"));
+    let mut prod_log = BpqsVerifierLog::new_production();
+    let err = prod_log
+        .accept_at_height::<H, ParamsTestFast>(test_signer.public(), 0, b"test-row", &sig)
+        .expect_err("production verifier log must refuse ParamsTestFast");
+    assert_eq!(
+        err,
+        BpqsError::Malformed("non-production BPQS parameter row refused by production verifier")
+    );
+}
+
+#[test]
+fn blg_185_bpqs_wire_size_includes_randomizer_at_l5_and_l3() {
+    let l5_bytes = 4 + 16 + ParamsL5::LEN * 32 + ParamsL5::T_LOG2 * 32;
+    let l3_bytes = 4 + 16 + ParamsL3::LEN * 32 + ParamsL3::T_LOG2 * 32;
+    assert_eq!(l5_bytes, 2676);
+    assert_eq!(l3_bytes, 2164);
 }
 
 /// The frozen digest of the KAT battery. Frozen 2026-09-19, commit marking
