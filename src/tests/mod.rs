@@ -263,3 +263,7 @@ pub mod persistence_move;
 // Instant Duty Handover and Disaster Recovery Mode suite.
 #[cfg(test)]
 pub mod wp14_handover_recovery;
+
+// WP-41 alert rule metric binding test.
+#[cfg(test)]
+pub mod alert_rules_reference_existing_metrics;

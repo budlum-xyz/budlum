@@ -1088,9 +1088,7 @@ src/tokenomics/mod.rs	fn	seconds_per_epoch
 src/tokenomics/mod.rs	fn	unlocked_at
 src/tokenomics/reward_pool.rs	const	DEFAULT_TREASURY_POOL
 src/tokenomics/reward_pool.rs	const	DEFAULT_VALIDATION_POOL_EPOCHS
-src/tokenomics/reward_pool.rs	const	DEFAULT_VALIDATION_REWARD_POOL
 src/tokenomics/reward_pool.rs	enum	RewardPoolError
-src/tokenomics/reward_pool.rs	fn	per_epoch_budget
 src/tokenomics/reward_pool.rs	fn	reward_for_epoch
 src/tokenomics/reward_pool.rs	fn	total_epoch_payout
 #

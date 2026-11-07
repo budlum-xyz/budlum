@@ -94,3 +94,34 @@ groups:
           severity: critical
         annotations:
           summary: "Less than 10% disk left on {{ $labels.instance }}"
+
+  # WP-41 public services. The faucet's proof-of-work difficulty is demand
+  # driven, so a rising refusal counter is the observable signal that the
+  # public door is under pressure (section 11.9 item 3).
+  #
+  # The remaining mandatory alerts of WP-41 item 6 are NOT written here yet:
+  # budlum_finality_stalled, budlum_finality_lag_checkpoints,
+  # budlum_bud3_segments_at_risk, budlum_bud3_repair_backlog,
+  # budlum_relay_reservations, budlum_ee_fault_total and
+  # budlum_state_root_mismatch_total are not exported by src/core/metrics.rs.
+  # Writing those rules now would produce alerts that can never fire; they
+  # belong with the packages that export the metrics (WP-15, WP-20, WP-26,
+  # WP-42). The named test alert_rules_reference_existing_metrics refuses any
+  # rule that gets ahead of its exporter.
+  - name: budlum-public-services
+    rules:
+      - alert: BudlumRpcRateLimitedSpike
+        expr: increase(budlum_rpc_rate_limited_total[5m]) > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RPC rate limiter refused {{ $value }} requests in 5 minutes"
+
+      - alert: BudlumRpcRefusalRateHigh
+        expr: rate(budlum_rpc_rate_limited_total[5m]) / clamp_min(rate(budlum_rpc_requests_total[5m]), 1) > 0.10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 10% of RPC requests are being rate limited"
