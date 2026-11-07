@@ -1,0 +1,47 @@
+//! Permanent regression coverage for the lane A live audit.
+
+use crate::core::account::AccountState;
+use crate::core::address::Address;
+use crate::core::transaction::{Transaction, TransactionType};
+use crate::execution::executor::Executor;
+
+fn address(byte: u8) -> Address {
+    let mut bytes = [0; 32];
+    bytes[0] = byte;
+    Address::from(bytes)
+}
+
+#[test]
+fn audit_lane_a_blg_019_retired_state_update_preserves_accounts() {
+    // Exercise the executor's structured refusal on both testnet and devnet,
+    // including duplicate victim entries and an attempted sender nonce write.
+    for chain_id in [45261, 45262] {
+        let sender = address(0xad);
+        let victim = address(0xb0);
+        let mut state = AccountState::new();
+        state.add_balance(&sender, 1_000_000);
+        state.add_balance(&victim, 500);
+        let transaction = Transaction::new_with_chain_id(
+            sender,
+            Address::zero(),
+            0,
+            1,
+            state.get_nonce(&sender),
+            Vec::new(),
+            chain_id,
+            TransactionType::StateUpdate {
+                domain_id: 1,
+                domain_height: 1,
+                state_updates: vec![(victim, 123), (victim, u64::MAX - 1001), (sender, 42)],
+            },
+        );
+
+        let error = Executor::apply_transaction_checked(&mut state, &transaction)
+            .expect_err("the retired state update must be refused");
+        assert_eq!(error.code(), "state_update_retired");
+        assert_eq!(state.get_nonce(&victim), 0);
+        assert_eq!(state.get_nonce(&sender), 0);
+        assert_eq!(state.get_balance(&victim), 500);
+        assert_eq!(state.get_balance(&sender), 1_000_000);
+    }
+}

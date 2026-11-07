@@ -37,6 +37,8 @@ pub mod sharding_e2e;
 #[cfg(test)]
 pub mod bud_e2e;
 #[cfg(test)]
+pub mod audit_lane_a;
+#[cfg(test)]
 pub mod byzantine_settlement;
 #[cfg(test)]
 pub mod chaos;
