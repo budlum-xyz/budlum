@@ -2634,6 +2634,7 @@ mod tests {
             agg_sig_bls: vec![1, 2, 3],
             bitmap: vec![0u8],
             set_hash: "set".into(),
+            seat_table_version: 0,
         }
     }
 
