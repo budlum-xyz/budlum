@@ -290,8 +290,6 @@ impl EeClient {
         Ok(())
     }
 
-    /// Sends the first frame of a request, connecting (or reconnecting once,
-    /// when a reused connection turns out to be dead) as needed.
     /// Sends one request frame, connecting if needed. A failed write may have
     /// delivered a prefix or even the complete frame, so it is never retried.
     fn open_request(&mut self, body: pb::envelope::Body) -> Result<u64, TransportError> {
@@ -412,6 +410,7 @@ impl EeClient {
             pb::envelope::Body::ExecuteResponse(response) => match response.result {
                 Some(pb::execute_response::Result::Outcome(outcome)) => Ok(Ok(outcome.try_into()?)),
                 Some(pb::execute_response::Result::Fault(fault)) => {
+                    // A faulted worker closes its connection and must restart.
                     self.stream = None;
                     Ok(Err(fault.try_into()?))
                 }

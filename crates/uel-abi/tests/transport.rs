@@ -530,41 +530,73 @@ fn uel_abi_wire_values_are_bounded() {
     let _ = ServeEnd::Closed;
 }
 
-#[cfg(unix)]
 #[test]
 fn uel_abi_partial_request_write_is_not_retried() {
+    use std::io::Read;
     use std::net::Shutdown;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::mpsc;
 
     let path = socket_path();
     let listener = UnixListener::bind(&path).expect("bind");
-    let accepts = Arc::new(AtomicUsize::new(0));
-    let accepts_bg = Arc::clone(&accepts);
-
+    let (connected_tx, connected_rx) = mpsc::channel();
     let worker = thread::spawn(move || {
-        // Accept first connection, complete handshake, then shut down read side
-        // so the subsequent request write fails after reuse.
-        let (mut s1, _) = listener.accept().expect("accept 1");
-        accepts_bg.fetch_add(1, Ordering::SeqCst);
-        let h = read_frame(&mut s1).expect("hello");
+        let (mut stream, _) = listener.accept().expect("first connection");
+        let hello = read_frame(&mut stream).expect("hello");
         write_frame(
-            &mut s1,
+            &mut stream,
             &pb::Envelope {
                 abi_version: ABI_VERSION,
-                request_id: h.request_id,
-                body: Some(pb::envelope::Body::Hello(pb::Hello { ee: EeId::EVM.0 as u32 })),
+                request_id: hello.request_id,
+                body: Some(pb::envelope::Body::Hello(pb::Hello { ee: 1 })),
             },
         )
         .expect("hello reply");
-        let _ = s1.shutdown(Shutdown::Both);
-        drop(s1);
+        let request = read_frame(&mut stream).expect("first request");
+        write_frame(
+            &mut stream,
+            &pb::Envelope {
+                abi_version: ABI_VERSION,
+                request_id: request.request_id,
+                body: Some(pb::envelope::Body::ValidateDeployResponse(
+                    pb::ValidateDeployResponse {
+                        result: Some(pb::validate_deploy_response::Result::Info(pb::CodeInfo {
+                            code_hash: vec![0; 32],
+                            abi_tag: "mock/1".into(),
+                        })),
+                    },
+                )),
+            },
+        )
+        .expect("first response");
+        // Read a prefix and close while a large frame is still being sent.
+        let mut prefix = [0u8; 32];
+        stream.read_exact(&mut prefix).expect("request prefix");
+        stream.shutdown(Shutdown::Both).expect("shutdown");
+        drop(stream);
+        let (stream, _) = listener.accept().expect("next connection");
+        connected_tx.send(()).expect("notify");
+        let _ = serve_connection(stream, &mut MockEe::new(EeId::EVM));
     });
 
-    let mut client = EeClient::new(&path, EeId::EVM);
-    // Warm connection via explicit connect test path: first validate_deploy fails
-    // without attempting a second accept on `listener`.
-    let _ = client.validate_deploy(b"code");
-    worker.join().expect("worker join");
-    assert_eq!(accepts.load(Ordering::SeqCst), 1);
+    let mut client = EeClient::new(&path, EeId::EVM).with_timeout(Duration::from_millis(300));
+    client
+        .validate_deploy(b"first")
+        .expect("transport")
+        .expect("valid");
+    assert!(client.validate_deploy(&vec![7; 8 * 1024 * 1024]).is_err());
+    assert!(!client.is_connected());
+    assert!(
+        connected_rx.try_recv().is_err(),
+        "failed request was retried"
+    );
+    client
+        .validate_deploy(b"next")
+        .expect("reconnect")
+        .expect("valid");
+    connected_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("new connection");
+    drop(client);
+    worker.join().expect("worker");
+    std::fs::remove_file(path).expect("remove socket");
 }
