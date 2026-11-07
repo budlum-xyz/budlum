@@ -333,7 +333,11 @@ impl Bud3RpcService {
             }
             "bud_storageMayView" => {
                 let grant_tag = parse_hex32(params.get("grant_tag"), "grant_tag")?;
-                let active = registry.grant_row(&grant_tag).is_some();
+                let current_epoch = params
+                    .get("current_epoch")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| String::from("missing `current_epoch`"))?;
+                let active = registry.active_grant(&grant_tag, current_epoch).is_some();
                 Ok(json!({ "grant_tag": hex::encode(grant_tag), "may_view": active }))
             }
             "bud_storageListViewGrants" => {

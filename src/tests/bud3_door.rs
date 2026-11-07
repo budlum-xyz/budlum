@@ -468,6 +468,30 @@ fn bud3_sealed_grant_issue_revoke_and_not_served() {
     let viewed = view_sealed(&up.record, &opened_key, up.segments.concat()).unwrap();
     assert_eq!(viewed, plaintext);
 
+    let mut rpc = crate::storage::bud3::rpc::Bud3RpcService::default();
+    let network = crate::storage::bud3::view::MemorySymbolNetwork::default();
+    let placement = crate::storage::bud3::placement::PlacementRow {
+        n_full: 0,
+        s_full: 0,
+        n_mobile: 0,
+        s_mobile: 0,
+    };
+    for (epoch, expected) in [(14, true), (15, false)] {
+        let response = rpc
+            .handle(
+                "bud_storageMayView",
+                &serde_json::json!({
+                    "grant_tag": hex::encode(grant_tag),
+                    "current_epoch": epoch,
+                }),
+                &state.bud3_registry,
+                &network,
+                (&placement, &[], 0),
+            )
+            .unwrap();
+        assert_eq!(response["may_view"], serde_json::json!(expected));
+    }
+
     // RevokeViewGrant deletes the HPKE capsule so it is never served again.
     let revoke_sig =
         sign_with_grant_one_time_key(&one_time_seed, &grant_revoke_digest(&grant_tag)).unwrap();
