@@ -222,7 +222,10 @@ pub fn apply_cross_shard_transfer(
     let total_cost = tx.total_cost();
     // Read-only checks: `get_or_create` would insert empty accounts into
     // the state on a rejected transfer.
-    if state.get_balance(&tx.from) < total_cost {
+    // The consensus executor uses spendable balance for every debit so a
+    // cross-shard route cannot bypass the team vesting lock. Use that same
+    // gate here, before either account is created or changed.
+    if state.spendable_balance(&tx.from) < total_cost {
         return Err("insufficient balance for cross-shard transfer".into());
     }
     state
@@ -252,6 +255,7 @@ pub fn apply_cross_shard_transfer(
 mod tests {
     use super::*;
     use crate::core::transaction::{Transaction, DEFAULT_CHAIN_ID};
+    use crate::tokenomics::VestingSchedule;
 
     fn addr(first: u8) -> Address {
         Address::from([first; 32])
@@ -363,6 +367,59 @@ mod tests {
         assert_eq!(state.get_or_create(&addr(0)).balance, 100 - 45);
         assert_eq!(state.get_or_create(&addr(1)).balance, 40);
         assert_eq!(state.get_or_create(&addr(0)).nonce, 1);
+    }
+
+    #[test]
+    fn cross_shard_transfer_rejects_team_vesting_overdraft_without_mutation() {
+        let mut state = AccountState::new();
+        let sender = addr(0);
+        let receiver = addr(1);
+        state.get_or_create(&sender).balance = 100;
+        state.team_vesting = Some((
+            sender,
+            VestingSchedule {
+                total: 80,
+                start_epoch: 0,
+                cliff_epochs: 100,
+                duration_epochs: 200,
+            },
+        ));
+        let before = shards_commitment(&state, 2);
+        let tx = transfer(sender, receiver, 19, 2);
+
+        let error = apply_cross_shard_transfer(&mut state, &tx, 2)
+            .expect_err("locked team funds cannot cover a cross-shard debit");
+
+        assert!(error.contains("insufficient balance"));
+        assert_eq!(shards_commitment(&state, 2), before);
+        assert_eq!(state.get_balance(&sender), 100);
+        assert_eq!(state.get_nonce(&sender), 0);
+        assert!(!state.accounts.contains_key(&receiver));
+    }
+
+    #[test]
+    fn cross_shard_transfer_can_spend_unlocked_team_balance() {
+        let mut state = AccountState::new();
+        let sender = addr(0);
+        let receiver = addr(1);
+        state.get_or_create(&sender).balance = 100;
+        state.team_vesting = Some((
+            sender,
+            VestingSchedule {
+                total: 80,
+                start_epoch: 0,
+                cliff_epochs: 100,
+                duration_epochs: 200,
+            },
+        ));
+        let tx = transfer(sender, receiver, 19, 1);
+
+        apply_cross_shard_transfer(&mut state, &tx, 2)
+            .expect("the spendable 20 units cover amount and fee");
+
+        assert_eq!(state.get_balance(&sender), 80);
+        assert_eq!(state.get_balance(&receiver), 19);
+        assert_eq!(state.get_nonce(&sender), 1);
     }
 
     /// A rejected transfer must not create accounts.
