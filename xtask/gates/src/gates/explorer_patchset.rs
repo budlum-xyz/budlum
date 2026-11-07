@@ -334,7 +334,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     if problems.is_empty() {
         return Ok(format!(
-            "budscan patchset OK: {} patches agree between the list and the disk, each touching \
+            "explorer patchset OK: {} patches agree between the list and the disk, each touching \
              at least one file and staying inside the permitted trees, and {scanned} files \
              carry no foreign brand name",
             listed.len()
@@ -427,7 +427,7 @@ pub fn self_test() -> Result<String, String> {
     }
 
     // Canary 6: the gate must not pass on a tree it cannot read.
-    if run(std::path::Path::new("/nonexistent-budscan-patchset-canary")).is_ok() {
+    if run(std::path::Path::new("/nonexistent-explorer-patchset-canary")).is_ok() {
         problems.push(String::from(
             "VACUOUS: the gate passed on a tree that does not exist",
         ));
@@ -441,7 +441,7 @@ pub fn self_test() -> Result<String, String> {
         return Err(msg);
     }
     Ok(String::from(
-        "budscan patchset self-test OK: duplicates are refused, a deletion target is not counted, \
+        "explorer patchset self-test OK: duplicates are refused, a deletion target is not counted, \
          the 'b/' prefix is stripped, a miscounted hunk is refused, the brand list is populated \
          and the gate does not pass on a tree it cannot read",
     ))

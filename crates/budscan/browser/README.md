@@ -42,7 +42,7 @@ The checks:
 
 ```
 cargo run -p budscan --bin budscan -- patch-list budscan/browser/patches.txt
-cargo run --manifest-path xtask/gates/Cargo.toml -- budscan-patchset
+cargo run --manifest-path xtask/gates/Cargo.toml -- explorer-patchset
 ```
 
 ## Directory layout
@@ -60,7 +60,7 @@ cargo run --manifest-path xtask/gates/Cargo.toml -- budscan-patchset
 
 No other browser's brand name appears in this tree. The patch arrangement was
 taken as an idea, not as a name; the `budscan::patchset::FORBIDDEN_BRAND_TOKENS`
-list turns that into a rule and the `budscan-patchset` gate measures it in CI.
+list turns that into a rule and the `explorer-patchset` gate measures it in CI.
 
 ## What the patches do
 

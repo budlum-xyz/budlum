@@ -1,4 +1,4 @@
-//! Gate: the regeneration health layer stays wired, blocked, and provable.
+//! Gate: the state recovery door stays wired, blocked, and provable.
 //!
 //! What this gate promises, per the 2026-09-17 decision record (item 11):
 //! code that is incompatible with the regeneration layer's wiring is BLOCKED
@@ -208,7 +208,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         return Err(problems.join("\n  "));
     }
     Ok(String::from(
-        "regen-health door wired: advisor ordering pinned, forgery door present, \
+        "state-recovery-door wired: advisor ordering pinned, forgery door present, \
          chaos suite name-locked",
     ))
 }
@@ -359,7 +359,7 @@ pub fn self_test() -> Result<String, String> {
         return Err(problems.join("\n  "));
     }
     Ok(String::from(
-        "regen-health-door gate canaries all caught: deletion, re-unwiring, forgery-door \
+        "state-recovery-door gate canaries all caught: deletion, re-unwiring, forgery-door \
          removal, order scramble, test dissolution",
     ))
 }

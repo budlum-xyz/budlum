@@ -1,4 +1,4 @@
-//! Regeneration: it reproduces the canonical code and its identity from
+//! Canonical programs reproduce: the gate reproduces the canonical code and its identity from
 //! scratch and rejects unauthorized code entry before release.
 //!
 //! # The idea
@@ -988,7 +988,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         .to_string();
     let set_token = &hex32(&canonical_set_digest()?)[..16].to_string();
     Ok(format!(
-        "regeneration OK: program-hash {} reproduced, \
+        "canonical-programs-reproduce OK: program-hash {} reproduced, \
          convergence (idempotence + repair) was verified, and all {checked} \
          production points found by discovery are canonical (verified with an \
          independent Keccak-256 and an independent ISA encoding). matmul-hash {} \
@@ -1030,7 +1030,7 @@ pub fn self_test() -> Result<String, String> {
     run_drift_canaries(&tmp)?;
     let _ = fs::remove_dir_all(&tmp);
     Ok(String::from(
-        "regeneration self-test OK: the correct tree passed and five drifts were caught \
+        "canonical-programs-reproduce self-test OK: the correct tree passed and five drifts were caught \
          (tagged production, a missing verifier, a blinded scan, a changed program, \
          a hidden production point added later)",
     ))
@@ -1375,7 +1375,7 @@ mod tests {
 
         // The message the gate actually emits on success, rebuilt here.
         let message = format!(
-            "regeneration OK: program-hash {} reproduced, and the rest is prose. matmul-hash {} \
+            "canonical-programs-reproduce OK: program-hash {} reproduced, and the rest is prose. matmul-hash {} \
              syscall-hash {} canonical-set {}",
             &hex32(&[0xabu8; 32])[..16],
             &hex32(&[0xcdu8; 32])[..16],

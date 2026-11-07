@@ -25,7 +25,7 @@
 //! This module is the running version of the rule inside
 //! `xtask/gates/src/gates/bns_names_are_safe_in_an_address_bar.rs`. The two
 //! copies deliberately apply the same table, and the
-//! `budscan-name-rule-parity` gate fails their divergence in CI: two places
+//! `explorer-parity` gate fails their divergence in CI: two places
 //! deciding what a name may contain, drifting apart unaware of each other, is
 //! worse than one place deciding badly.
 

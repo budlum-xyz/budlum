@@ -1224,7 +1224,7 @@ jobs:
     # and ContentId. Copies can diverge silently and their divergence is a silent
     # results (the explorer accepts a name the chain does not; or
     # the explorer says a byte verified while the chain computes a different identity).
-    # `budscan-name-rule-parity` turns those two silences into noise.
+    # `explorer-parity` turns those two silences into noise.
     name: Budscan (explorer core + patch layer)
     runs-on: ubuntu-latest
     steps:
@@ -1256,14 +1256,14 @@ jobs:
         if: always() && steps.rust.outcome == 'success'
         run: |
           set -euo pipefail
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-name-rule-parity --self-test
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-patchset --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- explorer-parity --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- explorer-patchset --self-test
       - name: Name rule and ContentId parity
         if: always() && steps.rust.outcome == 'success'
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-name-rule-parity
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- explorer-parity
       - name: Patch layer (list=disk, no foreign brand)
         if: always() && steps.rust.outcome == 'success'
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-patchset
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- explorer-patchset
 
   # ============================ Standalone crates: bpqs and note-packing ============================
   standalone-crates:
@@ -2592,11 +2592,18 @@ jobs:
       # the value the verifier computes from the proof differ: either every honest
       # proof is refused, or a program not on the list counts as being on it.
       # The gate REGENERATES the value with an independent Keccak-256; it does not
-      # soyledigine inanmaz.
-      - name: regeneration (canonical code regenerated, convergent) + canary
+      # believe the claim that the four agree.
+      - name: canonical programs reproduce (canonical code regenerated, convergent) + canary
         run: |
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- regeneration --self-test
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- regeneration
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- canonical-programs-reproduce --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- canonical-programs-reproduce
+      # A proof verifier that trusts the proof is not a verifier. The gate holds the
+      # refusal path of the BudZero verifier: an untrusted proof is refused, and the
+      # refusal is reachable from the production path rather than only from a test.
+      - name: ZKVM refuses untrusted proofs + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- zkvm-refuses-untrusted-proofs --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- zkvm-refuses-untrusted-proofs
       # Relay: ships the regeneration consensus (tokens + proof-side canonical
       # set + signed relay-status.json) to external consumers. Runs after
       # regeneration because it consumes its output line; the proof-side

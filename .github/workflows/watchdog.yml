@@ -115,9 +115,9 @@ jobs:
       - name: Build the gate binary
         run: cargo build --release --manifest-path xtask/gates/Cargo.toml
       - name: Regen-health door still wired on main
-        run: ./xtask/gates/target/release/budlum-gates regen-health-door
+        run: ./xtask/gates/target/release/budlum-gates state-recovery-door
       - name: Regen-health gate canaries still caught
-        run: ./xtask/gates/target/release/budlum-gates regen-health-door --self-test
+        run: ./xtask/gates/target/release/budlum-gates state-recovery-door --self-test
 
   summary:
     name: Watchdog summary

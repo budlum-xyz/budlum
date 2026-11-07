@@ -53,7 +53,7 @@ jobs:
           ./target/release/bench_internal_pipeline_tps 2>&1 | tee /tmp/bench-single.txt
           echo "Benchmark runs completed."
       # BudZero canonical-program benches: prove/verify times for the three
-      # programs the regeneration gate reproduces (storage challenge, private
+      # programs the canonical-programs-reproduce gate reproduces (storage challenge, private
       # transfer, matmul guest). One sample each keeps the job well inside the
       # timeout; the JSON lines are recorded as artifacts.
       - name: Run the BudZero canonical benches

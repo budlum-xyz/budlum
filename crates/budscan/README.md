@@ -98,7 +98,7 @@ boundary. The price is two copies, and the price is measured:
 | size limit | `src/fetch.rs` | `src/gateway/service.rs` |
 | `EPOCH_LENGTH` | `src/light_client.rs` | `src/chain/blockchain.rs` |
 
-The `budscan-name-rule-parity` gate measures all four in CI. Divergence would
+The `explorer-parity` gate measures all four in CI. Divergence would
 be silent: the browser accepts a name the chain does not, or the browser says
 a byte is verified while the chain computes a different identity.
 
@@ -119,8 +119,8 @@ cargo run   --manifest-path budscan/Cargo.toml --bin budscan -- self-test
 cargo run   --manifest-path budscan/Cargo.toml --bin budscan -- classify ayaz.bud
 cargo run   --manifest-path budscan/Cargo.toml --bin budscan -- name-rule "javascript:alert(1)"
 
-cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-name-rule-parity
-cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-patchset
+cargo run --release --manifest-path xtask/gates/Cargo.toml -- explorer-parity
+cargo run --release --manifest-path xtask/gates/Cargo.toml -- explorer-patchset
 ```
 
 107 tests, all passing. There is no engine source under `browser/` and there

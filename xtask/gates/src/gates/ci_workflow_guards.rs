@@ -431,7 +431,7 @@ pub fn self_test() -> Result<String, String> {
     )?;
     // 7. The `- run:` step form and the subshell form of the diverse
     //    double-compiling workflow are read.
-    let ddc = "name: ddc\njobs:\n  j:\n    steps:\n      - run: (cd xtask/gates && cargo run --release --quiet -- regeneration) > /tmp/x 2>&1\n";
+    let ddc = "name: ddc\njobs:\n  j:\n    steps:\n      - run: (cd xtask/gates && cargo run --release --quiet -- canonical-programs-reproduce) > /tmp/x 2>&1\n";
     let found = run_blocks(ddc)
         .iter()
         .flat_map(|b| b.lines.iter())

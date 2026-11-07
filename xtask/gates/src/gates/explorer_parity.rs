@@ -64,7 +64,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     if problems.is_empty() {
         return Ok(String::from(
-            "budscan parity OK: the name rule carries six refusal classes and the same character set, \
+            "explorer parity OK: the name rule carries six refusal classes and the same character set, \
              ContentId is computed with the same domain tag and length prefix, \
              and the size bound and EPOCH_LENGTH agree in all three places",
         ));
@@ -268,7 +268,7 @@ pub fn self_test() -> Result<String, String> {
         return Err(msg);
     }
     Ok(String::from(
-        "budscan parity self-test OK: the gate does not pass on a tree it cannot read and none of \
+        "explorer parity self-test OK: the gate does not pass on a tree it cannot read and none of \
          the patterns it searches for are empty",
     ))
 }

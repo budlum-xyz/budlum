@@ -4,7 +4,7 @@
 //! `crate::network::regen_health_tick`, which `Node::run` drives once per
 //! finality beat and which executes the verdict through the ledger. The rules
 //! are pinned by this file's tests, the chaos acceptance suite, and the
-//! `regen-health-door` gate.
+//! `state-recovery-door` gate.
 //!
 //! `regeneration_stage` holds the reversion ledger and every rule that makes
 //! reversion safe, and it said so in its own header: the ledger is driven by
