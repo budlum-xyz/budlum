@@ -1,4 +1,4 @@
-//! Static gate: `handover-and-recovery` (Section 7.6, Section 7.7, WP-14).
+//! Static gate: `handover-and-recovery` (Section 7.6, Section 7.7,).
 //!
 //! Verifies:
 //! 1. `src/registry/handover.rs` implements all Section 7.6 Instant Task Handover
@@ -7,7 +7,7 @@
 //!    aggregate fallback) and Section 7.7 40-block disaster recovery mode
 //!    (`FINALITY_STALL_RECOVERY_BLOCKS = 40`, `budlum_finality_stalled`, R-03 doc).
 //! 2. `src/core/metrics.rs` registers `"budlum_finality_stalled"`.
-//! 3. `tests/churn/main.rs` exercises all seven WP-14 churn scenarios.
+//! 3. `tests/churn/main.rs` exercises all seven  churn scenarios.
 
 use std::fs;
 use std::path::Path;

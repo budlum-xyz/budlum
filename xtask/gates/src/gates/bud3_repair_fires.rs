@@ -1,4 +1,4 @@
-//! B.U.D. 3.0 lazy-repair, handover, and reassignment gate (`bud3-repair-fires`, WP-20).
+//! B.U.D. 3.0 lazy-repair, handover, and reassignment gate (`bud3-repair-fires`,).
 //!
 //! Enforces statically that:
 //! 1. `src/storage/bud3/repair.rs` implements 20-block Instant Task Handover
@@ -45,7 +45,7 @@ fn strip_line_comments(src: &str) -> String {
 ///
 /// # Errors
 ///
-/// Returns an error if any WP-20 lazy-repair, 20-block handover, 1% bad-repair
+/// Returns an error if any  lazy-repair, 20-block handover, 1% bad-repair
 /// slash, or reassignment invariant is missing.
 pub fn run(root: &Path) -> Result<String, String> {
     let repair_src = strip_line_comments(strip_cfg_test(&read_rel(

@@ -1,4 +1,4 @@
-//! B.U.D. 3.0 class-aware placement gate (`bud3-placement`, WP-20).
+//! B.U.D. 3.0 class-aware placement gate (`bud3-placement`,).
 //!
 //! Enforces statically that:
 //! 1. `src/storage/bud3/placement.rs` uses integer-only fixed-point rendezvous
@@ -43,7 +43,7 @@ fn strip_line_comments(src: &str) -> String {
 ///
 /// # Errors
 ///
-/// Returns an error if any WP-20 placement, mobile-floor, shrink, or float-free
+/// Returns an error if any  placement, mobile-floor, shrink, or float-free
 /// consensus invariant is violated.
 pub fn run(root: &Path) -> Result<String, String> {
     let placement_src = strip_line_comments(strip_cfg_test(&read_rel(

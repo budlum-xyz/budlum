@@ -8,7 +8,7 @@
 //! Compatibility Lane (`src/execution/coordinator/foreign/`), where a
 //! classical foreign account is tagged `Classical`, may only move its own
 //! classical holdings (K-3), and closes under Quantum Alert Levels 2 and 3
-//! (closing BLG-267).
+//! (closing).
 //!
 //! This gate reads production Rust for the classical crates and protocols
 //! (`ed25519_dalek`, `schnorrkel`, `bls12_381`, `x25519`, `libp2p::noise`) and

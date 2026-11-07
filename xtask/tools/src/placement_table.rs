@@ -1,4 +1,4 @@
-//! Off-chain `placement-table` calculator (Section 6.9.3 & WP-20 item 1).
+//! Off-chain `placement-table` calculator (Section 6.9.3 &  item 1).
 //!
 //! Uses IEEE-754 floating-point binomial tail bounds off chain (consensus code
 //! never touches floating-point arithmetic, G-2) to evaluate annual durability

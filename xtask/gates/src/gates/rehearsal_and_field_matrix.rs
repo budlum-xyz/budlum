@@ -1,5 +1,5 @@
 //! Static gate: ceremony rehearsal topology, T-1..T-7 drill evaluator, Mobile
-//! device matrix, and UEL execution limits (`WP-46`, `WP-37`, `WP-35`).
+//! device matrix, and UEL execution limits (,,).
 
 use std::path::Path;
 

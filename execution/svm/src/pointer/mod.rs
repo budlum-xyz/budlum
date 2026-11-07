@@ -1,4 +1,4 @@
-//! Stateless SPL Token pointer codec (`WP-52`, `Section 8.8`).
+//! Stateless SPL Token pointer codec (, `Section 8.8`).
 //!
 //! An SPL pointer mint/program holds **zero** shadow balances and **zero**
 //! local delegate allowances in `ee/svm/account`: every transfer, delegate

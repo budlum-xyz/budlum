@@ -1,7 +1,7 @@
 //! B.U.D. 3.0 sealed-content, unlinkable view-grant, and cryptographic-erasure
-//! gate (`bud3-sealed-and-deletion`, WP-22).
+//! gate (`bud3-sealed-and-deletion`,).
 //!
-//! Enforces the Section 6.8 & WP-22 invariants statically across `src/storage/bud3/`:
+//! Enforces the Section 6.8 &  invariants statically across `src/storage/bud3/`:
 //! 1. `seal.rs` applies Padme bucket padding (`padme_padded_len`), seals via
 //!    `XChaCha20Poly1305` bound to `SEAL_AAD_TAG`, and zeroes the outer BOF-1
 //!    `content_len: 0` (`sealed_header_hides_length`).
@@ -58,7 +58,7 @@ fn extract_struct_body<'a>(code: &'a str, marker: &str) -> Option<&'a str> {
 ///
 /// # Errors
 ///
-/// Returns an actionable message if any WP-22 sealing, unlinkability, or
+/// Returns an actionable message if any  sealing, unlinkability, or
 /// cryptographic-erasure invariant is violated.
 pub fn run(root: &Path) -> Result<String, String> {
     let seal_src = strip_line_comments(strip_cfg_test(&read_rel(

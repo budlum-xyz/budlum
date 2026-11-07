@@ -1,4 +1,4 @@
-//! Out-of-process deterministic Move (Sui dialect) UEL execution worker (`WP-50`,
+//! Out-of-process deterministic Move (Sui dialect) UEL execution worker (,
 //! `EeId::MOVE_SUI = 0x05`).
 //!
 //! Stores Sui objects and immutable Move packages under `ee/sui/object` using
@@ -19,16 +19,16 @@ use budlum_uel_abi::{
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
-/// Pinned upstream `MystenLabs/sui` (`sui-execution`, Apache-2.0) commit reference (`WP-50`).
+/// Pinned upstream `MystenLabs/sui` (`sui-execution`, Apache-2.0) commit reference ().
 pub const PINNED_SUI_EXECUTION_COMMIT: &str = "e5b8d9a4c2718f140933b42c66d8c04a7d1e9b02";
 
 /// Budlum testnet chain ID (`Section 1.5`).
 pub const BUDLUM_TESTNET_CHAIN_ID: u64 = 45_261;
 
-/// Proposed activation height on testnet `45261` (`WP-50` exit criterion).
+/// Proposed activation height on testnet `45261` ( exit criterion).
 pub const PROPOSED_SUI_ACTIVATION_HEIGHT: u64 = 50_000;
 
-/// Canonical UEL namespace storing Sui objects and published Move packages (`WP-50`).
+/// Canonical UEL namespace storing Sui objects and published Move packages ().
 pub const NS_SUI_OBJECT: &str = "ee/sui/object";
 
 /// Magic header identifying deterministic Budlum-Sui compiled Move module bundles.

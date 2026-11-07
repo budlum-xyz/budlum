@@ -480,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_093_ai_inference_license_matches_polyform_shield() {
+    fn ai_inference_license_matches_polyform_shield() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let root_lic = std::fs::read(root.join("LICENSE.md")).expect("LICENSE.md");
         let ai_lic = std::fs::read(root.join("crates/ai-inference/LICENSE.md"))

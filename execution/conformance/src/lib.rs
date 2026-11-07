@@ -1,5 +1,5 @@
 //! UEL conformance suite runner, gas calibration verifier, and cross-architecture
-//! deterministic `execution_root` harness (`WP-35`, Sections 8.9, 8.13, 8.15, 8.16).
+//! deterministic `execution_root` harness (, Sections 8.9, 8.13, 8.15, 8.16).
 
 #![forbid(unsafe_code)]
 

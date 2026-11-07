@@ -1,5 +1,5 @@
 //! Deterministic wire payloads between the Execution Coordinator and
-//! `budlum-ee-wasm` (`EeId::WASM = 0x02`, `WP-29`).
+//! `budlum-ee-wasm` (`EeId::WASM = 0x02`,).
 
 use serde::{Deserialize, Serialize};
 

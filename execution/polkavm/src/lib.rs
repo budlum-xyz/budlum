@@ -1,5 +1,5 @@
 //! Out-of-process deterministic PolkaVM (`ink!` / `resolc` RV32EM interpreter) UEL
-//! execution worker (`WP-53`, `EeId::POLKAVM = 0x08`).
+//! execution worker (, `EeId::POLKAVM = 0x08`).
 //!
 //! Runs strictly in interpreter mode (JIT disabled for consensus determinism across
 //! `x86_64` and `aarch64`), persists contract blobs and key-value storage under
@@ -24,7 +24,7 @@ pub const POLKAVM_JIT_ENABLED: bool = false;
 /// Budlum testnet chain ID (`Section 1.5`).
 pub const BUDLUM_TESTNET_CHAIN_ID: u64 = 45_261;
 
-/// Proposed activation height on testnet `45261` (`WP-53` 1/5).
+/// Proposed activation height on testnet `45261` ( 1/5).
 pub const PROPOSED_POLKAVM_ACTIVATION_HEIGHT: u64 = 60_000;
 
 /// Canonical UEL namespace storing PolkaVM code blobs and contract key-value storage.

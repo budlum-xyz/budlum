@@ -1,4 +1,4 @@
-//! Fuzz harness for EVM migration deployment, account, and storage MPT proofs (`WP-34`).
+//! Fuzz harness for EVM migration deployment, account, and storage MPT proofs ().
 
 #![no_main]
 

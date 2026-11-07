@@ -29,15 +29,14 @@ const SCAN_DIRS: &[&str] = &[
 
 const SCAN_FILES: &[&str] = &["src/ai/registry.rs"];
 
-/// A float the repository still owes, with the finding that records it.
-///
-/// `BLG-240` is verifier/agent ranking in `f64`, display only. Closing it is
-/// an API change owned by `WP-45` (open PR #44), not by this CI package. The
-/// pin is a ceiling equal to the current AST finding count, so one new float
-/// in the pinned file fails; a pin whose file has no float left is stale and
-/// fails, so closing the finding cannot leave a silent exemption behind.
-const PINNED: &[(&str, usize, &str, &str)] =
-    &[("src/ai/registry.rs", 7, "BLG-240", "WP-45")];
+/// Display-only floats pinned by path, AST count, surface, and component.
+/// A new float fails; removing every pinned float makes the stale pin fail.
+const PINNED: &[(&str, usize, &str, &str)] = &[(
+    "src/ai/registry.rs",
+    7,
+    "AI verifier ranking",
+    "AI and privacy",
+)];
 
 fn is_cfg_test(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|attr| {
@@ -298,7 +297,7 @@ pub fn self_test() -> Result<String, String> {
             return Err(String::from("canary: a float AI ranking passed"));
         }
         Ok(String::from(
-            "no_float_in_consensus_paths canary OK: clean passes, f64 type/cast/literal fail, test-only and comment/string floats pass, AI ranking float above the BLG-240 ceiling fails",
+            "no_float_in_consensus_paths canary OK: clean passes, f64 type/cast/literal fail, test-only and comment/string floats pass, AI ranking float above the pinned ceiling fails",
         ))
     })();
     let _ = std::fs::remove_dir_all(&dir);

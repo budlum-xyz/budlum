@@ -1,6 +1,6 @@
 //! Gate `ee-workers-build-with-unwind`: node binary builds with `panic = "abort"`,
 //! while every execution-environment worker (`execution/*/Cargo.toml`) builds with
-//! `panic = "unwind"` so engine panics are caught at `catch_unwind` (`BLG-250`).
+//! `panic = "unwind"` so engine panics are caught at `catch_unwind` ().
 
 use std::fmt::Write as _;
 use std::fs;
@@ -61,7 +61,7 @@ pub fn check_root(root: &Path) -> Result<Vec<String>, String> {
                 Some("unwind") => {}
                 other => problems.push(format!(
                     "{rel}: EE worker `[profile.release]` must set `panic = \"unwind\"` so \
-                     `catch_unwind` isolates deterministic engine panics (`BLG-250`); found `{}`",
+                     `catch_unwind` isolates deterministic engine panics (); found `{}`",
                     other.unwrap_or("unset")
                 )),
             }

@@ -1,4 +1,4 @@
-//! Stateless Aptos `fungible_asset` and `coin` pointer codec (`WP-52`, `Section 8.8`).
+//! Stateless Aptos `fungible_asset` and `coin` pointer codec (, `Section 8.8`).
 //!
 //! A Move asset pointer holds **zero** local `CoinStore` / `FungibleStore`
 //! balances and **zero** local allowance resources in `ee/move/state`: every

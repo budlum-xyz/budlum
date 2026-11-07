@@ -1,4 +1,4 @@
-//! `budlum-ee-move-sui` Unix-domain-socket worker daemon (`WP-50`).
+//! `budlum-ee-move-sui` Unix-domain-socket worker daemon ().
 
 #![forbid(unsafe_code)]
 
