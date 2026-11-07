@@ -121,7 +121,13 @@ fn write_database_backup(
         .create(true)
         .truncate(false)
         .open(backup_dir.join(".budlum-backup.lock"))?;
-    lock.try_lock()?;
+    lock.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "another backup writer holds the backup lock",
+        ),
+        std::fs::TryLockError::Error(error) => error,
+    })?;
     let timestamp_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(std::io::Error::other)?
@@ -137,7 +143,13 @@ fn write_database_backup(
         let _ = std::fs::remove_file(&path);
         return Err(error);
     }
-    Storage::verify_snapshot(&path)?;
+    // A backup that fails verification must not survive under a backup name:
+    // a later restore could trust the name and not the bytes. Remove it with
+    // the same cleanup as a failed write.
+    if let Err(error) = Storage::verify_snapshot(&path) {
+        let _ = std::fs::remove_file(&path);
+        return Err(error);
+    }
 
     prune_database_backups(backup_dir, &path, retention_count)?;
     Ok(path)
@@ -2186,7 +2198,8 @@ mod tests {
         std::fs::write(&existing, b"existing").unwrap();
         let lock = std::fs::File::create(backups.join(".budlum-backup.lock")).unwrap();
         lock.lock().unwrap();
-        assert!(write_database_backup(&storage, &backups, 1).is_err());
+        let error = write_database_backup(&storage, &backups, 1).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
         assert_eq!(std::fs::read(existing).unwrap(), b"existing");
     }
 
