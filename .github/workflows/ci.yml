@@ -2622,7 +2622,7 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- git-deps-are-audited-by-commit --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- git-deps-are-audited-by-commit
-      # regeneration: the canonical hash that says which program a zk proof was produced for
+      # canonical-programs-reproduce: the canonical hash that says which program a zk proof was produced for
       # lives in four places in the tree, across three crates, with two hash libraries
       # is computed. That all four return the same result was an assumption and
       # assumptions go stale. If they diverge, the value written to the allowlist and
@@ -2643,7 +2643,7 @@ jobs:
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- zkvm-refuses-untrusted-proofs
       # Relay: ships the regeneration consensus (tokens + proof-side canonical
       # set + signed relay-status.json) to external consumers. Runs after
-      # regeneration because it consumes its output line; the proof-side
+      # canonical-programs-reproduce because it consumes its output line; the proof-side
       # live report is picked up from budzero's target/relay when the
       # bud-proof suite published one in this run.
       - name: relay (signed canonical-production status report) + canary
