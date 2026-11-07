@@ -88,6 +88,12 @@ const ALLOWED_FILES: &[&str] = &[
     // A typo dictionary: the entries are Turkish words precisely because it is
     // teaching the typo checker about them.
     ".quality/typos.toml",
+    // The concept-name register (directive appendix C). Its `old` and `term_tr`
+    // fields ARE the retired Turkish names: the file is the record of which
+    // names are being removed from the tree, so translating them would delete
+    // the record of what is being renamed. Same shape as the typo dictionary
+    // above, and the same reason: the Turkish is the subject, not prose.
+    "config/naming/concept_map.toml",
     // This gate itself. Its vocabulary list IS Turkish words, and its canaries
     // must write Turkish fixtures to prove they can still detect it. A gate
     // that cannot name what it is looking for cannot look for it. Exempting
