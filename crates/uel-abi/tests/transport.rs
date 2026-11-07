@@ -322,6 +322,8 @@ fn uel_abi_handshake_response_must_match_request_id() {
         )
         .expect("mismatched hello reply");
 
+        // Answering the next request ensures the assertion cannot pass merely
+        // because the peer disconnected.
         if let Ok(request) = read_frame(&mut stream) {
             let response = pb::ValidateDeployResponse {
                 result: Some(pb::validate_deploy_response::Result::Info(pb::CodeInfo {
