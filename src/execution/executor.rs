@@ -505,7 +505,7 @@ impl Executor {
                         "Claiming rewards requires zero amount, recipient, and data",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the reward claim fee",
@@ -3186,7 +3186,7 @@ impl Executor {
                         "a relayed cross-domain message requires zero amount, zero recipient and empty data",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the cross-domain relay fee",
@@ -3229,7 +3229,7 @@ impl Executor {
                         "a role unbond requires zero amount, zero recipient and empty data",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the role unbond fee",
@@ -3254,7 +3254,7 @@ impl Executor {
                         "a role withdraw requires zero amount, zero recipient and empty data",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the role withdraw fee",
@@ -3282,7 +3282,7 @@ impl Executor {
                         "a bridge burn takes its amount from the transfer row; it cannot carry one",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the bridge burn fee",
@@ -3361,7 +3361,7 @@ impl Executor {
                         "registering a cross-domain message moves no value",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the cross-domain message fee",
@@ -3396,7 +3396,7 @@ impl Executor {
                         "a storage transaction records commitments; it cannot carry value",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the storage transaction fee",
@@ -3430,7 +3430,7 @@ impl Executor {
                         "an external-domain transaction requires zero amount, zero recipient and empty data",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the external-domain transaction fee",
@@ -3463,7 +3463,7 @@ impl Executor {
                         "a settlement transaction requires zero amount, zero recipient and empty data",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the settlement transaction fee",
@@ -3494,7 +3494,7 @@ impl Executor {
                         "a bridge transaction requires zero amount, zero recipient and empty data",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the bridge transaction fee",
@@ -3523,7 +3523,7 @@ impl Executor {
                         "a canary commit requires zero amount, zero recipient and empty data",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the canary commit fee",
@@ -3552,7 +3552,7 @@ impl Executor {
                         "a Filiz registration requires zero amount, zero recipient and empty data",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the Filiz registration fee",
@@ -3588,7 +3588,7 @@ impl Executor {
                         "a canary reveal requires zero amount, zero recipient and empty data",
                     ));
                 }
-                if state.get_balance(&tx.from) < tx.fee {
+                if state.spendable_balance(&tx.from) < tx.fee {
                     return Err(BudlumError::validation(
                         "insufficient_balance_for_fee",
                         "insufficient balance for the canary reveal fee",
@@ -4068,6 +4068,69 @@ mod tests {
         // Nothing moved: balance intact, no validator registered.
         assert_eq!(state.get_balance(&team), 5_000);
         assert!(state.get_validator(&team).is_none());
+    }
+
+    /// BLG-020: an arm that charges only a fee still reads the spendable
+    /// balance. The vesting-locked funds of the team account do not pay a
+    /// fee, so the arm refuses at the fee gate and not later, for another
+    /// reason.
+    #[test]
+    fn a_fee_only_arm_refuses_vesting_locked_funds_at_the_fee_gate() {
+        use crate::core::account::AccountState;
+        use crate::core::address::Address;
+        use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
+        use crate::execution::executor::Executor;
+
+        let team = Address::from([7u8; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&team, 5_000);
+        state.team_vesting = Some((
+            team,
+            crate::tokenomics::VestingSchedule {
+                total: 5_000,
+                start_epoch: 0,
+                cliff_epochs: 10,
+                duration_epochs: 100,
+            },
+        ));
+        assert_eq!(state.spendable_balance(&team), 0);
+
+        let mut tx = Transaction::new_with_chain_id(
+            team,
+            Address::zero(),
+            0,
+            1,
+            0,
+            vec![],
+            DEFAULT_CHAIN_ID,
+            TransactionType::ClaimRewards {
+                validator: Address::from([8u8; 32]),
+            },
+        );
+        tx.hash = tx.calculate_hash();
+        let err = Executor::apply_transaction_checked(&mut state, &tx)
+            .expect_err("a locked fee must be refused");
+        assert_eq!(
+            err.code(),
+            "insufficient_balance_for_fee",
+            "unexpected error: {err}"
+        );
+        assert_eq!(state.get_balance(&team), 5_000);
+    }
+
+    /// BLG-020, the class: no money gate in the executor reads the raw
+    /// balance of the sender. A raw read skips the vesting lock.
+    #[test]
+    fn no_executor_gate_reads_the_raw_sender_balance() {
+        let src = include_str!("executor.rs");
+        let production = src
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .unwrap_or(src);
+        assert!(
+            !production.contains("get_balance(&tx.from) <"),
+            "a fee or cost gate compares the raw balance; read `spendable_balance`"
+        );
     }
 
     #[test]
