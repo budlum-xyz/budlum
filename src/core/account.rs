@@ -2110,18 +2110,6 @@ impl AccountState {
                     _ => return Err("AI inference layer operator is not in unbonding state".into()),
                 }
             }
-            TransactionType::PrivateTransferSubmit(_) | TransactionType::PrivacyNoteInsert(_) => {
-                if tx.chain_id
-                    == crate::core::chain_config::Network::Mainnet
-                        .chain_id()
-                        .value()
-                {
-                    return Err(
-                        "privacy transfers are disabled on mainnet until full proof verification is wired"
-                            .into(),
-                    );
-                }
-            }
             TransactionType::Unstake => {
                 if let Some(validator) = self.validators.get(&tx.from) {
                     let delegated = self.registry.delegated_stake(&tx.from);

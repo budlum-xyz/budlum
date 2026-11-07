@@ -2454,12 +2454,6 @@ impl Executor {
                 sender.nonce = sender.nonce.saturating_add(1);
             }
             TransactionType::PrivacyNoteInsert(commitment) => {
-                if !privacy_transfers_enabled(tx.chain_id) {
-                    return Err(BudlumError::validation(
-                        "privacy_mainnet_disabled",
-                        "privacy note insertion is disabled on mainnet until full proof verification is wired",
-                    ));
-                }
                 // The same boundary `PrivateTransferSubmit::validate_shape`
                 // holds: only a packed field element is a note.
                 if !crate::privacy::is_note_hash(commitment) {
@@ -2479,12 +2473,6 @@ impl Executor {
                 sender.nonce = sender.nonce.saturating_add(1);
             }
             TransactionType::PrivateTransferSubmit(sub) => {
-                if !privacy_transfers_enabled(tx.chain_id) {
-                    return Err(BudlumError::validation(
-                        "privacy_mainnet_disabled",
-                        "private transfers are disabled on mainnet until ownership, value-conservation, and membership proofs are wired",
-                    ));
-                }
                 sub.validate_shape()
                     .map_err(|e| BudlumError::validation("private_transfer_shape", e))?;
                 if !sub.verify_digest_matches() {
