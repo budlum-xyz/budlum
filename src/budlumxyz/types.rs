@@ -21,7 +21,7 @@ pub struct AppRecord {
     pub developer: Address, // Owner of the app record
     pub category: AppCategory,
     pub website_url: String, // Can point to a .bud BNS name
-    pub manifest_id: Option<crate::storage::content_id::ContentId>, // B.U.D. link for the app frontend
+    pub manifest_id: Option<crate::storage::bud3::content_id::ContentId>, // B.U.D. link for the app frontend
     pub registered_at_epoch: u64,
     /// Developer self-attestation only (ownership proof). NOT third-party audit.
     pub developer_attested: bool,

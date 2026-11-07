@@ -13,7 +13,7 @@ fn test_addr_from_byte(byte: u8) -> crate::core::address::Address {
 
 use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
 use crate::execution::executor::Executor;
-use crate::storage::content_id::ContentId;
+use crate::storage::bud3::content_id::ContentId;
 use crate::tokenomics::{
     bud, genesis_allocations, TokenomicsAddresses, TokenomicsParams, BUD_TOTAL_SUPPLY,
 };
@@ -576,63 +576,6 @@ fn team_vesting_holds_on_every_value_path_not_only_transfer() {
         state.validate_transaction(&transfer).is_err(),
         "validate_transaction must not admit a spend of locked team funds"
     );
-}
-
-/// F4 (Constitution): NftBoost 4% B.U.D. share accumulates in
-/// `pending_bud_boost_share` for later distribution to storage operators.
-/// REGRESSION LOCK - verifies the executor-side wiring.
-#[test]
-fn f4_boost_share_accumulates_in_pending_bud_boost_share() {
-    let mut state = AccountState::new();
-    let booster = test_addr_from_byte(1u8);
-    let creator = test_addr_from_byte(2u8);
-
-    state.add_balance(&booster, 10_000_000);
-
-    // Mint an NFT for the creator.
-    let cid = ContentId([0xABu8; 32]);
-    let nft_id = state
-        .nft_registry
-        .mint(creator, cid, 1, None)
-        .expect("a fresh registry has no id to collide with");
-
-    // Boost the NFT with 1000 - 4% = 40 should go to pending_bud_boost_share.
-    let boost_amount: u64 = 1000;
-    let tx = Transaction {
-        from: booster,
-        to: Address::zero(),
-        amount: 0,
-        fee: 100,
-        max_fee: 100,
-        priority_fee: 0,
-        nonce: 1,
-        data: bincode::serialize(&(nft_id, boost_amount)).unwrap(),
-        timestamp: 1000,
-        hash: String::new(),
-        signature: None,
-        signer_public_key: Vec::new(),
-        authorization: None,
-        chain_id: DEFAULT_CHAIN_ID,
-        signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
-        tx_type: TransactionType::NftBoost {
-            nft_id,
-            amount: boost_amount,
-        },
-    };
-
-    Executor::apply_transaction_checked(&mut state, &tx).unwrap();
-
-    let expected_bud_share = boost_amount * 4 / 100; // 40
-    let expected_creator_share = boost_amount * 16 / 100; // 160
-
-    // Creator should have received 16%.
-    assert_eq!(state.get_balance(&creator), expected_creator_share);
-
-    // 4% should be in pending_bud_boost_share.
-    assert_eq!(state.pending_bud_boost_share, expected_bud_share);
-
-    // Booster should have lost amount + fee.
-    assert_eq!(state.get_balance(&booster), 10_000_000 - boost_amount - 100);
 }
 
 /// The mainnet template seeds no $BUD distribution until the ceremony

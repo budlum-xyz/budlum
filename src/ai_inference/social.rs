@@ -16,7 +16,7 @@
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
 use crate::socialfi::NftRegistry;
-use crate::storage::content_id::ContentId;
+use crate::storage::bud3::content_id::ContentId;
 
 use super::SocialDataRef;
 
@@ -82,7 +82,7 @@ pub fn federated_ai_output_event(
         AI_OUTPUT_EVENT_KIND.as_bytes(),
         &nft_le,
         &owner.0,
-        &content_id.0,
+        &content_id.digest,
         &epoch_le,
     ]);
     FederatedAiOutputEvent {
@@ -114,7 +114,7 @@ impl FederatedAiOutputEvent {
             hex_lower(&self.event_id),
             hex_lower(&self.owner.0),
             self.nft_id,
-            hex_lower(&self.content_id.0),
+            hex_lower(&self.content_id.digest),
             self.epoch,
             // Passed explicitly, not captured implicitly: the format string is
             // built by `concat!`, and implicit named-argument capture only
@@ -128,7 +128,7 @@ impl FederatedAiOutputEvent {
 
 /// Mint an AI inference layer AI output as an NFT on SocialFi (the real
 /// `NftRegistry::mint`). `output` is the bytes of the AI inference layer inference
-/// response; the ContentId is `ContentId::of(output)`.
+/// response; the ContentId is `ContentId::public(output)`.
 /// # Errors
 ///
 /// Whatever `NftRegistry::mint` refuses, which today is a duplicate id: the
@@ -141,7 +141,7 @@ pub fn ai_output_to_nft(
     output: &[u8],
     epoch: u64,
 ) -> Result<(u64, ContentId), crate::socialfi::NftError> {
-    let cid = ContentId::of(output);
+    let cid = ContentId::public(output);
     let nft_id = registry.mint(owner, cid, epoch, Some("ai-inference".to_string()))?;
     Ok((nft_id, cid))
 }
@@ -151,7 +151,7 @@ pub fn ai_output_to_nft(
 /// `validate_inference_grant`.)
 #[must_use]
 pub fn social_nft_to_data_ref(nft_id: u64, content_id: ContentId, owner: Address) -> SocialDataRef {
-    SocialDataRef::from_social(nft_id, content_id.0, owner)
+    SocialDataRef::from_social(nft_id, content_id.digest, owner)
 }
 
 /// Add a tag to an AI inference layer NFT (for example "#ai-inference" or "#ai-output").
@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn federated_event_id_is_bound_to_every_field() {
         let owner = addr(7);
-        let cid = ContentId::of(b"ai output");
+        let cid = ContentId::public(b"ai output");
         let base = federated_ai_output_event(owner, 42, cid, 9);
         assert_eq!(base.nft_id, 42);
         assert_eq!(base.owner, owner);
@@ -208,7 +208,7 @@ mod tests {
         );
         assert_ne!(
             base.event_id,
-            federated_ai_output_event(owner, 42, ContentId::of(b"other"), 9).event_id
+            federated_ai_output_event(owner, 42, ContentId::public(b"other"), 9).event_id
         );
         assert_ne!(
             base.event_id,
@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn federated_event_json_is_deterministic_transport_view() {
-        let event = federated_ai_output_event(addr(3), 5, ContentId::of(b"payload"), 11);
+        let event = federated_ai_output_event(addr(3), 5, ContentId::public(b"payload"), 11);
         let json = event.to_json();
         assert_eq!(json, event.to_json(), "rendering must be deterministic");
         assert!(json.contains("\"type\":\"budlum.ai.output.v1\""));
@@ -227,6 +227,6 @@ mod tests {
         assert!(json.contains("\"epoch\":11"));
         assert!(json.contains(&hex_lower(&event.event_id)));
         assert!(json.contains(&hex_lower(&event.owner.0)));
-        assert!(json.contains(&hex_lower(&event.content_id.0)));
+        assert!(json.contains(&hex_lower(&event.content_id.digest)));
     }
 }

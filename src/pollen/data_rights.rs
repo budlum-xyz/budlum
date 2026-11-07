@@ -8,7 +8,7 @@
 //! admitted without a valid AccessGrant. There is no DAO or admin override.
 
 use crate::core::address::Address;
-use crate::storage::content_id::ContentId;
+use crate::storage::bud3::content_id::ContentId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -692,7 +692,7 @@ mod tests {
 
     #[test]
     fn data_asset_id_is_deterministic() {
-        let cid = ContentId::of(b"bud-data");
+        let cid = ContentId::public(b"bud-data");
         let asset = DataAsset::new(addr(1), cid, [9u8; 32], true);
         assert_eq!(
             asset.asset_id,

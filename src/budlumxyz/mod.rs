@@ -50,7 +50,7 @@ impl BudlumxyzRegistry {
         developer: Address,
         category: AppCategory,
         website_url: String,
-        manifest_id: Option<crate::storage::content_id::ContentId>,
+        manifest_id: Option<crate::storage::bud3::content_id::ContentId>,
         epoch: u64,
     ) -> Result<u64, BudlumxyzError> {
         if name.is_empty()
@@ -101,7 +101,7 @@ impl BudlumxyzRegistry {
         id: u64,
         caller: &Address,
         new_url: Option<String>,
-        new_manifest: Option<crate::storage::content_id::ContentId>,
+        new_manifest: Option<crate::storage::bud3::content_id::ContentId>,
     ) -> Result<(), BudlumxyzError> {
         let app = self.apps.get_mut(&id).ok_or(BudlumxyzError::NotFound)?;
         if &app.developer != caller {
@@ -189,7 +189,7 @@ impl BudlumxyzRegistry {
         &mut self,
         id: u64,
         expected_developer: &crate::core::address::Address,
-        expected_manifest_id: Option<crate::storage::content_id::ContentId>,
+        expected_manifest_id: Option<crate::storage::bud3::content_id::ContentId>,
         expected_website_url_hash: &[u8; 32],
     ) -> Result<(), BudlumxyzError> {
         use sha2::{Digest, Sha256};
@@ -277,7 +277,7 @@ impl BudlumxyzRegistry {
 mod tests {
     use super::*;
     use crate::core::address::Address;
-    use crate::storage::content_id::ContentId;
+    use crate::storage::bud3::content_id::ContentId;
 
     #[test]
     fn register_and_attest_flow() {
@@ -289,7 +289,7 @@ mod tests {
                 dev,
                 AppCategory::SocialFi,
                 "https://example.bud".into(),
-                Some(ContentId([2u8; 32])),
+                Some(ContentId::referenced([2u8; 32])),
                 1,
             )
             .expect("a fresh registry has no id to collide with");
@@ -414,10 +414,10 @@ mod tests {
             .register_app("U".into(), dev, AppCategory::DeFi, "u".into(), None, 1)
             .expect("a fresh registry has no id to collide with");
         assert!(reg
-            .update_app(id, &dev, Some("new".into()), Some(ContentId([3u8; 32])))
+            .update_app(id, &dev, Some("new".into()), Some(ContentId::referenced([3u8; 32])))
             .is_ok());
         assert_eq!(reg.apps[&id].website_url, "new");
-        assert_eq!(reg.apps[&id].manifest_id, Some(ContentId([3u8; 32])));
+        assert_eq!(reg.apps[&id].manifest_id, Some(ContentId::referenced([3u8; 32])));
     }
 
     #[test]
@@ -471,7 +471,7 @@ mod tests {
             id,
             &dev,
             Some("https://new.example".into()),
-            Some(ContentId([4u8; 32])),
+            Some(ContentId::referenced([4u8; 32])),
         )
         .unwrap();
         assert_ne!(root_before, reg.root());

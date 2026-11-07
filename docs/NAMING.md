@@ -32,7 +32,7 @@ Budlum's architecture names say what a thing does. Metaphor names are retired. T
 | Universal Gateway, BudGateway | `content_gateway` | content gateway | storage | WP-23 |
 | Regeneration, Turritopsis model | `state_recovery` | node state recovery | node | WP-06 |
 | PUL, PUL-Full, Pul-Lite | `sigagg (crate bud-sigagg)` | signature aggregation proof | budzero | WP-33 |
-| Tarif, Recipe, TARIF-3, VideoRecipe | `bud3::Object, ObjectCommitment, bof1` | B.U.D. 3.0 object, object commitment, BUD3 Object Format 1 (BOF-1) | storage | WP-19 |
+| Tarif, Recipe, TARIF-3, video recipe | `bud3::Object, ObjectCommitment, bof1` | B.U.D. 3.0 object, object commitment, BUD3 Object Format 1 (BOF-1) | storage | WP-19 |
 | three_* modules | `src/storage/bud3/*` | bud3 modules | storage | WP-21 |
 | Liquid storage | `wide_stripe` | class-aware wide-stripe placement | storage | WP-20 |
 | Living Threshold, temperature transition | `access_tiering, TierTransition` | access tiering policy | storage | WP-24 |

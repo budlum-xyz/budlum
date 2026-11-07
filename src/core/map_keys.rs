@@ -23,14 +23,13 @@
 //! | key type | JSON string |
 //! |---|---|
 //! | `[u8; 32]` (`Hash32`, `MessageId`) | 64 lowercase hex characters |
-//! | `AiModelId`, `AiRequestId`, `ContentId` | the inner 32 bytes as hex |
+//! | `AiModelId`, `AiRequestId` | the inner 32 bytes as hex |
 //! | `(DomainId, Address)` | `"<domain>:<address hex>"` |
 //! | `(DomainId, DomainId, Address)` | `"<src>:<dst>:<address hex>"` |
 //! | `(DomainId, u64, u64)` | `"<domain>:<height>:<index>"` |
 //! | `(u64, u32)` (height, evidence version) | `"<height>:<version>"` |
 //! | `DomainKey` | the inner 32 bytes as hex (impl in `external/spec.rs`) |
 //! | `(AiRequestId, [u8; 32])` | `"<request hex>:<hash hex>"` |
-//! | `(ContentId, ContentId)` | `"<content hex>:<shard hex>"` |
 //! | `ProofClaimKey` | `"<domain>:<target height>"` |
 //!
 //! The parser is strict: wrong length, non-hex characters, a missing tuple
@@ -60,12 +59,11 @@ use serde::{Deserialize, Serialize};
 use crate::ai::types::AiRequestId;
 use crate::core::Address;
 use crate::domain::types::DomainId;
-use crate::storage::content_id::ContentId;
 
 /// A map key with a canonical string form for human-readable formats.
 ///
 /// A named key type implements this next to its own definition
-/// (`AiRequestId` in `ai/types.rs`, `ContentId` in `storage/content_id.rs`,
+/// (`AiRequestId` in `ai/types.rs`,
 /// `ProofClaimKey` in `prover/mod.rs`), the way `AssetId` carries its own
 /// hex serde. Bare byte arrays and tuples have no home of their own, so
 /// their impls live here. Add a row to the table above with every impl.
@@ -199,18 +197,6 @@ impl MapKey for (AiRequestId, [u8; 32]) {
     }
 }
 
-impl MapKey for (ContentId, ContentId) {
-    fn to_key_string(&self) -> String {
-        format!("{}:{}", hex::encode(self.0 .0), hex::encode(self.1 .0))
-    }
-    fn from_key_string(s: &str) -> Result<Self, String> {
-        let [content, shard] = parts::<2>(s)?;
-        Ok((
-            ContentId(parse_hex32(content)?),
-            ContentId(parse_hex32(shard)?),
-        ))
-    }
-}
 
 /// `#[serde(with)]` half: string keys for JSON, the derived layout for
 /// binary formats.
@@ -422,12 +408,10 @@ mod tests {
         check([5u8; 32]);
         check(AiModelId([6u8; 32]));
         check(AiRequestId([7u8; 32]));
-        check(ContentId([8u8; 32]));
         check((3u32, Address([1u8; 32])));
         check((3u32, 4u32, Address([2u8; 32])));
         check((3u32, u64::MAX, 0u64));
         check((AiRequestId([9u8; 32]), [10u8; 32]));
-        check((ContentId([11u8; 32]), ContentId([12u8; 32])));
         check(ProofClaimKey {
             domain_id: 7,
             target_height: 99,

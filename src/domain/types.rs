@@ -2,7 +2,6 @@ use crate::core::address::Address;
 use crate::core::block::Block;
 use crate::core::hash::hash_fields_bytes;
 use crate::domain::finality_adapter::FinalityProof;
-use crate::domain::storage_params::StorageDomainParams;
 use serde::{Deserialize, Serialize};
 
 pub type DomainId = u32;
@@ -38,14 +37,12 @@ pub enum ConsensusKind {
     Custom(String),
     /// B.U.D. Storage ConsensusDomain.
     ///
-    /// Carries the bounded `StorageDomainParams` so the type system forces
-    /// Every consumer to handle the storage-specific limits. We use a new
-    /// Enum variant (not `Custom("StorageProofOfReplication")`) because the
-    /// Parameter bundle is part of the consensus surface plan
-    /// section 3.1: "do not invent a new hash function" and "do not invent a
-    /// new bridge protocol" - but it IS a new domain kind that needs its own
-    /// typing.
-    StorageAttestation(StorageDomainParams),
+    /// A domain whose consensus is storage attestation. The parameters of
+    /// the removed storage model are gone; the domain id keeps storage
+    /// domains apart. We use a dedicated enum variant (not
+    /// `Custom("StorageProofOfReplication")`) because the kind is part of the
+    /// consensus surface and needs its own typing.
+    StorageAttestation,
     /// AI Inference Consensus Domain (Paradigma).
     ///
     /// AI Inference operates as a first-class consensus domain in the
@@ -72,13 +69,11 @@ impl ConsensusKind {
                 out.extend_from_slice(name.as_bytes());
                 out
             }
-            ConsensusKind::StorageAttestation(params) => {
-                // Tag + parameters: distinct from any `Custom(...)` string so
-                // Downstream code that already pattern-matches on `as_bytes`
-                // Can recognize storage domains unambiguously.
-                let mut out = b"storage_attestation:".to_vec();
-                out.extend_from_slice(&crate::domain::storage_params::storage_params_bytes(params));
-                out
+            ConsensusKind::StorageAttestation => {
+                // Tag only: the parameters of the removed storage model are
+                // gone, and the domain id in the leaf keeps storage domains
+                // apart from each other and from any `Custom(...)` string.
+                b"storage_attestation:".to_vec()
             }
             ConsensusKind::AiInference => b"ai_inference".to_vec(),
         }
@@ -86,7 +81,7 @@ impl ConsensusKind {
 
     /// Convenience: is this a B.U.D. storage domain?
     pub fn is_storage(&self) -> bool {
-        matches!(self, ConsensusKind::StorageAttestation(_))
+        matches!(self, ConsensusKind::StorageAttestation)
     }
 
     /// Convenience: is this an AI Inference domain?

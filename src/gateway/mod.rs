@@ -1,6 +1,5 @@
 pub mod atlas;
 pub mod passport;
-pub mod service;
 pub use atlas::{
     build_wallet_context, AtlasEvidenceCard, AtlasEvidenceStatus, AtlasQueryEngine,
     AtlasWalletContext, CrossDomainTrace, DomainSummary, EvidenceRecord, MessageTraceStatus,
@@ -12,4 +11,7 @@ pub use passport::{
     validate_passport_name, DwebPassportProfile, EvidenceCard, EvidenceStatus, PassportProofBundle,
     PassportProofItem,
 };
-pub use service::{pollen_guard_ids, BudGateway};
+
+/// Maximum payload bytes served by the content gateway in a single response.
+/// WIRING: exposed for: budscan content-gateway parity.
+pub const MAX_GATEWAY_CONTENT_BYTES: usize = 10 * 1024 * 1024;

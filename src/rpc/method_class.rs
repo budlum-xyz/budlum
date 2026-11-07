@@ -175,10 +175,6 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_adminUnbanPeer", Operator, LocalAdmin),
     row("bud_adminListBannedPeers", Operator, Read),
     // refused; manifest registration is `StorageTx::RegisterManifest`.
-    row("bud_storageRegisterManifest", Operator, Refused),
-    row("bud_storageVerifyEncoding", Public, Read),
-    row("bud_storageQrFeedPreview", Public, Read),
-    row("bud_storageQrFeedFrames", Public, Read),
     // Refused on every chain until grants ride a block transaction.
     row("bud_storageIssueViewGrant", Public, Refused),
     row("bud_storageRevokeViewGrant", Public, Refused),
@@ -188,26 +184,8 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_storageOpenReveal", Public, LocalAdmin),
     row("bud_storageRevealFrames", Public, LocalAdmin),
     row("bud_storageCloseReveal", Public, LocalAdmin),
-    row("bud_storageRegisterConfidentialCommit", Operator, Refused),
-    row("bud_storageGetConfidentialCommit", Public, Read),
-    // refused; the doors are `StorageTx::OpenDeal` and
-    // `StorageTx::AcceptReallocation`.
-    row("bud_storageOpenDeal", Operator, Refused),
-    row("bud_storageAcceptReallocation", Operator, Refused),
-    row("bud_storageGetManifest", Public, Read),
-    row("bud_storageGetDealsByManifest", Public, Read),
-    row("bud_storageGetDealsByShard", Public, Read),
-    row("bud_storageGetChallenges", Public, Read),
-    // refused; the doors are `StorageTx::OpenChallenge` and
-    // `StorageTx::AnswerChallenge`.
-    row("bud_storageOpenChallenge", Operator, Refused),
-    row("bud_storageAnswerChallenge", Operator, Refused),
-    row("bud_storageGetEconomicsSummary", Public, Read),
-    row("bud_storageGetEconomicsEvents", Public, Read),
-    row("bud_storageGetOperatorEconomics", Public, Read),
-    row("bud_storageGetOutcome", Public, Read),
-    row("bud_storageRepairBand", Public, Read),
-    row("bud_storageActiveOperators", Public, Read),
+    // refused; the doors are the signed storage transactions.
+    // refused; the doors are the signed storage transactions.
     row("bud_bnsResolve", Public, Read),
     row("bud_bnsResolveFull", Public, Read),
     row("bud_bnsResolveContent", Public, Read),
@@ -417,5 +395,14 @@ mod tests {
         let missing = &all[1..];
         let err = check_served_methods(missing.iter().copied()).unwrap_err();
         assert!(err.contains(&format!("{} has a row", all[0])));
+    }
+
+    /// The classified table matches the registered surface exactly: a method
+    /// cannot be served without a row, and a row cannot outlive its method.
+    #[test]
+    fn rpc_method_table_matches_registered_methods() {
+        let declared = declared_methods();
+        let names: Vec<&str> = declared.iter().map(String::as_str).collect();
+        check_served_methods(names).expect("the table and the registered methods match");
     }
 }

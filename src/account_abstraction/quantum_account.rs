@@ -339,9 +339,9 @@ impl RecoveryProposal {
     }
 }
 
-/// The PACT binding type lives in `src/storage/pact_binding.rs`.
+/// The PACT binding type lives in `src/account_abstraction/pact_binding.rs`.
 ///
-/// There used to be a second `PactBinding` definition here: the same five fields, the same 128-byte
+/// There used to be a second commitment-binding definition here: the same five fields, the same 128-byte
 /// budget check, the same `verify_commitment`. `storage::Pact` is a superset of it -
 /// it also carries `id` and `mod_flag`, and binds to a root through
 /// `PactRegistry`.
@@ -351,7 +351,7 @@ impl RecoveryProposal {
 /// `is_residual_only` did not exist on this side, so it could not tell a pure-production PACT
 /// from a residual-only one. The copy was removed; the single definition
 /// is used from outside.
-pub use crate::storage::pact_binding::{Pact, PactRegistry};
+pub use crate::account_abstraction::pact_binding::{Pact, PactRegistry};
 
 /// One guardian's vote on a recovery proposal: the guardian's ML-DSA-87
 /// public key, the digest of the proposal it approves, and its signature

@@ -5,7 +5,7 @@ use crate::core::address::Address;
 use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
 use crate::execution::executor::Executor;
 use crate::pollen::{AccessGrant, AiDataInputRef, DataAsset, GrantId, Signature64};
-use crate::storage::content_id::ContentId;
+use crate::storage::bud3::content_id::ContentId;
 
 fn test_keypair(byte: u8) -> crate::crypto::primitives::KeyPair {
     crate::crypto::primitives::KeyPair::from_seed(&[byte; 32]).expect("deterministic test keypair")
@@ -52,13 +52,13 @@ fn request(
     let perception = match crate::pollen::data_rights::AiDataInputRef::decode(&input_ref) {
         Ok(Some(r)) => Some(crate::ai_inference::perception::PerceptionRequest {
             asset_id: r.asset_id,
-            content_id: crate::storage::content_id::ContentId([0; 32]),
+            content_id: crate::storage::bud3::content_id::ContentId::referenced([0; 32]),
             kind: crate::ai_inference::perception::PerceptionKind::Text,
             declared_units: 100,
         }),
         _ => Some(crate::ai_inference::perception::PerceptionRequest {
             asset_id: crate::pollen::AssetId([0xEE; 32]),
-            content_id: crate::storage::content_id::ContentId([0; 32]),
+            content_id: crate::storage::bud3::content_id::ContentId::referenced([0; 32]),
             kind: crate::ai_inference::perception::PerceptionKind::Text,
             declared_units: 100,
         }),
@@ -121,7 +121,7 @@ fn pollen_ai_data_ref_without_access_grant_is_rejected() {
     let model_id = spec.model_id;
     state.ai_registry.register_model(spec).unwrap();
 
-    let asset = DataAsset::new(addr(1), ContentId::of(b"private data"), [0x11; 32], true);
+    let asset = DataAsset::new(addr(1), ContentId::public(b"private data"), [0x11; 32], true);
     let asset_id = asset.asset_id;
     state.marketplace.register_data_asset(asset).unwrap();
     let input = AiDataInputRef {
@@ -147,7 +147,7 @@ fn pollen_ai_data_ref_with_access_grant_is_consumed_once() {
     let model_id = spec.model_id;
     state.ai_registry.register_model(spec).unwrap();
 
-    let asset = DataAsset::new(addr(1), ContentId::of(b"private data"), [0x22; 32], true);
+    let asset = DataAsset::new(addr(1), ContentId::public(b"private data"), [0x22; 32], true);
     let asset_id = asset.asset_id;
     state
         .marketplace
@@ -209,7 +209,7 @@ fn signed_sale_authorization(asset: &DataAsset) -> crate::pollen::SaleAuthorizat
     authorization
 }
 
-/// Register a plaintext manifest owned by `owner` and return its content id.
+/// Register content owned by `owner` and return its content id.
 ///
 /// `PollenRegisterDataAsset` requires positive ownership: the content id must
 /// already be registered to the sender. Without that precondition any funded
@@ -219,13 +219,8 @@ fn registered_plaintext_content(state: &mut AccountState, owner: Address, seed: 
     let bytes: Vec<u8> = (0..4096u32)
         .map(|i| ((i % 251) as u8).wrapping_add(seed))
         .collect();
-    let encoded =
-        crate::storage::encode_object(&bytes, crate::storage::ErasureScheme { k: 4, n: 6 })
-            .expect("encode");
-    let mut manifest = encoded.to_manifest().expect("manifest");
-    manifest.owner = owner;
-    let content_id = manifest.manifest_id;
-    state.storage_registry.register_manifest(&manifest);
+    let content_id = ContentId::public(&bytes);
+    state.content_ownership.record_test_owner(content_id, owner);
     content_id
 }
 
@@ -297,7 +292,7 @@ fn tx_backed_pollen_rejects_non_owner_grant_submission() {
     state.add_balance(&owner, 100);
     state.add_balance(&requester, 100);
 
-    let asset = DataAsset::new(owner, ContentId::of(b"private data"), [0x55; 32], true);
+    let asset = DataAsset::new(owner, ContentId::public(b"private data"), [0x55; 32], true);
     state
         .marketplace
         .register_data_asset(asset.clone())
@@ -318,7 +313,7 @@ fn tx_backed_pollen_revoke_asset_blocks_ai_reads() {
     let requester = addr(2);
     let mut state = AccountState::new();
     state.add_balance(&owner, 100);
-    let asset = DataAsset::new(owner, ContentId::of(b"private data"), [0x66; 32], true);
+    let asset = DataAsset::new(owner, ContentId::public(b"private data"), [0x66; 32], true);
     let asset_id = state
         .marketplace
         .register_data_asset(asset.clone())
@@ -343,7 +338,7 @@ fn tx_backed_pollen_revoke_asset_blocks_ai_reads() {
 #[test]
 fn tx_backed_pollen_sale_authorization_registers_and_roundtrips_proto() {
     let owner = addr(1);
-    let asset = DataAsset::new(owner, ContentId::of(b"private data"), [0x77; 32], true);
+    let asset = DataAsset::new(owner, ContentId::public(b"private data"), [0x77; 32], true);
     let authorization = signed_sale_authorization(&asset);
     let tx = pollen_tx(
         owner,
@@ -377,7 +372,7 @@ fn ai_request_by_a_requester_who_is_not_the_grantee_is_refused() {
     let model_id = spec.model_id;
     state.ai_registry.register_model(spec).unwrap();
 
-    let asset = DataAsset::new(owner, ContentId::of(b"private data"), [0x77; 32], true);
+    let asset = DataAsset::new(owner, ContentId::public(b"private data"), [0x77; 32], true);
     let asset_id = state
         .marketplace
         .register_data_asset(asset.clone())
@@ -414,7 +409,7 @@ fn ai_request_after_the_asset_is_revoked_is_refused_by_the_executor() {
     let model_id = spec.model_id;
     state.ai_registry.register_model(spec).unwrap();
 
-    let asset = DataAsset::new(owner, ContentId::of(b"private data"), [0x88; 32], true);
+    let asset = DataAsset::new(owner, ContentId::public(b"private data"), [0x88; 32], true);
     let asset_id = state
         .marketplace
         .register_data_asset(asset.clone())

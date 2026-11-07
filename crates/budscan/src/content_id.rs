@@ -1,31 +1,15 @@
-//! B.U.D. content addressing, the browser side.
+//! B.U.D. 3.0 content addressing, the browser side.
 //!
-//! The **same** definition as `src/storage/content_id.rs` in `budlum-core`:
-//! `ContentId = hash_fields_bytes([b"BDLM_CONTENT_V1", chunk])`, where
-//! `hash_fields_bytes` length-prefixes every field before feeding it to
-//! SHA-256.
-//!
-//! # Why a copy and not a dependency
-//!
-//! If the browser depended on `budlum-core` it would also pull in libp2p,
-//! tokio, jsonrpsee and sled, and that graph is unwanted inside a browser's
-//! trust boundary. The price is that the two copies can drift apart, and that
-//! price is not left unpaid: the `budscan-name-rule-parity` gate measures in CI
-//! that both definitions carry the same domain tag and the same pinned vector.
-//! The copy is not free, it is measured.
-//!
-//! # Verification is an equality check, not a signature check
-//!
-//! If the hash of the fetched bytes equals the expected identity, the bytes are
-//! correct. The browser never has to decide whom to trust: a node can at most
-//! refuse to serve, it cannot lie.
+//! Mirrors `src/storage/bud3/content_id.rs` in `budlum-core`:
+//! - Public content identity is `Sha256::digest(bytes)`.
+//! - Sealed content identity uses `BDLM_BUD3_CID_SEALED_V1` with length-prefixed fields.
 
 use sha2::{Digest, Sha256};
 
-/// Length-prefixed field hash, mirroring `budlum-core::core::hash::hash_fields_bytes`.
-///
-/// Without the length prefix `["a","bc"]` and `["ab","c"]` would hash the same
-/// byte sequence and two different contents would share the same identity.
+/// Domain tag shared with `src/storage/bud3/content_id.rs`.
+pub const SEALED_ID_TAG: &[u8] = b"BDLM_BUD3_CID_SEALED_V1";
+
+/// Length-prefixed field hash, mirroring `budlum-core`'s length-prefixed framing.
 #[must_use]
 pub fn hash_fields_bytes(fields: &[&[u8]]) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -36,17 +20,30 @@ pub fn hash_fields_bytes(fields: &[&[u8]]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// The canonical content identity.
+/// The canonical 32-byte content identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContentId(pub [u8; 32]);
 
 impl ContentId {
-    /// The `ContentId` of a byte string.
+    /// Compute the public SHA-256 `ContentId` of `bytes`.
     #[must_use]
-    pub fn of(chunk: &[u8]) -> Self {
-        ContentId(hash_fields_bytes(&[b"BDLM_CONTENT_V1", chunk]))
+    pub fn public(bytes: &[u8]) -> Self {
+        Self(Sha256::digest(bytes).into())
     }
 
+    /// Alias for `ContentId::public` used across explorer fetch/verify paths.
+    #[must_use]
+    pub fn of(bytes: &[u8]) -> Self {
+        Self::public(bytes)
+    }
+
+    /// Compute the sealed commitment under `SEALED_ID_TAG`.
+    #[must_use]
+    pub fn sealed(id_key: &[u8; 32], plaintext: &[u8]) -> Self {
+        Self(hash_fields_bytes(&[SEALED_ID_TAG, id_key, plaintext]))
+    }
+
+    /// Borrow the raw 32-byte digest.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
@@ -73,15 +70,8 @@ impl std::fmt::Display for ContentId {
     }
 }
 
-/// Identity comparison after a manifest's shards have been joined.
-///
-/// The comparison is not constant-time and does not need to be: both sides are
-/// public. Nothing here is secret, so there is nothing to leak.
+/// Identity comparison for fetched public content bytes.
 #[must_use]
-///
-/// Convenience: the one-line identity check for the fetch path that
-/// compares a reassembled object to its address; in-tree callers
-/// compare `ContentId`s directly today.
 pub fn bytes_match(expected: ContentId, bytes: &[u8]) -> bool {
     ContentId::of(bytes) == expected
 }
@@ -101,29 +91,17 @@ mod tests {
     }
 
     #[test]
-    fn truncation_cannot_collide() {
-        // The same as `content_id_collisions_impossible_for_truncated_payloads`
-        // in budlum-core: the length prefix makes this equality impossible.
-        let one = ContentId::of(b"ab");
-        let two = ContentId::of(b"a").0;
-        let three = ContentId::of(b"b").0;
-        assert_ne!(
-            one.0,
-            hash_fields_bytes(&[b"BDLM_CONTENT_V1", &two, &three])
+    fn empty_bytes_match_sha256_vector() {
+        assert_eq!(
+            ContentId::public(b"").to_string(),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
     }
 
     #[test]
-    fn the_core_vector_is_pinned() {
-        // This vector is the contract shared with `budlum-core`. If it
-        // changes, one of the two sides has drifted, and that is a bug, not an
-        // update.
-        let id = ContentId::of(b"budlum");
-        assert_eq!(
-            id.to_string(),
-            hex::encode(hash_fields_bytes(&[b"BDLM_CONTENT_V1", b"budlum"]))
-        );
-        assert_eq!(id.0.len(), 32);
+    fn sealed_id_is_length_prefixed() {
+        let key = [0x42u8; 32];
+        assert_ne!(ContentId::sealed(&key, b"ab"), ContentId::sealed(&key, b"a"));
     }
 
     #[test]

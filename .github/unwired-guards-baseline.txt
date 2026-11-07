@@ -1,4 +1,4 @@
-3
+2
 # Guards no production path reaches.
 #
 # Every `pub fn` named check/verify/validate/require/enforce/assert/reject/
@@ -9,20 +9,15 @@
 # honestly declares `WIRING: unwired`, lowers it; lower this file in the same
 # pull request or the gain is given back silently.
 #
-# Not a hard zero on purpose. Some of what remains should not be wired at all:
-# `verify_answer_challenge_zk_proof` returns `Err` unconditionally on purpose,
-# because a Merkle proof not bound to its deal and challenge context is
-# replayable across storage deals and networks, and callers are meant to use
-# `answer_challenge`, which rebuilds that context from registry state. Calling
-# it would satisfy this gate and weaken the chain. A number that can only fall
-# gets paid down; a number driven to zero by wiring refusals that exist to
-# stay unwired is worse than the number it replaced.
+# Not a hard zero on purpose. A number that can only fall gets paid down; a
+# number driven to zero by wiring refusals that exist to stay unwired is worse
+# than the number it replaced.
 #
-# The three, and why each one is still here rather than wired:
+# The two, and why each one is still here rather than wired:
 #
 #   src/ai/execution/verify.rs   verify_execution_proof_structural
 #   src/ai_inference/verify.rs          verify_inference_stark
-#       All three verify a STARK over an execution trace, and all three are
+#       Both verify a STARK over an execution trace, and both are
 #       blocked on the same gate: `MainnetActivation` ships with
 #       `verify_merkle_enabled: false` and `verify_inference_enabled: false`,
 #       pending external audit of the zkVM opcodes. Wiring them before that

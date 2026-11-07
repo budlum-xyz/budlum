@@ -1,0 +1,17 @@
+// B.U.D. 3.0 storage messages.
+//
+// The storage system's wire forms live here, not in the network protocol
+// file: the storage family is its own package so the network envelope does
+// not grow a storage-shaped side.
+syntax = "proto3";
+
+package budlum.storage.v3;
+
+// A B.U.D. 3.0 storage transaction: the bincode encoding of StorageTxV3.
+// The signature preimage carries the same bytes, length-prefixed. The
+// payload is opaque here on purpose: the wire form is the encoded
+// transaction, and the encoding is the transaction's own, versioned by the
+// storage transaction wire version.
+message ProtoStorageV3Tx {
+    bytes data = 1;
+}

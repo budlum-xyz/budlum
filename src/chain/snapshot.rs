@@ -655,8 +655,6 @@ pub struct StateSnapshotV2 {
     #[serde(default)]
     pub governance: Option<crate::core::governance::GovernanceState>,
     #[serde(default)]
-    pub storage_registry: Option<crate::domain::storage_deal::StorageRegistry>,
-    #[serde(default)]
     pub ai_registry: Option<crate::ai::registry::AiRegistry>,
     #[serde(default)]
     pub note_registry: Option<crate::privacy::L1NoteRegistry>,
@@ -934,7 +932,6 @@ impl StateSnapshotV2 {
             marketplace: Some(account_state.marketplace.clone()),
             budlumxyz: Some(account_state.budlumxyz.clone()),
             governance: Some(account_state.governance.clone()),
-            storage_registry: Some(account_state.storage_registry.clone()),
             ai_registry: Some(account_state.ai_registry.clone()),
             note_registry: Some(account_state.note_registry.clone()),
             bridge_state: Some(account_state.bridge_state.clone()),
@@ -1086,7 +1083,6 @@ impl StateSnapshotV2 {
             hash_opt_serializable(&mut hasher, &self.marketplace);
             hash_opt_serializable(&mut hasher, &self.budlumxyz);
             hash_opt_serializable(&mut hasher, &self.governance);
-            hash_opt_serializable(&mut hasher, &self.storage_registry);
             hash_opt_serializable(&mut hasher, &self.ai_registry);
             // The private-note registry, which holds `spent_nullifiers`.
             //
@@ -2490,7 +2486,6 @@ mod tests {
         "marketplace",
         "hub",
         "governance",
-        "storage_registry",
         "ai_registry",
         "note_registry",
         "bridge_state",
@@ -2681,7 +2676,6 @@ mod tests {
             "marketplace",
             "hub",
             "governance",
-            "storage_registry",
             "ai_registry",
             "note_registry",
             "bridge_state",
@@ -2797,7 +2791,6 @@ mod tests {
                 && restored.marketplace.is_none()
                 && restored.budlumxyz.is_none()
                 && restored.governance.is_none()
-                && restored.storage_registry.is_none()
                 && restored.ai_registry.is_none()
                 && restored.note_registry.is_none()
                 && restored.bridge_state.is_none()
@@ -2943,7 +2936,6 @@ mod tests {
             "marketplace",
             "hub",
             "governance",
-            "storage_registry",
             "ai_registry",
             "note_registry",
             "bridge_state",

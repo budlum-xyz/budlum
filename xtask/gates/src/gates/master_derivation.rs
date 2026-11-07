@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 fn code_of(root: &Path) -> Result<String, String> {
-    let f = root.join("src/storage/derived.rs");
+    let f = root.join("crates/bud-codec/src/derived.rs");
     if !f.is_file() {
         return Err(format!("derived-content module missing at {}", f.display()));
     }
@@ -84,13 +84,13 @@ pub fn self_test() -> Result<String, String> {
         writeln!(good, "#[test]\nfn {t}() {{ assert!(true); }}")
             .expect("writing to a String cannot fail");
     }
-    std::fs::write(dir.join("src/storage/derived.rs"), &good).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("crates/bud-codec/src/derived.rs"), &good).map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from("canary: a correct module was refused"));
     }
     let bad = good.replace("MasterRegistry", "MasterThing");
-    std::fs::write(dir.join("src/storage/derived.rs"), bad).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("crates/bud-codec/src/derived.rs"), bad).map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from(

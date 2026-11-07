@@ -1316,7 +1316,7 @@ flowchart LR
   Content[Raw content bytes] --> Hash[ContentId = SHA3-256 domain-tagged]
   Content --> Shards[Off-chain sharding]
   Shards --> ShardRef["ShardRef: shard_id + size"]
-  Hash --> Manifest["ContentManifest: shards + metadata + owner"]
+  Hash --> Manifest["the content manifest: shards + metadata + owner"]
   Manifest --> ManifestId["Manifest::id() = deterministic hash"]
   ManifestId --> Chain[On-chain registration]
   Chain --> Deal[Storage deal per shard]
@@ -2100,7 +2100,7 @@ same answer.
 
 ```mermaid
 flowchart TD
-  M["ContentManifest.source"] --> S1{"Which regime?"}
+  M["the content manifest source"] --> S1{"Which regime?"}
   S1 -->|"Stored"| A["Bytes themselves persist -> full target (3)"]
   S1 -->|"Generated(spec)"| B["Only the recipe persists -> 1 copy"]
   S1 -->|"Hybrid(prefix, spec)"| C["Prefix is not regenerable -> full target (3)"]
@@ -2115,7 +2115,7 @@ flowchart TD
 
 ### The source regime is the manifest's declaration
 
-`ContentManifest.source` states one of three regimes:
+the content manifest `source` field states one of three regimes:
 
 | regime | what persists | copies required |
 |---|---|---|
@@ -2139,7 +2139,7 @@ durability payment for a third of the copies. If that claim were not verified,
 anyone labelling ordinary organic content as `Generated` would take the discount
 and the content **would actually be lost**.
 
-`StorageRegistry::register_manifest_with_source` **runs the recipe** before
+the storage registry registration door **runs the recipe** before
 accepting the claim, computes the content identity of the resulting bytes and
 compares it against the manifest's shard. If it does not hold, registration is
 refused; a refused manifest is not stored, so it does not get the discount either.
@@ -2900,7 +2900,7 @@ flowchart TD
   B -->|"Hybrid / Derived"| NoneR["Ok(None): not a recipe on its own"]
   NoneR --> Fall["Caller falls through to stored-byte paths"]
   B -->|"Generated"| Gen["generate_content"]
-  Gen --> Re["ContentManifest::from_bytes_sliced - rehash"]
+  Gen --> Re["the manifest slicing constructor - rehash"]
   Re --> Cmp{"Does the identity hold?"}
   Cmp -->|"no"| ErrR["Err: recipe exists but generation is untrustworthy"]
   ErrR --> Stop["Do NOT fall through to later paths"]
@@ -2915,7 +2915,7 @@ flowchart TD
 
 The recipe is on chain. But the only thing saying the generator code read that recipe
 correctly is that the produced bytes hold the manifest identity. The branch produces the
-bytes with `generate_content`, rehashes them with `ContentManifest::from_bytes_sliced` and
+bytes with `generate_content`, rehashes them with the manifest slicing constructor and
 compares the identity. If it does not hold, the request is refused.
 
 This is not an internal consistency check but the proof that what the gateway serves is the
@@ -2990,7 +2990,7 @@ wrong one.**
 ### Still unwired: `displaced_shards`
 
 Turning a divergence into a repair requires the placement recorded when the object was
-written. `ContentManifest` does not carry a holder list. Comparing against a placement nobody
+written. the content manifest does not carry a holder list. Comparing against a placement nobody
 stored would be comparing today's answer with today's answer again; the same error as the
 stale tree in section 62, from the other direction.
 
@@ -3943,7 +3943,7 @@ they are banned from *this* edition.
 
 ```mermaid
 flowchart TD
-    M[ContentManifest] --> E{edition}
+    M[the content manifest] --> E{edition}
     E -->|Classic| S[Stored / Hybrid / Derived allowed]
     E -->|Three| G[Generated only]
     G --> R[Recipe on chain]
@@ -3951,7 +3951,7 @@ flowchart TD
     D --> X[Not a deal object]
 ```
 
-`BudStorageEdition` defaults to `Classic` and adds no commitment bytes in that
+the storage edition tag defaults to `Classic` and adds no commitment bytes in that
 case, so every pre-edition id stays bit-identical. `Three` binds
 `BUD_EDITION_3` into the manifest id and `check_source` refuses `Stored`,
 `Hybrid` and `Derived` at registration and at `validate_untrusted`. The

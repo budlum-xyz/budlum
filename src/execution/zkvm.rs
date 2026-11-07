@@ -105,7 +105,26 @@ impl ZkVmExecutor {
     ///
     /// Decodes under the testing profile and applies no activation gate. Never
     /// reachable from transaction execution.
-    #[cfg(test)]
+    /// Canonical 2-instruction `VerifyMerkle` program (`CANONICAL_PROGRAM_HASHES[0]`).
+///
+/// Kept in the execution layer after the legacy storage challenge path left the
+/// tree so the `VerifyMerkle` ISA path remains pinned in the canonical program
+/// set until the B.U.D. 3.0 symbol Merkle proof verifier wires into it.
+/// WIRING: exposed for: canonical program hash reproduction.
+#[must_use]
+pub fn canonical_merkle_verify_program() -> bud_isa::IsaProgram {
+    let mut builder = bud_compiler::ProgramBuilder::new();
+    builder.emit(bud_isa::Instruction::VerifyMerkle {
+        leaf_reg: 0,
+        proof_ptr_reg: 1,
+        root_reg: 2,
+        dst: 3,
+    });
+    builder.emit(bud_isa::Instruction::Halt);
+    builder.finish()
+}
+
+#[cfg(test)]
     pub fn execute_bytecode_ungated(
         bytecode: &[u8],
         gas_limit: u64,

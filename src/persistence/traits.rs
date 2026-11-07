@@ -220,21 +220,6 @@ pub trait BlockchainStorage: Send + Sync {
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
-    fn save_storage_economics_state(
-        &self,
-        snapshot: &crate::chain::blockchain::StorageEconomicsStateSnapshot,
-    ) -> std::io::Result<()>;
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
-    fn load_storage_economics_state(
-        &self,
-    ) -> std::io::Result<Option<crate::chain::blockchain::StorageEconomicsStateSnapshot>>;
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
     fn save_cross_domain_message(&self, message: &CrossDomainMessage) -> std::io::Result<()>;
     /// # Errors
     ///

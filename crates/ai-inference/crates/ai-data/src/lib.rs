@@ -4,7 +4,7 @@
 //! # ai-data - the closed-circuit data layer
 //!
 //! AI inference layer only reads data that carries a Pollen grant, is labelled as a B.U.D.
-//! StorageDeal, or comes from SocialFi. This crate contains not a single path
+//! stored content, or comes from SocialFi. This crate contains not a single path
 //! that reads external data: even external datasets are recorded into B.U.D.
 //! first.
 //!

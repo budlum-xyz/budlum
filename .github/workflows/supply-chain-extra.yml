@@ -159,7 +159,7 @@ jobs:
           # Same staleness, second workspace: budzero/target carries the same
           # cached dep-info trap as the root build above.
           cargo clean
-          for crate in bud-compiler bud-vm bud-isa bud-state bud-proof bud-node bud-cli verifier-registry; do
+          for crate in bud-compiler bud-vm bud-isa bud-state bud-proof bud-cli verifier-registry; do
             set +e
             # cargo-geiger wants an ABSOLUTE path: given a relative one
             # it says "is not an absolute path. Please provide an absolute path."

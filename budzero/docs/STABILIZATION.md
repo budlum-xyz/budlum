@@ -298,7 +298,6 @@ Adding a new state area (storage, stack, memory) to a ZKVM does not always requi
 | Topic | Status | Plan |
 |------|-------|------|
 | Poseidon multi-round AIR | only round 0 is verified | full verification once Plonky3 supports multi-round constraints |
-| L1 node integration | bud-node placeholder | JSON-RPC API and P2P network layer |
 | Compiler error messages | no span information | `miette` integration |
 | Debug mode | no step-by-step debugger | a `bud-cli debug` command |
 

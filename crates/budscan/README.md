@@ -94,7 +94,7 @@ boundary. The price is two copies, and the price is measured:
 | copy | browser | chain |
 |---|---|---|
 | name rule | `src/name_rule.rs` | `xtask/gates/.../bns_names_are_safe_in_an_address_bar.rs` |
-| `ContentId` | `src/content_id.rs` | `src/storage/content_id.rs` |
+| `ContentId` | `src/content_id.rs` | `src/storage/bud3/content_id.rs` |
 | size limit | `src/fetch.rs` | `src/gateway/service.rs` |
 | `EPOCH_LENGTH` | `src/light_client.rs` | `src/chain/blockchain.rs` |
 

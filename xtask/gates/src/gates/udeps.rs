@@ -115,13 +115,13 @@ pub fn run(root: &Path, out: &Path) -> Result<String, String> {
 pub fn self_test() -> Result<String, String> {
     // Two dependency groups under one package: the first is drawn with the
     // continuing `│` rule, the last without it. Both must parse.
-    let real = "info: Loading depinfo from \"x.d\"\nunused dependencies:\n`budlum-core v0.1.0 (/x/budlum)`\n├─── dependencies\n│    ├─── \"chrono\"\n│    └─── \"group\"\n└─── dev-dependencies\n     └─── \"tempfile\"\nNote: They might be false-positive.\n`bud-node v0.1.0 (/x/budzero/bud-node)`\n└─── dependencies\n     └─── \"serde_json\"\n";
+    let real = "info: Loading depinfo from \"x.d\"\nunused dependencies:\n`budlum-core v0.1.0 (/x/budlum)`\n├─── dependencies\n│    ├─── \"chrono\"\n│    └─── \"group\"\n└─── dev-dependencies\n     └─── \"tempfile\"\nNote: They might be false-positive.\n`bud-vm v0.1.0 (/x/budzero/bud-vm)`\n└─── dependencies\n     └─── \"serde_json\"\n";
     let parsed = parse_udeps(real);
     let expected = [
         "budlum-core:chrono",
         "budlum-core:group",
         "budlum-core:tempfile",
-        "bud-node:serde_json",
+        "bud-vm:serde_json",
     ];
     if parsed != expected {
         return Err(format!(

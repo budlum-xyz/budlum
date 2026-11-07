@@ -110,31 +110,32 @@ fn blg_266_min_stake_is_split_per_class() {
     assert!(window.contains("min_stake_mobile: crate::tokenomics::bud(10)"));
 }
 
-// Carried from pr-68 (M0 live verification locks).
 #[test]
-    fn audit_lane_a_blg_001() {
-        // BLG-001: PoS leader selection skips empty height and locks production.
-        // Pre-corrected. Test is permanent.
-        // Source: src/consensus/leader.rs (MAX_LEADER_ROUNDS, affordable_leader_round)
-        assert!(true, "BLG-001 pre-corrected. Test passes.");
-    }
+fn audit_lane_a_blg_001_leader_round_surface_present() {
+    let src = include_str!("../consensus/leader.rs");
+    assert!(
+        src.contains("MAX_LEADER_ROUNDS"),
+        "BLG-001: bounded leader-round fallback constant must remain present"
+    );
+}
 
 #[test]
-    fn audit_lane_a_blg_006() {
-        // BLG-006: Reward pool epoch dependency.
-        // Pre-corrected. Test is permanent.
-        // Source: src/tokenomics/reward_pool.rs (pay_epoch)
-        assert!(true, "BLG-006 pre-corrected. Test passes.");
-    }
+fn audit_lane_a_blg_006_reward_pool_epoch_surface_present() {
+    let src = include_str!("../tokenomics/reward_pool.rs");
+    assert!(
+        src.contains("pay_epoch"),
+        "BLG-006: epoch reward settlement entrypoint must remain present"
+    );
+}
 
 #[test]
-    fn audit_lane_a_blg_018() {
-        // BLG-018: Hybrid finality progress stalls.
-        // Pre-corrected. Test is permanent.
-        // Source: src/chain/blockchain.rs (finalized_height)
-        assert!(true, "BLG-018 pre-corrected. Test passes.");
-    }
-
+fn audit_lane_a_blg_018_finalized_height_tracked_in_blockchain() {
+    let src = include_str!("../chain/blockchain.rs");
+    assert!(
+        src.contains("finalized_height"),
+        "BLG-018: finalized_height tracking must remain present in blockchain"
+    );
+}
 
 #[test]
 fn audit_lane_a_blg_019_retired_state_update_preserves_accounts() {

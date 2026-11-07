@@ -86,10 +86,8 @@ const BASELINE: &[&str] = &[
     "src/domain/finality_adapter.rs",
     "src/domain/fork_choice.rs",
     "src/domain/plugin.rs",
-    "src/domain/storage_deal.rs",
     "src/execution/executor.rs",
     "src/execution/zkvm.rs",
-    "src/gateway/service.rs",
     "src/light_client/mod.rs",
     "src/ai_inference/mod.rs",
     "src/main.rs",
@@ -106,16 +104,7 @@ const BASELINE: &[&str] = &[
     "src/settlement/proof_market.rs",
     "src/sharding/mod.rs",
     "src/socialfi/mod.rs",
-    "src/storage/assignment.rs",
-    "src/storage/content_id.rs",
-    "src/storage/dictionary.rs",
-    "src/storage/erasure.rs",
-    "src/storage/generated.rs",
-    "src/storage/manifest.rs",
     "src/persistence/state_trie.rs",
-    "src/storage/msr.rs",
-    "src/storage/provider.rs",
-    "src/storage/render.rs",
     "src/tokenomics/mod.rs",
     // The 2026-10-27 change: fourteen more files, each measured against the
     // bound that makes its index unreachable at runtime, cited beside it.
@@ -364,7 +353,7 @@ pub fn self_test() -> Result<String, String> {
         ));
     }
 
-    if !is_test_support("src/tests/foo.rs") || is_test_support("src/storage/erasure.rs") {
+    if !is_test_support("src/tests/foo.rs") || is_test_support("src/storage/bud3/content_id.rs") {
         return Err(String::from("test-support detection is wrong"));
     }
 

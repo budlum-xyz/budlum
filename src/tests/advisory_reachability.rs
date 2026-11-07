@@ -137,10 +137,6 @@ mod tests {
         const REV: &str = "38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd";
         for (name, manifest) in [
             ("Cargo.toml", include_str!("../../Cargo.toml")),
-            (
-                "budzero/bud-node/Cargo.toml",
-                include_str!("../../budzero/bud-node/Cargo.toml"),
-            ),
             ("fuzz/Cargo.toml", include_str!("../../fuzz/Cargo.toml")),
         ] {
             let dep = manifest

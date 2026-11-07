@@ -62,6 +62,19 @@ fn decode_validator_tx(data: &[u8]) -> Result<crate::validators::ValidatorTx, St
         .map_err(|e| format!("Invalid validator transaction payload: {e}"))
 }
 
+/// The largest StorageTx v3 payload a peer may send.
+const MAX_STORAGE_V3_TX_BYTES: u64 = 1 << 20;
+
+fn decode_storage_v3_tx(data: &[u8]) -> Result<crate::storage::bud3::tx::StorageTx, String> {
+    use bincode::Options as _;
+    bincode::options()
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+        .with_limit(MAX_STORAGE_V3_TX_BYTES)
+        .deserialize(data)
+        .map_err(|e| format!("Invalid storage transaction payload: {e}"))
+}
+
 /// The only transaction wire version this node encodes and accepts.
 const TX_WIRE_VERSION: u32 = 2;
 
@@ -297,6 +310,14 @@ impl From<&Transaction> for pb::ProtoTransaction {
                     },
                 )),
             ),
+            TransactionType::Storage(storage_tx) => (
+                pb::ProtoTransactionType::StorageV3 as i32,
+                Some(pb::proto_transaction::TypePayload::StorageV3(
+                    pb::ProtoStorageV3Tx {
+                        data: bincode_payload_or_log("StorageTx", storage_tx.as_ref()),
+                    },
+                )),
+            ),
             TransactionType::CrossDomainMessage(message) => (
                 pb::ProtoTransactionType::CrossDomainMessage as i32,
                 Some(pb::proto_transaction::TypePayload::CrossDomainMessage(
@@ -354,14 +375,6 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 Some(pb::proto_transaction::TypePayload::Vault(
                     pb::ProtoVaultTx {
                         data: bincode_payload_or_log("VaultTx", vault_tx),
-                    },
-                )),
-            ),
-            TransactionType::Storage(storage_tx) => (
-                pb::ProtoTransactionType::Storage as i32,
-                Some(pb::proto_transaction::TypePayload::Storage(
-                    pb::ProtoStorageTx {
-                        data: bincode_payload_or_log("StorageTx", storage_tx),
                     },
                 )),
             ),
@@ -442,7 +455,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                         effort_tenths: u32::from(req.effort.tenths()),
                         perception: req.perception.clone().map(|p| pb::ProtoPerceptionRequest {
                             asset_id: p.asset_id.0.to_vec(),
-                            content_id: p.content_id.0.to_vec(),
+                            content_id: p.content_id.digest.to_vec(),
                             kind_tag: u32::from(p.kind.perception_tag()),
                             declared_units: p.declared_units,
                         }),
@@ -1230,7 +1243,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                 }
                 cid_bytes.copy_from_slice(&payload.cid);
                 TransactionType::AiOfferData {
-                    cid: crate::storage::content_id::ContentId(cid_bytes),
+                    cid: crate::storage::bud3::content_id::ContentId::referenced(cid_bytes),
                     price: payload.price,
                 }
             }
@@ -1256,7 +1269,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     }
                     let mut arr = [0u8; 32];
                     arr.copy_from_slice(&payload.manifest_id);
-                    Some(crate::storage::content_id::ContentId(arr))
+                    Some(crate::storage::bud3::content_id::ContentId::referenced(arr))
                 };
                 TransactionType::BudlumxyzRegisterApp {
                     name: payload.name,
@@ -1338,6 +1351,13 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                 };
                 TransactionType::Validator(decode_validator_tx(&payload.data)?)
             }
+            pb::ProtoTransactionType::StorageV3 => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::StorageV3(p)) => p,
+                    _ => return Err("Missing or mismatched StorageV3 payload".into()),
+                };
+                TransactionType::Storage(Box::new(decode_storage_v3_tx(&payload.data)?))
+            }
             pb::ProtoTransactionType::CrossDomainMessage => {
                 let payload = match proto.type_payload {
                     Some(pb::proto_transaction::TypePayload::CrossDomainMessage(p)) => p,
@@ -1413,14 +1433,10 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                 )
             }
             pb::ProtoTransactionType::Storage => {
-                let payload = match proto.type_payload {
-                    Some(pb::proto_transaction::TypePayload::Storage(p)) => p,
-                    _ => return Err("Missing or mismatched Storage payload".into()),
-                };
-                TransactionType::Storage(
-                    bincode::deserialize(&payload.data)
-                        .map_err(|e| format!("Invalid StorageTx payload: {e}"))?,
-                )
+                // The v2 storage payload carries no binding-record header:
+                // its tags would decode as the wrong bodies here, so the tag
+                // refuses instead.
+                Err("the v2 storage payload no longer decodes".into())
             }
             pb::ProtoTransactionType::ExternalDomain => {
                 let payload = match proto.type_payload {
@@ -1588,7 +1604,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                             })?;
                             Some(crate::ai_inference::perception::PerceptionRequest {
                                 asset_id: crate::pollen::AssetId(aid),
-                                content_id: crate::storage::content_id::ContentId(cid),
+                                content_id: crate::storage::bud3::content_id::ContentId::referenced(cid),
                                 kind,
                                 declared_units: p.declared_units,
                             })
@@ -2805,7 +2821,7 @@ mod tests {
                 external_state_root: [5u8; 32],
             }),
             TransactionType::AiOfferData {
-                cid: crate::storage::content_id::ContentId([7u8; 32]),
+                cid: crate::storage::bud3::content_id::ContentId::referenced([7u8; 32]),
                 price: 500,
             },
             TransactionType::AiPurchaseData { offer_id: 888 },
@@ -2813,7 +2829,7 @@ mod tests {
                 name: "BudApp".into(),
                 category: crate::budlumxyz::types::AppCategory::DeFi,
                 website_url: "https://budlum.ai".into(),
-                manifest_id: Some(crate::storage::content_id::ContentId([8u8; 32])),
+                manifest_id: Some(crate::storage::bud3::content_id::ContentId::referenced([8u8; 32])),
             },
             TransactionType::BudlumxyzAttestApp { app_id: 4242 },
             TransactionType::AiModelRegister(crate::ai::types::AiModelSpec {
@@ -2867,68 +2883,9 @@ mod tests {
                 to: 4,
                 member: 5,
             }),
-            TransactionType::Storage(crate::domain::StorageTx::RegisterManifest {
-                manifest: {
-                    let mut m = crate::storage::encode_object(
-                        &[5u8; 2048],
-                        crate::storage::ErasureScheme { k: 4, n: 6 },
-                    )
-                    .expect("encode")
-                    .to_manifest()
-                    .expect("manifest");
-                    m.owner = from;
-                    m
-                },
-            }),
-            TransactionType::Storage(crate::domain::StorageTx::DeclareOperatorClass {
-                class: crate::domain::storage_deal::OperatorClass::Mobile,
-            }),
-            TransactionType::Storage(crate::domain::StorageTx::DeclareSelfHostPolicy {
-                manifest_id: crate::storage::ContentId([1u8; 32]),
-                policy: crate::storage::MobileSelfContentPolicy {
-                    content_id: crate::storage::ContentId([2u8; 32]),
-                    owner: from,
-                    critical: true,
-                    required_paid_replicas: 2,
-                    self_host_allowed: false,
-                },
-                profile: crate::storage::MobileSelfProfile {
-                    owner: from,
-                    device_commitment: [3u8; 32],
-                    availability: crate::storage::MobileAvailabilityClass::Scheduled,
-                    max_storage_bytes: 1 << 20,
-                    metered_network_ok: true,
-                    battery_saver_aware: false,
-                    last_seen_block: 9,
-                },
-            }),
-            TransactionType::Storage(crate::domain::StorageTx::OpenDeal(Box::new(
-                crate::domain::StorageDealOpen {
-                    domain_id: 7,
-                    manifest_id: crate::storage::ContentId([1u8; 32]),
-                    shard_id: crate::storage::ContentId([2u8; 32]),
-                    operator: to,
-                    replica_index: 1,
-                    start_epoch: 3,
-                    end_epoch: 13,
-                    economics: crate::domain::StorageEconomicsParams {
-                        operator_bond: 1_000_000,
-                        fee_per_byte_epoch: 17,
-                    },
-                    merkle_proof: vec![9u8; 40],
-                    storage_root: [4u8; 32],
-                    operator_consent: crate::storage::GrantAuthorization {
-                        owner_key: [5u8; crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN],
-                        signature: vec![6u8; 64],
-                    },
-                },
+            TransactionType::Storage(Box::new(crate::storage::bud3::tx::StorageTx::new(
+                vec![7u8; 32],
             ))),
-            TransactionType::Storage(crate::domain::StorageTx::AnswerCodingAudit {
-                audit_id: 11,
-                data_column: vec![1, 2, 3, 4],
-                parity_byte: 5,
-                column_proof: vec![[6u8; 32], [7u8; 32]],
-            }),
             TransactionType::Identity(crate::registry::IdentityTx::Register {
                 record: crate::registry::IdentityRecord::new(
                     from,

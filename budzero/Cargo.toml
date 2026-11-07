@@ -6,7 +6,6 @@ members = [
   "bud-state",
   "bud-proof",
   "bud-pul",
-  "bud-node",
   "bud-cli",
   "verifier-registry",
 ]

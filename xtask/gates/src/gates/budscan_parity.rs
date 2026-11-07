@@ -9,7 +9,7 @@
 //! 1. **The name rule.** `crates/budscan/src/name_rule.rs::check_name` and
 //!    `bns_names_are_safe_in_an_address_bar::check_name` apply the same table.
 //! 2. **The content identity.** `crates/budscan/src/content_id.rs::ContentId::of`
-//!    and `src/storage/content_id.rs::ContentId::of` use the same domain tag and
+//!    and `src/storage/bud3/content_id.rs::ContentId::of` use the same domain tag and
 //!    the same length-prefixed hash.
 //!
 //! Both can diverge silently, and if they do the outcome is silent too: the
@@ -46,7 +46,7 @@ const CHARSET_PATTERN: &str = "'a'..='z' | '0'..='9' | '-' | '.'";
 const LENGTH_BOUND: &str = "(3..=32).contains(&count)";
 
 /// The domain separator tag of the content identity; it must be the same on both sides.
-const CONTENT_DOMAIN_TAG: &str = "BDLM_CONTENT_V1";
+const CONTENT_DOMAIN_TAG: &str = "BDLM_BUD3_CID_SEALED_V1";
 
 fn read(root: &Path, rel: &str) -> Result<String, String> {
     let path = root.join(rel);
@@ -136,13 +136,13 @@ fn check_name_rule(root: &Path, problems: &mut Vec<String>) -> Result<(), String
 }
 
 /// The core copy hashes the tag and the chunk through the length-prefixed field hash.
-const CORE_CONTENT_CALL: &str = "hash_fields_bytes(&[b\"BDLM_CONTENT_V1\", chunk])";
+const CORE_CONTENT_CALL: &str = "Sha256::digest(bytes)";
 
 /// Do the two `ContentId` definitions produce the same identity?
 fn check_content_id(root: &Path, problems: &mut Vec<String>) -> Result<(), String> {
     // -- 2. The content identity -----------------------------------------
     let browser_cid = read(root, "crates/budscan/src/content_id.rs")?;
-    let core_cid = read(root, "src/storage/content_id.rs")?;
+    let core_cid = read(root, "src/storage/bud3/content_id.rs")?;
     content_id_problems(&browser_cid, &core_cid, problems);
     Ok(())
 }
@@ -157,7 +157,7 @@ fn content_id_problems(browser_cid: &str, core_cid: &str, problems: &mut Vec<Str
     }
     if !core_cid.contains(CONTENT_DOMAIN_TAG) {
         problems.push(format!(
-            "src/storage/content_id.rs has lost the {CONTENT_DOMAIN_TAG} tag; the \
+            "src/storage/bud3/content_id.rs has lost the {CONTENT_DOMAIN_TAG} tag; the \
              scanner carries it"
         ));
     }
@@ -172,7 +172,7 @@ fn content_id_problems(browser_cid: &str, core_cid: &str, problems: &mut Vec<Str
     }
     if !core_cid.contains(CORE_CONTENT_CALL) {
         problems.push(String::from(
-            "src/storage/content_id.rs no longer hashes the tag and the chunk through \
+            "src/storage/bud3/content_id.rs no longer hashes the tag and the chunk through \
              hash_fields_bytes, the length-prefixed field hash. The scanner copy prefixes \
              every field; the chain copy has to do the same",
         ));
@@ -189,7 +189,7 @@ fn const_line<'a>(text: &'a str, name: &str) -> Option<&'a str> {
 fn check_shared_constants(root: &Path, problems: &mut Vec<String>) -> Result<(), String> {
     // -- 3. Size bound: identical in three places ------------------------
     let browser_fetch = read(root, "crates/budscan/src/fetch.rs")?;
-    let core_gateway = read(root, "src/gateway/service.rs")?;
+    let core_gateway = read(root, "src/gateway/mod.rs")?;
     let browser_lc = read(root, "crates/budscan/src/light_client.rs")?;
     let chain = read(root, "src/chain/blockchain.rs")?;
     shared_constant_problems(&browser_fetch, &core_gateway, &browser_lc, &chain, problems);
@@ -208,7 +208,7 @@ fn shared_constant_problems(
     if browser_limit.is_none() || browser_limit != core_limit {
         problems.push(String::from(
             "the content size bound has diverged between crates/budscan/src/fetch.rs and \
-             src/gateway/service.rs. Two different bounds open a gap where one accepts \
+             src/gateway/mod.rs. Two different bounds open a gap where one accepts \
              what the other refuses",
         ));
     }

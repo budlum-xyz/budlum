@@ -239,7 +239,7 @@ pub enum ProposalType {
     VerifyHubApp {
         app_id: u64,
         developer: crate::core::address::Address,
-        manifest_id: Option<crate::storage::content_id::ContentId>,
+        manifest_id: Option<crate::storage::bud3::content_id::ContentId>,
         website_url_hash: [u8; 32],
     },
     UnfreezeConsensusDomain {

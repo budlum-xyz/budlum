@@ -91,15 +91,15 @@ branch that carries the work is `In progress`.
 
 <!-- carried rows from pr-68 -->
 | Package | Lane | Status | Dependency | PR List |
-| WP-01 | A | Open | None | PR #64 (proposed) |
-| WP-02 | B | Open | None | PR #65 (proposed) |
-| WP-03 | C | Open | None | PR #66 (proposed) |
-| WP-04 | D | Open | WP-01, WP-02, WP-03 | PR #67 (proposed) |
-| WP-05 | D | Open (WP-05) | WP-04 | PR #50 (WP-05) |
-| WP-06 | B | Open (WP-06) | WP-02 | PR #60 (WP-06 continuation) |
-| WP-07 | B | Open | WP-06 | PR #68 (proposed) |
-| WP-08 | A | Open | WP-01 | PR #69 (proposed) |
-| WP-09 | C | Open | WP-03 | PR #70 (proposed) |
+| WP-01 | A | In Review (PR #131, M0/M1 complete) | None | PR #131 |
+| WP-02 | B | In Review (PR #131, M0/M1 complete) | None | PR #131 |
+| WP-03 | C | In Review (PR #131, M0/M1 complete) | None | PR #131 |
+| WP-04 | D | In Review (PR #131, M0/M1 complete) | WP-01, WP-02, WP-03 | PR #131 |
+| WP-05 | D | In Review (PR #131, M0/M1 complete) | WP-04 | PR #131 |
+| WP-06 | B | In Review (PR #131, M0/M1 complete) | WP-02 | PR #131 |
+| WP-07 | B | In Review (PR #131, M0/M1 complete) | WP-06 | PR #131 |
+| WP-08 | A | In Review (PR #131, M0/M1 complete) | WP-01 | PR #131 |
+| WP-09 | C | In Review (PR #131, M0/M1 complete) | WP-03 | PR #131 |
 | ... (remaining WP-10 to WP-64) ... | | | | |
 
 ## WP-05 status carried from pr-20

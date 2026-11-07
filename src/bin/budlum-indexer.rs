@@ -624,9 +624,6 @@ async fn route(
         ["v1", "bns", name] => {
             from_node(node, "bud_bnsResolveFull", serde_json::json!([name])).await
         }
-        ["v1", "manifests", id] => {
-            from_node(node, "bud_storageGetManifest", serde_json::json!([id])).await
-        }
         _ => json_response(
             StatusCode::NOT_FOUND,
             &serde_json::json!({"error": "unknown path; see docs/explorer-api.openapi.yaml"}),

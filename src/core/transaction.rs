@@ -537,7 +537,7 @@ pub enum TransactionType {
     UniversalRelay(ExternalTransaction),
     RelayerResult(RelayerExternalResult),
     AiOfferData {
-        cid: crate::storage::content_id::ContentId,
+        cid: crate::storage::bud3::content_id::ContentId,
         price: u64,
     },
     AiPurchaseData {
@@ -547,7 +547,7 @@ pub enum TransactionType {
         name: String,
         category: crate::budlumxyz::types::AppCategory,
         website_url: String,
-        manifest_id: Option<crate::storage::content_id::ContentId>,
+        manifest_id: Option<crate::storage::bud3::content_id::ContentId>,
     },
     /// The developer's own claim that an app record is theirs.
     ///
@@ -650,13 +650,14 @@ pub enum TransactionType {
     /// named in a doc comment here was resolved as if a transaction
     /// carried the whole registry.)
     Vault(crate::socialfi::VaultTx),
-    /// B.U.D. storage write, applied in block. The sender is `tx.from`; the
-    /// payload carries no actor field. The signing preimage commits every
-    /// field of the payload, a registered manifest included, so a relay
-    /// cannot change any of it without changing the hash. (Written without
-    /// naming types: the signing gate reads the enum
-    /// body's identifiers to resolve carried payload types.)
-    Storage(crate::domain::storage_tx::StorageTx),
+    /// B.U.D. 3.0 storage write, applied in block. The signer is `tx.from`.
+    /// The payload carries the binding-record header - the transaction kind
+    /// and its long version number, written by this door - and then the body,
+    /// so a payload from another generation never decodes here and old hash
+    /// chains are never rewritten. (Written without naming types: the signing
+    /// gate reads the enum body's identifiers to resolve carried payload
+    /// types.)
+    Storage(Box<crate::storage::bud3::tx::StorageTx>),
     /// PoA admission door: a candidate applies for themselves, an admin of
     /// the target domain decides, and the admin set changes only through
     /// admins or governance. Ids, a dossier commitment and reasons - no
@@ -2453,16 +2454,9 @@ impl Transaction {
             TransactionType::Validator(_) => {
                 schedule.contract_call_gas * 2 + schedule.gas_per_signature * 2
             }
-            TransactionType::RoleBond { .. } => schedule.contract_call_gas,
-            // A registry write that re-derives the manifest id over every
-            // shard: priced like the registry arms beside it. Opening a deal
-            // also verifies the operator's consent signature, so it adds
-            // one signature check on top.
-            TransactionType::Storage(
-                crate::domain::storage_tx::StorageTx::OpenDeal(_)
-                | crate::domain::storage_tx::StorageTx::AcceptReallocation(_),
-            ) => schedule.contract_call_gas * 2 + schedule.gas_per_signature,
+            // A registry write; a proof batch also hashes Merkle paths.
             TransactionType::Storage(_) => schedule.contract_call_gas * 2,
+            TransactionType::RoleBond { .. } => schedule.contract_call_gas,
             // One registry insert behind a relayer-bond lookup: priced like
             // the registry arms above.
             TransactionType::RelayCrossDomainMessage(_) => schedule.contract_call_gas * 2,
@@ -3037,244 +3031,6 @@ fn encode_vault_tx(tx: &crate::socialfi::VaultTx, out: &mut Vec<u8>) {
     }
 }
 
-/// Canonical preimage of a storage transaction.
-///
-/// A manifest is committed whole: its id, the owner and sizes (written out
-/// again so the signature does not rely on the id alone), and then the
-/// shards, the scheme, the dictionary, the source, the edition and the
-/// encryption claim written out. A relay that rewrites any field changes
-/// the signing hash, so a bad copy cannot take the place of the honest one in
-/// a mempool that dedups on the hash.
-fn encode_storage_tx(tx: &crate::domain::storage_tx::StorageTx, out: &mut Vec<u8>) {
-    match tx {
-        crate::domain::storage_tx::StorageTx::RegisterManifest { manifest } => {
-            put_u8(out, 0);
-            out.extend_from_slice(manifest.manifest_id.as_bytes());
-            out.extend_from_slice(manifest.owner.as_bytes());
-            put_u64(out, manifest.content_size);
-            put_u64(out, manifest.total_size);
-            put_u32(out, manifest.shard_count);
-            encode_manifest_body(manifest, out);
-        }
-        crate::domain::storage_tx::StorageTx::DeclareOperatorClass { class } => {
-            put_u8(out, 1);
-            put_u8(
-                out,
-                match class {
-                    crate::domain::storage_deal::OperatorClass::AlwaysOn => 0,
-                    crate::domain::storage_deal::OperatorClass::Mobile => 1,
-                },
-            );
-        }
-        crate::domain::storage_tx::StorageTx::DeclareSelfHostPolicy {
-            manifest_id,
-            policy,
-            profile,
-        } => {
-            put_u8(out, 2);
-            put_fixed(out, manifest_id.as_bytes());
-            put_fixed(out, policy.content_id.as_bytes());
-            put_fixed(out, policy.owner.as_bytes());
-            put_u8(out, u8::from(policy.critical));
-            out.extend_from_slice(&policy.required_paid_replicas.to_le_bytes());
-            put_u8(out, u8::from(policy.self_host_allowed));
-            put_fixed(out, profile.owner.as_bytes());
-            put_fixed(out, &profile.device_commitment);
-            put_u8(
-                out,
-                match profile.availability {
-                    crate::storage::MobileAvailabilityClass::Opportunistic => 0,
-                    crate::storage::MobileAvailabilityClass::Scheduled => 1,
-                    crate::storage::MobileAvailabilityClass::AlwaysOnReplica => 2,
-                },
-            );
-            put_u64(out, profile.max_storage_bytes);
-            put_u8(out, u8::from(profile.metered_network_ok));
-            put_u8(out, u8::from(profile.battery_saver_aware));
-            put_u64(out, profile.last_seen_block);
-        }
-        crate::domain::storage_tx::StorageTx::OpenDeal(open) => {
-            put_u8(out, 3);
-            put_u32(out, open.domain_id);
-            put_fixed(out, open.manifest_id.as_bytes());
-            put_fixed(out, open.shard_id.as_bytes());
-            put_fixed(out, open.operator.as_bytes());
-            put_u8(out, open.replica_index);
-            put_u64(out, open.start_epoch);
-            put_u64(out, open.end_epoch);
-            put_u64(out, open.economics.operator_bond);
-            put_u64(out, open.economics.fee_per_byte_epoch);
-            put_bytes(out, &open.merkle_proof);
-            put_fixed(out, &open.storage_root);
-            // The consent is committed whole, signature included, so a relay
-            // cannot strip it or swap in another valid one.
-            put_fixed(out, &open.operator_consent.owner_key);
-            put_bytes(out, &open.operator_consent.signature);
-        }
-        crate::domain::storage_tx::StorageTx::AnswerCodingAudit {
-            audit_id,
-            data_column,
-            parity_byte,
-            column_proof,
-        } => {
-            put_u8(out, 4);
-            put_u64(out, *audit_id);
-            put_bytes(out, data_column);
-            put_u8(out, *parity_byte);
-            // The proof is part of the signed body: a relay that dropped it
-            // would turn a proven answer into an unproven one, and a relay that
-            // swapped it would answer for a byte the operator never held.
-            put_u32(out, column_proof.len() as u32);
-            for sibling in column_proof {
-                put_fixed(out, sibling);
-            }
-        }
-        crate::domain::storage_tx::StorageTx::AcceptReallocation(accept) => {
-            put_u8(out, 5);
-            put_u64(out, accept.ticket_id);
-            put_fixed(out, accept.replacement_operator.as_bytes());
-            put_u64(out, accept.start_epoch);
-            put_u64(out, accept.end_epoch);
-            put_u64(out, accept.economics.operator_bond);
-            put_u64(out, accept.economics.fee_per_byte_epoch);
-            put_bytes(out, &accept.merkle_proof);
-            put_fixed(out, &accept.storage_root);
-            // Committed whole, like the deal-open consent.
-            put_fixed(out, &accept.operator_consent.owner_key);
-            put_bytes(out, &accept.operator_consent.signature);
-        }
-        crate::domain::storage_tx::StorageTx::OpenChallenge {
-            deal_id,
-            range_len,
-            deadline_epoch,
-            opener_bond,
-        } => {
-            put_u8(out, 6);
-            put_u64(out, *deal_id);
-            put_u64(out, *range_len);
-            put_u64(out, *deadline_epoch);
-            put_u64(out, *opener_bond);
-        }
-        crate::domain::storage_tx::StorageTx::AnswerChallenge {
-            challenge_id,
-            range_hash,
-            proof,
-        } => {
-            put_u8(out, 7);
-            put_u64(out, *challenge_id);
-            put_fixed(out, range_hash.as_bytes());
-            put_bytes(out, proof);
-        }
-        crate::domain::storage_tx::StorageTx::IssueViewGrant {
-            content_id,
-            grantee,
-            key_id,
-            policy,
-        } => {
-            put_u8(out, 8);
-            put_fixed(out, content_id.as_bytes());
-            match grantee {
-                Some(g) => {
-                    put_u8(out, 1);
-                    put_fixed(out, g.as_bytes());
-                }
-                None => put_u8(out, 0),
-            }
-            put_fixed(out, key_id);
-            put_u8(
-                out,
-                match policy {
-                    crate::storage::ViewPolicy::OwnerOnly => 1,
-                    crate::storage::ViewPolicy::NamedGrantee => 2,
-                    crate::storage::ViewPolicy::PublicKeyId => 3,
-                },
-            );
-        }
-        crate::domain::storage_tx::StorageTx::RevokeViewGrant { grant_id } => {
-            put_u8(out, 9);
-            put_u64(out, *grant_id);
-        }
-        crate::domain::storage_tx::StorageTx::SocialDelete { content_id } => {
-            put_u8(out, 10);
-            put_fixed(out, content_id.as_bytes());
-        }
-        crate::domain::storage_tx::StorageTx::CommitConfidentialBody { commit } => {
-            put_u8(out, 11);
-            put_fixed(out, commit.content_id.as_bytes());
-            put_u8(out, commit.encryption.commitment_tag());
-            put_fixed(out, &commit.ciphertext_root);
-            put_u8(
-                out,
-                match commit.proof_kind {
-                    crate::storage::ConfidentialProofKind::RetrievalChallenge => 1,
-                    crate::storage::ConfidentialProofKind::ZkStorageProof => 2,
-                    crate::storage::ConfidentialProofKind::TeeAttested => 3,
-                    crate::storage::ConfidentialProofKind::HybridZkTee => 4,
-                },
-            );
-            // The commitment hashes the cipher named inside the encryption
-            // claim too, which the tag above leaves out.
-            put_fixed(out, &commit.commitment());
-        }
-    }
-}
-
-/// Every field of a manifest that the id and the fields above leave out or
-/// fold ambiguously, written explicitly. The id preimage appends the source
-/// bytes and the dictionary bytes without tags, so two different splits of
-/// source and dictionary can share an id; writing both here keeps them apart.
-fn encode_manifest_body(manifest: &crate::storage::ContentManifest, out: &mut Vec<u8>) {
-    put_u64(out, manifest.shards.len() as u64);
-    for shard in &manifest.shards {
-        put_u32(out, shard.index);
-        put_fixed(out, shard.shard_id.as_bytes());
-        put_u32(out, shard.size);
-        put_u8(
-            out,
-            match shard.kind {
-                crate::storage::ShardKind::Data => 0,
-                crate::storage::ShardKind::Parity => 1,
-            },
-        );
-    }
-    put_u32(out, manifest.erasure.k);
-    put_u32(out, manifest.erasure.n);
-    match &manifest.dictionary_id {
-        None => put_u8(out, 0),
-        Some(dictionary) => {
-            put_u8(out, 1);
-            put_fixed(out, dictionary.as_bytes());
-        }
-    }
-    // The source commitment is injective: a variant tag plus the digest of
-    // the recipe, so a spec is committed without spelling it out.
-    put_bytes(
-        out,
-        &crate::storage::generated::source_commitment_bytes(&manifest.source),
-    );
-    put_u8(
-        out,
-        match manifest.edition {
-            crate::storage::BudStorageEdition::Classic => 1,
-            crate::storage::BudStorageEdition::Three => 3,
-        },
-    );
-    put_u8(out, manifest.encryption.commitment_tag());
-    // Column commitments of the parity shards. Length-prefixed and written on
-    // every encoding (an empty list is a zero length, not an absence) so the
-    // signing preimage cannot tell two manifests apart by their roots alone.
-    // They are also inside `manifest_id`, which the preimage already carries -
-    // that makes a rewrite detectable, this makes it a signature failure
-    // rather than a refused registration.
-    put_u32(out, manifest.column_roots.len() as u32);
-    for root in &manifest.column_roots {
-        put_fixed(out, root);
-    }
-}
-
-/// Canonical preimage of a validator transaction: every field of every carried
-/// struct, written explicitly (the signature preimage is the consensus
-/// commitment; bincode is only the wire format).
 fn encode_validator_tx(tx: &crate::validators::ValidatorTx, out: &mut Vec<u8>) {
     use crate::validators::ValidatorTx;
     match tx {
@@ -3689,7 +3445,7 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
                 Some(p) => {
                     put_u8(out, 1);
                     put_fixed(out, &p.asset_id.0);
-                    put_fixed(out, &p.content_id.0);
+                    put_fixed(out, &p.content_id.digest);
                     put_u8(out, p.kind.perception_tag());
                     put_u32(out, p.declared_units);
                 }
@@ -3822,7 +3578,13 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
             put_u32(out, *role);
         }
         TransactionType::Vault(vault_tx) => encode_vault_tx(vault_tx, out),
-        TransactionType::Storage(storage_tx) => encode_storage_tx(storage_tx, out),
+        // The whole payload is signed: its canonical bincode bytes - the
+        // binding-record header first - length-prefixed.
+        TransactionType::Storage(storage_tx) => {
+            put_u8(out, 47);
+            put_fixed(out, &storage_tx.header);
+            put_bytes(out, &storage_tx.payload);
+        }
         TransactionType::RelayCrossDomainMessage(message) => encode_message(message, out),
         TransactionType::RoleUnbond { role } => {
             put_u8(out, 51);

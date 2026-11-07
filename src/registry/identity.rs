@@ -43,7 +43,7 @@
 //! "is the data true" - the chain holds commitments to claims, the claims
 //! live with their holders, and an issuer's signature is verified where the
 //! signature is made (the grant-side precedent:
-//! [`crate::storage::view_grant::GrantAuthorization::verify`]).
+//! the signed-claim verify door).
 //!
 //! # Disclosure binding
 //!
@@ -648,11 +648,10 @@ impl IdentityRegistry {
     /// Guardian recovery: a quorum of guardians rotates the DID to a new key
     /// and revokes every method older than `now`. The approvals are checked
     /// as *set membership and count* here - signature verification belongs
-    /// to the transaction door that calls this (the [`GrantAuthorization`]
+    /// to the transaction door that calls this (the signed-claim
     /// pattern: `verify_ml_dsa_87_signature` over a recovery digest), so
     /// this layer stays testable without key material.
     ///
-    /// [`GrantAuthorization`]: crate::storage::view_grant::GrantAuthorization
     ///
     /// # Errors
     ///

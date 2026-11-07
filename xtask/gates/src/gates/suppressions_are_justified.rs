@@ -297,12 +297,6 @@ const BUDGETS: &[Budget] = &[
         reason: "fields or helpers read only under a feature or by a subset of tests; kept beside their siblings rather than deleted and rewritten",
     },
     Budget {
-        file: "src/domain/storage_deal.rs",
-        lint: "clippy::too_many_arguments",
-        count: 5,
-        reason: "a consensus or storage entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply. The fifth is `answer_coding_audit`: the answer, the audit it answers and the clock reading are three different things, and the column, the byte and the inclusion path have to stay three slices a caller cannot confuse",
-    },
-    Budget {
         file: "src/ai_inference/executor.rs",
         lint: "clippy::too_many_arguments",
         count: 1,
@@ -387,7 +381,7 @@ const BUDGETS: &[Budget] = &[
         reason: "next_checkpoint_height cannot be const: the nightly jobs (udeps, determinism) reject trait calls inside const fns with E0658, and this fn was reverted from const in c72b911 for exactly that reason",
     },
     Budget {
-        file: "src/storage/pact_binding.rs",
+        file: "src/account_abstraction/pact_binding.rs",
         lint: "clippy::missing_const_for_fn",
         count: 3,
         reason: "Pact::new, is_residual_only and PactRegistry::new cannot be const: the nightly jobs (udeps, determinism) reject trait calls inside const fns with E0658, and these fns were reverted from const in c72b911 for exactly that reason",

@@ -375,9 +375,8 @@ mod poa_authority_binding {
         let honest: Vec<KeyPair> = (0..3).map(|_| KeyPair::generate().unwrap()).collect();
         let honest_addrs: Vec<_> = honest.iter().map(kp_address).collect();
 
-        let params = crate::domain::storage_params::StorageDomainParams::default();
         let mut domain = domain_with(
-            ConsensusKind::StorageAttestation(params),
+            ConsensusKind::StorageAttestation,
             "storage-attestation-v1",
             [0u8; 32],
         );
