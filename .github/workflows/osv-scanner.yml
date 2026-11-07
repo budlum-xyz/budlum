@@ -119,6 +119,7 @@ jobs:
             --lockfile=crates/ai-inference/Cargo.lock \
             --lockfile=crates/budscan/Cargo.lock \
             --lockfile=bud/Cargo.lock \
+            --lockfile=kani/Cargo.lock \
             --lockfile=xtask/release/Cargo.lock
 
       # So the list above never shrinks: every Cargo.lock in the repository must
