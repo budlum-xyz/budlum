@@ -218,14 +218,18 @@ pub fn apply_cross_shard_transfer(
     if tx.tx_type != TransactionType::Transfer {
         return Err("apply_cross_shard_transfer requires a Transfer".into());
     }
+    if tx.to == Address::zero() {
+        return Err("cross-shard transfer missing non-zero recipient".into());
+    }
 
     let total_cost = tx
         .checked_total_cost()
         .ok_or_else(|| "cross-shard transfer amount + fee overflows u64".to_string())?;
     // Read-only checks: `get_or_create` would insert empty accounts into
-    // the state on a rejected transfer.
-    if state.get_balance(&tx.from) < total_cost {
-        return Err("insufficient balance for cross-shard transfer".into());
+    // the state on a rejected transfer, and `spendable_balance` enforces
+    // vesting schedules identically to `Executor::Transfer`.
+    if state.spendable_balance(&tx.from) < total_cost {
+        return Err("insufficient spendable balance for cross-shard transfer".into());
     }
     state
         .get_balance(&tx.to)
@@ -247,6 +251,8 @@ pub fn apply_cross_shard_transfer(
         .balance
         .checked_add(tx.amount)
         .ok_or("shard transfer: receiver balance overflow")?;
+    state.dirty_accounts.insert(tx.from);
+    state.dirty_accounts.insert(tx.to);
     Ok(())
 }
 

@@ -2355,11 +2355,10 @@ impl Transaction {
         self.fee
     }
 
-    /// Return the debit required for an amount-bearing transaction.
-    ///
-    /// Consensus and execution paths must reject `None`; a saturated debit
-    /// can undercharge fees and create supply when the fee is credited later.
-    pub fn checked_total_cost(&self) -> Option<u64> {
+    /// Convenience: checked sum of `amount + fee` for consensus debit paths so
+    /// an overflowing pair is rejected instead of saturating to `u64::MAX`.
+    #[must_use]
+    pub const fn checked_total_cost(&self) -> Option<u64> {
         self.amount.checked_add(self.fee)
     }
 
@@ -2373,6 +2372,7 @@ impl Transaction {
     #[must_use]
     pub fn checked_liquid_cost(&self) -> Option<u64> {
         match self.tx_type {
+            TransactionType::AiOperatorWithdraw => Some(0),
             TransactionType::Unstake
             | TransactionType::Vote
             | TransactionType::Undelegate { .. }
