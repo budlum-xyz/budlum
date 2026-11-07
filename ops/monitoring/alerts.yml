@@ -95,9 +95,9 @@ groups:
         annotations:
           summary: "Less than 10% disk left on {{ $labels.instance }}"
 
-  # Public-service alerts use only metrics registered by the node. Add each
-  # further alert together with its exporter; the metric-reference test reads
-  # every expression and refuses a name missing from the inventory.
+  # Public-service alerts use metrics registered by the node or faucet. Add
+  # each alert with its exporter; the metric-reference test reads every
+  # expression and refuses a name missing from both source inventories.
   - name: budlum-public-services
     rules:
       - alert: BudlumRpcRateLimitedSpike
@@ -115,3 +115,12 @@ groups:
           severity: warning
         annotations:
           summary: "More than 10% of RPC requests are being rate limited"
+
+      - alert: BudlumFaucetGrantSpike
+        # Exported by the faucet's own GET /metrics after acknowledged submissions.
+        expr: increase(budlum_faucet_grants_total[1h]) > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} faucet grants acknowledged in one hour"

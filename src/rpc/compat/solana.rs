@@ -199,7 +199,11 @@ impl SolanaCompatGateway {
                         "requestAirdrop is disabled outside testnet faucet mode",
                     );
                 }
-                JsonRpcResponse::ok(id, serde_json::json!("airdrop_queued"))
+                JsonRpcResponse::err(
+                    id,
+                    JSONRPC_TX_REJECTED,
+                    "requestAirdrop is not wired to the faucet; no grant was queued",
+                )
             }
             _ => JsonRpcResponse::ok(id, serde_json::json!({})),
         }

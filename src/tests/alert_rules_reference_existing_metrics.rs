@@ -3,7 +3,8 @@
 //! An alert that refers to a metric the node never writes is a silent lie:
 //! the rule never fires, and an operator cannot tell a quiet network from a
 //! broken exporter. The metric inventory is `src/core/metrics.rs`; the alert
-//! rules are `ops/monitoring/alerts.yml`. Both are compiled into this test,
+//! rules are `ops/monitoring/alerts.yml`; the faucet owns its separate grant
+//! counter in `src/bin/budlum-faucet.rs`. All are compiled into this test,
 //! so a rule added against a metric that does not exist fails the build here
 //! rather than on the first incident.
 
@@ -11,6 +12,7 @@ use std::collections::BTreeSet;
 
 const ALERT_RULES: &str = include_str!("../../ops/monitoring/alerts.yml");
 const METRIC_DEFINITIONS: &str = include_str!("../core/metrics.rs");
+const FAUCET_METRIC_DEFINITIONS: &str = include_str!("../bin/budlum-faucet.rs");
 
 /// All `budlum_*` tokens in `text`, split on anything that cannot be part of
 /// an identifier. Metrics from other exporters (`node_*`, `up`) are out of
@@ -25,7 +27,10 @@ fn budlum_metric_names(text: &str) -> BTreeSet<String> {
 /// The named lock for the alert-rule surface.
 #[test]
 fn alert_rules_reference_existing_metrics() {
-    let exported = budlum_metric_names(METRIC_DEFINITIONS);
+    let exported = budlum_metric_names(METRIC_DEFINITIONS)
+        .into_iter()
+        .chain(budlum_metric_names(FAUCET_METRIC_DEFINITIONS))
+        .collect::<BTreeSet<_>>();
     // Only the `expr:` lines are a claim about a metric. The rule file also
     // documents metric names that are deliberately not wired yet; a comment
     // is not a query and must not be read as one.
@@ -55,4 +60,5 @@ fn alert_rules_reference_existing_metrics() {
     // The two metrics the faucet and RPC rate limiter write must be covered,
     // so the rule file cannot quietly lose its public-service alerts.
     assert!(referenced.contains("budlum_rpc_rate_limited_total"));
+    assert!(referenced.contains("budlum_faucet_grants_total"));
 }

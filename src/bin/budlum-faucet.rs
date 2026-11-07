@@ -59,6 +59,7 @@ use clap::{Parser, Subcommand};
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::{Bytes, Incoming};
 use hyper::{Method, Request, Response, StatusCode};
+use prometheus::{Encoder as _, IntCounter, Registry, TextEncoder};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
@@ -652,6 +653,9 @@ struct Faucet {
     /// Per-process secret binding a challenge to its address, issuing second
     /// and difficulty. Generated at startup, never persisted or logged.
     pow_secret: [u8; 32],
+    /// Successful submissions and the registry that exposes only that counter.
+    grant_metric: IntCounter,
+    metric_registry: Registry,
     /// Do not queue an unbounded number of grants behind the nonce lock.
     grant_slots: Arc<Semaphore>,
     /// The ledger and the next nonce to use, under one lock so two requests
@@ -755,6 +759,7 @@ impl Faucet {
                 )
             })?;
 
+        self.grant_metric.inc();
         Ok(serde_json::json!({
             "to": format!("0x{}", to.to_hex()),
             "amount_atoms": self.policy.amount,
@@ -811,6 +816,28 @@ fn upstream_failure(method: &str, error: &str) -> (StatusCode, String) {
     )
 }
 
+/// Export the faucet's own successful-submission counter. Reservations whose
+/// node response was lost are deliberately not counted as confirmed grants.
+fn metrics_response(registry: &Registry) -> Response<Full<Bytes>> {
+    let mut buffer = Vec::new();
+    let encoder = TextEncoder::new();
+    let metric_families = registry.gather();
+    if encoder.encode(&metric_families, &mut buffer).is_err() {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the faucet metrics could not be encoded",
+        );
+    }
+    let mut response = Response::new(Full::new(Bytes::from(buffer)));
+    *response.status_mut() = StatusCode::OK;
+    if let Ok(value) = hyper::header::HeaderValue::from_str("text/plain; version=0.0.4") {
+        response
+            .headers_mut()
+            .insert(hyper::header::CONTENT_TYPE, value);
+    }
+    response
+}
+
 fn error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
     json_response(status, &serde_json::json!({ "error": message }))
 }
@@ -833,6 +860,9 @@ async fn handle(
     if method == Method::GET && path == "/health" {
         return Ok(json_response(StatusCode::OK, &faucet.health().await));
     }
+    if method == Method::GET && path == "/metrics" {
+        return Ok(metrics_response(&faucet.metric_registry));
+    }
     if method == Method::POST && path == "/challenge" {
         let body = match read_request_body(request.into_body(), BODY_TIMEOUT).await {
             Ok(body) => body,
@@ -853,7 +883,7 @@ async fn handle(
     if method != Method::POST || path != "/request" {
         return Ok(error_response(
             StatusCode::NOT_FOUND,
-            "POST /request, POST /challenge or GET /health",
+            "POST /request, POST /challenge or GET /health, /metrics",
         ));
     }
     let ip = match faucet.identity.client_ip(peer.ip(), request.headers()) {
@@ -968,6 +998,15 @@ async fn serve(
     // challenge, and no key material is written for the work check.
     let mut pow_secret = [0u8; 32];
     rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut pow_secret);
+    let metric_registry = Registry::new();
+    let grant_metric = IntCounter::new(
+        "budlum_faucet_grants_total",
+        "Ordinary signed transfers the testnet faucet submitted and the node acknowledged",
+    )
+    .map_err(|e| format!("faucet grant metric: {e}"))?;
+    metric_registry
+        .register(Box::new(grant_metric.clone()))
+        .map_err(|e| format!("faucet metric registry: {e}"))?;
     let faucet = Arc::new(Faucet {
         node,
         key,
@@ -977,8 +1016,10 @@ async fn serve(
         state_file: PathBuf::from(state_file),
         identity,
         pow_secret,
+        grant_metric,
+        metric_registry,
         grant_slots: Arc::new(Semaphore::new(1)),
-        state: Mutex::new((Ledger::default(), 0)),
+        state: Mutex::new((ledger, next_nonce)),
     });
     let listener = tokio::net::TcpListener::bind(listen)
         .await
@@ -1085,13 +1126,14 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        difficulty_for, faucet_allowed_on, parse_pow, parse_request, pow_challenge,
+        difficulty_for, faucet_allowed_on, metrics_response, parse_pow, parse_request, pow_challenge,
         pow_work_meets, rpc_u64, verify_pow, Ledger, Policy, PowSolution, Refusal, BASE_POW_BITS,
         CHALLENGE_TTL_SECS, DEFAULT_AMOUNT_BUD, DEFAULT_COOLDOWN_SECS, DEFAULT_DAILY_CAP_BUD,
         MAX_POW_BITS, POW_TARGET_REQUESTS_PER_DAY,
     };
     use budlum_core::core::address::Address;
     use budlum_core::core::chain_config::Network;
+    use prometheus::{IntCounter, Registry};
     use std::net::{IpAddr, Ipv6Addr};
 
     fn policy() -> Policy {
@@ -1579,4 +1621,21 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    #[test]
+    fn faucet_metrics_expose_successful_submissions() {
+        let registry = Registry::new();
+        let grants = IntCounter::new("budlum_faucet_grants_total", "test counter").unwrap();
+        registry.register(Box::new(grants.clone())).unwrap();
+        grants.inc();
+        let response = metrics_response(&registry);
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(response.into_body().collect())
+            .unwrap()
+            .to_bytes();
+        let text = std::str::from_utf8(&body).unwrap();
+        assert!(text.contains("budlum_faucet_grants_total 1"));
+        assert!(!text.contains("faucet_address"));
+    }
 }

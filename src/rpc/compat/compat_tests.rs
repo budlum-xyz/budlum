@@ -248,6 +248,25 @@ fn eth_send_raw_transaction_and_other_compat_gateways_work() {
     let sol_health = sol_gw.handle_request(&health_req, &state);
     assert_eq!(sol_health.result, Some(serde_json::json!("ok")));
 
+    let mut faucet_gw = SolanaCompatGateway::new(
+        SolanaCompatConfig {
+            testnet_faucet_enabled: true,
+            ..SolanaCompatConfig::default()
+        },
+        50,
+        [0x99; 32],
+    );
+    let airdrop = faucet_gw.handle_request(
+        &rpc_req("requestAirdrop", serde_json::json!([hex::encode([7u8; 32]), 1])),
+        &state,
+    );
+    assert!(airdrop.result.is_none());
+    assert!(airdrop
+        .error
+        .expect("unwired airdrop must fail")
+        .message
+        .contains("no grant was queued"));
+
     let mut apt_gw = AptosCompatGateway::new(AptosCompatConfig::default(), 50, 1_700_000_000);
     let apt_info = apt_gw.handle_rest("GET", "/v1", None, &state);
     assert_eq!(apt_info.status, 200);

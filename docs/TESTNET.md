@@ -8,6 +8,19 @@ rules and the same validator ceremony. Only the profile, the genesis and the
 parameter values differ. Values marked TESTNET-DEFAULT are testnet
 parameters.
 
+## First run: SoftHSM signer
+
+`config/testnet.toml` uses the SoftHSM signer. A fresh host has no token and
+no SoftHSM2 configuration, so follow `ops/TESTNET_FIRST_RUN.md` before
+starting a node. The short form: install `softhsm2`, copy
+`ops/softhsm2.conf` to `/etc/budlum/softhsm2.conf`, initialise the token,
+write the user PIN to `/etc/budlum/hsm.env`, and prepare a testnet-specific
+systemd override. The unit exports `SOFTHSM2_CONF`, but its generic mainnet
+`ExecStart` must not be started unchanged; genesis, peers and key paths remain
+operator prerequisites. The compatibility gateways and their public hosts are listed in
+`ops/Caddyfile.testnet`; the host-level startup and backup procedures are in
+`ops/TESTNET_FIRST_RUN.md` and `ops/BACKUP_DRILL.md`.
+
 `<TESTNET_DOMAIN>` stands for the testnet's DNS name. It is filled in when
 the operators publish it; until then no public endpoint exists, and every
 address below is the one a node, faucet or indexer listens on locally.
