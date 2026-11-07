@@ -51,6 +51,27 @@ These are the directive's snapshot counts. They are reproduced here so the next
 reader does not have to open the directive to know the order of magnitude, and they
 are explicitly not a live count: this tree has no artifact that could produce one.
 
+## Findings verified in this session
+
+Four records were verified against the tree while this file was written. They are
+not the register, and they do not close anything: a finding closes by the protocol
+in 14.5, and no `blg_NNN_` test exists yet. They are here because the evidence was
+in hand and a register that arrives later should not have to re-derive it.
+
+| Identity | Severity | Area | State on this tree | Evidence | Closing package |
+|---|---|---|---|---|---|
+| BLG-008 | Medium | RPC | Confirmed open, and the contradiction is wider than the register says | `config/testnet.toml:50` sets `auth_required = true` for both listeners. `src/main.rs:1624` builds one `RpcSecurityConfig` and `src/main.rs:1697` hands it to the public server; `src/main.rs:1758` refuses to bind the operator listener anywhere but loopback because it runs without auth. `docs/TESTNET.md:33` and directive decision KR-33 say the public listener accepts keyless reads and signed transactions while the operator listener requires the key, which is the opposite arrangement | WP-16, with WP-61 |
+| BLG-022 | Medium | Consensus | The fix trace exists, and so does the test, so what is missing is the before-and-after | `src/light_client/mod.rs:680` computes the next checkpoint in closed form with checked arithmetic instead of walking the interval, and `:1253` is `next_checkpoint_height_is_closed_form`. The protocol wants the test red first; nothing in the tree records that it ever was | WP-11 |
+| BLG-268 (new) | High | Repository | Closed by the cleanup commit in this branch: the binding directive is no longer in the tree, and `/THE_BUDLUM_DIREKTIF.md` is in `.gitignore` | `git show --stat` on the cleanup commit; `tree-is-english` had every line of the file as a finding because it was absent from `ALLOWED_FILES` and from `.github/turkish-baseline.txt` | this branch |
+| BLG-269 (new) | High | Repository | Open. Not one test in the tree follows the naming rule of 16.4, so no finding can be closed by the protocol and TLG-02 cannot be evidenced | measured: `*_is_closed_on_testnet` 0, `bud3_*` 0, `uel_*` 0, `blg_NNN_*` 0, `android_*`/`ios_*` 0 | WP-01..WP-04 |
+
+Why BLG-008 was not fixed here: the fix is a second `RpcSecurityConfig` with
+`auth_required = false` for the public listener and a keyed one for the operator
+listener, plus the config field that feeds it. That is a change inside the RPC
+security boundary, it is the boundary 15.5 item 6 asks a second agent to approve, and
+this sandbox has no way to compile or run it. A blind edit there trades a documented
+contradiction for an undocumented one.
+
 ## Recount proposal (WP-04 job 7)
 
 The directive's own sample says the register's "206 open" is stale for the analysis
@@ -85,6 +106,9 @@ item 9 asks an agent to do with a blocked step.
 
 ## What this file does not claim
 
-1. It does not claim that any finding is closed, open or invalid.
+1. It does not claim that any finding of the directive's register is closed, open or
+   invalid. The one record marked closed above, BLG-268, is a finding this branch
+   created and this branch fixed; that is a repository defect with a one-commit
+   history, not a verification of the register.
 2. It does not claim that any lane is complete.
 3. It does not replace the four lane files, which do not exist.
