@@ -4,7 +4,7 @@
 # The map moves to `absolute` mode once every line is zero.
 Anaç|0|0
 Atlas|7|55
-Budscan|33|268
+Budscan|32|258
 D-Web Passport|10|88
 DeEd|12|34
 Developer OS|6|50
@@ -21,11 +21,11 @@ Living Threshold|5|15
 Mikoriza|23|78
 Mobile Self|13|117
 PUL|13|99
-Pollen|71|760
+Pollen|70|755
 Regeneration|43|316
 Sera|0|0
-Tarif|51|1442
+Tarif|50|1433
 Universal Gateway|5|8
 Vault (SocialFi)|7|152
 budlumxyz|25|203
-three_* modules|31|201
+three_* modules|30|196
