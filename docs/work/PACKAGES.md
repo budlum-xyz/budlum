@@ -36,8 +36,8 @@ is not evidence.
 
 | Tree status | Packages |
 |---|---|
-| none present | 30 |
-| some present | 30 |
+| none present | 29 |
+| some present | 31 |
 | all present | 4 |
 | total | 64 |
 
@@ -49,7 +49,7 @@ is not evidence.
 | WP-02 | Live validation: storage | B | T-Launch | yes | none | M0 | 0/2 | 0 | #117 | none present |
 | WP-03 | Live validation: execution, BudZero, domains, privacy, AI | C | T-Launch | yes | none | M0 | 0/3 | 0 | #129 | none present |
 | WP-04 | Live validation: clients, operations, CI, documents and the combined status | D | T-Launch | yes | none | M0 | 2/5 | 0 | #75, #77, #96, #118, #129 | some present |
-| WP-05 | Concept-name map and counter gate | D | T-Launch | yes | WP-04 | M1 | 0/4 | 1 | #24, #120, #122, #126, #127, #135 | none present |
+| WP-05 | Concept-name map and counter gate | D | T-Launch | yes | WP-04 | M1 | 2/4 | 1 | #24, #120, #122, #126, #127, #135 | some present |
 | WP-06 | Persistence and state-recovery move | B | T-Launch | yes | WP-02 | M1 | 12/14 | 0 | #60, #84 | some present |
 | WP-07 | Removal of the legacy storage systems | B | T-Launch | yes | WP-06 | M1 | 15/18 | 27 | #69, #71, #104 | some present (removal package: a present path is work not done) |
 | WP-08 | Validator classes and the single registry | A | T-Launch | yes | WP-01 | M1 | 5/6 | 4 | #40 | some present |
@@ -122,7 +122,7 @@ create; for WP-07 and WP-23 they are the paths that are already gone.
 | WP-02 | `docs/audit/live/lane-b.md`, `src/tests/audit_lane_b.rs` |
 | WP-03 | `docs/audit/live/lane-c.md`, `src/tests/audit_lane_c.rs`, `budzero/tests/audit_lane_c.rs` |
 | WP-04 | `docs/audit/live/lane-d.md`, `docs/audit/FINDINGS.md`, `src/tests/audit_lane_d.rs` |
-| WP-05 | `config/naming/concept_map.toml`, `xtask/gates/src/gates/concept_names.rs`, `.github/concept-names-baseline.txt`, `docs/NAMING.md` |
+| WP-05 | `xtask/gates/src/gates/concept_names.rs`, `.github/concept-names-baseline.txt` |
 | WP-06 | `src/persistence/`, `src/chain/state_recovery/` |
 | WP-07 | `crates/bud-codec/`, `tests/vectors/bud3/corpus/`, `docs/STORAGE.md` |
 | WP-08 | `src/validators/` |
