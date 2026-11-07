@@ -202,8 +202,7 @@ pub enum Registered {
 
 /// The registry. It serializes as flat lists, so a JSON snapshot (which
 /// cannot key a map by a byte array) carries it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(from = "FlatRegistry", into = "FlatRegistry")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Bud3Registry {
     objects: BTreeMap<ObjectKey, ObjectEntry>,
     /// Content digest to the live object holding it. Lookups run through the
@@ -212,6 +211,24 @@ pub struct Bud3Registry {
     nfts: BTreeMap<NftId, (ObjectKey, Address)>,
     tombstones: BTreeMap<ObjectKey, u64>,
     declines: BTreeSet<([u8; 32], Address)>,
+}
+
+impl serde::Serialize for Bud3Registry {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        FlatRegistry::from(self.clone()).serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Bud3Registry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        FlatRegistry::deserialize(deserializer).map(Self::from)
+    }
 }
 
 /// The serialized form of [`Bud3Registry`].
