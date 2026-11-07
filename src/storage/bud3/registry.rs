@@ -128,6 +128,33 @@ pub struct ObjectEntry {
     pub endowment: ObjectEndowment,
 }
 
+/// One replacement of an object: a second, better representation of the same
+/// content (section 6.14).
+///
+/// The content id never changes. The replacement only moves which object
+/// carries the content: the references move at the proposal, the old shares
+/// stay until every new share is confirmed, and the old commitment redirects
+/// to the new one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Replacement {
+    /// The object that carries the content now.
+    pub new: ObjectKey,
+    /// The proposer: a Full validator of the old placement group, or the
+    /// owner when the content is sealed.
+    pub proposer: Address,
+    /// The content id. It is the same before and after.
+    pub content: ContentId,
+    /// The replaced object's length in bytes.
+    pub old_object_len: u64,
+    /// The new object's length in bytes.
+    pub new_object_len: u64,
+    /// The epoch the replacement was proposed in.
+    pub proposed_at: u64,
+    /// True once every new share is confirmed and the old shares are
+    /// released. A finalized record is the redirect for the old commitment.
+    pub finalized: bool,
+}
+
 /// Audit windows and probabilities, in epochs and ppm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuditParams {
@@ -246,6 +273,9 @@ pub struct Bud3Registry {
     revoked_grants: BTreeSet<[u8; 32]>,
     base_deps: BTreeMap<ObjectKey, BTreeSet<ObjectKey>>,
     validator_quotas: BTreeMap<Address, u64>,
+    /// The old commitment to its replacement. A record stays here after it
+    /// finalizes: it is the redirect the old commitment answers with.
+    replacements: BTreeMap<ObjectKey, Replacement>,
 }
 
 /// The serialized form of [`Bud3Registry`].
@@ -270,6 +300,10 @@ struct FlatRegistry {
     base_deps: Vec<(ObjectKey, Vec<ObjectKey>)>,
     #[serde(default)]
     validator_quotas: Vec<(Address, u64)>,
+    /// Added by the object replacement: a snapshot written before it has no
+    /// replacement and reads back as an empty map.
+    #[serde(default)]
+    replacements: Vec<(ObjectKey, Replacement)>,
 }
 
 impl From<Bud3Registry> for FlatRegistry {
@@ -291,6 +325,7 @@ impl From<Bud3Registry> for FlatRegistry {
                 .map(|(k, set)| (k, set.into_iter().collect()))
                 .collect(),
             validator_quotas: r.validator_quotas.into_iter().collect(),
+            replacements: r.replacements.into_iter().collect(),
         }
     }
 }
@@ -314,8 +349,46 @@ impl From<FlatRegistry> for Bud3Registry {
                 .map(|(k, v)| (k, v.into_iter().collect()))
                 .collect(),
             validator_quotas: f.validator_quotas.into_iter().collect(),
+            replacements: f.replacements.into_iter().collect(),
         }
     }
+}
+
+/// The state a record starts with: every share pending, one upload root per
+/// segment, and the next unused ESI of every segment.
+fn initial_state(
+    record: &ObjectRecord,
+    shares: Vec<(u64, Share)>,
+    epoch: u64,
+) -> (Vec<ShareState>, Vec<SymbolRoot>, Vec<u32>) {
+    let shares = shares
+        .into_iter()
+        .map(|(segment, share)| ShareState {
+            segment,
+            share,
+            status: ShareStatus::Pending,
+            open_audit: None,
+            passes: 0,
+            misses: 0,
+            consecutive_misses: 0,
+            lost: false,
+            root: usize::try_from(segment).unwrap_or(usize::MAX),
+            assigned_epoch: epoch,
+        })
+        .collect();
+    let roots = record
+        .symbol_roots
+        .iter()
+        .enumerate()
+        .map(|(i, r)| SymbolRoot {
+            segment: i as u64,
+            root: *r,
+            first_esi: 0,
+            count: record.symbols_per_segment,
+        })
+        .collect();
+    let next_esi = vec![record.symbols_per_segment; record.symbol_roots.len()];
+    (shares, roots, next_esi)
 }
 
 fn check_placement(record: &ObjectRecord, shares: &[(u64, Share)]) -> Result<(), RegistryError> {
@@ -434,33 +507,7 @@ impl Bud3Registry {
         )
         .map_err(|_| RegistryError::BadLifetime)?;
         let endowment = ObjectEndowment::new(fee_record, split_storage_fee(initial_fee));
-        let shares = shares
-            .into_iter()
-            .map(|(segment, share)| ShareState {
-                segment,
-                share,
-                status: ShareStatus::Pending,
-                open_audit: None,
-                passes: 0,
-                misses: 0,
-                consecutive_misses: 0,
-                lost: false,
-                root: usize::try_from(segment).unwrap_or(usize::MAX),
-                assigned_epoch: epoch,
-            })
-            .collect();
-        let roots = record
-            .symbol_roots
-            .iter()
-            .enumerate()
-            .map(|(i, r)| SymbolRoot {
-                segment: i as u64,
-                root: *r,
-                first_esi: 0,
-                count: record.symbols_per_segment,
-            })
-            .collect();
-        let next_esi = vec![record.symbols_per_segment; record.symbol_roots.len()];
+        let (shares, roots, next_esi) = initial_state(&record, shares, epoch);
         if public {
             self.public_index.insert(digest, key);
         }
@@ -478,6 +525,41 @@ impl Bud3Registry {
             },
         );
         Ok(Registered::New(key))
+    }
+
+    /// The replacement of `old`, if one was proposed.
+    #[must_use]
+    pub fn replacement(&self, old: &ObjectKey) -> Option<&Replacement> {
+        self.replacements.get(old)
+    }
+
+    /// Item 6 of section 6.14: every new share of `key` is confirmed, so every
+    /// object it replaced releases its shares. The old commitment keeps
+    /// answering, as a redirect to `key`.
+    fn release_replaced(&mut self, key: &ObjectKey) {
+        if self.replacements.is_empty() {
+            return;
+        }
+        let superseded: Vec<ObjectKey> = self
+            .replacements
+            .iter()
+            .filter(|(_, r)| r.new == *key && !r.finalized)
+            .map(|(old, _)| *old)
+            .collect();
+        for old in superseded {
+            if let Some(obj) = self.objects.remove(&old) {
+                self.forfeited_pool_total = self
+                    .forfeited_pool_total
+                    .saturating_add(obj.endowment.remaining_balance);
+                self.base_deps.remove(&old);
+                for nft in obj.references {
+                    self.nfts.remove(&nft);
+                }
+            }
+            if let Some(r) = self.replacements.get_mut(&old) {
+                r.finalized = true;
+            }
+        }
     }
 
     /// `BindNft`: one more reference to a live object.
@@ -522,6 +604,26 @@ impl Bud3Registry {
     }
 
     fn delete(&mut self, key: &ObjectKey, epoch: u64) {
+        self.drop_object(key, epoch);
+        // A replacement whose new object is deleted leaves no object that
+        // carries the content: the references are already gone (this is the
+        // burn of the last one, or expiry), so the replaced object goes with
+        // it and no redirect stands.
+        let replaced: Vec<ObjectKey> = self
+            .replacements
+            .iter()
+            .filter(|(_, r)| r.new == *key)
+            .map(|(old, _)| *old)
+            .collect();
+        for old in replaced {
+            self.drop_object(&old, epoch);
+            self.replacements.remove(&old);
+        }
+    }
+
+    /// Forget one live object: its public-index row, its references and its
+    /// shares. The replacement record, if any, is the caller's business.
+    fn drop_object(&mut self, key: &ObjectKey, epoch: u64) {
         if let Some(obj) = self.objects.remove(key) {
             // Early burn or replacement never refunds prior storage fees; any
             // undistributed balance enters the Network Security Pool.
@@ -530,7 +632,9 @@ impl Bud3Registry {
                     .forfeited_pool_total
                     .saturating_add(obj.endowment.remaining_balance);
             }
-            if obj.record.content_id.kind == ContentIdKind::Public {
+            if obj.record.content_id.kind == ContentIdKind::Public
+                && self.public_index.get(&obj.record.content_id.digest) == Some(key)
+            {
                 self.public_index.remove(&obj.record.content_id.digest);
             }
             for nft in obj.references {
@@ -795,10 +899,15 @@ impl Bud3Registry {
         Ok(())
     }
 
-    /// `ReplaceObject` (Section 6.14): atomically replace `old_key` with `new_record`
-    /// carrying the identical `ContentId`, verified by `>= 3` Full validators from
-    /// `old_key`'s placement group. Bound NFTs re-point to `new_record.commitment`;
-    /// prior fees are never refunded (`no_refund_on_replace`).
+    /// `ReplaceObject` (Section 6.14): propose a second representation of the
+    /// same content under the canonical attested transaction encoding.
+    ///
+    /// A public proposal comes from a Full validator holding an old share;
+    /// sealed content additionally requires its owner. Three distinct Full
+    /// placement-group attestations verify the identical `ContentId`.
+    /// References move at proposal, but old shares and their endowment stay
+    /// until every new share is acknowledged. The old commitment then remains
+    /// as a finalized redirect instead of becoming a deletion tombstone.
     pub fn replace_object(
         &mut self,
         proposer: (Address, u64),
@@ -809,7 +918,34 @@ impl Bud3Registry {
         epoch: u64,
     ) -> Result<ObjectKey, RegistryError> {
         let (sender, proposer_stake) = proposer;
-        let old_entry = self.objects.get(old_key).ok_or(RegistryError::UnknownObject)?;
+        if self.tombstones.contains_key(old_key) {
+            return Err(RegistryError::Tombstoned);
+        }
+        let old_entry = self
+            .objects
+            .get(old_key)
+            .ok_or(RegistryError::UnknownObject)?
+            .clone();
+        if self
+            .replacements
+            .get(old_key)
+            .is_some_and(|r| !r.finalized)
+        {
+            return Err(RegistryError::BadReplacement(
+                super::replace::ReplaceError::ReplacementAlreadyPending,
+            ));
+        }
+        if old_entry.record.content_id.kind == ContentIdKind::Sealed {
+            if sender != old_entry.owner {
+                return Err(RegistryError::NotAuthorized);
+            }
+        } else if !old_entry
+            .shares
+            .iter()
+            .any(|s| s.share.validator == sender && s.share.class == Class::Full)
+        {
+            return Err(RegistryError::NotAuthorized);
+        }
         let pg_full: BTreeSet<Address> = old_entry
             .shares
             .iter()
@@ -828,18 +964,22 @@ impl Bud3Registry {
         .map_err(RegistryError::BadReplacement)?;
 
         let new_key = new_record.commitment;
-        if self.tombstones.contains_key(&new_key) {
-            return Err(RegistryError::Tombstoned);
+        if self.tombstones.contains_key(&new_key) || self.objects.contains_key(&new_key) {
+            return Err(RegistryError::BadReplacement(
+                super::replace::ReplaceError::CommitmentAlreadyLive,
+            ));
         }
         check_placement(&new_record, &new_shares)?;
+        let digest = new_record.content_id.digest;
+        if new_shares
+            .iter()
+            .any(|(_, s)| self.declines.contains(&(digest, s.validator)))
+        {
+            return Err(RegistryError::Declined);
+        }
 
-        let owner = old_entry.owner;
         let expires_at = old_entry.expires_at.max(epoch.saturating_add(1));
         let remaining_epochs = expires_at.saturating_sub(epoch).max(1);
-        let refs = old_entry.references.clone();
-        let digest = new_record.content_id.digest;
-        let is_public = new_record.content_id.kind == ContentIdKind::Public;
-
         let fee_record = FeeRecord::from_placed_shares(&new_record, &new_shares);
         let new_fee = storage_fee_for_epochs(
             fee_record.user_physical_bytes,
@@ -848,60 +988,44 @@ impl Bud3Registry {
         )
         .map_err(|_| RegistryError::BadLifetime)?;
         let endowment = ObjectEndowment::new(fee_record, split_storage_fee(new_fee));
-
-        let shares = new_shares
-            .into_iter()
-            .map(|(segment, share)| ShareState {
-                segment,
-                share,
-                status: ShareStatus::Pending,
-                open_audit: None,
-                passes: 0,
-                misses: 0,
-                consecutive_misses: 0,
-                lost: false,
-                root: usize::try_from(segment).unwrap_or(usize::MAX),
-            })
-            .collect();
-        let roots = new_record
-            .symbol_roots
-            .iter()
-            .enumerate()
-            .map(|(i, r)| SymbolRoot {
-                segment: i as u64,
-                root: *r,
-                first_esi: 0,
-                count: new_record.symbols_per_segment,
-            })
-            .collect();
-        let next_esi = vec![new_record.symbols_per_segment; new_record.symbol_roots.len()];
-
-        // Forfeit any remaining endowment on the replaced object to the security pool
-        // (never refunded) and rebind every NFT reference atomically to `new_key`.
-        if let Some(removed) = self.objects.remove(old_key) {
-            let forfeited = removed.endowment.remaining_balance;
-            self.forfeited_pool_total = self.forfeited_pool_total.saturating_add(forfeited);
-        }
-        for nft in &refs {
-            if let Some((bound_obj, _)) = self.nfts.get_mut(nft) {
-                *bound_obj = new_key;
+        let (shares, roots, next_esi) = initial_state(&new_record, new_shares, epoch);
+        let references = old_entry.references.clone();
+        for nft in &references {
+            if let Some((_, holder)) = self.nfts.get(nft).copied() {
+                self.nfts.insert(*nft, (new_key, holder));
             }
         }
-        if is_public {
+        if new_record.content_id.kind == ContentIdKind::Public {
             self.public_index.insert(digest, new_key);
         }
-        self.tombstones.insert(*old_key, epoch);
+        let content = old_entry.record.content_id;
+        let new_object_len = new_record.object_len;
         self.objects.insert(
             new_key,
             ObjectEntry {
                 record: new_record,
-                owner,
-                references: refs,
+                owner: old_entry.owner,
+                references,
                 expires_at,
                 shares,
                 roots,
                 next_esi,
                 endowment,
+            },
+        );
+        if let Some(old) = self.objects.get_mut(old_key) {
+            old.references.clear();
+        }
+        self.replacements.insert(
+            *old_key,
+            Replacement {
+                new: new_key,
+                proposer: sender,
+                content,
+                old_object_len: old_entry.record.object_len,
+                new_object_len,
+                proposed_at: epoch,
+                finalized: false,
             },
         );
         Ok(new_key)
@@ -927,6 +1051,13 @@ impl Bud3Registry {
             .map(|(k, _)| *k)
             .collect();
         for k in &due {
+            if self.replacements.get(k).is_some_and(|r| !r.finalized) {
+                // Expiry is not an acknowledgement barrier. If the new object
+                // is also due, `delete(new)` removes both sides and the
+                // redirect; otherwise the old shares stay until every new
+                // share is acknowledged.
+                continue;
+            }
             self.delete(k, epoch);
         }
         due
@@ -1019,20 +1150,33 @@ impl Bud3Registry {
     ///
     /// [`RegistryError::UnknownObject`].
     pub fn ack(&mut self, key: &ObjectKey, holder: &Address) -> Result<usize, RegistryError> {
-        let obj = self
-            .objects
-            .get_mut(key)
-            .ok_or(RegistryError::UnknownObject)?;
-        let mut n = 0;
-        for s in obj
-            .shares
-            .iter_mut()
-            .filter(|s| s.share.validator == *holder)
-        {
-            if s.status == ShareStatus::Pending {
-                s.status = ShareStatus::Confirmed;
-                n += 1;
+        let (n, complete) = {
+            let obj = self
+                .objects
+                .get_mut(key)
+                .ok_or(RegistryError::UnknownObject)?;
+            let mut n = 0;
+            for s in obj
+                .shares
+                .iter_mut()
+                .filter(|s| s.share.validator == *holder)
+            {
+                if s.status == ShareStatus::Pending {
+                    s.status = ShareStatus::Confirmed;
+                    n += 1;
+                }
             }
+            let complete = !obj.shares.is_empty()
+                && obj
+                    .shares
+                    .iter()
+                    .all(|s| s.status == ShareStatus::Confirmed);
+            (n, complete)
+        };
+        // The new object carries the content from here on, so the replaced
+        // object may let its shares go (section 6.14, item 6).
+        if n > 0 && complete {
+            self.release_replaced(key);
         }
         Ok(n)
     }
@@ -1608,6 +1752,22 @@ impl Bud3Registry {
                             "gateway_paid": o.endowment.gateway_paid,
                             "forfeited_to_security_pool": o.endowment.forfeited_to_security_pool,
                         },
+                        "replaced_by": self
+                            .replacement(key)
+                            .filter(|r| !r.finalized)
+                            .map(|r| hex::encode(r.new)),
+                    })
+                } else if let Some(r) = self.replacements.get(key) {
+                    serde_json::json!({
+                        "commitment": hex::encode(key),
+                        "status": "replaced",
+                        "replaced_by": hex::encode(r.new),
+                        "finalized": r.finalized,
+                        "content_digest": hex::encode(r.content.digest),
+                        "content_len": r.content.len,
+                        "old_object_len": r.old_object_len,
+                        "new_object_len": r.new_object_len,
+                        "proposed_at_epoch": r.proposed_at,
                     })
                 } else if let Some(epoch) = self.tombstones.get(key) {
                     serde_json::json!({
@@ -1674,7 +1834,7 @@ impl Bud3Registry {
         }
     }
 
-    /// Whether the registry is empty.
+    /// Whether the registry is empty, including replacement redirects.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.objects.is_empty()
@@ -1687,6 +1847,7 @@ impl Bud3Registry {
             && self.revoked_grants.is_empty()
             && self.base_deps.is_empty()
             && self.validator_quotas.is_empty()
+            && self.replacements.is_empty()
     }
 
     /// The registry state root over every map, in order.
@@ -1797,6 +1958,22 @@ impl Bud3Registry {
         }
         for (validator, quota) in &self.validator_quotas {
             fold(&[b"quota", validator, &quota.to_le_bytes()]);
+        }
+        for (old, r) in &self.replacements {
+            fold(&[
+                b"repl",
+                old,
+                &r.new,
+                &r.proposer,
+                &r.content.digest,
+                &r.content.len.to_le_bytes(),
+                &r.old_object_len.to_le_bytes(),
+                &r.new_object_len.to_le_bytes(),
+                &r.proposed_at.to_le_bytes(),
+                b"pub",
+                &[u8::from(r.content.kind == ContentIdKind::Public)],
+                &[u8::from(r.finalized)],
+            ]);
         }
         acc
     }

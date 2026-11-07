@@ -14,7 +14,7 @@
 //! | [`bof1`] | The BOF-1 object: canonical binary header and payload |
 //! | [`segment`] | Segmentation, segment digests and the object commitment |
 //! | [`placement`] | Stake-weighted rendezvous placement, diversity caps, the placement table |
-//! | [`registry`] | Chain state: objects, dedup, references, deletion, shares, audits |
+//! | [`registry`] | Chain state: objects, dedup, references, deletion, shares, audits, object replacement |
 //! | [`tx`] | `StorageTx` v3 and its one apply door |
 //! | [`custody`] | Sub-block tree, symbol root, the audit draw and custody proofs |
 //! | [`fees`] | Physical-byte storage fees, Custody Endowment, 95/5 split and epoch custody rewards |
@@ -27,6 +27,10 @@
 //! The commitment is fixed-size (32 bytes). The object is not fixed-size: it
 //! is the header plus the payload, and it is at most the header larger than
 //! the content (or Padme bucket ceiling plus salt and AEAD tag when sealed).
+//!
+//! Object replacement keeps the canonical attested transaction encoding. The
+//! registry moves references at proposal, retains old shares until every new
+//! share is acknowledged, and then keeps the old commitment as a redirect.
 
 pub mod access_tiering;
 pub mod bof1;

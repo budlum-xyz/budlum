@@ -295,3 +295,7 @@ pub mod ceremony_and_drills;
 // Security, conservation, and privilege-boundary regressions.
 #[cfg(test)]
 pub mod security_review;
+// Object replacement: the second representation of one content id
+// (section 6.14).
+#[cfg(test)]
+pub mod bud3_replace;

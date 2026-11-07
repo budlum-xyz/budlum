@@ -108,6 +108,10 @@ pub enum ReplaceError {
     SealedReplacementMustComeFromOwner,
     CodecNotOpen(CodecId),
     CommitmentUnchanged,
+    /// A second proposal cannot overwrite an unconfirmed replacement.
+    ReplacementAlreadyPending,
+    /// A live or tombstoned commitment cannot be reused for a replacement.
+    CommitmentAlreadyLive,
     InsufficientAttestations { got: usize, need: usize },
     AttesterOutsidePlacementGroup(Address),
     /// Different content produced: rejected AND proposer is slashed 1% under bad-repair rule!
