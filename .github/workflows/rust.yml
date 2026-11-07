@@ -31,7 +31,7 @@ name: Rust Quality
 
 on:
   pull_request:
-    branches: [main, fix/architecture-tip-adlari]
+    branches: [main]
   schedule:
     - cron: "0 6 * * 2" # weekly, Tuesday 06:00 UTC (Monday 05:30 is security-hardening)
   workflow_dispatch:
