@@ -157,6 +157,18 @@ criteria = "safe-to-deploy"
 version = "0.10.1"
 notes = "QR decoder used as the independent read-back check in tests; reviewed 0.10.1: no build script, zero unsafe, pure-Rust detection and Reed-Solomon"
 
+[[audits.raptorq]]
+who = "Budlum Security <security@budlum.xyz>"
+criteria = "safe-to-deploy"
+version = "2.0.0"
+notes = "RFC 6330 RaptorQ systematic fountain encoder and decoder for B.U.D. 3.0; reviewed full upstream v2.0.0 source (22 .rs files): no build script, zero network or process access, and unsafe blocks are confined to src/octet.rs and src/octets.rs for GF(256) table lookups and SIMD slice operations"
+
+[[audits.ruzstd]]
+who = "Budlum Security <security@budlum.xyz>"
+criteria = "safe-to-deploy"
+version = "0.8.1"
+notes = "pure-Rust zstd frame decoder used by bud-codec; reviewed full v0.8.1 source (49 .rs files): no build script, zero network or process access, and all unsafe blocks are confined to src/decoding/ringbuffer.rs and src/decoding/decode_buffer.rs for bounds-checked circular history buffer copies"
+
 [[audits.simd-adler32]]
 who = "Budlum Security <security@budlum.xyz>"
 criteria = "safe-to-deploy"
@@ -174,3 +186,21 @@ who = "Budlum Security <security@budlum.xyz>"
 criteria = "safe-to-deploy"
 version = "0.6.1"
 notes = "RustCrypto first-party crate; reviewed this exact version source: zero unsafe blocks, no build script, no network or filesystem access. Bump is an API migration (GenericArray to Array, heapless to arrayvec, inout buffers); the RFC 8439 construction (Poly1305 mac key from keystream block 0, tag handling, counter flow) is unchanged from the already locked 0.10.1."
+
+[[audits.zstd]]
+who = "Budlum Security <security@budlum.xyz>"
+criteria = "safe-to-deploy"
+version = "0.13.3"
+notes = "zstd encoder wrapper used only on the non-consensus upload preparation path in bud-codec; reviewed v0.13.3 source (17 .rs files): no build script, zero network or process access, and three unsafe lines in src/stream/raw.rs copying bounded slice bytes into an OutBuffer"
+
+[[audits.zstd-safe]]
+who = "Budlum Security <security@budlum.xyz>"
+criteria = "safe-to-deploy"
+version = "7.4.0"
+notes = "checked slice-lifetime wrapper around zstd-sys; reviewed zstd-safe-7.4.0 source and build.rs: build.rs only emits rustc-cfg std on wasm32/hermit, zero network or process access, and unsafe FFI calls translate C size_t error codes into Rust Result"
+
+[[audits.zstd-sys]]
+who = "Budlum Security <security@budlum.xyz>"
+criteria = "safe-to-deploy"
+version = "2.1.2+zstd.1.5.7"
+notes = "FFI bindings and cc build of bundled upstream zstd 1.5.7 C sources; reviewed zstd-sys-2.1.2 source and build.rs: build.rs compiles vendored C sources via cc with hidden symbol visibility (or probes pkg-config), zero network access"
