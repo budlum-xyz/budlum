@@ -1,6 +1,6 @@
 //! Move (Aptos) execution environment (`EeId::MOVE` = `0x04`) over `HostApi`.
 //!
-//! Implements WP-32 items 1, 3, & 6:
+//! Implements  items 1, 3, & 6:
 //! - Strictly sequential Move execution (`block_stm_parallel = false`).
 //! - Move state persisted in `ee/move/state` keyed by canonical `StateKey` bytes.
 //! - Framework subset: `0x1::aptos_account`, `0x1::coin`, `0x1::fungible_asset`,
@@ -54,7 +54,7 @@ impl Default for MoveRuntimeConfig {
 }
 
 impl MoveRuntimeConfig {
-    /// Verifies Block-STM parallel execution is disabled (WP-32 item 1).
+    /// Verifies Block-STM parallel execution is disabled ( item 1).
     pub fn ensure_sequential(&self) -> Result<(), String> {
         if self.block_stm_parallel {
             return Err(String::from(

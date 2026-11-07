@@ -1,8 +1,8 @@
 //! Compatibility Lane RPC and REST gateways (section 8.11):
-//! - Ethereum JSON-RPC (`127.0.0.1:18547`, `WP-28`)
-//! - Solana JSON-RPC (`127.0.0.1:18548`, `WP-31`)
-//! - Aptos REST (`127.0.0.1:18549`, `WP-32`)
-//! - CometBFT RPC & Cosmos LCD (`127.0.0.1:18550` / `127.0.0.1:18551`, `WP-29`)
+//! - Ethereum JSON-RPC (`127.0.0.1:18547`, )
+//! - Solana JSON-RPC (`127.0.0.1:18548`, )
+//! - Aptos REST (`127.0.0.1:18549`, )
+//! - CometBFT RPC & Cosmos LCD (`127.0.0.1:18550` / `127.0.0.1:18551`, )
 //!
 //! Every gateway follows the `method_class.rs` discipline: each method's listener
 //! and effect are declared in a single table, and no method mutates consensus
@@ -228,7 +228,7 @@ impl PeerQuotaTracker {
         Ok(())
     }
 
-    /// exposed for: compatibility gateway rate-limiter window rotation (`WP-28`).
+    /// exposed for: compatibility gateway rate-limiter window rotation ().
     pub fn reset_window(&mut self) {
         self.counts.clear();
     }

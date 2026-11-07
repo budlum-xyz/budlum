@@ -1122,13 +1122,13 @@ mod tests {
         assert_eq!(names.len(), 1, "no temp file may remain");
     }
 
-    /// BLG-004 lock: rewriting a key file must not keep the wide mode of the
+    ///  lock: rewriting a key file must not keep the wide mode of the
     /// file it replaced. The lock covers the validator key file too, not only
     /// the account key pair: it carries the BLS and PQ secrets as well, and one
     /// saver that kept the old mode would leave the whole suite group readable.
     #[cfg(unix)]
     #[test]
-    fn blg_004_validator_key_save_resets_a_wide_mode() {
+    fn validator_key_save_resets_a_wide_mode() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("validator_key.bin");
@@ -1149,12 +1149,12 @@ mod tests {
         );
     }
 
-    /// BLG-200 lock, key material half. A BLS pair is refused when its secret
+    ///  lock, key material half. A BLS pair is refused when its secret
     /// half is the zero scalar, when its public half is the identity point, and
     /// when the two halves do not belong together. The identity point is a real
     /// encoding (`0xc0`), so the refusal cannot rest on a failed decode.
     #[test]
-    fn blg_200_zero_and_identity_bls_material_is_refused() {
+    fn zero_and_identity_bls_material_is_refused() {
         let identity = *bls12_381::G2Affine::identity().to_compressed();
         // A file holding a zero secret and the identity point: both halves are
         // bad on their own, and the pairing check is the second net.
@@ -1398,9 +1398,9 @@ fn test_bls_proof_of_possession() {
 
 #[cfg(test)]
 #[test]
-fn blg_004_key_file_rewrite_is_atomic_and_owner_only() {
+fn key_file_rewrite_is_atomic_and_owner_only() {
     let dir = std::env::temp_dir().join(format!(
-        "budlum-blg004-{}-{}",
+        "budlum-key-rewrite-{}-{}",
         std::process::id(),
         rand::random::<u64>()
     ));
@@ -1436,7 +1436,7 @@ fn blg_004_key_file_rewrite_is_atomic_and_owner_only() {
 
 #[cfg(test)]
 #[test]
-fn blg_200_bls_rejects_zero_scalar_and_identity_points() {
+fn bls_rejects_zero_scalar_and_identity_points() {
     use crate::core::address::Address;
     use crate::core::transaction::DEFAULT_CHAIN_ID;
 

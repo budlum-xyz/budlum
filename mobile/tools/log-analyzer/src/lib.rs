@@ -1,4 +1,4 @@
-//! Deterministic field-log analyzer for the Budlum mobile validator matrix (WP-37).
+//! Deterministic field-log analyzer for the Budlum mobile validator matrix.
 //!
 //! All rates and battery budgets are computed in integer basis points (1 bp = 0.01%)
 //! so reports stay bit-for-bit reproducible across architectures without floating point.
@@ -12,10 +12,10 @@ pub const TARGET_FOREGROUND_SECONDS: u64 = 86_400;
 /// Uncharged 24-hour battery budget in basis points (500 bps = 5.00%).
 pub const BATTERY_BUDGET_BPS: u32 = 500;
 
-/// Minimum real devices required in the WP-37 matrix.
+/// Minimum real devices required in the  matrix.
 pub const MIN_MATRIX_DEVICES: usize = 8;
 
-/// Minimum distinct OEM groups required in the WP-37 matrix.
+/// Minimum distinct OEM groups required in the  matrix.
 pub const MIN_MATRIX_OEMS: usize = 5;
 
 /// Minimum Android SDK level supported by the mobile validator (Android 10).
@@ -217,7 +217,7 @@ pub struct MatrixSummary {
 }
 
 impl MatrixSummary {
-    /// Overall WP-37 pass verdict.
+    /// Overall  pass verdict.
     #[must_use]
     pub const fn overall_passed(&self) -> bool {
         self.matrix_criteria_met

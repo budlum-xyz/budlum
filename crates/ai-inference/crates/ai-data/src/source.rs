@@ -18,7 +18,7 @@ pub enum DataError {
         expected: SourceKind,
         got: SourceKind,
     },
-    /// Closed-circuit source failed identity or grant-epoch validation (`BLG-160`).
+    /// Closed-circuit source failed identity or grant-epoch validation ().
     InvalidSource(SourceError),
     /// The SHA-256 verification failed - no data flows.
     HashMismatch { detail: String },
@@ -112,7 +112,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_160_assert_closed_loop_refuses_zero_id_and_expired_grant() {
+    fn assert_closed_loop_refuses_zero_id_and_expired_grant() {
         assert_eq!(
             assert_closed_loop(&SourceRef::storage_deal([0u8; 32])),
             Err(DataError::InvalidSource(SourceError::ZeroContentId))

@@ -1,7 +1,7 @@
 //! Mobile validator runtime policy, Android `specialUse` / `WorkManager` lifecycle,
 //! Keystore/StrongBox & Secure Enclave key-wrapping invariants, iOS `MobileOpportunistic`
 //! `BGProcessingTask` engine, and F-Droid reproducible APK verification
-//! (Section 7.9, Section 7.10, WP-36, WP-38, WP-58).
+//! (Section 7.9, Section 7.10, , , ).
 //! exposed for mobile UniFFI/JNI bindings, CLI/SDK verifiers, and CI gates.
 
 use serde::{Deserialize, Serialize};
@@ -17,7 +17,7 @@ pub const ANDROID_MIN_SDK: u32 = 29;
 /// Current Google Play target Android SDK level (`Android 16`, Section 7.9.2).
 pub const ANDROID_TARGET_SDK: u32 = 36;
 
-/// Pinned Android NDK version for deterministic `cargo-ndk` builds (`WP-36`, `WP-58`).
+/// Pinned Android NDK version for deterministic `cargo-ndk` builds (, ).
 /// Convenience: exposed for Android/F-Droid build verifiers.
 pub const PINNED_ANDROID_NDK_VERSION: &str = "27.2.12479018";
 
@@ -127,7 +127,7 @@ pub enum MobileRuntimeError {
     IncompleteOnboarding(&'static str),
     /// Background task violated platform power or connectivity requirements.
     BackgroundConstraintViolation(&'static str),
-    /// Two APK builds differed in byte length or SHA-256 digest (`WP-58`).
+    /// Two APK builds differed in byte length or SHA-256 digest ().
     NonReproducibleApk,
 }
 
@@ -385,7 +385,7 @@ pub struct ShareReleasePlan {
 
 /// Stateful Mobile validator controller modelling `noBackupFilesDir/bud3/` share storage,
 /// `WorkManager` / `BGProcessingTask` background audit execution, low-space `ReleaseShares`,
-/// and graceful `leave` (`WP-36`, `WP-38`).
+/// and graceful `leave` (, ).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MobileValidatorController {
     pub phase: MobileLifecyclePhase,
@@ -571,7 +571,7 @@ impl MobileValidatorController {
     }
 }
 
-/// Verify that two independent Android APK builds produce byte-identical artifacts (`WP-58`).
+/// Verify that two independent Android APK builds produce byte-identical artifacts ().
 /// exposed for F-Droid reproducible build gate and release pipeline.
 ///
 /// # Errors

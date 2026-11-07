@@ -22,7 +22,7 @@ use crate::registry::role::roles;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Non-slashing suspension emitted when a validator exceeds its absence window (V-4, BLG-251).
+/// Non-slashing suspension emitted when a validator exceeds its absence window (V-4, ).
 /// Convenience: exposed for epoch-close suspension handling.
 ///
 /// Offline validators are suspended (no new duties, seat eligibility suspended),
@@ -142,7 +142,7 @@ impl LivenessTracker {
         reports
     }
 
-    /// Record one epoch's participation under invariant V-4 (BLG-251):
+    /// Record one epoch's participation under invariant V-4 ():
     /// crossing `threshold` consecutive missed epochs emits a [`SuspensionNotice`]
     /// with `stake_slashed_atoms == 0` instead of a slashing report.
     pub fn record_suspension_epoch<F>(

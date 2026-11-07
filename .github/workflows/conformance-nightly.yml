@@ -61,7 +61,7 @@ jobs:
           ROOT=$(cat "uel-root-${CONFORMANCE_ARCH}.hex")
           echo "UEL_EXECUTION_ROOT (${CONFORMANCE_ARCH}): ${ROOT}"
           test "${#ROOT}" -eq 64
-      - name: Measure parallel block execution timing (WP-59)
+      - name: Measure parallel block execution timing
         env:
           CONFORMANCE_ARCH: ${{ matrix.arch }}
         shell: bash

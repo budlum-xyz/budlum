@@ -119,7 +119,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn blg_169_name_record_try_new_rejects_invalid_name_owner_or_expiry() {
+    fn name_record_try_new_rejects_invalid_name_owner_or_expiry() {
         let alice = Address::from([1u8; 32]);
         let valid = NameRecord::try_new(String::from("ayaz.bud"), alice, 5, 10);
         assert!(valid.is_ok());

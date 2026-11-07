@@ -1387,7 +1387,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_205_readmit_and_last_accepted_height_monotonicity() {
+    fn readmit_and_last_accepted_height_monotonicity() {
         let (mut registry, key, att) = registered();
         // Advance height to 50, then commit an older historical height 10:
         // `last_accepted_height` must stay at 50 rather than rewinding to 10.

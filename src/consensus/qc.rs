@@ -1954,7 +1954,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_203_qc_fault_proof_rejects_short_siblings_zero_root_and_high_index() {
+    fn qc_fault_proof_rejects_short_siblings_zero_root_and_high_index() {
         let short_sibling = QcFaultProof::new_invalid_dilithium(
             1,
             100,

@@ -66,7 +66,7 @@ const fn row(name: &'static str, listener: Listener, effect: Effect) -> MethodCl
     }
 }
 
-/// The ratchet file that records the coverage gaps TEST-GAP-07 cannot close yet.
+/// The ratchet file that records the coverage gaps  cannot close yet.
 #[cfg(test)]
 const COVERAGE_BASELINE_PATH: &str = ".github/rpc-method-coverage-baseline.txt";
 
@@ -646,7 +646,7 @@ mod tests {
             .collect()
     }
 
-    /// TEST-GAP-07. Every row of the table has a test that answers it and a test
+    /// . Every row of the table has a test that answers it and a test
     /// that refuses it, except a `Refused` row, which has no success answer to
     /// give. The gaps this delivery cannot close are recorded in the baseline
     /// file, and that file is a ratchet in the same shape as the concept-name

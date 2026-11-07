@@ -255,7 +255,7 @@ pub fn merkle_root_from_proof(
     for sibling in siblings {
         cur = if sibling == &odd_promotion_sentinel() {
             // Only an even-positioned tail (`idx % 2 == 0`) can ever lack a
-            // partner; an odd index always has a left sibling (`BLG-127`).
+            // partner; an odd index always has a left sibling ().
             if !idx.is_multiple_of(2) {
                 return None;
             }
@@ -476,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_127_merkle_root_from_proof_refuses_odd_index_promotion_phantom_leaf() {
+    fn merkle_root_from_proof_refuses_odd_index_promotion_phantom_leaf() {
         let leaves = [[1u8; 32], [2u8; 32], [3u8; 32]];
         let root = merkle_root(&leaves, combine_sha3, promote_sha3);
         let tail_proof = merkle_proof(&leaves, 2, combine_sha3, promote_sha3).unwrap();

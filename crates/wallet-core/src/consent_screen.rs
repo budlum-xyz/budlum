@@ -1,8 +1,8 @@
 //! Wallet-side blinded consent confirmation screen, Padme size buckets, and
-//! threshold Shamir key-escrow primitives (WP-56 Steps 9-10 / TK7, TSO8, TSO9,
+//! threshold Shamir key-escrow primitives ( Steps 9-10 / TK7, TSO8, TSO9,
 //! TSO10, TSO12).
 //!
-//! WIRING: unwired - staged for wallet UI consent confirmation integration (WP-56).
+//! WIRING: unwired - staged for wallet UI consent confirmation integration ().
 
 use sha3::{Digest, Sha3_256};
 
@@ -21,12 +21,12 @@ fn hash_prefixed(tag: &[u8], parts: &[&[u8]]) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// Padme length-hiding bucket size (`O(log log L)` leakage bound, WP-56 TSO12).
+/// Padme length-hiding bucket size (`O(log log L)` leakage bound,  TSO12).
 ///
 /// Every sealed object payload and key envelope pads to `padme_bucket_len`
 /// before encryption so observed ciphertext sizes fall strictly onto Padme
 /// buckets.
-/// exposed for: wallet and sealed-object builders under WP-56.
+/// exposed for: wallet and sealed-object builders under.
 #[must_use]
 pub const fn padme_bucket_len(raw_len: u64) -> u64 {
     if raw_len <= 1 {
@@ -49,7 +49,7 @@ pub const fn padme_bucket_len(raw_len: u64) -> u64 {
     }
 }
 
-/// Consent mode displayed on the wallet confirmation screen (WP-56 Step 9).
+/// Consent mode displayed on the wallet confirmation screen ( Step 9).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ConsentMode {
     /// Default blinded consent (`TSO9`): hides issuer, grantee, and content ID on chain.
@@ -62,7 +62,7 @@ pub enum ConsentMode {
 }
 
 /// Human-readable consent prompt rendered locally on the user's wallet screen
-/// prior to signing (WP-56 Step 9). Never serialized onto the chain.
+/// prior to signing ( Step 9). Never serialized onto the chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsentScreenPrompt {
     pub issuer_address: [u8; 32],
@@ -91,7 +91,7 @@ impl ConsentScreenPrompt {
     ///
     /// Refuses empty scope labels, zero blinding salt, or `PublicPublish`
     /// without a verified `YK6` non-blacklist predicate proof.
-    /// exposed for: wallet consent confirmation flow (WP-56 Step 9).
+    /// exposed for: wallet consent confirmation flow ( Step 9).
     pub fn seal_for_chain(&self, blinding_salt: &[u8; 32]) -> Result<BlindedConsentRecord, String> {
         if self.scope_label.trim().is_empty() {
             return Err("consent scope_label must not be empty".to_string());
@@ -136,7 +136,7 @@ impl ConsentScreenPrompt {
 impl BlindedConsentRecord {
     /// Verify whether a consent proof may open a new session at `current_epoch`
     /// against `revoked_handles` and `deleted_commitments` (`TSO8`, `TSO11`).
-    /// exposed for: consent session gate verification (WP-56).
+    /// exposed for: consent session gate verification ().
     #[must_use]
     pub fn allows_new_session(
         &self,
@@ -160,7 +160,7 @@ impl BlindedConsentRecord {
     }
 }
 
-/// One `GF(256)` Shamir share of a 32-byte key (`x = index != 0`, WP-56 TK7).
+/// One `GF(256)` Shamir share of a 32-byte key (`x = index != 0`,  TK7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShamirShare32 {
     pub index: u8,
@@ -207,7 +207,7 @@ const fn gf256_inv(a: u8) -> u8 {
 ///
 /// Refuses `threshold < 2`, `threshold > total`, `total == 255`, or insufficient
 /// `coeff_entropy`.
-/// exposed for: threshold escrow key splitting (WP-56 Step 10).
+/// exposed for: threshold escrow key splitting ( Step 10).
 pub fn shamir_split_32(
     secret: &[u8; 32],
     threshold: u8,
@@ -246,7 +246,7 @@ pub fn shamir_split_32(
 /// # Errors
 ///
 /// Refuses `< threshold` shares, `index == 0`, or duplicate share indices.
-/// exposed for: threshold escrow recovery (WP-56 Step 10).
+/// exposed for: threshold escrow recovery ( Step 10).
 pub fn shamir_reconstruct_32(
     shares: &[ShamirShare32],
     threshold: u8,

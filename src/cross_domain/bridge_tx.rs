@@ -1064,7 +1064,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_105_bridge_lock_refuses_vesting_locked_balance() {
+    fn bridge_lock_refuses_vesting_locked_balance() {
         let (mut state, _) = bridged();
         let team = Address::from([0x77; 32]);
         state.add_balance(&team, 5_000);

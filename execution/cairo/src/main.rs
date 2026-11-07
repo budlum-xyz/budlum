@@ -1,4 +1,4 @@
-//! `budlum-ee-cairo` Unix-domain-socket worker daemon (`WP-51`).
+//! `budlum-ee-cairo` Unix-domain-socket worker daemon ().
 
 #![forbid(unsafe_code)]
 

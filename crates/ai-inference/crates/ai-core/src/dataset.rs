@@ -137,7 +137,7 @@ impl SourceRef {
         }
     }
 
-    /// Validate closed-circuit source identity and epoch window (`BLG-160`).
+    /// Validate closed-circuit source identity and epoch window ().
     ///
     /// # Errors
     ///
@@ -159,7 +159,7 @@ impl SourceRef {
     }
 }
 
-/// Convenience: closed-circuit source validation errors (`BLG-160`).
+/// Convenience: closed-circuit source validation errors ().
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceError {
     /// All-zero `content_id` does not identify content.
@@ -231,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_160_zero_model_target_content_id_or_expired_grant_refused() {
+    fn zero_model_target_content_id_or_expired_grant_refused() {
         let mut bad = DatasetMetadata::training([4; 32], 10);
         bad.model_target = Some([0u8; 32]);
         assert_eq!(bad.validate(), Err(DatasetError::MissingModelTarget));

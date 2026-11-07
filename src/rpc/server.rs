@@ -7764,13 +7764,13 @@ mod tests {
         assert!(is_ip_allowed(&config, &req));
     }
 
-    /// BLG-029 lock, quota half. A client behind a proxy may forge every entry
+    ///  lock, quota half. A client behind a proxy may forge every entry
     /// to the left of the one its proxy appended. The quota is keyed on the
     /// appended address, so three forgeries spend three requests of one window
     /// and the fourth is refused. An implementation that took the leftmost entry
     /// would hand a fresh bucket to every forged address.
     #[test]
-    fn blg_029_a_forged_forwarded_for_entry_buys_no_fresh_quota() {
+    fn a_forged_forwarded_for_entry_buys_no_fresh_quota() {
         let config = RpcSecurityConfig {
             trusted_proxies: vec!["*".into()],
             allowed_ips: vec!["10.0.0.1".into()],
@@ -7810,12 +7810,12 @@ mod tests {
         );
     }
 
-    /// BLG-099 lock. The comparison walks the expected key on every call and
+    ///  lock. The comparison walks the expected key on every call and
     /// folds the length difference into the accumulator, so a candidate of the
     /// wrong length is refused without an early return and without the
     /// same-buffer self-comparison that measured shorter than a real mismatch.
     #[test]
-    fn blg_099_the_api_key_compare_never_early_returns_on_length() {
+    fn the_api_key_compare_never_early_returns_on_length() {
         let expected = "secret-value";
         for candidate in [
             "",
@@ -7878,7 +7878,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_029_forwarded_ip_and_quota_are_bound() {
+    fn forwarded_ip_and_quota_are_bound() {
         let config = RpcSecurityConfig {
             allowed_ips: vec!["203.0.113.7".into()],
             trusted_proxies: vec!["127.0.0.1".into(), "192.0.2.10".into()],
@@ -7909,7 +7909,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_099_constant_time_eq_checks_length_and_distinct_buffers() {
+    fn constant_time_eq_checks_length_and_distinct_buffers() {
         let expected = String::from("secret-token");
         let matching = String::from("secret-token");
         assert!(constant_time_eq_str(&matching, &expected));

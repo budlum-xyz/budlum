@@ -44,7 +44,7 @@ impl FromStr for NodeMode {
     }
 }
 
-/// Minimum finalized checkpoint retention window for pruned full nodes (`BLG-155`).
+/// Minimum finalized checkpoint retention window for pruned full nodes ().
 pub const MIN_PRUNING_RETENTION_BLOCKS: u64 = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,7 +217,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_155_pruning_rejects_in_reorg_single_block_retention() {
+    fn pruning_rejects_in_reorg_single_block_retention() {
         let mut policy = PruningPolicy::full_node_default();
         policy.retention_blocks = 1;
         assert!(policy.validate().is_err());

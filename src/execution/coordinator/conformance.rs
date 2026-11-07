@@ -1,4 +1,4 @@
-//! Conformance runners, BGU gas calibration, and cross-EE golden block harness (`WP-35`).
+//! Conformance runners, BGU gas calibration, and cross-EE golden block harness ().
 //!
 //! Implements section 8.9 item 4, section 8.13, section 8.15, and section 8.16:
 //! - Per-environment conformance suites across EVM, WASM, SVM, Move, and BudZero.
@@ -89,7 +89,7 @@ fn funded_pair() -> (AccountState, Address, Address) {
     (state, sender, proposer)
 }
 
-/// Runs the Prague EVM conformance vector pack (`WP-35`).
+/// Runs the Prague EVM conformance vector pack ().
 pub fn run_evm_conformance() -> Result<ConformanceReport, String> {
     let ee = EvmEe::new();
     // EIP-3860 initcode > 49_152 bytes must be refused (documented limit).
@@ -172,7 +172,7 @@ pub fn run_evm_conformance() -> Result<ConformanceReport, String> {
     })
 }
 
-/// Runs the CosmWasm WASM conformance vector pack (`WP-35`).
+/// Runs the CosmWasm WASM conformance vector pack ().
 pub fn run_wasm_conformance() -> Result<ConformanceReport, String> {
     let wasm = WasmEe::new();
     let float_mod = build_valid_cosmwasm_module(&["execute"], &[0x92]);
@@ -220,7 +220,7 @@ pub fn run_wasm_conformance() -> Result<ConformanceReport, String> {
     })
 }
 
-/// Runs the SBPF SVM conformance vector pack (`WP-35`).
+/// Runs the SBPF SVM conformance vector pack ().
 pub fn run_svm_conformance() -> Result<ConformanceReport, String> {
     let svm = SvmEe::new();
     if svm.config().jit_enabled {
@@ -316,7 +316,7 @@ pub fn run_svm_conformance() -> Result<ConformanceReport, String> {
     })
 }
 
-/// Runs the Aptos Move conformance vector pack (`WP-35`).
+/// Runs the Aptos Move conformance vector pack ().
 pub fn run_move_conformance() -> Result<ConformanceReport, String> {
     let mv = MoveEe::new();
     if mv.validate_deploy(b"bad").is_ok() {
@@ -384,7 +384,7 @@ pub fn run_move_conformance() -> Result<ConformanceReport, String> {
     })
 }
 
-/// Runs the BudZero native EE conformance vector pack (`WP-35`).
+/// Runs the BudZero native EE conformance vector pack ().
 pub fn run_budzero_conformance() -> Result<ConformanceReport, String> {
     let (mut state, sender, proposer) = funded_pair();
     let mut coord = ExecutionCoordinator::new();

@@ -1,4 +1,4 @@
-//! B.U.D. 3.0 content binding and view resolution for BNS (Section 5.6, WP-23).
+//! B.U.D. 3.0 content binding and view resolution for BNS (Section 5.6, ).
 //! exposed for BNS RPC handlers, `Bud3ContentGateway`, and dApp resolution.
 //!
 //! Each BNS name binding carries a B.U.D. 3.0 [`ContentRef`] (`ContentId`,

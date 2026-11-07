@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.1"
 license = "LicenseRef-PolyForm-Shield-1.0.0"
-description = "Field-test log analyzer for the Budlum mobile validator device matrix (WP-37)."
+description = "Field-test log analyzer for the Budlum mobile validator device matrix."
 publish = false
 
 [workspace]

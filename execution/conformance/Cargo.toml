@@ -8,7 +8,7 @@ edition = "2021"
 rust-version = "1.97.1"
 license = "Apache-2.0"
 publish = false
-description = "Budlum UEL cross-environment conformance, gas calibration, and cross-arch root runner (WP-35)"
+description = "Budlum UEL cross-environment conformance, gas calibration, and cross-arch root runner ()"
 
 [dependencies]
 bud-isa = { path = "../../budzero/bud-isa" }

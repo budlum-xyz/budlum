@@ -1,7 +1,7 @@
 import Foundation
 
 /// Bilingual localization bundle (EN and TR) for the iOS `MobileOpportunistic` app
-/// (Section 7.10, WP-38 item 5).
+/// (Section 7.10,  item 5).
 ///
 /// Turkish codepoints are represented with explicit Unicode scalar escapes so source
 /// files remain pure ASCII across repository-wide lint gates.

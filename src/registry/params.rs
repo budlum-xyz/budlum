@@ -991,7 +991,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_148_zero_malicious_slash_and_unbounded_fee_params_rejected() {
+    fn zero_malicious_slash_and_unbounded_fee_params_rejected() {
         for bad in [
             RegistryParams {
                 double_sign_slash_ratio_fixed: 0,

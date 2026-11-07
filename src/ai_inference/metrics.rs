@@ -112,7 +112,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_201_ai_metrics_counters_saturate_instead_of_wrapping() {
+    fn ai_metrics_counters_saturate_instead_of_wrapping() {
         let m = AiMetrics::new();
         m.record_fee(u64::MAX - 10);
         m.record_fee(100);

@@ -1,5 +1,5 @@
-//! End-to-end rehearsal drill suite (`T-1`..`T-7`, WP-46) and Mobile device
-//! field-test telemetry suite (WP-37).
+//! End-to-end rehearsal drill suite (`T-1`..`T-7`,) and Mobile device
+//! field-test telemetry suite ().
 
 use std::collections::BTreeSet;
 
@@ -152,7 +152,7 @@ fn rehearsal_t1_to_t7_drills_and_mobile_field_matrix_hold() {
     };
     evaluate_rehearsal_drills(&report).unwrap();
 
-    // 3. WP-37: Verify 20-device Android JSONL field telemetry stream + full suite runner.
+    // 3. : Verify 20-device Android JSONL field telemetry stream + full suite runner.
     let tiers = ["entry4_gb", "midrange6_gb", "midrange8_gb", "flagship12_gb"];
     let mut jsonl = String::new();
     for dev in 0..20u8 {

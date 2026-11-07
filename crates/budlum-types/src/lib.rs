@@ -38,10 +38,10 @@ use std::str::FromStr;
 /// The wire form is lowercase hex with no prefix. Parsing accepts exactly 64
 /// hexadecimal digits, optionally preceded by `0x` or `0X`.
 ///
-/// # The input contract is owned by BLG-151 (#43)
+/// # The input contract is owned by  (#43)
 ///
 /// The accepted input spellings are **not** settled by this crate's move. #43
-/// closes BLG-151 by making `"0"` and `"0x0"` errors and adding a `0X` prefix.
+/// closes  by making `"0"` and `"0x0"` errors and adding a `0X` prefix.
 /// That change is still correct and still needed; it now lands **here**, on
 /// `from_hex` below, rather than in `src/core/address.rs`, which is a re-export
 /// as of this commit. The behaviour was moved verbatim so that this PR decides
@@ -146,7 +146,7 @@ mod tests {
 
     /// The zero address and its printed form.
     ///
-    /// Which *input strings* parse to zero is BLG-151's question, and #43 owns
+    /// Which *input strings* parse to zero is 's question, and #43 owns
     /// it: that PR makes `"0"` and `"0x0"` errors and adds a `0X` prefix. This
     /// slice moves the definition without answering that question, so it pins
     /// only the value and its output, not the accepted spellings.

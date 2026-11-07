@@ -1,4 +1,4 @@
-//! Ethereum JSON-RPC compatibility gateway (`127.0.0.1:18547`, WP-28 & section 8.11.2).
+//! Ethereum JSON-RPC compatibility gateway (`127.0.0.1:18547`,  & section 8.11.2).
 //!
 //! Serves all 34 T-Launch public methods of section 8.11.2 plus operator-only
 //! `debug_traceTransaction` and `debug_traceCall`. `eth_getProof` explicitly
@@ -196,7 +196,7 @@ impl EthereumCompatGateway {
         &self.filters
     }
 
-    /// exposed for: Ethereum JSON-RPC gateway block-height sync (`WP-28`).
+    /// exposed for: Ethereum JSON-RPC gateway block-height sync ().
     pub fn set_block_height(&mut self, height: u64) {
         self.block_height = height;
     }
@@ -626,7 +626,7 @@ pub const MAX_COMPAT_REQUEST_BYTES: usize = 256 * 1024;
 /// Evaluates a raw JSON-RPC 2.0 request string against read-only `state` on the public
 /// Ethereum compatibility surface (`127.0.0.1:18547`).
 ///
-/// exposed for: wire-level Ethereum JSON-RPC handler (`WP-28`, `WP-34`, `WP-48`).
+/// exposed for: wire-level Ethereum JSON-RPC handler (, , ).
 #[must_use]
 pub fn handle_eth_jsonrpc(state: &AccountState, raw_json: &str) -> String {
     if raw_json.len() > MAX_COMPAT_REQUEST_BYTES {

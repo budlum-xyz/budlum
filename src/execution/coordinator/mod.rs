@@ -1,6 +1,6 @@
 //! The Universal Execution Layer coordinator: account aliases, sparse Merkle
 //! namespaces, BGU gas and EIP-1559 fee accounting, nested call-frame overlays,
-//! stateful BudZero contract execution (closing BLG-248), and worker supervision.
+//! stateful BudZero contract execution (closing ), and worker supervision.
 
 pub mod alias;
 pub mod assets;
@@ -118,7 +118,7 @@ impl std::fmt::Display for CoordinatorError {
     }
 }
 
-/// Stateful BudZero execution adapter closing BLG-248 (deploy, contract address,
+/// Stateful BudZero execution adapter closing  (deploy, contract address,
 /// and persistent key-value storage in `ee/budzero/{program,storage}`).
 #[derive(Debug, Default, Clone)]
 pub struct StatefulBudZeroEe;
@@ -126,7 +126,7 @@ pub struct StatefulBudZeroEe;
 impl StatefulBudZeroEe {
     /// Creates the stateful BudZero execution environment adapter.
     ///
-    /// exposed for: `ExecutionCoordinator` default BudZero registration (`BLG-248`).
+    /// exposed for: `ExecutionCoordinator` default BudZero registration ().
     #[must_use]
     pub const fn new() -> Self {
         Self
@@ -381,7 +381,7 @@ impl Default for ExecutionCoordinator {
 impl ExecutionCoordinator {
     /// Creates a coordinator with the built-in stateful BudZero adapter registered.
     ///
-    /// exposed for: block execution (`WP-26` slice 2/2) and EE worker setup.
+    /// exposed for: block execution ( slice 2/2) and EE worker setup.
     #[must_use]
     pub fn new() -> Self {
         let mut supervisor = WorkerSupervisor::new();
@@ -397,22 +397,22 @@ impl ExecutionCoordinator {
 
     /// Registers or overrides a worker endpoint (e.g. `budlum-ee-evm` Unix socket).
     ///
-    /// exposed for: registering external `budlum-ee-*` worker sockets (`WP-26`..`WP-29`).
+    /// exposed for: registering external `budlum-ee-*` worker sockets (..).
     pub fn register_worker(&mut self, endpoint: WorkerEndpoint) {
         self.supervisor.register(endpoint);
     }
 
     /// Immutable view of the worker supervisor (fault counts and halt alarms).
     ///
-    /// exposed for: node telemetry and halt monitoring (`WP-26` section 8.3.5).
+    /// exposed for: node telemetry and halt monitoring ( section 8.3.5).
     #[must_use]
     pub const fn supervisor(&self) -> &WorkerSupervisor {
         &self.supervisor
     }
 
-    /// Applies a verified EVM contract migration transaction (`WP-34` 2/3 door).
+    /// Applies a verified EVM contract migration transaction ( 2/3 door).
     ///
-    /// exposed for: EVM Migration Kit consensus block execution (`WP-34`).
+    /// exposed for: EVM Migration Kit consensus block execution ().
     pub fn apply_evm_migration(
         &mut self,
         state: &mut AccountState,
@@ -433,7 +433,7 @@ impl ExecutionCoordinator {
 
     /// Admits and applies a foreign Compatibility Lane envelope against `state`.
     ///
-    /// exposed for: foreign mempool lane and Compatibility Lane RPC gateways (`WP-27`..`WP-32`).
+    /// exposed for: foreign mempool lane and Compatibility Lane RPC gateways (..).
     pub fn process_foreign_envelope(
         &mut self,
         state: &mut AccountState,
@@ -970,6 +970,6 @@ mod conformance_tests;
 #[cfg(test)]
 mod review_2_attack_tests;
 #[cfg(test)]
-mod uel_wp27_wp29_wp30_tests;
+mod evm_wasm_universal_call_tests;
 #[cfg(test)]
-mod uel_wp31_wp32_tests;
+mod svm_move_tests;

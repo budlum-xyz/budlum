@@ -1,12 +1,12 @@
 //! 256-bit four-limb Goldilocks digest (`Digest4`) and suite-tagged commitments
-//! for `note-packing` V2 (WP-56 Step 1, KP-2 `no_64bit_commitments`, KP-5
+//! for `note-packing` V2 ( Step 1, KP-2 `no_64bit_commitments`, KP-5
 //! `commitments_carry_hash_suite`).
 //!
-//! WIRING: unwired - staged for WP-56 Digest4 V2 activation.
+//! WIRING: unwired - staged for  Digest4 V2 activation.
 
 use crate::{is_canonical_field, NoteHash};
 
-/// Canonical hash suite identifier carried alongside V2 commitments (WP-56).
+/// Canonical hash suite identifier carried alongside V2 commitments ().
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum HashSuiteId {
@@ -42,7 +42,7 @@ impl HashSuiteId {
 }
 
 /// Four canonical Goldilocks field elements (`4 * 64 = 256` bits), replacing
-/// 64-bit single-limb commitments (WP-56 Step 1 / KP-2).
+/// 64-bit single-limb commitments ( Step 1 / KP-2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Digest4([u64; 4]);
 

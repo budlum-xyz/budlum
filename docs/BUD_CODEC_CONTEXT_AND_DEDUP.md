@@ -1,6 +1,6 @@
 # Domain Transforms, Shared `CompressionContext`, & Convergent Private Dedup (WP-54)
 
-## 1. Pure-Rust Decodable Domain Transforms (`crates/bud-codec/src/wp54_context.rs`)
+## 1. Pure-Rust Decodable Domain Transforms (`crates/bud-codec/src/shared_context.rs`)
 
 All decoders run through pure-Rust `ruzstd` (`bud_codec::decode(ZSTD, ...)`) with
 strict `content_len` bounds and zero `unsafe`:

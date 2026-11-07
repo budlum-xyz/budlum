@@ -254,7 +254,7 @@ impl Mempool {
 
     /// Enqueues a typed UEL or duty envelope into its isolated lane.
     ///
-    /// exposed for: compatibility RPC gateways and duty gossip (`WP-13`, `WP-28`..`WP-32`).
+    /// exposed for: compatibility RPC gateways and duty gossip (, ..).
     pub fn enqueue_lane_envelope(
         &mut self,
         entry: crate::mempool::lanes::LaneEntry,
@@ -266,7 +266,7 @@ impl Mempool {
 
     /// Selects ready UEL and duty envelopes across all lanes up to `block_bgu_limit`.
     ///
-    /// exposed for: proposer block assembly (`WP-26` slice 2/2).
+    /// exposed for: proposer block assembly ( slice 2/2).
     #[must_use]
     pub fn select_lane_envelopes(
         &self,

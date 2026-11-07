@@ -1,4 +1,4 @@
-//! `revm::Database` adapters over `HostApi` and `HostRead` (`Section 8.7.1`, `WP-27`).
+//! `revm::Database` adapters over `HostApi` and `HostRead` (`Section 8.7.1`,).
 //!
 //! State layout in the coordinator's sparse-Merkle overlay:
 //! - `ee/evm/account`: key = 20B EVM address, value = 40B (`nonce` u64 LE || `code_hash` 32B)

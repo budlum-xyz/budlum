@@ -1,6 +1,6 @@
 //! Static gate: dependent application modules (BNS, SocialFi, Data Market, and
 //! Education Domain) bind B.U.D. 3.0 `ContentRef` / `ContentId` and never use
-//! retired 2.0 `RegisterManifest` registration (`WP-23`, Section 5.6).
+//! retired 2.0 `RegisterManifest` registration (, Section 5.6).
 
 use std::path::Path;
 
@@ -68,7 +68,7 @@ fn check(root: &Path) -> Result<String, String> {
     let retired_manifest_tx = ["Register", "Manifest"].concat();
     if edu_mod.contains(&retired_manifest_tx) {
         return Err(format!(
-            "`{edu_mod_rel}` still references retired 2.0 `{retired_manifest_tx}` (BLG-261)"
+            "`{edu_mod_rel}` still references retired 2.0 `{retired_manifest_tx}` ()"
         ));
     }
 

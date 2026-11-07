@@ -1,20 +1,20 @@
 //! Phase-A dual finality evaluation, binary segment recursion boundary checks,
-//! and block batch-proof status tracking (WP-60: TS8, TS9, TA4, TA5, TA8).
+//! and block batch-proof status tracking (: TS8, TS9, TA4, TA5, TA8).
 //!
-//! WIRING: unwired - staged for WP-60 recursion and Phase-A dual-finality activation.
+//! WIRING: unwired - staged for  recursion and Phase-A dual-finality activation.
 
 use crate::core::hash::hash_fields_bytes;
 use crate::domain::types::{DomainId, Hash32};
 
-/// Maximum rows per execution segment before chunked recursion (`2^20`, WP-60 Step 1).
-/// WIRING: enforced by the WP-60 segment prover and recursive aggregator.
+/// Maximum rows per execution segment before chunked recursion (`2^20`,  Step 1).
+/// WIRING: enforced by the  segment prover and recursive aggregator.
 pub const MAX_SEGMENT_ROWS: u64 = 1 << 20;
 
-/// Maximum block aggregate proof lag in blocks (`D = 8`, WP-60 Step 6).
+/// Maximum block aggregate proof lag in blocks (`D = 8`,  Step 6).
 /// WIRING: enforced by light-client pending-proof status classification.
 pub const MAX_BATCH_PROOF_DELAY_BLOCKS: u64 = 8;
 
-/// Boundary summary of one `<= 2^20`-row execution segment (WP-60 Step 1).
+/// Boundary summary of one `<= 2^20`-row execution segment ( Step 1).
 /// WIRING: produced per chunk by the BudZero segment prover.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SegmentBoundary {
@@ -30,7 +30,7 @@ pub struct SegmentBoundary {
 
 impl SegmentBoundary {
     /// Deterministic commitment to this segment's boundary and inner proof (`TS8`).
-    /// WIRING: folded into binary recursion tree nodes (WP-60).
+    /// WIRING: folded into binary recursion tree nodes ().
     #[must_use]
     pub fn commitment(&self) -> Hash32 {
         let idx = self.segment_index.to_le_bytes();
@@ -74,7 +74,7 @@ pub struct RecursiveAggregate {
 /// Refuses empty segment lists, `row_count == 0` or `> MAX_SEGMENT_ROWS`,
 /// non-contiguous `segment_index`, mismatched `program_hash`, `next_pc != start_pc`,
 /// or `post_state_root != pre_state_root` (`TS9`).
-/// WIRING: staged for WP-60 binary segment recursion verification.
+/// WIRING: staged for  binary segment recursion verification.
 pub fn fold_segment_tree(segments: &[SegmentBoundary]) -> Result<RecursiveAggregate, &'static str> {
     if segments.is_empty() {
         return Err("cannot fold an empty segment slice");
@@ -150,7 +150,7 @@ pub fn fold_segment_tree(segments: &[SegmentBoundary]) -> Result<RecursiveAggreg
 }
 
 /// Light-client display state for block state roots under `D = 8` delayed batch
-/// proving (`TA5`, WP-60 Step 6).
+/// proving (`TA5`,  Step 6).
 /// WIRING: surfaced by light-client header inspection before `proven_height` catches up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootProofStatus {
@@ -163,7 +163,7 @@ pub enum RootProofStatus {
 }
 
 /// Classify a finalized header's proof status relative to `proven_height` (`TA5`).
-/// WIRING: called by light-client status views (WP-60 Step 6).
+/// WIRING: called by light-client status views ( Step 6).
 #[must_use]
 pub const fn classify_root_proof_status(block_height: u64, proven_height: u64) -> RootProofStatus {
     if block_height <= proven_height {
@@ -178,7 +178,7 @@ pub const fn classify_root_proof_status(block_height: u64, proven_height: u64) -
 }
 
 /// Block batch proof commitment over inner transaction/block proof digests (`TA4`).
-/// WIRING: committed via `proof_root` once `proven_height` advances (WP-60 Step 6).
+/// WIRING: committed via `proof_root` once `proven_height` advances ( Step 6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockBatchProof {
     pub start_height: u64,
@@ -193,7 +193,7 @@ impl BlockBatchProof {
     /// # Errors
     ///
     /// Refuses empty inner digest lists or `proven_height < start_height`.
-    /// WIRING: staged for block proof-market batch sealing (WP-60 Step 6).
+    /// WIRING: staged for block proof-market batch sealing ( Step 6).
     pub fn seal(
         start_height: u64,
         proven_height: u64,
@@ -226,7 +226,7 @@ impl BlockBatchProof {
     }
 
     /// Recompute `proof_root` and confirm integrity against any inner tamper (`TA4`).
-    /// WIRING: called by batch proof intake and light-client verification (WP-60).
+    /// WIRING: called by batch proof intake and light-client verification ().
     #[must_use]
     pub fn matches_root(&self) -> bool {
         !self.inner_proof_digests.is_empty()
@@ -239,7 +239,7 @@ impl BlockBatchProof {
     }
 }
 
-/// Phase-A dual-path verification outcome (`TA8`, WP-60 Step 4).
+/// Phase-A dual-path verification outcome (`TA8`,  Step 4).
 /// WIRING: returned to external-domain intake when secondary zkVM proof arrives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhaseAVerdict {
@@ -253,7 +253,7 @@ pub enum PhaseAVerdict {
 
 /// Evaluate Phase-A authoritative native finality against optional secondary
 /// zkVM guest proof result (`TA8`).
-/// WIRING: staged for external-domain Phase-A shadow-proof comparison (WP-60 Step 4).
+/// WIRING: staged for external-domain Phase-A shadow-proof comparison ( Step 4).
 #[must_use]
 pub fn evaluate_phase_a_dual(
     domain_id: DomainId,

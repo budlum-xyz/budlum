@@ -259,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_139_note_registry_binds_nullifier_to_commitment() {
+    fn note_registry_binds_nullifier_to_commitment() {
         let mut r = NoteRegistry::new();
         let victim = PrivacyNote::from_field_elements(0x1111, 0x2222);
         let attacker = PrivacyNote::from_field_elements(0x3333, 0x4444);

@@ -1,6 +1,6 @@
 //! Solana foreign transaction envelope decoding (legacy + v0) and Ed25519 verification.
 //!
-//! Implements section 8.6.2 (`Foreign::Solana`) and WP-31 item 4:
+//! Implements section 8.6.2 (`Foreign::Solana`) and  item 4:
 //! - Compact-u16 wire decoding of legacy and `v0` (`0x80`) versioned messages,
 //!   including `v0` address lookup tables.
 //! - Strict Ed25519 signature verification over the serialized message.

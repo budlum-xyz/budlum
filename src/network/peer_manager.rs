@@ -136,7 +136,7 @@ impl PeerScore {
 /// as a bare IPv6 address and every IPv6 peer was unbucketed altogether, so a
 /// dual-stack listener handed one host the whole peer table: the bound the
 /// profile sets was enforced on one of the two families and on neither mapped
-/// address (BLG-034).
+/// address ().
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct SubnetKey([u8; 16]);
 

@@ -694,7 +694,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_143_https_target_rejects_missing_or_wrong_scheme() {
+    fn https_target_rejects_missing_or_wrong_scheme() {
         for bad in [
             "http://example.com/",
             "javascript:alert(1)",
@@ -712,7 +712,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_121_arweave_tx_id_32b_is_labelled_rpc_claim_only_not_refused() {
+    fn arweave_tx_id_32b_is_labelled_rpc_claim_only_not_refused() {
         let tx_id = vec![0x42u8; 32];
         let t = Table::with(&hex::encode(&tx_id), b"permaweb via arweave-ns");
         let got = fetch_and_verify(&t, &Target::Arweave(tx_id)).unwrap();

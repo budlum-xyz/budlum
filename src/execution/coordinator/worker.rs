@@ -1,6 +1,6 @@
 //! Execution-environment worker manager, health checks, and fault isolation.
 //!
-//! Implements sections 8.3.2 and 8.3.5 (closing BLG-250 and BLG-260):
+//! Implements sections 8.3.2 and 8.3.5 (closing  and ):
 //! - Separate worker processes (`budlum-ee-*`) talk over Unix domain sockets
 //!   with a 2-second watchdog (`budlum_uel_abi::transport::EeClient`) and a
 //!   4 GiB address-space ceiling (`RLIMIT_AS`, enforced via `ulimit -v` before
@@ -94,7 +94,7 @@ impl WorkerEndpoint {
 
     /// Builds a Unix-socket endpoint backed by `socket_path` and optional worker binary.
     ///
-    /// exposed for: `budlum-ee-*` Unix-socket worker registration (`WP-26`..`WP-29`).
+    /// exposed for: `budlum-ee-*` Unix-socket worker registration (..).
     #[cfg(unix)]
     #[must_use]
     pub fn unix_socket(ee: EeId, socket_path: PathBuf, binary_path: Option<PathBuf>) -> Self {
@@ -190,7 +190,7 @@ impl WorkerEndpoint {
 
     /// Validates contract deployment bytecode on the worker.
     ///
-    /// exposed for: UEL mempool admission preflight (`WP-27`..`WP-29`).
+    /// exposed for: UEL mempool admission preflight (..).
     pub fn validate_deploy(
         &mut self,
         code: &[u8],
@@ -261,7 +261,7 @@ impl WorkerEndpoint {
 
     /// Runs a read-only query on the worker.
     ///
-    /// exposed for: compatibility RPC gateways and Universal Asset metadata (`WP-28`..`WP-32`).
+    /// exposed for: compatibility RPC gateways and Universal Asset metadata (..).
     pub fn query(
         &mut self,
         ctx: &BlockContext,
@@ -366,7 +366,7 @@ impl WorkerSupervisor {
 
     /// Returns the active halt alarm if the supervisor halted the node.
     ///
-    /// exposed for: operator halt inspection (`WP-26` section 8.3.5).
+    /// exposed for: operator halt inspection ( section 8.3.5).
     #[must_use]
     pub fn halt_alarm(&self) -> Option<&str> {
         self.halt_alarm.as_deref()

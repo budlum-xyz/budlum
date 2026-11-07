@@ -588,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_068_storage_root_fallback_never_receives_verified_badge() {
+    fn storage_root_fallback_never_receives_verified_badge() {
         let bytes = b"<html>fallback</html>";
         let id = bud_id(bytes);
         let resolved = ResolvedName {
@@ -625,7 +625,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_121_ens_arweave_ns_32b_tx_id_renders_with_honest_badge() {
+    fn ens_arweave_ns_32b_tx_id_renders_with_honest_badge() {
         // EIP-1577 `arweave-ns` codec 0xb29910 as unsigned varint: 0x90 0xb2 0x2c
         let mut ch = vec![0x90, 0xb2, 0x2c];
         let tx_id = [0x55u8; 32];

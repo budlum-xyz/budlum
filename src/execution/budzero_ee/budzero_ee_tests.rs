@@ -92,7 +92,7 @@ fn verify_inference_is_closed_on_testnet() {
 #[test]
 fn budzero_sender_is_four_words() {
     // Two addresses identical in their low 8 bytes (`[0..8]`) and differing only
-    // in the upper 192 bits (`[8..32]`) MUST produce distinct 4-word VM contexts (`BLG-230`).
+    // in the upper 192 bits (`[8..32]`) MUST produce distinct 4-word VM contexts ().
     let mut raw_a = [0x11u8; 32];
     let mut raw_b = [0x11u8; 32];
     raw_a[31] = 0xAA;
@@ -106,7 +106,7 @@ fn budzero_sender_is_four_words() {
     assert_eq!(ctx_a.sender_words[0], ctx_b.sender_words[0]);
     assert_ne!(
         ctx_a.sender_words, ctx_b.sender_words,
-        "4-word 256-bit sender context must preserve upper 192 bits (BLG-230)"
+        "4-word 256-bit sender context must preserve upper 192 bits ()"
     );
     assert_eq!(ctx_a.sender_address(), addr_a);
     assert_eq!(ctx_b.sender_address(), addr_b);
@@ -217,7 +217,7 @@ fn budzero_ee_stateful_program_persists() {
 }
 
 #[test]
-fn blg_039_and_blg_142_verifier_dos_bounds_and_optional_proof_market() {
+fn verifier_dos_bounds_and_optional_proof_market() {
     assert!(evaluate_preprocessed_setup(0, 64, 500_000).is_err());
     assert!(evaluate_preprocessed_setup(MAX_DEGREE_BITS + 1, 64, 500_000).is_err());
     assert!(

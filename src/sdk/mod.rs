@@ -254,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_169_removed_sections_and_unknown_fields_are_rejected() {
+    fn removed_sections_and_unknown_fields_are_rejected() {
         let base = "[project]\nname = \"x\"\nversion = \"0.1.0\"\n";
         for extra in [
             "[devnet]\ndomains = [\"pow\"]\n",

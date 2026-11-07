@@ -666,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_129_register_overflow_and_non_canonical_high_bits_are_refused() {
+    fn register_overflow_and_non_canonical_high_bits_are_refused() {
         let bad_rd = Instruction {
             opcode: Opcode::Add,
             rd: 32,

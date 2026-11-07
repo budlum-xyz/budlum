@@ -1,4 +1,4 @@
-//! `budlum-ee-polkavm` Unix-domain-socket worker daemon (`WP-53`).
+//! `budlum-ee-polkavm` Unix-domain-socket worker daemon ().
 
 #![forbid(unsafe_code)]
 

@@ -1,8 +1,8 @@
-//! B.U.D. 3.0 App Registry (`src/app_registry/`, `WP-23` item 5).
+//! B.U.D. 3.0 App Registry (`src/app_registry/`,  item 5).
 //!
 //! Stores verified application metadata and B.U.D. 3.0 [`ContentRef`] bundle pointers.
 //!
-//! exposed for: dApp directory RPC handlers and governance verification (`WP-23`).
+//! exposed for: dApp directory RPC handlers and governance verification ().
 
 use std::collections::BTreeMap;
 
@@ -61,7 +61,7 @@ pub struct AppRegistry {
 impl AppRegistry {
     /// Create an empty App Registry.
     ///
-    /// exposed for: App Registry state initialization (`WP-23`).
+    /// exposed for: App Registry state initialization ().
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -69,7 +69,7 @@ impl AppRegistry {
 
     /// Register a new application backed by a registered B.U.D. 3.0 bundle object.
     ///
-    /// exposed for: App Registry registration transactions (`WP-23`).
+    /// exposed for: App Registry registration transactions ().
     pub fn register_app(
         &mut self,
         bud3: &Bud3Registry,
@@ -116,7 +116,7 @@ impl AppRegistry {
 
     /// Look up a registered application by name.
     ///
-    /// exposed for: App Registry RPC queries (`WP-23`).
+    /// exposed for: App Registry RPC queries ().
     #[must_use]
     pub fn get_app(&self, name: &str) -> Option<&RegisteredApp> {
         self.apps.get(&name.trim().to_ascii_lowercase())

@@ -19,7 +19,7 @@
 //! answers "is this a duty transaction", and the window answers "which one".
 //!
 //! The presence aggregate is the third item of the batch. It reaches the pool
-//! with the rest of the batch when its carrier lands (WP-13 defines the
+//! with the rest of the batch when its carrier lands ( defines the
 //! presence protocol); the lane's accounting does not change when it does,
 //! because the rule is per validator and per window.
 //!

@@ -1,4 +1,4 @@
-//! CLI entry point for `budlum-mobile-log-analyzer` (WP-37).
+//! CLI entry point for `budlum-mobile-log-analyzer`.
 
 use std::env;
 use std::fs;

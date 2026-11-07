@@ -1,4 +1,4 @@
-//! B.U.D. 3.0 custody-proof and symbol-protocol gate (`bud3-custody-proofs`, WP-20).
+//! B.U.D. 3.0 custody-proof and symbol-protocol gate (`bud3-custody-proofs`,).
 //!
 //! Enforces statically that:
 //! 1. `src/storage/bud3/custody.rs` builds 64-byte sub-block Merkle trees under
@@ -44,7 +44,7 @@ fn strip_line_comments(src: &str) -> String {
 ///
 /// # Errors
 ///
-/// Returns an error if any WP-20 sub-block proof, symbol protocol cap, or
+/// Returns an error if any  sub-block proof, symbol protocol cap, or
 /// non-slashing missed-audit invariant is missing.
 pub fn run(root: &Path) -> Result<String, String> {
     let custody_src = strip_line_comments(strip_cfg_test(&read_rel(

@@ -34,7 +34,7 @@ pub enum ForeignScheme {
     AptosAuth = 0x03,
     /// Cosmos 20-byte `secp256k1` account address bytes.
     CosmosSecp256k1 = 0x04,
-    /// Sui 32-byte `BLAKE2b-256(0x00 || ed25519_pk)` address (`WP-50`).
+    /// Sui 32-byte `BLAKE2b-256(0x00 || ed25519_pk)` address ().
     SuiEd25519 = 0x05,
 }
 

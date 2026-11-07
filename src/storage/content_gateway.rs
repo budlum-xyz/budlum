@@ -721,7 +721,7 @@ mod tests {
         let legacy = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/gateway"));
         assert!(
             !legacy.exists(),
-            "legacy src/gateway tree must remain deleted (BLG-262)"
+            "legacy src/gateway tree must remain deleted ()"
         );
     }
 }

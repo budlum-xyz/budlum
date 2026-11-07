@@ -2485,7 +2485,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_190_recover_enforces_poa_gate_guardian_sender_and_rejects_injected_roots() {
+    fn recover_enforces_poa_gate_guardian_sender_and_rejects_injected_roots() {
         let mut registry = IdentityRegistry::new();
         let mut injected = subject_record();
         injected.credential_root = Some([0xAA; 32]);

@@ -168,11 +168,11 @@ fn kat_freeze_digest_is_stable() {
 }
 
 #[test]
-fn blg_111_bpqs_l3_noncanonical_lane_never_panics_and_verify_refuses() {
+fn bpqs_l3_noncanonical_lane_never_panics_and_verify_refuses() {
     let mut signer = BpqsSigner::<ParamsFastL3, H>::fresh_device([0x31; 32], EpochWindow(4))
         .unwrap_or_else(|e| panic!("l3 keygen: {e}"));
     let mut sig = signer
-        .sign_at_height(8, b"blg-111-l3")
+        .sign_at_height(8, b"one-time-signing-l3")
         .unwrap_or_else(|e| panic!("l3 sign: {e}"));
     // Corrupt non-meaningful tail padding (bytes 24..32 at N=24) across every
     // used chain segment so even a `digits[i] == 15` (`remaining == 0`) lane
@@ -185,7 +185,7 @@ fn blg_111_bpqs_l3_noncanonical_lane_never_panics_and_verify_refuses() {
     let _ = wots::verify_chains::<H, ParamsFastL3>(&sig.chains, &[0xFF; 32]);
     // Public signature verification must refuse non-canonical lane padding in
     // both debug and release builds.
-    let err = verify_at_height::<H, ParamsFastL3>(signer.public(), 8, b"blg-111-l3", &sig)
+    let err = verify_at_height::<H, ParamsFastL3>(signer.public(), 8, b"one-time-signing-l3", &sig)
         .expect_err("non-zero L3 lane padding must be refused");
     assert_eq!(
         err,
@@ -194,7 +194,7 @@ fn blg_111_bpqs_l3_noncanonical_lane_never_panics_and_verify_refuses() {
 }
 
 #[test]
-fn blg_111_bpqs_stateful_verifier_refuses_second_signature_in_same_epoch() {
+fn bpqs_stateful_verifier_refuses_second_signature_in_same_epoch() {
     let mut signer_a = BpqsSigner::<ParamsTestFast, H>::fresh_device([0x44; 32], EpochWindow(8))
         .unwrap_or_else(|e| panic!("keygen a: {e}"));
     // Simulate a compromised or rolled-back cold device producing a second
@@ -224,7 +224,7 @@ fn blg_111_bpqs_stateful_verifier_refuses_second_signature_in_same_epoch() {
 }
 
 #[test]
-fn blg_164_bpqs_epoch_overflow_and_test_params_refused_in_production() {
+fn bpqs_epoch_overflow_and_test_params_refused_in_production() {
     let window = EpochWindow(8);
     let overflow_height = (u64::from(u32::MAX) + 1) * window.0;
     assert_eq!(
@@ -254,7 +254,7 @@ fn blg_164_bpqs_epoch_overflow_and_test_params_refused_in_production() {
 }
 
 #[test]
-fn blg_185_bpqs_wire_size_includes_randomizer_at_l5_and_l3() {
+fn bpqs_wire_size_includes_randomizer_at_l5_and_l3() {
     let l5_bytes = 4 + 16 + ParamsL5::LEN * 32 + ParamsL5::T_LOG2 * 32;
     let l3_bytes = 4 + 16 + ParamsL3::LEN * 32 + ParamsL3::T_LOG2 * 32;
     assert_eq!(l5_bytes, 2676);

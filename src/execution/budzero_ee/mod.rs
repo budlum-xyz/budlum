@@ -1,9 +1,9 @@
-//! BudZero execution-environment adapter (`EeId::BUDZERO = 0x00`, `WP-33`).
+//! BudZero execution-environment adapter (`EeId::BUDZERO = 0x00`, ).
 //!
 //! Runs BudZero bytecode in execution-only mode against the UEL [`HostApi`]
 //! (`ee/budzero/program` and `ee/budzero/storage`), populating all four 64-bit
-//! words of `sender_words` (`256-bit` caller identity, `BLG-230` execution leg)
-//! and holding `VerifyMerkle` and `VerifyInference` closed (`BLG-223`, `BLG-226`).
+//! words of `sender_words` (`256-bit` caller identity,  execution leg)
+//! and holding `VerifyMerkle` and `VerifyInference` closed (, ).
 //!
 //! WIRING: exposed for in-process testing and paired with the out-of-process
 //! `budlum-ee-budzero` worker binary (`execution/budzero/`).

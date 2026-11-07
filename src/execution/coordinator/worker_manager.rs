@@ -1,4 +1,4 @@
-//! Execution-environment worker manager and block coordinator (`BLG-250`).
+//! Execution-environment worker manager and block coordinator ().
 //!
 //! Section 8.3.2 & 8.3.5 isolate every execution environment in an out-of-process
 //! worker binary (`panic = "unwind"`, `RLIMIT_AS = 4 GiB`, `WATCHDOG = 2s`)

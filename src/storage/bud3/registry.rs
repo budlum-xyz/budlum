@@ -929,7 +929,7 @@ impl Bud3Registry {
 
     /// `DeclineContent`: a validator refuses shares of `content`. Any existing
     /// share held by `validator` on an object with `content` enters share-loss
-    /// reassignment without penalty (WP-20 item 10).
+    /// reassignment without penalty ( item 10).
     pub fn decline(&mut self, validator: Address, content: &ContentId) {
         self.declines.insert((content.digest, validator));
         for obj in self.objects.values_mut() {
@@ -974,7 +974,7 @@ impl Bud3Registry {
     /// `ReleaseShares`: `holder` voluntarily releases its share(s) of `key`
     /// (on `segment`, or across all segments when `None`) and lowers its
     /// declared quota by `lower_quota_bytes` without any slash or penalty
-    /// (WP-20 item 11). Released shares enter the share-loss reassignment path.
+    /// ( item 11). Released shares enter the share-loss reassignment path.
     ///
     /// # Errors
     ///

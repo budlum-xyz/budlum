@@ -248,7 +248,7 @@ fn unsupported_public_inputs_are_refused() {
 }
 
 #[test]
-fn blg_036_sorted_table_soundness_refuses_tampered_trace() {
+fn sorted_table_soundness_refuses_tampered_trace() {
     let program = vec![
         inst(Opcode::Load, 1, 0, 0, 100),
         inst(Opcode::Load, 2, 0, 0, 42),
@@ -269,7 +269,7 @@ fn blg_036_sorted_table_soundness_refuses_tampered_trace() {
 }
 
 #[test]
-fn blg_037_verify_inference_and_forged_swrite_digest_refused() {
+fn verify_inference_and_forged_swrite_digest_refused() {
     verify_inference_is_refused_in_any_trace();
     let program = vec![
         inst(Opcode::Load, 1, 0, 0, 7),
@@ -286,7 +286,7 @@ fn blg_037_verify_inference_and_forged_swrite_digest_refused() {
 }
 
 #[test]
-fn blg_038_memory_event_chain_id_and_zk_mode_bound() {
+fn memory_event_chain_id_and_zk_mode_bound() {
     let (program, vm, events) = logging_run();
     let pi = honest_inputs(&vm, &program, &events);
     let env = Prover::prove(&vm.trace, &pi, &program).expect("honest proof");
@@ -306,12 +306,12 @@ fn blg_038_memory_event_chain_id_and_zk_mode_bound() {
 }
 
 #[test]
-fn blg_039_oversized_degree_bits_and_preprocessed_setup_refused() {
+fn oversized_degree_bits_and_preprocessed_setup_refused() {
     oversized_claims_are_refused_not_fatal();
 }
 
 #[test]
-fn blg_139_quarantine_ledger_caps_entries_and_roundtrips() {
+fn quarantine_ledger_caps_entries_and_roundtrips() {
     use bud_proof::quarantine::{QuarantineLedger, QuarantineReason};
     let mut ledger = QuarantineLedger::new();
     for i in 0..4100u32 {
@@ -326,18 +326,18 @@ fn blg_139_quarantine_ledger_caps_entries_and_roundtrips() {
 }
 
 #[test]
-fn blg_142_symbolic_degree_hint_and_trailing_proof_bytes_enforced() {
+fn symbolic_degree_hint_and_trailing_proof_bytes_enforced() {
     trailing_bytes_after_a_valid_proof_are_refused();
     assert!(bud_proof::canonical_boot::check_canonical_programs().is_ok());
 }
 
 #[test]
-fn blg_154_aux_openings_and_canonical_recovery_unanimity_enforced() {
+fn aux_openings_and_canonical_recovery_unanimity_enforced() {
     single_pin_source_is_not_unanimity();
 }
 
 #[test]
-fn blg_159_preprocessed_setup_and_stark_config_bounds_enforced() {
+fn preprocessed_setup_and_stark_config_bounds_enforced() {
     use bud_proof::bud_stark::preprocessed::{setup_preprocessed, MAX_SETUP_DEGREE_BITS};
     use bud_proof::plonky3_air::BudAir;
     let cfg = bud_proof::plonky3_prover::build_config();
@@ -349,12 +349,12 @@ fn blg_159_preprocessed_setup_and_stark_config_bounds_enforced() {
 }
 
 #[test]
-fn blg_182_public_inputs_final_state_exit_and_events_bound() {
+fn public_inputs_final_state_exit_and_events_bound() {
     unsupported_public_inputs_are_refused();
 }
 
 #[test]
-fn blg_186_goldilocks_canonical_scalars_and_envelope_degree_bound() {
+fn goldilocks_canonical_scalars_and_envelope_degree_bound() {
     non_canonical_public_scalars_are_refused();
     let (program, vm, events) = logging_run();
     let pi = honest_inputs(&vm, &program, &events);
@@ -364,7 +364,7 @@ fn blg_186_goldilocks_canonical_scalars_and_envelope_degree_bound() {
 }
 
 #[test]
-fn blg_191_faulting_vm_trace_with_synthetic_halt_is_provable() {
+fn faulting_vm_trace_with_synthetic_halt_is_provable() {
     // Program triggers assertion failure (`Assert r1` where r1 == 0); `run_receipt`
     // records exit_code != 0 without injecting an unprovable non-program PC Halt.
     let program = vec![

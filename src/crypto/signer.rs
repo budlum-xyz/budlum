@@ -195,13 +195,13 @@ mod tests {
         assert_eq!(signer.pq_public_key(), Some(expected_pq_pk));
     }
 
-    /// BLG-150 lock, signer half. One Ed25519 key signs blocks, prevotes and
+    ///  lock, signer half. One Ed25519 key signs blocks, prevotes and
     /// precommits, and the three must never be interchangeable: a prevote
     /// replayed as a block signature, or a precommit replayed as a prevote, is
     /// a consensus forgery made from a legitimate signature. Each half also has
     /// to verify, so the separation is not produced by a refusal.
     #[test]
-    fn blg_150_block_prevote_and_precommit_signatures_are_not_interchangeable() {
+    fn block_prevote_and_precommit_signatures_are_not_interchangeable() {
         let keypair = KeyPair::generate().expect("ed25519 key");
         let signer = KeyPairSigner::new(keypair.clone());
         let msg = [9u8; 32];
@@ -266,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_150_consensus_signer_separates_block_prevote_and_precommit() {
+    fn consensus_signer_separates_block_prevote_and_precommit() {
         let keypair = KeyPair::generate().unwrap();
         let signer = KeyPairSigner::new(keypair.clone());
         let payload = [0x42u8; 32];

@@ -480,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_068_bud_content_id_search_does_not_query_wallet_account() {
+    fn bud_content_id_search_does_not_query_wallet_account() {
         let view = Fake {
             account: Some(AccountView {
                 address: [0x33; 32],

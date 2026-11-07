@@ -1,7 +1,7 @@
 package xyz.budlum.validator.devicetests
 
 /**
- * 24-hour device field-test telemetry emitter for WP-37 (`docs/MOBILE_DEVICE_MATRIX.md`).
+ * 24-hour device field-test telemetry emitter for  (`docs/MOBILE_DEVICE_MATRIX.md`).
  *
  * Emits newline-delimited JSON (`JSONL`) records consumed by
  * `budlum_core::registry::rehearsal::analyze_mobile_field_logs` covering:

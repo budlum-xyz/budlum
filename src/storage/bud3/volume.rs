@@ -1,4 +1,4 @@
-//! Aggregation Volume for sub-symbol B.U.D. 3.0 objects (Section 6.12, WP-21 item 4).
+//! Aggregation Volume for sub-symbol B.U.D. 3.0 objects (Section 6.12,  item 4).
 //! exposed for upload small-object packing, gateway reads, and compaction sweeps.
 //!
 //! Per Section 6.12:

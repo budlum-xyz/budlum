@@ -1040,7 +1040,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_051_check_receipt_refuses_empty_entries() {
+    fn check_receipt_refuses_empty_entries() {
         let registry = IdentityRegistry::new();
         let key = crate::crypto::primitives::KeyPair::generate().unwrap();
         let subject = Address::from(key.public_key_bytes());

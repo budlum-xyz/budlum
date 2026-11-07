@@ -1,4 +1,4 @@
-//! Out-of-process EVM Execution Environment (`EeId::EVM = 0x01`, `WP-27`, `BLG-267`).
+//! Out-of-process EVM Execution Environment (`EeId::EVM = 0x01`,,).
 //!
 //! Runs `revm = "=43.0.3"` at `SpecId::OSAKA` with `1 BGU = 1 EVM gas`, chain ID `45261`,
 //! `CREATE`/`CREATE2` post-quantum alias collision protection, and the Universal Call

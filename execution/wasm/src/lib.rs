@@ -1,4 +1,4 @@
-//! Out-of-process CosmWasm Execution Environment (`EeId::WASM = 0x02`, `WP-29` & `WP-30`).
+//! Out-of-process CosmWasm Execution Environment (`EeId::WASM = 0x02`,  &).
 //!
 //! Runs `wasmi = "=2.0.0"` in pure-interpreter mode with:
 //! - floating-point instructions forbidden (`Config::floats(false)`);
@@ -9,7 +9,7 @@
 //! - IBC entry-point exports (`ibc_*`) and `StakingMsg` / `DistributionMsg` /
 //!   `GovMsg` / `IbcMsg` submessages deterministically refused (`Section 8.15`);
 //! - `BudlumMsg::UniversalCall` and `BudlumQuery::UniversalView` routed over
-//!   `HostApi::universal_call` (`Section 8.7.2`, `WP-30`).
+//!   `HostApi::universal_call` (`Section 8.7.2`,).
 
 #![forbid(unsafe_code)]
 
@@ -63,7 +63,7 @@ pub const ATTOS_PER_UBUD: u128 = 1_000_000_000_000;
 /// Maximum nested submessage depth within WASM (`8`).
 pub const MAX_SUBMSG_DEPTH: u32 = 8;
 
-/// IBC entry points forbidden on Budlum T-Launch (`Section 8.15`, `WP-29` item 2).
+/// IBC entry points forbidden on Budlum T-Launch (`Section 8.15`,  item 2).
 pub const FORBIDDEN_IBC_EXPORTS: &[&str] = &[
     "ibc_channel_open",
     "ibc_channel_connect",
@@ -157,7 +157,7 @@ pub fn build_wasm_engine() -> Engine {
     Engine::new(&cfg)
 }
 
-/// Compile and validate `.wasm` bytecode against Budlum's CosmWasm rules (`WP-29`).
+/// Compile and validate `.wasm` bytecode against Budlum's CosmWasm rules ().
 pub fn compile_and_validate_module(engine: &Engine, code: &[u8]) -> Result<Module, EeRefusal> {
     if code.is_empty() {
         return Err(EeRefusal {

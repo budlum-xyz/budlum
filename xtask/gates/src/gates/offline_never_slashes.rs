@@ -1,6 +1,6 @@
-//! Static gate: `offline-never-slashes` (Section 7.8, Section 11.7, WP-13).
+//! Static gate: `offline-never-slashes` (Section 7.8, Section 11.7,).
 //!
-//! Enforces invariant V-4 (closing BLG-251):
+//! Enforces invariant V-4 (closing):
 //! 1. `src/registry/presence.rs` implements `PresenceSignal`, `PresenceAggregate`
 //!    single-pairing BLS verification (`verify_single_pairing`), `hours_to_epochs`,
 //!    `apply_resume_validator` (1-epoch delay), and 1% presence double-sign slash

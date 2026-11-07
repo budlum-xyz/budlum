@@ -1,6 +1,6 @@
 //! Universal Asset Registry (`uel/assets`) and zero-balance cross-EE pointers.
 //!
-//! Implements section 8.8 and WP-30 items 5-6:
+//! Implements section 8.8 and  items 5-6:
 //! - Every asset lives exclusively in its home environment (`Y-5`).
 //! - `asset_id = SHA3-256("BDLM_UEL_ASSET_V1" || home_ee || len_le64 || home_ref)`.
 //! - Permissionless `RegisterAsset` reads metadata from the home EE.
@@ -99,7 +99,7 @@ pub fn derive_pointer_address(asset_id: &[u8; 32], target_ee: EeId) -> Result<Ve
             Ok(bech32_contract_addr(&digest).into_bytes())
         }
         other => Err(format!(
-            "pointers for EE 0x{:02x} are deferred to T-Expansion (WP-52)",
+            "pointers for EE 0x{:02x} are deferred to T-Expansion ()",
             other.0
         )),
     }

@@ -1,5 +1,5 @@
-//! Static gate: Android Mobile validator (`WP-36`), F-Droid reproducible APK
-//! recipe (`WP-58`), and iOS `MobileOpportunistic` validator (`WP-38`).
+//! Static gate: Android Mobile validator (), F-Droid reproducible APK
+//! recipe (), and iOS `MobileOpportunistic` validator ().
 
 use std::path::Path;
 

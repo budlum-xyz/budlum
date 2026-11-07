@@ -1,6 +1,6 @@
 //! Aptos (`SignedTransaction` BCS) foreign envelope decoding and verification.
 //!
-//! Implements section 8.6.2 (`Foreign::Aptos`) and WP-32 items 2 & 4:
+//! Implements section 8.6.2 (`Foreign::Aptos`) and  items 2 & 4:
 //! - Chain ID `205` (`45261 mod 256`), `sequence_number`, and `expiration_timestamp_secs`.
 //! - Authenticators: `Ed25519` (`0`), `MultiEd25519` (`1`), and `SingleSender`
 //!   secp256k1 (`2`). OIDC keyless accounts are refused at launch (section 8.15).

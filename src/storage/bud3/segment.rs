@@ -170,7 +170,7 @@ pub fn commit_object(object: &[u8], profile: &Profile) -> Option<ObjectCommitmen
 
 /// Refusal reasons for [`SegmentStreamCommitter`].
 ///
-/// WIRING: streaming multi-GiB object ingestion path (WP-18 item 4; T3/T4).
+/// WIRING: streaming multi-GiB object ingestion path ( item 4; T3/T4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamCommitError {
     /// More bytes were pushed than declared in `expected_len`.
@@ -191,9 +191,9 @@ pub enum StreamCommitError {
 
 /// Streaming B.U.D. 3.0 segment committer holding at most one active segment
 /// buffer in memory (`<= profile.segment_bytes()`, well below the two-segment
-/// ceiling of WP-18 item 4).
+/// ceiling of  item 4).
 ///
-/// WIRING: streaming multi-GiB object ingestion path (WP-18 item 4; T3/T4).
+/// WIRING: streaming multi-GiB object ingestion path ( item 4; T3/T4).
 #[derive(Debug, Clone)]
 pub struct SegmentStreamCommitter {
     layout: Segmentation,
@@ -208,7 +208,7 @@ pub struct SegmentStreamCommitter {
 impl SegmentStreamCommitter {
     /// Create a streaming committer for an object of `expected_len` bytes.
     ///
-    /// WIRING: streaming multi-GiB object ingestion path (WP-18 item 4; T3/T4).
+    /// WIRING: streaming multi-GiB object ingestion path ( item 4; T3/T4).
     #[must_use]
     pub fn new(expected_len: u64, profile: &Profile) -> Option<Self> {
         let layout = Segmentation::new(expected_len, profile)?;
@@ -233,7 +233,7 @@ impl SegmentStreamCommitter {
     /// Returns [`StreamCommitError::LengthExceeded`] if `chunk` pushes total
     /// bytes past the declared `expected_len`.
     ///
-    /// WIRING: streaming multi-GiB object ingestion path (WP-18 item 4; T3/T4).
+    /// WIRING: streaming multi-GiB object ingestion path ( item 4; T3/T4).
     pub fn push(&mut self, mut chunk: &[u8]) -> Result<(), StreamCommitError> {
         let attempted = self.received.saturating_add(chunk.len() as u64);
         if attempted > self.layout.object_len() {
@@ -263,7 +263,7 @@ impl SegmentStreamCommitter {
 
     /// Peak bytes held in the segment buffer across the lifetime of this stream.
     ///
-    /// WIRING: streaming multi-GiB object ingestion path (WP-18 item 4; T3/T4).
+    /// WIRING: streaming multi-GiB object ingestion path ( item 4; T3/T4).
     #[must_use]
     pub const fn peak_buffered_bytes(&self) -> usize {
         self.peak_buffered
@@ -277,7 +277,7 @@ impl SegmentStreamCommitter {
     /// Returns [`StreamCommitError::IncompleteObject`] if fewer than
     /// `expected_len` bytes were pushed.
     ///
-    /// WIRING: streaming multi-GiB object ingestion path (WP-18 item 4; T3/T4).
+    /// WIRING: streaming multi-GiB object ingestion path ( item 4; T3/T4).
     pub fn finish(mut self) -> Result<ObjectCommitment, StreamCommitError> {
         if self.received != self.layout.object_len() {
             return Err(StreamCommitError::IncompleteObject {
@@ -361,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_213_stream_committer_matches_in_memory_and_crosses_old_ceilings() {
+    fn stream_committer_matches_in_memory_and_crosses_old_ceilings() {
         // Streaming across prime-sized chunk boundaries produces the exact
         // same ObjectCommitment while holding at most one segment in memory.
         let obj: Vec<u8> = (0..1027usize).map(|i| (i * 37 + 11) as u8).collect();

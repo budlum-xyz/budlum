@@ -709,7 +709,7 @@ jobs:
           exit "${PIPESTATUS[0]}"
       # `f64` is not a consensus type: the same expression may give two answers
       # on two machines, and the disagreement looks like a fork. The paths that
-      # decide a block, a receipt or a committee seat may not use it, `BLG-240`
+      # decide a block, a receipt or a committee seat may not use it,
       # excepted and pinned by name in the gate.
       - name: No-float gate canary
         if: always() && steps.build.outcome == 'success'

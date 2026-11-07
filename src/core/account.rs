@@ -3828,7 +3828,7 @@ impl AccountState {
     /// Executes a batch of UEL transactions against this `AccountState` through
     /// `coordinator`, committing the resulting `ExecutionState` and fee splits.
     ///
-    /// exposed for: block execution (`WP-26` slice 2/2).
+    /// exposed for: block execution ( slice 2/2).
     pub fn execute_uel_block(
         &mut self,
         coordinator: &mut crate::execution::coordinator::ExecutionCoordinator,
@@ -3956,7 +3956,7 @@ impl AccountState {
             return Err("a zero bond escrows nothing".to_string());
         }
         // The spendable balance gates the bond: the locked part of a vesting
-        // account is not collateral (BULGU-019). The raw balance is what the
+        // account is not collateral (). The raw balance is what the
         // debit below reads.
         let balance = self.get_balance(poster);
         let spendable = self.spendable_balance(poster);

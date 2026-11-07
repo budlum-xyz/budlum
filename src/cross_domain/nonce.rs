@@ -323,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_134_replay_nonce_store_refuses_u64_max_and_unbounded_jumps() {
+    fn replay_nonce_store_refuses_u64_max_and_unbounded_jumps() {
         let mut store = ReplayNonceStore::new();
         let s = sender(9);
         assert!(store.mark_processed_at(1, 2, &s, u64::MAX, 1).is_err());

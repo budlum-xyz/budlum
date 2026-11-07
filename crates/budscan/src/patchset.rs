@@ -622,7 +622,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_121_patchset_rejects_parent_traversal_and_preserves_order() {
+    fn patchset_rejects_parent_traversal_and_preserves_order() {
         for bad in [
             "../escape.patch\n",
             "a/../../etc/passwd\n",

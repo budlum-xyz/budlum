@@ -1,4 +1,4 @@
-//! Fuzz harness for all four Compatibility Lane foreign transaction decoders (`WP-28`/`WP-32`).
+//! Fuzz harness for all four Compatibility Lane foreign transaction decoders (/).
 
 #![no_main]
 

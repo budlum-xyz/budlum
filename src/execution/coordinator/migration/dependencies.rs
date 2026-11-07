@@ -25,7 +25,7 @@ pub struct DependencyReport {
 impl DependencyReport {
     /// Union of static and traced external contract dependencies, sorted and unique.
     ///
-    /// exposed for: `bud-migrate` dependency planning and callers (`WP-34`).
+    /// exposed for: `bud-migrate` dependency planning and callers ().
     #[must_use]
     pub fn required_migrations(&self) -> Vec<[u8; 20]> {
         let mut required = self.static_targets.clone();

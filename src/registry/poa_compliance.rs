@@ -572,7 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_108_poa_compliance_root_binds_collection_boundaries_and_caps_audit_log() {
+    fn poa_compliance_root_binds_collection_boundaries_and_caps_audit_log() {
         let mut reg = PoaComplianceRegistry::new();
         for i in 0..=(MAX_POA_COMPLIANCE_AUDIT_EVENTS as u64) {
             reg.screen_address(

@@ -40,7 +40,7 @@ impl ExecutionVerifyReport {
             && self.weights_bound
     }
 
-    /// Structural + STARK: requires `stark_ok == Some(true)` (`BLG-059`).
+    /// Structural + STARK: requires `stark_ok == Some(true)` ().
     pub fn is_fully_valid(&self) -> bool {
         self.is_structurally_valid() && self.stark_ok == Some(true)
     }
@@ -839,7 +839,7 @@ mod stark_path_e2e {
     }
 
     #[test]
-    fn blg_059_is_fully_valid_requires_stark_ok_true_and_clean_exit() {
+    fn is_fully_valid_requires_stark_ok_true_and_clean_exit() {
         let mut rep = ExecutionVerifyReport {
             commitments_ok: true,
             model_bound: true,

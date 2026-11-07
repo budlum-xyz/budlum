@@ -50,7 +50,7 @@ fn zero_slash_ratios_are_refused() {
 }
 
 #[test]
-fn blg_069_state_root_commits_params_history_and_zero_liveness_refused() {
+fn state_root_commits_params_history_and_zero_liveness_refused() {
     use verifier_registry::registry::VerifierRegistry;
     let base = VerifierRegistry::default();
     let Ok(custom) = VerifierRegistry::with_params(RegistryParams {
@@ -65,7 +65,7 @@ fn blg_069_state_root_commits_params_history_and_zero_liveness_refused() {
 }
 
 #[test]
-fn blg_148_verifier_registry_caps_unbounded_params_and_zero_malice_slash() {
+fn verifier_registry_caps_unbounded_params_and_zero_malice_slash() {
     use verifier_registry::params::{MAX_PARAM_AMOUNT, MAX_UNBONDING_EPOCHS};
     let max_stake = RegistryParams {
         min_stake: u64::MAX,

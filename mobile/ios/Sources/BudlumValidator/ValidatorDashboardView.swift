@@ -2,7 +2,7 @@
 import SwiftUI
 
 /// SwiftUI onboarding, dashboard, earnings, quota, and graceful `Leave` view for
-/// the iOS `MobileOpportunistic` validator (WP-38 item 5).
+/// the iOS `MobileOpportunistic` validator ( item 5).
 @available(iOS 16.0, macOS 13.0, *)
 public struct ValidatorDashboardView: View {
     @State private var locale: ValidatorLocale = .english

@@ -1,4 +1,4 @@
-//! Solana JSON-RPC compatibility gateway (`127.0.0.1:18548`, WP-31 & section 8.11.3).
+//! Solana JSON-RPC compatibility gateway (`127.0.0.1:18548`,  & section 8.11.3).
 
 use crate::core::account::AccountState;
 use crate::execution::coordinator::alias::{derive_foreign_account, ForeignScheme};
@@ -203,7 +203,7 @@ fn parse_pubkey_hex(params: &serde_json::Value, idx: usize) -> Option<[u8; 32]> 
 
 /// Evaluates a raw Solana JSON-RPC 2.0 request string against read-only `state` (`18548`).
 ///
-/// exposed for: wire-level Solana JSON-RPC handler (`WP-28`, `WP-48`).
+/// exposed for: wire-level Solana JSON-RPC handler (, ).
 #[must_use]
 pub fn handle_solana_jsonrpc(state: &AccountState, raw_json: &str) -> String {
     if raw_json.len() > crate::rpc::compat::ethereum::MAX_COMPAT_REQUEST_BYTES {

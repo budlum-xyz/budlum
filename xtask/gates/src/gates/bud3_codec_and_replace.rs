@@ -1,4 +1,4 @@
-//! Static gate: `bud3-codec-and-replace` (Section 6.6.1, 6.6.2, 6.14; WP-24).
+//! Static gate: `bud3-codec-and-replace` (Section 6.6.1, 6.6.2, 6.14;).
 //!
 //! Verifies:
 //! 1. `crates/bud-codec/src/registry.rs` freezes the 27-slot A0 `REGISTER` table

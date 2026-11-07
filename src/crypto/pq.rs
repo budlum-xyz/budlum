@@ -745,13 +745,13 @@ mod tests {
         }
     }
 
-    /// BLG-009 lock: the facade takes the context and the scheme as arguments
+    ///  lock: the facade takes the context and the scheme as arguments
     /// and refuses before it decodes anything. An empty context, an over-long
     /// context, a context nobody registered and a scheme this facade does not
     /// verify are each refused with their own error, so a caller cannot invent a
     /// context string or let the key length choose the scheme.
     #[test]
-    fn blg_009_an_unregistered_context_or_scheme_is_refused_before_the_keys() {
+    fn an_unregistered_context_or_scheme_is_refused_before_the_keys() {
         let scheme = SchemeId::ML_DSA_65;
         assert_eq!(verify(scheme, &[], &[], b"", &[]), Err(PqError::EmptyContext));
         let too_long = vec![b'C'; MAX_CONTEXT_LEN + 1];
@@ -951,7 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_009_pq_verify_requires_registered_context_and_explicit_scheme() {
+    fn pq_verify_requires_registered_context_and_explicit_scheme() {
         let pk65 = ml_dsa_public_key(SchemeId::ML_DSA_65, &seed(11)).unwrap();
         let sig65 = ml_dsa_sign(SchemeId::ML_DSA_65, &seed(11), MSG, ctx::TX_V7, &[0u8; 32])
             .unwrap();

@@ -1,4 +1,4 @@
-//! Access tiering and temperature observation log (Section 6.14 items 8-9; WP-24).
+//! Access tiering and temperature observation log (Section 6.14 items 8-9; ).
 //! exposed for RPC access telemetry and archival tier monitoring.
 //!
 //! At testnet launch, `SlowY` archival codecs are closed, so [`AccessTierTracker`]
@@ -152,7 +152,7 @@ impl AccessTierTracker {
     }
 
     /// Return public objects eligible for archival `SlowY` / Codec `13` conversion
-    /// when expansion-tier conversion is enabled (`Section 6.14 item 8`, `WP-54 item 5`).
+    /// when expansion-tier conversion is enabled (`Section 6.14 item 8`,  item 5`).
     ///
     /// Returns an empty list on testnet launch (`expansion_enabled == false`) and never
     /// selects sealed objects (`is_sealed == true`).

@@ -1,7 +1,7 @@
-//! Stateful contract deployment and execution for `TransactionType::ContractCall` (`BLG-248`).
+//! Stateful contract deployment and execution for `TransactionType::ContractCall` ().
 //!
 //! Legacy `ContractCall` executed raw BudZKVM bytecode statelessly and generated
-//! a full STARK proof inside every validator (`BLG-248`, `BLG-040`). When a
+//! a full STARK proof inside every validator (, ). When a
 //! `ContractCall` payload begins with [`STATEFUL_CONTRACT_MAGIC`]
 //! (`BDLM_UEL_STATEFUL_V1`), the coordinator decodes a [`StatefulContractEnvelope`]:
 //!
@@ -242,7 +242,7 @@ pub fn is_stateful_contract_payload(data: &[u8]) -> bool {
     data.starts_with(STATEFUL_CONTRACT_MAGIC)
 }
 
-/// Execute a stateful `ContractCall` through the UEL coordinator overlay (`BLG-248`).
+/// Execute a stateful `ContractCall` through the UEL coordinator overlay ().
 pub fn execute_stateful_contract_tx(
     tx: &Transaction,
     state: &mut AccountState,

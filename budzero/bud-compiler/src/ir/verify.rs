@@ -878,7 +878,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_136_verifier_rejects_local_assert_and_call_type_mismatches() {
+    fn verifier_rejects_local_assert_and_call_type_mismatches() {
         // 1. WriteLocal with Bool into a U64 local slot fails.
         let bad_local_block = BasicBlock {
             id: BlockId::new(0),

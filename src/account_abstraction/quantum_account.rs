@@ -827,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_025_quantum_account_refuses_duplicate_guardians_and_stale_root() {
+    fn quantum_account_refuses_duplicate_guardians_and_stale_root() {
         let mut g1 = [0u8; ML_DSA_87_PUBLIC_KEY_LEN];
         g1[0] = 1;
         let mut g2 = [0u8; ML_DSA_87_PUBLIC_KEY_LEN];

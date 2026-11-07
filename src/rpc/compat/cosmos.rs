@@ -1,5 +1,5 @@
 //! CometBFT RPC (`127.0.0.1:18550`) & Cosmos LCD (`127.0.0.1:18551`) gateway
-//! (`WP-29` & section 8.11.5) supporting CosmJS `SigningCosmWasmClient`.
+//! ( & section 8.11.5) supporting CosmJS `SigningCosmWasmClient`.
 
 use crate::core::account::{AccountState, ATTOS_PER_ATOM};
 use crate::execution::coordinator::foreign::cosmos::BUDLUM_COSMOS_CHAIN_ID;
@@ -227,7 +227,7 @@ fn execute_abci_query(path: &str, data: &[u8], state: &AccountState) -> Vec<u8> 
 
 /// Evaluates a Cosmos LCD gRPC-REST request against read-only `state` (`18551`).
 ///
-/// exposed for: wire-level Cosmos LCD REST handler (`WP-29`, `WP-48`).
+/// exposed for: wire-level Cosmos LCD REST handler (, ).
 #[must_use]
 pub fn handle_cosmos_rest(
     state: &AccountState,

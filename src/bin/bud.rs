@@ -885,7 +885,7 @@ fn node_chain_id(rpc_url: &str) -> Result<u64, String> {
     chain_id_binding(node, requested)
 }
 
-/// Query the node's live fee floor when `--fee` is omitted (`DOC-GAP-08`).
+/// Query the node's live fee floor when `--fee` is omitted ().
 ///
 /// Tries `bud_estimateGas` first when a draft transaction is available so
 /// proportional transfer cuts and governance escalations are included, then

@@ -1,5 +1,5 @@
 //! Pinned Aptos scheme-byte table, Move binary module verifier, and `0x1`
-//! framework dispatch (`WP-32`, `BLG-249` Aptos leg).
+//! framework dispatch (,  Aptos leg).
 
 use serde::{Deserialize, Serialize};
 use sha3::{Digest as _, Sha3_256};

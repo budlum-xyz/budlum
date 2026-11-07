@@ -1,5 +1,5 @@
 //! Standalone Move (Aptos) out-of-process Execution Environment worker
-//! (`EeId::MOVE = 0x04`, `WP-32`, `BLG-249` Aptos leg).
+//! (`EeId::MOVE = 0x04`,,  Aptos leg).
 //!
 //! Enforces:
 //! - Block-STM disabled (`BLOCK_STM_ENABLED = false`): strictly sequential execution

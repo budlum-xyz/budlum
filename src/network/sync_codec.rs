@@ -132,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_147_sync_codec_refuses_oversize_writes_symmetrically() {
+    fn sync_codec_refuses_oversize_writes_symmetrically() {
         use libp2p::request_response::Codec as _;
         let mut codec = SyncCodec;
         let proto = StreamProtocol::new("/budlum/sync/1.0.0");

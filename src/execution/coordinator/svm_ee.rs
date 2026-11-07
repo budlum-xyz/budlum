@@ -1,6 +1,6 @@
 //! SVM execution environment (`EeId::SVM` = `0x03`) over `HostApi`.
 //!
-//! Implements WP-31 items 1-3 & 6:
+//! Implements  items 1-3 & 6:
 //! - Strictly interpreted SBPF execution (`jit_enabled = false`; attempting to
 //!   enable JIT is deterministically refused).
 //! - SVM account model persisted in `ee/svm/account` (`32-byte pubkey -> SvmAccount`).
@@ -71,7 +71,7 @@ impl Default for SvmRuntimeConfig {
 }
 
 impl SvmRuntimeConfig {
-    /// Validates that JIT compilation is disabled (WP-31 item 1).
+    /// Validates that JIT compilation is disabled ( item 1).
     pub fn ensure_deterministic(&self) -> Result<(), String> {
         if self.jit_enabled {
             return Err(String::from(

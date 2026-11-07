@@ -1,4 +1,4 @@
-//! Aptos REST compatibility gateway (`127.0.0.1:18549`, WP-32 & section 8.11.4).
+//! Aptos REST compatibility gateway (`127.0.0.1:18549`,  & section 8.11.4).
 
 use crate::core::account::AccountState;
 use crate::execution::coordinator::alias::{derive_foreign_account, ForeignScheme};
@@ -173,7 +173,7 @@ impl AptosCompatGateway {
 
 /// Evaluates an Aptos REST v1 HTTP request against read-only `state` (`18549`).
 ///
-/// exposed for: wire-level Aptos REST handler (`WP-28`, `WP-48`).
+/// exposed for: wire-level Aptos REST handler (, ).
 #[must_use]
 pub fn handle_aptos_rest(
     state: &AccountState,

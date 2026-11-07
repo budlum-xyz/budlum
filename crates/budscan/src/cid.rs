@@ -323,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_068_cid_rejects_noncanonical_base32_and_overlong_varint() {
+    fn cid_rejects_noncanonical_base32_and_overlong_varint() {
         let valid = "bafkreibm6jg3ux5qumhcn2b3flc3tyu6dmlb4xa7u5bf44yegnrjhc4yeq";
         assert!(parse(valid).is_ok());
         // Uppercase multibase `B` for the exact same CIDv1 raw digest.

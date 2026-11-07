@@ -274,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_124_compact_context_render_masks_secrets() {
+    fn compact_context_render_masks_secrets() {
         let mut ctx = sample();
         let leaked = format!("ghp_{}{}", "0123456789abcdefghij", "0123456789");
         ctx.notes.push(format!("token: {leaked}"));

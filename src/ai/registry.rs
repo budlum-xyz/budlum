@@ -1612,7 +1612,7 @@ impl AiRegistry {
     /// Used for QoS-aware verifier selection in the Agentic Economy.
     ///
     /// The sort key is the integer permyriad score, not the `f64` display
-    /// score (WP-45 / BLG-240): a float key rounds differently between
+    /// score ( / ): a float key rounds differently between
     /// builds and `partial_cmp` hides a `NaN` as `Equal`. Ties break on the
     /// address, so the order is total and identical on every node.
     pub fn verifiers_by_reliability(&self) -> Vec<AiVerifierQos> {
@@ -2012,7 +2012,7 @@ impl AiRegistry {
     /// Returns Vec of (agent_address, trust_score) tuples.
     ///
     /// The returned score is the `f64` display column, but the *ordering*
-    /// comes from the integer permyriad score (WP-45 / BLG-240), with the
+    /// comes from the integer permyriad score ( / ), with the
     /// address breaking ties. Keeping the float in the signature keeps the
     /// RPC's display column stable while removing it from the decision.
     ///
@@ -2030,7 +2030,7 @@ impl AiRegistry {
     }
 
     /// The agent ranking as integers: `(address, permyriad score)`, ordered
-    /// exactly as [`Self::agents_by_trust_score`] orders (WP-45 / BLG-240).
+    /// exactly as [`Self::agents_by_trust_score`] orders ( / ).
     ///
     /// This is the form a consensus or cross-process consumer should use.
     /// One permyriad is 1/10_000 of a unit of trust; the range is
@@ -2059,7 +2059,7 @@ impl AiRegistry {
     /// The actor and RPC boundary carries this, not the raw
     /// `f64` - a float crossing process boundaries is the Z8 rule.
     ///
-    /// WP-45 / BLG-240: this used to re-quantize the display float
+    ///  / : this used to re-quantize the display float
     /// (`(score * 10_000.0).round() as u64`), which put a float back on the
     /// boundary it was meant to keep off, and rounded where the ranking
     /// truncates. It now returns the integer score itself, so the value the
@@ -2230,7 +2230,7 @@ impl Default for AiRegistry {
 
 #[cfg(test)]
 mod tests {
-    //! WP-45 / BLG-240: the ranking read models must order on integers.
+    //!  / : the ranking read models must order on integers.
     //!
     //! A float sort key is not a consensus-safe ordering: two nodes built
     //! with different optimization settings may round the last bit of a
@@ -2344,7 +2344,7 @@ mod tests {
         assert_eq!(agent_order, vec![addr(3), addr(7), addr(9)]);
     }
 
-    /// BLG-062 overflow leg: the score arithmetic widens before it
+    ///  overflow leg: the score arithmetic widens before it
     /// multiplies. Counters at `u64::MAX` must produce a bounded score
     /// instead of wrapping (debug panic / release wrap).
     #[test]

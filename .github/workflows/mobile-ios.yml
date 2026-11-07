@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   ios-opportunistic-validator:
-    name: iOS Opportunistic Validator Swift Package Tests (WP-38)
+    name: iOS Opportunistic Validator Swift Package Tests
     runs-on: macos-latest
     timeout-minutes: 20
     permissions:
@@ -32,7 +32,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Build and run WP-38 iOS Swift test suite
+      - name: Build and run  iOS Swift test suite
         working-directory: mobile/ios
         run: |
           set -euo pipefail
