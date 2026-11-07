@@ -102,7 +102,6 @@ updates:
   # covered by any entry above. None of them depends on bincode, so no ignore is needed.
   - package-ecosystem: "cargo"
     directories:
-      - "/bud"
       - "/crates/ai-inference"
       - "/crates/bpqs"
       - "/crates/budscan"

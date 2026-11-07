@@ -799,34 +799,14 @@ jobs:
         run: |
           cargo clippy --manifest-path crates/ai-inference/Cargo.toml --all-targets -- -D warnings
           cargo test --manifest-path crates/ai-inference/Cargo.toml
-      # The B.U.D. core (bud/) was in the same silent hole: bud-core with 103 modules
-      # -- ALL of B.U.D. 1.0/2.0/3.0 -- was built by no CI job,
-      # because it is not a member of the root workspace and no step pointed
-      # was not looked at. Measured: `clippy --features bud3 --all-targets -D warnings`
-      # -> 91 violations, among them real nested bugs (an if with identical branches,
-      # a lost Vec capacity, a misplaced cfg gate).
-      #
-      # All three configurations run because the versions are split by feature:
-      # default (bud2) and bud3 compile different module sets, while no-default
-      # what falls outside both. Skipping a configuration is exactly the
-      # would hide the "a 3.0 module leaked into the 2.0 build" bug found this
-      # would leave behind.
-      # `cargo fmt --all` scans the root workspace; because `bud/` is not a member of it
-      # there was no formatting check in this tree. Measured: 119
-      # 103 of the files had drifted from rustfmt output. Formatting does not change
-      # behaviour, but an unchecked tree becomes unreadable over time and
-      # telling a real change from noise gets harder. The tree was fixed once
-      # (`2c95cfe2`); this step prevents it drifting back.
-      - name: B.U.D. core is formatted
+      - name: The codec crate is formatted
         if: always() && steps.build.outcome == 'success'
-        run: cargo fmt --manifest-path bud/Cargo.toml --all -- --check
-      - name: B.U.D. core builds and its tests pass
+        run: cargo fmt --manifest-path crates/bud-codec/Cargo.toml --all -- --check
+      - name: The codec crate builds and its tests pass
         if: always() && steps.build.outcome == 'success'
         run: |
-          cargo clippy --manifest-path bud/Cargo.toml --all-targets -- -D warnings
-          cargo clippy --manifest-path bud/Cargo.toml --features bud3 --all-targets -- -D warnings
-          cargo clippy --manifest-path bud/Cargo.toml --no-default-features --all-targets -- -D warnings
-          cargo test --manifest-path bud/Cargo.toml --features bud3
+          cargo clippy --manifest-path crates/bud-codec/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path crates/bud-codec/Cargo.toml
       # `slice[i]` stops the process under the release profile (panic = abort); that is
       # the same liveness class as `unwrap`. 66 files in the tree carry this debt and
       # most of them in index-heavy parsers (RLP/MPT/erasure), and converting those to iterators
@@ -1651,7 +1631,6 @@ jobs:
           # which cargo-deny discovers on its own.
           - { name: root, manifest: "./Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: budzero, manifest: "budzero/Cargo.toml", config: "" }
-          - { name: bud, manifest: "bud/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: fuzz, manifest: "fuzz/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: ai-inference, manifest: "crates/ai-inference/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: bpqs, manifest: "crates/bpqs/Cargo.toml", config: "--config .quality/deny.toml" }
@@ -1693,7 +1672,6 @@ jobs:
         include:
           - { name: root, manifest: "./Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: budzero, manifest: "budzero/Cargo.toml", config: "" }
-          - { name: bud, manifest: "bud/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: fuzz, manifest: "fuzz/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: ai-inference, manifest: "crates/ai-inference/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: bpqs, manifest: "crates/bpqs/Cargo.toml", config: "--config .quality/deny.toml" }
@@ -1865,28 +1843,6 @@ jobs:
             cargo +nightly-2026-10-09 fuzz run "$t" -- -max_total_time=60 -timeout=25 -print_final_stats=1
           done
           echo "All fuzz targets clean."
-      - name: B.U.D. format fuzz (60s)
-        # bud/ is its own crate with its own fuzz/ directory, so cargo-fuzz
-        # has to run from bud/.
-        working-directory: bud
-        # The use-after-scope opt-out is scoped to this step only: ASan
-        # aborts inside vendored zstd 1.5.7 C code (zstd_opt.c reading its
-        # own getAllMatchesFns dispatch table, a global whose shadow is
-        # nevertheless f8 stack-use-after-scope poisoned - an
-        # instrumentation artifact in third-party C, no bud frame involved;
-        # bud itself is forbid(unsafe_code) and zstd is ASan-fuzzed
-        # upstream). The runtime option covers the Rust/LLVM objects, but
-        # a 2026-10-20 quick-fuzz run still aborted in the GCC-instrumented
-        # C objects: GCC emits that lifetime poisoning at compile time and
-        # does not honour detect_stack_use_after_scope=0 for it. The
-        # matching -fno-sanitize-address-use-after-scope CFLAGS entry is
-        # therefore also required; cc appends it after its default
-        # -fsanitize=address, so every other ASan check (heap/stack/global
-        # overflow, use-after-free) stays enabled for this target.
-        env:
-          ASAN_OPTIONS: detect_stack_use_after_scope=0
-          CFLAGS_x86_64_unknown_linux_gnu: -fno-sanitize-address-use-after-scope
-        run: cargo +nightly-2026-10-09 fuzz run fuzz_bud_format -- -max_total_time=60 -timeout=25 -print_final_stats=1
       - name: Crash artifact (varsa)
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

@@ -14,7 +14,7 @@ const HOMES: &[&str] = &[
 ];
 
 /// Source roots walked for inline copies. Every entry must exist.
-const SCAN_ROOTS: &[&str] = &["src", "budzero", "crates", "bud"];
+const SCAN_ROOTS: &[&str] = &["src", "budzero", "crates"];
 
 /// Does this line look like the slash expression: stake/bond-ish u128
 /// multiply-divide by `FIXED_POINT_SCALE` with `as u64`?

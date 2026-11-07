@@ -1,5 +1,4 @@
 # Shrinking legacy baseline for no-legacy-storage.
-bud/
 budzero/bud-node/
 budzero/bud-node/src/bitswap.rs
 budzero/bud-node/src/discovery.rs

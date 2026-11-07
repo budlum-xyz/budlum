@@ -109,7 +109,6 @@ jobs:
           osv-scanner scan source \
             --config=osv-scanner.toml \
             --lockfile=Cargo.lock \
-            --lockfile=bud/Cargo.lock \
             --lockfile=budzero/Cargo.lock \
             --lockfile=crates/ai-inference/Cargo.lock \
             --lockfile=crates/bpqs/Cargo.lock \

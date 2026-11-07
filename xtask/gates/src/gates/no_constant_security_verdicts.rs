@@ -52,7 +52,7 @@ const VERDICT_TOKENS: &[&str] = &[
 const ALLOWED: &[(&str, &str, &str)] = &[];
 
 /// Source trees whose non-test code is scanned.
-const ROOTS: &[&str] = &["src", "bud/src"];
+const ROOTS: &[&str] = &["src"];
 
 /// Workspace members that carry a `src` tree: `crates/*/src` and `budzero/*/src`.
 const MEMBER_PARENTS: &[&str] = &["crates", "budzero"];

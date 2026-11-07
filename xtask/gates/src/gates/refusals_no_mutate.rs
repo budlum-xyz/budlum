@@ -9,7 +9,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-const SCAN_ROOTS: &[&str] = &["src", "budzero", "crates", "bud/src"];
+const SCAN_ROOTS: &[&str] = &["src", "budzero", "crates"];
 
 /// Balanced brace body starting at `open` (index of `{`).
 /// Skip a regular string literal starting at `b[j] == b'"'`. Returns the
@@ -509,7 +509,7 @@ pub fn self_test() -> Result<String, String> {
     // A partial write under a standalone crate or the bud tree is scanned
     // like one under src.
     std::fs::write(dir.join("src/lib.rs"), good).map_err(|e| e.to_string())?;
-    for rel in ["crates/demo/src/lib.rs", "bud/src/lib.rs"] {
+    for rel in ["crates/demo/src/lib.rs"] {
         std::fs::write(dir.join(rel), bad).map_err(|e| e.to_string())?;
         let missed = run(&dir).is_ok();
         let _ = std::fs::remove_file(dir.join(rel));

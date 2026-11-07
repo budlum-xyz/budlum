@@ -1,7 +1,4 @@
 # Shrinking legacy baseline for bud3-forbidden-phrases.
-bud/src/bud_format_economics.rs
-bud/src/bud_format_edition.rs
-bud/src/bud_format_regeneration.rs
 crates/ai-inference/crates/ai-serve/src/fee_scenario.rs
 docs/ARCHITECTURE.md
 src/domain/storage_deal.rs

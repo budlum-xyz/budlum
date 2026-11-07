@@ -389,8 +389,7 @@ fn is_scanned_document(rel: &str) -> bool {
     if rel.starts_with("docs/") {
         return true;
     }
-    rel == "bud/README.md"
-        || rel == "budzero/README.md"
+    rel == "budzero/README.md"
         || (rel.starts_with("crates/")
             && rel.matches('/').count() == 2
             && file.starts_with("README"))
