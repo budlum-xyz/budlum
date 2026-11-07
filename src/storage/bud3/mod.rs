@@ -97,8 +97,10 @@ pub use maintenance::{
 };
 pub use meter::{Meter, MeterError};
 pub use pipeline::{
-    prepare_public_upload, prepare_public_upload_two_path, prepare_sealed_upload, view_public,
-    view_public_optical, view_sealed, ObjectRecord, PipelineError, PreparedUpload,
+    prepare_public_upload, prepare_public_upload_two_path, prepare_sealed_upload,
+    prepare_volume_upload, view_public, view_public_optical, view_sealed, view_volume_bytes,
+    view_volume_member, ObjectRecord, PipelineError, PreparedUpload, PreparedVolume, SmallObject,
+    VolumeRecord,
 };
 pub use placement::{
     place, rank, segment_key, Candidate, Class, PlacementError, PlacementRow, PlacementTable,
@@ -154,6 +156,7 @@ pub use view::{
     ViewBud3Error, MIN_PAID_VIEW_FEE_ATOMS,
 };
 pub use volume::{
-    qualifies_for_volume, verify_volume_inclusion, AggregationVolume, VolumeEntry, VolumeError,
-    VolumeInclusionProof, VolumeScope, DEFAULT_VOLUME_BYTES, VOLUME_REENCODE_MAX_SECS,
+    proof_for, root_of, verify_member, volume_id_of, AggregationVolume, Freed, PathStep, Removal,
+    Visibility, VolumeError, VolumeMember, DEFAULT_VOLUME_BYTES, MAX_MEMBERS, MAX_PATH,
+    RECODE_DEADLINE_SECS, VOLUME_TAG,
 };

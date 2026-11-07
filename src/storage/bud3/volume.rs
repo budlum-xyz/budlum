@@ -1,448 +1,833 @@
-//! Aggregation Volume for sub-symbol B.U.D. 3.0 objects (Section 6.12,  item 4).
-//! exposed for upload small-object packing, gateway reads, and compaction sweeps.
+//! Aggregation volumes: small objects share one placed segment.
 //!
-//! Per Section 6.12:
-//! 1. Objects smaller than a single symbol (`< symbol_size`, 2,911 bytes in P0)
-//!    are neither placed alone nor kept as full replicas.
-//! 2. Small objects pack into an [`AggregationVolume`] (default 4 MiB,
-//!    `DEFAULT_VOLUME_BYTES`) that is segmented, Fountain-coded, and placed like
-//!    a single segment.
-//! 3. Each small object retains its own BOF-1 [`ObjectKey`] commitment and is
-//!    located inside the volume by `(offset, len)` plus a Merkle inclusion proof
-//!    under `BDLM_BUD3_VOLUME_V1`.
-//! 4. A volume never mixes visibilities or owners: it is either [`VolumeScope::Public`]
-//!    or [`VolumeScope::SealedOwner`].
-//! 5. When an entry's reference count drops to zero it is evicted from active
-//!    entries and the volume is marked for re-encoding within at most 7 days
-//!    (`VOLUME_REENCODE_MAX_SECS`).
+//! An object whose bytes fit inside one symbol is not placed on its own and is
+//! not kept as a full copy. Small objects are joined in an aggregation volume,
+//! and the volume is coded and placed exactly like one segment. Every member is
+//! found by its offset and a Merkle proof; the object commitment of the member
+//! does not change.
+//!
+//! * Member leaf: `SHA-256` over the length-prefixed fields
+//!   `BDLM_BUD3_VOLUME_V1`, `0x00`, the member index (`u64` little-endian),
+//!   the offset (`u64`), the length (`u64`), the content-id kind byte, the
+//!   content-id digest, the content length and the object commitment.
+//! * Volume root: a binary Merkle tree over the member leaves. An odd node
+//!   moves up unchanged, and the root binds the member count, so two volumes
+//!   with a different member count never share a root.
+//! * Volume id: `SHA-256` over `BDLM_BUD3_VOLUME_V1`, `0x03`, the visibility
+//!   tag, the owner, the volume length and the volume bytes. A view checks it,
+//!   so bytes that arrive from holders are refused unless they are the bytes
+//!   the chain recorded.
+//!
+//! Only objects of one visibility share a volume: a public volume, or the
+//! sealed volume of one owner. A deletion takes the member out of the table and
+//! zeroes its slot. For sealed content the owner/delete layer must also destroy the content key
+//! and distribute the changed volume; zeroing this local buffer alone does not
+//! erase remote replicas. For public content the volume is recoded within
+//! [`RECODE_DEADLINE_SECS`].
+//!
+//! WIRING: unwired - [`super::pipeline`] builds and views a volume for the
+//! upload and view paths. The delete path of `bud3::delete` and the reference
+//! counter call [`AggregationVolume::remove`],
+//! [`AggregationVolume::needs_recode`] and [`AggregationVolume::compact`] once
+//! that door lands.
 
-use super::bof1::Object;
-use super::limits::Profile;
-use super::registry::{Address, ObjectKey};
-use super::segment::commit_object;
+use super::content_id::{ContentId, ContentIdKind};
+use super::registry::Address;
 use crate::core::hash::hash_fields_bytes;
 
-/// Domain tag for Aggregation Volume leaf/node/root Merkle commitments.
+/// The domain tag of every volume hash.
 pub const VOLUME_TAG: &[u8] = b"BDLM_BUD3_VOLUME_V1";
+/// TESTNET-DEFAULT volume length: 4 MiB (section 6.12 item 6).
+pub const DEFAULT_VOLUME_BYTES: u64 = 4 * 1024 * 1024;
+/// A public volume with a freed slot is recoded within seven days.
+pub const RECODE_DEADLINE_SECS: u64 = 7 * 24 * 60 * 60;
+/// The most members one volume may carry. The proof walk is bounded by it.
+pub const MAX_MEMBERS: usize = 1 << 16;
+/// The longest Merkle path a proof may carry.
+pub const MAX_PATH: usize = 32;
 
-/// Default Aggregation Volume capacity in bytes (4 MiB, TESTNET-DEFAULT Section 6.12.6).
-pub const DEFAULT_VOLUME_BYTES: usize = 4 * 1024 * 1024;
+/// One step of a member path: the sibling, or `None` where the node had no
+/// sibling and moved up unchanged.
+pub type PathStep = Option<[u8; 32]>;
 
-/// Maximum re-encoding delay after an entry's refcount reaches zero (7 days, Section 6.12.5).
-pub const VOLUME_REENCODE_MAX_SECS: u64 = 7 * 86_400;
-
-/// Visibility and ownership isolation boundary of an [`AggregationVolume`].
+/// What a volume may carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VolumeScope {
-    /// Public small objects only (`!Flags::SEALED`).
+pub enum Visibility {
+    /// Public content only.
     Public,
-    /// Sealed small objects belonging to a single owner (`Flags::SEALED`).
-    SealedOwner(Address),
+    /// Sealed content of one owner only.
+    Sealed(Address),
 }
 
-/// Metadata and byte location of one small object packed inside a volume.
+impl Visibility {
+    /// The tag and the owner the volume id binds.
+    #[must_use]
+    fn tag(&self) -> (&'static [u8], [u8; 32]) {
+        match self {
+            Self::Public => (b"public", [0u8; 32]),
+            Self::Sealed(owner) => (b"sealed", *owner),
+        }
+    }
+
+    /// Whether the volume carries sealed content.
+    #[must_use]
+    pub fn is_sealed(&self) -> bool {
+        matches!(self, Self::Sealed(_))
+    }
+
+    /// The owner of a sealed volume.
+    #[must_use]
+    pub fn owner(&self) -> Option<Address> {
+        match self {
+            Self::Public => None,
+            Self::Sealed(owner) => Some(*owner),
+        }
+    }
+}
+
+/// One small object inside a volume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VolumeEntry {
-    /// Standalone BOF-1 commitment of the small object (never altered by packing).
-    pub object: ObjectKey,
-    /// Byte offset inside the volume buffer.
+pub struct VolumeMember {
+    /// The content id of the member. Its kind must match the volume.
+    pub content_id: ContentId,
+    /// Byte offset of the member inside the volume.
     pub offset: u64,
-    /// Encoded BOF-1 byte length of the small object.
+    /// Member length in bytes.
     pub len: u64,
-    /// Whether this entry is still live (`false` once refcount hits 0).
-    pub active: bool,
+    /// The object commitment of the member. It does not change when the member
+    /// joins a volume.
+    pub commitment: [u8; 32],
 }
 
-/// Merkle inclusion proof locating one [`VolumeEntry`] under a volume's root.
+impl VolumeMember {
+    /// The leaf of this member at `index` in the volume.
+    #[must_use]
+    fn leaf(&self, index: u64) -> [u8; 32] {
+        let kind = match self.content_id.kind {
+            ContentIdKind::Public => 0u8,
+            ContentIdKind::Sealed => 1u8,
+        };
+        hash_fields_bytes(&[
+            VOLUME_TAG,
+            &[0x00],
+            &index.to_le_bytes(),
+            &self.offset.to_le_bytes(),
+            &self.len.to_le_bytes(),
+            &[kind],
+            &self.content_id.digest,
+            &self.content_id.len.to_le_bytes(),
+            &self.commitment,
+        ])
+    }
+}
+
+/// A slot freed by a deletion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Freed {
+    /// Offset of the freed slot.
+    pub offset: u64,
+    /// Length of the freed slot.
+    pub len: u64,
+    /// Unix seconds of the deletion.
+    pub at: u64,
+    /// Whether the volume is sealed. Sealed deletion additionally requires
+    /// content-key destruction at the owner/delete layer; no delayed public
+    /// compaction deadline is recorded here.
+    pub sealed: bool,
+}
+
+/// The result of taking a member out of a volume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Removal {
+    /// The member that left.
+    pub member: VolumeMember,
+    /// Whether the volume is sealed.
+    pub sealed: bool,
+    /// The local removal time for sealed content. Remote deletion is not
+    /// effective until the delete layer destroys the key and replaces replicas.
+    pub effective_at: Option<u64>,
+}
+
+/// Why a volume refused a member or a view.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VolumeInclusionProof {
-    /// Leaf index in the volume's entry list.
-    pub index: u64,
-    /// Total leaves in the volume Merkle tree.
-    pub leaf_count: u64,
-    /// Byte offset in the packed volume payload.
-    pub offset: u64,
-    /// Byte length of the encoded BOF-1 object.
-    pub len: u64,
-    /// Sibling hashes (`None` when an odd node moved up unchanged).
-    pub path: Vec<Option<[u8; 32]>>,
-}
-
-/// Errors packing or reading an [`AggregationVolume`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VolumeError {
-    /// Object is at least one full symbol (`>= symbol_size`) and does not belong in a small-object volume.
-    NotSmallObject,
-    /// Mixing public and sealed objects (or different owners) in one volume is forbidden.
-    ScopeMismatch,
-    /// Volume has insufficient remaining space under `max_bytes`.
-    VolumeFull,
-    /// Duplicate object commitment in the same volume.
-    DuplicateEntry,
-    /// Requested object is not active in this volume.
-    UnknownEntry,
-    /// Object commitment failed to compute.
-    CommitmentFailed,
+    /// The capacity is zero, so no member would ever be admitted.
+    EmptyCapacity,
+    /// The batch has no object, so there is nothing to place.
+    EmptyVolume,
+    /// The object is not smaller than one symbol, so it is placed on its own.
+    NotSmall {
+        /// Object length.
+        len: u64,
+        /// Symbol size of the profile.
+        symbol_size: u64,
+    },
+    /// The volume has no room left.
+    Capacity {
+        /// Member length.
+        len: u64,
+        /// Free bytes before the member.
+        free: u64,
+        /// Volume capacity.
+        capacity: u64,
+    },
+    /// A sealed object was offered to a public volume, or the reverse.
+    MixedVisibility,
+    /// The content id is already a member.
+    DuplicateMember,
+    /// The member table is full.
+    TooManyMembers {
+        /// Members now.
+        count: usize,
+        /// The cap.
+        max: usize,
+    },
+    /// The content id is not a member.
+    UnknownMember,
+    /// An offset or a length does not fit a `u64`.
+    OffsetOverflow,
+    /// The member table does not tile the volume bytes, or a hole is not zero.
+    LayoutMismatch,
+    /// A length differs from the recorded one.
+    LengthMismatch {
+        /// Recorded length.
+        want: u64,
+        /// Recovered length.
+        got: u64,
+    },
+    /// The recovered bytes are not the bytes the chain recorded.
+    IdMismatch,
+    /// The member table does not match the recorded root.
+    RootMismatch,
+    /// The member path does not lead to the recorded root.
+    ProofMismatch,
 }
 
-fn entry_leaf_hash(index: u64, entry: &VolumeEntry, bytes: &[u8]) -> [u8; 32] {
+/// A placed aggregation volume.
+#[derive(Debug, Clone)]
+pub struct AggregationVolume {
+    visibility: Visibility,
+    capacity: u64,
+    bytes: Vec<u8>,
+    members: Vec<VolumeMember>,
+    freed: Vec<Freed>,
+    root: [u8; 32],
+    volume_id: [u8; 32],
+}
+
+impl AggregationVolume {
+    /// An empty volume of one visibility.
+    ///
+    /// # Errors
+    ///
+    /// [`VolumeError::EmptyCapacity`] for a zero capacity.
+    pub fn new(visibility: Visibility, capacity: u64) -> Result<Self, VolumeError> {
+        if capacity == 0 {
+            return Err(VolumeError::EmptyCapacity);
+        }
+        let mut volume = Self {
+            visibility,
+            capacity,
+            bytes: Vec::new(),
+            members: Vec::new(),
+            freed: Vec::new(),
+            root: root_of(&[]),
+            volume_id: [0u8; 32],
+        };
+        volume.volume_id = volume_id_of(&volume.visibility, &[]);
+        Ok(volume)
+    }
+
+    /// The visibility.
+    #[must_use]
+    pub const fn visibility(&self) -> Visibility {
+        self.visibility
+    }
+
+    /// The capacity in bytes.
+    #[must_use]
+    pub const fn capacity(&self) -> u64 {
+        self.capacity
+    }
+
+    /// The volume bytes: the members in insertion order, with freed slots
+    /// zeroed.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// The volume length in bytes.
+    #[must_use]
+    pub fn len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    /// Whether the volume has no member.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+
+    /// Free bytes before the capacity.
+    #[must_use]
+    pub fn free(&self) -> u64 {
+        self.capacity.saturating_sub(self.len())
+    }
+
+    /// The member table.
+    #[must_use]
+    pub fn members(&self) -> &[VolumeMember] {
+        &self.members
+    }
+
+    /// The freed slots.
+    #[must_use]
+    pub fn freed(&self) -> &[Freed] {
+        &self.freed
+    }
+
+    /// The member root.
+    #[must_use]
+    pub const fn root(&self) -> [u8; 32] {
+        self.root
+    }
+
+    /// The volume id.
+    #[must_use]
+    pub const fn volume_id(&self) -> [u8; 32] {
+        self.volume_id
+    }
+
+    /// The member with this content id.
+    #[must_use]
+    pub fn member(&self, content_id: &ContentId) -> Option<&VolumeMember> {
+        self.members.iter().find(|m| m.content_id == *content_id)
+    }
+
+    /// Join one public object. Sealed objects must use [`Self::push_owned`]
+    /// so the volume owner is checked explicitly.
+    ///
+    /// # Errors
+    ///
+    /// [`VolumeError`] for a large object, a full volume, a repeated content
+    /// id, a visibility mismatch or an offset that does not fit.
+    pub fn push(
+        &mut self,
+        content_id: &ContentId,
+        commitment: [u8; 32],
+        bytes: &[u8],
+        symbol_size: u32,
+    ) -> Result<VolumeMember, VolumeError> {
+        self.push_owned(content_id, None, commitment, bytes, symbol_size)
+    }
+
+    /// Join one object with its registry-verified owner. Public objects require
+    /// `None`; sealed objects require exactly the owner of this volume.
+    ///
+    /// # Errors
+    ///
+    /// [`VolumeError`] for a large object, a full volume, a repeated content
+    /// id, a visibility/owner mismatch or an offset that does not fit.
+    pub fn push_owned(
+        &mut self,
+        content_id: &ContentId,
+        owner: Option<Address>,
+        commitment: [u8; 32],
+        bytes: &[u8],
+        symbol_size: u32,
+    ) -> Result<VolumeMember, VolumeError> {
+        let len = bytes.len() as u64;
+        let symbol_size = u64::from(symbol_size);
+        if symbol_size == 0 || len >= symbol_size {
+            return Err(VolumeError::NotSmall { len, symbol_size });
+        }
+        if self.members.len() >= MAX_MEMBERS {
+            return Err(VolumeError::TooManyMembers {
+                count: self.members.len(),
+                max: MAX_MEMBERS,
+            });
+        }
+        if self.member(content_id).is_some() {
+            return Err(VolumeError::DuplicateMember);
+        }
+        let visible = match self.visibility {
+            Visibility::Public => content_id.kind == ContentIdKind::Public && owner.is_none(),
+            Visibility::Sealed(expected) => {
+                content_id.kind == ContentIdKind::Sealed && owner == Some(expected)
+            }
+        };
+        if !visible {
+            return Err(VolumeError::MixedVisibility);
+        }
+        let offset = self.len();
+        let end = offset.checked_add(len).ok_or(VolumeError::OffsetOverflow)?;
+        if end > self.capacity {
+            return Err(VolumeError::Capacity {
+                len,
+                free: self.free(),
+                capacity: self.capacity,
+            });
+        }
+        self.bytes.extend_from_slice(bytes);
+        let member = VolumeMember {
+            content_id: *content_id,
+            offset,
+            len,
+            commitment,
+        };
+        self.members.push(member);
+        self.rehash();
+        Ok(member)
+    }
+
+    /// The Merkle path of one member, if it is a member.
+    ///
+    /// WIRING: the reveal path hands this path to a viewer with the
+    /// member, so the viewer checks the member against the root it holds.
+    #[must_use]
+    pub fn member_proof(&self, content_id: &ContentId) -> Option<Vec<PathStep>> {
+        let index = self
+            .members
+            .iter()
+            .position(|m| m.content_id == *content_id)?;
+        Some(proof_for(&self.members, index))
+    }
+
+    /// Take a member out. Its slot is zeroed, the table is rebuilt and the
+    /// volume id follows the bytes.
+    ///
+    /// WIRING: the `SocialDelete` and reference-counter door calls
+    /// this when the last reference to a member is burned.
+    ///
+    /// # Errors
+    ///
+    /// [`VolumeError::UnknownMember`] when the content id is not a member.
+    pub fn remove(&mut self, content_id: &ContentId, now: u64) -> Result<Removal, VolumeError> {
+        let index = self
+            .members
+            .iter()
+            .position(|m| m.content_id == *content_id)
+            .ok_or(VolumeError::UnknownMember)?;
+        let member = self.members[index];
+        let start = usize::try_from(member.offset).map_err(|_| VolumeError::OffsetOverflow)?;
+        let len = usize::try_from(member.len).map_err(|_| VolumeError::OffsetOverflow)?;
+        let end = start.checked_add(len).ok_or(VolumeError::OffsetOverflow)?;
+        let slot = self
+            .bytes
+            .get_mut(start..end)
+            .ok_or(VolumeError::OffsetOverflow)?;
+        slot.fill(0);
+        self.members.remove(index);
+        let sealed = self.visibility.is_sealed();
+        self.freed.push(Freed {
+            offset: member.offset,
+            len: member.len,
+            at: now,
+            sealed,
+        });
+        self.rehash();
+        Ok(Removal {
+            member,
+            sealed,
+            effective_at: if sealed { Some(now) } else { None },
+        })
+    }
+
+    /// Whether a freed public slot has waited out [`RECODE_DEADLINE_SECS`].
+    ///
+    /// WIRING: the maintenance pass calls this before it recodes a
+    /// volume, and the delete door records the deadline beside it.
+    #[must_use]
+    pub fn needs_recode(&self, now: u64) -> bool {
+        self.freed
+            .iter()
+            .any(|f| !f.sealed && now.saturating_sub(f.at) >= RECODE_DEADLINE_SECS)
+    }
+
+    /// Recode the volume: the members move together and the holes leave.
+    ///
+    /// WIRING: the maintenance pass calls this when
+    /// [`AggregationVolume::needs_recode`] says the deadline has passed.
+    ///
+    /// # Errors
+    ///
+    /// [`VolumeError::OffsetOverflow`] for a slot outside the bytes.
+    pub fn compact(&mut self) -> Result<(), VolumeError> {
+        let mut bytes = Vec::with_capacity(self.bytes.len());
+        let mut members = Vec::with_capacity(self.members.len());
+        for member in &self.members {
+            let start = usize::try_from(member.offset).map_err(|_| VolumeError::OffsetOverflow)?;
+            let len = usize::try_from(member.len).map_err(|_| VolumeError::OffsetOverflow)?;
+            let end = start.checked_add(len).ok_or(VolumeError::OffsetOverflow)?;
+            let slot = self
+                .bytes
+                .get(start..end)
+                .ok_or(VolumeError::OffsetOverflow)?;
+            let offset = bytes.len() as u64;
+            bytes.extend_from_slice(slot);
+            members.push(VolumeMember {
+                offset,
+                ..*member
+            });
+        }
+        self.bytes = bytes;
+        self.members = members;
+        self.freed.clear();
+        self.rehash();
+        Ok(())
+    }
+
+    fn rehash(&mut self) {
+        self.root = root_of(&self.members);
+        self.volume_id = volume_id_of(&self.visibility, &self.bytes);
+    }
+}
+
+fn node_hash(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    hash_fields_bytes(&[VOLUME_TAG, &[0x01], left, right])
+}
+
+fn root_hash(root: &[u8; 32], count: u64) -> [u8; 32] {
+    hash_fields_bytes(&[VOLUME_TAG, &[0x02], &count.to_le_bytes(), root])
+}
+
+/// The root of a member table. An empty table has its own root.
+#[must_use]
+pub fn root_of(members: &[VolumeMember]) -> [u8; 32] {
+    if members.is_empty() {
+        return hash_fields_bytes(&[VOLUME_TAG, &[0x05]]);
+    }
+    let mut level: Vec<[u8; 32]> = members
+        .iter()
+        .enumerate()
+        .map(|(index, member)| member.leaf(index as u64))
+        .collect();
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        let mut i = 0usize;
+        while i < level.len() {
+            match level.get(i + 1) {
+                Some(right) => next.push(node_hash(&level[i], right)),
+                None => next.push(level[i]),
+            }
+            i += 2;
+        }
+        level = next;
+    }
+    root_hash(&level[0], members.len() as u64)
+}
+
+/// The id of a volume with these bytes and this visibility.
+#[must_use]
+pub fn volume_id_of(visibility: &Visibility, bytes: &[u8]) -> [u8; 32] {
+    let (tag, owner) = visibility.tag();
     hash_fields_bytes(&[
         VOLUME_TAG,
-        &[0x00],
-        &index.to_le_bytes(),
-        &entry.object,
-        &entry.offset.to_le_bytes(),
-        &entry.len.to_le_bytes(),
+        &[0x03],
+        tag,
+        &owner,
+        &(bytes.len() as u64).to_le_bytes(),
         bytes,
     ])
 }
 
-fn volume_node_hash(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
-    hash_fields_bytes(&[VOLUME_TAG, &[0x01], left, right])
-}
-
-fn volume_root_hash(count: u64, top: &[u8; 32]) -> [u8; 32] {
-    hash_fields_bytes(&[VOLUME_TAG, &[0x02], &count.to_le_bytes(), top])
-}
-
-/// Whether an encoded BOF-1 object of `object_len` bytes belongs in an
-/// [`AggregationVolume`] (`object_len < profile.symbol_size`).
+/// The Merkle path of the member at `index`.
 #[must_use]
-pub const fn qualifies_for_volume(object_len: u64, profile: &Profile) -> bool {
-    object_len < profile.symbol_size as u64
-}
-
-/// Packed small-object container encoded and placed as B.U.D. 3.0 segments.
-#[derive(Debug, Clone)]
-pub struct AggregationVolume {
-    scope: VolumeScope,
-    profile: Profile,
-    max_bytes: usize,
-    data: Vec<u8>,
-    entries: Vec<VolumeEntry>,
-    reencode_due_by_sec: Option<u64>,
-}
-
-impl AggregationVolume {
-    /// Create a fresh empty [`AggregationVolume`] for `scope` and `profile`.
-    #[must_use]
-    pub fn new(scope: VolumeScope, profile: Profile, max_bytes: usize) -> Self {
-        Self {
-            scope,
-            profile,
-            max_bytes: max_bytes.max(usize::from(profile.symbol_size)),
-            data: Vec::new(),
-            entries: Vec::new(),
-            reencode_due_by_sec: None,
-        }
-    }
-
-    /// Visibility/owner scope of this volume.
-    #[must_use]
-    pub const fn scope(&self) -> VolumeScope {
-        self.scope
-    }
-
-    /// Packed volume bytes ready for segment encoding and placement.
-    #[must_use]
-    pub fn bytes(&self) -> &[u8] {
-        &self.data
-    }
-
-    /// Deadline timestamp (`now_sec + 7 days`) by which evicted entries must be
-    /// compacted via [`Self::reencode_compact`], if any eviction occurred.
-    #[must_use]
-    pub const fn reencode_due_by_sec(&self) -> Option<u64> {
-        self.reencode_due_by_sec
-    }
-
-    /// Append a small BOF-1 `object` owned by `owner` (ignored for public scope).
-    ///
-    /// # Errors
-    ///
-    /// [`VolumeError`] if `object` is `>= symbol_size`, violates `scope`,
-    /// duplicates an existing entry, or exceeds `max_bytes`.
-    pub fn insert(
-        &mut self,
-        object: &Object,
-        owner: Option<Address>,
-    ) -> Result<VolumeEntry, VolumeError> {
-        match (self.scope, object.header.is_sealed(), owner) {
-            (VolumeScope::Public, false, _) => {}
-            (VolumeScope::SealedOwner(expected), true, Some(actual)) if expected == actual => {}
-            _ => return Err(VolumeError::ScopeMismatch),
-        }
-        let encoded = object.encode();
-        if !qualifies_for_volume(encoded.len() as u64, &self.profile) {
-            return Err(VolumeError::NotSmallObject);
-        }
-        if self.data.len().saturating_add(encoded.len()) > self.max_bytes {
-            return Err(VolumeError::VolumeFull);
-        }
-        let commitment =
-            commit_object(&encoded, &self.profile).ok_or(VolumeError::CommitmentFailed)?;
-        if self.entries.iter().any(|e| e.active && e.object == commitment) {
-            return Err(VolumeError::DuplicateEntry);
-        }
-        let entry = VolumeEntry {
-            object: commitment,
-            offset: self.data.len() as u64,
-            len: encoded.len() as u64,
-            active: true,
+pub fn proof_for(members: &[VolumeMember], index: usize) -> Vec<PathStep> {
+    let mut level: Vec<[u8; 32]> = members
+        .iter()
+        .enumerate()
+        .map(|(i, member)| member.leaf(i as u64))
+        .collect();
+    let mut pos = index;
+    let mut path = Vec::new();
+    while level.len() > 1 {
+        let sibling = if pos % 2 == 0 {
+            level.get(pos + 1).copied()
+        } else {
+            level.get(pos - 1).copied()
         };
-        self.data.extend_from_slice(&encoded);
-        self.entries.push(entry);
-        Ok(entry)
-    }
-
-    /// Evict `object` when its reference count hits zero and schedule volume
-    /// compaction within `VOLUME_REENCODE_MAX_SECS` (7 days).
-    ///
-    /// # Errors
-    ///
-    /// [`VolumeError::UnknownEntry`] if `object` is not active in this volume.
-    pub fn evict(&mut self, object: &ObjectKey, now_sec: u64) -> Result<(), VolumeError> {
-        let entry = self
-            .entries
-            .iter_mut()
-            .find(|e| e.active && e.object == *object)
-            .ok_or(VolumeError::UnknownEntry)?;
-        entry.active = false;
-        let due = now_sec.saturating_add(VOLUME_REENCODE_MAX_SECS);
-        self.reencode_due_by_sec = Some(self.reencode_due_by_sec.map_or(due, |cur| cur.min(due)));
-        Ok(())
-    }
-
-    /// Compact out evicted entries and produce a clean [`AggregationVolume`]
-    /// preserving every active object's standalone commitment.
-    #[must_use]
-    pub fn reencode_compact(&self) -> Self {
-        let mut next_data = Vec::with_capacity(self.data.len());
-        let mut next_entries = Vec::new();
-        for e in self.entries.iter().filter(|e| e.active) {
-            let Ok(start) = usize::try_from(e.offset) else {
-                continue;
-            };
-            let Ok(len) = usize::try_from(e.len) else {
-                continue;
-            };
-            let Some(end) = start.checked_add(len) else {
-                continue;
-            };
-            let Some(slice) = self.data.get(start..end) else {
-                continue;
-            };
-            let new_offset = next_data.len() as u64;
-            next_data.extend_from_slice(slice);
-            next_entries.push(VolumeEntry {
-                object: e.object,
-                offset: new_offset,
-                len: e.len,
-                active: true,
-            });
+        path.push(sibling);
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        let mut i = 0usize;
+        while i < level.len() {
+            match level.get(i + 1) {
+                Some(right) => next.push(node_hash(&level[i], right)),
+                None => next.push(level[i]),
+            }
+            i += 2;
         }
-        Self {
-            scope: self.scope,
-            profile: self.profile,
-            max_bytes: self.max_bytes,
-            data: next_data,
-            entries: next_entries,
-            reencode_due_by_sec: None,
-        }
+        level = next;
+        pos /= 2;
     }
-
-    fn active_leaves(&self) -> Vec<(VolumeEntry, &[u8], [u8; 32])> {
-        let mut out = Vec::new();
-        for e in self.entries.iter().filter(|e| e.active) {
-            let Ok(start) = usize::try_from(e.offset) else {
-                continue;
-            };
-            let Ok(len) = usize::try_from(e.len) else {
-                continue;
-            };
-            let Some(end) = start.checked_add(len) else {
-                continue;
-            };
-            let Some(slice) = self.data.get(start..end) else {
-                continue;
-            };
-            let idx = out.len() as u64;
-            let leaf = entry_leaf_hash(idx, e, slice);
-            out.push((*e, slice, leaf));
-        }
-        out
-    }
-
-    /// Merkle root over all active entries in this volume.
-    #[must_use]
-    pub fn root(&self) -> [u8; 32] {
-        let leaves: Vec<[u8; 32]> = self.active_leaves().into_iter().map(|(_, _, h)| h).collect();
-        let count = leaves.len() as u64;
-        let mut level = leaves;
-        while level.len() > 1 {
-            level = level
-                .chunks(2)
-                .map(|pair| match pair {
-                    [l, r] => volume_node_hash(l, r),
-                    [one] => *one,
-                    _ => [0u8; 32],
-                })
-                .collect();
-        }
-        let top = level.first().copied().unwrap_or([0u8; 32]);
-        volume_root_hash(count, &top)
-    }
-
-    /// Extract the encoded BOF-1 bytes and Merkle inclusion proof of `object`.
-    ///
-    /// # Errors
-    ///
-    /// [`VolumeError::UnknownEntry`] if `object` is not active in this volume.
-    pub fn get_with_proof(
-        &self,
-        object: &ObjectKey,
-    ) -> Result<(Vec<u8>, VolumeInclusionProof), VolumeError> {
-        let active = self.active_leaves();
-        let want_idx = active
-            .iter()
-            .position(|(e, _, _)| e.object == *object)
-            .ok_or(VolumeError::UnknownEntry)?;
-        let (entry, slice, _) = *active.get(want_idx).ok_or(VolumeError::UnknownEntry)?;
-        let count = active.len() as u64;
-        let mut level: Vec<[u8; 32]> = active.into_iter().map(|(_, _, h)| h).collect();
-        let mut pos = want_idx;
-        let mut path = Vec::new();
-        while level.len() > 1 {
-            let sibling = if pos.is_multiple_of(2) { pos + 1 } else { pos - 1 };
-            path.push(level.get(sibling).copied());
-            pos /= 2;
-            level = level
-                .chunks(2)
-                .map(|pair| match pair {
-                    [l, r] => volume_node_hash(l, r),
-                    [one] => *one,
-                    _ => [0u8; 32],
-                })
-                .collect();
-        }
-        Ok((
-            slice.to_vec(),
-            VolumeInclusionProof {
-                index: want_idx as u64,
-                leaf_count: count,
-                offset: entry.offset,
-                len: entry.len,
-                path,
-            },
-        ))
-    }
-
-    /// Retrieve `object` along with its [`VolumeInclusionProof`] and self-verify
-    /// the Merkle proof against [`Self::root`] before returning.
-    /// Convenience: exposed for gateway and client small-object reads.
-    pub fn get_verified(
-        &self,
-        object: &ObjectKey,
-    ) -> Result<(Vec<u8>, VolumeInclusionProof), VolumeError> {
-        let (bytes, proof) = self.get_with_proof(object)?;
-        let root = self.root();
-        if !verify_volume_inclusion(&root, object, &bytes, &proof) {
-            return Err(VolumeError::UnknownEntry);
-        }
-        Ok((bytes, proof))
-    }
+    path
 }
 
-/// Verify a [`VolumeInclusionProof`] for `object` and `encoded_bytes` against `volume_root`.
+/// Check a member path against a recorded root and member count.
 #[must_use]
-pub fn verify_volume_inclusion(
-    volume_root: &[u8; 32],
-    object: &ObjectKey,
-    encoded_bytes: &[u8],
-    proof: &VolumeInclusionProof,
+pub fn verify_member(
+    root: &[u8; 32],
+    count: u64,
+    index: u64,
+    member: &VolumeMember,
+    path: &[PathStep],
 ) -> bool {
-    if proof.leaf_count == 0 || proof.index >= proof.leaf_count || encoded_bytes.len() as u64 != proof.len {
+    if count == 0 || count > MAX_MEMBERS as u64 || index >= count {
         return false;
     }
-    let entry = VolumeEntry {
-        object: *object,
-        offset: proof.offset,
-        len: proof.len,
-        active: true,
-    };
-    let mut cur = entry_leaf_hash(proof.index, &entry, encoded_bytes);
-    let mut idx = proof.index;
-    let mut width = proof.leaf_count;
-    for step in &proof.path {
-        if width <= 1 {
-            return false;
-        }
+    let mut levels = count;
+    let mut expected_depth = 0usize;
+    while levels > 1 {
+        expected_depth += 1;
+        levels = (levels + 1) / 2;
+    }
+    // A proof is canonical as well as valid: neither a truncated path nor
+    // trailing no-op steps may authenticate the same member.
+    if path.len() != expected_depth || path.len() > MAX_PATH {
+        return false;
+    }
+    let mut hash = member.leaf(index);
+    let mut pos = index;
+    for step in path {
         match step {
-            Some(sib) => {
-                cur = if idx.is_multiple_of(2) {
-                    volume_node_hash(&cur, sib)
+            Some(sibling) => {
+                hash = if pos % 2 == 0 {
+                    node_hash(&hash, sibling)
                 } else {
-                    volume_node_hash(sib, &cur)
+                    node_hash(sibling, &hash)
                 };
             }
             None => {
-                if !idx.is_multiple_of(2) || idx + 1 != width {
+                if pos % 2 == 1 {
                     return false;
                 }
             }
         }
-        idx /= 2;
-        width = width.div_ceil(2);
+        pos /= 2;
     }
-    width == 1 && volume_root_hash(proof.leaf_count, &cur) == *volume_root
+    pos == 0 && root_hash(&hash, count) == *root
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::keys::derive_object_content_key;
-    use super::super::seal::seal_object;
     use super::*;
+    use crate::storage::bud3::content_id::ContentKey;
+
+    const SYMBOL: u32 = 128;
+
+    fn public(bytes: &[u8]) -> ContentId {
+        ContentId::public(bytes)
+    }
+
+    fn sealed(bytes: &[u8]) -> ContentId {
+        ContentId::sealed(&ContentKey([7u8; 32]), bytes)
+    }
+
+    fn commitment(byte: u8) -> [u8; 32] {
+        [byte; 32]
+    }
 
     #[test]
-    fn bud3_aggregation_volume() {
-        let mut vol = AggregationVolume::new(VolumeScope::Public, Profile::P0, DEFAULT_VOLUME_BYTES);
-        let o1 = Object::raw_public(b"tiny object one");
-        let o2 = Object::raw_public(b"tiny object two");
-        let o3 = Object::raw_public(b"tiny object three");
-
-        let e1 = vol.insert(&o1, None).unwrap();
-        let e2 = vol.insert(&o2, None).unwrap();
-        let e3 = vol.insert(&o3, None).unwrap();
-
-        // Sealed object cannot enter a public volume (Section 6.12.4).
-        let sealed = seal_object(
-            b"secret",
-            &derive_object_content_key(&[9; 32], 1),
-            [1; 24],
-        )
-        .unwrap();
+    fn bud3_volume_members_are_smaller_than_one_symbol() {
+        let mut volume = AggregationVolume::new(Visibility::Public, 1024).unwrap();
+        let id = public(b"x");
+        // Exactly one symbol is placed on its own, so the volume refuses it.
+        let big = vec![1u8; SYMBOL as usize];
         assert_eq!(
-            vol.insert(&sealed, Some([1; 32])),
-            Err(VolumeError::ScopeMismatch)
+            volume.push(&id, commitment(1), &big, SYMBOL),
+            Err(VolumeError::NotSmall {
+                len: u64::from(SYMBOL),
+                symbol_size: u64::from(SYMBOL),
+            })
         );
+        let small = vec![1u8; SYMBOL as usize - 1];
+        assert!(volume.push(&id, commitment(1), &small, SYMBOL).is_ok());
+        assert_eq!(volume.members().len(), 1);
+    }
 
-        let root = vol.root();
-        for e in [e1, e2, e3] {
-            let (bytes, proof) = vol.get_with_proof(&e.object).unwrap();
-            assert!(verify_volume_inclusion(&root, &e.object, &bytes, &proof));
+    #[test]
+    fn bud3_volume_refuses_mixed_visibility_and_duplicates() {
+        let mut volume = AggregationVolume::new(Visibility::Public, 4096).unwrap();
+        let public_id = public(b"public member");
+        assert!(volume.push(&public_id, commitment(1), b"public member", SYMBOL).is_ok());
+        // A sealed member never shares a public volume.
+        let sealed_id = sealed(b"sealed member");
+        assert_eq!(
+            volume.push(&sealed_id, commitment(2), b"sealed member", SYMBOL),
+            Err(VolumeError::MixedVisibility)
+        );
+        // The same content id joins once.
+        assert_eq!(
+            volume.push(&public_id, commitment(1), b"public member", SYMBOL),
+            Err(VolumeError::DuplicateMember)
+        );
+        // A sealed volume refuses a public member.
+        let mut sealed_volume =
+            AggregationVolume::new(Visibility::Sealed([0u8; 32]), 4096).unwrap();
+        assert_eq!(
+            sealed_volume.push(&public_id, commitment(1), b"public member", SYMBOL),
+            Err(VolumeError::MixedVisibility)
+        );
+        assert!(sealed_volume
+            .push_owned(
+                &sealed_id,
+                Some([0u8; 32]),
+                commitment(2),
+                b"sealed member",
+                SYMBOL,
+            )
+            .is_ok());
+        let other = sealed(b"other owner");
+        assert_eq!(
+            sealed_volume.push_owned(
+                &other,
+                Some([1u8; 32]),
+                commitment(3),
+                b"other owner",
+                SYMBOL,
+            ),
+            Err(VolumeError::MixedVisibility)
+        );
+    }
+
+    #[test]
+    fn bud3_volume_root_binds_every_member_field() {
+        let mut volume = AggregationVolume::new(Visibility::Public, 4096).unwrap();
+        let a = public(b"a");
+        let b = public(b"b");
+        volume.push(&a, commitment(1), b"a", SYMBOL).unwrap();
+        let one = volume.root();
+        volume.push(&b, commitment(2), b"b", SYMBOL).unwrap();
+        let two = volume.root();
+        assert_ne!(one, two, "the count and the members are bound");
+
+        let mut changed = volume.members().to_vec();
+        changed[0].commitment = commitment(9);
+        assert_ne!(root_of(&changed), two, "the commitment is bound");
+
+        let mut changed = volume.members().to_vec();
+        changed[1].offset += 1;
+        assert_ne!(root_of(&changed), two, "the offset is bound");
+
+        let mut order = volume.members().to_vec();
+        order.swap(0, 1);
+        assert_ne!(root_of(&order), two, "the position is bound");
+    }
+
+    #[test]
+    fn bud3_volume_proof_finds_each_member() {
+        let mut volume = AggregationVolume::new(Visibility::Public, 4096).unwrap();
+        let ids: Vec<ContentId> = (0u8..5).map(|i| public(&[i])).collect();
+        for (i, id) in ids.iter().enumerate() {
+            volume
+                .push(id, commitment(i as u8), &[i as u8], SYMBOL)
+                .unwrap();
         }
+        let count = volume.members().len() as u64;
+        for (i, id) in ids.iter().enumerate() {
+            let member = *volume.member(id).unwrap();
+            let path = volume.member_proof(id).unwrap();
+            assert!(verify_member(volume.root(), count, i as u64, &member, &path));
+            let mut extended = path.clone();
+            extended.push(None);
+            assert!(!verify_member(volume.root(), count, i as u64, &member, &extended));
+            assert!(!verify_member(
+                volume.root(),
+                count,
+                i as u64,
+                &member,
+                &path[..path.len() - 1],
+            ));
+            // The same path never finds a member at another position.
+            assert!(!verify_member(volume.root(), count, i as u64 + 1, &member, &path));
+            // A member with another commitment fails under the same path.
+            let mut forged = member;
+            forged.commitment = commitment(200);
+            assert!(!verify_member(volume.root(), count, i as u64, &forged, &path));
+        }
+        assert!(volume.member_proof(&public(b"absent")).is_none());
+    }
 
-        // Evicting o2 schedules 7-day compaction while preserving o1 and o3 commitments!
-        vol.evict(&e2.object, 1_000).unwrap();
-        assert_eq!(vol.reencode_due_by_sec(), Some(1_000 + VOLUME_REENCODE_MAX_SECS));
-        assert_eq!(vol.get_with_proof(&e2.object), Err(VolumeError::UnknownEntry));
+    #[test]
+    fn bud3_volume_delete_zeroes_the_bytes() {
+        let mut volume = AggregationVolume::new(Visibility::Public, 4096).unwrap();
+        let a = public(b"one");
+        let b = public(b"two");
+        volume.push(&a, commitment(1), b"one", SYMBOL).unwrap();
+        volume.push(&b, commitment(2), b"two", SYMBOL).unwrap();
+        let before = volume.volume_id();
+        let removal = volume.remove(&a, 1_000).unwrap();
+        assert_eq!(removal.member.content_id, a);
+        assert!(!removal.sealed);
+        assert_eq!(removal.effective_at, None);
+        let bytes = volume.bytes();
+        assert_eq!(&bytes[..3], &[0u8, 0, 0], "the slot is zeroed at once");
+        assert_eq!(&bytes[3..], b"two");
+        assert_ne!(volume.volume_id(), before, "the id follows the bytes");
+        assert_eq!(volume.members().len(), 1);
+        assert_eq!(volume.remove(&a, 1_000), Err(VolumeError::UnknownMember));
 
-        let compacted = vol.reencode_compact();
-        assert!(compacted.reencode_due_by_sec().is_none());
-        let new_root = compacted.root();
-        let (b1, p1) = compacted.get_with_proof(&e1.object).unwrap();
-        let (b3, p3) = compacted.get_with_proof(&e3.object).unwrap();
-        assert!(verify_volume_inclusion(&new_root, &e1.object, &b1, &p1));
-        assert!(verify_volume_inclusion(&new_root, &e3.object, &b3, &p3));
+        // Seven days after the deletion the public volume needs a recode.
+        assert!(!volume.needs_recode(1_000 + RECODE_DEADLINE_SECS - 1));
+        assert!(volume.needs_recode(1_000 + RECODE_DEADLINE_SECS));
+
+        volume.compact().unwrap();
+        assert_eq!(volume.bytes(), b"two");
+        assert_eq!(volume.members()[0].offset, 0);
+        assert!(!volume.needs_recode(1_000 + RECODE_DEADLINE_SECS));
+        assert!(!volume.is_empty());
+    }
+
+    #[test]
+    fn bud3_volume_sealed_removal_is_local_until_key_destruction() {
+        let owner = [0u8; 32];
+        let mut volume = AggregationVolume::new(Visibility::Sealed(owner), 4096).unwrap();
+        let a = sealed(b"secret one");
+        let b = sealed(b"secret two");
+        volume.push_owned(&a, Some(owner), commitment(1), b"secret one", SYMBOL).unwrap();
+        volume.push_owned(&b, Some(owner), commitment(2), b"secret two", SYMBOL).unwrap();
+        let removal = volume.remove(&a, 7).unwrap();
+        assert!(removal.sealed);
+        assert_eq!(removal.effective_at, Some(7), "local removal is recorded");
+        assert_eq!(&volume.bytes()[..10], &[0u8; 10]);
+        // Key destruction and replica replacement remain delete-layer duties.
+        assert!(!volume.needs_recode(7 + RECODE_DEADLINE_SECS * 10));
+        assert_eq!(volume.visibility().owner(), Some(owner));
+    }
+
+    #[test]
+    fn bud3_volume_capacity_is_the_genesis_length() {
+        let small = AggregationVolume::new(Visibility::Public, 8).unwrap();
+        assert_eq!(small.capacity(), 8);
+        assert_eq!(small.free(), 8);
+        let mut volume = small;
+        volume.push(&public(b"a"), commitment(1), b"12345", SYMBOL).unwrap();
+        assert_eq!(volume.free(), 3);
+        assert_eq!(
+            volume.push(&public(b"b"), commitment(2), b"1234", SYMBOL),
+            Err(VolumeError::Capacity {
+                len: 4,
+                free: 3,
+                capacity: 8
+            })
+        );
+        assert!(matches!(
+            AggregationVolume::new(Visibility::Public, 0),
+            Err(VolumeError::EmptyCapacity)
+        ));
+        assert_eq!(DEFAULT_VOLUME_BYTES, 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn bud3_volume_id_binds_visibility_and_owner() {
+        let bytes = b"members";
+        let public = volume_id_of(&Visibility::Public, bytes);
+        let other = volume_id_of(&Visibility::Public, b"memberz");
+        assert_ne!(public, other);
+        let one = volume_id_of(&Visibility::Sealed([0u8; 32]), bytes);
+        let two = volume_id_of(&Visibility::Sealed([1u8; 32]), bytes);
+        assert_ne!(public, one, "a sealed id never equals a public id");
+        assert_ne!(one, two, "the owner is bound");
     }
 }

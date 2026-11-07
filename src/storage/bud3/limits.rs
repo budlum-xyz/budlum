@@ -121,6 +121,10 @@ impl OpticalProfile {
 pub struct Bud3Limits {
     /// Largest content in bytes.
     pub max_content_bytes: u64,
+    /// Largest aggregation volume in bytes. Small objects share one volume
+    /// (section 6.12 item 6), and the volume is coded as one segment, so the
+    /// effective capacity is the smaller of this and the segment.
+    pub volume_bytes: u64,
     /// Lifetime of an upload session, in seconds.
     pub upload_session_secs: u64,
     /// Open upload sessions per account.
@@ -156,6 +160,7 @@ impl Bud3Limits {
     /// TESTNET-DEFAULT values.
     pub const TESTNET_DEFAULT: Self = Self {
         max_content_bytes: 16 * GIB,
+        volume_bytes: super::volume::DEFAULT_VOLUME_BYTES,
         upload_session_secs: 6 * 3600,
         sessions_per_account: 4,
         daily_upload_bytes_per_account: 64 * GIB,
@@ -175,6 +180,9 @@ impl Bud3Limits {
     pub const fn validate(&self) -> Result<(), LimitError> {
         if self.max_content_bytes == 0 {
             return Err(LimitError::Inconsistent("max_content_bytes is zero"));
+        }
+        if self.volume_bytes == 0 {
+            return Err(LimitError::Inconsistent("volume_bytes is zero"));
         }
         if self.upload_session_secs == 0 {
             return Err(LimitError::Inconsistent("upload_session_secs is zero"));
@@ -277,6 +285,7 @@ mod tests {
         assert_eq!(l, Bud3Limits::TESTNET_DEFAULT);
         assert!(l.validate().is_ok());
         assert_eq!(l.max_content_bytes, 16 * GIB);
+        assert_eq!(l.volume_bytes, super::super::volume::DEFAULT_VOLUME_BYTES);
         assert_eq!(l.upload_session_secs, 21_600);
         assert_eq!(l.max_lifetime_days, 3650);
 
