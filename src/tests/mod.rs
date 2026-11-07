@@ -311,3 +311,7 @@ pub mod bud3_custody_and_repair;
 // WP-44 domains, cross-domain bridge, settlement, and testnet feature-matrix locks.
 #[cfg(test)]
 pub mod wp44_domains_bridge_settlement;
+
+// WP-48 Independent Review 2 security, conservation, and privilege-boundary suite.
+#[cfg(test)]
+pub mod wp48_review2_security;

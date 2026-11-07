@@ -2618,9 +2618,14 @@ impl AccountState {
                         "the owner already has a validator record",
                     ));
                 }
-                if self.validator_directory.iter().any(|r| {
-                    r.peer_id == registration.peer_id || r.operator_key == registration.operator_key
-                }) {
+                if self
+                    .validator_directory
+                    .iter()
+                    .any(|r| r.peer_id == registration.peer_id)
+                    || self
+                        .validator_directory
+                        .operator_key_in_use(&registration.operator_key)
+                {
                     return Err(refuse(
                         "validator_peer_or_operator_key_in_use",
                         "the peer id or the operator key belongs to another validator",
@@ -2649,7 +2654,7 @@ impl AccountState {
                     )?;
                 }
             }
-            ValidatorTx::ChangeClass { .. } | ValidatorTx::RotateOperatorKey { .. } | ValidatorTx::Resume => {
+            ValidatorTx::Resume => {
                 if tx.amount != 0 {
                     return Err(refuse(
                         "validator_tx_shape",
@@ -2660,6 +2665,57 @@ impl AccountState {
                     return Err(refuse(
                         "validator_not_registered",
                         "only the owner account of a validator may send this",
+                    ));
+                }
+            }
+            ValidatorTx::ChangeClass { new_class, seat } => {
+                if tx.amount != 0 {
+                    return Err(refuse(
+                        "validator_tx_shape",
+                        "this validator transaction moves no value",
+                    ));
+                }
+                let Some(record) = self.validator_directory.get(&tx.from) else {
+                    return Err(refuse(
+                        "validator_not_registered",
+                        "only the owner account of a validator may send this",
+                    ));
+                };
+                if new_class.holds_seat() {
+                    if self.validators.contains_key(&tx.from) {
+                        return Err(refuse(
+                            "validator_already_registered",
+                            "the owner is already in the consensus set",
+                        ));
+                    }
+                    if let Some(seat) = seat {
+                        Self::check_seat_keys(
+                            &tx.from,
+                            &record.bls_key,
+                            &record.bls_pop,
+                            seat,
+                            tx.chain_id,
+                        )?;
+                    }
+                }
+            }
+            ValidatorTx::RotateOperatorKey { new_operator_key } => {
+                if tx.amount != 0 {
+                    return Err(refuse(
+                        "validator_tx_shape",
+                        "this validator transaction moves no value",
+                    ));
+                }
+                if self.validator_directory.get(&tx.from).is_none() {
+                    return Err(refuse(
+                        "validator_not_registered",
+                        "only the owner account of a validator may send this",
+                    ));
+                }
+                if self.validator_directory.operator_key_in_use(new_operator_key) {
+                    return Err(refuse(
+                        "validator_peer_or_operator_key_in_use",
+                        "the operator key belongs to a validator already",
                     ));
                 }
             }
@@ -2681,6 +2737,12 @@ impl AccountState {
                         "the owner has no validator record",
                     )
                 })?;
+                if record.pending_operator_key.is_some() {
+                    return Err(refuse(
+                        "validator_rotation_pending",
+                        "quota updates are frozen while an operator key rotation is pending",
+                    ));
+                }
                 let message = crate::validators::quota_update_message(
                     tx.chain_id,
                     owner,
@@ -2748,32 +2810,44 @@ impl AccountState {
             return Err("the owner is already in the consensus set".into());
         }
         Self::check_seat_keys(&owner, bls_key, bls_pop, seat, chain_id).map_err(|e| e.message)?;
+        let epoch = self.epoch_index;
+        if epoch.checked_add(1).is_none()
+            || seat.leader_commitment.length == 0
+            || seat.leader_commitment.length > 100_000
+        {
+            return Err("leader commitment epoch or chain length out of range".into());
+        }
         let floor = crate::core::chain_config::Network::from_chain_id(chain_id)
             .map_or(1, |n| n.min_stake_full());
-        let epoch = self.epoch_index;
         self.add_validator_with_floor(owner, stake, floor);
-        let validator = self
+        let reg_res = self
             .validators
             .get_mut(&owner)
-            .ok_or_else(|| "the validator was not created".to_string())?;
-        validator.vrf_public_key = seat.vrf_key.clone();
-        validator.bls_public_key = bls_key.to_vec();
-        validator.pop_signature = bls_pop.to_vec();
-        validator.pq_public_key = seat.pq_vote_key.clone();
-        validator.active = validator.stake >= floor
-            && validator.is_consensus_ready()
-            && validator.verify_pop_is_valid(chain_id)
-            && !validator.jailed;
-        validator
-            .filiz
-            .get_or_insert_with(Default::default)
-            .register(
-                owner.0,
-                seat.leader_commitment.commitment,
-                seat.leader_commitment.length,
-                epoch,
-            )
-            .map_err(|e| format!("{e:?}"))?;
+            .ok_or_else(|| "the validator was not created".to_string())
+            .and_then(|validator| {
+                validator.vrf_public_key = seat.vrf_key.clone();
+                validator.bls_public_key = bls_key.to_vec();
+                validator.pop_signature = bls_pop.to_vec();
+                validator.pq_public_key = seat.pq_vote_key.clone();
+                validator.active = validator.stake >= floor
+                    && validator.is_consensus_ready()
+                    && validator.verify_pop_is_valid(chain_id)
+                    && !validator.jailed;
+                validator
+                    .filiz
+                    .get_or_insert_with(Default::default)
+                    .register(
+                        owner.0,
+                        seat.leader_commitment.commitment,
+                        seat.leader_commitment.length,
+                        epoch,
+                    )
+                    .map_err(|e| format!("{e:?}"))
+            });
+        if let Err(err) = reg_res {
+            self.validators.remove(&owner);
+            return Err(err);
+        }
         self.sync_validator_registration_with_floor(&owner, floor);
         self.keys_dirty = true;
         Ok(())

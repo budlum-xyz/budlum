@@ -3135,18 +3135,20 @@ impl Executor {
                             .register(registration, tx.amount, floor, epoch)
                             .map_err(refuse)?;
                         if let Some(seat) = &registration.seat {
-                            state
-                                .install_full_validator(
-                                    registration.owner,
-                                    tx.amount,
-                                    &registration.bls_key,
-                                    &registration.bls_pop,
-                                    seat,
-                                    tx.chain_id,
-                                )
-                                .map_err(|message| {
-                                    BudlumError::validation("validator_seat_install", message)
-                                })?;
+                            if let Err(message) = state.install_full_validator(
+                                registration.owner,
+                                tx.amount,
+                                &registration.bls_key,
+                                &registration.bls_pop,
+                                seat,
+                                tx.chain_id,
+                            ) {
+                                state.validator_directory.remove(&registration.owner);
+                                return Err(BudlumError::validation(
+                                    "validator_seat_install",
+                                    message,
+                                ));
+                            }
                         }
                     }
                     ValidatorTx::ChangeClass { new_class, seat } => {

@@ -3,9 +3,9 @@
 # Lower it with: BUDLUM_CONCEPT_NAMES_WRITE=1 budlum-gates concept-names
 # The map moves to `absolute` mode once every line is zero.
 Anaç|0|0
-Atlas|7|55
+Atlas|7|54
 Budscan|35|273
-D-Web Passport|10|88
+D-Web Passport|10|87
 DeEd|12|34
 Developer OS|6|50
 Filiz (faucet)|1|14
@@ -21,7 +21,7 @@ Living Threshold|5|15
 Mikoriza|21|71
 Mobile Self|14|120
 PUL|14|100
-Pollen|71|760
+Pollen|71|759
 Regeneration|28|109
 Sera|0|0
 Tarif|53|1446

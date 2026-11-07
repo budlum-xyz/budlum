@@ -1,7 +1,7 @@
-//! D-Web Passport core profile model.
+//! Identity profile model.
 //!
 //! This module is intentionally read-only. It builds evidence-labelled profile
-//! Data for budlum.xyz without claiming that unproven data is verified.
+//! Data without claiming that unproven data is verified.
 //!
 //! Reached from the RPC surface: `rpc/server.rs` calls
 //! `validate_passport_name` at line 2873, `build_passport_profile` at 2889
@@ -149,12 +149,15 @@ pub struct PassportProofBundle {
 
 impl PassportProofBundle {
     pub fn validate_against_profile(&self, profile: &DwebPassportProfile) -> Result<(), String> {
+        profile.validate_public()?;
         validate_passport_name(&self.name)?;
         if self.name != profile.name || self.exists != profile.exists || self.owner != profile.owner
         {
             return Err("PassportProofBundle profile binding mismatch".into());
         }
-        if self.items.len() > MAX_PASSPORT_EVIDENCE_ITEMS {
+        if self.items.len() > MAX_PASSPORT_EVIDENCE_ITEMS
+            || profile.evidence.len() != self.items.len()
+        {
             return Err("PassportProofBundle item limit exceeded".into());
         }
         if self.evidence_count as usize != self.items.len() {
@@ -226,6 +229,62 @@ pub fn build_passport_proof_bundle(
         }
         None => hasher.update([0]),
     }
+    match profile.address {
+        Some(addr) => {
+            hasher.update([1]);
+            hasher.update(addr.as_bytes());
+        }
+        None => hasher.update([0]),
+    }
+    match &profile.storage_root {
+        Some(root) => {
+            hasher.update([1]);
+            update_str(&mut hasher, root);
+        }
+        None => hasher.update([0]),
+    }
+    match profile.storage_domain_id {
+        Some(domain_id) => {
+            hasher.update([1]);
+            hasher.update(domain_id.to_le_bytes());
+        }
+        None => hasher.update([0]),
+    }
+    match &profile.content_id {
+        Some(cid) => {
+            hasher.update([1]);
+            update_str(&mut hasher, cid);
+        }
+        None => hasher.update([0]),
+    }
+    hasher.update([u8::from(profile.is_expired)]);
+    match &profile.manifest {
+        Some(manifest) => {
+            hasher.update([1]);
+            update_str(&mut hasher, &manifest.manifest_id);
+            hasher.update([u8::from(manifest.found)]);
+            match manifest.shard_count {
+                Some(sc) => {
+                    hasher.update([1]);
+                    hasher.update(sc.to_le_bytes());
+                }
+                None => hasher.update([0]),
+            }
+            match manifest.total_size {
+                Some(sz) => {
+                    hasher.update([1]);
+                    hasher.update(sz.to_le_bytes());
+                }
+                None => hasher.update([0]),
+            }
+        }
+        None => hasher.update([0]),
+    }
+    let lineage = &profile.pollen;
+    hasher.update((lineage.assets_owned as u64).to_le_bytes());
+    hasher.update((lineage.grants_as_owner as u64).to_le_bytes());
+    hasher.update((lineage.grants_as_grantee as u64).to_le_bytes());
+    hasher.update((lineage.sale_authorizations as u64).to_le_bytes());
     hasher.update(generated_at_block.to_le_bytes());
     hasher.update((items.len() as u32).to_le_bytes());
     for item in &items {
@@ -324,19 +383,29 @@ pub fn build_passport_profile(
 
     let assets_owned = data_assets
         .iter()
-        .filter(|asset| owned_by(&owner, asset))
+        .filter(|asset| owned_by(&owner, asset) && asset.is_active())
         .count();
     let grants_as_owner = access_grants
         .iter()
-        .filter(|grant| grant.owner == owner)
+        .filter(|grant| {
+            grant.owner == owner
+                && grant.status == Default::default()
+                && grant.reads_used < grant.max_reads
+        })
         .count();
     let grants_as_grantee = access_grants
         .iter()
-        .filter(|grant| grant.grantee == owner)
+        .filter(|grant| {
+            grant.grantee == owner
+                && grant.status == Default::default()
+                && grant.reads_used < grant.max_reads
+        })
         .count();
     let sale_authorizations = sale_authorizations
         .iter()
-        .filter(|authorization| authorization.seller == owner)
+        .filter(|authorization| {
+            authorization.seller == owner && authorization.grants_issued < authorization.max_grants
+        })
         .count();
 
     let manifest_summary = manifest_id.map(|id| {
@@ -392,7 +461,7 @@ pub fn build_passport_profile(
     evidence.push(EvidenceCard {
         subject: "pollen".into(),
         status: EvidenceStatus::Verified,
-        source: "Pollen registry root".into(),
+        source: "data-market registry root".into(),
         root: None,
         warning: Some(
             "Counts are registry-derived; individual data bytes are never exposed by this endpoint"
@@ -536,5 +605,48 @@ mod tests {
         assert!(try_build_passport_proof_bundle(&profile, 1)
             .unwrap_err()
             .contains("evidence"));
+    }
+
+    #[test]
+    fn blg_129_bundle_commits_all_fields_and_excludes_revoked_lineage() {
+        let owner = addr(9);
+        let cid = ContentId::of(b"site-v2");
+        let resolved = BnsResolved {
+            name: "alice.bud".into(),
+            owner,
+            address: Some(owner),
+            storage_root: Some(*cid.as_bytes()),
+            storage_domain_id: Some(3),
+            content_id: Some(cid),
+            is_expired: false,
+        };
+        let mut revoked: DataAsset = serde_json::from_value(serde_json::json!({
+            "asset_id": DataAsset::derive_id(&owner, &cid, &[1u8; 32]),
+            "owner": owner,
+            "manifest_id": cid,
+            "metadata_commitment": [1u8; 32],
+            "encrypted": true,
+            "status": "Revoked"
+        }))
+        .unwrap();
+        assert!(!revoked.is_active());
+        let active = DataAsset::new(owner, cid, [2u8; 32], true);
+        let profile = build_passport_profile(
+            "alice.bud".into(),
+            Some(resolved),
+            None,
+            &[revoked, active],
+            &[],
+            &[],
+        );
+        let lineage_count = (&profile.pollen).assets_owned;
+        assert_eq!(lineage_count, 1);
+        let bundle = try_build_passport_proof_bundle(&profile, 50).unwrap();
+        let mut spoofed = profile.clone();
+        spoofed.is_expired = true;
+        assert!(bundle.validate_against_profile(&spoofed).is_err());
+        let mut spoofed_addr = profile;
+        spoofed_addr.address = Some(addr(10));
+        assert!(bundle.validate_against_profile(&spoofed_addr).is_err());
     }
 }
