@@ -169,7 +169,7 @@ fn aptos_move_refusals_name_an_existing_budlum_door() {
         assert!(error.message.contains(door));
         let body = error.body();
         assert_eq!(body["door"], door);
-        assert_eq!(body["package"], "WP-32");
+        assert_eq!(body["package"], "Aptos REST compatibility");
         assert_eq!(
             body["error_code"],
             "move_execution_environment_unavailable"

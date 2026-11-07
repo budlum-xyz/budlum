@@ -334,7 +334,7 @@ impl RestError {
             "error_code": self.error_code,
             "vm_error_code": null,
             "door": self.door,
-            "package": "WP-32",
+            "package": "Aptos REST compatibility",
         })
     }
 }
@@ -344,7 +344,7 @@ fn move_unavailable(endpoint: &Endpoint, door: &'static str) -> RestError {
         status: StatusCode::SERVICE_UNAVAILABLE,
         error_code: "move_execution_environment_unavailable",
         message: format!(
-            "{} {} needs the Move execution environment (WP-32); use {door}",
+            "{} {} needs the Move execution environment; use {door}",
             endpoint.verb.as_str(),
             endpoint.pattern
         ),
