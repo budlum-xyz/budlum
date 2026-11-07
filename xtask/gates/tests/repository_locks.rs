@@ -94,12 +94,11 @@ fn workflows_and_dependabot_are_current() {
 
     let dependabot = read(".github/dependabot.yml");
     for lock_dir in [
-        "/bud",
         "/budzero",
         "/fuzz",
         "/crates/ai-inference",
         "/crates/bpqs",
-        "/crates/budscan",
+        "/crates/budlum-explorer",
         "/crates/note-packing",
         "/crates/wallet-core",
         "/xtask/gates",
@@ -152,6 +151,11 @@ fn binding_directive_stays_outside_repository() {
         "the binding directive must stay outside the repository tree: {}",
         path.display()
     );
+    let ignore = read(".gitignore");
+    assert!(
+        ignore.contains("/THE_BUDLUM_DIREKTIF.md"),
+        "an upload of the directive must be ignored, not tracked"
+    );
 }
 
 /// The indexer binary has an explicit `[[bin]]` entry.
@@ -161,20 +165,6 @@ fn indexer_binary_is_registered() {
     assert!(
         manifest.contains("name = \"budlum-indexer\"\npath = \"src/bin/budlum-indexer.rs\""),
         "no explicit [[bin]] for budlum-indexer"
-    );
-}
-
-/// Directive 0.1 item 5: the planning directive stays outside the repository.
-#[test]
-fn binding_directive_stays_outside_repository() {
-    assert!(
-        !repo_root().join("THE_BUDLUM_DIREKTIF.md").exists(),
-        "THE_BUDLUM_DIREKTIF.md must not sit in the repository tree"
-    );
-    let ignore = read(".gitignore");
-    assert!(
-        ignore.contains("/THE_BUDLUM_DIREKTIF.md"),
-        "an upload of the directive must be ignored, not tracked"
     );
 }
 

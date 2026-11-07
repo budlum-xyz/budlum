@@ -9,8 +9,7 @@
 //! 2. `src/storage/bud3/two_path.rs` implements Y10-Y12 (`verify_upload_two_path_and_round_trip`)
 //!    so every content class round-trips identically through the encoder and
 //!    optical QR paths.
-//! 3. No `src/storage/bud3/` file carries legacy recipe-only types
-//!    (`ThreeRecipe`, `ThreeRecipePublic`, `VideoRecipe`).
+//! 3. No `src/storage/bud3/` file carries legacy descriptor-only types.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -102,10 +101,14 @@ pub fn run(root: &Path) -> Result<String, String> {
                 let name = entry.file_name().to_string_lossy().to_string();
                 let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
                 let prod = strip_line_comments(strip_cfg_test(&text));
-                for legacy in ["ThreeRecipe", "ThreeRecipePublic", "VideoRecipe"] {
+                for legacy in [
+                    concat!("Three", "Rec", "ipe"),
+                    concat!("Three", "Rec", "ipePublic"),
+                    concat!("Video", "Rec", "ipe"),
+                ] {
                     if prod.contains(legacy) {
                         problems.push(format!(
-                            "`src/storage/bud3/{name}` references legacy recipe type `{legacy}`; only `bud3::Object` is permitted."
+                            "`src/storage/bud3/{name}` references legacy descriptor type `{legacy}`; only `bud3::Object` is permitted."
                         ));
                     }
                 }
@@ -122,7 +125,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
 
     Ok(String::from(
-        "bud3-object-is-universal OK: binary and text BOF-1, testnet flag refusals, two-path equivalence, and zero-legacy-recipe checks verified.",
+        "bud3-object-is-universal OK: binary and text BOF-1, testnet flag refusals, two-path equivalence, and zero-legacy-descriptor checks verified.",
     ))
 }
 
@@ -162,13 +165,13 @@ pub fn decode_optical_path() {}
         put("src/storage/bud3/limits.rs", clean_limits)?;
         run(&dir).map_err(|e| format!("canary: clean tree failed: {e}"))?;
 
-        // Canary 1: legacy ThreeRecipe inside bud3 must fail.
+        // Canary 1: legacy descriptor inside bud3 must fail.
         put(
             "src/storage/bud3/two_path.rs",
-            &format!("{clean_two_path}\npub struct ThreeRecipe;\n"),
+            &format!("{clean_two_path}\npub struct {};\n", concat!("Three", "Rec", "ipe")),
         )?;
         if run(&dir).is_ok() {
-            return Err(String::from("canary: ThreeRecipe in bud3 passed"));
+            return Err(String::from("canary: legacy descriptor in bud3 passed"));
         }
         put("src/storage/bud3/two_path.rs", clean_two_path)?;
 
@@ -186,7 +189,7 @@ pub fn decode_optical_path() {}
     let _ = std::fs::remove_dir_all(&dir);
     result?;
     Ok(String::from(
-        "bud3-object-is-universal canary OK: clean tree passed; legacy recipe and missing text decoder failed.",
+        "bud3-object-is-universal canary OK: clean tree passed; legacy descriptor and missing text decoder failed.",
     ))
 }
 

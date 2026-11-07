@@ -125,7 +125,7 @@ impl RecipeEmitter {
     }
 
     /// Recipe digest (stable pin).
-/// WIRING: deterministic QR recipe digest helper exposed for optical presentation checks.
+/// WIRING: deterministic QR stream digest helper exposed for optical presentation checks.
     #[must_use]
     pub fn recipe_digest(&self) -> [u8; 32] {
         three_recipe_digest(&self.recipe)

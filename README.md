@@ -194,7 +194,7 @@ dependencies, so the entire system builds, tests and ships as one tree.
 
 | Path | Contents |
 | --- | --- |
-| [`crates/`](crates) | Standalone workspaces: wallet-core, budscan, ai_inference, note-packing |
+| [`crates/`](crates) | Standalone workspaces: wallet-core, budlum-explorer, ai_inference, note-packing |
 | [`bud/`](bud) | B.U.D. 1.0/2.0/3.0 implementation (its own workspace) |
 | [`docs/`](docs) | Reference docs: ARCHITECTURE, SPECIFICATION, SECURITY, CONTRIBUTING, PROVENANCE_NOTES |
 | [`config/`](config) | Devnet / testnet / mainnet profiles and genesis templates |

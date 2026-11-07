@@ -250,7 +250,8 @@ fn quantity(value: &serde_json::Value) -> Option<u64> {
     }
 }
 
-/// The index: four trees in one sled database.
+/// The index: sled trees storing finalized blocks, transactions, receipts,
+/// `0xB001` Universal Call trees, and `B.U.D. 3.0`/finality/UEL events.
 struct Index {
     db: sled::Db,
     /// height (8 bytes, big endian) -> block JSON
@@ -259,6 +260,12 @@ struct Index {
     block_hashes: sled::Tree,
     /// transaction hash -> `{"blockNumber", "index", "transaction"}`
     txs: sled::Tree,
+    /// transaction hash -> `{"blockNumber", "index", "receipt"}`
+    receipts: sled::Tree,
+    /// transaction hash -> `{"blockNumber", "txHash", "dispatcher", "callTree"}`
+    call_trees: sled::Tree,
+    /// category ‖ 0x00 ‖ height (8 BE) ‖ seq (4 BE) -> event JSON
+    events: sled::Tree,
     /// address ‖ height ‖ index (big endian) -> transaction hash
     address_txs: sled::Tree,
     /// producer -> `{"blocks", "first", "last"}`
@@ -275,6 +282,9 @@ impl Index {
             blocks: tree("blocks")?,
             block_hashes: tree("block_hashes")?,
             txs: tree("txs")?,
+            receipts: tree("receipts")?,
+            call_trees: tree("call_trees")?,
+            events: tree("events")?,
             address_txs: tree("address_txs")?,
             producers: tree("producers")?,
             db,
@@ -317,6 +327,31 @@ impl Index {
             self.txs
                 .insert(hash.as_bytes(), record.to_string().as_bytes())
                 .map_err(store)?;
+            if let Some(receipt) = tx.get("receipt") {
+                let receipt_record = serde_json::json!({
+                    "blockNumber": height,
+                    "index": index,
+                    "txHash": format!("0x{hash}"),
+                    "receipt": receipt,
+                });
+                self.receipts
+                    .insert(hash.as_bytes(), receipt_record.to_string().as_bytes())
+                    .map_err(store)?;
+            }
+            let call_tree_val = tx
+                .get("universalCallTree")
+                .or_else(|| tx.get("receipt").and_then(|r| r.get("universalCallTree")));
+            if let Some(tree_json) = call_tree_val {
+                let tree_record = serde_json::json!({
+                    "blockNumber": height,
+                    "txHash": format!("0x{hash}"),
+                    "dispatcher": "0xb001",
+                    "callTree": tree_json,
+                });
+                self.call_trees
+                    .insert(hash.as_bytes(), tree_record.to_string().as_bytes())
+                    .map_err(store)?;
+            }
             let position = u32::try_from(index).unwrap_or(u32::MAX).to_be_bytes();
             for side in ["from", "to"] {
                 if let Some(address) = tx.get(side).and_then(|a| a.as_str()).map(normalize) {
@@ -326,6 +361,29 @@ impl Index {
                     self.address_txs.insert(k, hash.as_bytes()).map_err(store)?;
                 }
             }
+        }
+        let block_events = block
+            .get("events")
+            .and_then(|e| e.as_array())
+            .unwrap_or(&empty);
+        for (seq, ev) in block_events.iter().enumerate() {
+            let category = ev
+                .get("category")
+                .and_then(|c| c.as_str())
+                .unwrap_or("uel")
+                .to_ascii_lowercase();
+            let mut ev_key = category.as_bytes().to_vec();
+            ev_key.push(0);
+            ev_key.extend_from_slice(&key);
+            ev_key.extend_from_slice(&u32::try_from(seq).unwrap_or(u32::MAX).to_be_bytes());
+            let ev_record = serde_json::json!({
+                "blockNumber": height,
+                "category": category,
+                "event": ev,
+            });
+            self.events
+                .insert(ev_key, ev_record.to_string().as_bytes())
+                .map_err(store)?;
         }
         if let Some(producer) = block
             .get("producer")
@@ -387,6 +445,31 @@ impl Index {
     fn tx(&self, hash: &str) -> Option<serde_json::Value> {
         let raw = self.txs.get(normalize(hash).as_bytes()).ok()??;
         serde_json::from_slice(&raw).ok()
+    }
+
+    fn receipt(&self, hash: &str) -> Option<serde_json::Value> {
+        let raw = self.receipts.get(normalize(hash).as_bytes()).ok()??;
+        serde_json::from_slice(&raw).ok()
+    }
+
+    fn call_tree(&self, hash: &str) -> Option<serde_json::Value> {
+        let raw = self.call_trees.get(normalize(hash).as_bytes()).ok()??;
+        serde_json::from_slice(&raw).ok()
+    }
+
+    fn events_by_category(&self, category: &str, limit: usize) -> Vec<serde_json::Value> {
+        let mut prefix = category.to_ascii_lowercase().into_bytes();
+        prefix.push(0);
+        let mut upper = prefix.clone();
+        upper.extend_from_slice(&u64::MAX.to_be_bytes());
+        upper.extend_from_slice(&u32::MAX.to_be_bytes());
+        self.events
+            .range(prefix..upper)
+            .rev()
+            .take(limit)
+            .filter_map(|entry| entry.ok())
+            .filter_map(|(_, raw)| serde_json::from_slice(&raw).ok())
+            .collect()
     }
 
     /// An address's transactions, newest first, below `before` when given.
@@ -597,6 +680,16 @@ async fn route(
         ["v1", "blocks", "hash", hash] => found(index.block_by_hash(hash)),
         ["v1", "blocks", height] => found(height.parse().ok().and_then(|h| index.block(h))),
         ["v1", "txs", hash] => found(index.tx(hash)),
+        ["v1", "tx", hash, "call-tree"] | ["v1", "txs", hash, "call-tree"] => {
+            found(index.call_tree(hash))
+        }
+        ["v1", "tx", hash, "receipt"] | ["v1", "txs", hash, "receipt"] => {
+            found(index.receipt(hash))
+        }
+        ["v1", "events", category] => json_response(
+            StatusCode::OK,
+            &serde_json::Value::Array(index.events_by_category(category, limit(query))),
+        ),
         ["v1", "addresses", address, "txs"] => {
             let before = param(query, "before").and_then(|b| b.parse().ok());
             json_response(
@@ -930,5 +1023,61 @@ mod tests {
         assert!(!clients.take(one, 59));
         assert!(clients.take(two, 59));
         assert!(clients.take(one, 60));
+    }
+
+    #[test]
+    fn indexer_indexes_universal_call_tree() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let index = Index::open(dir.path().to_str().expect("utf-8")).expect("opens");
+        let tx_hash = "0xcafe00000000000000000000000000000000000000000000000000000000b001";
+        let nested_tree = serde_json::json!({
+            "dispatcher": "0xb001",
+            "callerEnv": "evm",
+            "calleeEnv": "solana_svm",
+            "selector": "0xdeadbeef",
+            "succeeded": true,
+            "children": [{
+                "dispatcher": "0xb001",
+                "callerEnv": "solana_svm",
+                "calleeEnv": "move_vm",
+                "selector": "0xcafebabe",
+                "succeeded": true,
+                "children": []
+            }]
+        });
+        let tx = serde_json::json!({
+            "hash": tx_hash,
+            "from": "aa".repeat(32),
+            "to": "bb".repeat(32),
+            "receipt": {
+                "status": "0x1",
+                "universalCallTree": nested_tree,
+            }
+        });
+        let mut blk = block(5, "p1", serde_json::json!([tx]));
+        blk["events"] = serde_json::json!([
+            {"category": "bud3", "kind": "ObjectSealed", "objectId": "0x11"},
+            {"category": "finality", "kind": "CheckpointFinalized", "epoch": 1},
+            {"category": "uel", "kind": "UniversalCallDispatched", "dispatcher": "0xb001"}
+        ]);
+
+        index.add_block(5, &blk).expect("indexes block with call tree");
+
+        assert!(!node_backed(&["v1", "tx", tx_hash, "call-tree"]));
+        let stored_tree = index.call_tree(tx_hash).expect("call tree indexed");
+        assert_eq!(stored_tree["blockNumber"], 5);
+        assert_eq!(stored_tree["dispatcher"], "0xb001");
+        assert_eq!(stored_tree["callTree"]["calleeEnv"], "solana_svm");
+        assert_eq!(
+            stored_tree["callTree"]["children"][0]["calleeEnv"],
+            "move_vm"
+        );
+
+        let stored_receipt = index.receipt(tx_hash).expect("receipt indexed");
+        assert_eq!(stored_receipt["receipt"]["status"], "0x1");
+
+        assert_eq!(index.events_by_category("bud3", 10).len(), 1);
+        assert_eq!(index.events_by_category("finality", 10).len(), 1);
+        assert_eq!(index.events_by_category("uel", 10).len(), 1);
     }
 }

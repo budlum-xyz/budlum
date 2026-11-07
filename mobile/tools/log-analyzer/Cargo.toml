@@ -1,4 +1,4 @@
-# Standalone workspace on purpose (same pattern as crates/budscan): the
+# Standalone workspace on purpose (same pattern as crates/budlum-explorer): the
 # analyzer is a host tool for WP-37 device tests and is not a member of the
 # node workspace.
 [workspace]
