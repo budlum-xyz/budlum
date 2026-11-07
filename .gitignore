@@ -19,3 +19,6 @@ __pycache__/
 # Foundry build output of the Ethereum-side contracts.
 /contracts/out/
 /contracts/cache/
+
+# External planning input; repository documentation is maintained in English.
+/THE_BUDLUM_DIREKTIF.md
