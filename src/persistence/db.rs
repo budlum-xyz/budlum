@@ -324,9 +324,10 @@ impl Storage {
         let mut partial = path.as_os_str().to_owned();
         partial.push(".partial");
         let partial = std::path::PathBuf::from(partial);
+        // Never truncate an existing partial file or follow a pre-existing
+        // symlink. A stale partial needs operator inspection before retrying.
         let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .write(true)
             .open(&partial)?;
         file.write_all(&bytes)?;
@@ -2499,6 +2500,36 @@ mod tests {
             .create_snapshot(dir.path().join("b2.bin"))
             .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    // Sled uses libc::getrlimit, which Miri cannot execute. The normal CI
+    // storage tests exercise this regression instead.
+    #[cfg(not(miri))]
+    #[test]
+    fn snapshot_refuses_existing_partial_without_overwriting_it() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().join("db").to_str().unwrap()).unwrap();
+        let backup = dir.path().join("backup.bin");
+        let partial = dir.path().join("backup.bin.partial");
+        std::fs::write(&backup, b"existing backup").unwrap();
+        std::fs::write(&partial, b"existing partial").unwrap();
+
+        let error = storage.create_snapshot(&backup).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&partial).unwrap(), b"existing partial");
+        assert_eq!(std::fs::read(&backup).unwrap(), b"existing backup");
+
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&partial).unwrap();
+            let target = dir.path().join("target");
+            std::fs::write(&target, b"protected target").unwrap();
+            std::os::unix::fs::symlink(&target, &partial).unwrap();
+            let error = storage.create_snapshot(&backup).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+            assert_eq!(std::fs::read(&target).unwrap(), b"protected target");
+            assert_eq!(std::fs::read(&backup).unwrap(), b"existing backup");
+        }
     }
 
     #[test]
