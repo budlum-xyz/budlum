@@ -29,6 +29,7 @@ use std::fmt;
 use crate::chain::finality::{FinalityCert, ValidatorSetSnapshot};
 use crate::consensus::qc::QcBlob;
 use crate::core::block::BlockHeader;
+use crate::core::transaction::DEFAULT_CHAIN_ID;
 
 /// A 64-character lowercase hex digest.
 /// A 64-character lowercase hex digest. `const fn` so the trust-anchor check
@@ -803,6 +804,7 @@ mod tests {
     ) -> FinalityCert {
         let checkpoint_hash = header.hash.clone();
         let mut agg = FinalityAggregator::new(
+            crate::core::transaction::DEFAULT_CHAIN_ID,
             snapshot.epoch,
             header.index,
             checkpoint_hash.clone(),
@@ -873,6 +875,7 @@ mod tests {
             agg_sig_bls: Vec::new(),
             bitmap: vec![1],
             set_hash: snapshot.set_hash.clone(),
+            seat_table_version: 0,
         };
         let err = client
             .verify_checkpoint(&header, &cert, &snapshot)
