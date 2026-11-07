@@ -462,3 +462,23 @@ fn next_checkpoint_height_terminates_at_the_u64_edge() {
     assert_eq!(anchor(5).next_checkpoint_height(0, 100), None);
     assert_eq!(anchor(20).next_checkpoint_height(10, 25), None);
 }
+
+/// F-Droid and Gradle reproducible Android build settings omit Play dependency
+/// blobs, normalize archive timestamps/order, and carry zero proprietary SDKs.
+#[test]
+fn android_reproducible_build_matches() {
+    let gradle = read_repo("mobile/android/app/build.gradle.kts");
+    assert!(gradle.contains("includeInApk = false"));
+    assert!(gradle.contains("includeInBundle = false"));
+    assert!(gradle.contains("isPreserveFileTimestamps = false"));
+    assert!(gradle.contains("isReproducibleFileOrder = true"));
+    for forbidden in ["com.google.android.gms", "com.google.firebase", "sentry", "crashlytics"] {
+        assert!(!gradle.contains(forbidden), "proprietary SDK {forbidden} found");
+    }
+
+    let fdroid = read_repo("mobile/android/fdroid/network.budlum.validator.yml");
+    assert!(fdroid.contains("SOURCE_DATE_EPOCH=1700000000"));
+    assert!(fdroid.contains("CARGO_INCREMENTAL=0"));
+    assert!(fdroid.contains("--remap-path-prefix="));
+}
+

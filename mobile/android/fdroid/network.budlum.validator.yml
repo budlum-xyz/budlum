@@ -1,0 +1,43 @@
+# F-Droid reproducible build recipe for Budlum Mobile Validator (WP-58)
+Categories:
+  - Connectivity
+  - Security
+License: Apache-2.0
+AuthorName: Budlum Contributors
+WebSite: https://budlum.network
+SourceCode: https://budlum.network/source
+IssueTracker: https://budlum.network/issues
+Changelog: https://budlum.network/releases
+
+AutoName: Budlum Validator
+Summary: Post-quantum light validator and encrypted storage share custodian
+Description: |-
+  Budlum Validator turns an Android 10+ phone into a low-stake (10 BUD) light
+  validator and erasure-coded encrypted storage custodian on the Budlum network:
+
+  * Wi-Fi-only by default with strict daily cellular caps and thermal pause.
+  * Hardware-backed Android Keystore wrapping for the ML-DSA-65 duty key; the
+    ML-DSA-87 owner key requires biometric or device PIN confirmation.
+  * Zero third-party analytics, crash-reporting, or advertising SDKs.
+
+RepoType: git
+Repo: https://budlum.network/budlum.git
+
+Builds:
+  - versionName: 0.1.0-testnet
+    versionCode: 1
+    commit: v0.1.0-testnet
+    subdir: mobile/android/app
+    gradle:
+      - yes
+    ndk: 27.2.12479018
+    build:
+      - export SOURCE_DATE_EPOCH=1700000000
+      - export CARGO_INCREMENTAL=0
+      - export RUSTFLAGS="--remap-path-prefix=$PWD=/build/budlum -C debuginfo=0"
+      - rustup toolchain install 1.97.1 --profile minimal --target aarch64-linux-android x86_64-linux-android
+
+AutoUpdateMode: Version
+UpdateCheckMode: Tags
+CurrentVersion: 0.1.0-testnet
+CurrentVersionCode: 1

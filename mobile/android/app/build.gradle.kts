@@ -1,30 +1,34 @@
 plugins {
-    alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
-    alias(libs.plugins.kotlin.compose)
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
-    namespace = "dev.budlum.validator"
-    compileSdk = libs.versions.compileSdk.get().toInt()
+    namespace = "network.budlum.validator"
+    compileSdk = 36
+
+    // Pin NDK version for deterministic cargo-ndk builds of budlum-mobile-core.
+    ndkVersion = "27.2.12479018"
 
     defaultConfig {
-        applicationId = "dev.budlum.validator"
-        // Directive 7.9.2: minSdk 29 (Android 10). targetSdk 36 is the current
-        // Google Play target API requirement for new apps (since 2026-08-31).
-        minSdk = libs.versions.minSdk.get().toInt()
-        targetSdk = libs.versions.targetSdk.get().toInt()
+        applicationId = "network.budlum.validator"
+        minSdk = 29
+        targetSdk = 36
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = "0.1.0-testnet"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
     }
 
     buildTypes {
         release {
-            // Release signing and reproducible-build settings land with the
-            // distribution PR (directive 7.9.10). Minification stays off until
-            // the UniFFI mobile core binding exists and can be kept.
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            isCrunchPngs = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -32,31 +36,54 @@ android {
         }
     }
 
+    buildFeatures {
+        compose = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+
     kotlinOptions {
         jvmTarget = "17"
     }
-    buildFeatures {
-        compose = true
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+    }
+
+    // F-Droid reproducible builds require omitting Play's encrypted dependency blob (WP-58).
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
     }
 }
 
+tasks.withType<org.gradle.api.tasks.bundling.AbstractArchiveTask>().configureEach {
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+}
+
+// Zero third-party analytics, tracking, or remote crash SDKs (Section 7.9 / WP-36).
 dependencies {
-    implementation(platform(libs.compose.bom))
-    implementation(libs.compose.ui)
-    implementation(libs.compose.ui.tooling.preview)
-    implementation(libs.compose.material3)
-    implementation(libs.activity.compose)
-    implementation(libs.core.ktx)
-    implementation(libs.coroutines.android)
-    implementation(libs.work.runtime.ktx)
+    val composeBom = platform("androidx.compose:compose-bom:2024.10.01")
+    implementation(composeBom)
+    implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.activity:activity-compose:1.9.3")
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+    implementation("androidx.work:work-runtime-ktx:2.10.0")
+    implementation("androidx.biometric:biometric:1.1.0")
+    implementation("net.java.dev.jna:jna:5.15.0@aar")
 
-    testImplementation(libs.junit)
-
-    androidTestImplementation(platform(libs.compose.bom))
-    androidTestImplementation(libs.androidx.test.runner)
-    androidTestImplementation(libs.androidx.test.ext.junit)
+    testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.work:work-testing:2.10.0")
 }

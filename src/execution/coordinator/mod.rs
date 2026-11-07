@@ -19,6 +19,8 @@ pub mod universal_call;
 pub mod wasm_ee;
 pub mod worker;
 
+pub use scheduler::{execute_block_checked, ParallelExecutionConfig, ScheduleReport};
+
 use crate::core::account::{AccountState, BudEnvUnit};
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;

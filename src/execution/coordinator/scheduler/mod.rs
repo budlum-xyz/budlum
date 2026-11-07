@@ -33,8 +33,11 @@
 //! architecture produces the same waves
 //! (`parallel_scheduler_is_deterministic_across_arch`).
 
+use crate::core::account::{Account, AccountState};
 use crate::core::address::Address;
+use crate::core::error::BudlumResult;
 use crate::core::transaction::{Transaction, TransactionType};
+use crate::execution::executor::Executor;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// One unit of state a transaction can touch.
@@ -175,6 +178,157 @@ pub fn plan(sets: &[AccessSet]) -> Plan {
         }
     }
     Plan { waves }
+}
+
+/// Runtime switches for parallel wave execution and intra-environment Block-STM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParallelExecutionConfig {
+    /// Enable wave-parallel execution across disjoint `AccessSet` waves.
+    pub enabled: bool,
+    /// Separate feature gate for optimistic Block-STM validation with conflict fallback.
+    pub block_stm_enabled: bool,
+    /// Worker thread cap per wave (`>= 1`).
+    pub worker_threads: usize,
+}
+
+impl Default for ParallelExecutionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            block_stm_enabled: false,
+            worker_threads: 4,
+        }
+    }
+}
+
+/// Deterministic summary of a scheduled block execution.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScheduleReport {
+    pub wave_count: usize,
+    pub parallel_txs: usize,
+    pub sequential_txs: usize,
+    pub block_stm_fallbacks: usize,
+}
+
+fn isolated_transfer_state(base: &AccountState, tx: &Transaction) -> AccountState {
+    let mut local = AccountState::new();
+    local.burn_reserve_address = base.burn_reserve_address;
+    local.team_vesting = base.team_vesting.clone();
+    local.epoch_index = base.epoch_index;
+    local.base_fee = base.base_fee;
+    local.current_block_height = base.current_block_height;
+    local.current_block_unix_secs = base.current_block_unix_secs;
+    if let Some(sender) = base.accounts.get(&tx.from) {
+        local.accounts.insert(tx.from, sender.clone());
+    }
+    if let Some(receiver) = base.accounts.get(&tx.to) {
+        local.accounts.insert(tx.to, receiver.clone());
+    }
+    local
+}
+
+type TransferDelta = (Address, Account, Address, Account);
+
+fn run_isolated_transfer(base: &AccountState, tx: &Transaction) -> BudlumResult<TransferDelta> {
+    let mut local = isolated_transfer_state(base, tx);
+    Executor::apply_transaction_checked(&mut local, tx)?;
+    let sender = local
+        .accounts
+        .get(&tx.from)
+        .cloned()
+        .unwrap_or_else(|| Account::new(tx.from));
+    let receiver = local
+        .accounts
+        .get(&tx.to)
+        .cloned()
+        .unwrap_or_else(|| Account::new(tx.to));
+    Ok((tx.from, sender, tx.to, receiver))
+}
+
+/// Execute `transactions` against `state` using deterministic `AccessSet` waves,
+/// scoped worker threads, and sequential fallback on conflicts or global barriers.
+///
+/// Failure-atomic (`G-4`): on any transaction error, `state` is left untouched.
+pub fn execute_block_checked(
+    state: &mut AccountState,
+    transactions: &[Transaction],
+    block_producer: Option<&Address>,
+    config: &ParallelExecutionConfig,
+) -> BudlumResult<ScheduleReport> {
+    Executor::check_block_contract_gas(transactions)?;
+    let mut candidate = state.clone();
+    let sets: Vec<AccessSet> = transactions.iter().map(access_set).collect();
+    let schedule = plan(&sets);
+    let mut report = ScheduleReport {
+        wave_count: schedule.waves.len(),
+        ..ScheduleReport::default()
+    };
+
+    for wave in &schedule.waves {
+        let wave_txs: Vec<&Transaction> = wave
+            .iter()
+            .filter_map(|&idx| transactions.get(idx))
+            .collect();
+        let all_disjoint_transfers = config.enabled
+            && wave_txs.len() > 1
+            && wave_txs
+                .iter()
+                .all(|tx| tx.tx_type == TransactionType::Transfer && tx.from != Address::zero());
+
+        if !all_disjoint_transfers {
+            for tx in wave_txs {
+                Executor::apply_transaction_checked(&mut candidate, tx)?;
+                report.sequential_txs = report.sequential_txs.saturating_add(1);
+            }
+            continue;
+        }
+
+        let workers = config.worker_threads.max(1).min(wave_txs.len());
+        let chunk_size = wave_txs.len().div_ceil(workers);
+        let snapshot = &candidate;
+        let chunk_results: Vec<Vec<BudlumResult<TransferDelta>>> = std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(workers);
+            for chunk in wave_txs.chunks(chunk_size) {
+                handles.push(scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|tx| run_isolated_transfer(snapshot, tx))
+                        .collect::<Vec<_>>()
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_default())
+                .collect()
+        });
+
+        let mut touched_in_wave: BTreeSet<Address> = BTreeSet::new();
+        for (tx, outcome) in wave_txs
+            .iter()
+            .zip(chunk_results.into_iter().flatten())
+        {
+            if config.block_stm_enabled
+                && (touched_in_wave.contains(&tx.from) || touched_in_wave.contains(&tx.to))
+            {
+                report.block_stm_fallbacks = report.block_stm_fallbacks.saturating_add(1);
+                Executor::apply_transaction_checked(&mut candidate, tx)?;
+                report.sequential_txs = report.sequential_txs.saturating_add(1);
+                continue;
+            }
+            let (from, updated_from, to, updated_to) = outcome?;
+            touched_in_wave.insert(from);
+            touched_in_wave.insert(to);
+            *candidate.get_or_create(&from) = updated_from;
+            if from != to {
+                *candidate.get_or_create(&to) = updated_to;
+            }
+            report.parallel_txs = report.parallel_txs.saturating_add(1);
+        }
+    }
+
+    Executor::finalize_block_checked(&mut candidate, transactions, block_producer)?;
+    *state = candidate;
+    Ok(report)
 }
 
 #[cfg(test)]

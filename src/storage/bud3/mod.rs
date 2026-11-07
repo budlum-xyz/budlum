@@ -40,6 +40,7 @@
 pub mod access_tiering;
 pub mod admission;
 pub mod bof1;
+pub mod compression_context;
 pub mod content_id;
 pub mod content_ref;
 pub mod custody;
@@ -56,6 +57,8 @@ pub mod live_broadcast;
 pub mod meter;
 pub mod pipeline;
 pub mod placement;
+pub mod predicates;
+pub mod private_dedup;
 pub mod qr;
 pub mod registry;
 pub mod repair;

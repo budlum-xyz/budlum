@@ -48,6 +48,8 @@
 //!   Linked SGX/Nitro runtime (no silent plaintext fallback).
 
 mod bip39_wordlist;
+/// Wallet-side blinded consent confirmation screen, Padme buckets, and Shamir escrow (WP-56).
+pub mod consent_screen;
 /// The cryptographic core shared with the node: scheme registry, FIPS 204 and
 /// FIPS 205 context strings, the dual-verifier facade and the composite
 /// signature. The files are the node's own (`src/crypto`), mounted by path.

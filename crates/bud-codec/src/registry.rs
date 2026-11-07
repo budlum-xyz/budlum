@@ -15,9 +15,11 @@
 //! [`Speed::High`] at least 50 MB/s, [`Speed::Medium`] at least 5 MB/s,
 //! [`Speed::Slow`] at least 0.5 MB/s. Rows whose speed is a target rather
 //! than a measurement stay closed until they are measured and pass.
-//! Convenience: public B.U.D. 3.0 codec and storage surface consumed by gateway, CLI, and fuzz harnesses.
 
 use crate::CodecId;
+
+#[path = "wp54_context.rs"]
+pub mod wp54_context;
 
 /// The state of a codec id in the register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

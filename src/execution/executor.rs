@@ -208,7 +208,7 @@ impl Executor {
         Ok(())
     }
 
-    fn check_block_contract_gas(transactions: &[Transaction]) -> BudlumResult<()> {
+    pub(crate) fn check_block_contract_gas(transactions: &[Transaction]) -> BudlumResult<()> {
         let calls = transactions
             .iter()
             .filter(|tx| tx.tx_type == TransactionType::ContractCall)
@@ -3743,6 +3743,14 @@ impl Executor {
         for tx in transactions {
             Self::apply_transaction_checked(state, tx)?;
         }
+        Self::finalize_block_checked(state, transactions, block_producer)
+    }
+
+    pub(crate) fn finalize_block_checked(
+        state: &mut AccountState,
+        transactions: &[Transaction],
+        block_producer: Option<&Address>,
+    ) -> BudlumResult<()> {
         if let Some(producer) = block_producer {
             // Economic policy (2026-07-25): validators earn the protocol
             // portion of the flat transaction fee, less the configured
