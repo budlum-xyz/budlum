@@ -150,10 +150,13 @@ fn prune_database_backups(
             continue;
         }
         let name = entry.file_name();
-        let Some(timestamp) = name.to_str()
+        let Some(timestamp) = name
+            .to_str()
             .and_then(|name| name.strip_prefix("budlum-"))
             .and_then(|name| name.strip_suffix(".budbak"))
-            .filter(|timestamp| !timestamp.is_empty() && timestamp.bytes().all(|b| b.is_ascii_digit()))
+            .filter(|timestamp| {
+                !timestamp.is_empty() && timestamp.bytes().all(|b| b.is_ascii_digit())
+            })
             .and_then(|timestamp| timestamp.parse::<u128>().ok())
         else {
             continue;
@@ -161,7 +164,9 @@ fn prune_database_backups(
         backups.push((timestamp, path));
     }
     backups.sort();
-    let remove_count = backups.len().saturating_sub(retention_count.saturating_sub(1));
+    let remove_count = backups
+        .len()
+        .saturating_sub(retention_count.saturating_sub(1));
     for (_, expired) in backups.into_iter().take(remove_count) {
         std::fs::remove_file(expired)?;
     }
@@ -2145,7 +2150,12 @@ mod tests {
     #[test]
     fn retention_uses_numeric_timestamps_and_preserves_current_and_unknown_files() {
         let dir = tempfile::tempdir().unwrap();
-        for name in ["budlum-2.budbak", "budlum-10.budbak", "budlum-1.budbak", "budlum-manual.budbak"] {
+        for name in [
+            "budlum-2.budbak",
+            "budlum-10.budbak",
+            "budlum-1.budbak",
+            "budlum-manual.budbak",
+        ] {
             std::fs::write(dir.path().join(name), name).unwrap();
         }
         let current = dir.path().join("budlum-1.budbak");
@@ -2159,8 +2169,9 @@ mod tests {
     #[test]
     fn backup_returns_a_verified_existing_snapshot() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = budlum_core::storage::db::Storage::new(dir.path().join("db").to_str().unwrap())
-            .expect("open database");
+        let storage =
+            budlum_core::storage::db::Storage::new(dir.path().join("db").to_str().unwrap())
+                .expect("open database");
         let path = write_database_backup(&storage, &dir.path().join("backups"), 1)
             .expect("write backup");
         assert!(path.is_file());
