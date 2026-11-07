@@ -550,4 +550,48 @@ mod tests {
         assert_eq!(endowment.remaining_balance, 0);
         assert_eq!(accounted, initial);
     }
+    #[test]
+    fn custom_rates_overflow_and_shared_reference_rounding_stay_exact() {
+        let one_gib = 1u64 << 30;
+        let year_days = 365;
+        let default = FeeParams::TESTNET_DEFAULT;
+        let ten_rate = FeeParams {
+            price_per_gib_year: DEFAULT_PRICE_PER_GIB_YEAR_BUD * 10,
+            ..default
+        };
+        let ten = storage_fee_for_days(one_gib, year_days, &ten_rate).unwrap();
+        assert_eq!(ten, 10 * BUD_UNIT);
+        let split = split_storage_fee(ten);
+        assert_eq!(split.endowment_share + split.gateway_share, ten);
+
+        let half_rate = FeeParams {
+            price_per_gib_year: DEFAULT_PRICE_PER_GIB_YEAR_BUD / 2,
+            ..default
+        };
+        assert_eq!(
+            storage_fee_for_days(one_gib, year_days, &half_rate).unwrap(),
+            BUD_UNIT / 2
+        );
+        assert_eq!(
+            storage_fee_for_days(u64::MAX, u64::MAX, &default),
+            Err(FeeError::ArithmeticOverflow)
+        );
+        assert!(storage_fee_for_days(16 * one_gib, 3_650, &default).is_ok());
+
+        let full_year_epochs = year_days * default.epochs_per_day;
+        let shared = shared_public_reference_fee_epochs(
+            3 * one_gib + 1,
+            3,
+            full_year_epochs,
+            &default,
+        )
+        .unwrap();
+        let direct = storage_fee_for_epochs(one_gib + 1, full_year_epochs, &default).unwrap();
+        assert_eq!(shared, direct, "the shared byte count is rounded up");
+        assert_eq!(
+            shared_public_reference_fee_epochs(one_gib, 0, full_year_epochs, &default),
+            Err(FeeError::ZeroReferences)
+        );
+    }
+
 }

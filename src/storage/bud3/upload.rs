@@ -627,5 +627,35 @@ mod tests {
             max_two_segment_memory_bytes(&SMALL)
         );
         assert!(finished.segments.len() >= 2);
+        assert_eq!(finished.record.content_id, ContentId::public(&data));
+        assert!(matches!(
+            mgr.finish_session(sid, &SMALL, &row, &full_candidates(4), &reg, 502),
+            Err(UploadError::UnknownOrExpiredSession)
+        ));
+    }
+
+    #[test]
+    fn an_empty_upload_is_explicit_and_an_early_stream_is_not_empty() {
+        let mut mgr = UploadSessionManager::new(Bud3Limits::default());
+        let reg = Bud3Registry::default();
+        let row = PlacementRow {
+            n_full: 2,
+            s_full: 10,
+            n_mobile: 0,
+            s_mobile: 0,
+        };
+        let client = ([7; 32], [4; 16]);
+
+        let stopped = mgr.open_session(client, 1, 0, 20, false, 500).unwrap();
+        assert!(matches!(
+            mgr.finish_session(stopped, &SMALL, &row, &full_candidates(4), &reg, 501),
+            Err(UploadError::LengthMismatch { .. })
+        ));
+
+        let empty = mgr.open_session(client, 0, 0, 20, false, 502).unwrap();
+        let finished = mgr
+            .finish_session(empty, &SMALL, &row, &full_candidates(4), &reg, 503)
+            .expect("a declared zero-length upload is a deliberate empty object");
+        assert_eq!(finished.record.content_id, ContentId::public(b""));
     }
 }
