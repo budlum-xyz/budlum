@@ -147,6 +147,7 @@ fn uel_abi_version_mismatch_refused() {
 
 #[test]
 fn uel_abi_duplicate_version_cannot_override_checked_version() {
+    // Both fields are legal protobuf; the later scalar value wins on decode.
     for wrong in [0u8, 2, 127] {
         let body = [0x08, ABI_VERSION as u8, 0x10, 0x01, 0x08, wrong];
         let mut wire = (body.len() as u32).to_be_bytes().to_vec();
@@ -156,9 +157,18 @@ fn uel_abi_duplicate_version_cannot_override_checked_version() {
             Err(FrameError::VersionMismatch { got, want })
                 if got == u32::from(wrong) && want == ABI_VERSION
         ));
+        assert!(matches!(
+            read_frame(&mut &wire[..]),
+            Err(FrameError::VersionMismatch { got, want })
+                if got == u32::from(wrong) && want == ABI_VERSION
+        ));
     }
+    // Repeating the supported version does not change the effective version.
     let valid_repeat = [0, 0, 0, 4, 0x08, 0x01, 0x08, 0x01];
-    assert_eq!(decode_frame(&valid_repeat).unwrap().0.abi_version, ABI_VERSION);
+    assert_eq!(
+        decode_frame(&valid_repeat).unwrap().0.abi_version,
+        ABI_VERSION
+    );
 }
 
 #[test]
