@@ -58,6 +58,28 @@ fn decode_database_backup(bytes: &[u8]) -> std::io::Result<DatabaseBackupV1> {
             "backup checksum mismatch",
         ));
     }
+    if backup.entries.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "backup contains no database entries",
+        ));
+    }
+    let mut keys: std::collections::HashSet<&[u8]> =
+        std::collections::HashSet::with_capacity(backup.entries.len());
+    for (key, _) in &backup.entries {
+        if !keys.insert(key.as_slice()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "backup contains duplicate database keys",
+            ));
+        }
+    }
+    if !keys.iter().any(|key| *key == b"SCHEMA_VERSION") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "backup has no schema version",
+        ));
+    }
     Ok(backup)
 }
 
@@ -358,30 +380,7 @@ impl Storage {
     pub fn verify_snapshot<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<usize> {
         let bytes = std::fs::read(path)?;
         let backup = decode_database_backup(&bytes)?;
-        let entries = backup.entries;
-        if entries.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "backup contains no database entries",
-            ));
-        }
-        let mut keys: std::collections::HashSet<&[u8]> =
-            std::collections::HashSet::with_capacity(entries.len());
-        for (key, _) in &entries {
-            if !keys.insert(key.as_slice()) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "backup contains duplicate database keys",
-                ));
-            }
-        }
-        if !keys.iter().any(|key| *key == b"SCHEMA_VERSION") {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "backup has no schema version",
-            ));
-        }
-        Ok(entries.len())
+        Ok(backup.entries.len())
     }
 
     /// Restore an offline backup into a new, empty sled directory and run the
@@ -432,12 +431,6 @@ impl Storage {
         let bytes = std::fs::read(snapshot_path)?;
         let backup = decode_database_backup(&bytes)?;
         let entries = backup.entries;
-        if entries.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "backup contains no database entries",
-            ));
-        }
         if let Some(parent) = target_db_path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -2838,6 +2831,46 @@ mod tests {
 
         let error = Storage::restore_snapshot(&backup, &restored_path).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn blg_202_restore_rejects_duplicate_keys_and_missing_schema() {
+        let root = tempdir().unwrap();
+        let write_backup = |name: &str, entries: Vec<(Vec<u8>, Vec<u8>)>| {
+            let payload = encode(&entries).unwrap();
+            let backup = DatabaseBackupV1 {
+                format_version: 1,
+                entries_hash: crate::core::hash::calculate_hash_bytes(&payload),
+                entries,
+            };
+            let path = root.path().join(name);
+            std::fs::write(&path, encode(&backup).unwrap()).unwrap();
+            path
+        };
+
+        let duplicate = write_backup(
+            "duplicate.backup",
+            vec![
+                (b"SCHEMA_VERSION".to_vec(), b"1".to_vec()),
+                (b"SCHEMA_VERSION".to_vec(), b"1".to_vec()),
+            ],
+        );
+        let duplicate_target = root.path().join("duplicate-target");
+        let error = Storage::restore_snapshot(&duplicate, &duplicate_target).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("duplicate database keys"));
+        assert!(!duplicate_target.exists());
+
+        let missing_schema = write_backup(
+            "missing-schema.backup",
+            vec![(b"LAST".to_vec(), b"00".to_vec())],
+        );
+        let missing_schema_target = root.path().join("missing-schema-target");
+        let error =
+            Storage::restore_snapshot(&missing_schema, &missing_schema_target).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("no schema version"));
+        assert!(!missing_schema_target.exists());
     }
 
     #[test]
