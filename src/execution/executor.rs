@@ -73,6 +73,51 @@ fn privacy_transfers_enabled(chain_id: u64) -> bool {
             .value()
 }
 
+/// Until the verification findings and both VL-1 conditions have evidence,
+/// the on-chain AI verification layer is a devnet-only surface (KR-27).
+fn check_ai_layer(chain_id: u64) -> BudlumResult<()> {
+    if chain_id
+        != crate::core::chain_config::Network::Devnet
+            .chain_id()
+            .value()
+    {
+        return Err(BudlumError::validation(
+            "ai_layer_closed_on_testnet",
+            "the on-chain AI verification layer is closed on this network until its verification findings and VL-1 conditions are satisfied",
+        ));
+    }
+    Ok(())
+}
+
+fn is_ai_layer_tx(tx_type: &TransactionType) -> bool {
+    match tx_type {
+        TransactionType::AiModelRegister(_)
+        | TransactionType::AiInferenceRequest(_)
+        | TransactionType::AiInferenceResult(_)
+        | TransactionType::AiFeeReclaim(_)
+        | TransactionType::AiModelDeactivate(_)
+        | TransactionType::AiModelReactivate(_)
+        | TransactionType::AiRequestCancel(_)
+        | TransactionType::AiDisputeSlash { .. }
+        | TransactionType::AiAgentPayment(_)
+        | TransactionType::AiAgentPaymentRelease(_)
+        | TransactionType::AiAgentPaymentReclaim(_)
+        | TransactionType::AiAttachExecutionProof { .. }
+        | TransactionType::AiOperatorBond
+        | TransactionType::AiOperatorUnbond
+        | TransactionType::AiOperatorWithdraw => true,
+        // A generic role transaction must not reopen AI verifier admission.
+        TransactionType::RoleBond { role }
+        | TransactionType::RoleUnbond { role }
+        | TransactionType::RoleWithdraw { role } => matches!(
+            crate::registry::role::RoleId(*role),
+            crate::registry::role::roles::AI_VERIFIER | crate::registry::role::roles::AI_OPERATOR
+        ),
+        // Data-market transactions are not AI verification transactions.
+        _ => false,
+    }
+}
+
 /// The same feature boundary applies to admission, precheck and execution.
 /// Refuse before creating an account, taking a fee or touching note state.
 pub(crate) fn check_transaction_features(
@@ -89,6 +134,9 @@ pub(crate) fn check_transaction_features(
             "privacy_mainnet_disabled",
             "private transfers and note insertion are closed on this network until ownership, value-conservation and membership proofs are wired",
         ));
+    }
+    if is_ai_layer_tx(tx_type) {
+        check_ai_layer(chain_id)?;
     }
     Ok(())
 }
@@ -813,6 +861,9 @@ impl Executor {
                     && receipt.events[0] == 0x00A1_00A1
                     && receipt.events.len() >= 4
                 {
+                    // An ordinary ContractCall can emit an inference request.
+                    // Apply the same policy before touching escrow or grants.
+                    check_ai_layer(tx.chain_id)?;
                     let mut model_id = [0u8; 32];
                     model_id[0..8].copy_from_slice(&receipt.events[1].to_le_bytes());
                     let max_fee = receipt.events[2];
