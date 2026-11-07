@@ -259,3 +259,7 @@ pub mod conformance_locks;
 // The persistence move is behaviour-neutral.
 #[cfg(test)]
 pub mod persistence_move;
+
+// Instant Duty Handover and Disaster Recovery Mode suite.
+#[cfg(test)]
+pub mod wp14_handover_recovery;

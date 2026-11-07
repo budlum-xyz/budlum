@@ -3678,6 +3678,7 @@ impl Executor {
     /// Apply a whole block atomically. A rejected block leaves `state` exactly
     /// as it was before the call, including effects from transactions earlier
     /// in the same block.
+    /// Convenience: failure-atomic checked block application entry point.
     pub fn apply_block_checked(
         state: &mut AccountState,
         transactions: &[Transaction],
@@ -3905,13 +3906,13 @@ mod tests {
         state.add_balance(&alice, 100);
         let root_before = state.calculate_state_root();
 
-        let transfer = |to, amount| {
+        let transfer = |to, amount, nonce| {
             let mut tx = Transaction::new_with_chain_id(
                 alice,
                 to,
                 amount,
                 1,
-                0,
+                nonce,
                 vec![],
                 DEFAULT_CHAIN_ID,
                 TransactionType::Transfer,
@@ -3919,7 +3920,7 @@ mod tests {
             tx.hash = tx.calculate_hash();
             tx
         };
-        let transactions = [transfer(bob, 10), transfer(carol, 100)];
+        let transactions = [transfer(bob, 10, 0), transfer(carol, 100, 1)];
 
         assert!(Executor::apply_block_checked(&mut state, &transactions, None).is_err());
         assert_eq!(state.calculate_state_root(), root_before);
