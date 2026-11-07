@@ -1,0 +1,79 @@
+# WP-38 CI: the iOS opportunistic validator (directive 7.10).
+#
+# Two jobs. The first runs on every change and needs no Apple toolchain beyond
+# the one the runner carries: it checks the Swift class parameters against the
+# Rust definition and runs the unit tests. The second builds the app target and
+# is manual-dispatch only until the Xcode project that wraps
+# `Sources/BudlumValidatorUI` lands with WP-38 2/N; the package builds and
+# tests without it, which is why the split exists.
+name: Mobile iOS
+
+on:
+  push:
+    branches: [main, 'arena/**']
+    paths:
+      - 'mobile/ios/**'
+      - 'crates/budlum-types/**'
+      - '.github/workflows/mobile-ios.yml'
+  pull_request:
+    paths:
+      - 'mobile/ios/**'
+      - 'crates/budlum-types/**'
+      - '.github/workflows/mobile-ios.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kit-tests:
+    name: iOS kit tests and Rust parity
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The Rust crate is the definition (WP-11). The script reports green with
+      # a written reason while that crate is not in the tree, so this workflow
+      # is not blocked on another package landing.
+      - name: Class parameters agree with crates/budlum-types
+        run: python3 mobile/ios/Scripts/check_class_parity.py --repo .
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Unit tests
+        working-directory: mobile/ios
+        run: swift test 2>&1 | tee /tmp/ios-tests.log
+
+      # A `swift test` that runs zero tests exits 0 and looks identical to a
+      # pass, and the three names below are the acceptance tests of the WP-38
+      # card. They are matched by name so a rename cannot quietly drop one.
+      - name: The three named tests of the WP-38 card ran and passed
+        run: |
+          set -euo pipefail
+          for test in ios_bg_task_answers_audit ios_quota_cap_is_8_gib ios_class_is_opportunistic; do
+            if ! grep -qE "test_${test}\]' passed" /tmp/ios-tests.log; then
+              echo "ERROR: ${test} did not run and pass"
+              exit 1
+            fi
+          done
+          grep -E '^Test Case ' /tmp/ios-tests.log | wc -l
+
+  app-build:
+    # The Xcode project that turns Sources/BudlumValidatorUI into a shippable
+    # app lands with WP-38 2/N, together with the exported TestFlight build.
+    if: github.event_name == 'workflow_dispatch'
+    name: iOS app build
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build the package for iOS
+        working-directory: mobile/ios
+        run: |
+          set -euo pipefail
+          xcodebuild -resolvePackageDependencies \
+            -scheme BudlumValidator \
+            -destination 'generic/platform=iOS' 2>&1 | tail -20

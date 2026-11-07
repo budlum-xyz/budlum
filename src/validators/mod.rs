@@ -30,7 +30,7 @@ pub const MAX_OFFER_ADDRESS_BYTES: usize = 256;
 /// The most relay multiaddresses one registration may carry.
 pub const MAX_RELAY_ADDRESSES: usize = 8;
 /// The custody quota ceiling of an iOS opportunistic validator: 8 GiB.
-pub const MOBILE_OPPORTUNISTIC_MAX_QUOTA_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+pub use budlum_types::MOBILE_OPPORTUNISTIC_MAX_QUOTA_BYTES;
 /// Epochs between a request and the moment it takes effect.
 pub const ACTIVATION_DELAY_EPOCHS: u64 = 1;
 /// Compressed BLS12-381 G2 public key length.
@@ -38,34 +38,8 @@ pub const BLS_KEY_LEN: usize = 96;
 /// Compressed BLS12-381 G1 proof-of-possession length.
 pub const BLS_POP_LEN: usize = 48;
 
-/// The class of a validator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum ValidatorClass {
-    /// Runs every block, proposes, holds a finality seat.
-    Full,
-    /// A phone: stores content, answers audits, holds no seat.
-    Mobile,
-    /// An iPhone: the same duties, only while the app is open or charging.
-    MobileOpportunistic,
-}
-
-impl ValidatorClass {
-    /// Whether the class holds a consensus seat.
-    #[must_use]
-    pub const fn holds_seat(self) -> bool {
-        matches!(self, Self::Full)
-    }
-
-    /// The byte written into signing preimages and the directory root.
-    #[must_use]
-    pub const fn tag(self) -> u8 {
-        match self {
-            Self::Full => 0,
-            Self::Mobile => 1,
-            Self::MobileOpportunistic => 2,
-        }
-    }
-}
+/// The class of a validator, shared with the mobile core via `budlum-types` (K-4).
+pub use budlum_types::ValidatorClass;
 
 /// A refused validator operation: a stable code and a message.
 #[derive(Debug, Clone, PartialEq, Eq)]

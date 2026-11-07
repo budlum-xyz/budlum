@@ -1,0 +1,14 @@
+# Standalone workspace on purpose (same pattern as crates/budlum-explorer): the
+# analyzer is a host tool for WP-37 device tests and is not a member of the
+# node workspace.
+[workspace]
+
+[package]
+name = "budlum-mobile-log-analyzer"
+version = "0.1.0"
+edition = "2021"
+description = "Analyzes Budlum Android validator device-test duty logs into golden reports (WP-37)"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+
+[dependencies]
+# std only: the tool must build on any host with any toolchain.

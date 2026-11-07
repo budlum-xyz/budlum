@@ -18,7 +18,6 @@ use crate::core::address::Address;
 use crate::registry::evidence::{DoubleSignKind, SlashingProof, SlashingReport};
 use crate::validators::ValidatorClass;
 use serde::{Deserialize, Serialize};
-use sha3::{Digest, Sha3_256};
 use std::collections::BTreeMap;
 
 /// The gossipsub topic presence signals are published on.
@@ -74,15 +73,7 @@ pub fn suspension_threshold_epochs(
 /// two different classes in one window is a provable double sign.
 #[must_use]
 pub fn presence_message(chain_id: u64, window: u64, class: ValidatorClass) -> Vec<u8> {
-    let mut hasher = Sha3_256::new();
-    hasher.update(PRESENCE_DOMAIN_TAG.as_bytes());
-    hasher.update((8u64).to_le_bytes());
-    hasher.update(chain_id.to_le_bytes());
-    hasher.update((8u64).to_le_bytes());
-    hasher.update(window.to_le_bytes());
-    hasher.update((1u64).to_le_bytes());
-    hasher.update([class.tag()]);
-    hasher.finalize().to_vec()
+    budlum_types::presence::presence_message(chain_id, window, class).to_vec()
 }
 
 /// One signed "I am online" message of a validator for one window.
@@ -173,8 +164,11 @@ impl PresenceTracker {
     ) -> Result<PresenceEvent, String> {
         let msg = presence_message(chain_id, signal.window, signal.class);
         crate::chain::finality::verify_bls_sig(bls_pk, &msg, &signal.sig_bls)?;
-        let key = (signal.validator.0, signal.window);
-        if let Some(old) = self.seen_signatures.get(&key) {
+        if let Some((_, old)) = self
+            .seen_signatures
+            .get(&signal.validator.0)
+            .and_then(|entries| entries.iter().find(|(w, _)| *w == signal.window))
+        {
             if *old != signal.sig_bls {
                 // Same window, same validator, two different signatures:
                 // only the offender's key can produce both (section 7.8.8).
@@ -195,7 +189,10 @@ impl PresenceTracker {
             }
             return Ok(PresenceEvent::Seen);
         }
-        self.seen_signatures.insert(key, signal.sig_bls.clone());
+        self.seen_signatures
+            .entry(signal.validator.0)
+            .or_default()
+            .push((signal.window, signal.sig_bls.clone()));
         self.last_seen_window.insert(signal.validator.0, signal.window);
         *self.window_seen.entry(signal.window).or_insert(0) += 1;
         self.window_total = self.window_total.saturating_add(1);
@@ -293,7 +290,10 @@ impl PresenceTracker {
     /// stays bounded by one window.
     /// Convenience: prunes expired rolling presence windows.
     pub fn retain_window(&mut self, window: u64) {
-        self.seen_signatures.retain(|(_, w), _| *w >= window);
+        for entries in self.seen_signatures.values_mut() {
+            entries.retain(|(w, _)| *w >= window);
+        }
+        self.seen_signatures.retain(|_, entries| !entries.is_empty());
         self.window_seen.retain(|w, _| *w >= window);
     }
 }
