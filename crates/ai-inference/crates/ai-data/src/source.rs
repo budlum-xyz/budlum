@@ -1,11 +1,11 @@
 //! The closed-circuit source check.
 //!
 //! The principle: the source kinds AI inference layer can read form a closed set (a Pollen
-//! grant, a B.U.D. StorageDeal, or SocialFi). The permission **rules** are
+//! grant, a B.U.D. `StorageDeal`, or `SocialFi`). The permission **rules** are
 //! queried from the chain and are not copied here (the decision; the "the
 //! second copy is the worst copy" principle from budlum).
 
-use ai_core::dataset::{SourceKind, SourceRef};
+use ai_core::dataset::{SourceError, SourceKind, SourceRef};
 
 /// Data layer errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +18,8 @@ pub enum DataError {
         expected: SourceKind,
         got: SourceKind,
     },
+    /// Closed-circuit source identity or grant fields are invalid.
+    InvalidSource(SourceError),
     /// The SHA-256 verification failed - no data flows.
     HashMismatch { detail: String },
 }
@@ -28,6 +30,7 @@ pub enum DataError {
 ///
 /// `NotClosedLoop` when the source kind is not one of the three channels.
 pub fn assert_closed_loop(source: &SourceRef) -> Result<(), DataError> {
+    source.validate().map_err(DataError::InvalidSource)?;
     match source.kind {
         SourceKind::PollenGrant | SourceKind::StorageDeal | SourceKind::SocialRef => Ok(()),
     }
@@ -71,7 +74,7 @@ mod tests {
 
     #[test]
     fn all_three_closed_loop_kinds_pass() {
-        assert!(assert_closed_loop(&SourceRef::pollen_grant([1; 32], 2)).is_ok());
+        assert!(assert_closed_loop(&SourceRef::pollen_grant([8; 32], [9; 32], [1; 32], 2)).is_ok());
         assert!(assert_closed_loop(&SourceRef::storage_deal([1; 32])).is_ok());
         assert!(assert_closed_loop(&SourceRef::social([1; 32])).is_ok());
     }
@@ -91,7 +94,7 @@ mod tests {
 
     #[test]
     fn require_source_enforces_exact_kind() {
-        let grant = SourceRef::pollen_grant([1; 32], 1);
+        let mut grant = SourceRef::pollen_grant([8; 32], [9; 32], [1; 32], 1);
         assert!(require_source(&grant, SourceKind::PollenGrant).is_ok());
         assert_eq!(
             require_source(&grant, SourceKind::StorageDeal),
@@ -99,6 +102,11 @@ mod tests {
                 expected: SourceKind::StorageDeal,
                 got: SourceKind::PollenGrant
             })
+        );
+        grant.grant_id = None;
+        assert_eq!(
+            assert_closed_loop(&grant),
+            Err(DataError::InvalidSource(SourceError::MissingGrantId))
         );
     }
 }
