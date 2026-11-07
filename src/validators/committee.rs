@@ -214,7 +214,7 @@ fn standby_rank(randomness: &[u8; 32], epoch: u64, seat: u64, address: &Address)
 
 /// The top 64 bits of a rank, read big-endian, used as the rendezvous hash.
 fn rank_head(rank: &[u8; 32]) -> u64 {
-    let head = <[u8; 8]>::try_from(&rank[..8]).unwrap_or([0u8; 8]);
+    let head = rank.get(..8).and_then(|s| <[u8; 8]>::try_from(s).ok()).unwrap_or([0u8; 8]);
     u64::from_be_bytes(head)
 }
 
@@ -257,8 +257,8 @@ impl CommitteeTable {
         // Seat indices run in address order; each validator's seats are
         // consecutive. Seats the cap could not fill stay empty at the end.
         let mut seats: Vec<Seat> = Vec::with_capacity(seat_count);
-        for (index, (address, _)) in members.iter().enumerate() {
-            for _ in 0..alloc[index] {
+        for ((address, _), count) in members.iter().zip(alloc.iter().copied()) {
+            for _ in 0..count {
                 seats.push(Seat { owner: Some(*address), standbys: Vec::new() });
             }
         }
@@ -411,14 +411,18 @@ impl CommitteeTable {
             // still sit. A validator that already lost a seat this epoch does
             // not come back through a standby slot, and none may cross the
             // quarter cap by collecting handed-over seats.
-            let replacement = next.seats[index]
-                .standbys
-                .iter()
+            let replacement = next
+                .seats
+                .get(index)
+                .into_iter()
+                .flat_map(|s| s.standbys.iter())
                 .find(|candidate| {
                     !lost.contains(*candidate) && next.seats_of(*candidate).len() < cap
                 })
                 .copied();
-            next.seats[index].owner = replacement;
+            if let Some(seat_mut) = next.seats.get_mut(index) {
+                seat_mut.owner = replacement;
+            }
             lost.insert(owner);
             moved += 1;
         }
@@ -457,7 +461,9 @@ fn allocate_seats(
     for (index, (address, weight)) in members.iter().enumerate() {
         let ideal = seats * u128::from(*weight);
         let base = ideal / total_weight;
-        alloc[index] = usize::try_from(base).unwrap_or(0).min(cap);
+        if let Some(slot) = alloc.get_mut(index) {
+            *slot = usize::try_from(base).unwrap_or(0).min(cap);
+        }
         remainders.push((ideal % total_weight, tie_rank(randomness, address), index));
     }
     remainders.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
@@ -468,9 +474,11 @@ fn allocate_seats(
             if used == seat_count {
                 break;
             }
-            if alloc[*index] < cap {
-                alloc[*index] += 1;
-                used += 1;
+            if let Some(slot) = alloc.get_mut(*index) {
+                if *slot < cap {
+                    *slot += 1;
+                    used += 1;
+                }
             }
         }
         if used == before {

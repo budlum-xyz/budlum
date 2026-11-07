@@ -397,3 +397,6 @@ lto = true
 codegen-units = 1
 strip = true
 
+[[bin]]
+name = "bud-migrate"
+path = "src/bin/bud-migrate.rs"

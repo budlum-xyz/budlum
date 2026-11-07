@@ -18,9 +18,7 @@
 //!   without one marks a miss. A miss withholds the window's reward; it never
 //!   slashes.
 //!
-//! WIRING: unwired - the `StorageTx` v3 transaction door and the block
-//! executor call these methods when the legacy storage registry is removed;
-//! until then the state machine is exercised by its tests.
+//! Convenience: public B.U.D. 3.0 chain-state surface wired into `AccountState::bud3_registry` (`WP-17`).
 
 use super::content_id::{ContentId, ContentIdKind};
 use super::custody::{

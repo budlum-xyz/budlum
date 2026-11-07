@@ -719,9 +719,11 @@ pub(crate) fn eth_address_of_secret(priv_key: &[u8; 32]) -> [u8; 20] {
 
     let d = Scalar::from_repr((*priv_key).into()).unwrap();
     let pub_pt = AffinePoint::from(ProjectivePoint::GENERATOR * d).to_sec1_point(false);
-    let digest = keccak256(&pub_pt.as_bytes()[1..]);
+    let digest = keccak256(pub_pt.as_bytes().get(1..).unwrap_or_default());
     let mut addr = [0u8; 20];
-    addr.copy_from_slice(&digest[12..32]);
+    if let Some(tail) = digest.get(12..32) {
+        addr.copy_from_slice(tail);
+    }
     addr
 }
 

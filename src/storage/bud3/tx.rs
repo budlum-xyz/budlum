@@ -40,7 +40,7 @@ mod validation_pairs {
     ) -> Result<S::Ok, S::Error> {
         let mut seq = serializer.serialize_seq(Some(pairs.len()))?;
         for (who, sig) in pairs {
-            seq.serialize_element(&(Bytes(&who[..]), Bytes(&sig[..])))?;
+            seq.serialize_element(&(Bytes(who.as_slice()), Bytes(sig.as_slice())))?;
         }
         seq.end()
     }

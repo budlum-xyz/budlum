@@ -6,6 +6,7 @@
 pub mod aptos;
 pub mod cosmos;
 pub mod ethereum;
+pub mod solana;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -350,6 +351,10 @@ impl ForeignCoordinatorBook {
 
         if self.is_registered_evm_alias(&tx.sender) {
             return Err(ForeignLaneError::AliasCollision(tx.sender));
+        }
+        if tx.to.is_none() {
+            let created = crate::execution::coordinator::migration::create_address(&tx.sender, tx.nonce);
+            self.validate_create_target(&created)?;
         }
 
         // Enforce QuantumAlertLevel (Section 8.6.2 item 5).

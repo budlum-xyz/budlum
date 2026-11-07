@@ -21,3 +21,4 @@ pub mod scheduler;
 pub mod stateful_contract;
 pub mod universal_call;
 pub mod worker_manager;
+pub mod migration;

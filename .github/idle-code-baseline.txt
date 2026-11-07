@@ -584,8 +584,6 @@ src/cross_domain/evm/header.rs	enum	HeaderError
 src/cross_domain/evm/mpt.rs	const	EMPTY_TRIE_ROOT
 src/cross_domain/evm/mpt.rs	const	MAX_WALK_DEPTH
 src/cross_domain/evm/mpt.rs	fn	hp_decode
-src/cross_domain/evm/mpt.rs	fn	hp_encode
-src/cross_domain/evm/mpt.rs	fn	to_nibbles
 src/cross_domain/evm/rlp.rs	fn	encode_uint
 src/cross_domain/evm/rlp.rs	fn	from_item
 src/cross_domain/evm/rlp.rs	struct	RlpBytes

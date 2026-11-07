@@ -3,5 +3,7 @@
 //! Each gateway serves read queries and admits signed foreign-envelope transactions
 //! into the mempool without mutating consensus state outside block execution.
 
+pub mod aptos;
 pub mod cosmos;
 pub mod ethereum;
+pub mod solana;
