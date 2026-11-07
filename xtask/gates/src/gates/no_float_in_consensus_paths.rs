@@ -23,11 +23,12 @@
 //! # What counts
 //!
 //! Comments and literals are blanked first: a `f64` in prose, in a doc string
-//! or in an error message is not arithmetic. The scan then stops at the file's
-//! test module - a statistical test may measure a distribution with a float,
-//! and nothing it computes reaches a block - and counts the surviving `f32`
-//! and `f64` tokens as whole words, so `u64`, `i64` and `my_f64` are not hits
-//! while the suffix of `1.0f64` is.
+//! or in an error message is not arithmetic. Every `#[cfg(test)]` item is then
+//! blanked by brace matching - a statistical test may measure a distribution
+//! with a float, and nothing it computes reaches a block - so an item-level
+//! exemption does not hide the production code that follows it. What is left
+//! is counted as whole `f32` and `f64` tokens, so `u64`, `i64` and `my_f64`
+//! are not hits while the suffix of `1.0f64` is.
 //!
 //! # It ratchets instead of starting red
 //!
@@ -127,12 +128,52 @@ fn joins_suffix(character: char) -> bool {
     character.is_alphanumeric() || character == '_'
 }
 
+/// The end of the item that starts at `from`: the closing brace of its body,
+/// or the semicolon of its statement.
+///
+/// `text` is already scrubbed, so a brace here is a real brace: strings, char
+/// literals and comments are spaces.
+fn item_end(text: &str, from: usize) -> usize {
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    let mut index = from;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' => depth += 1,
+            b'}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    return index + 1;
+                }
+            }
+            b'}' => return index + 1,
+            b';' if depth == 0 => return index + 1,
+            _ => {}
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+/// Every `#[cfg(test)]` item blanked out, keeping byte offsets.
+///
+/// One test module is the ordinary shape, but a file may carry a `#[cfg(test)]`
+/// item early and production code after it. Cutting at the first marker would
+/// exempt that production code, so each item is blanked on its own.
+fn without_test_items(code: &str) -> String {
+    const MARKER: &str = "#[cfg(test)]";
+    let mut text = code.to_string();
+    while let Some(start) = text.find(MARKER) {
+        let end = item_end(&text, start + MARKER.len());
+        text.replace_range(start..end, &" ".repeat(end - start));
+    }
+    text
+}
+
 /// Count the whole `f32`/`f64` tokens in the code above the test module.
 fn count_floats(source: &str) -> usize {
     let scrubbed = rust_literals::scrub(source);
-    let code = scrubbed
-        .find("#[cfg(test)]")
-        .map_or(scrubbed.as_str(), |cut| &scrubbed[..cut]);
+    let code = without_test_items(&scrubbed);
     let characters: Vec<char> = code.chars().collect();
     let mut total = 0usize;
     for token in TOKENS {
@@ -397,6 +438,20 @@ pub fn self_test() -> Result<String, String> {
         return Err(format!("canary: a test module's float was counted: {error}"));
     }
 
+    let after_test = staged(
+        "float-after-test",
+        &[(
+            "src/consensus/round.rs",
+            "pub fn round(n: u64) -> u64 { n }\n\n#[cfg(test)]\nmod tests {\n    fn f() {\n        \
+             let _ = 1.0f64;\n    }\n}\n\npub fn share(hits: u64) -> f64 { hits as f64 }\n",
+        )],
+    )?;
+    if run(&after_test).is_ok() {
+        return Err(String::from(
+            "canary: production code after a test item was exempted with it",
+        ));
+    }
+
     let benched = staged("float-bench", &[("src/ai/benches/scores.rs", &float_body(7))])?;
     if let Err(error) = run(&benched) {
         return Err(format!("canary: a bench was counted: {error}"));
@@ -425,8 +480,9 @@ pub fn self_test() -> Result<String, String> {
 
     Ok(String::from(
         "Self-test OK: the clean tree passes, an injected float is named, a crossed ceiling \
-         and a loose ceiling are reported, a test module and a bench are not counted, a file \
-         outside the surfaces is not counted, a missing surface is refused.",
+         and a loose ceiling are reported, a test item and a bench are not counted, production \
+         code after a test item is counted, a file outside the surfaces is not counted, a \
+         missing surface is refused.",
     ))
 }
 
