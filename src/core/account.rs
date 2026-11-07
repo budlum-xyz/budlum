@@ -14,7 +14,7 @@ use crate::cross_domain::message_registry::CrossDomainMessageRegistry;
 use crate::cross_domain::BridgeState;
 use crate::domain::storage_deal::StorageRegistry;
 use crate::registry::role::{roles, RoleId};
-use crate::storage::db::Storage;
+use crate::persistence::db::Storage;
 #[cfg(not(miri))]
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};

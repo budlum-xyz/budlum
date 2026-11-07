@@ -137,7 +137,7 @@ mod tests {
         let copy = tempfile::tempdir().expect("copy dir");
         let live_path = live.path().join("db");
         let copy_path = copy.path().join("db");
-        let storage = crate::storage::db::Storage::new(live_path.to_str().expect("utf8 path"))
+        let storage = crate::persistence::db::Storage::new(live_path.to_str().expect("utf8 path"))
             .expect("open live store");
         let checkpoint = crate::consensus::pos::Checkpoint {
             block_index: 7,
@@ -149,7 +149,7 @@ mod tests {
             .expect("save checkpoint");
 
         copy_dir(&live_path, &copy_path);
-        let reopened = crate::storage::db::Storage::new(copy_path.to_str().expect("utf8 path"))
+        let reopened = crate::persistence::db::Storage::new(copy_path.to_str().expect("utf8 path"))
             .expect("open copy");
         let loaded = reopened.load_checkpoints().expect("load checkpoints");
         assert_eq!(loaded.len(), 1, "the copy must hold the flushed checkpoint");
@@ -296,7 +296,7 @@ fn a_restart_keeps_the_epoch_boundary_checkpoint() {
     use crate::consensus::pos::{Checkpoint, PoSConfig, PoSEngine};
     use crate::consensus::ConsensusEngine;
     use crate::core::address::Address;
-    use crate::storage::db::Storage;
+    use crate::persistence::db::Storage;
     use std::sync::Arc;
 
     let dir = tempfile::tempdir().expect("temp dir");
