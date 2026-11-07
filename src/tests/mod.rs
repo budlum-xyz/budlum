@@ -236,3 +236,17 @@ mod audit_lane_a;
 mod audit_lane_b;
 mod audit_lane_c;
 mod audit_lane_d;
+
+// WP-01..04 live-verification regression tests, one module per lane.
+#[cfg(test)]
+pub mod audit_lane_a;
+#[cfg(test)]
+pub mod audit_lane_b;
+#[cfg(test)]
+pub mod audit_lane_c;
+#[cfg(test)]
+pub mod audit_lane_d;
+
+// WP-08: validator classes and the single registration door.
+#[cfg(test)]
+pub mod validator_classes;

@@ -2992,6 +2992,84 @@ impl Executor {
                 })?;
                 sender.nonce = sender.nonce.saturating_add(1);
             }
+            TransactionType::Validator(validator_tx) => {
+                use crate::validators::ValidatorTx;
+                // One set of checks for admission and execution.
+                state
+                    .check_validator_tx(tx, validator_tx)
+                    .map_err(|e| BudlumError::validation(e.code, e.message))?;
+                let refuse = |e: crate::validators::ValidatorError| {
+                    BudlumError::validation(e.code, e.message)
+                };
+                let epoch = state.epoch_index;
+                if state.spendable_balance(&tx.from) < total_cost {
+                    return Err(BudlumError::validation(
+                        "validator_vesting_locked",
+                        format!(
+                            "the bond exceeds the spendable balance (vesting-locked funds cannot be bonded): need {total_cost}"
+                        ),
+                    ));
+                }
+                let network = crate::core::chain_config::Network::from_chain_id(tx.chain_id);
+                match validator_tx {
+                    ValidatorTx::Register(registration) => {
+                        let floor = network.map_or(1, |n| n.class_floor(registration.class));
+                        state
+                            .validator_directory
+                            .register(registration, tx.amount, floor, epoch)
+                            .map_err(refuse)?;
+                        if let Some(seat) = &registration.seat {
+                            state
+                                .install_full_validator(
+                                    registration.owner,
+                                    tx.amount,
+                                    &registration.bls_key,
+                                    &registration.bls_pop,
+                                    seat,
+                                    tx.chain_id,
+                                )
+                                .map_err(|message| {
+                                    BudlumError::validation("validator_seat_install", message)
+                                })?;
+                        }
+                    }
+                    ValidatorTx::ChangeClass { new_class, seat } => {
+                        let full_floor = network.map_or(1, |n| n.min_stake_full());
+                        state
+                            .validator_directory
+                            .request_class_change(
+                                &tx.from,
+                                *new_class,
+                                seat.clone(),
+                                full_floor,
+                                epoch,
+                            )
+                            .map_err(refuse)?;
+                    }
+                    ValidatorTx::RotateOperatorKey { new_operator_key } => {
+                        state
+                            .validator_directory
+                            .request_operator_rotation(&tx.from, new_operator_key.clone(), epoch)
+                            .map_err(refuse)?;
+                    }
+                    ValidatorTx::UpdateCustodyQuota {
+                        owner,
+                        new_quota_bytes,
+                        seq,
+                        ..
+                    } => {
+                        state
+                            .validator_directory
+                            .request_quota_increase(owner, *new_quota_bytes, *seq, epoch)
+                            .map_err(refuse)?;
+                    }
+                }
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(total_cost).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
             TransactionType::RoleBond { role } => {
                 // The verifier family's production
                 // registration door. The bond is the signed amount; the role

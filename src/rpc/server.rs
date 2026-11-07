@@ -6884,6 +6884,31 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
+    async fn get_validator(&self, owner: String) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean = owner.strip_prefix("0x").unwrap_or(&owner);
+        let owner = Address::from_hex(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
+        })?;
+        Ok(self
+            .chain
+            .validator_directory(crate::validators::DirectoryQuery::One(owner))
+            .await)
+    }
+
+    async fn list_relays(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Ok(self
+            .chain
+            .validator_directory(crate::validators::DirectoryQuery::Relays)
+            .await)
+    }
+
+    async fn list_gateways(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Ok(self
+            .chain
+            .validator_directory(crate::validators::DirectoryQuery::Gateways)
+            .await)
+    }
+
     async fn get_quantum_alarm(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         Ok(self.chain.quantum_view().await)
     }
