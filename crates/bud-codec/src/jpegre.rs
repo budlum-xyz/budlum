@@ -3,9 +3,8 @@
 //! It parses an existing JPEG and records the segment structure (SOI, APP,
 //! DQT, SOF, SOS, EOI) in a deterministic blob. Only the parsing migrates:
 //! the re-encode suggestions are not part of this layer.
-//! Exposed for the B.U.D. 3.0 codec registry: the registry wires these
+//! WIRING: exposed for the B.U.D. 3.0 codec registry: the registry wires these
 //! transforms.
-//! Convenience: public B.U.D. 3.0 codec and storage surface consumed by gateway, CLI, and fuzz harnesses.
 
 #![forbid(unsafe_code)]
 

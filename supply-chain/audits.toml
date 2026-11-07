@@ -157,6 +157,12 @@ criteria = "safe-to-deploy"
 version = "0.10.1"
 notes = "QR decoder used as the independent read-back check in tests; reviewed 0.10.1: no build script, zero unsafe, pure-Rust detection and Reed-Solomon"
 
+[[audits.raptorq]]
+who = "Budlum Security <security@budlum.xyz>"
+criteria = "safe-to-deploy"
+version = "2.0.0"
+notes = "RFC 6330 RaptorQ systematic fountain encoder and decoder for B.U.D. 3.0; reviewed full upstream v2.0.0 source (22 .rs files): no build script, zero network or process access, and unsafe blocks are confined to src/octet.rs and src/octets.rs for GF(256) table lookups and SIMD slice operations"
+
 [[audits.ruzstd]]
 who = "Budlum Security <security@budlum.xyz>"
 criteria = "safe-to-deploy"

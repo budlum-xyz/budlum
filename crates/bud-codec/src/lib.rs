@@ -23,7 +23,7 @@
 //! less, the slow candidates are not run.
 //!
 //! Every codec id, its frozen meaning and its state live in [`registry`].
-//! Convenience: public B.U.D. 3.0 codec and storage surface consumed by gateway, CLI, and fuzz harnesses.
+//! Convenience: public B.U.D. 3.0 codec surface consumed by upload, replacement, and fuzz harnesses.
 
 use std::io::Read;
 

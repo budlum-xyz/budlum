@@ -15,9 +15,8 @@
 //! consecutive deltas: `0` for no change, `10` plus 6 bits within plus or minus
 //! 63, `110` plus 8 bits within plus or minus 255, and `111` plus 64 bits
 //! otherwise.
-//! Exposed for the B.U.D. 3.0 codec registry: the registry wires these
+//! WIRING: exposed for the B.U.D. 3.0 codec registry: the registry wires these
 //! transforms.
-//! Convenience: public B.U.D. 3.0 codec and storage surface consumed by gateway, CLI, and fuzz harnesses.
 
 #![forbid(unsafe_code)]
 

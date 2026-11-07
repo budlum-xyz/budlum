@@ -13,9 +13,8 @@
 //! separately, left to zstd.
 //!
 //! The code is `#![forbid(unsafe_code)]`, deterministic and panic-free.
-//! Exposed for the B.U.D. 3.0 codec registry: the registry wires these
+//! WIRING: exposed for the B.U.D. 3.0 codec registry: the registry wires these
 //! transforms.
-//! Convenience: public B.U.D. 3.0 codec and storage surface consumed by gateway, CLI, and fuzz harnesses.
 
 #![forbid(unsafe_code)]
 

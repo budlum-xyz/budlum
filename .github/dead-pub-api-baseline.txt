@@ -140,17 +140,6 @@ src/registry/poa_compliance.rs:travel_rule
 src/registry/poa_onboarding.rs:kyc_expiry_of
 src/rpc/server.rs:with_security
 src/persistence/db.rs:put_content
-src/storage/derived.rs:acquire_master
-src/storage/derived.rs:hold_master
-src/storage/derived.rs:is_master_held
-src/storage/derived.rs:master_count
-src/storage/derived.rs:pending_release_epoch
-src/storage/derived.rs:pixel_height
-src/storage/derived.rs:pixel_width
-src/storage/derived.rs:releasable_masters
-src/storage/derived.rs:release_derivation
-src/storage/derived.rs:release_master
-src/storage/derived.rs:stored_versus_independent
 src/storage/dictionary.rs:deletable_dictionaries
 src/storage/dictionary.rs:delete_dictionary
 src/storage/dictionary.rs:dictionary_count

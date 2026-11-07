@@ -21,3 +21,4 @@ doc = false
 
 [profile.release]
 debug = 1
+overflow-checks = true

@@ -4,9 +4,8 @@
 //! error in full as a RESIDUAL (bit for bit): a lossless return, or the input
 //! is refused. Choosing an external codec is a separate decision; this module
 //! is the SEED.
-//! Exposed for the B.U.D. 3.0 codec registry: the registry wires these
+//! WIRING: exposed for the B.U.D. 3.0 codec registry: the registry wires these
 //! transforms.
-//! Convenience: public B.U.D. 3.0 codec and storage surface consumed by gateway, CLI, and fuzz harnesses.
 
 #![forbid(unsafe_code)]
 

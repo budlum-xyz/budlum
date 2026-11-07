@@ -15,7 +15,7 @@
 //! [`Speed::High`] at least 50 MB/s, [`Speed::Medium`] at least 5 MB/s,
 //! [`Speed::Slow`] at least 0.5 MB/s. Rows whose speed is a target rather
 //! than a measurement stay closed until they are measured and pass.
-//! Convenience: public B.U.D. 3.0 codec and storage surface consumed by gateway, CLI, and fuzz harnesses.
+//! Convenience: public B.U.D. 3.0 codec surface consumed by upload, replacement, and fuzz harnesses.
 
 use crate::CodecId;
 

@@ -21,9 +21,8 @@
 //! Both of them: `#![forbid(unsafe_code)]`, deterministic, panic free,
 //! lossless, None on irregular input (the caller falls back to the raw
 //! path).
-//! Exposed for the B.U.D. 3.0 codec registry: the registry wires these
+//! WIRING: exposed for the B.U.D. 3.0 codec registry: the registry wires these
 //! transforms.
-//! Convenience: public B.U.D. 3.0 codec and storage surface consumed by gateway, CLI, and fuzz harnesses.
 
 #![forbid(unsafe_code)]
 

@@ -6,7 +6,7 @@
 //! the codec registry; re-measure before wiring.
 //!
 //! Code: `#![forbid(unsafe_code)]`, deterministic, with tests.
-//! Convenience: public B.U.D. 3.0 codec and storage surface consumed by gateway, CLI, and fuzz harnesses.
+//! Convenience: public B.U.D. 3.0 codec surface consumed by upload, replacement, and fuzz harnesses.
 
 #![forbid(unsafe_code)]
 

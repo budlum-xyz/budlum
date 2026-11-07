@@ -17,9 +17,8 @@
 //! alignment, classifies a crop as aligned or broken, and produces a
 //! deterministic derivation record, which can be bound to a PACT as a
 //! production proof.
-//! Exposed for the B.U.D. 3.0 codec registry: the registry wires these
+//! WIRING: exposed for the B.U.D. 3.0 codec registry: the registry wires these
 //! transforms.
-//! Convenience: public B.U.D. 3.0 codec and storage surface consumed by gateway, CLI, and fuzz harnesses.
 
 #![forbid(unsafe_code)]
 
