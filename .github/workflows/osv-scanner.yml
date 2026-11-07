@@ -22,7 +22,7 @@ name: OSV Scanner
 
 on:
   pull_request:
-    branches: [main, fix/architecture-tip-adlari]
+    branches: [main]
   push:
     branches: [main]
   schedule:
@@ -111,6 +111,7 @@ jobs:
             --lockfile=Cargo.lock \
             --lockfile=budzero/Cargo.lock \
             --lockfile=fuzz/Cargo.lock \
+            --lockfile=kani/Cargo.lock \
             --lockfile=crates/wallet-core/Cargo.lock \
             --lockfile=crates/note-packing/Cargo.lock \
             --lockfile=crates/bpqs/Cargo.lock \
