@@ -249,3 +249,9 @@ pub mod validator_classes;
 // The B.U.D. 3.0 storage door end to end.
 #[cfg(test)]
 pub mod bud3_door;
+
+// M0 live-verification regression locks (WP-01, WP-02).
+#[cfg(test)]
+pub mod audit_lane_a;
+#[cfg(test)]
+pub mod audit_lane_b;
