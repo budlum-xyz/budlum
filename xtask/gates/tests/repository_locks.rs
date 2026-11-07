@@ -132,6 +132,34 @@ fn micro_benches_do_not_clamp_to_u32_max() {
     }
 }
 
+/// The binding directive is an external planning input, not a repository
+/// document. Keep it outside the source tree so an upload cannot reintroduce
+/// untranslated planning text into the repository-wide source checks.
+#[test]
+fn binding_directive_stays_outside_repository() {
+    let path = root().join("THE_BUDLUM_DIREKTIF.md");
+    let entry = std::fs::symlink_metadata(&path);
+    assert!(
+        matches!(&entry, Err(error) if error.kind() == std::io::ErrorKind::NotFound),
+        "the binding directive must stay outside the repository tree: {}",
+        path.display()
+    );
+}
+
+/// Keep future uploads from adding the external planning input back to git.
+/// The absence check above catches a tracked copy; this pins the ignore rule
+/// that prevents an accidental re-upload from entering the index.
+#[test]
+fn binding_directive_has_a_root_ignore_rule() {
+    let ignore = read(".gitignore");
+    assert!(
+        ignore
+            .lines()
+            .any(|line| line.trim() == "/THE_BUDLUM_DIREKTIF.md"),
+        ".gitignore must pin the root binding directive"
+    );
+}
+
 /// The kani workspace carries a `Cargo.lock`, so `--locked` resolves
 /// and the lock-freshness step in CI sees it.
 #[test]

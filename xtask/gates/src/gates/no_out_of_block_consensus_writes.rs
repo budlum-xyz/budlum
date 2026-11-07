@@ -517,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn required_fee_is_a_state_read() {
+    fn required_fee_quote_is_a_read_without_widening_the_exception() {
         assert!(
             check_actor_state_access("let fee = self.blockchain.state.required_fee(&tx);").is_ok()
         );

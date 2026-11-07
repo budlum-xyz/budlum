@@ -48,6 +48,9 @@ pub struct BloomFilter {
 /// gives the same lanes on every architecture.
 fn two_hashes(digest: &[u8; 32]) -> [u64; 2] {
     let mut lanes = [0u64; 4];
+    // The four lanes are filled by zipping with the array, not by indexing it:
+    // a 32-byte digest has exactly four 8-byte chunks, and the shape that
+    // cannot panic is the one the release profile needs.
     for (slot, chunk) in lanes.iter_mut().zip(digest.chunks_exact(8)) {
         let mut v = 0u64;
         for (j, b) in chunk.iter().enumerate() {
