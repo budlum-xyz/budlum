@@ -115,7 +115,11 @@ const ALLOWED_FILES: &[&str] = &[
 /// so that a localisation gains files without the gate having to be edited,
 /// and it is deliberately narrow - only the Turkish locale of the browser,
 /// never a source tree.
-const ALLOWED_DIRS: &[&str] = &["crates/budscan/browser/l10n/tr-TR/"];
+const ALLOWED_DIRS: &[&str] = &[
+    "crates/budscan/browser/l10n/tr-TR/",
+    "crates/budlum-explorer/browser/l10n/tr-TR/",
+    "mobile/android/app/src/main/res/values-tr/",
+];
 
 /// The one Turkish word that may appear anywhere: the label on the link to the
 /// Turkish README. Scrubbed before both scans.

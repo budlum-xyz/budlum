@@ -1,0 +1,35 @@
+[versions]
+# AGP 8.7.x supports compileSdk 36 (Android 16). Google Play requires new apps
+# and updates to target API 36 since 2026-08-31 (verified 2026-11-06 against
+# the Play target API level requirement page).
+agp = "8.7.3"
+kotlin = "2.0.20"
+compileSdk = "36"
+minSdk = "29"
+targetSdk = "36"
+coreKtx = "1.15.0"
+activityCompose = "1.9.3"
+coroutines = "1.8.1"
+workmanager = "2.10.0"
+composeBom = "2024.10.00"
+junit = "4.13.2"
+androidxTestRunner = "1.6.2"
+androidxTestExtJunit = "1.2.1"
+
+[libraries]
+core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
+work-runtime-ktx = { group = "androidx.work", name = "work-runtime-ktx", version.ref = "workmanager" }
+compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+compose-ui = { group = "androidx.compose.ui", name = "ui" }
+compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
+compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+androidx-test-runner = { group = "androidx.test", name = "runner", version.ref = "androidxTestRunner" }
+androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxTestExtJunit" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
