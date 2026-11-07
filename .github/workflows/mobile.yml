@@ -44,7 +44,7 @@ jobs:
           toolchain: "1.97.1"
           components: clippy, rustfmt
 
-      - name: Format, clippy, and golden tests for budlum-mobile-log-analyzer (WP-37)
+      - name: Format, clippy, and golden tests for budlum-mobile-log-analyzer
         run: |
           set -euo pipefail
           cargo fmt --manifest-path mobile/tools/log-analyzer/Cargo.toml --all -- --check
@@ -63,7 +63,7 @@ jobs:
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- --self-test mobile-validator-apps
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- mobile-validator-apps
 
-      - name: Verify Android manifest & Play policy invariants (WP-36)
+      - name: Verify Android manifest & Play policy invariants
         run: |
           set -euo pipefail
           manifest="mobile/android/app/src/main/AndroidManifest.xml"
@@ -79,7 +79,7 @@ jobs:
           grep -q 'minSdk = 29' "$gradle_file"
           test -s mobile/android/PLAY_DECLARATION.md
 
-      - name: Compile and run WP-36 Android Kotlin core & unit test suite
+      - name: Compile and run  Android Kotlin core & unit test suite
         run: |
           set -euo pipefail
           kotlinc \

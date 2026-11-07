@@ -83,25 +83,25 @@ category = "d"
 [[entry]]
 path = "src/execution/coordinator/foreign/ethereum.rs"
 function = "*"
-pq_companion = "QuantumClass::Classical foreign-only custody (K-3, BLG-267); cannot touch QuantumClass::PostQuantum holdings; Adopt requires ML-DSA-87 PQ companion"
+pq_companion = "QuantumClass::Classical foreign-only custody; cannot touch QuantumClass::PostQuantum holdings; Adopt requires ML-DSA-87 PQ companion"
 category = "f"
 
 [[entry]]
 path = "src/execution/coordinator/foreign/cosmos.rs"
 function = "*"
-pq_companion = "QuantumClass::Classical foreign-only custody (K-3, BLG-267); cannot touch QuantumClass::PostQuantum holdings; Adopt requires ML-DSA-87 PQ companion"
+pq_companion = "QuantumClass::Classical foreign-only custody; cannot touch QuantumClass::PostQuantum holdings; Adopt requires ML-DSA-87 PQ companion"
 category = "f"
 
 [[entry]]
 path = "src/execution/coordinator/foreign/aptos.rs"
 function = "*"
-pq_companion = "QuantumClass::Classical foreign-only custody (K-3, BLG-267); cannot touch QuantumClass::PostQuantum holdings; Adopt requires ML-DSA-87 PQ companion"
+pq_companion = "QuantumClass::Classical foreign-only custody; cannot touch QuantumClass::PostQuantum holdings; Adopt requires ML-DSA-87 PQ companion"
 category = "f"
 
 [[entry]]
 path = "src/execution/coordinator/foreign/sui.rs"
 function = "*"
-pq_companion = "QuantumClass::Classical foreign-only custody (K-3, BLG-267); cannot touch QuantumClass::PostQuantum holdings; Adopt requires ML-DSA-87 PQ companion"
+pq_companion = "QuantumClass::Classical foreign-only custody; cannot touch QuantumClass::PostQuantum holdings; Adopt requires ML-DSA-87 PQ companion"
 category = "f"
 
 [[entry]]

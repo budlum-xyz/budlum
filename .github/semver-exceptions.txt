@@ -84,7 +84,7 @@ trait_method_added | PR #110: AnchorSigner gained key_index and backend so the a
 # left. Removing it is a public API break by construction.
 PqSignatureClass | removed: a type that classified a signature by its byte length was the scheme inference INV-03 forbids (the scheme-is-never-inferred gate names it), and every caller moved to an explicit scheme id | PR #110 directive INV-03 (scheme is never inferred), approved 2026-10-29
 
-# WP-26 (Universal Execution Layer coordinator and attoBUD sub-unit ledger):
+# Universal Execution Layer coordinator and attoBUD sub-unit ledger:
 # Account gained `frac_attos: u64` (`#[serde(default)]`) so 18-decimal EVM and
 # 9-decimal SVM environments share the single BUD ledger without precision loss.
-Account | WP-26: Account gained serde-defaulted frac_attos sub-atom field for UEL attoBUD conservation (BLG-256) | THE_BUDLUM_DIREKTIF v1.0 section 8.5 approval
+Account | Account gained a serde-defaulted frac_attos sub-atom field for UEL attoBUD conservation | THE_BUDLUM_DIREKTIF v1.0 section 8.5 approval

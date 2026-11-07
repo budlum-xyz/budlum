@@ -1,4 +1,4 @@
-# Ceremony Rehearsal Network Topology (WP-46)
+# Ceremony Rehearsal Network Topology
 
 chain_id = 45262
 genesis_file = "config/rehearsal-genesis.json"

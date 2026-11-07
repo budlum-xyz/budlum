@@ -1,10 +1,10 @@
-//! Golden report and acceptance tests for `budlum-mobile-log-analyzer` (WP-37).
+//! Golden report and acceptance tests for `budlum-mobile-log-analyzer`.
 
 use budlum_mobile_log_analyzer::NatEnvironment;
 use budlum_mobile_log_analyzer::{evaluate_bundle, parse_field_log, render_markdown_report};
 
 const EIGHT_DEVICE_FIXTURE: &str = "\
-# WP-37 8-device, 5-OEM golden field log
+#  8-device, 5-OEM golden field log
 kind=device\tid=dev-pixel8a\toem=Google\tmodel=Pixel_8a\tapi=36\tram_mib=8192
 kind=device\tid=dev-pixel4a\toem=Google\tmodel=Pixel_4a\tapi=29\tram_mib=6144
 kind=device\tid=dev-s24\toem=Samsung\tmodel=Galaxy_S24\tapi=35\tram_mib=8192

@@ -58,7 +58,7 @@ android {
         }
     }
 
-    // F-Droid reproducible builds require omitting Play's encrypted dependency blob (WP-58).
+    // F-Droid reproducible builds require omitting Play's encrypted dependency blob.
     dependenciesInfo {
         includeInApk = false
         includeInBundle = false
@@ -70,7 +70,7 @@ tasks.withType<org.gradle.api.tasks.bundling.AbstractArchiveTask>().configureEac
     isReproducibleFileOrder = true
 }
 
-// Zero third-party analytics, tracking, or remote crash SDKs (Section 7.9 / WP-36).
+// Zero third-party analytics, tracking, or remote crash SDKs (Section 7.9 /).
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2024.10.01")
     implementation(composeBom)

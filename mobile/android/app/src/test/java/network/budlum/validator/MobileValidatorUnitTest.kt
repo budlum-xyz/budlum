@@ -19,7 +19,7 @@ import network.budlum.validator.core.StorageAudit
 import network.budlum.validator.devicetests.DeviceFieldHarness
 
 /**
- * Executable specification & unit suite covering all 7 WP-36 required tests.
+ * Executable specification and unit suite for the Android validator.
  *
  * Can run both under JUnit and directly from `kotlinc` via `main()` in CI.
  */
@@ -223,13 +223,13 @@ object MobileValidatorUnitTest {
 
     fun android_reproducible_build_matches() {
         val gradle = File("mobile/android/app/build.gradle.kts").readText()
-        check(gradle.contains("includeInApk = false"), "WP-58 Play dependency block must be excluded from APK")
-        check(gradle.contains("isPreserveFileTimestamps = false"), "WP-58 archive timestamps must be normalized")
-        check(gradle.contains("isReproducibleFileOrder = true"), "WP-58 archive entry order must be deterministic")
+        check(gradle.contains("includeInApk = false"), " Play dependency block must be excluded from APK")
+        check(gradle.contains("isPreserveFileTimestamps = false"), " archive timestamps must be normalized")
+        check(gradle.contains("isReproducibleFileOrder = true"), " archive entry order must be deterministic")
 
         val fdroid = File("mobile/android/fdroid/network.budlum.validator.yml").readText()
-        check(fdroid.contains("ndk: 27.2.12479018"), "WP-58 F-Droid metadata must pin NDK 27.2.12479018")
-        check(fdroid.contains("1.97.1"), "WP-58 F-Droid metadata must pin Rust 1.97.1")
+        check(fdroid.contains("ndk: 27.2.12479018"), " F-Droid metadata must pin NDK 27.2.12479018")
+        check(fdroid.contains("1.97.1"), " F-Droid metadata must pin Rust 1.97.1")
 
         fun packDeterministicApk(inputs: List<Pair<String, ByteArray>>): String {
             val out = java.io.ByteArrayOutputStream()
@@ -255,7 +255,7 @@ object MobileValidatorUnitTest {
         val entriesReverse = entriesForward.reversed()
         check(
             packDeterministicApk(entriesForward) == packDeterministicApk(entriesReverse),
-            "WP-58 deterministic APK packaging must yield identical SHA-256 across build orders",
+            " deterministic APK packaging must yield identical SHA-256 across build orders",
         )
     }
 
@@ -269,6 +269,6 @@ object MobileValidatorUnitTest {
         android_onboarding_reaches_registered_state()
         android_workmanager_answers_audit_when_service_stopped()
         android_reproducible_build_matches()
-        println("ALL 8 WP-36/WP-58 ANDROID VALIDATOR TESTS PASSED")
+        println("ALL ANDROID VALIDATOR TESTS PASSED")
     }
 }

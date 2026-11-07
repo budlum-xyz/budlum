@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 
 /// Secure Enclave P-256 + Keychain wrapper for post-quantum ML-DSA-87, ML-DSA-65,
-/// and BLS12-381 presence keys on iOS (Section 7.10, WP-38 item 3).
+/// and BLS12-381 presence keys on iOS (Section 7.10,  item 3).
 ///
 /// - Owner wallet key (`ML-DSA-87`) requires user presence (Face ID / Touch ID / passcode).
 /// - Operator (`ML-DSA-65`) and BLS presence keys use

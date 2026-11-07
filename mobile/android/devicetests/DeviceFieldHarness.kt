@@ -1,7 +1,7 @@
 package network.budlum.validator.devicetests
 
 /**
- * Structured field-test log emitter for WP-37 (`budlum-mobile-log-analyzer` TSV format).
+ * Structured field-test log emitter for  (`budlum-mobile-log-analyzer` TSV format).
  */
 object DeviceFieldHarness {
     fun formatDeviceRecord(
