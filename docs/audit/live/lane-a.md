@@ -8,7 +8,7 @@ WP-08, WP-12, WP-13, WP-14, WP-15, WP-16 or WP-17 (directive section 14.1.4).
 | Base commit | `20140e87061efc9d8d4076e04305c1318705e348` (`main`) |
 | Work branch | `arena/31c78aa9-budlum` |
 | Records in scope | 54 |
-| Revalidated in this slice | 5 |
+| Revalidated in this slice | 6 |
 | CI run numbers | none: this environment has no `cargo`, `rustc` or `rustfmt` |
 
 ## Method
@@ -68,7 +68,7 @@ would break.
 | BLG-027 | High | WP-12 | Not revalidated | No revalidation in this slice. |
 | BLG-028 | High | WP-17 | Not revalidated | No revalidation in this slice. |
 | BLG-031 | Low | WP-17 | Not revalidated | No revalidation in this slice. |
-| BLG-033 | Critical | WP-15 | Not revalidated | No revalidation in this slice. |
+| BLG-033 | Critical | WP-15 | Confirmed | `src/network/proto_conversions.rs` still decodes untrusted wire payloads with `bincode::deserialize` at 14 call sites (lines 1279, 1289, 1306, 1316, 1380, 1390, 1400, 1410, 1420, 1734, 1744, 1754, 2028, 2147) and nothing in `src/network/` sets a decode limit: a search for `bincode::options`, `with_limit` or `bincode::config` in that directory returns nothing. A length prefix inside the payload therefore sizes an allocation before any length is checked. Proposed fix, with the trap written down: replace the calls with one helper over `bincode::DefaultOptions` carrying `with_limit`, and prove in the same pull request that the encoding flags still match what `bincode::deserialize` uses (bincode 1.3: fixed-int, no trailing bytes), because a changed flag silently changes the wire format rather than failing. That proof needs a compile and a round-trip test, so this slice stops at the measurement. The `AiModelRegister` half of the finding was not revalidated. |
 | BLG-034 | High | WP-15 | Not revalidated | No revalidation in this slice. |
 | BLG-041 | Critical | WP-17 | Not revalidated | No revalidation in this slice. |
 | BLG-042 | Critical | WP-17 | Not revalidated | No revalidation in this slice. |
@@ -109,7 +109,7 @@ would break.
 
 ## Notes
 
-1. The 49 `Not revalidated` rows are the remaining work of this package, and
+1. The 48 `Not revalidated` rows are the remaining work of this package, and
    the count is the package's progress measure. Nothing else in this file
    claims a closure.
 2. Section 14.1.7 asks for a permanent regression test per previously fixed
