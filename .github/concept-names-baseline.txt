@@ -20,7 +20,7 @@ Liquid storage|0|0
 Living Threshold|5|15
 Mikoriza|23|78
 Mobile Self|13|117
-PUL|13|99
+PUL|14|100
 Pollen|70|755
 Regeneration|43|316
 Sera|0|0
