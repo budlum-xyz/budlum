@@ -1,0 +1,259 @@
+schema = 1
+mode = "count"            # becomes "absolute" once every count is zero
+global_allow_paths = [
+  "config/naming/",
+  "docs/NAMING.md",
+  "docs/audit/",
+  ".github/concept-names-baseline.txt",
+]
+
+[[concept]]
+old = ["Filiz (leader election)"]
+patterns = ['(?i)filiz', 'BDLM_FILIZ_']
+paths = ["src/consensus/", "src/chain/", "src/tests/", "src/crypto/", "docs/"]
+new_code = "hash_chain_election"
+term_en = "hash chain leader election (HCLE)"
+term_tr = "Hash zinciri lider seçimi"
+area = "consensus"
+reason = "The name states the mechanism."
+
+[[concept]]
+old = ["Filiz (faucet)"]
+patterns = ['(?i)filiz']
+paths = ["src/bin/", "ops/", "config/", "mobile/"]
+new_code = "faucet"
+term_en = "testnet faucet"
+term_tr = "Testnet musluğu"
+area = "operations"
+reason = "One concept, one term."
+
+[[concept]]
+old = ["Kiragi", "Don", "Zemheri"]
+patterns = ['(?i)kiragi', '(?i)k[ıi]ra[ğg][ıi]', '(?i)zemheri', '\(Don\)', '\bDon:']
+paths = ["src/", "docs/", "crates/"]
+new_code = "QuantumAlertLevel::{Advisory, Restricted, Isolated}"
+term_en = "quantum alert level 1, 2, 3 (Advisory, Restricted, Isolated)"
+term_tr = "Kuantum alarm düzeyi 1, 2, 3 (Uyarı, Kısıtlı, Yalıtılmış)"
+area = "security"
+reason = "Levels are named by their effect."
+
+[[concept]]
+old = ["Mikoriza", "Mycorrhiza"]
+patterns = ['(?i)mikoriza', '(?i)mycorrhiza']
+new_code = "shared_security"
+term_en = "shared security"
+term_tr = "Paylaşılan güvenlik"
+area = "settlement"
+reason = "Standard industry term."
+
+[[concept]]
+old = ["Graft", "Aşı"]
+patterns = ['(?i)graft', '\bAşı\b']
+new_code = "app_binding"
+term_en = "remote app binding"
+term_tr = "Uzak Uygulama Bağı"
+area = "settlement"
+reason = "The name states the function."
+
+[[concept]]
+old = ["Pollen"]
+patterns = ['(?i)pollen']
+new_code = "data_market"
+term_en = "Data Market"
+term_tr = "Veri Pazarı"
+area = "application"
+reason = "The name states the function."
+
+[[concept]]
+old = ["Budscan", "BudScan"]
+patterns = ['(?i)budscan']
+new_code = "budlum-explorer"
+term_en = "Budlum Explorer"
+term_tr = "Budlum Gezgini"
+area = "application"
+reason = "Standard industry term."
+
+[[concept]]
+old = ["Atlas"]
+patterns = ['Atlas[A-Z]', '\batlas_', 'gateway/atlas', '\bAtlas\b']
+paths = ["src/", "crates/", "docs/ARCHITECTURE.md"]
+new_code = "explorer_evidence"
+term_en = "explorer evidence model"
+term_tr = "Gezgin kanıt modeli"
+area = "application"
+reason = "The name states the function."
+
+[[concept]]
+old = ["D-Web Passport"]
+patterns = ['(?i)d-?web ?passport', '(?i)dweb', 'Passport[A-Z]', '\bpassport\b']
+paths = ["src/", "crates/", "docs/"]
+new_code = "identity_profile"
+term_en = "identity profile"
+term_tr = "Kimlik profili"
+area = "application"
+reason = "The name states the function."
+
+[[concept]]
+old = ["Vault (SocialFi)"]
+patterns = ['\bVault(Error|Registry|Tx|Id|Entry|Folder)?\b', '\bvault_']
+paths = ["src/socialfi/", "src/core/", "src/chain/", "src/rpc/", "docs/"]
+new_code = "nft_folders"
+term_en = "NFT folders"
+term_tr = "NFT klasörleri"
+area = "application"
+reason = "The name states the function."
+
+[[concept]]
+old = ["DeEd"]
+patterns = ['\bDeEd', 'src/deed', '\bdeed::', '\bmod deed\b']
+new_code = "education_domain"
+term_en = "education domain"
+term_tr = "Eğitim domaini"
+area = "application"
+reason = "The name states the function."
+
+[[concept]]
+old = ["budlumxyz"]
+patterns = ['(?i)budlumxyz']
+new_code = "app_registry"
+term_en = "app registry"
+term_tr = "Uygulama kaydı"
+area = "application"
+reason = "The name states the function."
+
+[[concept]]
+old = ["Developer OS"]
+patterns = ['(?i)developer[ _]?os\b', 'DeveloperOs']
+new_code = "project_manifest"
+term_en = "project manifest"
+term_tr = "Proje bildirimi"
+area = "tooling"
+reason = "The name states the function."
+
+[[concept]]
+old = ["Universal Gateway", "BudGateway"]
+patterns = ['(?i)universal gateway', '(?i)budgateway']
+new_code = "content_gateway"
+term_en = "content gateway"
+term_tr = "İçerik ağ geçidi"
+area = "storage"
+reason = "The name states the function."
+
+[[concept]]
+old = ["Regeneration", "Turritopsis model"]
+patterns = ['(?i)regeneration', '(?i)\bregen_', 'Regen[A-Z]', '(?i)turritopsis']
+new_code = "state_recovery"
+term_en = "node state recovery"
+term_tr = "Düğüm durum kurtarma"
+area = "node"
+reason = "Standard industry term."
+
+[[concept]]
+old = ["PUL", "PUL-Full", "Pul-Lite"]
+patterns = ['Pul[A-Z]', '(?i)bud[-_]pul', '\bPUL\b', '\bpul_']
+new_code = "sigagg (crate bud-sigagg)"
+term_en = "signature aggregation proof"
+term_tr = "İmza toplama kanıtı"
+area = "budzero"
+reason = "The name states the function."
+
+[[concept]]
+old = ["Tarif", "Recipe", "TARIF-3", "VideoRecipe"]
+patterns = ['(?i)recipe', '(?i)\btarif', 'TARIF-3']
+new_code = "bud3::Object, ObjectCommitment, bof1"
+term_en = "B.U.D. 3.0 object, object commitment, BUD3 Object Format 1 (BOF-1)"
+term_tr = "B.U.D. 3.0 nesnesi, nesne taahhüdü, BOF-1"
+area = "storage"
+reason = "One storage object, one term."
+allow_paths = ["mobile/android/fdroid/"]
+
+[[concept]]
+old = ["three_* modules"]
+patterns = ['\bthree_(recipe|regime|pipe|hooks|gate|nft|rpc|reveal|meter|visibility)', '\bTHREE_(PAYLOAD|FRAME)_', 'BudStorageEdition']
+new_code = "src/storage/bud3/*"
+term_en = "bud3 modules"
+term_tr = "bud3 modülleri"
+area = "storage"
+reason = "One implementation of B.U.D. 3.0."
+
+[[concept]]
+old = ["Liquid storage"]
+patterns = ['(?i)liquid[ _-]?(storage|placement|stripe)']
+new_code = "wide_stripe"
+term_en = "class-aware wide-stripe placement"
+term_tr = "Geniş şeritli yerleşim"
+area = "storage"
+reason = "Standard industry term."
+
+[[concept]]
+old = ["Living Threshold", "temperature transition"]
+patterns = ['(?i)living[ _]?threshold', 'LivingThreshold']
+new_code = "access_tiering, TierTransition"
+term_en = "access tiering policy"
+term_tr = "Erişim katmanı politikası"
+area = "storage"
+reason = "Standard industry term."
+
+[[concept]]
+old = ["Mobile Self", "Server Admission"]
+patterns = ['MobileSelf', '(?i)mobile_self', 'ServerAdmission', '(?i)server_admission']
+new_code = "(removed)"
+term_en = "removed; replaced by the Mobile validator class"
+term_tr = "Kaldırılır; yerine Mobil doğrulayıcı sınıfı"
+area = "storage"
+reason = "B.U.D. 1.0 model is removed."
+
+[[concept]]
+old = ["Gonca", "Kabuk", "Kabuk-A", "Kabuk-Z", "Öz kökü", "Mezar kümesi", "Emanet açma", "Gonca kanıtı"]
+patterns = ['(?i)gonca', '(?i)\bkabuk', '(?i)\boz_koku\b', '(?i)öz kökü', '(?i)mezar', '(?i)emanet açma']
+new_code = "sealed_object, ciphertext_chunks, CipherProfile::{Aead, FieldNative}, plaintext_root, deletion_set, EscrowedDisclosure, PredicateProof"
+term_en = "sealed object and its parts"
+term_tr = "Mühürlü nesne ve parçaları"
+area = "budzero privacy"
+reason = "Standard cryptographic terms."
+
+[[concept]]
+old = ["GT-1"]
+patterns = ['\bGT-1\b', '(?i)\bgt1_']
+new_code = "private_transfer_v1"
+term_en = "Private Transfer Protocol 1 (PTP-1)"
+term_tr = "Gizli Transfer Protokolü 1 (PTP-1)"
+area = "budzero privacy"
+reason = "The name states the function."
+
+[[concept]]
+old = ["Anaç", "Anaç kanıtı", "Tek kanıt", "Kök görünüm"]
+patterns = ['\bAnaç', '(?i)\banac_', '(?i)tek kan[ıi]t', '(?i)kök görünüm']
+new_code = "DomainFinalityProof, BlockAggregateProof, RemoteStateView"
+term_en = "domain finality proof, block aggregate proof, remote state view"
+term_tr = "Domain kesinlik kanıtı, blok toplu kanıtı, uzak durum görünümü"
+area = "budzero"
+reason = "The names state the function."
+
+[[concept]]
+old = ["Fotosentez", "DS-0..DS-3", "BÇP", "YKP", "Lubot"]
+patterns = ['(?i)fotosentez', '\bDS-[0-3]\b', '\bBÇP\b', '\bYKP\b', '(?i)lubot']
+new_code = "ai_verification, VerificationLevel, DeterministicInferenceProfile, AnswerProofBundle, on_device_assistant"
+term_en = "AI Verification Layer, verification level VL-0..VL-3, Deterministic Inference Profile (DIP), Answer Proof Bundle (APB), on-device assistant"
+term_tr = "AI Doğrulama Katmanı, VL-0 ile VL-3, DIP, APB, cihaz içi asistan"
+area = "ai"
+reason = "The names state the function."
+allow_paths = ["xtask/gates/src/gates/no_upstream_brands.rs", ".quality/typos.toml"]
+
+[[concept]]
+old = ["Gövde", "Gövde-RV32", "govde-konuk", "Cep kanıtçısı"]
+patterns = ['(?i)g[oö]vde', '(?i)cep kan[ıi]t']
+new_code = "budzero core, budzero-rv32, budzero-guest, MobileProverProfile"
+term_en = "BudZero core, BudZero RV32, BudZero guest SDK, mobile prover profile"
+term_tr = "BudZero çekirdeği, BudZero RV32, BudZero konuk SDK, mobil kanıtlayıcı profili"
+area = "budzero"
+reason = "BudZero is the concept term."
+
+[[concept]]
+old = ["Sera", "Greenhouse", "Floem", "Phloem", "Ksilem", "Xylem", "Genotip", "Genotype", "Fenotip", "Phenotype", "Tomurcuk", "Çiçek", "Meyve", "Kök Sözleşmesi", "Yuva", "Nakil"]
+patterns = ['(?i)(^|[^a-z])sera($|[^a-z])', '(?i)greenhouse', '(?i)floem', '(?i)phloem', '(?i)ksilem', '(?i)xylem', '(?i)genotip', '(?i)genotype', '(?i)fenotip', '(?i)phenotype', '(?i)tomurcuk', '\bÇiçek\b', '\bMeyve\b', '(?i)kök sözleşmesi', '\bYuva\b', '\bNakil\b']
+new_code = "object_layer and Section 2.2 object layer terms"
+term_en = "Universal Object Layer (UOL) terms"
+term_tr = "Evrensel Nesne Katmanı (UOL) terimleri"
+area = "object layer"
+reason = "Professional terms replace metaphors."

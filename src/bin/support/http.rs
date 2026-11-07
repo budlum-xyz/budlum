@@ -120,7 +120,10 @@ mod tests {
         );
 
         let direct = ClientIdentity::new(true, vec![]).unwrap();
-        assert_eq!(direct.client_ip(first, &HeaderMap::new()), Ok(bucket(first)));
+        assert_eq!(
+            direct.client_ip(first, &HeaderMap::new()),
+            Ok(bucket(first))
+        );
         assert_eq!(
             direct.client_ip(second, &HeaderMap::new()),
             Ok(bucket(first)),
