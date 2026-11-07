@@ -51,6 +51,7 @@ pub enum DataMarketError {
     ChainIdMismatch { signed: u64, expected: u64 },
     InvalidBuyerSignature,
     PaymentFailed(String),
+    ReplayedPurchase,
     Grant(GrantBud3Error),
     Registry(RegistryError),
 }
@@ -145,6 +146,8 @@ pub struct DataMarketPurchaseReceipt {
 pub struct DataMarketRegistry {
     listings: BTreeMap<[u8; 32], DataMarketListing>,
     receipts: Vec<DataMarketPurchaseReceipt>,
+    #[serde(default)]
+    consumed_purchases: BTreeSet<([u8; 32], Address)>,
 }
 
 impl DataMarketRegistry {
@@ -231,6 +234,10 @@ impl DataMarketRegistry {
         if !listing.active {
             return Err(DataMarketError::InactiveListing);
         }
+        let purchase_key = (auth.listing_id, auth.buyer);
+        if self.consumed_purchases.contains(&purchase_key) {
+            return Err(DataMarketError::ReplayedPurchase);
+        }
         if auth.content_id != listing.content_ref.content_id
             || auth.price_atoms != listing.price_atoms
         {
@@ -256,16 +263,16 @@ impl DataMarketRegistry {
         )
         .map_err(DataMarketError::Grant)?;
 
-        // Validate grant eligibility BEFORE debiting buyer (`G-4` atomicity).
-        if bud3.active_grant(&row.grant_tag, current_epoch).is_some() {
-            return Err(DataMarketError::Grant(GrantBud3Error::DuplicateOrRevokedTag));
-        }
+        // Validate every grant-issuance condition BEFORE debiting the buyer.
+        bud3.validate_view_grant(&row, current_epoch)
+            .map_err(DataMarketError::Registry)?;
 
         accounts
             .transfer(&auth.buyer, &listing.seller, listing.price_atoms)
             .map_err(|e| DataMarketError::PaymentFailed(e.to_string()))?;
         bud3.issue_grant(row.clone(), current_epoch)
             .map_err(DataMarketError::Registry)?;
+        self.consumed_purchases.insert(purchase_key);
 
         let receipt = DataMarketPurchaseReceipt {
             listing_id: listing.listing_id,
@@ -386,7 +393,7 @@ mod tests {
                 &auth,
                 &SellerGrantBundle {
                     grant_nonce: [0x61; 32],
-                    one_time_ml_dsa_65_pk: otk_pk,
+                    one_time_ml_dsa_65_pk: otk_pk.clone(),
                     content_key: ck.clone(),
                 },
                 2,
@@ -402,5 +409,27 @@ mod tests {
                 .expect("buyer opens HPKE grant package");
         assert_eq!(opened_obj, obj_key);
         assert_eq!(opened_ck, ck);
+        assert!(bud3.active_grant(&rcpt.grant_tag, 3).is_some());
+        assert!(bud3
+            .active_grant(&rcpt.grant_tag, rcpt.expires_at_epoch)
+            .is_none());
+
+        let buyer_balance = accounts.get_balance(&buyer);
+        let seller_balance = accounts.get_balance(&seller);
+        let replay = market.settle_purchase_with_grant(
+            &mut accounts,
+            &mut bud3,
+            45_261,
+            &auth,
+            &SellerGrantBundle {
+                grant_nonce: [0x61; 32],
+                one_time_ml_dsa_65_pk: otk_pk,
+                content_key: ck,
+            },
+            3,
+        );
+        assert_eq!(replay, Err(DataMarketError::ReplayedPurchase));
+        assert_eq!(accounts.get_balance(&buyer), buyer_balance);
+        assert_eq!(accounts.get_balance(&seller), seller_balance);
     }
 }

@@ -628,14 +628,19 @@ impl Bud3Registry {
     /// [`RegistryError::Grant`] if the tag is duplicate/revoked, expired, or has
     /// an invalid ML-DSA-65 one-time key or HPKE X-Wing (`0x647a`) package.
     pub fn issue_view_grant(&mut self, row: GrantRow, epoch: u64) -> Result<(), RegistryError> {
+        self.validate_view_grant(&row, epoch)?;
+        self.grants.insert(row.grant_tag, row);
+        Ok(())
+    }
+
+    /// Check grant issuance without changing registry state.
+    pub fn validate_view_grant(&self, row: &GrantRow, epoch: u64) -> Result<(), RegistryError> {
         if self.grants.contains_key(&row.grant_tag)
             || self.revoked_grants.contains(&row.grant_tag)
         {
             return Err(RegistryError::Grant(GrantBud3Error::DuplicateOrRevokedTag));
         }
-        row.validate_for_issue(epoch)?;
-        self.grants.insert(row.grant_tag, row);
-        Ok(())
+        row.validate_for_issue(epoch).map_err(RegistryError::Grant)
     }
 
     /// Issue a view grant through the canonical issuance path.
@@ -671,8 +676,8 @@ impl Bud3Registry {
         Ok(())
     }
 
-    /// Convenience: read a live grant row by `grant_tag`; returns `None` once
-    /// revoked, expired, or shredded so revoked key packages are never served.
+    /// Read a stored grant row by `grant_tag`. Use [`Self::active_grant`] when
+    /// an authorization decision depends on the current epoch.
     #[must_use]
     pub fn grant_row(&self, grant_tag: &[u8; 32]) -> Option<&GrantRow> {
         self.grants.get(grant_tag)
