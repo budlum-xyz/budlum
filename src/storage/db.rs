@@ -43,7 +43,21 @@ struct DatabaseBackupV1 {
 }
 
 fn decode_database_backup(bytes: &[u8]) -> std::io::Result<DatabaseBackupV1> {
-    let backup: DatabaseBackupV1 = decode(bytes)?;
+    use bincode::Options;
+
+    let limit = u64::try_from(bytes.len()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "backup length does not fit the decoder limit",
+        )
+    })?;
+    // Match bincode::deserialize's fixed-width format, but reject trailing
+    // bytes and never let a declared allocation exceed the supplied input.
+    let backup: DatabaseBackupV1 = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(limit)
+        .deserialize(bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     if backup.format_version != 1 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -2845,6 +2859,33 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("no schema version"));
         assert!(!missing_schema_target.exists());
+    }
+
+    #[test]
+    fn blg_202_backup_decoder_is_bounded_and_rejects_trailing_bytes() {
+        let mut excessive_allocation = 1u32.to_le_bytes().to_vec();
+        excessive_allocation.extend_from_slice(&[0; 32]);
+        excessive_allocation.extend_from_slice(&u64::MAX.to_le_bytes());
+        let error = decode_database_backup(&excessive_allocation)
+            .err()
+            .expect("an input-sized limit must reject the declared vector length");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("size limit"), "{error}");
+
+        let root = tempdir().unwrap();
+        let entries = vec![(b"SCHEMA_VERSION".to_vec(), b"1".to_vec())];
+        let payload = encode(&entries).unwrap();
+        let backup = DatabaseBackupV1 {
+            format_version: 1,
+            entries_hash: crate::core::hash::calculate_hash_bytes(&payload),
+            entries,
+        };
+        let mut bytes = encode(&backup).unwrap();
+        bytes.extend_from_slice(b"unauthenticated suffix");
+        let path = root.path().join("trailing.backup");
+        std::fs::write(&path, bytes).unwrap();
+        let error = Storage::verify_snapshot(&path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]
