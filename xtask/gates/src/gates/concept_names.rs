@@ -560,9 +560,7 @@ fn statements(text: &str) -> Result<Vec<String>, String> {
         out.push(std::mem::take(&mut buffer));
     }
     if !buffer.is_empty() {
-        return Err(String::from(
-            "the map ends inside an array; every array has to close",
-        ));
+        return Err(String::from("the map ends inside an array; every array has to close"));
     }
     Ok(out)
 }
@@ -1070,9 +1068,7 @@ fn canaries(root: &Path) -> Result<(), String> {
         &["fn clean() {}", "// FixtureName was seen here"],
     )?;
     if run(root).is_ok() {
-        return Err(String::from(
-            "canary: an injected legacy name was not caught",
-        ));
+        return Err(String::from("canary: an injected legacy name was not caught"));
     }
 
     stage(root, FIXTURE_MAP, Some("FixtureName\t1\t1\n"), &["fn clean() {}"])?;
@@ -1091,20 +1087,16 @@ fn canaries(root: &Path) -> Result<(), String> {
     let map = load_map(root)?;
     let counts = measure(root, &map)?;
     if write_baseline(root, &counts, &map).is_ok() {
-        return Err(String::from(
-            "canary: the baseline writer raised a count instead of refusing",
-        ));
+        return Err(String::from("canary: the baseline writer raised a count instead of refusing"));
     }
 
     let bad_owner = FIXTURE_MAP.replace("WP-12", "WP-99");
     stage(root, &bad_owner, Some("FixtureName\t0\t0\n"), &["fn clean() {}"])?;
     if load_map(root).is_ok() {
-        return Err(String::from(
-            "canary: an owner outside WP-01 to WP-64 was accepted",
-        ));
+        return Err(String::from("canary: an owner outside WP-01 to WP-64 was accepted"));
     }
 
-    let bad_pattern = FIXTURE_MAP.replace("'(?i)filiz'", "'(?i)fil+'");
+    let bad_pattern = FIXTURE_MAP.replace("'(?i)fixturename'", "'(?i)fixturename+'");
     stage(root, &bad_pattern, Some("FixtureName\t0\t0\n"), &["fn clean() {}"])?;
     if load_map(root).is_ok() {
         return Err(String::from(
@@ -1169,10 +1161,7 @@ mod tests {
         assert!(run(&dir).is_err(), "a rise was not reported");
         let map = load_map(&dir).expect("map");
         let counts = measure(&dir, &map).expect("measure");
-        assert!(
-            write_baseline(&dir, &counts, &map).is_err(),
-            "the writer raised a count"
-        );
+        assert!(write_baseline(&dir, &counts, &map).is_err(), "the writer raised a count");
         stage(&dir, FIXTURE_MAP, Some("FixtureName\t1\t1\n"), &["fn clean() {}"])
             .expect("fixture");
         assert!(run(&dir).is_err(), "a fall the baseline did not follow passed");
@@ -1203,8 +1192,8 @@ mod tests {
 
     #[test]
     fn unsupported_quantifiers_are_refused() {
-        assert!(compile_pattern("(?i)fil+").is_err());
-        assert!(compile_pattern("(?i)fil.*").is_err());
-        assert!(compile_pattern("(?m)filiz").is_err());
+        assert!(compile_pattern("(?i)abc+").is_err());
+        assert!(compile_pattern("(?i)abc.*").is_err());
+        assert!(compile_pattern("(?m)abc").is_err());
     }
 }
