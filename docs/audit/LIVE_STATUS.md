@@ -60,7 +60,7 @@ in hand and a register that arrives later should not have to re-derive it.
 
 | Identity | Severity | Area | State on this tree | Evidence | Closing package |
 |---|---|---|---|---|---|
-| BLG-008 | Medium | RPC | Confirmed open, and the contradiction is wider than the register says | `config/testnet.toml:50` sets `auth_required = true` for both listeners. `src/main.rs:1624` builds one `RpcSecurityConfig` and `src/main.rs:1697` hands it to the public server; `src/main.rs:1758` refuses to bind the operator listener anywhere but loopback because it runs without auth. `docs/TESTNET.md:33` and directive decision KR-33 say the public listener accepts keyless reads and signed transactions while the operator listener requires the key, which is the opposite arrangement | WP-16, with WP-61 |
+| BLG-008 | Medium | RPC | Confirmed open, and the contradiction is wider than the register says: it is a documented decision on one side and two configuration files plus the node's own startup check on the other | `config/testnet.toml:50` sets `auth_required = true` for both listeners. `src/main.rs:1624` builds one `RpcSecurityConfig` and `src/main.rs:1697` hands it to the public server; `src/main.rs:1758` refuses to bind the operator listener anywhere but loopback because it runs without auth. `docs/TESTNET.md:33` and directive decision KR-33 say the public listener accepts keyless reads and signed transactions while the operator listener requires the key, which is the opposite arrangement. `ops/docker-compose.yml:15` states the same as the code ("RPC authentication is ON here") and `:125` sends the CI smoke harness to the unauthenticated operator listener, so the arrangement is deliberate in three places, not one | WP-16, with WP-61 |
 | BLG-022 | Medium | Consensus | The fix trace exists, and so does the test, so what is missing is the before-and-after | `src/light_client/mod.rs:680` computes the next checkpoint in closed form with checked arithmetic instead of walking the interval, and `:1253` is `next_checkpoint_height_is_closed_form`. The protocol wants the test red first; nothing in the tree records that it ever was | WP-11 |
 | BLG-268 (new) | High | Repository | Closed by the cleanup commit in this branch: the binding directive is no longer in the tree, and `/THE_BUDLUM_DIREKTIF.md` is in `.gitignore` | `git show --stat` on the cleanup commit; `tree-is-english` had every line of the file as a finding because it was absent from `ALLOWED_FILES` and from `.github/turkish-baseline.txt` | this branch |
 | BLG-269 (new) | High | Repository | Open. Not one test in the tree follows the naming rule of 16.4, so no finding can be closed by the protocol and TLG-02 cannot be evidenced | measured: `*_is_closed_on_testnet` 0, `bud3_*` 0, `uel_*` 0, `blg_NNN_*` 0, `android_*`/`ios_*` 0 | WP-01..WP-04 |
@@ -71,6 +71,23 @@ listener, plus the config field that feeds it. That is a change inside the RPC
 security boundary, it is the boundary 15.5 item 6 asks a second agent to approve, and
 this sandbox has no way to compile or run it. A blind edit there trades a documented
 contradiction for an undocumented one.
+
+
+### Documents checked against the tree, and found to agree
+
+The endpoint and parameter claims in `docs/TESTNET.md` were read one by one against
+the code and the configuration. These agree, which is worth recording because the one
+that does not (BLG-008) is easier to trust when the rest were checked:
+
+| Claim in `docs/TESTNET.md` | Where the tree says the same |
+|---|---|
+| Chain ids 45260 mainnet, 45261 testnet, 45262 devnet | `src/core/chain_config.rs:34-36`; `config/testnet.toml:5` |
+| Network magic `BDLT` | `src/core/chain_config.rs:266` |
+| Public RPC `127.0.0.1:28545`, operator `127.0.0.1:18546` | `ops/testnet-local.yml:156` publishes 28545 to the container's 8545; `config/testnet.toml:46` is the operator listener |
+| Faucet 100 BUD per request, 100,000 BUD per day | `src/bin/budlum-faucet.rs:61-66` |
+| `budlum-faucet`, `budlum-indexer` exist as binaries | `src/bin/` |
+| 12-word phrases refused | `crates/wallet-core/src/wallet_v3.rs:76-78` refuses any count but 24 before the mnemonic is read |
+| TLS terminated by Caddy; contract in `docs/explorer-api.openapi.yaml` | `ops/Caddyfile.testnet`, `docs/explorer-api.openapi.yaml` |
 
 ## Recount proposal (WP-04 job 7)
 
