@@ -1,5 +1,6 @@
 use crate::core::address::Address;
 use crate::core::transaction::Transaction;
+use crate::mempool::duty_lane::{self, DutyLane};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 // (2026-07-21) consensus determinism: transactions sharing a fee arrived in
@@ -91,6 +92,19 @@ pub enum MempoolError {
     TransactionExpired,
     RbfFeeTooLow,
     InvalidTransaction(String),
+    /// A duty transaction from a validator that already used its batch in this
+    /// window.
+    ///
+    /// Its own variant rather than `InvalidTransaction`: a mobile validator
+    /// needs to tell "you ran out of your one batch this epoch" from "your
+    /// signature is wrong", and the two have different client fixes.
+    DutyWindowExhausted,
+    /// The duty corridor is at its 20 percent share for this block.
+    ///
+    /// Not `PoolBytesFull`: that says the whole pool is full, and this says the
+    /// free corridor inside it is, which is a wait for the next block rather
+    /// than a reason to raise a limit.
+    DutyCorridorFull,
 }
 
 /// A bundle member the pool refused, and where in the bundle it was.
@@ -152,6 +166,13 @@ pub struct Mempool {
     /// comes back (re-gossip, a block replay) is not verified twice.
     authority_cache: crate::mempool::authority_cache::AuthorityCache,
 
+    /// The free, rate limited corridor a mobile validator's duty work travels.
+    ///
+    /// Section 7.3 item 6: `CustodyAck` and `CustodyProofBatch` pay no fee, are
+    /// limited to one batch per validator per window, and may take at most 20
+    /// percent of a block. See [`crate::mempool::duty_lane`].
+    duty: DutyLane,
+
     /// Entries this pool removed while a bundle was being admitted.
     ///
     /// Admission is not free of side effects on other people's transactions: a
@@ -178,6 +199,9 @@ pub fn charged_bytes(tx: &Transaction) -> usize {
 
 impl Mempool {
     pub fn new(config: MempoolConfig) -> Self {
+        // The corridor is a share of the block, not of the pool: the pool holds
+        // many blocks' worth by design and the lane limits one block's worth.
+        let lane = DutyLane::new(crate::consensus::MAX_BLOCK_SIZE);
         Mempool {
             config,
             transactions: HashMap::new(),
@@ -187,6 +211,7 @@ impl Mempool {
             scheme_registry: crate::crypto::scheme::SchemeStatusRegistry::genesis(),
             authority_cache: crate::mempool::authority_cache::AuthorityCache::default(),
             journal: None,
+            duty: lane,
         }
     }
 
@@ -210,6 +235,22 @@ impl Mempool {
     }
 
     pub fn add_transaction(&mut self, tx: Transaction) -> Result<(), MempoolError> {
+        self.add_transaction_in_window(tx, 0)
+    }
+
+    /// Admit a transaction in a named duty window.
+    ///
+    /// The window is the caller's because the pool has no clock consensus
+    /// agrees on: `Blockchain::add_transaction` passes the chain's epoch, and
+    /// the plain [`Mempool::add_transaction`] passes zero, which puts every duty
+    /// transaction in one window. A node that admits duty work without passing
+    /// an epoch therefore grants each validator one batch in total rather than
+    /// one per window - it under-serves, and it never over-serves.
+    pub fn add_transaction_in_window(
+        &mut self,
+        tx: Transaction,
+        window: u64,
+    ) -> Result<(), MempoolError> {
         // The cheap rejections run first. `Transaction::verify` can cost an
         // ML-DSA verification, so a duplicate or a below-floor flood must be
         // refused by a map lookup and an integer compare before it can make
@@ -218,7 +259,22 @@ impl Mempool {
             return Err(MempoolError::DuplicateTransaction);
         }
 
-        if tx.fee < self.config.min_fee {
+        // A duty transaction is free (Section 7.3 item 6). Only a duty
+        // transaction skips the floor, and only after the lane says it may:
+        // asking the lane first means an exhausted window is refused before the
+        // node spends a signature verification on it.
+        let duty = duty_lane::duty_kind(&tx);
+        if duty.is_some() {
+            let bytes = charged_bytes(&tx);
+            self.duty
+                .admit(&tx.from, window, bytes)
+                .map_err(|refusal| match refusal {
+                    duty_lane::DutyRefusal::WindowExhausted => MempoolError::DutyWindowExhausted,
+                    duty_lane::DutyRefusal::CorridorFull => MempoolError::DutyCorridorFull,
+                })?;
+        }
+
+        if duty.is_none() && tx.fee < self.config.min_fee {
             return Err(MempoolError::FeeTooLow);
         }
 
@@ -349,6 +405,13 @@ impl Mempool {
             .insert(tx.hash.clone());
 
         self.resident_bytes = self.resident_bytes.saturating_add(incoming);
+        if duty.is_some() {
+            // Recorded only here, after every refusal path: a duty transaction
+            // the ordinary checks turned away must not spend the validator's
+            // one slot for the window.
+            self.duty.record(&tx.from, window, incoming);
+        }
+
         self.transactions.insert(
             tx.hash.clone(),
             PendingTx {
@@ -448,6 +511,12 @@ impl Mempool {
         self.transactions.insert(pending.tx.hash.clone(), pending);
     }
 
+    /// Every transaction, fee descending, hash ascending on a tie.
+    ///
+    /// This order is the consensus order of a block body and is tested as such.
+    /// It does **not** apply the duty corridor: a block builder must, or the 20
+    /// percent ceiling would exist only in the pool. Use
+    /// [`Mempool::get_sorted_transactions_for_block`] there.
     pub fn get_sorted_transactions(&self, limit: usize) -> Vec<Transaction> {
         let mut result = Vec::with_capacity(limit);
 
@@ -462,6 +531,85 @@ impl Mempool {
             }
         }
         result
+    }
+
+    /// The block candidate, with the duty corridor applied.
+    ///
+    /// A duty transaction is free, so without this a phone could take the whole
+    /// block: this caps what the corridor contributes at 20 percent of the
+    /// block's bytes. Past the cap the remaining duty transactions wait for the
+    /// next block rather than being dropped, which is what a corridor is for.
+    ///
+    /// The paying transactions keep their fee order, and a duty transaction is
+    /// never placed ahead of a paying one: the filter only removes entries, so
+    /// the sequence a validator that sorts by fee would build is preserved.
+    #[must_use]
+    /// Convenience: public duty-corridor block assembly helper.
+    pub fn get_sorted_transactions_for_block(&self, limit: usize) -> Vec<Transaction> {
+        let corridor = self.duty.corridor_bytes();
+        let mut result: Vec<Transaction> = Vec::with_capacity(limit);
+        let mut duty_bytes = 0usize;
+        for (_, hashes) in self.by_fee.iter().rev() {
+            for hash in hashes {
+                if result.len() >= limit {
+                    return result;
+                }
+                let Some(pending) = self.transactions.get(hash) else {
+                    continue;
+                };
+                if duty_lane::duty_kind(&pending.tx).is_some() {
+                    if duty_bytes.saturating_add(pending.charged) > corridor {
+                        continue;
+                    }
+                    duty_bytes = duty_bytes.saturating_add(pending.charged);
+                }
+                result.push(pending.tx.clone());
+            }
+        }
+        result
+    }
+
+    /// Start a new block: reset the duty corridor and prune old windows.
+    ///
+    /// Called by the block producer before it selects, so the corridor is
+    /// measured per block. A node that never calls it keeps charging the same
+    /// corridor until it fills, which refuses duty work it should accept - the
+    /// safe direction, and the reason this is a separate door rather than
+    /// something inferred from wall-clock time.
+    /// Convenience: public duty-corridor block assembly helper.
+    pub fn begin_block(&mut self, window: u64) {
+        self.duty.begin_block(window);
+    }
+
+    /// Start a block and select its candidate in one step.
+    ///
+    /// Returns the transactions and the corridor ceiling that applied, so the
+    /// caller can report what the block was built against rather than reading a
+    /// limit back afterwards. Both halves belong together: selecting without
+    /// resetting charges the previous block's duty bytes to this one, and
+    /// resetting without selecting leaves a corridor that no block ever used.
+    pub fn begin_block_and_select(
+        &mut self,
+        window: u64,
+        limit: usize,
+    ) -> (Vec<Transaction>, usize) {
+        self.duty.begin_block(window);
+        let corridor = self.duty.corridor_bytes();
+        (self.get_sorted_transactions_for_block(limit), corridor)
+    }
+
+    /// Bytes the duty corridor has admitted in the current block.
+    #[must_use]
+    /// Convenience: public duty-corridor block assembly helper.
+    pub fn duty_bytes_this_block(&self) -> usize {
+        self.duty.admitted_bytes()
+    }
+
+    /// The duty corridor's ceiling for one block.
+    #[must_use]
+    /// Convenience: public duty-corridor block assembly helper.
+    pub fn duty_corridor_bytes(&self) -> usize {
+        self.duty.corridor_bytes()
     }
 
     pub fn cleanup_expired(&mut self) -> usize {
