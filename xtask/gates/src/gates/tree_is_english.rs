@@ -549,10 +549,18 @@ fn scan(root: &Path) -> Scan {
 
 /// # Errors
 ///
-/// Returns a finding when a file not on the baseline carries Turkish, when a
-/// baselined file carries more Turkish than recorded, when a recorded count is
-/// stale, or when the scan would be vacuous.
+/// Returns a finding when the binding directive enters the repository, when a
+/// file not on the baseline carries Turkish, when a baselined file carries
+/// more Turkish than recorded, when a recorded count is stale, or when the
+/// scan would be vacuous.
 pub fn run(root: &Path) -> Result<String, String> {
+    let directive = root.join("THE_BUDLUM_DIREKTIF.md");
+    if fs::symlink_metadata(&directive).is_ok() {
+        return Err(String::from(
+            "THE_BUDLUM_DIREKTIF.md is a binding source, but section 0.1.5 requires it to stay outside the repository",
+        ));
+    }
+
     let result = scan(root);
 
     if result.scanned < VACUITY_FLOOR {
@@ -775,6 +783,30 @@ fn baseline_canaries(clean: &Path, tmp: &Path) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// The binding directive stays outside the repository even if a future copy
+/// contains only English and would otherwise pass the language ratchet.
+///
+/// # Errors
+///
+/// Returns an error when the structural boundary is no longer enforced.
+fn directive_boundary_canaries(clean: &Path, tmp: &Path) -> Result<usize, String> {
+    let mut ran = 0usize;
+    if counted_accepts_with(
+        &mut ran,
+        clean,
+        tmp,
+        "directive-present",
+        "THE_BUDLUM_DIREKTIF.md",
+        "",
+    )? {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "canary: the binding directive path was accepted inside the repository",
+        ));
+    }
+    Ok(ran)
 }
 
 /// Canaries for the two scans themselves: every Turkish character, and the
@@ -1069,7 +1101,11 @@ type CanaryGroup = (&'static str, fn(&Path, &Path) -> Result<usize, String>);
 /// A table rather than one call per line: dropping a line would drop a whole
 /// group of canaries and nothing would go red. The length is reported in the
 /// success message, so a removed group changes the gate's own output.
-const CANARY_GROUPS: [CanaryGroup; 3] = [
+const CANARY_GROUPS: [CanaryGroup; 4] = [
+    (
+        "directive-boundary",
+        directive_boundary_canaries as fn(&Path, &Path) -> Result<usize, String>,
+    ),
     (
         "scan",
         scan_canaries as fn(&Path, &Path) -> Result<usize, String>,
@@ -1083,7 +1119,7 @@ const CANARY_GROUPS: [CanaryGroup; 3] = [
 /// Hard-coded on purpose. A group that stops testing anything still returns
 /// `Ok`, so the only way to notice is to know the number beforehand. Raise it
 /// deliberately when a canary is added; a drop is a defect.
-const EXPECTED_CANARIES: usize = 65;
+const EXPECTED_CANARIES: usize = 66;
 
 pub fn self_test() -> Result<String, String> {
     let tmp = scratch_dir()?;
