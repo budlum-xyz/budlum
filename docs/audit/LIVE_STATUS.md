@@ -498,8 +498,8 @@ could express and lost the rest. They are carried here verbatim.
 | Open - partial removal | Partly closed by removal; remainder carried on the named package's card. |
 
 
-| BLG-001 | Critical | Consensus | Open | blg_001_leader_round_skip | src/consensus/filiz.rs, src/consensus/handoff.rs (MAX_LEADER_ROUNDS, affordable_leader_round; snapshot kod izi 2/2) | IP-12 |
-| BLG-005 | Medium | Build/CI | Closed | - | Source ledger record (defter kaydi) | IP-16 |
+| BLG-001 | Critical | Consensus | Open | blg_001_leader_round_skip | src/consensus/filiz.rs, src/consensus/handoff.rs (MAX_LEADER_ROUNDS, affordable_leader_round; snapshot code trace 2/2) | IP-12 |
+| BLG-005 | Medium | Build/CI | Closed | - | Source ledger record (ledger record) | IP-16 |
 | BLG-030 | Critical | RPC | Open | blg_030_public_rpc_consensus_write | src/rpc/ (snapshot 22/23 traces; faucet part is IP-41) | IP-61, IP-41 |
 | BLG-207 | Critical | PoS double-signature slashing | Open | blg_207_pos_engine_verify_evidence | src/consensus/pos.rs (11/12 traces) | IP-12 |
 | BLG-208 | High | BUD3 H1 | Open - removal (IP-07, IP-21) | blg_208_bud_storage_edition_three | src/storage/generated.rs (BudStorageEdition::Three admits_body() false) | IP-07, IP-21 |

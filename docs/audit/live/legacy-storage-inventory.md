@@ -19,76 +19,76 @@ pass - see "Gates" below).
 
 | Path | Decision (directive 5.2) | Live status | Closing findings |
 |---|---|---|---|
-| `src/storage/db.rs` | Tasi | present | WP-06 sonrasi WP-17 kapsami |
-| `src/storage/traits.rs` | Tasi | present | WP-06 sonrasi WP-17 kapsami |
-| `src/storage/merkle_trie.rs` | Tasi | present | WP-06 sonrasi WP-17 kapsami |
-| `src/storage/pruning.rs` | Tasi | present | WP-06 sonrasi WP-17 kapsami |
-| `src/storage/witness_retention.rs` | Tasi | present |  |
-| `src/storage/content_id.rs` | Goc | present | BLG-073 (uclu `content_id` uyumsuzlugu) |
-| `src/storage/manifest.rs` | Sil | present | BLG-047, BLG-109, BLG-168 |
-| `src/storage/lrc.rs` | Sil | present | BLG-049, BLG-089, BLG-144, BLG-220 |
-| `src/storage/erasure.rs` | Sil | present | BLG-049, BLG-089, BLG-144, BLG-220 |
-| `src/storage/msr.rs` | Sil | present | BLG-049, BLG-089, BLG-144, BLG-220 |
-| `src/storage/column_commitment.rs` | Sil | present | BLG-049, BLG-089, BLG-144, BLG-220 |
-| `src/storage/lifecycle.rs` | Sil | present | BLG-045, BLG-046 |
-| `src/storage/provider.rs` | Sil | present | BLG-045, BLG-046 |
-| `src/storage/one_share.rs` | Sil | present | BLG-049 (`OneShare` kota atlatmasi) |
-| `src/storage/one_view.rs` | Sil | present | BLG-049 (`OneShare` kota atlatmasi) |
-| `src/storage/server_admission.rs` | Sil | present | BLG-253 |
-| `src/storage/mobile_self.rs` | Sil | present | BLG-253 |
-| `src/storage/render.rs` | Sil | present | BLG-048, BLG-208 |
-| `src/storage/generated.rs` | Sil | present | BLG-048, BLG-208 |
-| `src/storage/fixed_point.rs` | Sil | present | BLG-048, BLG-208 |
-| `src/storage/pact_binding.rs` | Sil | present |  |
-| `src/storage/three_regime.rs` | Sil | present | BLG-209 |
-| `src/storage/qr_reemit.rs` | Goc | present | BLG-210, BLG-211 |
-| `src/storage/qr_recipe.rs` | Goc | present | BLG-210, BLG-211 |
-| `src/storage/qr_payload.rs` | Goc | present | BLG-210, BLG-211 |
-| `src/storage/three_recipe.rs` | Goc | present | BLG-210, BLG-211 |
-| `src/storage/qr_carousel.rs` | Goc | present | BLG-049, BLG-216 |
-| `src/storage/qr_codec.rs` | Goc | present | BLG-214 |
-| `src/storage/qr_png.rs` | Goc | present | BLG-214 |
-| `src/storage/qr_matrix.rs` | Goc | present | BLG-214 |
-| `src/storage/qr_video.rs` | Goc | present | BLG-214 |
-| `src/storage/qr_frame.rs` | Goc | present | BLG-214 |
-| `src/storage/qr_encode.rs` | Goc | present | BLG-214 |
-| `src/storage/qr_verify.rs` | Goc | present | BLG-214 |
-| `src/storage/qr_receive.rs` | Goc | present | BLG-214 |
-| `src/storage/qr_verify_indep.rs` | Goc | present | BLG-214 |
-| `src/storage/three_pipe.rs` | Goc | present | BLG-213, BLG-218 |
-| `src/storage/emit.rs` | Goc | present | BLG-213, BLG-218 |
-| `src/storage/three_nft.rs` | Goc | present | BLG-212 |
-| `src/storage/reveal_gateway.rs` | Goc | present | BLG-125 |
-| `src/storage/three_rpc.rs` | Goc | present | BLG-125 |
-| `src/storage/three_reveal.rs` | Goc | present | BLG-125 |
-| `src/storage/three_meter.rs` | Goc | present |  |
-| `src/storage/three_gate.rs` | Goc | present |  |
-| `src/storage/three_visibility.rs` | Goc | present |  |
-| `src/storage/three_hooks.rs` | Goc | present |  |
-| `src/storage/assignment.rs` | Goc | present | BLG-047 (`assign_shard`) |
-| `src/storage/dictionary.rs` | Goc | present | BLG-141, BLG-222 |
-| `src/storage/derived.rs` | Goc | present | BLG-222 |
-| `src/storage/transformed.rs` | Goc | present | BLG-219 |
-| `src/storage/living_threshold.rs` | Goc | present | BLG-222 |
-| `src/storage/payload_crypt.rs` | Goc | present | BLG-049 (`ViewGrant` epoch-0), BLG-125 |
-| `src/storage/key_package.rs` | Goc | present | BLG-049 (`ViewGrant` epoch-0), BLG-125 |
-| `src/storage/social_delete.rs` | Goc | present | BLG-049 (`ViewGrant` epoch-0), BLG-125 |
-| `src/storage/view_grant.rs` | Goc | present | BLG-049 (`ViewGrant` epoch-0), BLG-125 |
-| `src/domain/storage_params.rs` | Sil | present | BLG-045, BLG-046, BLG-047, BLG-102, BLG-183 |
-| `src/domain/deal_open.rs` | Sil | present | BLG-045, BLG-046, BLG-047, BLG-102, BLG-183 |
-| `src/domain/storage_deal.rs` | Sil | present | BLG-045, BLG-046, BLG-047, BLG-102, BLG-183 |
-| `src/domain/storage_tx.rs` | Goc | present | BLG-183 |
-| `src/chain/storage_economics_tests.rs` | Sil | present | BLG-041 (`run_storage_maintenance`) |
-| `src/chain/storage_maintenance.rs` | Sil | present | BLG-041 (`run_storage_maintenance`) |
-| `src/domain/regeneration_stage.rs` | Tasi ve yeniden adlandir | present |  |
-| `src/domain/regen_health.rs` | Tasi ve yeniden adlandir | present |  |
-| `src/network/regen_health_tick.rs` | Tasi ve yeniden adlandir | present |  |
-| `src/domain/regen_mempool.rs` | Tasi ve yeniden adlandir | present |  |
-| `src/gateway/service.rs` | Goc | present | BLG-032, BLG-262 |
-| `budzero/bud-node/` | Sil | present | BLG-035, BLG-258 |
-| `bud/` | Goc ve sil | present | BLG-073 ile BLG-080, BLG-142 ile BLG-145, BLG-217 |
-| `docs/BUD_CONTENT_ENCRYPTION.md` | Goc | present |  |
-| `docs/BUD_STORAGE_ROADMAP.md` | Goc | present |  |
+| `src/storage/db.rs` | Move | present | WP-17 scope after WP-06 |
+| `src/storage/traits.rs` | Move | present | WP-17 scope after WP-06 |
+| `src/storage/merkle_trie.rs` | Move | present | WP-17 scope after WP-06 |
+| `src/storage/pruning.rs` | Move | present | WP-17 scope after WP-06 |
+| `src/storage/witness_retention.rs` | Move | present |  |
+| `src/storage/content_id.rs` | Migrate | present | BLG-073 (three-way `content_id` mismatch) |
+| `src/storage/manifest.rs` | Delete | present | BLG-047, BLG-109, BLG-168 |
+| `src/storage/lrc.rs` | Delete | present | BLG-049, BLG-089, BLG-144, BLG-220 |
+| `src/storage/erasure.rs` | Delete | present | BLG-049, BLG-089, BLG-144, BLG-220 |
+| `src/storage/msr.rs` | Delete | present | BLG-049, BLG-089, BLG-144, BLG-220 |
+| `src/storage/column_commitment.rs` | Delete | present | BLG-049, BLG-089, BLG-144, BLG-220 |
+| `src/storage/lifecycle.rs` | Delete | present | BLG-045, BLG-046 |
+| `src/storage/provider.rs` | Delete | present | BLG-045, BLG-046 |
+| `src/storage/one_share.rs` | Delete | present | BLG-049 (`OneShare` quota bypass) |
+| `src/storage/one_view.rs` | Delete | present | BLG-049 (`OneShare` quota bypass) |
+| `src/storage/server_admission.rs` | Delete | present | BLG-253 |
+| `src/storage/mobile_self.rs` | Delete | present | BLG-253 |
+| `src/storage/render.rs` | Delete | present | BLG-048, BLG-208 |
+| `src/storage/generated.rs` | Delete | present | BLG-048, BLG-208 |
+| `src/storage/fixed_point.rs` | Delete | present | BLG-048, BLG-208 |
+| `src/storage/pact_binding.rs` | Delete | present |  |
+| `src/storage/three_regime.rs` | Delete | present | BLG-209 |
+| `src/storage/qr_reemit.rs` | Migrate | present | BLG-210, BLG-211 |
+| `src/storage/qr_recipe.rs` | Migrate | present | BLG-210, BLG-211 |
+| `src/storage/qr_payload.rs` | Migrate | present | BLG-210, BLG-211 |
+| `src/storage/three_recipe.rs` | Migrate | present | BLG-210, BLG-211 |
+| `src/storage/qr_carousel.rs` | Migrate | present | BLG-049, BLG-216 |
+| `src/storage/qr_codec.rs` | Migrate | present | BLG-214 |
+| `src/storage/qr_png.rs` | Migrate | present | BLG-214 |
+| `src/storage/qr_matrix.rs` | Migrate | present | BLG-214 |
+| `src/storage/qr_video.rs` | Migrate | present | BLG-214 |
+| `src/storage/qr_frame.rs` | Migrate | present | BLG-214 |
+| `src/storage/qr_encode.rs` | Migrate | present | BLG-214 |
+| `src/storage/qr_verify.rs` | Migrate | present | BLG-214 |
+| `src/storage/qr_receive.rs` | Migrate | present | BLG-214 |
+| `src/storage/qr_verify_indep.rs` | Migrate | present | BLG-214 |
+| `src/storage/three_pipe.rs` | Migrate | present | BLG-213, BLG-218 |
+| `src/storage/emit.rs` | Migrate | present | BLG-213, BLG-218 |
+| `src/storage/three_nft.rs` | Migrate | present | BLG-212 |
+| `src/storage/reveal_gateway.rs` | Migrate | present | BLG-125 |
+| `src/storage/three_rpc.rs` | Migrate | present | BLG-125 |
+| `src/storage/three_reveal.rs` | Migrate | present | BLG-125 |
+| `src/storage/three_meter.rs` | Migrate | present |  |
+| `src/storage/three_gate.rs` | Migrate | present |  |
+| `src/storage/three_visibility.rs` | Migrate | present |  |
+| `src/storage/three_hooks.rs` | Migrate | present |  |
+| `src/storage/assignment.rs` | Migrate | present | BLG-047 (`assign_shard`) |
+| `src/storage/dictionary.rs` | Migrate | present | BLG-141, BLG-222 |
+| `src/storage/derived.rs` | Migrate | present | BLG-222 |
+| `src/storage/transformed.rs` | Migrate | present | BLG-219 |
+| `src/storage/living_threshold.rs` | Migrate | present | BLG-222 |
+| `src/storage/payload_crypt.rs` | Migrate | present | BLG-049 (`ViewGrant` epoch-0), BLG-125 |
+| `src/storage/key_package.rs` | Migrate | present | BLG-049 (`ViewGrant` epoch-0), BLG-125 |
+| `src/storage/social_delete.rs` | Migrate | present | BLG-049 (`ViewGrant` epoch-0), BLG-125 |
+| `src/storage/view_grant.rs` | Migrate | present | BLG-049 (`ViewGrant` epoch-0), BLG-125 |
+| `src/domain/storage_params.rs` | Delete | present | BLG-045, BLG-046, BLG-047, BLG-102, BLG-183 |
+| `src/domain/deal_open.rs` | Delete | present | BLG-045, BLG-046, BLG-047, BLG-102, BLG-183 |
+| `src/domain/storage_deal.rs` | Delete | present | BLG-045, BLG-046, BLG-047, BLG-102, BLG-183 |
+| `src/domain/storage_tx.rs` | Migrate | present | BLG-183 |
+| `src/chain/storage_economics_tests.rs` | Delete | present | BLG-041 (`run_storage_maintenance`) |
+| `src/chain/storage_maintenance.rs` | Delete | present | BLG-041 (`run_storage_maintenance`) |
+| `src/domain/regeneration_stage.rs` | Move and rename | present |  |
+| `src/domain/regen_health.rs` | Move and rename | present |  |
+| `src/network/regen_health_tick.rs` | Move and rename | present |  |
+| `src/domain/regen_mempool.rs` | Move and rename | present |  |
+| `src/gateway/service.rs` | Migrate | present | BLG-032, BLG-262 |
+| `budzero/bud-node/` | Delete | present | BLG-035, BLG-258 |
+| `bud/` | Migrate and delete | present | BLG-073..BLG-080, BLG-142..BLG-145, BLG-217 |
+| `docs/BUD_CONTENT_ENCRYPTION.md` | Migrate | present |  |
+| `docs/BUD_STORAGE_ROADMAP.md` | Migrate | present |  |
 
 All 70 decision-table paths are present in this snapshot. No deletion has
 landed. The removal order (WP-06 move, then WP-07 delete, then WP-10/WP-18
