@@ -5,12 +5,12 @@ use std::collections::BTreeSet;
 use crate::chain::genesis_ceremony::{assemble, genesis_hash, CeremonyInputs, OperatorRecord};
 use crate::core::address::Address;
 use crate::core::chain_config::Network;
-use crate::crypto::pq::generate_keypair;
+use crate::crypto::pq::ml_dsa_public_key;
 use crate::crypto::primitives::ValidatorKeys;
 use crate::crypto::scheme::SchemeId;
 use crate::rpc::method_class::{Effect, Listener, METHOD_CLASSES};
 use crate::storage::bud3::placement::PlacementTable;
-use crate::tokenomics::{TokenomicsAddresses, BUD_MAX_SUPPLY};
+use crate::tokenomics::{TokenomicsAddresses, BUD_TOTAL_SUPPLY};
 use crate::validators::handover::{
     handover_spec, is_finality_stalled, DutyKind, HandoverBound, RecoveryTracker,
     SeatHandoverTracker, FINALITY_STALL_BLOCKS, TESTNET_CHECKPOINT_INTERVAL_BLOCKS,
@@ -98,7 +98,7 @@ fn rehearsal_ceremony_assembles_eight_full_validators_deterministically() {
         .iter()
         .filter_map(|entry| entry.get(1).and_then(serde_json::Value::as_u64))
         .sum();
-    assert_eq!(alloc_sum, BUD_MAX_SUPPLY);
+    assert_eq!(alloc_sum, BUD_TOTAL_SUPPLY);
 }
 
 #[test]
@@ -129,7 +129,7 @@ fn drill_t1_and_t4_mobile_departure_and_one_epoch_activation() {
     // T-4: Mobile quota / class changes activate strictly at E + 1 via activate_due.
     let mut dir = ValidatorDirectory::new();
     let owner = Address::from([0x81; 32]);
-    let (op_pk, _) = generate_keypair(SchemeId::ML_DSA_65).expect("keygen");
+    let op_pk = ml_dsa_public_key(SchemeId::ML_DSA_65, &[0x81; 32]).expect("keygen");
     let min_mobile_quota: u64 = 1 << 30;
     let min_mobile_stake: u64 = 1_000_000_000;
     let reg = ValidatorRegistration {
