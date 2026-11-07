@@ -930,7 +930,7 @@ fn main() {
     if !confirmed.is_empty() {
         for (seed, first, second) in &confirmed {
             println!(
-                "FINDING: seed {seed:#x} separated TWICE ({first:.2}, then {second:.2}), both > {THRESHOLD:.1}."
+                "seed {seed:#x} separated twice ({first:.2}, then {second:.2}), both > {THRESHOLD:.1}."
             );
         }
         println!("The field operations spend measurably different time on different values.");

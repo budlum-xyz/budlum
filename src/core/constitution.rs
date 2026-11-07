@@ -304,7 +304,7 @@ mod tests {
 
     /// A guardrail slot must hold the parameter of its own key.
     #[test]
-    fn p20_f08_guardrail_slot_with_foreign_parameter_is_rejected() {
+    fn guardrail_slot_with_foreign_parameter_is_rejected() {
         let mut registry = ConstitutionRegistry::new();
         registry.parameters.insert(
             ConstitutionParameterKey::PoaIslandIsolation,

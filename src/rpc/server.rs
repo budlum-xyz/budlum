@@ -7013,7 +7013,7 @@ mod tests {
     }
 
     #[test]
-    fn p21_f01_default_config_has_a_rate_limit() {
+    fn default_config_has_a_rate_limit() {
         assert!(RpcSecurityConfig::default().rate_limit_per_minute.is_some());
     }
 

@@ -1332,7 +1332,7 @@ mod tests {
         let mut s = valid_spec();
         s.execution_dims = Some(vec![2, 1]);
         let with_dims = s.calculate_leaf();
-        assert_ne!(base, with_dims, "P31-F02: dims must change the leaf");
+        assert_ne!(base, with_dims, "dimensions must change the leaf");
         s.execution_dims = Some(vec![2, 2]);
         assert_ne!(
             with_dims,
@@ -1344,7 +1344,7 @@ mod tests {
         assert_ne!(
             base,
             m.calculate_leaf(),
-            "P31-F02: modalities must change the leaf"
+            "modalities must change the leaf"
         );
     }
 

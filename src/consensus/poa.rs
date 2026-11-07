@@ -488,7 +488,7 @@ impl ConsensusEngine for PoAEngine {
     ) -> Result<(), ConsensusError> {
         let expected =
             self.prepare_common(block, state, chain.last().map(|p| p.timestamp), chain)?;
-        // P01-F24: refuse a slot we do not lead before the caller applies any
+        // Refuse a slot we do not lead before the caller applies any
         // state. `prepare_common` names the round-0 leader for display when no
         // affordable round names us; previewing through to the end made every
         // non-leader PoA node compute the full state transition and then fail

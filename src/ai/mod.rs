@@ -4388,7 +4388,7 @@ mod tests {
         const {
             assert!(
                 !FULL_AI_STARK_VERIFICATION_LIVE,
-                "P32-F02: STARK public inputs are not bound to the request yet"
+                "STARK public inputs are not bound to the request"
             );
         }
     }

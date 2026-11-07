@@ -1171,7 +1171,7 @@ mod tests {
     /// The constitution's MinConstitutionProposalEpochs binds
     /// constitution amendments instead of the hard coded 10.
     #[test]
-    fn p20_f05_amendment_respects_min_constitution_proposal_epochs() {
+    fn amendment_respects_min_constitution_proposal_epochs() {
         let mut gov = GovernanceState::default();
         let proposer = Address::from([0x01; 32]);
         gov.constitution
@@ -1200,7 +1200,7 @@ mod tests {
 
     /// Proposals that execution would drop are refused up front.
     #[test]
-    fn p20_f07_unexecutable_proposals_are_refused_at_creation() {
+    fn unexecutable_proposals_are_refused_at_creation() {
         use crate::core::account::MAX_BASE_FEE;
         let mut gov = GovernanceState::default();
         let proposer = Address::from([0x01; 32]);
@@ -1422,7 +1422,7 @@ mod l4_tests {
     /// One proposer cannot fill the Active slots by using one
     /// proposal per epoch, which keeps the per-epoch fee multiplier at 1x.
     #[test]
-    fn p20_f01_one_proposer_cannot_exhaust_active_slots() {
+    fn one_proposer_cannot_exhaust_active_slots() {
         let mut gov = GovernanceState::default();
         let attacker = Address::from([0xA1; 32]);
         let mut accepted = 0u64;
@@ -1443,7 +1443,7 @@ mod l4_tests {
 
     /// Closed proposals leave state after the retention window.
     #[test]
-    fn p20_f02_closed_proposals_are_pruned() {
+    fn closed_proposals_are_pruned() {
         let mut gov = GovernanceState::default();
         let proposer = Address::from([0xB1; 32]);
         let closed = gov

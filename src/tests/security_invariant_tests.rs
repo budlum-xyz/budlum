@@ -216,7 +216,7 @@ mod tests {
         );
     }
 
-    /// NOT A FINDING, pinned: replaying slashing evidence cannot slash twice.
+    /// Replaying slashing evidence cannot slash twice.
     ///
     /// `slash_validator` returns early when the validator is already flagged.
     /// Without that, resubmitting the same double-sign evidence in a later
@@ -246,7 +246,7 @@ mod tests {
         );
     }
 
-    /// NOT A FINDING, pinned: X-Forwarded-For is ignored unless the peer is a
+    /// X-Forwarded-For is ignored unless the peer is a
     /// configured trusted proxy.
     ///
     /// If an empty `trusted_proxies` list meant "trust the header", per-IP rate
@@ -264,7 +264,7 @@ mod tests {
         );
     }
 
-    /// NOT A FINDING, pinned: the operator RPC refuses to bind off-loopback.
+    /// The operator RPC refuses to bind off-loopback.
     ///
     /// The reviewer's point stands that loopback is weaker than it looks inside
     /// a shared network namespace (a Kubernetes sidecar shares it). The bind
