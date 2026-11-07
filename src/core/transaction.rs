@@ -3334,6 +3334,9 @@ fn encode_validator_tx(tx: &crate::validators::ValidatorTx, out: &mut Vec<u8>) {
             put_u64(out, *seq);
             put_bytes(out, operator_signature);
         }
+        ValidatorTx::Resume => {
+            put_u8(out, 4);
+        }
     }
 }
 
