@@ -1,4 +1,7 @@
 target/
+
+# The binding Turkish directive is maintained outside the English-only repository.
+/THE_BUDLUM_DIREKTIF.md
 # A CI artifact (the output of the xtask/tools generate-sbom tool); it is not committed
 sbom.cdx.json
 protoc-*.zip
