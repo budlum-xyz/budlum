@@ -171,7 +171,7 @@ impl Executor {
         // transaction may originate from it, and it is rejected everywhere
         // but the genesis block by `validate_and_add_block`. Accepting any
         // zero-address sender here would let an attacker fill blocks with
-        // free, unsigned, fee-free transactions (BUDLUM finding #65/#171).
+        // free, unsigned, fee-free transactions.
         if tx.from == Address::zero() {
             if tx.verify_in(&state.scheme_registry) {
                 return Ok(());
@@ -1918,7 +1918,7 @@ impl Executor {
                         .map_err(|e| BudlumError::validation("ai_data_access_denied", e))?;
                 }
                 // Balance check before deduction (spendable: the vesting gate -
-                // finding #356; the deduction comes from the spendable part and the lock
+                // the deduction comes from the spendable part and the lock
                 // is not broken because the first gate already verified spendable).
                 // spendable is read BEFORE the mutable borrow of `get_or_create`
                 // (E0502): if the account does not exist spendable is 0, and it is 0 after

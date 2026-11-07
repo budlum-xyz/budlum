@@ -240,7 +240,7 @@ fn ai_require_execution_proof_blocks_finalize_without_proof() {
             modalities: crate::ai_inference::perception::ModalitySet::text_only(),
         })
         .expect_err(
-            "F-04: proof-required models cannot register while STARK verification is not live",
+            "proof-required models cannot register while STARK verification is not live",
         );
     assert!(
         err.contains("full AI STARK"),

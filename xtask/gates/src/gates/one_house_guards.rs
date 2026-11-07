@@ -2,10 +2,10 @@
 //!
 //! The audit report's dominant finding class (7 of 12 findings) was not a
 //! wrong check but a **missing sibling**: the mint path validated the fee
-//! ceiling while the unlock path narrowed it with a cast (F-8), two of the
+//! ceiling while the unlock path narrowed it with a cast, two of the
 //! three Merkle implementations promoted an odd tail while the third
-//! duplicated it (F-6), one fork-choice family resolved equal-weight ties
-//! while its siblings refused the reorg in both directions (F-2). Every
+//! duplicated it, one fork-choice family resolved equal-weight ties
+//! while its siblings refused the reorg in both directions. Every
 //! one of those is a set of functions that do the same job, where one of
 //! them stopped carrying a guard its siblings still carry.
 //!

@@ -8,8 +8,8 @@
 //! An unpaired tail is promoted under its own domain tag, never paired
 //! with itself. The self-pairing made the tail contribute exactly what a
 //! duplicated leaf would, so the root of `[a, b, c]` equalled the root of
-//! `[a, b, c, c]`: two different commitments, one digest (the F-6 shape,
-//! in every tree that used this module's duplicate-tail rule). A promoted
+//! `[a, b, c, c]`: two different commitments, one digest (a duplicated-tail
+//! shape, in every tree that used this module's duplicate-tail rule). A promoted
 //! digest is produced by `promote` alone, which no `combine` call can
 //! reproduce, so the ambiguity is closed at the shape level and every
 //! binding inherits it.

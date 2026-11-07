@@ -1596,7 +1596,7 @@ impl Blockchain {
     /// Derived from the chain prefix on every read, never stored. The
     /// previous `settlement_finality_hashes` field had no production
     /// writer at all, so the settlement root folded into the state root
-    /// was always the empty-tree root (F-7, dead-feature illusion). Wiring
+    /// was always the empty-tree root (dead-feature illusion). Wiring
     /// a writer that appended on finality-certificate arrival would have
     /// traded the dead input for a consensus race: two honest nodes that
     /// finalized the same checkpoint at different moments would fold
@@ -8731,7 +8731,7 @@ mod tests {
         }
     }
 
-    /// F-7: the settlement finality window is a pure function of the chain
+    /// The settlement finality window is a pure function of the chain
     /// prefix. A checkpoint enters only once it is buried a finality
     /// horizon deep, and leaves once it is older than the settled-row
     /// retention; the genesis height, non-checkpoint heights and malformed
@@ -9724,7 +9724,7 @@ mod tests {
             .expect("peer must accept a self-produced mainnet block");
     }
 
-    /// Audit 2026-09-09, F-3: an operator sealing global headers must not
+    /// Audit 2026-09-09: an operator sealing global headers must not
     /// fork the node. The last sealed header is node-local operator state;
     /// hashing it into the state root made the producer's root irreproducible
     /// by unsealed peers (and inconsistent with the reorg paths, which

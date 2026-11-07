@@ -52,8 +52,8 @@ const TX_WIRE_VERSION: u32 = 2;
 /// A peer may put an arbitrarily large blob in a transaction wire payload's
 /// `data` field. bincode deserialization has no size limit by default, so an
 /// unauthenticated peer can force the node to allocate until it is killed
-/// (remote OOM, R-28 / BLG-033). Reject oversized payloads before
-/// deserialization. Legitimate payloads are far smaller than this bound.
+/// (remote OOM). Reject oversized payloads before deserialization. Legitimate
+/// payloads are far smaller than this bound.
 const MAX_TX_PAYLOAD_BYTES: usize = 1_048_576; // 1 MiB
 
 impl From<&Transaction> for pb::ProtoTransaction {

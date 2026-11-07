@@ -165,7 +165,7 @@ mod tests {
         )
         .expect("build request");
         assert!(req.verify_id(), "canonical request_id must verify");
-        // (after finding #359 the verifier stake is mandatory)
+        // The verifier stake is mandatory.
         let _ = registry.lock_verifier_stake(&operator, crate::ai::registry::MIN_VERIFIER_STAKE);
         let req_id = registry.submit_request(req, 1).expect("submit request");
 

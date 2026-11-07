@@ -1845,7 +1845,7 @@ async fn main() {
                                                 .and_then(|v| v.to_str().ok())
                                                 .unwrap_or("");
                                             let bearer = format!("Bearer {key}");
-                                            // F-0003: constant-time comparison, closing a timing side
+                                            // Constant-time comparison, closing a timing side
                                             // channel. A short-circuiting `!=` leaks both the length and
                                             // the content of the secret into timing, so
                                             // `subtle::ConstantTimeEq` is used instead.
