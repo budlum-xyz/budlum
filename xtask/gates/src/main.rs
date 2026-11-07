@@ -114,6 +114,7 @@ mod gates {
     pub mod no_conflict_markers;
     pub mod no_constant_security_verdicts;
     pub mod no_idle_code;
+    pub mod no_legacy_storage;
     pub mod no_new_shell_gates;
     pub mod no_orphan_source_files;
     pub mod no_out_of_block_consensus_writes;
@@ -957,6 +958,22 @@ const GATES: &[Gate] = &[
         run_log: Some(gates::badges_current::run),
         run_args: None,
         self_test: gates::badges_current::self_test,
+    },
+    Gate {
+        name: "rust-syntax-is-parseable",
+        replaces: None,
+        run: gates::rust_syntax_is_parseable::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::rust_syntax_is_parseable::self_test,
+    },
+    Gate {
+        name: "no-legacy-storage",
+        replaces: None,
+        run: gates::no_legacy_storage::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::no_legacy_storage::self_test,
     },
     Gate {
         name: "concept-names",
