@@ -1,4 +1,4 @@
-//! Developer OS / BudL SDK primitives.
+//! Project Manifest / BudL SDK primitives.
 //!
 //! This module defines deterministic project manifests and fixture bundles for
 //! Local Budlum development. It does not start a network, call external APIs, or
@@ -58,13 +58,13 @@ pub struct BudlPackageFixture {
 }
 
 impl BudlPackageFixture {
-    pub fn validate(&self) -> Result<(), DeveloperOsError> {
+    pub fn validate(&self) -> Result<(), ProjectManifestError> {
         validate_label("package_name", &self.package_name)?;
         validate_label("compiler_profile", &self.compiler_profile)?;
         validate_compiler_profile(&self.compiler_profile)?;
         validate_label("entrypoint", &self.entrypoint)?;
         if self.source_hash == [0u8; 32] {
-            return Err(DeveloperOsError::ZeroBudlSourceHash);
+            return Err(ProjectManifestError::ZeroBudlSourceHash);
         }
         Ok(())
     }
@@ -104,16 +104,16 @@ pub struct ProofFixture {
 }
 
 impl ProofFixture {
-    pub fn validate(&self) -> Result<(), DeveloperOsError> {
+    pub fn validate(&self) -> Result<(), ProjectManifestError> {
         validate_label("proof fixture name", &self.name)?;
         if self.input_commitment == [0u8; 32] {
-            return Err(DeveloperOsError::ZeroProofInputCommitment);
+            return Err(ProjectManifestError::ZeroProofInputCommitment);
         }
         if self.result_root == [0u8; 32] {
-            return Err(DeveloperOsError::ZeroProofResultRoot);
+            return Err(ProjectManifestError::ZeroProofResultRoot);
         }
         if self.status == ProofFixtureStatus::Verified && self.proof_hash == [0u8; 32] {
-            return Err(DeveloperOsError::VerifiedProofWithoutProofHash);
+            return Err(ProjectManifestError::VerifiedProofWithoutProofHash);
         }
         Ok(())
     }
@@ -138,15 +138,15 @@ impl ProofFixture {
     ///
     /// When the record is not `Verified`, or when the `proof_hash` it carries
     /// does not match the verified envelope's.
-    pub fn bind_verified(&self, verified_proof_hash: [u8; 32]) -> Result<(), DeveloperOsError> {
+    pub fn bind_verified(&self, verified_proof_hash: [u8; 32]) -> Result<(), ProjectManifestError> {
         self.validate()?;
         if self.status != ProofFixtureStatus::Verified {
-            return Err(DeveloperOsError::ProofFixtureNotVerified {
+            return Err(ProjectManifestError::ProofFixtureNotVerified {
                 name: self.name.clone(),
             });
         }
         if self.proof_hash != verified_proof_hash {
-            return Err(DeveloperOsError::ProofFixtureHashMismatch {
+            return Err(ProjectManifestError::ProofFixtureHashMismatch {
                 name: self.name.clone(),
             });
         }
@@ -170,15 +170,15 @@ pub struct PollenFixture {
 }
 
 impl PollenFixture {
-    pub fn validate(&self) -> Result<(), DeveloperOsError> {
+    pub fn validate(&self) -> Result<(), ProjectManifestError> {
         if self.asset_id == [0u8; 32] {
-            return Err(DeveloperOsError::ZeroPollenAssetId);
+            return Err(ProjectManifestError::ZeroPollenAssetId);
         }
         if self.grant_id == [0u8; 32] {
-            return Err(DeveloperOsError::ZeroPollenGrantId);
+            return Err(ProjectManifestError::ZeroPollenGrantId);
         }
         if !self.ai_read_requires_grant {
-            return Err(DeveloperOsError::AiReadGrantBypassFixture);
+            return Err(ProjectManifestError::AiReadGrantBypassFixture);
         }
         Ok(())
     }
@@ -197,10 +197,10 @@ pub struct RelayerPolicyFixture {
 }
 
 impl RelayerPolicyFixture {
-    pub fn validate(&self) -> Result<(), DeveloperOsError> {
+    pub fn validate(&self) -> Result<(), ProjectManifestError> {
         validate_label("intent_kind", &self.intent_kind)?;
         if self.policy_hash == [0u8; 32] {
-            return Err(DeveloperOsError::ZeroRelayerPolicyHash);
+            return Err(ProjectManifestError::ZeroRelayerPolicyHash);
         }
         Ok(())
     }
@@ -212,7 +212,7 @@ impl RelayerPolicyFixture {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeveloperOsManifest {
+pub struct ProjectManifest {
     pub project_name: String,
     pub chain_id: u64,
     pub devnet_topology: DevnetTopology,
@@ -224,7 +224,7 @@ pub struct DeveloperOsManifest {
     pub external_network_access: bool,
 }
 
-impl DeveloperOsManifest {
+impl ProjectManifest {
     pub fn local_standard(project_name: impl Into<String>, budl_source_hash: [u8; 32]) -> Self {
         Self {
             project_name: project_name.into(),
@@ -262,13 +262,13 @@ impl DeveloperOsManifest {
         }
     }
 
-    pub fn validate(&self) -> Result<(), DeveloperOsError> {
+    pub fn validate(&self) -> Result<(), ProjectManifestError> {
         validate_label("project_name", &self.project_name)?;
         if self.chain_id == 0 {
-            return Err(DeveloperOsError::ZeroChainId);
+            return Err(ProjectManifestError::ZeroChainId);
         }
         if self.external_network_access {
-            return Err(DeveloperOsError::ExternalNetworkAccessNotAllowed);
+            return Err(ProjectManifestError::ExternalNetworkAccessNotAllowed);
         }
         self.budl_package.validate()?;
         for fixture in &self.proof_fixtures {
@@ -281,7 +281,7 @@ impl DeveloperOsManifest {
             fixture.validate()?;
         }
         if self.sdk_features.is_empty() {
-            return Err(DeveloperOsError::NoSdkFeatures);
+            return Err(ProjectManifestError::NoSdkFeatures);
         }
         Ok(())
     }
@@ -315,7 +315,7 @@ impl DeveloperOsManifest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DeveloperOsError {
+pub enum ProjectManifestError {
     InvalidLabel {
         field: &'static str,
         value: String,
@@ -357,12 +357,12 @@ pub enum DeveloperOsError {
 ///
 /// The set comes from `bud_isa::IsaProfile` itself, so a new profile added
 /// there has to have a counterpart here.
-fn validate_compiler_profile(value: &str) -> Result<(), DeveloperOsError> {
+fn validate_compiler_profile(value: &str) -> Result<(), ProjectManifestError> {
     const KNOWN: [&str; 3] = ["production", "experimental", "testing"];
     if KNOWN.contains(&value) {
         Ok(())
     } else {
-        Err(DeveloperOsError::UnknownCompilerProfile {
+        Err(ProjectManifestError::UnknownCompilerProfile {
             value: value.into(),
         })
     }
@@ -373,7 +373,7 @@ fn update_str(hasher: &mut Sha256, value: &str) {
     hasher.update(value.as_bytes());
 }
 
-fn validate_label(field: &'static str, value: &str) -> Result<(), DeveloperOsError> {
+fn validate_label(field: &'static str, value: &str) -> Result<(), ProjectManifestError> {
     let valid = !value.is_empty()
         && value.len() <= 64
         && !value.contains("..")
@@ -383,7 +383,7 @@ fn validate_label(field: &'static str, value: &str) -> Result<(), DeveloperOsErr
     if valid {
         Ok(())
     } else {
-        Err(DeveloperOsError::InvalidLabel {
+        Err(ProjectManifestError::InvalidLabel {
             field,
             value: value.into(),
         })
@@ -394,8 +394,8 @@ fn validate_label(field: &'static str, value: &str) -> Result<(), DeveloperOsErr
 mod tests {
     use super::*;
 
-    fn manifest() -> DeveloperOsManifest {
-        DeveloperOsManifest::local_standard("demo-app", [9u8; 32])
+    fn manifest() -> ProjectManifest {
+        ProjectManifest::local_standard("demo-app", [9u8; 32])
     }
 
     #[test]
@@ -409,8 +409,8 @@ mod tests {
 
     #[test]
     fn project_id_changes_with_budl_source_hash() {
-        let first = DeveloperOsManifest::local_standard("demo-app", [9u8; 32]);
-        let second = DeveloperOsManifest::local_standard("demo-app", [10u8; 32]);
+        let first = ProjectManifest::local_standard("demo-app", [9u8; 32]);
+        let second = ProjectManifest::local_standard("demo-app", [10u8; 32]);
         assert_ne!(first.project_id(), second.project_id());
     }
 
@@ -421,7 +421,7 @@ mod tests {
         manifest.proof_fixtures[0].proof_hash = [0u8; 32];
         assert_eq!(
             manifest.validate().unwrap_err(),
-            DeveloperOsError::VerifiedProofWithoutProofHash
+            ProjectManifestError::VerifiedProofWithoutProofHash
         );
     }
 
@@ -431,7 +431,7 @@ mod tests {
         manifest.pollen_fixtures[0].ai_read_requires_grant = false;
         assert_eq!(
             manifest.validate().unwrap_err(),
-            DeveloperOsError::AiReadGrantBypassFixture
+            ProjectManifestError::AiReadGrantBypassFixture
         );
     }
 
@@ -441,7 +441,7 @@ mod tests {
         manifest.project_name = "../bad".into();
         assert!(matches!(
             manifest.validate().unwrap_err(),
-            DeveloperOsError::InvalidLabel { .. }
+            ProjectManifestError::InvalidLabel { .. }
         ));
     }
 
@@ -453,18 +453,18 @@ mod tests {
     /// and both look valid.
     #[test]
     fn a_compiler_profile_outside_the_isa_set_is_refused() {
-        let mut manifest = DeveloperOsManifest::local_standard("project", [7u8; 32]);
+        let mut manifest = ProjectManifest::local_standard("project", [7u8; 32]);
         // The spelling gate scans source text, so the transposed name is built
         // from letters here: producing bad input without weakening the gate.
         let typo = format!("prod{}ution", "c");
         manifest.budl_package.compiler_profile = typo;
         assert!(matches!(
             manifest.validate().unwrap_err(),
-            DeveloperOsError::UnknownCompilerProfile { .. }
+            ProjectManifestError::UnknownCompilerProfile { .. }
         ));
 
         for good in ["production", "experimental", "testing"] {
-            let mut ok = DeveloperOsManifest::local_standard("project", [7u8; 32]);
+            let mut ok = ProjectManifest::local_standard("project", [7u8; 32]);
             ok.budl_package.compiler_profile = good.into();
             ok.validate()
                 .unwrap_or_else(|e| panic!("{good} should be a valid profile: {e:?}"));
@@ -512,7 +512,7 @@ mod tests {
             .expect("it should bind to its own proof");
         assert!(matches!(
             fixture.bind_verified([8u8; 32]).unwrap_err(),
-            DeveloperOsError::ProofFixtureHashMismatch { .. }
+            ProjectManifestError::ProofFixtureHashMismatch { .. }
         ));
     }
 
@@ -523,7 +523,7 @@ mod tests {
         fixture.status = ProofFixtureStatus::Pending;
         assert!(matches!(
             fixture.bind_verified([9u8; 32]).unwrap_err(),
-            DeveloperOsError::ProofFixtureNotVerified { .. }
+            ProjectManifestError::ProofFixtureNotVerified { .. }
         ));
     }
 }

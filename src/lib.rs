@@ -22,7 +22,7 @@ pub mod core;
 pub mod cross_domain;
 pub mod crypto;
 pub mod deed;
-pub mod developer_os;
+pub mod project_manifest;
 pub mod domain;
 pub mod error;
 pub mod execution;

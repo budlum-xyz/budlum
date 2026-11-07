@@ -82,7 +82,7 @@ const BASELINE: &[&str] = &[
     "src/cross_domain/evm/sync_committee.rs",
     "src/crypto/pkcs11.rs",
     "src/crypto/primitives.rs",
-    "src/developer_os.rs",
+    "src/project_manifest.rs",
     "src/domain/finality_adapter.rs",
     "src/domain/fork_choice.rs",
     "src/domain/plugin.rs",
