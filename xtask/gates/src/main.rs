@@ -112,6 +112,7 @@ mod gates {
     pub mod network_hardening_gate;
     pub mod no_conflict_markers;
     pub mod no_constant_security_verdicts;
+    pub mod no_float_in_consensus_paths;
     pub mod no_idle_code;
     pub mod no_new_shell_gates;
     pub mod no_orphan_source_files;
@@ -1388,6 +1389,17 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::concept_names::self_test,
+    },
+    // Exact arithmetic in the consensus surfaces: no float reaches a block.
+    // It walks the tree from the root and reads its pins from this binary, so
+    // like the concept-name ratchet it takes no log path.
+    Gate {
+        name: "no-float-in-consensus-paths",
+        replaces: None,
+        run: gates::no_float_in_consensus_paths::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::no_float_in_consensus_paths::self_test,
     },
 ];
 

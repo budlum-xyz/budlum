@@ -2000,6 +2000,17 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- concept-names --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- concept-names
+      # Exact arithmetic in the consensus surfaces. A float that reaches a block
+      # makes a node on x86_64 and a node on aarch64 disagree about the same
+      # block, so `src/chain`, `src/consensus`, the execution and settlement
+      # surfaces, the AI selection path and `budzero` may not carry one. The two
+      # `src/ai` sites that do are pinned in the gate with a ceiling and an
+      # owner, and the canary injects a float and requires the report to name
+      # the file.
+      - name: no floats in consensus paths gate + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-float-in-consensus-paths --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-float-in-consensus-paths
       - name: zizmor gate + canary
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- zizmor --self-test
