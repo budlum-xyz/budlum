@@ -127,14 +127,20 @@ fn the_registry_collision_scan_can_detect_a_violation() {
 /// The node profiles carry `network.chain_id` next to the network name. The
 /// loader refuses a profile whose id differs from the network's registered id
 /// (`NodeConfig::validate`), so a profile with the wrong number is a profile
-/// nobody can start. All six shipped profiles used to carry the pre-registry
+/// nobody can start. All seven shipped profiles used to carry the pre-registry
 /// numbers (1, 42, 1337) and were refused at startup; this lock reads each one
-/// and compares it with the code the way the loader does.
+/// and compares it with the code the way the loader does. `config/archive.toml`
+/// was the one profile this lock skipped: it was covered only by
+/// `shipped_profiles_match_the_chain_id_of_their_genesis_file`, which compares
+/// it with the genesis file it names and not with the network registry the
+/// loader uses. A profile and its genesis edited together drifted from the code
+/// and both locks stayed green (BLG-094).
 #[test]
 fn the_shipped_node_profiles_agree_with_the_code() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     for (file, network) in [
         ("config/mainnet.toml", Network::Mainnet),
+        ("config/archive.toml", Network::Testnet),
         ("config/testnet.toml", Network::Testnet),
         ("config/devnet.toml", Network::Devnet),
         ("config/personas/enterprise-poa.toml", Network::Mainnet),

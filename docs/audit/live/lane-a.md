@@ -8,7 +8,7 @@ WP-08, WP-12, WP-13, WP-14, WP-15, WP-16 or WP-17 (directive section 14.1.4).
 | Base commit | `20140e87061efc9d8d4076e04305c1318705e348` (`main`) |
 | Work branch | `arena/31c78aa9-budlum` |
 | Records in scope | 54 |
-| Revalidated in this slice | 3 |
+| Revalidated in this slice | 5 |
 | CI run numbers | none: this environment has no `cargo`, `rustc` or `rustfmt` |
 
 ## Method
@@ -53,7 +53,7 @@ would break.
 | Finding | Severity | Closing package | Live status | Evidence |
 |---|---|---|---|---|
 | BLG-001 | Critical | WP-12 | Trace present, not proved | `src/consensus/mod.rs:36` defines `MAX_LEADER_ROUNDS = 16` and `src/consensus/mod.rs:104` defines `affordable_leader_round`, which is the leader-round skip the finding asked for. Whether an empty height is skipped end to end needs a four-node run; the trace is not proof (section 14.1.3). |
-| BLG-002 | High | WP-16 | Not revalidated | No revalidation in this slice. |
+| BLG-002 | High | WP-16 | Confirmed | `config/testnet.toml` ships no reachable peer source: `bootnodes = []` and `dns_seeds = []`, and the block above them is a placeholder `seeds.<TESTNET_DOMAIN> A 203.0.113.7`. The validator key it names (`./secrets/testnet-validator.key`) is produced by the ceremony, not by the repository. The profile therefore cannot be started as shipped, which is the finding. The tokenomics half of the finding was not revalidated. |
 | BLG-003 | High | WP-16 | Not revalidated | No revalidation in this slice. |
 | BLG-005 | Medium | WP-16 | Previously fixed | `.gitignore:16` ignores `/secrets/` and `.gitignore:17` ignores `/data/`. The closure is the two lines; the ledger note said the same. |
 | BLG-006 | Medium | WP-16 | Not revalidated | No revalidation in this slice. |
@@ -78,7 +78,7 @@ would break.
 | BLG-088 | Medium | WP-17 | Not revalidated | No revalidation in this slice. |
 | BLG-089 | High | WP-17 | Not revalidated | No revalidation in this slice. |
 | BLG-090 | Medium | WP-17 | Not revalidated | No revalidation in this slice. |
-| BLG-094 | High | WP-16 | Not revalidated | No revalidation in this slice. |
+| BLG-094 | High | WP-16 | Previously fixed, one gap closed here | `config/archive.toml:6` now carries `chain_id = 45261` under `profile = "testnet"`, and every service in `ops/docker-compose.yml` passes `--consensus=pos` (lines 106, 160, 193, 226, 259) while its header claims PoS. The part of the finding that says the lock test skips the archive profile is closed by this slice: `the_shipped_node_profiles_agree_with_the_code` now lists `config/archive.toml` as `Network::Testnet`, so the profile is compared with the code registry and not only with the genesis file it names. |
 | BLG-096 | High | WP-12 | Not revalidated | No revalidation in this slice. |
 | BLG-100 | Critical | WP-17 | Not revalidated | No revalidation in this slice. |
 | BLG-101 | Critical | WP-17 | Not revalidated | No revalidation in this slice. |
@@ -109,7 +109,7 @@ would break.
 
 ## Notes
 
-1. The 51 `Not revalidated` rows are the remaining work of this package, and
+1. The 49 `Not revalidated` rows are the remaining work of this package, and
    the count is the package's progress measure. Nothing else in this file
    claims a closure.
 2. Section 14.1.7 asks for a permanent regression test per previously fixed
