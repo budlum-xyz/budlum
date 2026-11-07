@@ -23,7 +23,7 @@
 //! less, the slow candidates are not run.
 //!
 //! Every codec id, its frozen meaning and its state live in [`registry`].
-//! Convenience: public codec selection and A0 parameters consumed by budlum-core and codec transforms.
+//! Convenience: public B.U.D. 3.0 codec and storage surface consumed by gateway, CLI, and fuzz harnesses.
 
 use std::io::Read;
 
@@ -31,6 +31,37 @@ use std::io::Read;
 pub type CodecId = u16;
 
 pub mod registry;
+
+// The adopted compression methods, migrated from the old tree: lossless
+// transforms, wired into the registry by the candidate-encoder packages.
+pub mod autozstd;
+pub mod bloom;
+pub mod catalog;
+pub mod columnar;
+pub mod container;
+pub mod crop;
+pub mod dbdelta;
+pub mod dictionary;
+pub mod exepdf;
+pub mod fastcdc;
+pub mod genomic;
+pub mod huffman;
+pub mod jpegre;
+pub mod logfield;
+pub mod markdown;
+pub mod media;
+pub mod model;
+pub mod multifile;
+pub mod office;
+pub mod pcap;
+pub mod pgm;
+pub mod pointcloud;
+pub mod r3fix;
+pub mod ratioconsensus;
+pub mod real;
+pub mod timeseries;
+pub mod tiny;
+pub mod wal;
 
 /// Raw: the payload is the content.
 pub const RAW: CodecId = 0;
@@ -305,9 +336,9 @@ mod tests {
         // header of five bytes, then the five literal bytes.
         let frame: [u8; 14] = [
             0x28, 0xB5, 0x2F, 0xFD, // magic
-            0x20, // single segment, one-byte content size
-            0x05, // content size 5
-            0x29, 0x00, 0x00, // last block, raw, size 5
+            0x20,                   // single segment, one-byte content size
+            0x05,                   // content size 5
+            0x29, 0x00, 0x00,       // last block, raw, size 5
             b'h', b'e', b'l', b'l', b'o',
         ];
         assert_eq!(decode(ZSTD, &frame, 5).unwrap(), b"hello".to_vec());

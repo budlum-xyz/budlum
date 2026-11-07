@@ -15,6 +15,54 @@ use super::pipeline::ObjectRecord;
 use super::placement::Share;
 use super::registry::{Address, Bud3Registry, NftId, ObjectKey, Registered, RegistryError};
 
+/// Serde for the `(validator, signature)` pairs: serde derives arrays only up
+/// to 32 elements, and a detached signature is 64 bytes, so each side is
+/// carried as one length-prefixed byte string. A wrong length is a decode
+/// error.
+mod validation_pairs {
+    use serde::ser::SerializeSeq;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    struct Bytes<'a>(&'a [u8]);
+
+    impl Serialize for Bytes<'_> {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.serialize_bytes(self.0)
+        }
+    }
+
+    // The `serde(with)` hook passes exactly `&Vec<..>`, so the shape is fixed
+    // here even though a slice would be the usual parameter.
+    #[allow(clippy::ptr_arg)]
+    pub fn serialize<S: Serializer>(
+        pairs: &Vec<([u8; 32], [u8; 64])>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut seq = serializer.serialize_seq(Some(pairs.len()))?;
+        for (who, sig) in pairs {
+            seq.serialize_element(&(Bytes(&who[..]), Bytes(&sig[..])))?;
+        }
+        seq.end()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<([u8; 32], [u8; 64])>, D::Error> {
+        let raw = <Vec<(Vec<u8>, Vec<u8>)>>::deserialize(deserializer)?;
+        raw.into_iter()
+            .map(|(who, sig)| {
+                let who = <[u8; 32]>::try_from(who.as_slice()).map_err(|_| {
+                    serde::de::Error::invalid_length(who.len(), &"a 32-byte validator id")
+                })?;
+                let sig = <[u8; 64]>::try_from(sig.as_slice()).map_err(|_| {
+                    serde::de::Error::invalid_length(sig.len(), &"a 64-byte signature")
+                })?;
+                Ok((who, sig))
+            })
+            .collect()
+    }
+}
+
 /// The `StorageTx` v3 transactions.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StorageTxV3 {
@@ -72,6 +120,23 @@ pub enum StorageTxV3 {
         /// The content.
         content: ContentId,
     },
+    /// Replace an object with a new representation of the same content. The
+    /// content id never changes. Signed by the proposing Full validator.
+    ReplaceObject {
+        /// The content id; the object's fixed identity.
+        content: ContentId,
+        /// The object being replaced, named by its old commitment.
+        old_object: ObjectKey,
+        /// The record of the new representation.
+        new_record: ObjectRecord,
+        /// The placement of the new representation: `(segment, share)`.
+        shares: Vec<(u64, Share)>,
+        /// `(validator, signature)` pairs over the replacement validation
+        /// message, from at least three independent Full holders of the old
+        /// placement.
+        #[serde(with = "validation_pairs")]
+        validations: Vec<([u8; 32], [u8; 64])>,
+    },
 }
 
 /// What an applied transaction did.
@@ -85,6 +150,8 @@ pub enum Applied {
     Proved(usize),
     /// Repair recorded.
     Repaired,
+    /// Object replaced; the new object key.
+    Replaced(ObjectKey),
     /// NFT bound.
     Bound,
     /// Reference burned; `true` when the object was deleted.
@@ -114,7 +181,9 @@ pub fn apply(
         } => registry
             .register_object(signer, record, shares, epoch, lifetime_epochs)
             .map(Applied::Registered),
-        StorageTxV3::CustodyAck { object } => registry.ack(&object, &signer).map(Applied::Acked),
+        StorageTxV3::CustodyAck { object } => registry
+            .ack(&object, &signer, epoch)
+            .map(Applied::Acked),
         StorageTxV3::CustodyProofBatch { proofs } => registry
             .submit_proofs(&signer, &proofs, epoch)
             .map(Applied::Proved),
@@ -145,6 +214,15 @@ pub fn apply(
             object,
             extra_epochs,
         } => registry.renew(&object, extra_epochs).map(Applied::Renewed),
+        StorageTxV3::ReplaceObject {
+            content,
+            old_object,
+            new_record,
+            shares,
+            validations,
+        } => registry
+            .replace_object(&signer, content, &old_object, new_record, shares, &validations)
+            .map(Applied::Replaced),
         StorageTxV3::DeclineContent { content } => {
             registry.decline(signer, &content);
             Ok(Applied::Declined)

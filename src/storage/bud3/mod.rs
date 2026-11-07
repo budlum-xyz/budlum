@@ -31,6 +31,7 @@
 //! when the legacy storage code is removed; until then it is exercised by its
 //! own tests and the golden vectors under `tests/vectors/bud3/`.
 
+pub mod access_tiering;
 pub mod admission;
 pub mod bof1;
 pub mod content_id;
@@ -43,6 +44,7 @@ pub mod pipeline;
 pub mod placement;
 pub mod registry;
 pub mod repair;
+pub mod replace;
 pub mod segment;
 pub mod tx;
 pub mod varint;
