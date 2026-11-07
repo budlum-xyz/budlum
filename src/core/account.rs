@@ -2255,7 +2255,9 @@ impl AccountState {
         {
             let cut = slash_penalty(entry.amount, slash_ratio_fixed);
             entry.amount = entry.amount.saturating_sub(cut);
-            penalty = penalty.saturating_add(cut);
+            penalty = penalty
+                .checked_add(cut)
+                .expect("slashing-penalty arithmetic overflowed u64");
         }
         self.unbonding_queue
             .retain(|entry| entry.address != *address || entry.amount > 0);
@@ -2322,10 +2324,12 @@ impl AccountState {
         );
         self.registry
             .reduce_delegated_for_slash(address, bond_penalty, stake_before);
-        penalty = penalty.saturating_add(
-            self.registry
-                .slash_delegation_unbonding(address, slash_ratio_fixed),
-        );
+        penalty = penalty
+            .checked_add(
+                self.registry
+                    .slash_delegation_unbonding(address, slash_ratio_fixed),
+            )
+            .expect("delegation-slashing arithmetic overflowed u64");
 
         tracing::info!(
             "Slashed validator {} for {} stake due to {} (Jailed until epoch {})",
@@ -2384,7 +2388,9 @@ impl AccountState {
             {
                 let cut = crate::core::chain_config::slash_penalty(entry.amount, ratio);
                 entry.amount = entry.amount.saturating_sub(cut);
-                cut_total = cut_total.saturating_add(cut);
+                cut_total = cut_total
+                    .checked_add(cut)
+                    .expect("reported-slashing arithmetic overflowed u64");
             }
             if cut_total > 0 {
                 self.unbonding_queue
@@ -3085,7 +3091,10 @@ impl AccountState {
 
     pub fn add_balance(&mut self, public_key: &Address, amount: u64) {
         let account = self.get_or_create(public_key);
-        account.balance = account.balance.saturating_add(amount);
+        account.balance = account
+            .balance
+            .checked_add(amount)
+            .expect("balance addition overflowed u64");
         self.dirty_accounts.insert(*public_key);
     }
 
@@ -3211,9 +3220,10 @@ impl AccountState {
     /// Part of `accounts`, so supply-cap checks must use [`Self::total_bud_committed`]
     /// Instead of this helper alone.
     pub fn circulating_supply(&self) -> u128 {
-        self.accounts
-            .values()
-            .fold(0u128, |acc, a| acc + u128::from(a.balance))
+        self.accounts.values().fold(0u128, |acc, account| {
+            acc.checked_add(u128::from(account.balance))
+                .expect("circulating-supply arithmetic overflowed u128")
+        })
     }
 
     /// Total $BUD locked in validator stake, including inactive/jailed validators.
@@ -3222,16 +3232,18 @@ impl AccountState {
     /// Inactive but unslashed stake still exists and must count against the fixed
     /// 100M cap.
     pub fn total_staked_supply(&self) -> u128 {
-        self.validators
-            .values()
-            .fold(0u128, |acc, v| acc + u128::from(v.stake))
+        self.validators.values().fold(0u128, |acc, validator| {
+            acc.checked_add(u128::from(validator.stake))
+                .expect("staked-supply arithmetic overflowed u128")
+        })
     }
 
     /// Total $BUD in unbonding limbo.
     pub fn total_unbonding_supply(&self) -> u128 {
-        self.unbonding_queue
-            .iter()
-            .fold(0u128, |acc, e| acc + u128::from(e.amount))
+        self.unbonding_queue.iter().fold(0u128, |acc, entry| {
+            acc.checked_add(u128::from(entry.amount))
+                .expect("unbonding-supply arithmetic overflowed u128")
+        })
     }
 
     /// Total non-validator role bonds held by the permissionless registry.
@@ -3303,8 +3315,9 @@ impl AccountState {
                     .total_fee(duration)
                     .saturating_sub(deal.total_fee(paid_through));
                 total
-                    .saturating_add(u128::from(deal.economics.operator_bond))
-                    .saturating_add(u128::from(unearned))
+                    .checked_add(u128::from(deal.economics.operator_bond))
+                    .and_then(|value| value.checked_add(u128::from(unearned)))
+                    .expect("storage-escrow supply arithmetic overflowed u128")
             })
     }
 
@@ -3316,9 +3329,10 @@ impl AccountState {
     /// the supply cap, pub so supply reporting can read the escrowed
     /// part on its own.
     pub fn total_external_bonded_supply(&self) -> u128 {
-        self.external_bond_escrow
-            .values()
-            .fold(0u128, |acc, v| acc + u128::from(*v))
+        self.external_bond_escrow.values().fold(0u128, |acc, bond| {
+            acc.checked_add(u128::from(*bond))
+                .expect("external-bond supply arithmetic overflowed u128")
+        })
     }
 
     /// Escrows an external-domain bond: the amount LEAVES the poster's
@@ -3413,21 +3427,21 @@ impl AccountState {
         // leaving it out of `burned_total` would reopen the same amount
         // as minting headroom under the cap.
         let burned = taken - reward;
-        self.burned_total = self.burned_total.saturating_add(burned);
+        self.record_destroyed(u128::from(burned));
         Ok(burned)
     }
 
     /// Records destroyed BUD in `burned_total`. BUD was issued once;
     /// supply that leaves committed state without entering this counter
     /// would reopen the same amount as mint headroom under the cap. The
-    /// counter saturates rather than wraps: an overstated burn only closes
-    /// headroom, it never opens it.
+    /// counter uses checked arithmetic and representation conversion: corrupt
+    /// state that exceeds the counter halts instead of reopening mint room.
     pub fn record_destroyed(&mut self, amount: u128) {
-        // Supply path: checked arithmetic, no saturating_add (WP-17 item 5).
         let total = u128::from(self.burned_total)
             .checked_add(amount)
             .expect("burned-supply arithmetic overflowed u128");
-        self.burned_total = u64::try_from(total).unwrap_or(u64::MAX);
+        self.burned_total =
+            u64::try_from(total).expect("burned-supply arithmetic exceeds the u64 counter");
     }
 
     /// Records the drop in committed supply since `committed_before` as
@@ -3493,7 +3507,7 @@ impl AccountState {
             );
         }
         account.balance -= burned;
-        self.burned_total = self.burned_total.saturating_add(burned);
+        self.record_destroyed(u128::from(burned));
         self.dirty_accounts.insert(*address);
         burned
     }
@@ -3543,8 +3557,14 @@ impl AccountState {
                 // We don't loop forever on future calls.
                 break;
             }
-            total = total.saturating_add(burned);
-            self.timed_burn.total_burned = self.timed_burn.total_burned.saturating_add(burned);
+            total = total
+                .checked_add(burned)
+                .expect("timed-burn total arithmetic overflowed u64");
+            self.timed_burn.total_burned = self
+                .timed_burn
+                .total_burned
+                .checked_add(burned)
+                .expect("lifetime timed-burn arithmetic overflowed u64");
         }
         self.timed_burn.years_burned = due;
         total
@@ -4860,6 +4880,14 @@ mod tests {
         assert_eq!(state.burn_from(&a, 400), 400);
         assert_eq!(state.supply_capacity_remaining(), before);
         assert_eq!(state.burned_total, 400);
+    }
+
+    #[test]
+    #[should_panic(expected = "burned-supply arithmetic exceeds the u64 counter")]
+    fn blg_197_burned_supply_counter_rejects_overflow() {
+        let mut state = AccountState::new();
+        state.burned_total = u64::MAX;
+        state.record_destroyed(1);
     }
 
     #[test]
