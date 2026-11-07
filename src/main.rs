@@ -114,6 +114,15 @@ fn write_database_backup(
         ));
     }
     std::fs::create_dir_all(backup_dir)?;
+    // Serialize creation and pruning across cooperating processes. An in-flight
+    // reservation must not be mistaken for an expired backup by another writer.
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(backup_dir.join(".budlum-backup.lock"))?;
+    lock.try_lock()
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
     let timestamp_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(std::io::Error::other)?
@@ -2164,6 +2173,22 @@ mod tests {
         assert!(!dir.path().join("budlum-2.budbak").exists());
         assert!(dir.path().join("budlum-10.budbak").exists());
         assert!(dir.path().join("budlum-manual.budbak").exists());
+    }
+
+    #[test]
+    fn backup_refuses_concurrent_writer_without_pruning() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage =
+            budlum_core::storage::db::Storage::new(dir.path().join("db").to_str().unwrap())
+                .expect("open database");
+        let backups = dir.path().join("backups");
+        std::fs::create_dir(&backups).unwrap();
+        let existing = backups.join("budlum-1.budbak");
+        std::fs::write(&existing, b"existing").unwrap();
+        let lock = std::fs::File::create(backups.join(".budlum-backup.lock")).unwrap();
+        lock.lock().unwrap();
+        assert!(write_database_backup(&storage, &backups, 1).is_err());
+        assert_eq!(std::fs::read(existing).unwrap(), b"existing");
     }
 
     #[test]
