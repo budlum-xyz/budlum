@@ -55,7 +55,7 @@ run number.
 
 | Finding | Severity | Area | Title | Status | Evidence | Closing package |
 |---|---|---|---|---|---|---|
-| BLG-268 | Medium | CI gates | The `indexing-is-not-new` ratchet is red on `main`: `src/bin/support/http.rs` indexes a slice at runtime and is not in the frozen baseline | Fix in review | The gate scans `src/` for `slice[i]` and `slice[a..b]` with non-literal bounds outside test modules, and fails on any file that is not in its baseline. A faithful port of the gate's own `indexes_at_runtime` and `strip_test_mods` over the tree at `20140e8` reports 293 files scanned, 80 baseline entries, 0 stale entries and one offender: `src/bin/support/http.rs:37: octets[8..].fill(0);`. The line zeroes the low 64 bits of an IPv6 bucket; the same result is written with `octets.iter_mut().skip(8)`, which adds no index. | WP-42 |
+| BLG-268 | Medium | CI gates | The `indexing-is-not-new` ratchet is red on `main`: `src/bin/support/http.rs` indexes a slice at runtime and is not in the frozen baseline | Fix in review (PR #135) | The gate scans `src/` for `slice[i]` and `slice[a..b]` with non-literal bounds outside test modules, and fails on any file that is not in its baseline. A faithful port of the gate's own `indexes_at_runtime` and `strip_test_mods` over the tree at `20140e8` reports 293 files scanned, 80 baseline entries, 0 stale entries and one offender: `src/bin/support/http.rs:37: octets[8..].fill(0);`. The line zeroes the low 64 bits of an IPv6 bucket; PR #135 replaces it with `octets.iter_mut().skip(8)`, which preserves the bucket without adding a runtime index. It remains open pending merge and CI evidence. | WP-42 |
 
 ## Notes on the evidence
 

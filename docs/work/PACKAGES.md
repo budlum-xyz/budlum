@@ -30,11 +30,11 @@ reconciled against the live pull-request stack on 2026-11-07.
 
 | WP | Package | Lane | Layer | TLG | Depends on | Milestone | Live PRs | Status |
 |---|---|---|---|---|---|---|---|---|
-| WP-01 | Live validation: core | A | T-Launch | Yes | None | M0 | - | not started |
+| WP-01 | Live validation: core | A | T-Launch | Yes | None | M0 | #123, #124, #125, #129 | in progress |
 | WP-02 | Live validation: storage | B | T-Launch | Yes | None | M0 | #117 (draft) | in progress |
-| WP-03 | Live validation: execution, BudZero, domains, privacy, AI | C | T-Launch | Yes | None | M0 | - | not started |
-| WP-04 | Live validation: clients, operations, CI, docs and the combined state | D | T-Launch | Yes | None | M0 | #75, #77, #96, #118 | in progress |
-| WP-05 | Concept name map and counter gate | D | T-Launch | Yes | WP-04 | M1 | #24, #120, #122 | in progress |
+| WP-03 | Live validation: execution, BudZero, domains, privacy, AI | C | T-Launch | Yes | None | M0 | #123, #129 | in progress |
+| WP-04 | Live validation: clients, operations, CI, docs and the combined state | D | T-Launch | Yes | None | M0 | #75, #77, #96, #118, #123, #129, #135 | in progress |
+| WP-05 | Concept name map and counter gate | D | T-Launch | Yes | WP-04 | M1 | #24, #120, #122, #126, #127, #132, #135 | in progress |
 | WP-06 | Persistence and state-recovery migration | B | T-Launch | Yes | WP-02 | M1 | #60, #84 | in progress |
 | WP-07 | Removal of the legacy storage systems | B | T-Launch | Yes | WP-06 | M1 | #69, #71, #104 | in progress |
 | WP-08 | Validator classes and the single registry | A | T-Launch | Yes | WP-01 | M1 | #40 | in progress |
@@ -68,13 +68,13 @@ reconciled against the live pull-request stack on 2026-11-07.
 | WP-36 | Android validator application | D | T-Launch | Yes | WP-11 | M4 | #92, #97 (draft) | in progress |
 | WP-37 | Mobile device matrix and field test | D | T-Launch | Yes | WP-36 | M4 | #92 | in progress |
 | WP-38 | iOS opportunistic application | D | T-Launch | No (Beta) | WP-11 | Not a condition | #100 | in progress |
-| WP-39 | Wallet core and CLI | D | T-Launch | Yes | WP-08, WP-21, WP-27 | M4 | - | not started |
+| WP-39 | Wallet core and CLI | D | T-Launch | Yes | WP-08, WP-21, WP-27 | M4 | #132, #135 | in progress |
 | WP-40 | Explorer and indexer | D | T-Launch | Yes | WP-21, WP-26 | M4 | #73 | in progress |
 | WP-41 | Faucet and operations | D | T-Launch | Yes | WP-16 | M4 | #34, #52, #58, #59 | in progress |
-| WP-42 | CI, gates and supply chain | D | T-Launch | Yes | WP-04 | M2 | #24, #29, #30, #42, #63, #74, #75, #93, #95, #96, #98, #101, #103, #104, #106, #107, #109, #116, #119, #120, #121, #122 | in progress |
+| WP-42 | CI, gates and supply chain | D | T-Launch | Yes | WP-04 | M2 | #24, #29, #30, #42, #63, #74, #75, #93, #95, #96, #98, #101, #103, #104, #106, #107, #109, #116, #119, #120, #121, #122, #129, #130, #131, #132, #135 | in progress |
 | WP-43 | Documentation, README and the TLG report | D | T-Launch | Yes | WP-46, WP-47, WP-48 | M6 | #51 | in progress |
 | WP-44 | Domains, bridge, settlement and contracts | A | T-Launch | Yes | WP-01 | M4 | #14 | in progress |
-| WP-45 | Privacy, AI and account abstraction: the testnet boundary | B | T-Launch | Yes | WP-22 | M4 | #44, #49 | in progress |
+| WP-45 | Privacy, AI and account abstraction: the testnet boundary | B | T-Launch | Yes | WP-22 | M4 | #44, #49, #128 | in progress |
 | WP-46 | Ceremony rehearsal, rehearsal network and measurements | D | T-Launch | Yes | M4 | M5 | #92, #99, #102 (draft) | in progress |
 | WP-47 | Independent review 1: core and storage | Cross (C or D) | T-Launch | Yes | M4 | M5 | #56 | in progress |
 | WP-48 | Independent review 2: execution, mobile and clients | Cross (A or B) | T-Launch | Yes | M4 | M5 | #36, #43, #100 | in progress |
