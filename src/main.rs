@@ -107,31 +107,78 @@ fn write_database_backup(
     backup_dir: &Path,
     retention_count: usize,
 ) -> std::io::Result<PathBuf> {
+    if retention_count == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "backup retention count must be at least one",
+        ));
+    }
     std::fs::create_dir_all(backup_dir)?;
+    // Serialize creation and pruning across cooperating processes. An in-flight
+    // reservation must not be mistaken for an expired backup by another writer.
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(backup_dir.join(".budlum-backup.lock"))?;
+    lock.try_lock()?;
     let timestamp_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(std::io::Error::other)?
         .as_millis();
     let path = backup_dir.join(format!("budlum-{timestamp_ms}.budbak"));
-    storage.create_snapshot(&path)?;
+    // Reserve the name rather than replacing an existing verified backup if
+    // two requests arrive in the same millisecond or the clock moves back.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    if let Err(error) = storage.create_snapshot(&path) {
+        let _ = std::fs::remove_file(&path);
+        return Err(error);
+    }
     Storage::verify_snapshot(&path)?;
 
-    let mut backups: Vec<PathBuf> = std::fs::read_dir(backup_dir)?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|candidate| {
-            candidate
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("budlum-") && name.ends_with(".budbak"))
-        })
-        .collect();
+    prune_database_backups(backup_dir, &path, retention_count)?;
+    Ok(path)
+}
+
+// Only files bearing our exact numeric timestamp naming scheme are managed.
+// Always retain the just-verified backup, even if the system clock moved back.
+fn prune_database_backups(
+    backup_dir: &Path,
+    current: &Path,
+    retention_count: usize,
+) -> std::io::Result<()> {
+    let mut backups = Vec::new();
+    for entry in std::fs::read_dir(backup_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path == current || !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(timestamp) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("budlum-"))
+            .and_then(|name| name.strip_suffix(".budbak"))
+            .filter(|timestamp| {
+                !timestamp.is_empty() && timestamp.bytes().all(|b| b.is_ascii_digit())
+            })
+            .and_then(|timestamp| timestamp.parse::<u128>().ok())
+        else {
+            continue;
+        };
+        backups.push((timestamp, path));
+    }
     backups.sort();
-    let remove_count = backups.len().saturating_sub(retention_count);
-    for expired in backups.into_iter().take(remove_count) {
+    let remove_count = backups
+        .len()
+        .saturating_sub(retention_count.saturating_sub(1));
+    for (_, expired) in backups.into_iter().take(remove_count) {
         std::fs::remove_file(expired)?;
     }
-    Ok(path)
+    Ok(())
 }
 
 #[tokio::main]
@@ -1697,7 +1744,9 @@ async fn main() {
             rpc_security.clone(),
             RpcMode::Public,
         )
-        .with_metrics(metrics.clone());
+        .with_metrics(metrics.clone())
+        .with_aptos_listener("127.0.0.1:18549".to_string())
+        .with_solana_listener("127.0.0.1:18548".to_string());
         // In-process TLS: TLS 1.3 with X25519MLKEM768 only. A
         // certificate without its key, or an unusable pair, stops the node
         // here instead of falling back to plain HTTP.
@@ -2087,9 +2136,73 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        claim_new_key_file, console_producer, daemon_producer_loop_runs, try_load_signing_key,
+        claim_new_key_file, console_producer, daemon_producer_loop_runs, prune_database_backups,
+        try_load_signing_key, write_database_backup,
     };
     use budlum_core::cli::ConsensusType;
+
+    #[test]
+    fn zero_retention_refuses_backup_without_deleting_existing_files() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let db_path = dir.path().join("db");
+        let storage = budlum_core::storage::db::Storage::new(db_path.to_str().unwrap())
+            .expect("open database");
+        let backups = dir.path().join("backups");
+        std::fs::create_dir(&backups).unwrap();
+        let existing = backups.join("budlum-9.budbak");
+        std::fs::write(&existing, b"existing").unwrap();
+        let error = write_database_backup(&storage, &backups, 0).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(std::fs::read(existing).unwrap(), b"existing");
+        assert_eq!(std::fs::read_dir(backups).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn retention_uses_numeric_timestamps_and_preserves_current_and_unknown_files() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "budlum-2.budbak",
+            "budlum-10.budbak",
+            "budlum-1.budbak",
+            "budlum-manual.budbak",
+        ] {
+            std::fs::write(dir.path().join(name), name).unwrap();
+        }
+        let current = dir.path().join("budlum-1.budbak");
+        prune_database_backups(dir.path(), &current, 2).unwrap();
+        assert!(current.exists());
+        assert!(!dir.path().join("budlum-2.budbak").exists());
+        assert!(dir.path().join("budlum-10.budbak").exists());
+        assert!(dir.path().join("budlum-manual.budbak").exists());
+    }
+
+    #[test]
+    fn backup_refuses_concurrent_writer_without_pruning() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage =
+            budlum_core::storage::db::Storage::new(dir.path().join("db").to_str().unwrap())
+                .expect("open database");
+        let backups = dir.path().join("backups");
+        std::fs::create_dir(&backups).unwrap();
+        let existing = backups.join("budlum-1.budbak");
+        std::fs::write(&existing, b"existing").unwrap();
+        let lock = std::fs::File::create(backups.join(".budlum-backup.lock")).unwrap();
+        lock.lock().unwrap();
+        assert!(write_database_backup(&storage, &backups, 1).is_err());
+        assert_eq!(std::fs::read(existing).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn backup_returns_a_verified_existing_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage =
+            budlum_core::storage::db::Storage::new(dir.path().join("db").to_str().unwrap())
+                .expect("open database");
+        let path = write_database_backup(&storage, &dir.path().join("backups"), 1)
+            .expect("write backup");
+        assert!(path.is_file());
+        budlum_core::storage::db::Storage::verify_snapshot(path).expect("verify backup");
+    }
 
     #[test]
     fn key_claim_refuses_to_overwrite_an_existing_file() {
