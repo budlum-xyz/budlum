@@ -307,7 +307,8 @@ impl Storage {
     ///
     /// The temporary file is written beside the destination and renamed only
     /// After all bytes are durable, so a crash never presents a partial file as
-    /// A usable backup.
+    /// A usable backup. On Unix the verified destination's parent directory is
+    /// also synced before success is returned.
     /// Reads every row twice and accepts the result only when both passes
     /// agree and no durable commit is in flight. sled offers no point in time
     /// iterator, so a commit landing mid-scan would otherwise be copied
@@ -372,6 +373,16 @@ impl Storage {
         if let Err(error) = Self::verify_snapshot(path) {
             let _ = std::fs::remove_file(path);
             return Err(error);
+        }
+        #[cfg(unix)]
+        {
+            // The file data and the rename are separate durability steps.
+            // Persist the directory entry before the caller prunes old backups.
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| std::path::Path::new("."));
+            std::fs::File::open(parent)?.sync_all()?;
         }
         Ok(())
     }
