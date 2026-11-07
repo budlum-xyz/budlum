@@ -3952,7 +3952,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_100_fee_only_execution_gate_rejects_vesting_locked_balance() {
+    fn blg_100_shared_execution_admission_rejects_vesting_locked_balance() {
         use crate::core::account::AccountState;
         use crate::core::address::Address;
         use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
@@ -3985,8 +3985,10 @@ mod tests {
         );
         tx.hash = tx.calculate_hash();
 
+        // The shared admission gate must refuse this before reward-claim
+        // execution; the per-arm fee gate is only defense in depth.
         let error = Executor::apply_transaction_checked(&mut state, &tx).unwrap_err();
-        assert_eq!(error.code(), "insufficient_balance_for_fee");
+        assert_eq!(error.code(), "insufficient_balance");
         assert_eq!(state.calculate_state_root(), root_before);
         assert_eq!(state.get_balance(&sender), 100);
         assert_eq!(state.get_nonce(&sender), 0);
