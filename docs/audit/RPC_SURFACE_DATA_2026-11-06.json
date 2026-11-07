@@ -1,0 +1,20 @@
+{
+  "api_methods": 218,
+  "class_rows": 218,
+  "classified_not_declared": [],
+  "compat_missing": {},
+  "compat_namespaces": {
+    "aptos": 0,
+    "solana": 35
+  },
+  "config_drift": [],
+  "declared_not_classified": [],
+  "duplicate_endpoint_patterns": [],
+  "missing_module_files": [],
+  "missing_named_methods": {},
+  "problems": [],
+  "rest_route_namespaces": {
+    "aptos": 18,
+    "solana": 0
+  }
+}

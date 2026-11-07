@@ -22,6 +22,8 @@ pub mod regression_canaries;
 pub mod bench_performance;
 #[cfg(test)]
 pub mod block_reward;
+#[cfg(test)]
+pub mod audit_lane_a;
 // State-machine sharding (Whitepaper v1.3): block-level shards commitment
 // production/validation and atomic cross-shard transfers.
 #[cfg(test)]
@@ -228,7 +230,28 @@ pub mod consensus_bypass_locks;
 pub mod block_clock;
 #[cfg(test)]
 pub mod real_chain_fixtures;
-// Effect-asserting locks for the slashing matrix and the overflow rule
-//.
+// Effect-asserting locks for the slashing matrix and the overflow rule.
 #[cfg(test)]
 pub mod refusal_locks;
+
+// Regression locks for fixes already in the tree, one module per area.
+#[cfg(test)]
+pub mod regression_ai_storage;
+#[cfg(test)]
+pub mod regression_bridge;
+#[cfg(test)]
+pub mod regression_chain;
+#[cfg(test)]
+pub mod regression_ops_crypto;
+
+// Validator classes and the single registration door.
+#[cfg(test)]
+pub mod validator_classes;
+
+// The B.U.D. 3.0 storage door end to end.
+#[cfg(test)]
+pub mod bud3_door;
+
+// WP-35: the conformance catalog and the execution limits agree with the code.
+#[cfg(test)]
+pub mod conformance_locks;

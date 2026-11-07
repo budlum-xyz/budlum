@@ -66,7 +66,7 @@
 - [56. Only the code we put there runs: the zk program allowlist](#56-only-the-code-we-put-there-runs-the-zk-program-allowlist)
 - [57. Regeneration: the gate that refuses unauthorized code and regenerates canonical code](#57-regeneration-the-gate-that-refuses-unauthorized-code-and-regenerates-canonical-code)
 - [58. Permission at the browser boundary: CORS is not a refusal, it is a delivery decision](#58-permission-at-the-browser-boundary-cors-is-not-a-refusal-it-is-a-delivery-decision)
-- [59. Durability comes from the recipe, not the copy: source regime and replication target](#59-durability-comes-from-the-recipe-not-the-copy-source-regime-and-replication-target)
+- [59. Durability comes from the object descriptor, not the copy: source regime and replication target](#59-durability-comes-from-the-recipe-not-the-copy-source-regime-and-replication-target)
 - [60. Derived representation: the frame describes itself, no intermediate is stored](#60-derived-representation-the-frame-describes-itself-no-intermediate-is-stored)
 - [61. Identity limits who, transport limits what it costs: two questions before listening](#61-identity-limits-who-transport-limits-what-it-costs-two-questions-before-listening)
 - [62. Two roots: the one consensus reads and the one that can prove](#62-two-roots-the-one-consensus-reads-and-the-one-that-can-prove)
@@ -77,7 +77,7 @@
 - [67. Proven demand: the discount is revoked by popularity](#67-proven-demand-the-discount-is-revoked-by-popularity)
 - [68. A verifier returns what it proved](#68-a-verifier-returns-what-it-proved)
 - [69. A single-leaf tree: the self-certifying proof](#69-a-single-leaf-tree-the-self-certifying-proof)
-- [70. The gateway reads the recipe: bytes that are not stored](#70-the-gateway-reads-the-recipe-bytes-that-are-not-stored)
+- [70. The gateway reads the object descriptor: bytes that are not stored](#70-the-gateway-reads-the-recipe-bytes-that-are-not-stored)
 - [71. A placement recommendation: measurement, not rule](#71-a-placement-recommendation-measurement-not-rule)
 - [72. Format is part of the commitment](#72-format-is-part-of-the-commitment)
 - [73. Two independent compilers: who says the source reached the binary](#73-two-independent-compilers-who-says-the-source-reached-the-binary)
@@ -113,7 +113,7 @@ flowchart TB
   Chain --> Net[P2P / Gossip]
   Exec --> ZK[BudZero / BudZKVM]
   State --> XD[Cross-domain / bridge state]
-  State --> Apps["BNS, B.U.D., Pollen, budlumxyz, SocialFi, AI"]
+  State --> Apps["BNS, B.U.D., Data Market, app registry, NFT folders, AI"]
 ```
 
 ## 2. Consensus-domain isolation
@@ -2019,7 +2019,7 @@ Keccak/SHA3 hasher with program words; it currently finds **7 sites**.
 
 ## 58. Permission at the browser boundary: CORS is not a refusal, it is a delivery decision
 
-For a client running inside a browser, such as Budscan, the node's RPC surface is
+For a client running inside a browser, such as Budlum Explorer, the node's RPC surface is
 determined not only by what the server returns but by whether the browser
 delivers that response to JavaScript. These are two separate decisions and each
 must have its own counterpart in the code.
@@ -2044,7 +2044,7 @@ not carry the authority its name implies.
 
 ```mermaid
 flowchart TD
-  B["Browser: fetch from Budscan"] --> Pre{"Custom header? preflight needed"}
+  B["Browser: fetch from Budlum Explorer"] --> Pre{"Custom header? preflight needed"}
   Pre -->|"yes"| OPT["OPTIONS preflight, no x-api-key"]
   OPT --> Auth1{"before: authentication runs first"}
   Auth1 -->|"401"| Dead["Real request never sent"]
@@ -2086,13 +2086,13 @@ non-browser client writes the `Origin` header however it likes. Authority comes
 from authentication, the IP allowlist and rate limiting; this section only makes
 it possible for the browser to do the right thing.
 
-## 59. Durability comes from the recipe, not the copy: source regime and replication target
+## 59. Durability comes from the object descriptor, not the copy: source regime and replication target
 
 The storage layer wanted `STORAGE_REPLICATION_TARGET` = 3 copies for every piece
 of content. That number was fixed and **did not ask what it was holding**. Keeping
 three copies of content born from a recipe means storing the same deterministic
 generator three times: the copies ADD no durability, because the content can
-already be regenerated from the recipe on chain.
+already be regenerated from the object descriptor on chain.
 
 The question to ask is not "how many copies are there" but **"do these bytes have
 another source"**. If they do, a copy is not a backup, it is a repetition of the
@@ -2102,10 +2102,10 @@ same answer.
 flowchart TD
   M["ContentManifest.source"] --> S1{"Which regime?"}
   S1 -->|"Stored"| A["Bytes themselves persist -> full target (3)"]
-  S1 -->|"Generated(spec)"| B["Only the recipe persists -> 1 copy"]
+  S1 -->|"Generated(spec)"| B["Only the object descriptor persists -> 1 copy"]
   S1 -->|"Hybrid(prefix, spec)"| C["Prefix is not regenerable -> full target (3)"]
   B --> Claim["'Generated' is a discount claim"]
-  Claim --> Run["register_manifest_with_source RUNS the recipe"]
+  Claim --> Run["register_manifest_with_source RUNS the object descriptor"]
   Run --> Cmp{"Do the output bytes match the manifest shard?"}
   Cmp -->|"no"| Rej["Registration refused - no discount"]
   Cmp -->|"yes"| Ok["Registered, 1 copy"]
@@ -2120,12 +2120,12 @@ flowchart TD
 | regime | what persists | copies required |
 |---|---|---|
 | `Stored` | the bytes themselves | full target (3) |
-| `Generated(spec)` | the recipe only | **1** |
+| `Generated(spec)` | the object descriptor only | **1** |
 | `Hybrid { prefix, spec }` | prefix + recipe | full target (3) |
 
 For `Generated`, one copy is enough: that copy is a live example showing the
-recipe produces output, and what provides durability is the recipe itself. A lost
-copy is regenerated from the recipe on chain.
+recipe produces output, and what provides durability is the object descriptor itself. A lost
+copy is regenerated from the object descriptor on chain.
 
 **Why `Hybrid` gets NO discount:** the discount comes from the existence of a
 generator that compensates for loss. A prefix is not born from such a generator  -
@@ -2139,13 +2139,13 @@ durability payment for a third of the copies. If that claim were not verified,
 anyone labelling ordinary organic content as `Generated` would take the discount
 and the content **would actually be lost**.
 
-`StorageRegistry::register_manifest_with_source` **runs the recipe** before
+`StorageRegistry::register_manifest_with_source` **runs the object descriptor** before
 accepting the claim, computes the content identity of the resulting bytes and
 compares it against the manifest's shard. If it does not hold, registration is
 refused; a refused manifest is not stored, so it does not get the discount either.
 Unregistered content falls to the full target (fail-closed).
 
-You cannot fake it: the recipe space is smaller than the content space. A recipe
+You cannot fake it: the object descriptor space is smaller than the content space. A recipe
 only holds if the content genuinely came from it - a design claiming "we can find
 a recipe for every organic file" collides with the pigeonhole principle.
 
@@ -2167,7 +2167,7 @@ Adding a field must not change old identities.
 
 - **It does not zero storage for organic content.** For content not born from a
   recipe, someone holding the bytes is information-theoretically required. This
-  section only makes copy counts honest in the recipe-bearing class; a design
+  section only makes copy counts honest in the object descriptor-bearing class; a design
   claiming "storage 0 for all content" is lying.
 - **It does not guarantee access continuity.** If the single copy of
   recipe-bearing content drops, no data is lost (the recipe is on chain) but
@@ -2919,7 +2919,7 @@ bytes with `generate_content`, rehashes them with `ContentManifest::from_bytes_s
 compares the identity. If it does not hold, the request is refused.
 
 This is not an internal consistency check but the proof that what the gateway serves is the
-**requested thing**. The same question as Budscan's fifth step: are the fetched bytes the
+**requested thing**. The same question as Budlum Explorer's fifth step: are the fetched bytes the
 requested bytes.
 
 ### Three outcomes, three meanings
@@ -3951,7 +3951,7 @@ flowchart TD
     D --> X[Not a deal object]
 ```
 
-`BudStorageEdition` defaults to `Classic` and adds no commitment bytes in that
+The storage edition field defaults to `Classic` and adds no commitment bytes in that
 case, so every pre-edition id stays bit-identical. `Three` binds
 `BUD_EDITION_3` into the manifest id and `check_source` refuses `Stored`,
 `Hybrid` and `Derived` at registration and at `validate_untrusted`. The

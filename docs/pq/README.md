@@ -30,5 +30,5 @@ to the rung its evidence reaches.
 the node, so `crates/wallet-core` mounts the same source files and the same test vectors run
 on the wallet build (including wasm32).
 
-Test vectors live in `tests/vectors/pq/`. Their provenance and the extraction recipe are in
+Test vectors live in `tests/vectors/pq/`. Their provenance and the extraction procedure are in
 the README of that directory.

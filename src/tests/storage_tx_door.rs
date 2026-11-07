@@ -1077,4 +1077,58 @@ mod answer_coding_audit {
             "column_proof contents"
         );
     }
+
+    /// A QR video decodes back to the object (the old ledger said there
+    /// was no extraction path).
+    #[test]
+    fn qr_video_decodes_back_to_the_object() {
+        use crate::storage::qr_payload::PayloadKind;
+        let content = b"regression-round-trip-object".repeat(10);
+        let enc = crate::storage::encode_qr_video(&content, 64, None).expect("encode");
+        assert!(enc.video_blob.starts_with(b"BDLV"));
+        let (kind, raw, _video) =
+            crate::storage::decode_qr_video(&enc.video_blob).expect("decode");
+        assert_eq!(kind, PayloadKind::ContentBytes);
+        assert_eq!(raw, content);
+    }
+
+    /// An object commitment over an entropy-class body re-emits the exact video.
+    #[test]
+    fn commitment_reemits_entropy_class_body_bit_equal() {
+        use crate::storage::qr_video::DEFAULT_FPS;
+        use crate::storage::{encode_qr_video, PIPE_DEFAULT_BLOCK_LEN};
+        use crate::storage::{RecipeTransform, VideoRecipe};
+        use crate::storage::transformed::TransformOpts;
+        let mut content = vec![0xff, 0xd8, 0xff, 0xe0];
+        content.extend_from_slice(&[0xabu8; 4096]);
+        let produced = encode_qr_video(&content, PIPE_DEFAULT_BLOCK_LEN, None).expect("video");
+        let spec = VideoRecipe::from_encoded(
+            &content,
+            RecipeTransform::pin_from(TransformOpts::default(), &content),
+            1,
+            PIPE_DEFAULT_BLOCK_LEN,
+            crate::storage::qr_carousel::ONESHOT_REPAIR_PERMILLAGE,
+            DEFAULT_FPS,
+            &produced,
+        );
+        let again = spec.reemit(&content).expect("re-emit");
+        assert_eq!(again.video_blob, produced.video_blob);
+    }
+
+    /// The stream check uses the full 32-byte commitment.
+    #[test]
+    fn stream_commitment_is_full_width() {
+        use crate::storage::{decode_frames, encode_qr_video};
+        let enc = encode_qr_video(
+            b"regression-stream-commitment".repeat(8).as_slice(),
+            64,
+            None,
+        )
+        .expect("video");
+        let frames = &enc.pipe.frames;
+        assert!(decode_frames(&enc.pipe.stream_commitment, frames).is_ok());
+        let mut wrong = enc.pipe.stream_commitment;
+        wrong[31] ^= 1;
+        assert!(decode_frames(&wrong, frames).is_err());
+    }
 }

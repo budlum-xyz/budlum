@@ -5,9 +5,8 @@ on:
     branches: [main]
   pull_request:
     # Run on the normal protected bases and on stacked continuation bases.
-    # `arena/**` covers this repository's generated continuation branches;
     # `consensus-of-consensuses` keeps upstream stack covered.
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, 'arena/**']
+    branches: [main, consensus-of-consensuses]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -182,6 +181,17 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --lib --verbose 2>&1 | tee /tmp/libtests.log
+      - name: Database backup retention tests
+        if: always() && steps.rust.outcome == 'success'
+        run: |
+          set -euo pipefail
+          cargo test --bin budlum-core 2>&1 | tee /tmp/node-tests.log
+          for name in zero_retention_refuses_backup_without_deleting_existing_files retention_uses_numeric_timestamps_and_preserves_current_and_unknown_files backup_refuses_concurrent_writer_without_pruning backup_returns_a_verified_existing_snapshot; do
+            grep -Eq "${name} \.\.\. ok" /tmp/node-tests.log || {
+              echo "::error::backup regression $name did not pass"
+              exit 1
+            }
+          done
       - name: Public service admission tests
         if: always() && steps.rust.outcome == 'success'
         run: |
@@ -706,6 +716,56 @@ jobs:
         if: always() && steps.build.outcome == 'success'
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-upstream-brands 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: Rust syntax gate canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- rust-syntax-is-parseable --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: Every Rust file parses cleanly
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- rust-syntax-is-parseable 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: No-float gate canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-float-in-consensus-paths --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: No floating point on the consensus path
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-float-in-consensus-paths 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: Workspace coverage gate canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- workflows-cover-every-workspace --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: Every workspace is built by a workflow
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- workflows-cover-every-workspace 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: Nightly workflow gate canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- nightly-workflows-are-required --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: Required nightly workflows are present and binding
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- nightly-workflows-are-required 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: No-legacy-storage gate canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-legacy-storage --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: No unbaselined legacy storage identifiers remain
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-legacy-storage 2>&1 | tee -a /tmp/gate-out.log
           exit "${PIPESTATUS[0]}"
       - name: Repair trigger canary
         if: always() && steps.build.outcome == 'success'

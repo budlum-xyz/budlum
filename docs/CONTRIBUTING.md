@@ -78,7 +78,7 @@ between a reader and another step's answer. Measured on 2026-09-11 - moving `For
 last made `budlum`'s `Test` step run and report, which is the point of the job, and
 the same job then showed the rule is not finished once: `Clippy` also fails, also
 sits ahead of `Test`, and re-masked it. So in the `budlum` job the lint steps come
-after the build/test/doc verdicts, and `Format` after them; in `budzero` and `budscan`
+after the build/test/doc verdicts, and `Format` after them; in `budzero` and the explorer job
 `Format` is still last. Keep both orders when editing any job: verdicts first, then
 analysis, then style, whatever is red today.
 

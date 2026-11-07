@@ -32,6 +32,9 @@ __bench_domain_throughput_disabled = []
 
 [dependencies]
 sha2 = "0.11"
+# B.U.D. 3.0 segment coding: RFC 6330 (RaptorQ), pinned exactly so the
+# golden symbol vectors lock the encoder version.
+raptorq = { version = "=2.0.0", default-features = false, features = ["std"] }
 # zlib for Three payload pack (only when it shrinks).
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # G1 payload AEAD (T11): content bytes encrypted before A1 pack.
@@ -194,6 +197,16 @@ bud-node = { path = "budzero/bud-node" }
 # one in the zkVM state layer, and nothing forced them to stay equal. They now
 # read one definition.
 budlum-note-packing = { path = "crates/note-packing" }
+# The Universal Execution Layer ABI: the interface, wire
+# types, framing and socket transport between the Execution Coordinator in this
+# process and the `budlum-ee-*` worker binaries.
+budlum-uel-abi = { path = "crates/uel-abi" }
+# B.U.D. 3.0 A0 codec registry.
+bud-codec = { path = "crates/bud-codec" }
+# The wire types the node and the mobile core both bind (K-4). The phone must
+# not link the whole node to read an address (7.9.5), so the shared definitions
+# live below both and `core::address` re-exports them.
+budlum-types = { path = "crates/budlum-types" }
 # In-tree, feature-gated (2026-09-19 user decision: no separate repository).
 budlum-bpqs = { path = "crates/bpqs", optional = true }
 
@@ -238,6 +251,13 @@ required-features = ["wallet-ml-dsa"]
 name = "budlum-domain-reporter"
 path = "src/bin/budlum-domain-reporter.rs"
 required-features = ["wallet-ml-dsa"]
+
+# The public-service indexer reads the node over JSON-RPC and signs nothing, so it
+# needs no feature. It is registered by name so a build or a package listing
+# shows it; Cargo would otherwise only discover it by directory.
+[[bin]]
+name = "budlum-indexer"
+path = "src/bin/budlum-indexer.rs"
 
 [[bin]]
 name = "bench_sig_verify"

@@ -269,6 +269,11 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_aiAgentRanking", Public, Read),
     row("bud_getStatus", Public, Read),
     row("bud_getValidatorSet", Public, Read),
+    row("bud_getValidator", Public, Read),
+    row("bud_storageGetObject", Public, Read),
+    row("bud_storageGetCustody", Public, Read),
+    row("bud_listRelays", Public, Read),
+    row("bud_listGateways", Public, Read),
     row("bud_getDomainInfo", Public, Read),
     row("bud_getQuantumAlarm", Public, Read),
     row("bud_getSlashingHistory", Public, Read),
@@ -279,6 +284,45 @@ const METHOD_CLASSES: &[MethodClass] = &[
     // WebSocket subscriptions: read-only feeds (src/rpc/subscriptions.rs).
     row("bud_subscribe", Public, Read),
     row("bud_unsubscribe", Public, Read),
+    // The Solana JSON-RPC compatibility gateway (WP-31, 1/N). Section 8.11.3
+    // names the methods; `src/rpc/compat/solana/mod.rs` says what each one
+    // answers. A row here is a node or chain read or a refusal that names the
+    // Budlum door, so nothing in this namespace changes consensus state.
+    row("getHealth", Public, Read),
+    row("getVersion", Public, Read),
+    row("getGenesisHash", Public, Refused),
+    row("getSlot", Public, Read),
+    row("getBlockHeight", Public, Read),
+    row("getEpochInfo", Public, Refused),
+    row("getLatestBlockhash", Public, Refused),
+    row("isBlockhashValid", Public, Refused),
+    row("getBalance", Public, Refused),
+    row("getAccountInfo", Public, Refused),
+    row("getMultipleAccounts", Public, Refused),
+    row("getProgramAccounts", Public, Refused),
+    row("getTokenAccountsByOwner", Public, Refused),
+    row("getTokenAccountBalance", Public, Refused),
+    row("getTokenSupply", Public, Refused),
+    row("getMinimumBalanceForRentExemption", Public, Refused),
+    row("getFeeForMessage", Public, Refused),
+    row("getRecentPrioritizationFees", Public, Refused),
+    row("sendTransaction", Public, Refused),
+    row("simulateTransaction", Public, Refused),
+    row("getSignatureStatuses", Public, Refused),
+    row("getSignaturesForAddress", Public, Refused),
+    row("getTransaction", Public, Refused),
+    row("getBlock", Public, Refused),
+    row("requestAirdrop", Public, Refused),
+    row("accountSubscribe", Public, Refused),
+    row("accountUnsubscribe", Public, Read),
+    row("signatureSubscribe", Public, Refused),
+    row("signatureUnsubscribe", Public, Read),
+    row("slotSubscribe", Public, Read),
+    row("slotUnsubscribe", Public, Read),
+    row("logsSubscribe", Public, Refused),
+    row("logsUnsubscribe", Public, Read),
+    row("programSubscribe", Public, Refused),
+    row("programUnsubscribe", Public, Read),
 ];
 
 /// Check that the methods a server registers are exactly the classified
@@ -302,6 +346,13 @@ pub fn check_served_methods<'a>(
         problems.push(format!(
             "{name} has a row in METHOD_CLASSES but is not served"
         ));
+    }
+    // A compatibility gateway answers a foreign namespace. Its table is the
+    // second classification: a method there must be in the gateway table, and
+    // a method the gateway marks pending must not be served at all
+    // (`src/rpc/compat/solana/mod.rs`).
+    if let Err(problem) = crate::rpc::compat::solana::check_served(registered.iter().copied()) {
+        problems.push(problem);
     }
     if problems.is_empty() {
         Ok(())

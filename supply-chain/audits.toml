@@ -151,6 +151,12 @@ criteria = "safe-to-deploy"
 version = "0.14.1"
 notes = "QR encoder used by the qr_* modules; reviewed 0.14.1 in full during the 3.0 QR work: no build script, zero unsafe, pure-Rust matrix construction"
 
+[[audits.raptorq]]
+who = "Budlum Security <security@budlum.xyz>"
+criteria = "safe-to-deploy"
+version = "2.0.0"
+notes = "reviewed full v2.0.0 source (28 .rs files, tag 329682c170b151f3cdccf16cb95c6f4f6246b6df): pure-Rust RFC 6330 RaptorQ fountain encoder/decoder pinned with default-features=false and features=[\"std\"] (zero optional dependencies enabled); no build script, zero filesystem, network, process or environment access; unsafe is confined to src/octet.rs (256-entry GF(256) log/exp table lookups proved in-bounds by unit test) and src/octets.rs (AVX2/SSSE3/NEON GF(256) SIMD slice loops guarded by runtime CPU feature detection and slice-length assertions)"
+
 [[audits.rqrr]]
 who = "Budlum Security <security@budlum.xyz>"
 criteria = "safe-to-deploy"

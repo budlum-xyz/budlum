@@ -2954,14 +2954,20 @@ impl Blockchain {
         let mut charged_fee = false;
         if let Some(reporter) = report.reporter {
             if fee > 0 {
-                let account = self.state.get_or_create(&reporter);
-                if account.balance < fee {
+                // The fee gate looks at the spendable balance, not the raw
+                // balance: vesting-locked funds must not pay consensus fees
+                // (BULGU-020 class, WP-17 item 4).
+                let spendable = self.state.spendable_balance(&reporter);
+                if spendable < fee {
                     return Err(format!(
-                        "insufficient balance for slashing report fee: have {}, need {}",
-                        account.balance, fee
+                        "insufficient spendable balance for slashing report fee: have {}, need {}",
+                        spendable, fee
                     ));
                 }
-                account.balance -= fee;
+                let account = self.state.get_or_create(&reporter);
+                account.balance = account.balance.checked_sub(fee).ok_or_else(|| {
+                    format!("slashing report fee underflow: balance below fee")
+                })?;
                 self.state.mark_dirty(&reporter);
                 charged_fee = true;
             }
@@ -3518,7 +3524,9 @@ impl Blockchain {
                 break;
             }
 
-            let pending_cost = pending.total_cost();
+            let Some(pending_cost) = pending.checked_liquid_cost() else {
+                break;
+            };
             if spendable_balance < pending_cost {
                 break;
             }
@@ -3574,17 +3582,11 @@ impl Blockchain {
         } else if tx.nonce > expected_nonce {
             reasons.push("nonce_too_high".to_string());
         }
-        let precheck_cost = if matches!(
-            &tx.tx_type,
-            crate::core::transaction::TransactionType::Undelegate { .. }
-                | crate::core::transaction::TransactionType::WithdrawDelegation { .. }
-                | crate::core::transaction::TransactionType::SetValidatorCommission { .. }
-                | crate::core::transaction::TransactionType::Redelegate { .. }
-                | crate::core::transaction::TransactionType::ClaimRewards { .. }
-        ) {
-            tx.fee
+        let precheck_cost = if let Some(cost) = tx.checked_liquid_cost() {
+            cost
         } else {
-            tx.total_cost()
+            reasons.push("transaction_cost_overflow".to_string());
+            u64::MAX
         };
         if spendable_balance < precheck_cost {
             reasons.push("insufficient_funds".to_string());
@@ -4414,7 +4416,7 @@ impl Blockchain {
         next_state.current_block_unix_secs = Self::block_timestamp_secs(block.timestamp);
         next_state.current_block_entropy =
             Self::block_context_entropy(&block.previous_hash, &block.vrf_output);
-        Executor::apply_block_checked(
+        Executor::apply_block_candidate_checked(
             &mut next_state,
             &block.transactions,
             block.producer.as_ref(),
