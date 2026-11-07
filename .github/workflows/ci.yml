@@ -782,6 +782,37 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- indexing-is-not-new 2>&1 | tee -a /tmp/gate-out.log
           exit "${PIPESTATUS[0]}"
+      # Section 16.2 rule 3: every Cargo workspace compiles in at least one
+      # workflow. A standalone workspace that no workflow builds is a blind
+      # spot - crates/ai-inference and bud/ were each in that hole once, and
+      # both were found by accident. The gate reads the manifests, then the
+      # live `run:` lines of every workflow, and refuses a workspace that no
+      # cargo command reaches.
+      - name: Workspace coverage canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- workflows-cover-every-workspace --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: Every Cargo workspace is compiled by a workflow
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- workflows-cover-every-workspace 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      # G-2: no floating point on a consensus-relevant production path. A
+      # float makes a decision depend on the machine's rounding mode, so two
+      # honest nodes can derive different roots from the same blocks. One
+      # pinned file is left: BLG-240, the display-only agent ranking in
+      # `src/ai/registry.rs`, whose ceiling falls when WP-45 closes it.
+      - name: No-float canary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-float-in-consensus-paths --self-test 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
+      - name: No float on the consensus path
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-float-in-consensus-paths 2>&1 | tee -a /tmp/gate-out.log
+          exit "${PIPESTATUS[0]}"
       - name: Derived content canary
         if: always() && steps.build.outcome == 'success'
         run: |
