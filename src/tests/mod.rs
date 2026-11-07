@@ -22,6 +22,8 @@ pub mod regression_canaries;
 pub mod bench_performance;
 #[cfg(test)]
 pub mod block_reward;
+#[cfg(test)]
+pub mod audit_lane_a;
 // State-machine sharding (Whitepaper v1.3): block-level shards commitment
 // production/validation and atomic cross-shard transfers.
 #[cfg(test)]
