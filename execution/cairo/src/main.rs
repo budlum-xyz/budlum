@@ -1,4 +1,4 @@
-//! `budlum-ee-cairo` Unix-domain-socket worker daemon ().
+//! `budlum-ee-cairo` Unix-domain-socket worker daemon.
 
 #![forbid(unsafe_code)]
 

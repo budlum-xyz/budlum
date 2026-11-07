@@ -338,7 +338,7 @@ const EXCEPTION_ESCAPES: &[&str] = &[
     " on request",
 ];
 
-/// Normalise wrapped prose while preserving hard clause breaks ().
+/// Normalise wrapped prose while preserving hard clause breaks.
 ///
 /// Single newlines inside wrapped prose collapse to spaces so line-wrapped
 /// phrases (`"generate\nimages"`) cannot evade marker matching, while blank

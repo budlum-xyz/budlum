@@ -6,7 +6,7 @@
 
 use crate::{is_canonical_field, NoteHash};
 
-/// Canonical hash suite identifier carried alongside V2 commitments ().
+/// Canonical hash suite identifier carried alongside V2 commitments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum HashSuiteId {

@@ -1,5 +1,5 @@
 //! Out-of-process deterministic PolkaVM (`ink!` / `resolc` RV32EM interpreter) UEL
-//! execution worker (, `EeId::POLKAVM = 0x08`).
+//! execution worker (`EeId::POLKAVM = 0x08`).
 //!
 //! Runs strictly in interpreter mode (JIT disabled for consensus determinism across
 //! `x86_64` and `aarch64`), persists contract blobs and key-value storage under

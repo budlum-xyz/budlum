@@ -1,4 +1,4 @@
-//! `budlum-ee-move` Unix-domain-socket worker daemon ().
+//! `budlum-ee-move` Unix-domain-socket worker daemon.
 
 #![forbid(unsafe_code)]
 

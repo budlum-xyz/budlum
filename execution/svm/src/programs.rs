@@ -1,4 +1,4 @@
-//! Canonical SVM built-in program catalog (`Section 8.7.2` SVM row, `8.15`,).
+//! Canonical SVM built-in program catalog (`Section 8.7.2` SVM row, `8.15`).
 //!
 //! Supported built-ins:
 //! - System Program (`11111111111111111111111111111111`)

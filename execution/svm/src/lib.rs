@@ -1,4 +1,4 @@
-//! Out-of-process SVM Execution Environment (`EeId::SVM = 0x03`,,).
+//! Out-of-process SVM Execution Environment (`EeId::SVM = 0x03`).
 //!
 //! Executes verified sBPF programs via `solana-sbpf = "=0.10.0"` with JIT
 //! disabled at compile time (`default-features = false`, `interpreted = true`),

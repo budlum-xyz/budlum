@@ -33,7 +33,7 @@ pub struct HardwarePricelist {
 }
 
 impl HardwarePricelist {
-    /// Convenience: true iff every component rate is finite and strictly positive ().
+    /// Convenience: true iff every component rate is finite and strictly positive.
     #[must_use]
     pub fn is_valid(self) -> bool {
         [

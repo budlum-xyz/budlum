@@ -18,7 +18,7 @@ pub enum DataError {
         expected: SourceKind,
         got: SourceKind,
     },
-    /// Closed-circuit source failed identity or grant-epoch validation ().
+    /// Closed-circuit source failed identity or grant-epoch validation.
     InvalidSource(SourceError),
     /// The SHA-256 verification failed - no data flows.
     HashMismatch { detail: String },

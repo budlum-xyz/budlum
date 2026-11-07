@@ -32,19 +32,19 @@ impl EeId {
     pub const SVM: Self = Self(0x03);
     /// Move (Aptos dialect).
     pub const MOVE: Self = Self(0x04);
-    /// Move (Sui dialect,).
+    /// Move (Sui dialect).
     pub const MOVE_SUI: Self = Self(0x05);
-    /// Cairo (Starknet,).
+    /// Cairo (Starknet).
     pub const CAIRO: Self = Self(0x06);
-    /// NEAR WASM ().
+    /// NEAR WASM.
     pub const NEAR_WASM: Self = Self(0x07);
-    /// PolkaVM ().
+    /// PolkaVM.
     pub const POLKAVM: Self = Self(0x08);
-    /// TVM ().
+    /// TVM.
     pub const TVM: Self = Self(0x09);
-    /// UTXO verification script ().
+    /// UTXO verification script.
     pub const UTXO: Self = Self(0x0A);
-    /// Plutus UPLC ().
+    /// Plutus UPLC.
     pub const PLUTUS: Self = Self(0x0B);
 }
 

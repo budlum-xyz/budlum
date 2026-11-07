@@ -1,4 +1,4 @@
-//! Out-of-process BudZero UEL worker library (`budlum-ee-budzero`,).
+//! Out-of-process BudZero UEL worker library (`budlum-ee-budzero`).
 
 #![forbid(unsafe_code)]
 

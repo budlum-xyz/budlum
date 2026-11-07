@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// Canonical Bech32 human-readable prefix for Budlum WASM/Cosmos addresses.
 pub const BUD_BECH32_HRP: &str = "bud";
 
-/// Custom `CosmosMsg::Custom(BudlumMsg)` extension (`Section 8.7.2` WASM row,).
+/// Custom `CosmosMsg::Custom(BudlumMsg)` extension (`Section 8.7.2` WASM row).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BudlumMsg {
@@ -31,7 +31,7 @@ fn zero_string() -> String {
     String::from("0")
 }
 
-/// Custom `QueryRequest::Custom(BudlumQuery)` read-only extension (`Section 8.7.2`,).
+/// Custom `QueryRequest::Custom(BudlumQuery)` read-only extension (`Section 8.7.2`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BudlumQuery {

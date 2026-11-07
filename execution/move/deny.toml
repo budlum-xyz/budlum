@@ -1,4 +1,4 @@
-# Supply-chain policy for the standalone `budlum-ee-move` worker ().
+# Supply-chain policy for the standalone `budlum-ee-move` worker.
 #
 # Per Section 8.14 item 4 and IP-32 item 7 of THE BUDLUM DIREKTIF, any
 # `unknown-git` source exception for `aptos-core` is confined strictly to this

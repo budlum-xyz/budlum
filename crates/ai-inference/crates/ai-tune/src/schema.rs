@@ -17,7 +17,7 @@ use ai_data::jsonl::InstructionRecord;
 /// Schema errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchemaError {
-    /// No records were supplied ().
+    /// No records were supplied.
     EmptyCorpus,
     /// `user` or `assistant` is empty.
     EmptyField { line: usize, field: &'static str },
@@ -29,9 +29,9 @@ pub enum SchemaError {
     },
     /// The JSONL line could not be decoded (a jsonl::decode error).
     Unparsable { line: usize, detail: String },
-    /// Role-delimiter or prompt-injection marker inside a field ().
+    /// Role-delimiter or prompt-injection marker inside a field.
     RoleDelimiterInjection { line: usize, field: &'static str },
-    /// Unmasked credential material inside a training record ().
+    /// Unmasked credential material inside a training record.
     UnmaskedSecret { line: usize, field: &'static str },
 }
 

@@ -2,7 +2,7 @@
 //! threshold Shamir key-escrow primitives ( Steps 9-10 / TK7, TSO8, TSO9,
 //! TSO10, TSO12).
 //!
-//! WIRING: unwired - staged for wallet UI consent confirmation integration ().
+//! WIRING: unwired - staged for wallet UI consent confirmation integration.
 
 use sha3::{Digest, Sha3_256};
 
@@ -136,7 +136,7 @@ impl ConsentScreenPrompt {
 impl BlindedConsentRecord {
     /// Verify whether a consent proof may open a new session at `current_epoch`
     /// against `revoked_handles` and `deleted_commitments` (`TSO8`, `TSO11`).
-    /// exposed for: consent session gate verification ().
+    /// exposed for: consent session gate verification.
     #[must_use]
     pub fn allows_new_session(
         &self,

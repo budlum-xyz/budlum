@@ -327,7 +327,7 @@ impl VerifierRegistry {
     }
 
     /// Like [`Self::with_params`], but refuses parameters that fail
-    /// [`RegistryParams::validate`] or exceed protocol ceilings ().
+    /// [`RegistryParams::validate`] or exceed protocol ceilings.
     pub fn try_with_params(params: RegistryParams) -> Result<Self, String> {
         validate_registry_params(&params)?;
         Ok(Self::with_params(params))

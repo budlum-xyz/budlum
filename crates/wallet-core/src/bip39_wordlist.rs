@@ -220,7 +220,7 @@ pub const BIP39_WORDLIST: &[&str] = &[
 ];
 
 /// Look up a word's index in the BIP39 wordlist using a constant-time scan
-/// across all 2048 entries ().
+/// across all 2048 entries.
 ///
 /// Every canonical BIP39 English word is 3..=8 ASCII bytes. Scanning the full
 /// table with fixed-width 8-byte XOR folding avoids position-dependent early

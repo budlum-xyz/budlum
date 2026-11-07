@@ -137,7 +137,7 @@ impl SourceRef {
         }
     }
 
-    /// Validate closed-circuit source identity and epoch window ().
+    /// Validate closed-circuit source identity and epoch window.
     ///
     /// # Errors
     ///
@@ -159,7 +159,7 @@ impl SourceRef {
     }
 }
 
-/// Convenience: closed-circuit source validation errors ().
+/// Convenience: closed-circuit source validation errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceError {
     /// All-zero `content_id` does not identify content.

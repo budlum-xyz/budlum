@@ -26,7 +26,7 @@ use crate::params::BpqsParams;
 fn lane<P: BpqsParams>(x: &[u8; 32]) -> [u8; 32] {
     // Canonicalize to the meaningful `P::N`-byte prefix without panicking in
     // debug builds when untrusted or fuzzed segments carry non-zero tail bytes
-    // (). `sign::verify_at_height` rejects non-canonical padding up
+    //. `sign::verify_at_height` rejects non-canonical padding up
     // front in both debug and release builds via `check_canonical`.
     let mut out = [0u8; 32];
     out[..P::N].copy_from_slice(&x[..P::N]);

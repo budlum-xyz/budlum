@@ -1,7 +1,7 @@
-//! Out-of-process deterministic Cairo (Starknet) UEL execution worker (,
+//! Out-of-process deterministic Cairo (Starknet) UEL execution worker (
 //! `EeId::CAIRO = 0x06`).
 //!
-//! Audited license posture (`Section 8.2`,): `lambdaclass/cairo-vm` (`Apache-2.0`)
+//! Audited license posture (`Section 8.2`): `lambdaclass/cairo-vm` (`Apache-2.0`)
 //! and `starkware-libs/sequencer` (`blockifier`, `Apache-2.0`).
 //! Binds Starknet Account Abstraction (`__validate__`, `__validate_declare__`,
 //! `__execute__`) directly to the caller's post-quantum Budlum local alias, stores
@@ -20,13 +20,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use sha3::Keccak256;
 
-/// Audited SPDX license identifier for `cairo-vm` and `blockifier` (`Section 8.2`,).
+/// Audited SPDX license identifier for `cairo-vm` and `blockifier` (`Section 8.2`).
 pub const AUDITED_CAIRO_ENGINE_SPDX: &str = "Apache-2.0";
 
 /// Budlum testnet chain ID (`Section 1.5`).
 pub const BUDLUM_TESTNET_CHAIN_ID: u64 = 45_261;
 
-/// Proposed activation height on testnet `45261` ().
+/// Proposed activation height on testnet `45261`.
 pub const PROPOSED_CAIRO_ACTIVATION_HEIGHT: u64 = 55_000;
 
 /// Canonical UEL namespace storing Starknet classes, contract instances, nonces, and storage.
@@ -152,7 +152,7 @@ pub struct StarknetCall {
     pub calldata: Vec<[u8; 32]>,
 }
 
-/// Starknet transaction actions bound to the Budlum local account alias ().
+/// Starknet transaction actions bound to the Budlum local account alias.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CairoAction {

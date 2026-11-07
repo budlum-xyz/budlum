@@ -1,5 +1,5 @@
 //! Solidity ABI codec for the UEL Universal Call precompile at
-//! `0x000000000000000000000000000000000000B001` (`Section 8.7.2`,).
+//! `0x000000000000000000000000000000000000B001` (`Section 8.7.2`).
 
 use revm::primitives::{address, Address};
 

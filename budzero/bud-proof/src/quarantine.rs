@@ -75,7 +75,7 @@ impl QuarantineReason {
     }
 
     /// Severe canonical-program offences that must not be evicted by
-    /// permissionless `NonCanonicalProgram` floods ().
+    /// permissionless `NonCanonicalProgram` floods.
     #[must_use]
     ///
     /// Convenience: classifies canonical-program bans whose audit trail is

@@ -1,4 +1,4 @@
-//! AI Verification Layer types and deterministic verifiers ():
+//! AI Verification Layer types and deterministic verifiers:
 //! - `VL-0..VL-3` verification levels and non-decreasing status (`TAI8`),
 //! - `e + 1` delayed committee seed & `n = 5, k = 4` parameters (`TAI1`, `TAI7`),
 //! - Deterministic Inference Profile (`DIP`) and `64 x 64` integer tile check
@@ -10,11 +10,11 @@
 
 use sha2::{Digest, Sha256};
 
-/// Testnet default committee size (`n = 5`,).
+/// Testnet default committee size (`n = 5`).
 pub const DEFAULT_COMMITTEE_N: u8 = 5;
-/// Testnet default quorum threshold (`k = 4`,).
+/// Testnet default quorum threshold (`k = 4`).
 pub const DEFAULT_COMMITTEE_K: u8 = 4;
-/// Testnet default optimistic challenge window in blocks (`100`,).
+/// Testnet default optimistic challenge window in blocks (`100`).
 pub const DEFAULT_CHALLENGE_WINDOW_BLOCKS: u64 = 100;
 /// Testnet default secondary audit sampling rate in basis points (`1% = 100 bps`).
 pub const DEFAULT_SAMPLING_BPS: u16 = 100;

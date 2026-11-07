@@ -383,8 +383,8 @@ pub fn verify_at_height<H: BpqsHash, P: BpqsParams>(
 }
 
 /// Stateful verifier-side ceremony log enforcing one-time epoch consumption
-/// (`Q_MAX = 1`,) and refusing non-production parameter rows unless
-/// explicitly constructed for tests ().
+/// (`Q_MAX = 1`) and refusing non-production parameter rows unless
+/// explicitly constructed for tests.
 ///
 /// WIRING: anchor family verifier log for research line F2.
 #[derive(Clone, Debug, Default)]
@@ -422,7 +422,7 @@ impl BpqsVerifierLog {
     /// as spent so any second signature under the same key and epoch is refused.
     ///
     /// WIRING: stateful verifier entry point pairing `verify_at_height` with
-    /// one-time epoch tracking (,).
+    /// one-time epoch tracking.
     pub fn accept_at_height<H: BpqsHash, P: BpqsParams>(
         &mut self,
         public: &BpqsPublicKey<P>,

@@ -48,7 +48,7 @@
 //!   Linked SGX/Nitro runtime (no silent plaintext fallback).
 
 mod bip39_wordlist;
-/// Wallet-side blinded consent confirmation screen, Padme buckets, and Shamir escrow ().
+/// Wallet-side blinded consent confirmation screen, Padme buckets, and Shamir escrow.
 pub mod consent_screen;
 /// The cryptographic core shared with the node: scheme registry, FIPS 204 and
 /// FIPS 205 context strings, the dual-verifier facade and the composite
@@ -205,7 +205,7 @@ pub fn entropy_to_mnemonic(entropy: &[u8]) -> Result<String, WalletError> {
 }
 
 /// Normalize a BIP39 mnemonic with Unicode NFKD, ASCII lowercasing, and
-/// canonical single-space word separation ().
+/// canonical single-space word separation.
 /// exposed for: the wallet crate's SDK and V3 surfaces.
 #[must_use]
 pub fn normalize_mnemonic_nfkd(mnemonic: &str) -> zeroize::Zeroizing<String> {
@@ -1110,7 +1110,7 @@ impl Wallet {
     /// Create a new wallet (random entropy -> mnemonic -> seed -> keypair).
     ///
     /// `word_count`: 24 (256-bit entropy). Twelve-word (128-bit) seeds are
-    /// refused fail-closed ().
+    /// refused fail-closed.
     ///
     /// **Production safety:** this function only works when the `production` feature
     /// is enabled. Without it `Wallet::generate` returns

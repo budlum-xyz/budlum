@@ -311,7 +311,7 @@ fn redact_key_value(line: &str, report: &mut RedactionReport) -> String {
 
         // Otherwise the value runs until the next unquoted field delimiter
         // (comma, semicolon, closing bracket, or whitespace), and scanning
-        // continues across the rest of the line ().
+        // continues across the rest of the line.
         let value_end = body
             .char_indices()
             .find(|(_, c)| matches!(c, ',' | ';' | ')' | '}' | ']' | ' ' | '\t'))

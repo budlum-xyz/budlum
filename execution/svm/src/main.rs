@@ -1,4 +1,4 @@
-//! `budlum-ee-svm` Unix-domain-socket worker daemon ().
+//! `budlum-ee-svm` Unix-domain-socket worker daemon.
 
 #![forbid(unsafe_code)]
 

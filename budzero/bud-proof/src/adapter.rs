@@ -181,10 +181,10 @@ pub fn initial_state_root_of(memory: [u8; 32], registers: [u8; 32]) -> [u8; 32] 
     out
 }
 
-/// Convenience: number of 64-bit little-endian words carrying a 256-bit Budlum sender ().
+/// Convenience: number of 64-bit little-endian words carrying a 256-bit Budlum sender.
 pub const SENDER_WORDS: usize = 4;
 
-/// Convenience: split a 32-byte Budlum address into four 64-bit little-endian words ().
+/// Convenience: split a 32-byte Budlum address into four 64-bit little-endian words.
 #[must_use]
 pub fn encode_sender_words(address: &[u8; 32]) -> [u64; SENDER_WORDS] {
     let mut words = [0u64; SENDER_WORDS];
@@ -199,7 +199,7 @@ pub fn encode_sender_words(address: &[u8; 32]) -> [u64; SENDER_WORDS] {
     words
 }
 
-/// Convenience: reconstruct a 32-byte Budlum address from four 64-bit little-endian words ().
+/// Convenience: reconstruct a 32-byte Budlum address from four 64-bit little-endian words.
 #[must_use]
 pub fn decode_sender_words(words: &[u64; SENDER_WORDS]) -> [u8; 32] {
     let mut out = [0u8; 32];
@@ -241,7 +241,7 @@ impl ExecutionPublicInputs {
     }
 
     /// Reject a public-input shape that a verifier must not act on: non-canonical
-    /// Goldilocks scalars (), a zero or oversized `trace_len`, or
+    /// Goldilocks scalars, a zero or oversized `trace_len`, or
     /// `gas_used` above `gas_limit`.
     pub fn validate_shape(&self) -> Result<(), VerifyError> {
         for &scalar in &[

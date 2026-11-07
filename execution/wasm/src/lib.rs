@@ -9,7 +9,7 @@
 //! - IBC entry-point exports (`ibc_*`) and `StakingMsg` / `DistributionMsg` /
 //!   `GovMsg` / `IbcMsg` submessages deterministically refused (`Section 8.15`);
 //! - `BudlumMsg::UniversalCall` and `BudlumQuery::UniversalView` routed over
-//!   `HostApi::universal_call` (`Section 8.7.2`,).
+//!   `HostApi::universal_call` (`Section 8.7.2`).
 
 #![forbid(unsafe_code)]
 
@@ -157,7 +157,7 @@ pub fn build_wasm_engine() -> Engine {
     Engine::new(&cfg)
 }
 
-/// Compile and validate `.wasm` bytecode against Budlum's CosmWasm rules ().
+/// Compile and validate `.wasm` bytecode against Budlum's CosmWasm rules.
 pub fn compile_and_validate_module(engine: &Engine, code: &[u8]) -> Result<Module, EeRefusal> {
     if code.is_empty() {
         return Err(EeRefusal {

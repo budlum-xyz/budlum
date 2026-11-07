@@ -47,7 +47,7 @@ pub enum Command {
     Prompt,
     /// The help text.
     Help,
-    /// Unrecognised command or unexpected trailing arguments ().
+    /// Unrecognised command or unexpected trailing arguments.
     Invalid(String),
 }
 

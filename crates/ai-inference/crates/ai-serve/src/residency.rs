@@ -229,12 +229,12 @@ pub enum PlanError {
     /// reporting the shortfall separately tells the operator the overshoot is
     /// on the disk side, not the fast-memory side.
     DiskPartDoesNotFit { needed: u64, available: u64 },
-    /// A weight shard declared zero bytes ().
+    /// A weight shard declared zero bytes.
     ZeroByteShard { content_id: [u8; 32] },
-    /// Two shards declared the same `content_id` ().
+    /// Two shards declared the same `content_id`.
     DuplicateShard { content_id: [u8; 32] },
     /// A caller-supplied hardware or throughput parameter was non-finite or
-    /// non-positive ().
+    /// non-positive.
     InvalidParameter { detail: &'static str },
 }
 

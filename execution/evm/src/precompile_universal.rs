@@ -1,5 +1,5 @@
 //! EVM Universal Call precompile (`0x000000000000000000000000000000000000B001`,
-//! `Section 8.7.2` & `8.7.3`,,).
+//! `Section 8.7.2` & `8.7.3`).
 //!
 //! Dispatches `call(uint8,bytes,bytes,uint256,uint64)` and
 //! `staticCall(uint8,bytes,bytes,uint64)` to `HostApi::universal_call` and
