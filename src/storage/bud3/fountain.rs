@@ -15,6 +15,7 @@
 //! length, ESI range) before the crate sees it, so a malformed symbol is
 //! refused and never reaches a crate assertion, and it caps the symbols it
 //! keeps so a flood of repair symbols cannot grow its memory.
+//! Convenience: public RFC 6330 RaptorQ symbol codec consumed by upload/repair pipelines and fuzz targets.
 
 use super::limits::Profile;
 use super::meter::{Meter, MeterError};

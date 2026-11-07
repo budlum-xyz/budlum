@@ -9,6 +9,7 @@
 //!
 //! A content id never changes. The object that carries the content may change
 //! (a better codec, a new dictionary); the content id does not.
+//! Convenience: public B.U.D. 3.0 content identifier hashers consumed by streaming upload and SDK callers.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

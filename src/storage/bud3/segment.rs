@@ -17,6 +17,7 @@
 //!   commitment.
 //!
 //! Segment digests are not written in the object: they are computed from it.
+//! Convenience: public B.U.D. 3.0 segment domain tags and tree builders.
 
 use super::limits::Profile;
 use crate::core::hash::hash_fields_bytes;

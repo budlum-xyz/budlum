@@ -574,6 +574,76 @@ pub fn verify_bls_sig(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// Aggregate BLS signatures over one shared message (section 7.8.4: the
+/// presence aggregate is one signature covering the whole window bitmap).
+#[must_use]
+    /// Convenience: public BLS signature aggregation helper for presence and finality callers.
+pub fn aggregate_bls(sks: &[&Scalar], msg: &[u8]) -> Vec<u8> {
+    let h_msg = hash_to_g1(msg);
+    let mut agg = G1Projective::identity();
+    for sk in sks {
+        agg += G1Projective::from(h_msg) * sk;
+    }
+    G1Affine::from(agg).to_compressed().to_vec()
+}
+
+/// Verify an aggregate BLS signature against the aggregate of the signers'
+/// public keys with a single pairing check.
+pub fn verify_bls_aggregate(pks: &[Vec<u8>], msg: &[u8], agg_sig: &[u8]) -> Result<(), String> {
+    if pks.is_empty() {
+        return Err("no signers for the aggregate".into());
+    }
+    let mut agg_pk = G2Projective::identity();
+    for pk in pks {
+        let pk_bytes: [u8; 96] = pk
+            .as_slice()
+            .try_into()
+            .map_err(|_| "Invalid BLS public key length".to_string())?;
+        let pk_affine = G2Affine::from_compressed_unchecked(&pk_bytes)
+            .into_option()
+            .ok_or_else(|| "Invalid BLS public key encoding".to_string())?;
+        if !bool::from(pk_affine.is_on_curve())
+            || !bool::from(pk_affine.is_torsion_free())
+            || bool::from(pk_affine.is_identity())
+        {
+            return Err(
+                "BLS public key is identity or not in the prime-order subgroup".to_string(),
+            );
+        }
+        agg_pk += pk_affine;
+    }
+    let agg_pk_affine = G2Affine::from(agg_pk);
+    if bool::from(agg_pk_affine.is_identity()) {
+        return Err("Aggregated BLS public key is identity".into());
+    }
+    let sig_bytes: [u8; 48] = agg_sig
+        .try_into()
+        .map_err(|_| "Invalid aggregated BLS signature length".to_string())?;
+    let sig_affine = G1Affine::from_compressed_unchecked(&sig_bytes)
+        .into_option()
+        .ok_or_else(|| "Invalid aggregated BLS signature encoding".to_string())?;
+    if !bool::from(sig_affine.is_on_curve())
+        || !bool::from(sig_affine.is_torsion_free())
+        || bool::from(sig_affine.is_identity())
+    {
+        return Err(
+            "Aggregated BLS signature is identity or not in the prime-order subgroup"
+                .to_string(),
+        );
+    }
+    let h_msg = hash_to_g1(msg);
+    let g2_gen_neg = -G2Affine::generator();
+    let pairing_result = bls12_381::multi_miller_loop(&[
+        (&sig_affine, &g2_gen_neg.into()),
+        (&h_msg, &agg_pk_affine.into()),
+    ])
+    .final_exponentiation();
+    if pairing_result != bls12_381::Gt::identity() {
+        return Err("BLS aggregate signature verification failed".into());
+    }
+    Ok(())
+}
+
 pub fn verify_pop(entry: &ValidatorEntry, chain_id: u64) -> bool {
     if entry.bls_public_key.is_empty() || entry.pop_signature.is_empty() {
         return false;

@@ -4,6 +4,7 @@
 //! [`Bud3Limits::TESTNET_DEFAULT`] are starting points: governance changes
 //! them once measurements arrive. The segment ceiling is not a parameter: it
 //! follows from the profile (`k_max` x `symbol_size`).
+//! Convenience: public B.U.D. 3.0 protocol constants shared across node admission, gateway, and clients.
 
 use serde::{Deserialize, Serialize};
 

@@ -13,6 +13,7 @@
 //! the filter's history.
 //!
 //! The hashing is integers only, so two architectures agree bit for bit.
+//! Convenience: public node-local Bloom filter index consumed by gateway upload admission.
 
 use std::collections::btree_map::{BTreeMap, IntoIter};
 

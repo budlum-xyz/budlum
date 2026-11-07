@@ -25,6 +25,7 @@
 //!
 //! The parser never panics, never allocates from an untrusted length before
 //! it has checked the bytes are there, and charges a [`Meter`] for the copy.
+//! Convenience: public BOF-1 container API consumed by upload/view pipelines, gateway, and fuzz targets.
 
 use super::content_id::{ContentId, ContentIdKind};
 use super::limits::{Profile, ProfileId};

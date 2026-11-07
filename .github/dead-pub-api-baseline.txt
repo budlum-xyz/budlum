@@ -84,7 +84,6 @@ src/core/account.rs:is_storage_operator
 src/core/account.rs:remove_role
 src/core/account.rs:save_to_storage
 src/core/account.rs:slash_all_roles
-src/core/chain_config.rs:finality_quorum
 src/core/encoding.rs:create_version_message
 src/core/encoding.rs:encode_block_header
 src/core/encoding.rs:encode_block_summary

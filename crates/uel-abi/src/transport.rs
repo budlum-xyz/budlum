@@ -10,6 +10,7 @@
 //! (a dead socket, a missed deadline, a protocol violation) is a
 //! [`TransportError`]: the non-deterministic class, on which the coordinator
 //! must not write anything.
+//! Convenience: public UDS worker client/server transport consumed by the UEL supervisor and EE workers.
 
 use crate::frame::{read_frame, write_frame, FrameError, ABI_VERSION};
 use crate::host::{ExecutionEnvironment, HostApi, HostRead};

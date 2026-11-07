@@ -14,6 +14,7 @@
 //! The codec register sits between content and payload: the upload path
 //! selects the codec and stores its payload, the view path decodes it back.
 //! Nothing after the object changes with the codec.
+//! Convenience: public B.U.D. 3.0 upload preparation and public view decode entry points for gateway and CLI.
 
 use super::bof1::{Bof1Error, CodecId, Object};
 use super::content_id::ContentId;
