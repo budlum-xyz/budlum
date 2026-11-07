@@ -39,6 +39,8 @@ annotation on purpose.
 | BLG-274 | Medium | `src/network/`, `.github/workflows/ci.yml` network hardening job | The network hardening test step fails with exit 101. | CI 42050659038, job 127488354561 step `network hardening tests` | WP-15 |
 | BLG-275 | Low | `deny.toml`, `.github/workflows/ci.yml` cargo deny jobs | Both cargo deny jobs (root and fuzz) fail, so the dependency policy is not enforced on this tree. | CI 42050659038, jobs 127488354574 and 127488354282 | WP-42 |
 | BLG-276 | High | `config/naming/concept_map.toml`, `.github/concept-names-baseline.txt` | The concept name ratchet cannot be green on the integrated tree: five entries measured above their baseline (Graft 897 against 895, Budscan 272 against 268, PUL 100 against 99, Tarif 1444 against 1442, Govde 2 against 1), and four entries measured below theirs (Pollen, Budscan, Tarif, the `three_*` modules). A ratchet that is wrong in both directions protects nothing. | Static measurement of the same rules the `concept_names` gate applies, run over this tree: 27 entries, 5036 matches, equal to the baseline after the fix. No CI run is available in this environment, so the red state is reproduced by measurement rather than by a job log. | WP-05 |
+| BLG-277 | Medium | `.github/workflows/` (all five gate-running workflows), `xtask/gates/src/main.rs` | 34 of the 141 registered gates had no canary of their own in any workflow, so on a green build their `self_test` never ran: a bare `--self-test` selects the whole registry, but the only step that ran it sat behind `if: failure()`. A gate whose canary runs only when something else is already red proves nothing about that gate. | Measured at `c11a463b` by matching each registry name against every workflow file: 141 registered, 107 named in a step, 34 named in none (`quantum-account`, `parallel-execution`, `bud3-placement`, `bud3-repair-fires`, `chain-id-is-not-hardcoded`, `gates-do-not-panic` and the rest). Fixed by one step running the whole registry's canaries (`0e31c3d7`). | WP-42 |
+| BLG-278 | Low | `xtask/gates/src/main.rs` (`content-encryption-bound`, `derived-content-stays-byte-exact`) | Two gates are registered under a name that is not the gate name directive 16.3 uses (`content_encryption_is_declared_and_bound`, `derived_content`). A register keyed on the directive's names reads them as missing, which is how this pass first counted them. | The registry names were read from `main.rs` and the module names from `xtask/gates/src/gates/`: the two disagree for exactly these two gates. The register in `docs/work/PACKAGES.md` now prints the registry name beside the directive name. | WP-42 |
 
 ## Closure record
 
@@ -57,5 +59,10 @@ annotation on purpose.
    suite description in `docs/pq/classical_allowlist.toml`.
 3. The baseline is lowered, never raised, to the measured counts: 5036 legacy
    matches across 27 entries.
+
+`BLG-277` and `BLG-278` are closed by this branch: the canary step is
+`0e31c3d7` and the register that shows the alternate names is `c11a463b`.
+Neither row carries a merge commit or a CI run number, because every run on this
+branch was cancelled by the next push and none of them started a job.
 
 `BLG-268` to `BLG-275` stay open.
