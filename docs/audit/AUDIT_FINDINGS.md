@@ -1024,30 +1024,46 @@ downgrade, and the count above is the tree's, not a report's.
 
 ---
 
-## Round 3 - 2026-11-07 (directive gates: workspace coverage and floats)
+## Round 4 - 2026-11-07 (directive gates: workspace coverage and floats)
 
 Section 16 of the binding directive names two new gates and two registry
 files. The registry files were absent from this tree, and so were both
 gates. This round adds them and writes the evidence here.
 
+The two register rows below are true of the commit that follows this one,
+not of the round in which they were first written: an earlier draft of this
+section named `docs/work/PACKAGES.md` and `docs/audit/FINDINGS.md` before
+either file existed. A document that says a file exists is not evidence that
+it does; the files are now in the same pull request as this correction.
+
 | Change | What it closes | Evidence |
 |---|---|---|
 | `workflows_cover_every_workspace` (`xtask/gates/src/gates/workflows_cover_every_workspace.rs`) | section 16.2 rule 3: a Cargo workspace that no workflow compiles is a blind spot. `crates/ai-inference` and `bud/` were each in that hole once and both were found by accident, not by a check. | Measured on this tree: 14 workspace roots discovered from the manifests, 14 covered by a live `run:` line. The gate refuses an uncovered root, a comment-only mention, a `continue-on-error` step, and `cargo fmt` as coverage. Canary: `workflows_cover_every_workspace_catches_injected_uncovered_workspace`. CI steps: `Workspace coverage canary`, `Every Cargo workspace is compiled by a workflow`. |
-| `no_float_in_consensus_paths` (`xtask/gates/src/gates/no_float_in_consensus_paths.rs`) | G-2 and section 15.8 WP-42 item 4: no floating point on a consensus-relevant production path. A float makes a decision depend on the rounding mode, so two honest nodes can derive different roots from the same blocks. | Measured with the AST reader (`syn`), not with text search: `src/chain`, `src/consensus`, `src/execution`, `src/settlement`, `src/validators`, `src/storage/bud3` and `budzero/` hold no float outside `#[cfg(test)]` and `benches/`. One pinned file remains, `src/ai/registry.rs`, whose agent ranking is display-only: BLG-240, owner WP-45, ceiling 7 findings (two `f64` types, three float literals, one cast, one float literal in a doc comment). A pin whose file has no float left fails, so closing BLG-240 cannot leave a silent exemption. Canary: `no_float_in_consensus_paths_catches_injected_f64`. CI steps: `No-float canary`, `No float on the consensus path`. |
+| `no_float_in_consensus_paths` (`xtask/gates/src/gates/no_float_in_consensus_paths.rs`) | G-2 and section 15.8 WP-42 item 4: no floating point on a consensus-relevant production path. A float makes a decision depend on the rounding mode, so two honest nodes can derive different roots from the same blocks. | Measured with the AST reader (`syn`), not with text search: `src/chain`, `src/consensus`, `src/execution`, `src/settlement`, `src/validators`, `src/storage/bud3` and `budzero/` hold no float outside `#[cfg(test)]` and `benches/`. One pinned file remains, `src/ai/registry.rs`, whose agent ranking is display-only: BLG-240, owner WP-45, ceiling 6 findings (three `f64` types, two float literals, one `as f64` cast; a cast is counted once, by the cast, not again as its target type, and the `f64` that appears inside a doc comment is a string literal and is not counted). A pin whose file has no float left fails, so closing BLG-240 cannot leave a silent exemption. Canary: `no_float_in_consensus_paths_catches_injected_f64`. CI steps: `No-float canary`, `No float on the consensus path`. |
 | `xtask/gates/src/gates/ci_workflow_guards.rs` | the reader both gates use. `RunBlock` now carries the step's `working-directory:`, because a workspace-relative path in a `run:` line is relative to that directory. `run_blocks` became `pub(crate)`. | No behaviour change for the existing guards: `working_directory` is `None` when a step declares none, and nothing under `ci_workflow_guards` reads it. |
-| `docs/work/PACKAGES.md` | section 15.5 rule 7: the package registry the directive requires and the tree did not have. | The file records the 64 packages, the lane/layer/TLG/dependency columns, the lock paths of each package and the shared append-only files. It claims no closure: a row stays `in progress` until its final pull request merges with a commit SHA and a CI run number. |
-| `docs/audit/FINDINGS.md` | section 14.1 and section 15.5 rule 8: the finding ledger the directive requires and the tree did not have. | The rules (identity, severity, status, closing protocol, append-only range from BLG-268) and the closed/open tables. It starts empty on purpose and says so: no finding is recorded as closed without a merged commit and a CI run. |
+| `docs/work/PACKAGES.md` | section 15.5 rule 7: the package register the directive requires and the tree did not have. | 64 rows, one per card in the directive's section 15.7 table, with lane, layer, TLG, dependency, milestone, status and the pull requests open against the package on 2026-11-07. No row is `closed`, because no package's final pull request has merged; the file says so rather than implying progress. The lock paths are not copied: the card is the authority and a second copy drifts. |
+| `docs/audit/FINDINGS.md` | section 14.1 rule 9 and section 15.5 rule 8: the finding ledger the directive requires and the tree did not have. | 267 rows, `BLG-001` to `BLG-267`, one per finding the directive's section 14 lists, with severity, area, English title and owning package, plus the closing protocol, the status vocabulary and an empty `BLG-268 and later` table. No row is `closed`: the reproduction tests of WP-01 to WP-04 have not run, and a closed row must carry a commit SHA and a CI run number. |
 
 Both gates are registered in `xtask/gates/src/main.rs` with a `self_test`,
-so `--all` and `--all --self-test` include them.
+so `--all` and `--all --self-test` include them. Neither gate adds a
+dependency: the workspace gate reads the four manifest facts it needs itself,
+rather than putting a TOML crate into the crate that decides what may enter
+the main branch. The canaries cover the cases that matter - an uncovered
+workspace, a comment-only mention, a softened step, `cargo fmt`, a
+`--manifest-path` build, a members array spread over several lines, a broken
+manifest, a pinned file at its ceiling, one above it, and a stale pin.
 
 ### Notes on the evidence
 
 The authoring environment for this round has no Rust toolchain: `cargo`,
 `rustc` and `rustfmt` are absent and the sandbox cannot reach a toolchain
 mirror. The two gates were therefore checked by porting their measurement
-rules to a scratch script and running them over the tree (14/14 workspaces
-covered; no unpinned float; 7 findings in the pinned file). That is a
-reproduction of the arithmetic, not a `cargo` run, and it is written here as
-such. The first CI run on the branch is what turns either row green, and the
-run number belongs in the row at that moment.
+rules to a scratch script and running them over the tree: 14 of 14
+workspaces covered, no un-pinned float, 6 findings in the pinned file. The
+port is also what caught the cast being counted twice by the AST reader,
+which would have set the pin one too high and let one new float into the
+file unnoticed.
+
+That is a reproduction of the arithmetic, not a `cargo` run, and it is
+written here as such. The first CI run on the branch is what turns either
+row green, and the run number belongs in the row at that moment.
