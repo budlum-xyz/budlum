@@ -21,6 +21,23 @@
 //! so operators must protect restarts as well as the funding key; only the
 //! faucet balance is an absolute bound across restarts.
 //!
+//! # Proof of work
+//!
+//! Every grant also carries a small proof of work (section 11.9). `POST
+//! /challenge` issues a challenge bound to the UTC day, the client IP and the
+//! recipient address. The number of leading zero bits the proof needs rises
+//! with the previous UTC day's demand and falls back when demand falls. A
+//! refusal costs the caller its work but reserves no allowance.
+//!
+//! # Request shapes
+//!
+//! `POST /request` is the native shape. `POST /mobile/request` is the mobile
+//! client shape and names `client = "mobile"`. `POST /requestAirdrop` is the
+//! Solana JSON-RPC shape routed here by the compatibility gateway; the gateway
+//! translates the base58 public key to the 32-byte address the node uses and
+//! attaches its proof of work in a `budlum` object. All three lead to the same
+//! ordinary signed transfer and the same three limits.
+//!
 //! # Chains
 //!
 //! The faucet asks the node for its chain id at startup and refuses to run
@@ -42,12 +59,14 @@
 
 use budlum_core::core::address::Address;
 use budlum_core::core::chain_config::Network;
+use budlum_core::core::hash::hash_fields_bytes;
 use budlum_core::core::transaction::{Transaction, TransactionType};
 use budlum_core::crypto::primitives::WalletKeyPair;
 use clap::{Parser, Subcommand};
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::{Bytes, Incoming};
 use hyper::{Method, Request, Response, StatusCode};
+use prometheus::{Encoder as _, IntCounter, Registry, TextEncoder};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::process::ExitCode;
@@ -73,6 +92,196 @@ const BODY_TIMEOUT: Duration = Duration::from_secs(10);
 /// letting the table grow without bound.
 const MAX_TRACKED_KEYS: usize = 200_000;
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
+/// TESTNET-DEFAULT: leading zero bits a proof carries on a quiet day.
+const POW_BASE_BITS: u8 = 8;
+/// TESTNET-DEFAULT: the ceiling. One grant must stay cheap on a phone.
+const POW_MAX_BITS: u8 = 24;
+/// TESTNET-DEFAULT: requests per UTC day that leave the difficulty at the base.
+const POW_DEMAND_TARGET: u64 = 1_000;
+/// TESTNET-DEFAULT: the largest amount a routed `requestAirdrop` may name.
+/// The amount never changes the grant: the faucet always sends its fixed sum.
+const MAX_AIRDROP_REQUEST: u64 = 1_000_000_000;
+/// Domain tags keep a challenge from being replayed as a proof and back.
+const POW_CHALLENGE_DOMAIN: &[u8] = b"BDLM/FAUCET/POW/V1/CHALLENGE";
+const POW_PROOF_DOMAIN: &[u8] = b"BDLM/FAUCET/POW/V1/PROOF";
+const CHALLENGE_HEX_LEN: usize = 64;
+
+/// Which HTTP shape carried a request. All three lead to the same grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestShape {
+    Native,
+    Mobile,
+    SolanaAirdrop,
+}
+
+/// The fields the faucet needs before it will sign anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GrantRequest {
+    to: Address,
+    challenge: [u8; 32],
+    nonce: u64,
+}
+
+/// One extra bit of work for every doubling of the previous day's demand.
+/// The arithmetic is integer only: a floating factor would make the difficulty
+/// depend on the toolchain instead of on a rule.
+fn pow_difficulty_for(previous_day_requests: u64) -> u8 {
+    let mut demand = previous_day_requests;
+    let mut extra = 0u8;
+    while demand > POW_DEMAND_TARGET && extra < POW_MAX_BITS - POW_BASE_BITS {
+        demand /= 2;
+        extra = extra.saturating_add(1);
+    }
+    POW_BASE_BITS.saturating_add(extra)
+}
+
+fn ip_bytes(ip: IpAddr) -> Vec<u8> {
+    match ip {
+        IpAddr::V4(v4) => v4.octets().to_vec(),
+        IpAddr::V6(v6) => v6.octets().to_vec(),
+    }
+}
+
+/// A challenge is bound to the server secret, the UTC day, the client IP and
+/// the recipient. Nobody can precompute work for another address or reuse a
+/// proof from another proxy address.
+fn pow_challenge(secret: &[u8; 32], day: u64, ip: IpAddr, to: &Address) -> [u8; 32] {
+    let day_bytes = day.to_le_bytes();
+    let ip = ip_bytes(ip);
+    hash_fields_bytes(&[
+        POW_CHALLENGE_DOMAIN,
+        secret.as_slice(),
+        &day_bytes[..],
+        ip.as_slice(),
+        &to.as_bytes()[..],
+    ])
+}
+
+fn pow_digest(challenge: &[u8; 32], to: &Address, nonce: u64) -> [u8; 32] {
+    let nonce_bytes = nonce.to_le_bytes();
+    hash_fields_bytes(&[
+        POW_PROOF_DOMAIN,
+        challenge.as_slice(),
+        &to.as_bytes()[..],
+        &nonce_bytes[..],
+    ])
+}
+
+/// Leading zero bits of a digest, without a cast. An all-zero digest reports
+/// 255: the difficulty ceiling is far below that, so the saturation is safe.
+fn leading_zero_bits(digest: &[u8; 32]) -> u8 {
+    let mut bits = 0u8;
+    for byte in digest {
+        if *byte == 0 {
+            bits = bits.saturating_add(8);
+        } else {
+            let mut mask = 0x80u8;
+            while mask != 0 && mask & *byte == 0 {
+                bits = bits.saturating_add(1);
+                mask >>= 1;
+            }
+            break;
+        }
+    }
+    bits
+}
+
+fn proof_is_valid(challenge: &[u8; 32], to: &Address, nonce: u64, difficulty: u8) -> bool {
+    leading_zero_bits(&pow_digest(challenge, to, nonce)) >= difficulty
+}
+
+fn parse_challenge(raw: &str) -> Result<[u8; 32], String> {
+    let raw = raw.strip_prefix("0x").unwrap_or(raw);
+    if raw.len() != CHALLENGE_HEX_LEN {
+        return Err("the proof-of-work challenge must be 32 bytes of hex".into());
+    }
+    let bytes = hex::decode(raw).map_err(|e| format!("invalid challenge: {e}"))?;
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+/// Native, mobile and routed Solana bodies all carry the same address and the
+/// same proof of work. `serde_json` is the only decoder: no new parser enters
+/// the tree, so the fuzz-target rule for a new parser is not engaged.
+fn parse_grant_request(shape: RequestShape, body: &[u8]) -> Result<GrantRequest, String> {
+    let value: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("request is not JSON: {e}"))?;
+    let (address_raw, proof) = match shape {
+        RequestShape::Native => (
+            value
+                .get("address")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("request needs an \"address\" string")?,
+            &value,
+        ),
+        RequestShape::Mobile => {
+            let client = value
+                .get("client")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("a mobile request needs a \"client\" string")?;
+            if client != "mobile" {
+                return Err("a mobile request must name client \"mobile\"".into());
+            }
+            (
+                value
+                    .get("address")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or("request needs an \"address\" string")?,
+                &value,
+            )
+        }
+        RequestShape::SolanaAirdrop => {
+            let rpc = value
+                .get("jsonrpc")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("requestAirdrop needs \"jsonrpc\": \"2.0\"")?;
+            if rpc != "2.0" {
+                return Err("requestAirdrop needs JSON-RPC 2.0".into());
+            }
+            let method = value
+                .get("method")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("requestAirdrop needs a \"method\" string")?;
+            if method != "requestAirdrop" {
+                return Err("only requestAirdrop is routed to the faucet".into());
+            }
+            let params = value
+                .get("params")
+                .and_then(serde_json::Value::as_array)
+                .ok_or("requestAirdrop needs a \"params\" array")?;
+            let address_raw = params
+                .first()
+                .and_then(serde_json::Value::as_str)
+                .ok_or("requestAirdrop params[0] is the translated 32-byte address")?;
+            let amount = params
+                .get(1)
+                .and_then(serde_json::Value::as_u64)
+                .ok_or("requestAirdrop params[1] is a positive amount")?;
+            if amount == 0 || amount > MAX_AIRDROP_REQUEST {
+                return Err("requestAirdrop amount is out of range; the grant is fixed".into());
+            }
+            let proof = value
+                .get("budlum")
+                .ok_or("requestAirdrop needs a \"budlum\" proof-of-work object")?;
+            (address_raw, proof)
+        }
+    };
+    let to = address_from_str(address_raw)?;
+    let challenge_raw = proof
+        .get("challenge")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("request needs a \"challenge\" string")?;
+    let nonce = proof
+        .get("nonce")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("request needs a \"nonce\" integer")?;
+    Ok(GrantRequest {
+        to,
+        challenge: parse_challenge(challenge_raw)?,
+        nonce,
+    })
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "budlum-faucet", about = "Testnet BUD faucet")]
@@ -155,6 +364,7 @@ enum Refusal {
     IpCooldown { retry_after: u64 },
     DailyCap,
     Busy,
+    InvalidProofOfWork,
 }
 
 impl Refusal {
@@ -168,6 +378,9 @@ impl Refusal {
             }
             Self::DailyCap => "the faucet's daily cap is reached; retry after 00:00 UTC".into(),
             Self::Busy => "the faucet is tracking too many requests; retry later".into(),
+            Self::InvalidProofOfWork => {
+                "the proof of work is missing, expired or below the current difficulty".into()
+            }
         }
     }
 }
@@ -179,6 +392,10 @@ struct Ledger {
     by_ip: BTreeMap<IpAddr, u64>,
     day: u64,
     sent_today: u64,
+    /// Every request that reaches the faucet, including refused ones. The next
+    /// day's proof-of-work difficulty comes from this count.
+    requests_today: u64,
+    requests_previous_day: u64,
 }
 
 impl Ledger {
@@ -225,11 +442,26 @@ impl Ledger {
         self.sent_today = self.sent_today.saturating_add(policy.amount);
     }
 
+    /// Count a request for demand without granting anything.
+    fn note_request(&mut self, now: u64) {
+        self.roll_day(now);
+        self.requests_today = self.requests_today.saturating_add(1);
+    }
+
+    /// The difficulty for the current day, from the previous day's demand.
+    fn difficulty(&self) -> u8 {
+        pow_difficulty_for(self.requests_previous_day)
+    }
+
     fn roll_day(&mut self, now: u64) {
         let day = now / SECONDS_PER_DAY;
-        if day != self.day {
+        // A wall-clock correction must not reset the cap a second time.
+        // Keep the newest day seen until the clock catches up again.
+        if day > self.day {
             self.day = day;
             self.sent_today = 0;
+            self.requests_previous_day = self.requests_today;
+            self.requests_today = 0;
         }
     }
 
@@ -246,14 +478,7 @@ fn faucet_allowed_on(chain_id: u64) -> bool {
         || chain_id == Network::Devnet.chain_id().value()
 }
 
-/// The `address` field of a request body.
-fn parse_request(body: &[u8]) -> Result<Address, String> {
-    let value: serde_json::Value =
-        serde_json::from_slice(body).map_err(|e| format!("request is not JSON: {e}"))?;
-    let raw = value
-        .get("address")
-        .and_then(serde_json::Value::as_str)
-        .ok_or("request needs an \"address\" string")?;
+fn address_from_str(raw: &str) -> Result<Address, String> {
     let hex = raw.strip_prefix("0x").unwrap_or(raw);
     if hex.len() != 64 {
         return Err("address must be 32 bytes of hex".into());
@@ -263,6 +488,17 @@ fn parse_request(body: &[u8]) -> Result<Address, String> {
         return Err("the zero address cannot receive".into());
     }
     Ok(address)
+}
+
+/// The `address` field of a challenge request body.
+fn parse_request(body: &[u8]) -> Result<Address, String> {
+    let value: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("request is not JSON: {e}"))?;
+    let raw = value
+        .get("address")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("request needs an \"address\" string")?;
+    address_from_str(raw)
 }
 
 /// Read a node RPC answer that is a decimal or `0x` hex number.
@@ -316,6 +552,12 @@ struct Faucet {
     address: Address,
     chain_id: u64,
     policy: Policy,
+    /// Per-process secret for proof-of-work challenges. A restart issues new
+    /// challenges; in-flight proofs must be fetched again, which is safe.
+    pow_secret: [u8; 32],
+    /// R-15 grant counter and the registry it is exposed through.
+    grant_metric: IntCounter,
+    metric_registry: Registry,
     identity: http_support::ClientIdentity,
     /// Do not queue an unbounded number of grants behind the nonce lock.
     grant_slots: Arc<Semaphore>,
@@ -327,7 +569,7 @@ struct Faucet {
 impl Faucet {
     async fn grant(
         &self,
-        to: Address,
+        request: GrantRequest,
         ip: IpAddr,
     ) -> Result<serde_json::Value, (StatusCode, String)> {
         let now = SystemTime::now()
@@ -335,8 +577,18 @@ impl Faucet {
             .map_or(0, |d| d.as_secs());
         let mut state = self.state.lock().await;
         let (ledger, next_nonce) = &mut *state;
+        ledger.note_request(now);
+        let expected = pow_challenge(&self.pow_secret, now / SECONDS_PER_DAY, ip, &request.to);
+        if request.challenge != expected
+            || !proof_is_valid(&expected, &request.to, request.nonce, ledger.difficulty())
+        {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Refusal::InvalidProofOfWork.message(),
+            ));
+        }
         ledger
-            .check(&self.policy, &to, ip, now)
+            .check(&self.policy, &request.to, ip, now)
             .map_err(|refusal| (StatusCode::TOO_MANY_REQUESTS, refusal.message()))?;
 
         let chain_nonce = self
@@ -348,7 +600,7 @@ impl Faucet {
         let nonce = chain_nonce.max(*next_nonce);
         let mut tx = Transaction::new_with_chain_id(
             self.address,
-            to,
+            request.to,
             self.policy.amount,
             0,
             nonce,
@@ -369,7 +621,7 @@ impl Faucet {
         // cooldown and daily allowance before sending, so an ambiguous RPC
         // timeout cannot yield unaccounted grants. Definite RPC refusals also
         // consume the allowance; this is safer than assuming no transfer ran.
-        ledger.record(&self.policy, to, ip, now);
+        ledger.record(&self.policy, request.to, ip, now);
         let hash = self
             .node
             .call("bud_sendRawTransaction", serde_json::json!([tx]))
@@ -386,8 +638,9 @@ impl Faucet {
             })?;
 
         *next_nonce = nonce.saturating_add(1);
+        self.grant_metric.inc();
         Ok(serde_json::json!({
-            "to": format!("0x{}", to.to_hex()),
+            "to": format!("0x{}", request.to.to_hex()),
             "amount_atoms": self.policy.amount,
             "fee_atoms": fee,
             "nonce": nonce,
@@ -404,6 +657,29 @@ impl Faucet {
             "cooldown_secs": self.policy.cooldown_secs,
             "daily_cap_atoms": self.policy.daily_cap,
             "sent_today_atoms": state.0.sent_today,
+            "pow_difficulty": state.0.difficulty(),
+            "requests_today": state.0.requests_today,
+            "requests_previous_day": state.0.requests_previous_day,
+        })
+    }
+
+    /// Issue the challenge a client must solve. It stays valid until 00:00 UTC.
+    async fn challenge_for(&self, ip: IpAddr, to: Address) -> serde_json::Value {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let day = now / SECONDS_PER_DAY;
+        let difficulty = {
+            let mut state = self.state.lock().await;
+            state.0.roll_day(now);
+            state.0.difficulty()
+        };
+        let challenge = pow_challenge(&self.pow_secret, day, ip, &to);
+        serde_json::json!({
+            "address": format!("0x{}", to.to_hex()),
+            "challenge": hex::encode(challenge),
+            "difficulty": difficulty,
+            "expires_at": (day + 1) * SECONDS_PER_DAY,
         })
     }
 }
@@ -432,6 +708,34 @@ fn upstream_failure(method: &str, error: &str) -> (StatusCode, String) {
     )
 }
 
+/// The four write routes and the two read routes, in one place so the refusal
+/// text cannot drift away from the dispatcher.
+const ROUTE_HELP: &str =
+    "POST /challenge, /request, /mobile/request, /requestAirdrop or GET /health, /metrics";
+
+/// R-15: the faucet exports its own grant counter. It is a separate process
+/// from the node, so it owns a separate registry instead of reporting a zero
+/// next to the node's metrics.
+fn metrics_response(registry: &Registry) -> Response<Full<Bytes>> {
+    let mut buffer = Vec::new();
+    let encoder = TextEncoder::new();
+    let metric_families = registry.gather();
+    if encoder.encode(&metric_families, &mut buffer).is_err() {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the faucet metrics could not be encoded",
+        );
+    }
+    let mut response = Response::new(Full::new(Bytes::from(buffer)));
+    *response.status_mut() = StatusCode::OK;
+    if let Ok(value) = hyper::header::HeaderValue::from_str("text/plain; version=0.0.4") {
+        response
+            .headers_mut()
+            .insert(hyper::header::CONTENT_TYPE, value);
+    }
+    response
+}
+
 fn error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
     json_response(status, &serde_json::json!({ "error": message }))
 }
@@ -454,12 +758,19 @@ async fn handle(
     if method == Method::GET && path == "/health" {
         return Ok(json_response(StatusCode::OK, &faucet.health().await));
     }
-    if method != Method::POST || path != "/request" {
-        return Ok(error_response(
-            StatusCode::NOT_FOUND,
-            "POST /request or GET /health",
-        ));
+    if method == Method::GET && path == "/metrics" {
+        return Ok(metrics_response(&faucet.metric_registry));
     }
+    if method != Method::POST {
+        return Ok(error_response(StatusCode::NOT_FOUND, ROUTE_HELP));
+    }
+    let shape = match path.as_str() {
+        "/challenge" => None,
+        "/request" => Some(RequestShape::Native),
+        "/mobile/request" => Some(RequestShape::Mobile),
+        "/requestAirdrop" => Some(RequestShape::SolanaAirdrop),
+        _ => return Ok(error_response(StatusCode::NOT_FOUND, ROUTE_HELP)),
+    };
     let ip = match faucet.identity.client_ip(peer.ip(), request.headers()) {
         Ok(ip) => ip,
         Err(message) => return Ok(error_response(StatusCode::BAD_REQUEST, message)),
@@ -473,9 +784,21 @@ async fn handle(
             ))
         }
     };
-    let to = match parse_request(&body) {
-        Ok(to) => to,
-        Err(e) => return Ok(error_response(StatusCode::BAD_REQUEST, &e)),
+    let grant_request = match shape {
+        None => {
+            let to = match parse_request(&body) {
+                Ok(to) => to,
+                Err(e) => return Ok(error_response(StatusCode::BAD_REQUEST, &e)),
+            };
+            return Ok(json_response(
+                StatusCode::OK,
+                &faucet.challenge_for(ip, to).await,
+            ));
+        }
+        Some(shape) => match parse_grant_request(shape, &body) {
+            Ok(grant_request) => grant_request,
+            Err(e) => return Ok(error_response(StatusCode::BAD_REQUEST, &e)),
+        },
     };
     let Ok(permit) = faucet.grant_slots.clone().try_acquire_owned() else {
         return Ok(error_response(
@@ -488,7 +811,7 @@ async fn handle(
     // discard the nonce/cooldown update after an accepted transaction.
     let grant = tokio::spawn(async move {
         let _permit = permit;
-        faucet.grant(to, ip).await
+        faucet.grant(grant_request, ip).await
     });
     Ok(match grant.await {
         Ok(Ok(receipt)) => json_response(StatusCode::OK, &receipt),
@@ -554,12 +877,26 @@ async fn serve(
             Network::Devnet.chain_id().value()
         ));
     }
+    let mut pow_secret = [0u8; 32];
+    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut pow_secret);
+    let metric_registry = Registry::new();
+    let grant_metric = IntCounter::new(
+        "budlum_faucet_grants_total",
+        "Ordinary signed transfers the testnet faucet submitted",
+    )
+    .map_err(|e| format!("faucet grant metric: {e}"))?;
+    metric_registry
+        .register(Box::new(grant_metric.clone()))
+        .map_err(|e| format!("faucet metric registry: {e}"))?;
     let faucet = Arc::new(Faucet {
         node,
         key,
         address,
         chain_id,
         policy,
+        pow_secret,
+        grant_metric,
+        metric_registry,
         identity,
         grant_slots: Arc::new(Semaphore::new(1)),
         state: Mutex::new((Ledger::default(), 0)),
@@ -667,8 +1004,10 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        faucet_allowed_on, parse_request, rpc_u64, Ledger, Policy, Refusal, DEFAULT_AMOUNT_BUD,
-        DEFAULT_COOLDOWN_SECS, DEFAULT_DAILY_CAP_BUD,
+        faucet_allowed_on, leading_zero_bits, parse_challenge, parse_grant_request, parse_request,
+        pow_challenge, pow_difficulty_for, pow_digest, proof_is_valid, rpc_u64, Ledger, Policy,
+        Refusal, RequestShape, DEFAULT_AMOUNT_BUD, DEFAULT_COOLDOWN_SECS, DEFAULT_DAILY_CAP_BUD,
+        MAX_AIRDROP_REQUEST, POW_BASE_BITS, POW_DEMAND_TARGET, POW_MAX_BITS, SECONDS_PER_DAY,
     };
     use budlum_core::core::address::Address;
     use budlum_core::core::chain_config::Network;
@@ -760,6 +1099,33 @@ mod tests {
                 &Address::from([9u8; 32]),
                 ip(9),
                 day + super::SECONDS_PER_DAY,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn faucet_limits_hold_when_the_clock_moves_backwards() {
+        let p = Policy::from_bud(100, 1, 100).unwrap();
+        let mut ledger = Ledger::default();
+        let today = 10 * super::SECONDS_PER_DAY;
+        let to = Address::from([1u8; 32]);
+        ledger.check(&p, &to, ip(1), today).unwrap();
+        ledger.record(&p, to, ip(1), today);
+
+        // A backwards correction, then a return to the same day, must not
+        // create either a second cap or a second daily reset.
+        for now in [today - super::SECONDS_PER_DAY, today + 2] {
+            assert_eq!(
+                ledger.check(&p, &Address::from([2u8; 32]), ip(2), now),
+                Err(Refusal::DailyCap)
+            );
+        }
+        ledger
+            .check(
+                &p,
+                &Address::from([2u8; 32]),
+                ip(2),
+                today + super::SECONDS_PER_DAY,
             )
             .unwrap();
     }
@@ -870,5 +1236,373 @@ mod tests {
             budlum_core::core::transaction::SIGNATURE_VERSION_V5
         );
         assert!(tx.verify());
+    }
+
+    /// Section 11.9: the three limits hold, and a request that is refused for
+    /// missing work counts as demand but reserves no allowance.
+    #[test]
+    fn faucet_limits_hold() {
+        let p = policy();
+        let mut ledger = Ledger::default();
+        let to = Address::from([11u8; 32]);
+        let day = 12 * SECONDS_PER_DAY;
+        ledger.check(&p, &to, ip(1), day).unwrap();
+        ledger.record(&p, to, ip(1), day);
+        assert!(matches!(
+            ledger.check(&p, &to, ip(2), day + 1),
+            Err(Refusal::AddressCooldown { .. })
+        ));
+        assert!(matches!(
+            ledger.check(&p, &Address::from([12u8; 32]), ip(1), day + 1),
+            Err(Refusal::IpCooldown { .. })
+        ));
+        let before = ledger.sent_today;
+        ledger.note_request(day + 2);
+        assert_eq!(ledger.sent_today, before, "demand is not a grant");
+        assert_eq!(ledger.requests_today, 1);
+        assert_eq!(ledger.difficulty(), POW_BASE_BITS);
+    }
+
+    /// Section 11.9 item 3: one extra bit per doubling of daily demand, with
+    /// a ceiling, and a fall back when demand falls.
+    #[test]
+    fn faucet_pow_difficulty_adjusts() {
+        assert_eq!(pow_difficulty_for(0), POW_BASE_BITS);
+        assert_eq!(pow_difficulty_for(POW_DEMAND_TARGET), POW_BASE_BITS);
+        assert_eq!(pow_difficulty_for(POW_DEMAND_TARGET + 1), POW_BASE_BITS + 1);
+        assert_eq!(pow_difficulty_for(4 * POW_DEMAND_TARGET), POW_BASE_BITS + 2);
+        assert_eq!(pow_difficulty_for(u64::MAX), POW_MAX_BITS);
+
+        let mut ledger = Ledger::default();
+        let day = 20 * SECONDS_PER_DAY;
+        for _ in 0..(8 * POW_DEMAND_TARGET) {
+            ledger.note_request(day);
+        }
+        ledger.note_request(day + SECONDS_PER_DAY);
+        assert!(
+            ledger.difficulty() > POW_BASE_BITS,
+            "a busy previous day raises the difficulty"
+        );
+        assert_eq!(ledger.requests_today, 1, "the new day starts a new count");
+        let busy = ledger.difficulty();
+        ledger.note_request(day + 2 * SECONDS_PER_DAY);
+        assert!(
+            ledger.difficulty() <= busy,
+            "a quiet previous day cannot raise the difficulty"
+        );
+    }
+
+    /// The faucet signs an ordinary V5 transfer. It never credits outside a
+    /// block and never serves a mainnet node.
+    #[test]
+    fn faucet_sends_signed_transfer_only() {
+        let key = budlum_core::crypto::primitives::WalletKeyPair::from_seed(&[9u8; 32]);
+        let mut tx = budlum_core::core::transaction::Transaction::new_with_chain_id(
+            key.address(),
+            Address::from([6u8; 32]),
+            policy().amount,
+            0,
+            7,
+            Vec::new(),
+            Network::Testnet.chain_id().value(),
+            budlum_core::core::transaction::TransactionType::Transfer,
+        );
+        tx.sign_v5(&key);
+        assert!(tx.verify(), "the node's own verifier accepts the grant");
+        assert_eq!(
+            tx.tx_type,
+            budlum_core::core::transaction::TransactionType::Transfer
+        );
+        assert_eq!(
+            tx.signature_version,
+            budlum_core::core::transaction::SIGNATURE_VERSION_V5
+        );
+        assert!(!faucet_allowed_on(Network::Mainnet.chain_id().value()));
+    }
+
+    #[test]
+    fn pow_challenge_is_bound_to_address_ip_and_day() {
+        let secret = [3u8; 32];
+        let to = Address::from([4u8; 32]);
+        let other = Address::from([5u8; 32]);
+        let day = 30;
+        let a = pow_challenge(&secret, day, ip(1), &to);
+        assert_eq!(a, pow_challenge(&secret, day, ip(1), &to));
+        assert_ne!(a, pow_challenge(&secret, day + 1, ip(1), &to));
+        assert_ne!(a, pow_challenge(&secret, day, ip(2), &to));
+        assert_ne!(a, pow_challenge(&secret, day, ip(1), &other));
+        assert_ne!(a, pow_challenge(&[4u8; 32], day, ip(1), &to));
+    }
+
+    #[test]
+    fn pow_proof_is_domain_separated_and_enforces_difficulty() {
+        let challenge = [7u8; 32];
+        let to = Address::from([8u8; 32]);
+        let mut digest = [0xffu8; 32];
+        digest[0] = 0;
+        digest[1] = 0x0f;
+        assert_eq!(leading_zero_bits(&digest), 12);
+        assert!(leading_zero_bits(&[0u8; 32]) >= POW_MAX_BITS);
+        let mut solved = None;
+        for nonce in 0..200_000u64 {
+            if proof_is_valid(&challenge, &to, nonce, POW_BASE_BITS) {
+                solved = Some(nonce);
+                break;
+            }
+        }
+        let nonce = solved.expect("a base-difficulty proof exists in the sampled range");
+        assert!(proof_is_valid(&challenge, &to, nonce, POW_BASE_BITS));
+        assert!(!proof_is_valid(&challenge, &to, nonce, POW_BASE_BITS + 8));
+        assert!(!proof_is_valid(
+            &challenge,
+            &Address::from([9u8; 32]),
+            nonce,
+            POW_BASE_BITS
+        ));
+        assert_ne!(
+            pow_digest(&challenge, &to, nonce),
+            pow_digest(&challenge, &to, nonce + 1)
+        );
+        assert_ne!(
+            pow_digest(&challenge, &to, nonce),
+            pow_challenge(&challenge, 0, ip(1), &to),
+            "the proof and challenge domains stay apart"
+        );
+    }
+
+    #[test]
+    fn request_shapes_are_accepted_with_a_proof_of_work() {
+        let secret = [1u8; 32];
+        let to = Address::from([2u8; 32]);
+        let expected = pow_challenge(&secret, 40, ip(7), &to);
+        let challenge = hex::encode(expected);
+        let native = format!(
+            "{{\"address\":\"0x{}\",\"challenge\":\"{challenge}\",\"nonce\":5}}",
+            to.to_hex()
+        );
+        let parsed = parse_grant_request(RequestShape::Native, native.as_bytes()).unwrap();
+        assert_eq!(parsed.to, to);
+        assert_eq!(parsed.nonce, 5);
+        assert_eq!(parsed.challenge, expected);
+
+        let mobile = format!(
+            "{{\"client\":\"mobile\",\"address\":\"0x{}\",\"challenge\":\"{challenge}\",\"nonce\":6}}",
+            to.to_hex()
+        );
+        assert_eq!(
+            parse_grant_request(RequestShape::Mobile, mobile.as_bytes())
+                .unwrap()
+                .nonce,
+            6
+        );
+
+        let airdrop = format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"requestAirdrop\",\"params\":[\"0x{}\",100000000],\"budlum\":{{\"challenge\":\"{challenge}\",\"nonce\":7}}}}",
+            to.to_hex()
+        );
+        let parsed = parse_grant_request(RequestShape::SolanaAirdrop, airdrop.as_bytes()).unwrap();
+        assert_eq!(parsed.to, to);
+        assert_eq!(parsed.nonce, 7);
+        assert_eq!(parsed.challenge, expected);
+    }
+
+    #[test]
+    fn request_shapes_refuse_bad_bodies() {
+        let to = Address::from([2u8; 32]);
+        let challenge = "ab".repeat(32);
+        let good = format!(
+            "{{\"address\":\"0x{}\",\"challenge\":\"{challenge}\",\"nonce\":1}}",
+            to.to_hex()
+        );
+        assert!(parse_grant_request(RequestShape::Native, b"not json").is_err());
+        assert!(parse_grant_request(RequestShape::Native, b"{}").is_err());
+        assert!(
+            parse_grant_request(
+                RequestShape::Native,
+                good.replace("\"nonce\":1", "\"nonce\":-1").as_bytes()
+            )
+            .is_err(),
+            "a negative nonce is not a u64"
+        );
+        assert!(
+            parse_grant_request(
+                RequestShape::Native,
+                good.replace(&challenge, "abcd").as_bytes()
+            )
+            .is_err(),
+            "a short challenge is refused"
+        );
+        assert!(parse_grant_request(RequestShape::Mobile, good.as_bytes()).is_err());
+        let mobile = format!(
+            "{{\"client\":\"mobile\",\"address\":\"0x{}\",\"challenge\":\"{challenge}\",\"nonce\":1}}",
+            to.to_hex()
+        );
+        assert!(parse_grant_request(RequestShape::Mobile, mobile.as_bytes()).is_ok());
+        assert!(
+            parse_grant_request(
+                RequestShape::Mobile,
+                mobile.replace("\"mobile\"", "\"desktop\"").as_bytes()
+            )
+            .is_err(),
+            "another client name cannot use the mobile shape"
+        );
+        for amount in [0, MAX_AIRDROP_REQUEST + 1] {
+            let body = format!(
+                "{{\"jsonrpc\":\"2.0\",\"method\":\"requestAirdrop\",\"params\":[\"0x{}\",{amount}],\"budlum\":{{\"challenge\":\"{challenge}\",\"nonce\":1}}}}",
+                to.to_hex()
+            );
+            assert!(
+                parse_grant_request(RequestShape::SolanaAirdrop, body.as_bytes()).is_err(),
+                "an out-of-range airdrop amount is refused"
+            );
+        }
+        let no_proof = format!(
+            "{{\"jsonrpc\":\"2.0\",\"method\":\"requestAirdrop\",\"params\":[\"0x{}\",1]}}",
+            to.to_hex()
+        );
+        assert!(
+            parse_grant_request(RequestShape::SolanaAirdrop, no_proof.as_bytes()).is_err(),
+            "a routed airdrop still carries its proof of work"
+        );
+        assert!(parse_challenge("abcd").is_err());
+        assert!(parse_challenge(&challenge).is_ok());
+        // The only decoder is serde_json. Arbitrary bytes are refused, never
+        // interpreted, and never panic.
+        for body in [
+            b"".as_slice(),
+            b"\xff\xfe".as_slice(),
+            b"[]".as_slice(),
+            b"null".as_slice(),
+        ] {
+            for shape in [
+                RequestShape::Native,
+                RequestShape::Mobile,
+                RequestShape::SolanaAirdrop,
+            ] {
+                assert!(parse_grant_request(shape, body).is_err());
+            }
+        }
+    }
+
+    /// The required launch-boundary alerts exist and every Budlum metric an
+    /// expression names is a metric the node really registers.
+    #[test]
+    fn alert_rules_reference_existing_metrics() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let metrics = std::fs::read_to_string(root.join("src/core/metrics.rs")).unwrap();
+        let mut registered = std::collections::BTreeSet::new();
+        for metric in metrics
+            .split('"')
+            .filter(|part| part.starts_with("budlum_"))
+        {
+            registered.insert(metric.to_string());
+        }
+        // The faucet is a separate process and exports its own counter.
+        let faucet = std::fs::read_to_string(root.join("src/bin/budlum-faucet.rs")).unwrap();
+        assert!(faucet.contains("\"budlum_faucet_grants_total\""));
+        assert!(faucet.contains("path == \"/metrics\""));
+        registered.insert("budlum_faucet_grants_total".to_string());
+        assert!(
+            registered.len() > 100,
+            "the metric scan found too few registered metrics"
+        );
+
+        let alerts = std::fs::read_to_string(root.join("ops/monitoring/alerts.yml")).unwrap();
+        let mut names = std::collections::BTreeSet::new();
+        for line in alerts.lines() {
+            let line = line.trim_start();
+            if let Some(name) = line.strip_prefix("- alert:") {
+                names.insert(name.trim().to_string());
+            }
+            if let Some(expr) = line.strip_prefix("expr:") {
+                let mut s = expr;
+                while let Some(pos) = s.find("budlum_") {
+                    s = &s[pos..];
+                    let metric: String = s
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .collect();
+                    assert!(
+                        registered.contains(&metric),
+                        "an alert expression names a metric the node does not export: {metric}"
+                    );
+                    s = &s[metric.len()..];
+                }
+            }
+        }
+        for required in [
+            "budlum_finality_stalled",
+            "budlum_finality_lag_checkpoints",
+            "budlum_bud3_segments_at_risk",
+            "budlum_bud3_repair_backlog",
+            "budlum_relay_reservations",
+            "budlum_ee_fault_total",
+            "budlum_state_root_mismatch_total",
+            "budlum_rpc_rate_limited_total",
+        ] {
+            assert!(
+                names.contains(required),
+                "a required launch-boundary alert is missing: {required}"
+            );
+        }
+    }
+
+    /// DOC-GAP-01 and DOC-GAP-04: the shipped testnet profile names a usable
+    /// SoftHSM configuration, and the systemd unit carries its context.
+    #[test]
+    fn testnet_first_run_has_softhsm_context() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let config = std::fs::read_to_string(root.join("config/testnet.toml")).unwrap();
+        assert!(config.contains("[validator.signer.pkcs11]"));
+        assert!(config.contains("module_path ="));
+        assert!(config.contains("token_pin_env ="));
+        let softhsm = std::fs::read_to_string(root.join("ops/softhsm2.conf")).unwrap();
+        assert!(softhsm.contains("directories.tokendir"));
+        let unit = std::fs::read_to_string(root.join("ops/budlum-core.service")).unwrap();
+        assert!(unit.contains("SOFTHSM2_CONF"));
+        assert!(unit.contains("/etc/budlum/hsm.env"));
+        assert!(unit.contains("Documentation=https://github.com/") && unit.contains("/budlum"));
+        assert!(!unit.contains("github.com/rade/"));
+    }
+
+    /// WP-41 job 4: the three compose profiles are present and the rehearsal
+    /// profile loads the alert rules. A CI host cannot boot Docker, so the
+    /// test locks the wiring instead of claiming a live boot.
+    #[test]
+    fn ops_compose_testnet_profile_boots() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let compose = std::fs::read_to_string(root.join("ops/docker-compose.testnet.yml")).unwrap();
+        for profile in ["single", "four-node", "rehearsal"] {
+            assert!(
+                compose.contains(&format!("profiles: [\"{profile}\"]"))
+                    || compose.contains(&format!("\"{profile}\"")),
+                "the {profile} profile is missing"
+            );
+        }
+        for service in [
+            "seed",
+            "relay",
+            "gateway",
+            "rpc",
+            "faucet",
+            "prometheus",
+            "grafana",
+        ] {
+            assert!(
+                compose.contains(&format!("  {service}:\n")),
+                "the {service} service is missing"
+            );
+        }
+        assert!(compose.contains("monitoring/alerts.yml"));
+        let alerts = std::fs::read_to_string(root.join("ops/monitoring/alerts.yml")).unwrap();
+        assert!(alerts.contains("budlum-launch-boundary"));
+        assert!(root
+            .join("ops/monitoring/grafana/budlum-launch-boundary.json")
+            .is_file());
+        assert!(root.join("ops/runbooks/seed-node.md").is_file());
+        assert!(root.join("ops/runbooks/relay-node.md").is_file());
+        assert!(root.join("ops/runbooks/upload-gateway.md").is_file());
+        assert!(root.join("ops/runbooks/rpc-node.md").is_file());
+        assert!(root.join("ops/BACKUP_DRILL.md").is_file());
     }
 }
