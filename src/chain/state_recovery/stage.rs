@@ -3,7 +3,7 @@
 //! WIRING: the reversion ledger is driven by the node-health layer at
 //! [`super::regen_health`], which decides *when* a node reverts against the
 //! canonical commitment source. The node runtime's health tick,
-//! `crate::network::regen_health_tick`, calls `assess` once per finality beat
+//! `crate::chain::state_recovery::tick`, calls `assess` once per finality beat
 //! and executes the verdict here. Rules stay pinned by this module's tests and
 //! by `regen_health`'s.
 //!
@@ -426,6 +426,8 @@ impl Default for RegenerationLedger {
         }
     }
 }
+
+pub type RecoveryLedger = RegenerationLedger;
 
 impl RegenerationLedger {
     /// A ledger for a node at `height` holding `commitment`, in the adult stage.

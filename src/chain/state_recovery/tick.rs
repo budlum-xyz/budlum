@@ -43,8 +43,8 @@
 //! does not define, so this tick does not do it.
 
 use crate::domain::pq_canonical::SealId;
-use crate::domain::regen_health::{assess, AlarmReason, HealthPolicy, HealthVerdict};
-use crate::domain::regeneration_stage::{
+use crate::chain::state_recovery::health::{assess, AlarmReason, HealthPolicy, HealthVerdict};
+use crate::chain::state_recovery::stage::{
     RegenerationLedger, Reversion, ReversionError, Stage, StageSnapshot, Stress,
 };
 
@@ -305,7 +305,7 @@ mod tests {
     use super::*;
     use crate::crypto::scheme::SchemeId;
     use crate::domain::pq_canonical::{test_seal, SealKind};
-    use crate::domain::regeneration_stage::ReversionPolicy;
+    use crate::chain::state_recovery::stage::ReversionPolicy;
 
     const INTERVAL: u64 = 100;
 

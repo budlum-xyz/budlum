@@ -8,8 +8,8 @@ pub mod peer_manager;
 pub mod privacy;
 pub mod proto_conversions;
 pub mod protocol;
-pub mod regen_health_tick;
 pub mod sync_codec;
+pub use crate::chain::state_recovery::tick as regen_health_tick;
 pub mod witness_protocol;
 
 pub use mobile::{MobileNodeProfile, PowerMode};

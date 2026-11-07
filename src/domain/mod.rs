@@ -6,9 +6,6 @@ pub mod plugin;
 pub mod plugin_registry;
 pub mod pq_canonical;
 pub mod producer;
-pub mod regen_health;
-pub mod regen_mempool;
-pub mod regeneration_stage;
 pub mod registry;
 pub mod sovereign;
 pub mod storage_deal;
@@ -32,9 +29,11 @@ pub use plugin::{
     PoADomainPlugin, PoSDomainPlugin, PoWDomainPlugin, ZkDomainPlugin,
 };
 pub use plugin_registry::DomainPluginRegistry;
+pub use crate::chain::state_recovery::{assess, AlarmReason, HealthPolicy, HealthVerdict, RegenMempool};
+pub use crate::chain::state_recovery::health as regen_health;
+pub use crate::chain::state_recovery::mempool as regen_mempool;
+pub use crate::chain::state_recovery::stage as regeneration_stage;
 pub use pq_canonical::{PqCanonicalSource, SealId, SealKind, SourceError};
-pub use regen_health::{assess, AlarmReason, HealthPolicy, HealthVerdict};
-pub use regen_mempool::RegenMempool;
 pub use registry::ConsensusDomainRegistry;
 pub use sovereign::{
     AuditExportBundle, ComplianceEvidence, DomainLifecycleState, SovereignDomainClass,

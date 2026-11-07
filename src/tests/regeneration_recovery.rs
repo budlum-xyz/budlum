@@ -17,8 +17,8 @@
 //!    cold-committee channel, not to this layer. This file pins the property
 //!    so the boundary stays visible in code rather than in tribal memory.
 
-use crate::domain::regen_health::{assess, HealthPolicy, HealthVerdict};
-use crate::domain::regeneration_stage::{
+use crate::chain::state_recovery::health::{assess, HealthPolicy, HealthVerdict};
+use crate::chain::state_recovery::stage::{
     RegenerationLedger, Reversion, Stage, StageSnapshot, Stress, Transdifferentiated,
 };
 

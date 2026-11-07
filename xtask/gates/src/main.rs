@@ -135,10 +135,12 @@ mod gates {
     pub mod quantum_account;
     pub mod readme_no_deny;
     pub mod reduction_claims;
+    pub mod canonical_programs_reproduce;
     pub mod refusals_no_mutate;
     pub mod regen_health_door;
     pub mod regeneration;
     pub mod rejection_tests;
+    pub mod state_recovery_door;
     pub mod relay;
     pub mod release_profile_pins;
     pub mod repair_fires;
@@ -181,6 +183,7 @@ mod gates {
     pub mod zero_tests_witness;
     pub mod zizmor;
     pub mod zkvm_immune_regeneration;
+    pub mod zkvm_refuses_untrusted_proofs;
 }
 
 /// A gate's plain run: inspect the repo root, return a verdict.
@@ -216,6 +219,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::zkvm_immune_regeneration::self_test,
+    },
+    Gate {
+        name: "zkvm-refuses-untrusted-proofs",
+        replaces: None,
+        run: gates::zkvm_refuses_untrusted_proofs::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::zkvm_refuses_untrusted_proofs::self_test,
     },
     Gate {
         name: "quantum-account",
@@ -686,12 +697,28 @@ const GATES: &[Gate] = &[
         self_test: gates::regeneration::self_test,
     },
     Gate {
+        name: "canonical-programs-reproduce",
+        replaces: None,
+        run: gates::canonical_programs_reproduce::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::canonical_programs_reproduce::self_test,
+    },
+    Gate {
         name: "regen-health-door",
         replaces: None,
         run: gates::regen_health_door::run,
         run_log: None,
         run_args: None,
         self_test: gates::regen_health_door::self_test,
+    },
+    Gate {
+        name: "state-recovery-door",
+        replaces: None,
+        run: gates::state_recovery_door::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::state_recovery_door::self_test,
     },
     Gate {
         name: "relay",

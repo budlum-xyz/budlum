@@ -1,7 +1,7 @@
 //! The node-health layer: the caller that decides *when* a node reverts.
 //!
 //! WIRING: wired - the production caller is the node runtime's health tick,
-//! `crate::network::regen_health_tick`, which `Node::run` drives once per
+//! `crate::chain::state_recovery::tick`, which `Node::run` drives once per
 //! finality beat and which executes the verdict through the ledger. The rules
 //! are pinned by this file's tests, the chaos acceptance suite, and the
 //! `regen-health-door` gate.
@@ -361,7 +361,7 @@ pub fn assess(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::regeneration_stage::Transdifferentiated;
+    use crate::chain::state_recovery::stage::Transdifferentiated;
 
     const C_POLYP: [u8; 32] = [0xA1; 32];
     const C_EPHYRA: [u8; 32] = [0xB2; 32];
@@ -541,7 +541,7 @@ mod tests {
         let mut forged = ledger.clone();
         forged
             .reversion_events
-            .push(crate::domain::regeneration_stage::Reversion {
+            .push(crate::chain::state_recovery::stage::Reversion {
                 from: Stage::Medusa,
                 to: Stage::Ephyra,
                 stress: Stress::Divergence,

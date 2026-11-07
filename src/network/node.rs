@@ -370,7 +370,7 @@ use crate::chain::chain_actor::ChainHandle;
 use crate::chain::finality::{Precommit, Prevote};
 use crate::network::gossip_dedup::{DedupResult, GossipDedup};
 use crate::network::peer_manager::PeerManager;
-use crate::network::regen_health_tick::{Checkpoint, CheckpointView, RegenHealthTick, TickOutcome};
+use crate::chain::state_recovery::tick::{Checkpoint, CheckpointView, RegenHealthTick, TickOutcome};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 #[allow(clippy::large_enum_variant)]
@@ -1352,7 +1352,7 @@ impl Node {
     /// outcome: repair and revert open a sync round, alarms are logged as
     /// errors with their stable kind label.
     async fn regen_health_tick(&mut self) {
-        use crate::domain::regeneration_stage::Stage;
+        use crate::chain::state_recovery::stage::Stage;
         let live = self.chain.get_finalized_height().await;
         let (polyp, previous) = self.chain.pq_sealed_heights(live).await;
         // Every stage is read through the post-quantum canonical source: a
