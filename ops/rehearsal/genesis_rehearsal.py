@@ -1,179 +1,407 @@
 #!/usr/bin/env python3
-"""Deterministic rehearsal genesis validator and assembler.
+"""Validate public validator records and assemble the rehearsal genesis."""
 
-Validates public `OperatorRecord` JSON files (as produced by `bud validator init`)
-without invoking a shell or evaluating untrusted paths, rejects secret-key fields,
-enforces >= 8 unique operator records, and emits a `genesis_schema`-compliant
-rehearsal genesis JSON together with its canonical SHA-256 digest.
-"""
-
-from __future__ import annotations
-
-import argparse
 import hashlib
 import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
-from typing import Any
 
-BUD_MAX_SUPPLY = 100_000_000_000_000
-MIN_REHEARSAL_VALIDATORS = 8
-FORBIDDEN_SECRET_KEYS = frozenset(
-    {
-        "private_key",
-        "secret_key",
-        "signing_key",
-        "seed",
-        "mnemonic",
-        "vrf_secret_key",
-        "bls_secret_key",
-        "pq_secret_key",
-        "operator_secret_key",
-    }
+
+BLS_SCHEME = "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_"
+PUBLIC_KEY_LENGTHS = {
+    "vrf_public_key": 32,
+    "bls_public_key": 96,
+    "pop_signature": 48,
+    "pq_public_key": 1952,
+}
+TEMPLATE_FIELDS = (
+    "chain_id",
+    "allocations",
+    "block_reward",
+    "base_fee",
+    "gas_schedule",
+    "timestamp",
+    "bud_tokenomics",
+    "pq_scheme",
 )
-REQUIRED_REGISTRATION_KEYS = (
-    "vrf_public_key",
-    "bls_public_key",
-    "bls_proof_of_possession",
-    "pq_public_key",
-)
+MIN_FULL_VALIDATORS = 8
+MAX_RECORD_BYTES = 64 * 1024
 
 
-class CeremonyValidationError(ValueError):
-    """Raised when an operator record or genesis input violates R-09 checks."""
+class Refusal(Exception):
+    """An invalid rehearsal input or output that must not be published."""
 
 
-def _contains_forbidden_key(obj: Any) -> str | None:
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            lowered = str(k).lower()
-            if lowered in FORBIDDEN_SECRET_KEYS or "private" in lowered or "secret" in lowered:
-                return str(k)
-            nested = _contains_forbidden_key(v)
-            if nested is not None:
-                return nested
-    elif isinstance(obj, list):
-        for item in obj:
-            nested = _contains_forbidden_key(item)
-            if nested is not None:
-                return nested
-    return None
+def refuse(message):
+    raise Refusal(message)
 
 
-def _normalize_hex(value: Any, label: str, expected_bytes: int | None = None) -> str:
-    if not isinstance(value, str):
-        raise CeremonyValidationError(f"{label} must be a hex string")
-    clean = value[2:] if value.startswith("0x") else value
-    if not clean or len(clean) % 2 != 0:
-        raise CeremonyValidationError(f"{label} must have non-empty even hex length")
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON field {key!r}")
+        result[key] = value
+    return result
+
+
+def reject_constant(value):
+    raise ValueError(f"non-JSON numeric constant {value!r}")
+
+
+def load_json(path, label, max_bytes=None):
     try:
-        raw = bytes.fromhex(clean)
-    except ValueError as exc:
-        raise CeremonyValidationError(f"{label} is not valid hex") from exc
-    if expected_bytes is not None and len(raw) != expected_bytes:
-        raise CeremonyValidationError(f"{label} must be {expected_bytes} bytes")
-    if all(b == 0 for b in raw):
-        raise CeremonyValidationError(f"{label} must not be all-zero")
-    return clean.lower()
+        if max_bytes is not None and path.stat().st_size > max_bytes:
+            refuse(f"{label} exceeds {max_bytes} bytes")
+        return json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=unique_object,
+            parse_constant=reject_constant,
+        )
+    except Refusal:
+        raise
+    except (OSError, UnicodeError, ValueError) as error:
+        refuse(f"cannot read {label} as strict JSON: {error}")
 
 
-def validate_operator_record(record: Any) -> dict[str, Any]:
-    if not isinstance(record, dict):
-        raise CeremonyValidationError("operator record must be a JSON object")
-    leaked = _contains_forbidden_key(record)
-    if leaked is not None:
-        raise CeremonyValidationError(f"secret material field `{leaked}` refused")
-
-    validator_hex = _normalize_hex(record.get("validator"), "validator", expected_bytes=32)
-    reg = record.get("registration")
-    if not isinstance(reg, dict):
-        raise CeremonyValidationError("missing `registration` consensus key bundle")
-    vrf_hex = _normalize_hex(reg.get("vrf_public_key"), "vrf_public_key", expected_bytes=32)
-    bls_hex = _normalize_hex(reg.get("bls_public_key"), "bls_public_key", expected_bytes=48)
-    pop_hex = _normalize_hex(
-        reg.get("bls_proof_of_possession"), "bls_proof_of_possession", expected_bytes=96
-    )
-    pq_hex = _normalize_hex(reg.get("pq_public_key"), "pq_public_key")
-    if len(bytes.fromhex(pq_hex)) < 1952:
-        raise CeremonyValidationError("pq_public_key is shorter than ML-DSA-65 public key")
-
-    return {
-        "validator": validator_hex,
-        "registration": {
-            "vrf_public_key": vrf_hex,
-            "bls_public_key": bls_hex,
-            "bls_proof_of_possession": pop_hex,
-            "pq_public_key": pq_hex,
-        },
-    }
+def is_sensitive_field(name):
+    normalized = "".join(character.lower() for character in name if character.isalnum())
+    return any(token in normalized for token in ("private", "secret", "mnemonic", "seed"))
 
 
-def assemble_rehearsal_genesis(
-    records_dir: Path,
-    template_path: Path,
-    min_validators: int = MIN_REHEARSAL_VALIDATORS,
-) -> tuple[dict[str, Any], str]:
-    if not records_dir.is_dir():
-        raise CeremonyValidationError(f"records directory does not exist: {records_dir}")
-    files = sorted(p for p in records_dir.iterdir() if p.is_file() and p.suffix == ".json")
-    if len(files) < min_validators:
-        raise CeremonyValidationError(
-            f"need at least {min_validators} operator records, found {len(files)}"
+def check_fields(value, required, optional, label):
+    if not isinstance(value, dict):
+        refuse(f"{label} must be a JSON object")
+    missing = required - value.keys()
+    if missing:
+        refuse(f"{label} is missing required public fields: {', '.join(sorted(missing))}")
+    unexpected = value.keys() - required - optional
+    if unexpected:
+        if any(is_sensitive_field(name) for name in unexpected):
+            refuse(f"{label} contains a private or secret field")
+        if "class" in unexpected:
+            refuse(
+                f"{label} is not a `bud validator init` record; Full is derived from "
+                "complete consensus keys, not a class label"
+            )
+        refuse(f"{label} has unsupported fields: {', '.join(sorted(unexpected))}")
+
+
+def normalize_address(value, label):
+    if not isinstance(value, str):
+        refuse(f"{label}.validator must be a 32-byte hexadecimal address")
+    address = value[2:] if value.startswith(("0x", "0X")) else value
+    if re.fullmatch(r"[0-9a-fA-F]{64}", address) is None:
+        refuse(f"{label}.validator must be a 32-byte hexadecimal address")
+    address = address.lower()
+    if address == "0" * 64:
+        refuse(f"{label}.validator must not be the zero address")
+    return address
+
+
+def public_bytes(value, field, label):
+    expected = PUBLIC_KEY_LENGTHS[field]
+    if (
+        not isinstance(value, list)
+        or len(value) != expected
+        or any(type(byte) is not int or byte < 0 or byte > 255 for byte in value)
+    ):
+        refuse(f"{label}.{field} must be a {expected}-byte public value")
+    return bytes(value)
+
+
+def validate_template(path):
+    template = load_json(path, "rehearsal template", MAX_RECORD_BYTES)
+    if not isinstance(template, dict):
+        refuse("rehearsal template must be a JSON object")
+    if template.get("chain_id") != 45261:
+        refuse("rehearsal template must use testnet chain id 45261")
+    if template.get("validators") != [] or template.get("validator_consensus_keys", []) != []:
+        refuse("rehearsal template must not contain validators or consensus keys")
+    if template.get("allocations") != []:
+        refuse("rehearsal template must not contain extra allocations")
+    timestamp = template.get("timestamp")
+    if type(timestamp) is not int or timestamp < 0:
+        refuse("rehearsal template must contain a non-negative integer timestamp")
+    if template.get("pq_scheme") != "ml-dsa-65":
+        refuse("rehearsal template must pin the testnet PQ scheme to ml-dsa-65")
+    for field in ("gas_schedule", "bud_tokenomics"):
+        if not isinstance(template.get(field), dict):
+            refuse(f"rehearsal template must contain {field}")
+    return template
+
+
+def stage_public_records(registrations_dir, staging_dir):
+    try:
+        paths = sorted(registrations_dir.glob("*.json"), key=lambda path: path.name)
+    except OSError as error:
+        refuse(f"cannot list registration directory: {error}")
+    if not paths:
+        refuse(f"no registration files in {registrations_dir}")
+
+    records = []
+    seen_addresses = set()
+    seen_keys = {field: set() for field in ("vrf_public_key", "bls_public_key", "pq_public_key")}
+    for path in paths:
+        if path.is_symlink() or not path.is_file():
+            refuse(f"registration entry {path.name!r} is not a regular file")
+        label = f"registration {path.name!r}"
+        record = load_json(path, label, MAX_RECORD_BYTES)
+        check_fields(record, {"validator", "registration"}, {"moniker"}, label)
+        if "moniker" in record and not isinstance(record["moniker"], str):
+            refuse(f"{label}.moniker must be a string")
+
+        address = normalize_address(record["validator"], label)
+        if address in seen_addresses:
+            refuse(f"duplicate validator address {address}")
+        seen_addresses.add(address)
+
+        registration = record["registration"]
+        registration_fields = set(PUBLIC_KEY_LENGTHS) | {"scheme_id"}
+        check_fields(registration, registration_fields, set(), f"{label}.registration")
+        if registration["scheme_id"] != BLS_SCHEME:
+            refuse(f"{label}.registration.scheme_id is not the pinned testnet BLS suite")
+
+        public_registration = {"scheme_id": BLS_SCHEME}
+        for field in PUBLIC_KEY_LENGTHS:
+            key_bytes = public_bytes(registration[field], field, f"{label}.registration")
+            if field in seen_keys:
+                if key_bytes in seen_keys[field]:
+                    refuse(f"duplicate {field} across validator records")
+                seen_keys[field].add(key_bytes)
+            public_registration[field] = list(key_bytes)
+
+        # OperatorRecord's moniker is display-only and is not part of genesis.
+        # Omitting it ensures arbitrary operator metadata is never published.
+        records.append({"validator": address, "registration": public_registration})
+
+    if len(records) < MIN_FULL_VALIDATORS:
+        refuse(
+            f"needs at least {MIN_FULL_VALIDATORS} complete Full validator public records, "
+            f"got {len(records)}"
         )
 
-    validated: list[dict[str, Any]] = []
-    seen_validators: set[str] = set()
-    seen_vrf: set[str] = set()
-    for file_path in files:
-        raw = json.loads(file_path.read_text(encoding="utf-8"))
-        cleaned = validate_operator_record(raw)
-        val = cleaned["validator"]
-        vrf = cleaned["registration"]["vrf_public_key"]
-        if val in seen_validators:
-            raise CeremonyValidationError(f"duplicate validator address: {val}")
-        if vrf in seen_vrf:
-            raise CeremonyValidationError(f"duplicate VRF key: {vrf}")
-        seen_validators.add(val)
-        seen_vrf.add(vrf)
-        validated.append(cleaned)
+    staging_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
+    for index, record in enumerate(records):
+        destination = staging_dir / f"operator-{index:04d}.json"
+        with destination.open("x", encoding="utf-8") as output:
+            json.dump(record, output, sort_keys=True, separators=(",", ":"))
+            output.write("\n")
+    return {record["validator"]: record["registration"] for record in records}
 
-    validated.sort(key=lambda item: item["validator"])
-    template = json.loads(template_path.read_text(encoding="utf-8"))
-    tok = template["bud_tokenomics"]
-    buckets = [
-        ("51" * 32, int(tok["community"])),
-        ("52" * 32, int(tok["liquidity"])),
-        ("53" * 32, int(tok["ecosystem"])),
-        ("54" * 32, int(tok["team"])),
-        ("55" * 32, int(tok["burn_reserve"])),
+
+def reserved_address(tag):
+    return f"b0d0{tag:02x}" + "0" * 58
+
+
+def run_genesis_assembler(staging_dir, output_path, timestamp):
+    binary = os.environ.get("BUD_BIN", "bud")
+    if "/" in binary:
+        if not Path(binary).is_file() or not os.access(binary, os.X_OK):
+            refuse(f"bud genesis assembler is not executable: {binary}")
+    else:
+        resolved = shutil.which(binary)
+        if resolved is None:
+            refuse("bud genesis assembler not found; build it or set BUD_BIN")
+        binary = resolved
+
+    arguments = [
+        binary,
+        "genesis",
+        "assemble",
+        "--network",
+        "testnet",
+        "--operators",
+        str(staging_dir),
+        "--community",
+        reserved_address(1),
+        "--liquidity",
+        reserved_address(2),
+        "--ecosystem",
+        reserved_address(3),
+        "--team",
+        reserved_address(4),
+        "--burn-reserve",
+        reserved_address(5),
+        "--timestamp-ms",
+        str(timestamp),
+        "--out",
+        str(output_path),
     ]
-    if sum(amount for _, amount in buckets) != BUD_MAX_SUPPLY:
-        raise CeremonyValidationError("tokenomics buckets do not sum to 100,000,000 BUD")
-
-    out = dict(template)
-    out["allocations"] = [[addr, amount] for addr, amount in buckets]
-    out["validators"] = [item["validator"] for item in validated]
-    out["ceremony_status"] = "rehearsal_records_validated"
-
-    canonical_bytes = json.dumps(out, indent=2, sort_keys=False).encode("utf-8") + b"\n"
-    digest = hashlib.sha256(canonical_bytes).hexdigest()
-    return out, digest
+    try:
+        result = subprocess.run(arguments, check=False)
+    except OSError as error:
+        refuse(f"cannot start the bud genesis assembler: {error}")
+    return result.returncode
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Assemble rehearsal genesis")
-    parser.add_argument("--operators", type=Path, required=True)
-    parser.add_argument(
-        "--template", type=Path, default=Path("config/testnet-genesis.json")
+def reject_secret_fields(value):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if is_sensitive_field(key):
+                refuse("assembled genesis contains a private or secret field")
+            reject_secret_fields(child)
+    elif isinstance(value, list):
+        for child in value:
+            reject_secret_fields(child)
+
+
+def finalize_genesis(template, assembled_path, expected_records):
+    expected_count = len(expected_records)
+    genesis = load_json(assembled_path, "assembled genesis")
+    if not isinstance(genesis, dict):
+        refuse("assembled genesis must be a JSON object")
+    for field in TEMPLATE_FIELDS:
+        if field not in template or genesis.get(field) != template[field]:
+            refuse(f"assembled testnet genesis differs from rehearsal template field {field!r}")
+
+    validators = genesis.get("validators")
+    keys = genesis.get("validator_consensus_keys")
+    if not isinstance(validators, list) or len(validators) != expected_count:
+        refuse("assembled genesis validator count differs from the validated records")
+    if not isinstance(keys, list) or len(keys) != expected_count:
+        refuse("assembled genesis must include one public consensus-key record per validator")
+    validators = [normalize_address(address, "assembled genesis") for address in validators]
+    if len(set(validators)) != len(validators):
+        refuse("assembled genesis contains duplicate validators")
+
+    keys_by_validator = {}
+    for entry in keys:
+        if not isinstance(entry, dict) or set(entry) != {"validator", "registration"}:
+            refuse("assembled genesis contains a malformed consensus-key record")
+        address = normalize_address(entry["validator"], "assembled consensus-key record")
+        registration = entry["registration"]
+        if address in keys_by_validator:
+            refuse("assembled genesis contains duplicate consensus-key registrations")
+        if not isinstance(registration, dict) or set(registration) != {
+            "scheme_id",
+            "vrf_public_key",
+            "bls_public_key",
+            "pop_signature",
+            "pq_public_key",
+        }:
+            refuse("assembled genesis contains an incomplete consensus-key registration")
+        if registration["scheme_id"] != BLS_SCHEME:
+            refuse("assembled genesis contains an unexpected BLS scheme")
+        for field in PUBLIC_KEY_LENGTHS:
+            public_bytes(registration[field], field, "assembled consensus-key record")
+        keys_by_validator[address] = registration
+    if set(keys_by_validator) != set(validators):
+        refuse("assembled genesis validator addresses and consensus-key records disagree")
+    if keys_by_validator != expected_records:
+        refuse("assembled genesis does not match the validated public operator records")
+
+    expected_addresses = {
+        name: reserved_address(tag)
+        for name, tag in (
+            ("community", 1),
+            ("liquidity", 2),
+            ("ecosystem", 3),
+            ("team", 4),
+            ("burn_reserve", 5),
+        )
+    }
+    if genesis.get("tokenomics_addresses") != expected_addresses:
+        refuse("assembled genesis does not use the reserved rehearsal tokenomics destinations")
+    if genesis.get("reward_pool") != {"enabled": True}:
+        refuse("assembled testnet genesis does not enable the testnet reward pool")
+
+    reject_secret_fields(genesis)
+    genesis["ceremony_status"] = "rehearsal"
+    genesis["ceremony_note"] = (
+        "Rehearsal genesis produced by ops/rehearsal/genesis_rehearsal.sh from "
+        f"{expected_count} complete Full validator public records. Throwaway network; "
+        "chain id 45261 (testnet)."
     )
-    parser.add_argument("--out", type=Path, required=True)
-    args = parser.parse_args()
+    return (json.dumps(genesis, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
-    genesis_doc, digest = assemble_rehearsal_genesis(args.operators, args.template)
-    rendered = json.dumps(genesis_doc, indent=2) + "\n"
-    args.out.write_text(rendered, encoding="utf-8")
-    print(f"rehearsal_genesis_sha256={digest}")
+
+def publish(output_dir, genesis_bytes):
+    digest = hashlib.sha256(genesis_bytes).hexdigest()
+    digest_bytes = f"{digest}  rehearsal-genesis.json\n".encode("ascii")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    temporary_paths = []
+    try:
+        for prefix, content in (
+            (".rehearsal-genesis.", genesis_bytes),
+            (".rehearsal-digest.", digest_bytes),
+        ):
+            with tempfile.NamedTemporaryFile(
+                mode="wb", prefix=prefix, dir=output_dir, delete=False
+            ) as output:
+                temporary_paths.append(Path(output.name))
+                output.write(content)
+                output.flush()
+                os.fchmod(output.fileno(), 0o644)
+                os.fsync(output.fileno())
+        # A pair of independent renames is not atomic. Remove any old digest
+        # before replacing the genesis so an interrupted publish cannot leave
+        # a stale digest next to the new file. Readers must verify the digest.
+        (output_dir / "rehearsal-genesis.sha256").unlink(missing_ok=True)
+        os.replace(temporary_paths[0], output_dir / "rehearsal-genesis.json")
+        os.replace(temporary_paths[1], output_dir / "rehearsal-genesis.sha256")
+    finally:
+        for path in temporary_paths:
+            path.unlink(missing_ok=True)
+    return digest
+
+
+def main(argv):
+    if len(argv) not in (1, 2):
+        print("usage: genesis_rehearsal.sh <registrations-dir> [out-dir]", file=sys.stderr)
+        return 2
+    registrations_dir = Path(argv[0]).resolve()
+    output_dir = Path(argv[1] if len(argv) == 2 else "docs/rehearsal").resolve()
+    template_path = Path("config/ceremony-rehearsal-template.json")
+
+    if not registrations_dir.is_dir():
+        print(f"registration directory does not exist: {registrations_dir}", file=sys.stderr)
+        return 2
+    if not template_path.is_file():
+        print(f"rehearsal genesis template is missing: {template_path}", file=sys.stderr)
+        return 2
+    if output_dir == registrations_dir or registrations_dir in output_dir.parents:
+        print("genesis rehearsal refused: the output directory must not be inside the registrations directory", file=sys.stderr)
+        return 1
+
+    try:
+        template = validate_template(template_path)
+        with tempfile.TemporaryDirectory(prefix="budlum-rehearsal-") as temporary:
+            temporary_dir = Path(temporary)
+            staging_dir = temporary_dir / "operators"
+            assembled_path = temporary_dir / "assembled-genesis.json"
+            records = stage_public_records(registrations_dir, staging_dir)
+            record_count = len(records)
+            print(
+                f"preflight accepted {record_count} complete public operator records; "
+                "the node CLI will validate their proofs",
+                file=sys.stderr,
+            )
+            assembler_status = run_genesis_assembler(
+                staging_dir, assembled_path, template["timestamp"]
+            )
+            if assembler_status != 0:
+                return assembler_status
+            genesis_bytes = finalize_genesis(template, assembled_path, records)
+        digest = publish(output_dir, genesis_bytes)
+    except Refusal as error:
+        print(f"genesis rehearsal refused: {error}", file=sys.stderr)
+        return 1
+    except OSError as error:
+        print(f"genesis rehearsal failed: {error}", file=sys.stderr)
+        return 1
+
+    print(
+        f"rehearsal genesis written to {output_dir / 'rehearsal-genesis.json'} "
+        f"({record_count} Full validators; SHA-256 {digest})"
+    )
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

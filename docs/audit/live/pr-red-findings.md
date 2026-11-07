@@ -85,9 +85,15 @@ These groups deduplicate the work by check name only. They are not yet root-caus
 | Network Hardening | 1 | UNTRIAGED |
 | Secret Scan (gitleaks, full history) | 1 | UNTRIAGED |
 | Serialize Map Keys Are Strings | 1 | UNTRIAGED |
-| StorageProvider Gate | 1 | UNTRIAGED |
+| Storage provider gate | 1 | UNTRIAGED |
 | Udeps: the unused dependency gate | 1 | UNTRIAGED |
 | cargo-hack feature matrix | 1 | UNTRIAGED |
+
+## Triage log
+
+| Findings | Executed triage | Current disposition |
+| --- | --- | --- |
+| PR-RED-121, PR-RED-122 | GitHub job metadata for source head `d87acf7b621f` shows `Build` succeeded and `Canonical digests` failed in both Stage 1 jobs. Raw log download redirected to the unavailable `results-receiver.actions.githubusercontent.com` host, so no compiler/test/digest line is asserted. The #102 ceremony regressions run separately and do not prove canonical digest parity. | OPEN — digest failure is located to a step, but its root cause and current-tree mapping remain unproven. |
 
 ## Hard-red finding register
 
@@ -209,12 +215,12 @@ These groups deduplicate the work by check name only. They are not yet root-caus
 | PR-RED-114 | #101 | `da169ed9f86a` | [Serialize Map Keys Are Strings](https://github.com/lubothebook/budlum/actions/runs/42237267965/job/127958045118) | OPEN — log triage required |
 | PR-RED-115 | #101 | `da169ed9f86a` | [Stage 1 (independent)](https://github.com/lubothebook/budlum/actions/runs/42237268316/job/127958046057) | OPEN — log triage required |
 | PR-RED-116 | #101 | `da169ed9f86a` | [Stage 1 (pinned)](https://github.com/lubothebook/budlum/actions/runs/42237268316/job/127958045527) | OPEN — log triage required |
-| PR-RED-117 | #101 | `da169ed9f86a` | [StorageProvider Gate](https://github.com/lubothebook/budlum/actions/runs/42237267965/job/127958044897) | OPEN — log triage required |
+| PR-RED-117 | #101 | `da169ed9f86a` | [Storage provider gate](https://github.com/lubothebook/budlum/actions/runs/42237267965/job/127958044897) | OPEN — log triage required |
 | PR-RED-118 | #101 | `da169ed9f86a` | [Typos (spell check, calibrated)](https://github.com/lubothebook/budlum/actions/runs/42237268245/job/127958046387) | OPEN — log triage required |
 | PR-RED-119 | #101 | `da169ed9f86a` | [cargo-hack feature matrix](https://github.com/lubothebook/budlum/actions/runs/42237268281/job/127958046252) | OPEN — log triage required |
 | PR-RED-120 | #101 | `da169ed9f86a` | [docker-smoke](https://github.com/lubothebook/budlum/actions/runs/42237268605/job/127958046193) | OPEN — log triage required |
-| PR-RED-121 | #102 | `d87acf7b621f` | [Stage 1 (independent)](https://github.com/lubothebook/budlum/actions/runs/42237865072/job/127960134751) | OPEN — log triage required |
-| PR-RED-122 | #102 | `d87acf7b621f` | [Stage 1 (pinned)](https://github.com/lubothebook/budlum/actions/runs/42237865072/job/127960135274) | OPEN — log triage required |
+| PR-RED-121 | #102 | `d87acf7b621f` | [Stage 1 (independent)](https://github.com/lubothebook/budlum/actions/runs/42237865072/job/127960134751) | OPEN — Canonical digests failed; raw log unavailable |
+| PR-RED-122 | #102 | `d87acf7b621f` | [Stage 1 (pinned)](https://github.com/lubothebook/budlum/actions/runs/42237865072/job/127960135274) | OPEN — Canonical digests failed; raw log unavailable |
 | PR-RED-123 | #103 | `26a7d4385c20` | [Budlum Core library test](https://github.com/lubothebook/budlum/actions/runs/42238560167/job/127962524799) | OPEN — log triage required |
 | PR-RED-124 | #103 | `26a7d4385c20` | [Cargo Deny (fuzz)](https://github.com/lubothebook/budlum/actions/runs/42238560167/job/127962524878) | OPEN — log triage required |
 | PR-RED-125 | #103 | `26a7d4385c20` | [Coverage (nextest + llvm-cov, ratchet)](https://github.com/lubothebook/budlum/actions/runs/42238560167/job/127962524566) | OPEN — log triage required |

@@ -8,7 +8,7 @@
 - **Supply Check**: `100,000,000 BUD` (`100_000_000_000_000` atomic units across `community`, `liquidity`, `ecosystem`, `team`, and `burn_reserve`)
 - **Assembler & Validator**:
   - Rust: `budlum_core::chain::genesis_ceremony::assemble` (`cargo run --manifest-path xtask/tools/Cargo.toml -- testnet-genesis`)
-  - Python preflight verifier: `ops/rehearsal/genesis_rehearsal.py` (tested by `ops/rehearsal/tests/test_genesis_rehearsal.py`, rejecting empty `class: Full` claims, duplicate validators/VRF keys, secret-key material, and untrusted filename injection)
+  - Ceremony wrapper: `ops/rehearsal/genesis_rehearsal.sh <public-records-dir> [output-dir]`. It accepts the actual `bud validator init` byte-array schema, stages public fields only, invokes the Rust assembler, compares every output registration with the validated inputs, and publishes a checksummed artifact. Its template is `config/ceremony-rehearsal-template.json`; the separate devnet drill fixture is unchanged. Python regressions cover duplicate/secret inputs, hostile filenames, assembler substitution, reordering, and publication failures.
 
 ---
 
