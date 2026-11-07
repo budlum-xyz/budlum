@@ -77,30 +77,20 @@ fn check_ai_exec_dims(dims: &[u16]) -> Result<(), String> {
     Ok(())
 }
 
-fn privacy_transfers_enabled(chain_id: u64) -> bool {
+pub(crate) fn privacy_transfers_enabled(chain_id: u64) -> bool {
     // Allowlist, not a denylist.
     //
     // `PrivateTransferSubmit` reaches `note_registry.apply_transfer`, which
     // takes the nullifier the submitter hands it: the binding check
     // `nullifier == derive_nullifier(commitment, proof)` only runs when
-    // `apply_transfer_with_proofs` is called with proofs, and nothing in the
-    // tree calls it that way. So today a transfer proves who signed the
-    // transaction, never that the signer owns the note; value conservation and
-    // membership are unwired too. That is survivable on the two networks where
-    // the notes are worth nothing.
-    //
-    // The old test was `chain_id != Mainnet`, which answers "is this not the
-    // one network we care about" instead of "is this a network where losing the
-    // notes costs nothing". Every id nobody has claimed yet - a second mainnet,
-    // a public testnet that grows real value - came back enabled.
+    // `apply_transfer_with_proofs` is called with proofs, and ownership,
+    // value-conservation, and membership proofs are not yet verified on-chain.
+    // Public testnet (45261) and mainnet (45260) keep this surface closed; only
+    // local devnet (45262) enables it for local integration testing.
     chain_id
         == crate::core::chain_config::Network::Devnet
             .chain_id()
             .value()
-        || chain_id
-            == crate::core::chain_config::Network::Testnet
-                .chain_id()
-                .value()
 }
 
 impl Executor {
@@ -4006,7 +3996,7 @@ mod tests {
 
         assert!(!privacy_transfers_enabled(mainnet), "mainnet must stay off");
         assert!(privacy_transfers_enabled(devnet), "devnet must stay on");
-        assert!(privacy_transfers_enabled(testnet), "testnet must stay on");
+        assert!(!privacy_transfers_enabled(testnet), "public testnet must stay off");
 
         for unclaimed in [1u64, 42, 1337, 45263, u64::MAX] {
             assert!(

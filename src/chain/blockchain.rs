@@ -3813,11 +3813,7 @@ impl Blockchain {
             }
             crate::core::transaction::TransactionType::PrivateTransferSubmit(_)
             | crate::core::transaction::TransactionType::PrivacyNoteInsert(_) => {
-                if self.chain_id
-                    == crate::core::chain_config::Network::Mainnet
-                        .chain_id()
-                        .value()
-                {
+                if !crate::execution::executor::privacy_transfers_enabled(self.chain_id) {
                     reasons.push("privacy_mainnet_disabled".to_string());
                 }
             }

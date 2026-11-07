@@ -286,6 +286,45 @@ fn signed_tx(kp: &KeyPair, chain_id: u64, tx_type: TransactionType) -> Transacti
 }
 
 #[test]
+fn private_transfer_is_closed_on_testnet() {
+    use crate::core::chain_config::Network;
+    let chain_id = Network::Testnet.chain_id().value();
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    let mut state = funded_state(from, 1_000_000);
+    let (sub, c_in, c_out) = transfer_fixture(&kp, &mut state);
+    let tx = signed_tx(&kp, chain_id, TransactionType::PrivateTransferSubmit(sub));
+    assert!(
+        state.validate_transaction(&tx).is_err(),
+        "account state validation must refuse unproven private transfers on public testnet 45261"
+    );
+    let err = Executor::apply_transaction(&mut state, &tx)
+        .expect_err("executor must refuse unproven private transfers on public testnet 45261");
+    assert!(err.contains("disabled on mainnet"), "got: {err}");
+    assert!(state.note_registry.contains_commitment(&c_in));
+    assert!(!state.note_registry.contains_commitment(&c_out));
+}
+
+#[test]
+fn privacy_note_insert_is_closed_on_testnet() {
+    use crate::core::chain_config::Network;
+    let chain_id = Network::Testnet.chain_id().value();
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    let mut state = funded_state(from, 1_000_000);
+    let c = hash_from_field(43);
+    let tx = signed_tx(&kp, chain_id, TransactionType::PrivacyNoteInsert(c));
+    assert!(
+        state.validate_transaction(&tx).is_err(),
+        "account state validation must refuse unproven note insertion on public testnet 45261"
+    );
+    let err = Executor::apply_transaction(&mut state, &tx)
+        .expect_err("executor must refuse unproven note insertion on public testnet 45261");
+    assert!(err.contains("disabled on mainnet"), "got: {err}");
+    assert!(!state.note_registry.contains_commitment(&c));
+}
+
+#[test]
 fn private_transfer_is_refused_on_mainnet_and_unknown_chain_ids() {
     use crate::core::chain_config::Network;
     for chain_id in [Network::Mainnet.chain_id().value(), 999_999] {
