@@ -304,4 +304,3 @@ fn no_legacy_storage_gate_is_registered_once() {
         "no-legacy-storage must be registered exactly once in main.rs"
     );
 }
-
