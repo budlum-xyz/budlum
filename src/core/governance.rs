@@ -234,8 +234,7 @@ pub enum ProposalType {
     /// no path could set it, so it was permanently false. This is the path.
     /// The proposal binds the reviewed snapshot: the developer address, the
     /// manifest id and the website-url hash that voters evaluated. A passed
-    /// vote may not be retargeted to different content (HIGH, CWE-345;
-    /// BUDLUM finding #173).
+    /// vote may not be retargeted to different content (CWE-345).
     VerifyHubApp {
         app_id: u64,
         developer: crate::core::address::Address,

@@ -743,10 +743,10 @@ pub struct Node {
     /// Spacing between the locator re-walks a fork signal triggers. Without it
     /// a follower that cannot name an ancestor re-asks inside the same
     /// iteration, the peer's rate limiter stops serving it, and the round
-    /// hangs (`ForkRewalkGate`, AF-17).
+    /// hangs (`ForkRewalkGate`).
     fork_rewalk: crate::network::fork_rewalk::ForkRewalkGate,
     /// Votes that arrived before this node had the round to count them in
-    /// (`DeferredVotes`, AF-18). They are replayed when the round opens,
+    /// (`DeferredVotes`). They are replayed when the round opens,
     /// because a vote can never be retransmitted by its author.
     deferred_votes: crate::network::deferred_votes::DeferredVotes,
     pub pending_bitswap_fetches: PendingBitswapFetches,
@@ -2705,8 +2705,7 @@ impl Node {
                     // first beat after that round opens. A vote is published
                     // once - the same bytes are a duplicate to gossipsub - so
                     // a dropped vote is a vote the author cannot re-send, and
-                    // the round it belonged to is short a validator forever
-                    // (AF-18).
+                    // the round it belonged to is short a validator forever.
                     if agg_state.active {
                         let due = self
                             .deferred_votes
@@ -3721,8 +3720,8 @@ impl Node {
                                                     // the branch that won the slot sends. Ten of them
                                                     // at `INVALID_BLOCK_PENALTY` ban an honest
                                                     // validator for an hour, which is the mesh
-                                                    // silencing the node whose block it needs
-                                                    // (AF-09). The sender is still demoted, never
+                                                    // silencing the node whose block it needs.
+                                                    // The sender is still demoted, never
                                                     // silenced; every other refusal keeps the
                                                     // banning verdict.
                                                     let unjoined = e.contains("Previous hash mismatch");
@@ -4206,7 +4205,7 @@ impl Node {
                                                     // published once: hold it
                                                     // for the round it names
                                                     // instead of spending its
-                                                    // only delivery (AF-18).
+                                                    // only delivery.
                                                     self.deferred_votes.push(
                                                         prevote.epoch,
                                                         prevote.checkpoint_height,
@@ -4294,7 +4293,7 @@ impl Node {
                                                     // replayed. Hold the vote for
                                                     // the round it names rather
                                                     // than dropping its only
-                                                    // delivery (AF-18).
+                                                    // delivery.
                                                     self.deferred_votes.push(
                                                         precommit.epoch,
                                                         precommit.checkpoint_height,

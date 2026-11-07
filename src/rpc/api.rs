@@ -1162,8 +1162,7 @@ pub trait BudlumApi {
     ///
     /// `buyer_signature`: an ed25519 signature by the buyer bound to the whole
     /// purchase set (authorization, price, duration, max_reads,
-    /// payment_commitment, expiry) - finding #358: an unsigned purchase is
-    /// not accepted.
+    /// payment_commitment, expiry): an unsigned purchase is not accepted.
     #[method(name = "bud_pollenPreparePurchase")]
     async fn pollen_prepare_purchase(
         &self,
