@@ -20,7 +20,8 @@
 //! verification refuses it rather than accept anything.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write as _;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
@@ -200,18 +201,28 @@ fn verify_manifest(public_key: &[u8], manifest: &str, signature: &[u8]) -> Resul
         .map_err(|_| "release signature is invalid".to_string())
 }
 
+fn write_new_key_file(path: &Path, contents: &str) -> Result<(), String> {
+    // Exclusive creation rejects existing files and symlinks; permissions apply
+    // before any key bytes are visible. The parent directory must be trusted.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("cannot create key file: {e}"))?;
+    file.write_all(contents.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|e| format!("cannot persist key file: {e}"))
+}
+
 fn keygen(seed_file: &Path, public_key_file: &Path) -> Result<(), String> {
     let seed = random_bytes(SEED_LEN)?;
     let key = signing_key(&seed)?;
-    fs::write(seed_file, format!("{}\n", hex_encode(&seed)))
-        .map_err(|e| format!("cannot write the seed: {e}"))?;
-    fs::set_permissions(seed_file, fs::Permissions::from_mode(0o600))
-        .map_err(|e| format!("cannot restrict the seed file: {e}"))?;
-    fs::write(
+    write_new_key_file(seed_file, &format!("{}\n", hex_encode(&seed)))?;
+    write_new_key_file(
         public_key_file,
-        format!("{}\n", hex_encode(&public_key_of(&key))),
+        &format!("{}\n", hex_encode(&public_key_of(&key))),
     )
-    .map_err(|e| format!("cannot write the public key: {e}"))
 }
 
 fn sign_release(
@@ -402,5 +413,66 @@ fn main() -> ExitCode {
             eprintln!("budlum-release: {message}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_new_key_file;
+    use std::fs;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct Directory(PathBuf);
+
+    impl Directory {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "budlum-key-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).expect("create isolated test directory");
+            Self(path)
+        }
+    }
+
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn key_files_are_private_and_never_overwritten() {
+        let dir = Directory::new();
+        let path = dir.0.join("seed");
+        write_new_key_file(&path, "seed material").expect("create seed");
+        let mode = fs::metadata(&path).expect("seed metadata").permissions().mode();
+        assert_eq!(mode & 0o077, 0);
+        assert_eq!(fs::read(&path).expect("read seed"), b"seed material");
+        assert!(write_new_key_file(&path, "replacement").is_err());
+        assert_eq!(fs::read(&path).expect("read seed"), b"seed material");
+    }
+
+    #[test]
+    fn key_files_reject_symlinks_and_hardlinks() {
+        let dir = Directory::new();
+        let seed = dir.0.join("seed");
+        write_new_key_file(&seed, "seed material").expect("create seed");
+        let symbolic = dir.0.join("public-link");
+        symlink(&seed, &symbolic).expect("create symlink");
+        assert!(write_new_key_file(&symbolic, "public material").is_err());
+        let hard = dir.0.join("public-hardlink");
+        fs::hard_link(&seed, &hard).expect("create hardlink");
+        assert!(write_new_key_file(&hard, "public material").is_err());
+        assert_eq!(fs::read(&seed).expect("read seed"), b"seed material");
+        let missing = dir.0.join("missing");
+        let dangling = dir.0.join("dangling");
+        symlink(&missing, &dangling).expect("create dangling symlink");
+        assert!(write_new_key_file(&dangling, "seed material").is_err());
+        assert!(!missing.exists());
     }
 }
