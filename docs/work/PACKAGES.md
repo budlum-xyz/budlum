@@ -36,9 +36,9 @@ no such record exists yet; it is not a claim that a check ran.
 | WP-02 | Live verification: storage | B | T-Opening | Yes | None | merged | #2, #4 | | | |
 | WP-03 | Live verification: execution, BudZero, domains, privacy, AI | C | T-Opening | Yes | None | merged | #2, #4 | | | |
 | WP-04 | Live verification: clients, operations, CI, documents and combined status | D | T-Opening | Yes | None | merged | #2, #4 | | | |
-| WP-05 | Concept name map and counter gate | D | T-Opening | Yes | WP-04 | merged | #4 | | | |
+| WP-05 | Concept name map and counter gate | D | T-Opening | Yes | WP-04 | merged | #4, #150 | c49b76cc | | BLG-276 |
 | WP-06 | Persistence and state recovery move | B | T-Opening | Yes | WP-02 | in-progress (PR #8) | #8 | | | |
-| WP-07 | Removal of the legacy storage systems | B | T-Opening | Yes | WP-06 | in-progress (PR #8) | #8 | | | |
+| WP-07 | Removal of the legacy storage systems | B | T-Opening | Yes | WP-06 | in-progress (PR #150) | #8, #150 | 7b49d7bc | | |
 | WP-08 | Validator classes and single registry | A | T-Opening | Yes | WP-01 | merged | #4 | | | |
 | WP-09 | Execution environment interface | C | T-Opening | Yes | WP-03 | merged | #4 | | | |
 | WP-10 | B.U.D. 3.0 skeleton and shared types | B | T-Opening | Yes | WP-07 | partial on main | #5, #6 | | | |
@@ -73,8 +73,8 @@ no such record exists yet; it is not a claim that a check ran.
 | WP-39 | Wallet core and CLI | D | T-Opening | Yes | WP-08, WP-21, WP-27 | blocked | - | | | |
 | WP-40 | Explorer and indexer | D | T-Opening | Yes | WP-21, WP-26 | blocked | - | | | |
 | WP-41 | Faucet and operations | D | T-Opening | Yes | WP-16 | blocked | - | | | |
-| WP-42 | CI, gates and supply chain | D | T-Opening | Yes | WP-04 | merged | #4 | | | |
-| WP-43 | Documents, README and TLG report | D | T-Opening | Yes | WP-46, WP-47, WP-48 | blocked | - | | | |
+| WP-42 | CI, gates and supply chain | D | T-Opening | Yes | WP-04 | merged | #4, #150 | 7b49d7bc | | |
+| WP-43 | Documents, README and TLG report | D | T-Opening | Yes | WP-46, WP-47, WP-48 | in-progress (PR #150) | #150 | 7b49d7bc | | |
 | WP-44 | Domains, bridge, settlement and contracts | A | T-Opening | Yes | WP-01 | in-progress | this PR | | | |
 | WP-45 | Privacy, AI and account abstraction: testnet boundary | B | T-Opening | Yes | WP-22 | blocked | - | | | |
 | WP-46 | Ceremony rehearsal, rehearsal network and measurements | D | T-Opening | Yes | M4 | blocked | - | | | |
