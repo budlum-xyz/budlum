@@ -18,8 +18,8 @@
 
 use crate::CodecId;
 
-#[path = "wp54_context.rs"]
-pub mod wp54_context;
+#[path = "shared_context.rs"]
+pub mod shared_context;
 
 /// The state of a codec id in the register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
