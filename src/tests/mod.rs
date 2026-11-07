@@ -257,3 +257,5 @@ pub mod audit_lane_a;
 pub mod audit_lane_b;
 #[cfg(test)]
 pub mod audit_lane_c;
+#[cfg(test)]
+pub mod audit_lane_d;
