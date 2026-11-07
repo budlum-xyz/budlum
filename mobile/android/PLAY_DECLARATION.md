@@ -1,5 +1,10 @@
 # Google Play `specialUse` Declaration & Platform Policy Verification (WP-36)
 
+> **Draft only — do not submit with the current scaffold.** The mobile-core
+> network binding, signed duty transport and durable release/acknowledgement
+> protocol are not connected. Text below describes intended behavior, not a
+> completed device/testnet capability.
+
 ## 1. Official Android & Google Play Policy Verification (Section 7.9.2 & 7.9.3)
 
 ### 1.1 Target API Level Requirement
@@ -29,8 +34,9 @@
      `startForegroundService()`. Instead, it posts a tap-to-resume status
      notification so the user can reopen the app to restore persistent foreground
      serving, and immediately schedules `DutyPeriodicWorker` via `WorkManager`
-     (15-minute interval, `NetworkType.UNMETERED` constraint) so storage audits,
-     presence signals, and share assignments continue without interruption.
+     (15-minute interval, `NetworkType.UNMETERED` constraint). The worker is a
+     local policy/storage shell only; no background audit or presence success is
+     implied until the network duty binding exists.
 
 ## 2. Google Play Console `specialUse` Foreground Service Declaration
 

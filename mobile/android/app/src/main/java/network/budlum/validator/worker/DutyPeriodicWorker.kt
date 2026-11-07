@@ -10,7 +10,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import java.io.File
 import java.util.concurrent.TimeUnit
-import network.budlum.validator.core.JvmMemoryWrappingKeyProvider
+import network.budlum.validator.core.AndroidKeystoreWrappingKeyProvider
 import network.budlum.validator.core.KeystoreKeyVault
 import network.budlum.validator.core.MobileConstants
 import network.budlum.validator.core.MobileValidatorEngine
@@ -29,7 +29,7 @@ class DutyPeriodicWorker(
     override suspend fun doWork(): Result {
         val bud3Dir = File(applicationContext.noBackupFilesDir, "bud3")
         val custody = ShareCustodyDirectory(bud3Dir)
-        val vault = KeystoreKeyVault(JvmMemoryWrappingKeyProvider())
+        val vault = KeystoreKeyVault(AndroidKeystoreWrappingKeyProvider())
         val engine = MobileValidatorEngine(
             ownerAddressHex = "00".repeat(32),
             keyVault = vault,

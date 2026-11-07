@@ -1,5 +1,6 @@
 package network.budlum.validator.core
 
+import java.security.KeyStoreException
 import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -34,11 +35,26 @@ data class WrappedKeyEnvelope(
 interface AesWrappingKeyProvider {
     val strongBoxAvailable: Boolean
     fun getOrCreateAes256Key(alias: String, requireUserAuth: Boolean): SecretKey
+
+    /** Return an existing wrapping key without creating replacement key material. */
+    fun getExistingAes256Key(alias: String, requireUserAuth: Boolean): SecretKey?
+}
+
+/** Retry without StrongBox only for the platform's explicit unavailable error. */
+internal fun <T> generatePreferStrongBox(
+    generate: (strongBox: Boolean) -> T,
+    isUnavailable: (Exception) -> Boolean,
+): T = try {
+    generate(true)
+} catch (error: Exception) {
+    if (!isUnavailable(error)) throw error
+    generate(false)
 }
 
 class JvmMemoryWrappingKeyProvider(override val strongBoxAvailable: Boolean = true) : AesWrappingKeyProvider {
     private val keys = mutableMapOf<String, SecretKey>()
 
+    @Synchronized
     override fun getOrCreateAes256Key(alias: String, requireUserAuth: Boolean): SecretKey {
         return keys.getOrPut(alias) {
             val kg = KeyGenerator.getInstance("AES")
@@ -46,6 +62,9 @@ class JvmMemoryWrappingKeyProvider(override val strongBoxAvailable: Boolean = tr
             kg.generateKey()
         }
     }
+
+    @Synchronized
+    override fun getExistingAes256Key(alias: String, requireUserAuth: Boolean): SecretKey? = keys[alias]
 }
 
 class KeystoreKeyVault(
@@ -92,10 +111,10 @@ class KeystoreKeyVault(
         if (envelope.purpose.requiresBiometricOrPin) {
             requireOwnerSpendAuthorization(biometricAuthToken ?: "")
         }
-        val secretKey = provider.getOrCreateAes256Key(
+        val secretKey = provider.getExistingAes256Key(
             envelope.keystoreAlias,
             envelope.purpose.requiresBiometricOrPin,
-        )
+        ) ?: throw KeyStoreException("wrapping key is missing; recovery is required")
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(128, envelope.iv))
         cipher.updateAAD(envelope.purpose.aadLabel.toByteArray(Charsets.UTF_8))

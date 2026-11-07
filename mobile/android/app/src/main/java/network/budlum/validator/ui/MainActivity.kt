@@ -24,7 +24,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import java.io.File
 import network.budlum.validator.R
-import network.budlum.validator.core.JvmMemoryWrappingKeyProvider
+import network.budlum.validator.core.AndroidKeystoreWrappingKeyProvider
 import network.budlum.validator.core.KeyPurpose
 import network.budlum.validator.core.KeystoreKeyVault
 import network.budlum.validator.core.MobileValidatorEngine
@@ -38,7 +38,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         DutyPeriodicWorker.enqueuePeriodic(this)
         val bud3Dir = File(noBackupFilesDir, "bud3")
-        val vault = KeystoreKeyVault(JvmMemoryWrappingKeyProvider())
+        val vault = KeystoreKeyVault(AndroidKeystoreWrappingKeyProvider())
         val engine = MobileValidatorEngine(
             ownerAddressHex = "01".repeat(32),
             keyVault = vault,

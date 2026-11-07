@@ -4,7 +4,7 @@
     <string name="notif_channel_name">Validator Custody Service</string>
     <string name="notif_status_template">Stored: %1$s | Last audit: %2$s | Net: %3$s</string>
     <string name="notif_boot_resume_title">Budlum Validator Paused After Reboot</string>
-    <string name="notif_boot_resume_body">WorkManager audits remain active. Open the app to resume foreground symbol serving.</string>
+    <string name="notif_boot_resume_body">Validator duties are not connected yet. Audits are not running. Reopen the app to view its status.</string>
     <string name="onboarding_disclosure">Your phone stores erasure-coded content shares that cannot reconstruct files alone. Public objects are public network data; sealed objects are end-to-end encrypted. No PoW mining runs on this device.</string>
     <string name="security_tradeoff_note">Owner spend key (ML-DSA-87, 24 words) requires biometric or PIN verification. Operator (ML-DSA-65) and BLS presence keys are wrapped by Android Keystore AES-256-GCM (StrongBox when available) without unlock gating so background audits succeed: physical device compromise can sign duty messages only and can never spend staked BUD.</string>
     <string name="action_faucet_request">Request Testnet Faucet (100 BUD)</string>

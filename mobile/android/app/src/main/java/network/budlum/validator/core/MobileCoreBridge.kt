@@ -1,6 +1,10 @@
 package network.budlum.validator.core
 
 import java.io.File
+import java.io.FileOutputStream
+import java.nio.file.FileAlreadyExistsException
+import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.security.MessageDigest
 
 /**
@@ -134,54 +138,160 @@ sealed interface DutyTx {
 /**
  * Manages `noBackupFilesDir/bud3/` segment share files (Section 7.9.5).
  */
-class ShareCustodyDirectory(private val rootDir: File) {
-    private val shares = linkedMapOf<String, AssignedShare>()
+class ShareCustodyDirectory(
+    private val rootDir: File,
+    private val freeSpaceProvider: () -> Long = { rootDir.usableSpace },
+) {
+    private data class StoredShareFile(val id: String, val file: File, val size: Long)
+
+    // ESI metadata is process-local. After a process restart an audit fails
+    // closed instead of guessing it; release can still use the filename.
+    private val shareEsis = mutableMapOf<String, Int>()
 
     init {
+        // Preserve first-run host-space measurement and the original app-private
+        // directory behavior. Admission still verifies any creation failure.
         if (!rootDir.exists()) {
             rootDir.mkdirs()
         }
     }
 
-    fun storedBytes(): Long = shares.values.sumOf { it.symbolBytes.size.toLong() }
+    private fun validSegmentId(id: String): Boolean =
+        id.isNotEmpty() && id.length % 2 == 0 && id.all { it.isDigit() || it in 'a'..'f' }
 
-    fun segmentIds(): List<String> = shares.keys.toList()
-
-    fun putShare(share: AssignedShare, quotaBytes: Long) {
-        require(share.segmentIdHex.isNotBlank() && share.segmentIdHex.all { it.isDigit() || it in 'a'..'f' }) {
-            "segmentIdHex must be lowercase hex"
+    private fun snapshot(): List<StoredShareFile>? {
+        if (!rootDir.exists()) return emptyList()
+        if (!rootDir.isDirectory) return null
+        val files = rootDir.listFiles() ?: return null
+        val result = mutableListOf<StoredShareFile>()
+        for (file in files) {
+            if (!Files.isRegularFile(file.toPath(), LinkOption.NOFOLLOW_LINKS) ||
+                !validSegmentId(file.name)
+            ) {
+                return null
+            }
+            result.add(StoredShareFile(file.name, file, file.length()))
         }
-        val nextBytes = storedBytes() - (shares[share.segmentIdHex]?.symbolBytes?.size?.toLong() ?: 0L) +
-            share.symbolBytes.size.toLong()
-        if (nextBytes > quotaBytes) {
+        return result.sortedBy { it.id }
+    }
+
+    private fun totalBytes(files: List<StoredShareFile>): Long? {
+        var total = 0L
+        for (file in files) {
+            if (file.size > Long.MAX_VALUE - total) return null
+            total += file.size
+        }
+        return total
+    }
+
+    /** A listing or arithmetic failure never understates occupied space. */
+    fun storedBytes(): Long = synchronized(STORE_LOCK) {
+        val files = snapshot() ?: return@synchronized Long.MAX_VALUE
+        totalBytes(files) ?: Long.MAX_VALUE
+    }
+
+    fun segmentIds(): List<String> = synchronized(STORE_LOCK) {
+        snapshot()?.map { it.id } ?: emptyList()
+    }
+
+    fun getShare(segmentIdHex: String): AssignedShare? = synchronized(STORE_LOCK) {
+        if (!validSegmentId(segmentIdHex)) return@synchronized null
+        val esi = shareEsis[segmentIdHex] ?: return@synchronized null
+        val stored = snapshot()?.firstOrNull { it.id == segmentIdHex } ?: return@synchronized null
+        val bytes = try {
+            stored.file.readBytes()
+        } catch (_: Exception) {
+            return@synchronized null
+        }
+        if (bytes.size.toLong() != stored.size) return@synchronized null
+        AssignedShare(segmentIdHex, esi, bytes)
+    }
+
+    /**
+     * Publish a complete share without replacing an existing name. Duplicate
+     * names, dangling links, quota/free-floor crossings and partial writes fail.
+     * This is an interim local store, not a durable chain release protocol.
+     */
+    fun putShare(share: AssignedShare, quotaBytes: Long): Unit = synchronized(STORE_LOCK) {
+        require(validSegmentId(share.segmentIdHex)) {
+            "segmentIdHex must be non-empty lowercase hex with whole bytes"
+        }
+        val target = File(rootDir, share.segmentIdHex)
+        if (Files.exists(target.toPath(), LinkOption.NOFOLLOW_LINKS)) {
+            throw IllegalStateException("mobile_share_already_stored: segment id is already occupied")
+        }
+        val files = snapshot()
+            ?: throw IllegalStateException("mobile_store_unavailable: custody directory cannot be read safely")
+        val used = totalBytes(files)
+            ?: throw IllegalStateException("mobile_quota_exceeded: stored-byte accounting overflow")
+        val size = share.symbolBytes.size.toLong()
+        if (quotaBytes < 0L || used > quotaBytes || size > quotaBytes - used) {
             throw IllegalStateException("mobile_quota_exceeded: incoming share exceeds custody quota")
         }
-        val file = File(rootDir, share.segmentIdHex)
-        file.writeBytes(share.symbolBytes)
-        shares[share.segmentIdHex] = share
+        val free = freeSpaceProvider()
+        if (free < MobileConstants.FREE_SPACE_FLOOR_BYTES ||
+            size > free - MobileConstants.FREE_SPACE_FLOOR_BYTES
+        ) {
+            throw IllegalStateException("mobile_free_space_floor: incoming share crosses 2 GiB free-space floor")
+        }
+        if (!rootDir.isDirectory && !rootDir.mkdirs()) {
+            throw IllegalStateException("mobile_store_unavailable: custody directory cannot be created")
+        }
+
+        val temporary = File.createTempFile(".share-", ".tmp", rootDir)
+        try {
+            FileOutputStream(temporary).use { output ->
+                output.write(share.symbolBytes)
+                output.fd.sync()
+            }
+            try {
+                // Same-filesystem atomic no-replace publication. EEXIST cannot
+                // overwrite a share or follow a dangling link planted concurrently.
+                Files.createLink(target.toPath(), temporary.toPath())
+            } catch (error: FileAlreadyExistsException) {
+                throw IllegalStateException("mobile_share_already_stored: segment id is already occupied", error)
+            }
+            shareEsis[share.segmentIdHex] = share.esi
+        } finally {
+            temporary.delete()
+        }
     }
 
-    fun getShare(segmentIdHex: String): AssignedShare? = shares[segmentIdHex]
-
-    fun trimToQuota(newQuotaBytes: Long): List<String> {
+    /** Delete oldest recognized shares until quota is met; never delete unknown files. */
+    fun trimToQuota(newQuotaBytes: Long): List<String> = synchronized(STORE_LOCK) {
+        require(newQuotaBytes >= 0L) { "quota must not be negative" }
+        val files = snapshot() ?: return@synchronized emptyList()
+        var total = totalBytes(files) ?: return@synchronized emptyList()
         val released = mutableListOf<String>()
-        val iterator = shares.entries.iterator()
-        while (storedBytes() > newQuotaBytes && iterator.hasNext()) {
-            val entry = iterator.next()
-            File(rootDir, entry.key).delete()
-            released.add(entry.key)
-            iterator.remove()
+        val candidates = files.sortedWith(compareBy<StoredShareFile> { it.file.lastModified() }.thenBy { it.id })
+        for (stored in candidates) {
+            if (total <= newQuotaBytes) break
+            if (stored.file.delete()) {
+                total -= stored.size
+                shareEsis.remove(stored.id)
+                released.add(stored.id)
+            }
         }
-        return released
+        released
     }
 
-    fun releaseAll(): List<String> {
-        val all = shares.keys.toList()
-        for (seg in all) {
-            File(rootDir, seg).delete()
+    /** Local deletion only; no chain acknowledgement is implied. */
+    fun releaseAll(): List<String> = synchronized(STORE_LOCK) {
+        val files = snapshot() ?: return@synchronized emptyList()
+        val released = mutableListOf<String>()
+        for (stored in files) {
+            if (stored.file.delete()) {
+                shareEsis.remove(stored.id)
+                released.add(stored.id)
+            }
         }
-        shares.clear()
-        return all
+        released
+    }
+
+    companion object {
+        // All store instances in this process make admission/deletion decisions
+        // against the same directory snapshot.
+        private val STORE_LOCK = Any()
     }
 }
 
@@ -213,13 +323,18 @@ class MobileValidatorEngine(
     fun setPolicy(next: Policy): List<DutyTx> {
         next.validate()
         val emitted = mutableListOf<DutyTx>()
-        if (next.quotaBytes < custodyDir.storedBytes()) {
-            val trimmed = custodyDir.trimToQuota(next.quotaBytes)
-            if (trimmed.isNotEmpty()) {
-                val tx = DutyTx.ReleaseShares(trimmed)
-                outbox.add(tx)
-                emitted.add(tx)
-            }
+        val trimmed = if (next.quotaBytes < custodyDir.storedBytes()) {
+            custodyDir.trimToQuota(next.quotaBytes)
+        } else {
+            emptyList()
+        }
+        check(custodyDir.storedBytes() <= next.quotaBytes) {
+            "mobile_quota_release_incomplete: local shares still exceed the requested quota"
+        }
+        if (trimmed.isNotEmpty()) {
+            val tx = DutyTx.ReleaseShares(trimmed)
+            outbox.add(tx)
+            emitted.add(tx)
         }
         policy = next
         return emitted
@@ -292,8 +407,12 @@ class MobileValidatorEngine(
         if (pausedForThermal) {
             throw IllegalStateException("mobile_thermal_paused: custody intake paused under thermal load")
         }
+        val incoming = share.symbolBytes.size.toLong()
+        if (incoming > availableBytes - MobileConstants.FREE_SPACE_FLOOR_BYTES) {
+            throw IllegalStateException("mobile_free_space_floor: incoming share crosses 2 GiB free-space floor")
+        }
         custodyDir.putShare(share, policy.quotaBytes)
-        availableBytes = (availableBytes - share.symbolBytes.size.toLong()).coerceAtLeast(0L)
+        availableBytes -= incoming
         val ack = DutyTx.CustodyAck(share.segmentIdHex, share.esi)
         outbox.add(ack)
         return ack
@@ -324,18 +443,25 @@ class MobileValidatorEngine(
         window: Long,
         isUnmeteredWifi: Boolean,
         pendingAudits: List<StorageAudit>,
+        mobileUsedMbToday: Long? = null,
         incomingShares: List<AssignedShare>,
     ): List<DutyTx> {
         if (!registered || unbonding || pausedForThermal) {
             return emptyList()
         }
-        if (policy.network is NetworkPolicy.UnmeteredOnly && !isUnmeteredWifi) {
-            return emptyList()
+        when (val network = policy.network) {
+            NetworkPolicy.UnmeteredOnly -> if (!isUnmeteredWifi) return emptyList()
+            is NetworkPolicy.Metered -> if (!isUnmeteredWifi) {
+                val used = mobileUsedMbToday ?: return emptyList()
+                if (used < 0L || used >= network.dailyCapMb) return emptyList()
+            }
         }
         val produced = mutableListOf<DutyTx>()
         for (share in incomingShares) {
+            val stored = custodyDir.storedBytes()
+            val size = share.symbolBytes.size.toLong()
             if (availableBytes >= MobileConstants.FREE_SPACE_FLOOR_BYTES &&
-                custodyDir.storedBytes() + share.symbolBytes.size <= policy.quotaBytes
+                stored <= policy.quotaBytes && size <= policy.quotaBytes - stored
             ) {
                 produced.add(acceptShare(share))
             }

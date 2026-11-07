@@ -2,6 +2,10 @@ package network.budlum.validator
 
 import java.io.File
 import java.nio.file.Files
+import java.security.KeyStoreException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import network.budlum.validator.core.AssignedShare
 import network.budlum.validator.core.DutyTx
 import network.budlum.validator.core.JvmMemoryWrappingKeyProvider
@@ -16,6 +20,7 @@ import network.budlum.validator.core.Policy
 import network.budlum.validator.core.RelayOffer
 import network.budlum.validator.core.ShareCustodyDirectory
 import network.budlum.validator.core.StorageAudit
+import network.budlum.validator.core.generatePreferStrongBox
 import network.budlum.validator.devicetests.DeviceFieldHarness
 
 /**
@@ -35,6 +40,11 @@ object MobileValidatorUnitTest {
         dir.deleteOnExit()
         return File(dir, "bud3")
     }
+
+    // Engine-level tests supply host-measured space separately. The physical
+    // sandbox filesystem floor is exercised by the dedicated store regression.
+    private fun newTestCustody(): ShareCustodyDirectory =
+        ShareCustodyDirectory(newTempBud3Dir()) { Long.MAX_VALUE }
 
     fun android_policy_wifi_only_by_default() {
         val policy = Policy()
@@ -67,7 +77,7 @@ object MobileValidatorUnitTest {
         val engine = MobileValidatorEngine(
             ownerAddressHex = "01".repeat(32),
             keyVault = KeystoreKeyVault(JvmMemoryWrappingKeyProvider()),
-            custodyDir = ShareCustodyDirectory(newTempBud3Dir()),
+            custodyDir = newTestCustody(),
             relays = emptyList(),
             initialAvailableBytes = 16L * MobileConstants.GIB_BYTES,
         )
@@ -115,13 +125,165 @@ object MobileValidatorUnitTest {
         )
     }
 
+    fun android_unwrap_requires_existing_wrapping_key() {
+        val original = KeystoreKeyVault(JvmMemoryWrappingKeyProvider())
+        val envelope = original.wrapKey(KeyPurpose.OperatorDutyMlDsa65, ByteArray(32) { 11 })
+        val missingProvider = JvmMemoryWrappingKeyProvider(strongBoxAvailable = false)
+        val missing = KeystoreKeyVault(missingProvider)
+        var refused = false
+        try {
+            missing.unwrapKey(envelope)
+        } catch (_: KeyStoreException) {
+            refused = true
+        }
+        check(refused, "unwrapping with a missing wrapping key must fail closed")
+        check(
+            missingProvider.getExistingAes256Key(envelope.keystoreAlias, false) == null,
+            "failed unwrap must not create unrelated replacement key material",
+        )
+    }
+
+    fun android_strongbox_fallback_is_narrow() {
+        class Unavailable : Exception()
+
+        val attempts = mutableListOf<Boolean>()
+        val fallback = generatePreferStrongBox(
+            generate = { strongBox ->
+                attempts.add(strongBox)
+                if (strongBox) throw Unavailable()
+                "ordinary"
+            },
+            isUnavailable = { it is Unavailable },
+        )
+        check(fallback == "ordinary" && attempts == listOf(true, false), "fallback only after unavailable")
+
+        val successAttempts = mutableListOf<Boolean>()
+        val direct = generatePreferStrongBox(
+            generate = { strongBox ->
+                successAttempts.add(strongBox)
+                "strongbox"
+            },
+            isUnavailable = { it is Unavailable },
+        )
+        check(direct == "strongbox" && successAttempts == listOf(true), "no fallback after success")
+
+        val unexpected = IllegalStateException("unexpected")
+        val unexpectedAttempts = mutableListOf<Boolean>()
+        val propagated = runCatching {
+            generatePreferStrongBox<String>(
+                generate = { strongBox ->
+                    unexpectedAttempts.add(strongBox)
+                    throw unexpected
+                },
+                isUnavailable = { it is Unavailable },
+            )
+        }.exceptionOrNull()
+        check(propagated === unexpected && unexpectedAttempts == listOf(true), "unexpected errors propagate")
+    }
+
+    fun android_share_admission_is_atomic_and_fail_closed() {
+        val root = newTempBud3Dir()
+        var free = MobileConstants.FREE_SPACE_FLOOR_BYTES + 3L
+        val store = ShareCustodyDirectory(root) { free }
+        val first = AssignedShare("010aff", 1, byteArrayOf(1, 2, 3, 4))
+        val second = AssignedShare("020b", 2, byteArrayOf(5, 6, 7, 8))
+
+        check(runCatching { store.putShare(first, 100L) }.isFailure, "share cannot cross free-space floor")
+        check(!File(root, first.segmentIdHex).exists(), "failed floor admission publishes no share")
+        free = MobileConstants.FREE_SPACE_FLOOR_BYTES + 4L
+        store.putShare(first, 100L)
+        store.putShare(second, 100L)
+        check(store.storedBytes() == 8L, "two admitted shares counted")
+
+        val duplicate = runCatching { store.putShare(first.copy(symbolBytes = byteArrayOf(9, 9, 9)), 100L) }
+        check(duplicate.isFailure, "duplicate segment id refused")
+        check(File(root, first.segmentIdHex).readBytes().contentEquals(byteArrayOf(1, 2, 3, 4)), "duplicate cannot overwrite")
+        check(File(root, second.segmentIdHex).setLastModified(2_000L), "second timestamp set")
+        check(File(root, first.segmentIdHex).setLastModified(1_000L), "first timestamp set")
+        check(store.trimToQuota(6L) == listOf(first.segmentIdHex), "quota releases only the oldest required share")
+        check(store.storedBytes() == 4L && File(root, second.segmentIdHex).isFile, "trim stops as soon as quota is met")
+
+        val linkTarget = File(root, "030c")
+        val outside = File(root.parentFile, "outside")
+        Files.createSymbolicLink(linkTarget.toPath(), outside.toPath())
+        check(runCatching { store.putShare(AssignedShare("030c", 3, byteArrayOf(1)), 100L) }.isFailure, "dangling link refused")
+        check(!outside.exists(), "dangling link cannot redirect a share write")
+        linkTarget.delete()
+
+        val unknown = File(root, "not-a-segment")
+        unknown.writeBytes(byteArrayOf(7, 8, 9))
+        check(store.storedBytes() == Long.MAX_VALUE, "unrecognized content fails accounting closed")
+        check(store.trimToQuota(0L).isEmpty(), "unrecognized content prevents quota deletion")
+        check(unknown.readBytes().contentEquals(byteArrayOf(7, 8, 9)), "unknown file preserved")
+        check(File(root, second.segmentIdHex).isFile, "recognized share also preserved after unsafe snapshot")
+        unknown.delete()
+        check(runCatching { store.trimToQuota(-1L) }.isFailure, "negative quota refused")
+        check(runCatching { store.putShare(AssignedShare("", 0, byteArrayOf(1)), 100L) }.isFailure, "empty segment id refused")
+    }
+
+    fun android_concurrent_share_admission_respects_quota() {
+        val root = newTempBud3Dir()
+        val workers = 16
+        val bytesPerShare = 16_384
+        val ready = CountDownLatch(workers)
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(workers)
+        try {
+            val writes = (0 until workers).map { index ->
+                executor.submit<Boolean> {
+                    val store = ShareCustodyDirectory(root) { Long.MAX_VALUE }
+                    ready.countDown()
+                    start.await()
+                    runCatching {
+                        store.putShare(
+                            AssignedShare("%02x".format(index), index, ByteArray(bytesPerShare)),
+                            bytesPerShare.toLong(),
+                        )
+                    }.isSuccess
+                }
+            }
+            check(ready.await(10, TimeUnit.SECONDS), "concurrent writers ready")
+            start.countDown()
+            check(writes.count { it.get(10, TimeUnit.SECONDS) } == 1, "only one concurrent writer fits quota")
+            check(ShareCustodyDirectory(root).storedBytes() == bytesPerShare.toLong(), "quota accounting after race")
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    fun android_metered_data_unknown_fails_closed() {
+        val engine = MobileValidatorEngine(
+            ownerAddressHex = "06".repeat(32),
+            keyVault = KeystoreKeyVault(JvmMemoryWrappingKeyProvider()),
+            custodyDir = newTestCustody(),
+            relays = emptyList(),
+            initialAvailableBytes = 16L * MobileConstants.GIB_BYTES,
+        )
+        engine.requestTestnetFaucet(1L)
+        engine.registerValidator("BIOMETRIC_VERIFIED_SESSION", "42".repeat(32))
+        engine.setPolicy(Policy(network = NetworkPolicy.Metered(dailyCapMb = 100)))
+        fun tick(used: Long?, unmetered: Boolean = false): List<DutyTx> =
+            engine.runWorkManagerPeriodicTick(
+                window = 19L,
+                isUnmeteredWifi = unmetered,
+                pendingAudits = emptyList(),
+                mobileUsedMbToday = used,
+                incomingShares = emptyList(),
+            )
+        check(tick(null).isEmpty(), "unknown metered usage fails closed")
+        check(tick(-1L).isEmpty(), "negative metered usage refused")
+        check(tick(100L).isEmpty(), "daily cap is exclusive")
+        check(tick(99L).any { it is DutyTx.Presence }, "usage below cap permits duty")
+        check(tick(null, unmetered = true).any { it is DutyTx.Presence }, "unmetered Wi-Fi needs no mobile meter")
+    }
+
     fun android_leave_releases_shares_and_unbonds() {
         val bud3 = newTempBud3Dir()
         val vault = KeystoreKeyVault(JvmMemoryWrappingKeyProvider())
         val engine = MobileValidatorEngine(
             ownerAddressHex = "02".repeat(32),
             keyVault = vault,
-            custodyDir = ShareCustodyDirectory(bud3),
+            custodyDir = ShareCustodyDirectory(bud3) { Long.MAX_VALUE },
             relays = listOf(RelayOffer("/ip4/198.51.100.2/udp/4001/quic-v1", 8_000L)),
             initialAvailableBytes = 16L * MobileConstants.GIB_BYTES,
         )
@@ -146,7 +308,7 @@ object MobileValidatorUnitTest {
         val engine = MobileValidatorEngine(
             ownerAddressHex = "03".repeat(32),
             keyVault = KeystoreKeyVault(JvmMemoryWrappingKeyProvider()),
-            custodyDir = ShareCustodyDirectory(bud3),
+            custodyDir = ShareCustodyDirectory(bud3) { Long.MAX_VALUE },
             relays = emptyList(),
             initialAvailableBytes = 8L * MobileConstants.GIB_BYTES,
         )
@@ -169,7 +331,7 @@ object MobileValidatorUnitTest {
         val engine = MobileValidatorEngine(
             ownerAddressHex = "04".repeat(32),
             keyVault = vault,
-            custodyDir = ShareCustodyDirectory(bud3),
+            custodyDir = ShareCustodyDirectory(bud3) { Long.MAX_VALUE },
             relays = listOf(RelayOffer("/ip4/203.0.113.7/udp/4001/quic-v1", 12_000L)),
             initialAvailableBytes = 12L * MobileConstants.GIB_BYTES,
         )
@@ -193,7 +355,7 @@ object MobileValidatorUnitTest {
         val engine = MobileValidatorEngine(
             ownerAddressHex = "05".repeat(32),
             keyVault = KeystoreKeyVault(JvmMemoryWrappingKeyProvider()),
-            custodyDir = ShareCustodyDirectory(bud3),
+            custodyDir = ShareCustodyDirectory(bud3) { Long.MAX_VALUE },
             relays = listOf(RelayOffer("/ip4/203.0.113.9/udp/4001/quic-v1", 10_000L)),
             initialAvailableBytes = 12L * MobileConstants.GIB_BYTES,
         )
@@ -264,6 +426,11 @@ object MobileValidatorUnitTest {
         android_policy_wifi_only_by_default()
         android_thermal_pause_cannot_be_disabled()
         android_keys_are_keystore_wrapped()
+        android_unwrap_requires_existing_wrapping_key()
+        android_strongbox_fallback_is_narrow()
+        android_share_admission_is_atomic_and_fail_closed()
+        android_concurrent_share_admission_respects_quota()
+        android_metered_data_unknown_fails_closed()
         android_leave_releases_shares_and_unbonds()
         android_low_space_releases_shares()
         android_onboarding_reaches_registered_state()
