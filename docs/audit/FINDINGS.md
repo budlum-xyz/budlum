@@ -240,3 +240,11 @@ review. Corrections without their required executed test remain open.
 | Finding | Severity | State | Evidence and correction |
 |---|---|---|---|
 | BLG-368 | Medium | Open; locally corrected, pinned concept-gate CI pending | The proposed unbounded `(?i)lubot` pattern also matches the repository owner name `lubothebook`, creating false naming matches and potentially inflating the ratchet with unrelated URLs and metadata. The current map uses `(?i)\blubot\b`; the source-wide pattern was not restored. No Rust gate runner was available. |
+
+## Android and rehearsal integration review
+
+| Finding | Severity | State | Evidence and correction |
+|---|---|---|---|
+| BLG-369 | High | Open; locally corrected, pinned Android CI pending | The current app used `compileSdk = 36` with AGP 8.7.2 and Gradle 8.9, and its workflow had no Gradle assemble/unit-test job. AGP is now 8.9.1, both Gradle invocations use 8.11.1, and a pinned `android-gradle` job runs `assembleDebug` and `testDebugUnitTest`. `android_compile_sdk_uses_a_compatible_toolchain` locks the versions and commands. Neither Gradle nor an emulator ran locally. |
+| BLG-370 | High | Closed by non-integration in the integrated tree | The proposed mobile workflow used movable action tags and an SDK-install fallback that converted installation failure into a warning. That would weaken both supply-chain pinning and build evidence. The current SHA-pinned actions were retained; the ported Gradle job has no `|| true` or warning-only SDK fallback. |
+| BLG-371 | Medium | Closed by non-integration in the integrated tree | The parallel Android vault caught any `ProviderException` as though StrongBox were absent, potentially hiding unrelated provider failures while silently retrying with weaker backing. The current provider retries only for `StrongBoxUnavailableException`. The old duplicate app and vault were not integrated. |
