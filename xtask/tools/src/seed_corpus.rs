@@ -104,7 +104,7 @@ pub fn generate(out_dir: &Path) -> Result<String, String> {
     ))
 }
 
-/// Varsayilan cikti dizini: `<kok>/fuzz/corpus/zkvm`.
+/// The default output directory: `<root>/fuzz/corpus/zkvm`.
 #[must_use]
 pub fn default_out_dir(root: &Path) -> PathBuf {
     root.join("fuzz").join("corpus").join("zkvm")
