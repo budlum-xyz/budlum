@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, fix/architecture-tip-adlari]
+    branches: [main]
   workflow_dispatch:
   # A weekly nightly run, continuous UB inspection
   schedule:
