@@ -212,23 +212,21 @@ pub(crate) fn issue_challenges(
         let [e0, e1, e2, e3, e4, e5, e6, e7, ..] = entropy;
         let byte_start = u64::from_le_bytes([e0, e1, e2, e3, e4, e5, e6, e7]) % range_count;
         let byte_end = byte_start + range_len;
-        let opener_bond =
-            crate::domain::storage_deal::StorageRegistry::required_opener_bond(range_len);
-        match state.storage_registry.open_challenge(
-            deal_id,
-            byte_start,
-            byte_end,
-            epoch,
-            epoch + 10,
-            Address::from([0u8; 32]),
-            opener_bond,
-        ) {
-            Ok(_challenge_id) => issued += 1,
-            Err(error) => tracing::warn!(
+        if state
+            .storage_registry
+            .open_challenge(
                 deal_id,
-                %error,
-                "automatic retrieval challenge could not be opened"
-            ),
+                byte_start,
+                byte_end,
+                epoch,
+                epoch + 10,
+                Address::from([0u8; 32]),
+                // The minimum opener bond for an automatic challenge.
+                1,
+            )
+            .is_ok()
+        {
+            issued += 1;
         }
     }
     issued

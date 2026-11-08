@@ -535,7 +535,6 @@ pub fn seal_log_path(anchor_log: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// The seed of the public development anchor key `index` of `chain_id`.
-#[cfg(feature = "wallet-ml-dsa")]
 fn devnet_seed(chain_id: u64, index: u8) -> [u8; 32] {
     let mut hasher = Sha3_256::new();
     hasher.update(b"BDLM_DEVNET_ANCHOR_KEY_V1");
@@ -545,7 +544,6 @@ fn devnet_seed(chain_id: u64, index: u8) -> [u8; 32] {
 }
 
 /// The seed of the public development seal key of `chain_id`, 96 bytes.
-#[cfg(feature = "wallet-ml-dsa")]
 fn devnet_seal_seed(chain_id: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(96);
     for block in 0u8..3 {
@@ -932,7 +930,6 @@ mod tests {
     fn cold_committee() -> ColdWalletState {
         ColdWalletState::new(ColdWalletPolicy {
             chain_id: DEVNET,
-            epoch_length_blocks: 100,
             max_value_per_settlement_atoms: 1000,
             max_value_per_epoch_atoms: 3000,
             min_height_advance: 1,

@@ -83,6 +83,10 @@ fn privacy_transfers_enabled(chain_id: u64) -> bool {
         == crate::core::chain_config::Network::Devnet
             .chain_id()
             .value()
+        || chain_id
+            == crate::core::chain_config::Network::Testnet
+                .chain_id()
+                .value()
 }
 
 impl Executor {
@@ -1451,17 +1455,6 @@ impl Executor {
                 // Root to be present in the consensus-owned, finalized
                 // External-root registry. A relayer cannot create that
                 // Anchor by submitting this transaction.
-                if let crate::core::transaction::ExternalChain::Custom(custom_id) = res.chain {
-                    if custom_id == 0
-                        || crate::core::transaction::ExternalChain::from_domain_id(custom_id)
-                            .is_some()
-                    {
-                        return Err(BudlumError::validation(
-                            "relayer_reserved_custom_chain",
-                            "custom external chain id collides with a reserved canonical chain slot",
-                        ));
-                    }
-                }
                 let domain_id = res.chain.domain_id();
                 match state.external_roots.get(&domain_id) {
                     Some(finalized_root) if finalized_root == &res.external_state_root => {}
@@ -2471,7 +2464,7 @@ impl Executor {
                 }
                 state
                     .note_registry
-                    .insert_note_for_owner(*commitment, tx.from)
+                    .insert_note(*commitment)
                     .map_err(|e| BudlumError::validation("privacy_note_insert", e))?;
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
@@ -2571,8 +2564,7 @@ impl Executor {
                 }
                 state
                     .note_registry
-                    .apply_transfer_for_owner(
-                        &tx.from,
+                    .apply_transfer_with_proofs(
                         &sub.spent_commitments,
                         &sub.nullifiers,
                         &sub.output_commitments,
@@ -3058,12 +3050,10 @@ impl Executor {
                          signature envelope must be empty",
                     ));
                 }
-                crate::cross_domain::message::register_relayed_cross_domain_on_state(
-                    state, message,
-                )
-                .map_err(|e| {
-                    BudlumError::validation("cross_domain_message_failed", e.to_string())
-                })?;
+                crate::cross_domain::message::register_cross_domain_on_state(state, message)
+                    .map_err(|e| {
+                        BudlumError::validation("cross_domain_message_failed", e.to_string())
+                    })?;
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
@@ -3156,7 +3146,7 @@ impl Executor {
                             "Unknown bridge transfer".to_string(),
                         )
                     })?;
-                burn.verify_holder_authorization_in(&state.scheme_registry, holder, tx.chain_id)
+                burn.verify_holder_authorization(holder, tx.chain_id)
                     .map_err(|e| BudlumError::validation("bridge_burn_failed", e))?;
                 // The refund window is a number of blocks past the burn, so
                 // its base is a height this chain has actually reached, not a
@@ -4002,7 +3992,7 @@ mod tests {
 
         assert!(!privacy_transfers_enabled(mainnet), "mainnet must stay off");
         assert!(privacy_transfers_enabled(devnet), "devnet must stay on");
-        assert!(!privacy_transfers_enabled(testnet), "testnet must stay off");
+        assert!(privacy_transfers_enabled(testnet), "testnet must stay on");
 
         for unclaimed in [1u64, 42, 1337, 45263, u64::MAX] {
             assert!(

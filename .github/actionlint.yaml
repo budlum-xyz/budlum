@@ -1,6 +1,0 @@
-paths:
-  .github/workflows/ci.yml:
-    ignore:
-      # GitHub introduced the `code-quality` permission scope for actions/upload-code-coverage
-      # after actionlint v1.7.12 froze its built-in permission table.
-      - '^unknown permission scope "code-quality"'

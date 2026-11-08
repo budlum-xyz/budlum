@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet]
+    branches: [main, fix/architecture-tip-adlari]
 
 concurrency:
   group: semver-${{ github.ref }}
@@ -61,32 +61,14 @@ jobs:
         # On nightly 'rustdoc' is NOT a separate component, it is part of the rustc
         # component (rustup: exit 1 with "did you mean 'rust-docs'?", 2026-07-21 CI evidence).
         run: rustup toolchain install nightly-2026-07-19 --profile minimal
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core
           # In the two-checkout layout there is no Cargo.toml at the workspace root;
           # rust-cache's `cargo metadata` call blows up at the root (Error log).
           workspaces: ./current
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Install cargo-semver-checks (locked)
         run: cargo +1.97.1 install cargo-semver-checks --locked
       - name: Gate canary (vacuous-gate protection)

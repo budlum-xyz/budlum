@@ -338,35 +338,13 @@ mod tests {
             let _ = bc.produce_block(zero); // tip 1
             snap_height_a = bc.last_block().index;
             let pm = PruningManager::new(10, 10, snap_dir_of(&dir));
-            let snap_a = StateSnapshotV2::from_state(
-                &bc.state,
-                StateSnapshotV2Params {
-                    height: snap_height_a,
-                    block_hash: bc.last_block().hash.clone(),
-                    genesis_hash: bc.chain[0].hash.clone(),
-                    chain_id: 45262,
-                    finalized_height: bc.finalized_height,
-                    finalized_hash: bc.finalized_hash.clone(),
-                    finality_certificates: vec![],
-                },
-            );
+            let snap_a = StateSnapshotV2::from_state(&bc.state, params_v2(snap_height_a, 45262));
             pm.save_snapshot_v2(&snap_a).expect("save A");
 
             bc.state.add_balance(&alice, 300); // 1000
             let _ = bc.produce_block(zero); // tip 2
             snap_height_b = bc.last_block().index;
-            let snap_b = StateSnapshotV2::from_state(
-                &bc.state,
-                StateSnapshotV2Params {
-                    height: snap_height_b,
-                    block_hash: bc.last_block().hash.clone(),
-                    genesis_hash: bc.chain[0].hash.clone(),
-                    chain_id: 45262,
-                    finalized_height: bc.finalized_height,
-                    finalized_hash: bc.finalized_hash.clone(),
-                    finality_certificates: vec![],
-                },
-            );
+            let snap_b = StateSnapshotV2::from_state(&bc.state, params_v2(snap_height_b, 45262));
             pm.save_snapshot_v2(&snap_b).expect("save B");
 
             let _ = bc.produce_block(zero); // tip 3 (chain_len=4 > hB=2)

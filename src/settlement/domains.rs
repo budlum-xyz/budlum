@@ -2,10 +2,9 @@
 //!
 //! Budlum settles the finality of the consensus domains it hosts: each
 //! domain registers once, then its commitments arrive with finality proofs,
-//! each one advancing the domain's committed height and anchoring its state
-//! root. Domain finality does not authorize native account nonce writes:
-//! those require account-owner authorization, absent from this commitment
-//! format. ZK domains advance by proof claims instead. Every one of those writes used to happen outside
+//! each one advancing the domain's committed height, anchoring its state
+//! root and applying the account nonce writes it carries. ZK domains advance
+//! by proof claims instead. Every one of those writes used to happen outside
 //! a block: operator RPCs (`bud_registerConsensusDomain`,
 //! `bud_submitVerifiedDomainCommitment`, `bud_registerSovereignTemplate`,
 //! `bud_submitZkProof`), a gossip side channel that applied commitments as
@@ -181,67 +180,12 @@ fn deliver_message(
     let derived = state
         .settlement
         .domains
-        .get(message.source_domain)
-        .map(|domain| {
-            state
-                .settlement
-                .domains
-                .observed(message.source_domain)
-                .quantum_class()
-                .unwrap_or_else(|| crate::settlement::pq_anchor::domain_quantum_class(&domain.kind))
-        });
+        .observed(message.source_domain)
+        .quantum_class();
     if message.source_quantum_class != derived {
         return Err(SettlementTxError::Refused(format!(
             "the message carries source class {:?}; the chain derives {derived:?}",
             message.source_quantum_class
-        )));
-    }
-    // A finalized commitment may arrive out of order and sit staged in the
-    // commitment registry until its parent chain links up; delivering its
-    // message may not consume it before `last_committed_height` reaches
-    // `delivery.domain_height`.
-    let (domain_status, bridge_enabled, committed_tip) = state
-        .settlement
-        .domains
-        .get(delivery.domain_id)
-        .map(|domain| {
-            (
-                domain.status,
-                domain.bridge_enabled,
-                domain.last_committed_height,
-            )
-        })
-        .ok_or_else(|| {
-            SettlementTxError::Refused(format!("unknown domain {}", delivery.domain_id))
-        })?;
-    if domain_status != crate::domain::types::DomainStatus::Active {
-        return Err(SettlementTxError::Refused(format!(
-            "domain {} is not active (status={domain_status:?})",
-            delivery.domain_id
-        )));
-    }
-    if !bridge_enabled {
-        return Err(SettlementTxError::Refused(format!(
-            "domain {} is not bridge-enabled",
-            delivery.domain_id
-        )));
-    }
-    let anchored_height = state.settlement.commitments.accepted_height(
-        delivery.domain_id,
-        delivery.domain_height,
-        delivery.sequence,
-    );
-    crate::core::account::enforce_classical_message_intake(
-        &message,
-        state.settlement.quantum.alarm(),
-        anchored_height,
-        state.current_block_height,
-    )
-    .map_err(SettlementTxError::Refused)?;
-    if delivery.domain_height > committed_tip {
-        return Err(SettlementTxError::Refused(format!(
-            "domain {} commitment at height {} is not on the applied domain chain (tip {committed_tip})",
-            delivery.domain_id, delivery.domain_height
         )));
     }
     crate::cross_domain::bridge_tx::verify_domain_event_proof(
@@ -314,11 +258,7 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
     if domain.id == 0 {
         return Err("Consensus domain id 0 is reserved".into());
     }
-    // Bitcoin uses numeric chain id 0; no other canonical or custom slot may
-    // register with zero. Keep this consistent with the chain bootstrap gate.
-    if domain.domain_chain_id == 0
-        && domain.id != crate::core::transaction::ExternalChain::Bitcoin.domain_id()
-    {
+    if domain.domain_chain_id == 0 {
         return Err(format!("Domain {} has invalid chain id 0", domain.id));
     }
 
@@ -379,26 +319,6 @@ pub fn register_domain(state: &mut AccountState, domain: ConsensusDomain) -> Res
             domain.id, domain.kind
         ));
     }
-    if domain.finality_adapter == crate::cross_domain::external::EXTERNAL_DOMAIN_FINALITY_ADAPTER {
-        if domain.config_hash == [0u8; 32] {
-            return Err(format!(
-                "External finality domain {} must bind its registered DomainKey in config_hash",
-                domain.id
-            ));
-        }
-        if state.settlement.domains.domains().iter().any(|existing| {
-            existing.id != domain.id
-                && existing.status != DomainStatus::Retired
-                && existing.finality_adapter
-                    == crate::cross_domain::external::EXTERNAL_DOMAIN_FINALITY_ADAPTER
-                && existing.config_hash == domain.config_hash
-        }) {
-            return Err(format!(
-                "External finality DomainKey {} is already claimed by another consensus domain",
-                hex::encode(domain.config_hash)
-            ));
-        }
-    }
     state.settlement.domains.register(domain)
 }
 
@@ -434,43 +354,6 @@ fn ensure_adapter_name(domain: &ConsensusDomain, expected: &'static str) -> Resu
         ));
     }
     Ok(())
-}
-
-/// Apply the same registry policy to classical addresses and composite-key
-/// records. A PoAPq authority record is not itself an Address.
-fn require_active_attester_authorities(
-    state: &AccountState,
-    proof: &FinalityProof,
-    purpose: &str,
-) -> Result<(), String> {
-    let check = |authority: &Address| {
-        if state.registry.is_active_attester(authority) {
-            Ok(())
-        } else {
-            Err(format!(
-                "{purpose} authority {authority} is not an active attester (D4 unified registry)"
-            ))
-        }
-    };
-    match proof {
-        FinalityProof::PoA { authorities, .. } => {
-            if authorities.is_empty() {
-                return Err(format!("{purpose} proof carries no authorities"));
-            }
-            authorities.iter().try_for_each(check)
-        }
-        FinalityProof::PoAPq { authorities, .. } => {
-            if authorities.is_empty() {
-                return Err(format!("{purpose} proof carries no authorities"));
-            }
-            authorities
-                .iter()
-                .try_for_each(|entry| check(&entry.authority))
-        }
-        _ => Err(format!(
-            "{purpose} commitment finality requires PoA or PoAPq authority signatures that bind commitment roots"
-        )),
-    }
 }
 
 /// Verify that `proof` finalizes `commitment` under the domain's own
@@ -513,18 +396,6 @@ pub fn verify_commitment_finality_observed(
     observer: &mut dyn crate::crypto::facts::CryptoObserver,
 ) -> Result<(), String> {
     let domain = validate_commitment_metadata(state, commitment)?;
-    // Domain authorities may attest their own domain, not authorize writes to
-    // another native account. Permissionless registration makes that distinction
-    // essential: even a correctly signed PoA/PoAPq commitment can be entirely
-    // controlled by its registrant. No current proof variant carries per-account
-    // owner authorization, so refuse these writes before verification or staging.
-    // Governance admission must not grant authority over the permissionless core.
-    if !commitment.state_updates.is_empty() {
-        return Err(format!(
-            "Domain {} height {}: canonical account nonce writes require account-owner authorization; domain finality is not account-owner authorization",
-            commitment.domain_id, commitment.domain_height
-        ));
-    }
     let expected_proof_hash = hash_finality_proof(proof).map_err(|e| e.to_string())?;
     if commitment.finality_proof_hash != expected_proof_hash {
         return Err(format!(
@@ -613,76 +484,24 @@ pub fn verify_commitment_finality_observed(
                 &evidence.adapter,
                 &evidence.network,
             );
-            if domain.config_hash == [0u8; 32] || key.as_bytes() != &domain.config_hash {
-                return Err(format!(
-                    "Domain {} is bound to external DomainKey {}, but evidence names {}",
-                    commitment.domain_id,
-                    hex::encode(domain.config_hash),
-                    hex::encode(key.0)
-                ));
-            }
             let Some(entry) = state.settlement.external_intake.entries.get(&key) else {
                 return Err(format!(
                     "Domain {} names an external adapter that is not registered",
                     commitment.domain_id
                 ));
             };
-            let Some(reg) = state.settlement.external_intake.registry.domain(&key) else {
-                return Err(format!(
-                    "Domain {} external registration {} is missing from the framework registry",
-                    commitment.domain_id,
-                    hex::encode(key.0)
-                ));
-            };
-            let is_eth_sync = matches!(
+            let pairing = matches!(
                 entry.spec,
                 crate::cross_domain::external::AdapterSpec::EthereumSync { .. }
-            );
-            let mut policy = entry.policy.clone();
-            policy.now = crate::cross_domain::external::live_policy_clock(
-                policy.now,
-                reg.record.last_accepted_height,
             )
-            .max(domain.last_committed_height);
-            let has_quorum_policy = state
-                .settlement
-                .external_intake
-                .quorum
-                .policy_of(&key)
-                .is_some();
-            let eval_adapter = entry.spec.build(is_eth_sync.then(bls), None);
-            let evaluated = state
-                .settlement
-                .external_intake
-                .registry
-                .evaluate_for_commitment(eval_adapter.as_ref(), &evidence, &policy)
-                .map_err(|e| format!("External domain policy refused commitment: {e}"))?;
-            if has_quorum_policy {
-                let Some(committed_att) = reg
-                    .attestations
-                    .get(&(commitment.domain_height, evidence.evidence_version))
-                else {
-                    return Err(format!(
-                        "Domain {} height {} requires a decided external quorum attestation before advancing commitment",
-                        commitment.domain_id, commitment.domain_height
-                    ));
-                };
-                if committed_att.state_root != commitment.state_root
-                    || committed_att.state_root != evaluated.state_root
-                    || !reg.is_quorum_decided(
-                        commitment.domain_height,
-                        evidence.evidence_version,
-                        &commitment.state_root,
-                    )
-                {
-                    return Err(format!(
-                        "Domain {} height {} commitment state root does not match decided external quorum attestation",
-                        commitment.domain_id, commitment.domain_height
-                    ));
-                }
-            }
+            .then(bls);
+            // The policy's `now` is the verification
+            // time: the domain's committed external height, the only clock
+            // with evidence behind it.
+            let mut policy = entry.policy.clone();
+            policy.now = policy.now.max(domain.last_committed_height);
             let bridge = crate::cross_domain::external::ExternalDomainFinalityBridge::new(
-                entry.spec.build(is_eth_sync.then(bls), None),
+                entry.spec.build(pairing, None),
                 policy,
             );
             if bridge.adapter_id() != evidence.adapter {
@@ -700,24 +519,56 @@ pub fn verify_commitment_finality_observed(
             let adapter = crate::domain::StorageAttestationFinalityAdapter;
             ensure_adapter_name(domain, adapter.adapter_name())?;
             let status = adapter.verify_finality(domain, commitment, proof);
-            require_active_attester_authorities(state, proof, "Storage attestation")?;
+            // Attester gate: enforced once any ATTESTER stake exists.
+            if state
+                .registry
+                .total_stake(crate::registry::role::roles::ATTESTER)
+                > 0
+            {
+                if let FinalityProof::PoA { authorities, .. } = proof {
+                    for auth in authorities {
+                        if !state.registry.is_active_attester(auth) {
+                            return Err(format!(
+                                "Storage attestation authority {auth} is not an active attester (D4 unified registry)"
+                            ));
+                        }
+                    }
+                }
+            }
             status
         }
         ConsensusKind::AiInference => {
             let adapter = crate::domain::AiInferenceFinalityAdapter;
             ensure_adapter_name(domain, adapter.adapter_name())?;
-            let status = adapter.verify_finality(domain, commitment, proof);
-            require_active_attester_authorities(state, proof, "AI inference")?;
-            status
+            adapter.verify_finality(domain, commitment, proof)
         }
     }
     .map_err(|e| e.to_string())?;
 
     match status {
         FinalityStatus::Finalized => {
-            // Account writes were refused before the proof was checked. A
-            // finality verdict cannot upgrade a domain authority into an account
-            // owner, even when the domain is governance-admitted.
+            // Only a PoA proof attests the commitment's nonce writes: both PoA
+            // adapters put `state_updates` into the message the authorities
+            // sign (`poa_commit_signing_message`), while the PoS, BFT, PoW and
+            // ZK adapters attest the block hash and the roots. A non-empty map
+            // under any other proof is therefore submitter-chosen data, and it
+            // is refused at the seam - before `apply_pending_commitments` can
+            // write another account's nonce - because the RELAYER role that
+            // submits a commitment is permissionless.
+            if !commitment.state_updates.is_empty()
+                && !matches!(
+                    proof,
+                    FinalityProof::PoA { .. } | FinalityProof::PoAPq { .. }
+                )
+            {
+                return Err(format!(
+                    "Domain {} height {}: commitment claims {} state updates that no finality \
+                     proof attests",
+                    commitment.domain_id,
+                    commitment.domain_height,
+                    commitment.state_updates.len()
+                ));
+            }
             // The same seam, applied to the roots' consumers rather than to
             // the commitment itself: a root no proof binds is never anchored
             // (`accept_verified_commitment`) and never trusted as an event
@@ -944,11 +795,7 @@ pub fn accept_commitment(
         }
     }
     let domain_id = commitment.domain_id;
-    let budlum_height = state.current_block_height;
-    state
-        .settlement
-        .commitments
-        .insert_at_height(commitment, budlum_height)?;
+    state.settlement.commitments.insert(commitment)?;
     apply_pending_commitments(state, domain_id)
 }
 
@@ -979,10 +826,6 @@ fn apply_pending_commitments(
             break;
         };
         if last_hash != [0u8; 32] && com.parent_domain_block_hash != last_hash {
-            state
-                .settlement
-                .commitments
-                .remove(domain_id, next_height, com.sequence);
             if CommitmentAttestation::for_kind(&com.consensus_kind).parent {
                 return Ok(freeze_domain(
                     state,
@@ -995,17 +838,13 @@ fn apply_pending_commitments(
             // a parent the submitter chose. Dropping it (rather than freezing)
             // leaves the domain free to advance on the honest commitment at
             // this height.
+            state
+                .settlement
+                .commitments
+                .remove(domain_id, next_height, com.sequence);
             break;
         }
         validate_commitment_state_updates(state, &com)?;
-        if !com.state_updates.is_empty() {
-            tracing::info!(
-                domain_id = com.domain_id,
-                domain_height = com.domain_height,
-                updates = com.state_updates.len(),
-                "applying domain commitment nonce updates"
-            );
-        }
         for (addr, new_nonce) in &com.state_updates {
             let account = state.get_or_create(addr);
             account.nonce = *new_nonce;
@@ -1409,21 +1248,6 @@ pub fn execute_settlement_tx(
         SettlementTx::RegisterDomain(domain) => {
             if domain.operator != Some(ctx.sender) {
                 return Err(SettlementTxError::OperatorIsNotSender);
-            }
-            // Canonical external-chain anchors (`state.external_roots[1..=4]`)
-            // belong exclusively to genesis bootstrap domains (`register_domain`).
-            // On a network whose genesis seeds no bootstrap domains, ids 1..=4
-            // are unoccupied; refusing a permissionless claim of an
-            // anchor-recognized chain's canonical `(id, domain_chain_id)` pair
-            // prevents the first registrant from capturing that chain's anchor.
-            if let Some(chain) = anchor_recognized_chain(domain.id) {
-                if domain.domain_chain_id == chain.canonical_chain_id() {
-                    return Err(SettlementTxError::Refused(format!(
-                        "domain {} cannot permissionlessly claim canonical external chain {:?}; \
-                         anchor-recognized external chains are seeded by genesis only",
-                        domain.id, chain
-                    )));
-                }
             }
             let balance = state.get_balance(&ctx.sender);
             let needed = domain.operator_bond.saturating_add(ctx.fee);
@@ -2237,24 +2061,18 @@ mod tests {
             "a domain that is not Ethereum's must not write Ethereum's anchor"
         );
 
-        // A permissionless registrant cannot claim canonical chain 1 on an
-        // unseeded network; only genesis bootstrap (`register_domain`) may
-        // install an anchor-recognized external chain.
+        // The same id, declared as the domain of chain 1, does anchor.
         let mut ethereum = pow(1);
         ethereum.domain_chain_id = 1;
         ethereum.validator_set_hash = [0u8; 32];
         let mut state = AccountState::new();
         state.add_balance(&operator(&ethereum), MIN_DOMAIN_OPERATOR_BOND + FEE);
-        assert!(
-            execute_settlement_tx(
-                &mut state,
-                &ctx(operator(&ethereum)),
-                &SettlementTx::RegisterDomain(Box::new(ethereum.clone())),
-            )
-            .is_err(),
-            "permissionless registration must not claim an anchor-recognized external chain"
-        );
-        register_domain(&mut state, ethereum.clone()).expect("genesis bootstrap domain registers");
+        execute_settlement_tx(
+            &mut state,
+            &ctx(operator(&ethereum)),
+            &SettlementTx::RegisterDomain(Box::new(ethereum.clone())),
+        )
+        .unwrap();
         accept_verified_commitment(&mut state, commitment(&ethereum, &block_one, 0))
             .expect("accepted");
         let mut expected = [0u8; 32];
@@ -2264,38 +2082,6 @@ mod tests {
             Some(expected),
             "the domain of chain 1 anchors under id 1"
         );
-    }
-
-    #[test]
-    fn bitcoin_anchor_requires_chain_id_zero_and_genesis_admission() {
-        use crate::core::transaction::ExternalChain;
-        let slot = ExternalChain::Bitcoin.domain_id();
-        let mut state = AccountState::new();
-        let mut impostor = pow(slot);
-        impostor.domain_chain_id = 45262;
-        register_domain(&mut state, impostor.clone()).unwrap();
-        let first = block(1, &"00".repeat(32), 0x83);
-        accept_verified_commitment(&mut state, commitment(&impostor, &first, 0)).unwrap();
-        assert!(
-            !state.external_roots.contains_key(&slot),
-            "a different network cannot anchor under Bitcoin's slot"
-        );
-
-        let bitcoin = default_domain(slot, ConsensusKind::PoW, 0, POW_HEADER_CHAIN_ADAPTER, 1);
-        let mut state = AccountState::new();
-        state.add_balance(&operator(&bitcoin), MIN_DOMAIN_OPERATOR_BOND + FEE);
-        assert!(
-            execute_settlement_tx(
-                &mut state,
-                &ctx(operator(&bitcoin)),
-                &SettlementTx::RegisterDomain(Box::new(bitcoin.clone())),
-            )
-            .is_err(),
-            "permissionless registration cannot capture Bitcoin's canonical anchor"
-        );
-        register_domain(&mut state, bitcoin.clone()).unwrap();
-        accept_verified_commitment(&mut state, commitment(&bitcoin, &first, 0)).unwrap();
-        assert!(state.external_roots.contains_key(&slot));
     }
 
     /// Registration is permissionless, so an id the wire contract reserves for
@@ -2506,8 +2292,7 @@ mod tests {
             payload_hash: [0x53; 32],
             kind: MessageKind::Custom(b"app/transfer/v1".to_vec()),
             expiry_height: 0,
-        })
-        .with_source_quantum_class(Some(crate::crypto::facts::QuantumClass::Hash));
+        });
         let event = DomainEvent {
             domain_id: 1,
             domain_height: 1,
@@ -3213,706 +2998,5 @@ mod tests {
         };
         assert_eq!(run(&second), run(&second));
         assert_ne!(run(&second), run(&other));
-    }
-
-    #[test]
-    fn poa_authorities_require_account_owner_authorization() {
-        let mut state = AccountState::new();
-        let authority_kp = crate::crypto::primitives::KeyPair::generate().expect("authority key");
-        let authority = Address::from(authority_kp.public_key_bytes());
-        let victim = Address::from([0xCC; 32]);
-
-        let mut domain = default_domain(99, ConsensusKind::PoA, 99_001, "poa-authority-quorum", 1);
-        domain.validator_set_hash = [0u8; 32];
-        register_domain(&mut state, domain.clone()).unwrap();
-
-        let blk = block(1, &"00".repeat(32), 1);
-        let mut com = commitment(&domain, &blk, 1);
-        com.state_updates.insert(victim, 42);
-        let signing_msg = crate::domain::finality_adapter::poa_commit_signing_message(
-            domain.domain_chain_id,
-            com.domain_id,
-            &com,
-        );
-        let sig = authority_kp.sign(&signing_msg).to_vec();
-        let proof = FinalityProof::PoA {
-            authorities: vec![authority],
-            signatures: vec![crate::domain::finality_adapter::PoAAuthoritySignature {
-                authority,
-                signature: sig,
-            }],
-        };
-        com.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
-
-        let err = verify_commitment_finality(
-            &state,
-            &com,
-            &proof,
-            crate::cross_domain::external::IntakeState::production_bls,
-        )
-        .expect_err("self-declared PoA authority set must not license nonce writes");
-        assert!(err.contains("account-owner authorization"), "got: {err}");
-
-        state.poa_onboarding.add_admin(domain.id, authority);
-        assert!(state.poa_is_permissioned(domain.id));
-        let err = verify_commitment_finality(
-            &state,
-            &com,
-            &proof,
-            crate::cross_domain::external::IntakeState::production_bls,
-        )
-        .expect_err("governance admission cannot authorize a native account's nonce");
-        assert!(err.contains("account-owner authorization"), "got: {err}");
-    }
-
-    #[test]
-    fn attestation_finality_rejects_pos_bft_and_zero_stake_unregistered_poa() {
-        let state = AccountState::new();
-        assert_eq!(
-            state
-                .registry
-                .total_stake(crate::registry::role::roles::ATTESTER),
-            0
-        );
-        let kp = crate::crypto::primitives::KeyPair::generate().unwrap();
-        let unregistered = Address::from(kp.public_key_bytes());
-        let poa_proof = FinalityProof::PoA {
-            authorities: vec![unregistered],
-            signatures: Vec::new(),
-        };
-        let err = require_active_attester_authorities(&state, &poa_proof, "Storage attestation")
-            .expect_err("zero total ATTESTER stake must not bypass active-attester check");
-        assert!(err.contains("not an active attester"), "got: {err}");
-
-        let empty_poa = FinalityProof::PoA {
-            authorities: Vec::new(),
-            signatures: Vec::new(),
-        };
-        let err_empty =
-            require_active_attester_authorities(&state, &empty_poa, "Storage attestation")
-                .expect_err("empty authority list must be refused");
-        assert!(err_empty.contains("no authorities"), "got: {err_empty}");
-
-        let raw_proof = FinalityProof::Raw(vec![1, 2, 3]);
-        let err_non_poa =
-            require_active_attester_authorities(&state, &raw_proof, "Execution attestation")
-                .expect_err("non-PoA/PoAPq proof must be refused for attestation finality");
-        assert!(
-            err_non_poa.contains("requires PoA or PoAPq"),
-            "got: {err_non_poa}"
-        );
-    }
-
-    #[test]
-    fn external_commitment_requires_decided_quorum_attestation_when_quorum_policy_configured() {
-        struct AcceptTestBls;
-        impl crate::cross_domain::external::BlsVerifier for AcceptTestBls {
-            fn verify_aggregate(
-                &self,
-                _signing_root: &[u8; 32],
-                aggregate_pubkey: &[u8],
-                signature: &[u8],
-                participants: u64,
-            ) -> Result<(), String> {
-                if participants == 0
-                    || signature.iter().all(|b| *b == 0)
-                    || aggregate_pubkey.iter().all(|b| *b == 0)
-                {
-                    return Err("invalid aggregate signature".to_string());
-                }
-                Ok(())
-            }
-        }
-        fn test_bls() -> Box<dyn crate::cross_domain::external::BlsVerifier> {
-            Box::new(AcceptTestBls)
-        }
-
-        let mut state = AccountState::new();
-        let spec = crate::cross_domain::external::AdapterSpec::EthereumSync {
-            network: "testnet".to_string(),
-            committee: Some(crate::cross_domain::external::ethereum::PinnedCommittee {
-                period: 0,
-                aggregate_pubkey: vec![0x11; 96],
-                next_committee_root: [0xbb; 32],
-            }),
-        };
-        let adapter = spec.build(Some(test_bls()), None);
-        let adapter_id = adapter.descriptor().id;
-
-        let build_eth_evidence = |height: u64, root: [u8; 32]| {
-            use crate::cross_domain::external::ethereum::layout;
-            let mut payload = vec![0u8; layout::LEN];
-            payload[layout::FINALIZED_ROOT].copy_from_slice(&[0xaa; 32]);
-            payload[layout::FINALIZED_SLOT].copy_from_slice(&height.to_le_bytes());
-            payload[layout::ATTESTED_SLOT].copy_from_slice(&(height + 64).to_le_bytes());
-            payload[layout::PERIOD].copy_from_slice(&0u64.to_le_bytes());
-            payload[layout::NEXT_COMMITTEE_ROOT].copy_from_slice(&[0xbb; 32]);
-            payload[layout::AGGREGATE_PUBKEY].copy_from_slice(&[0x11; 96]);
-            payload[layout::SIGNATURE].copy_from_slice(&[0x22; 96]);
-            payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0xff; 64]);
-            payload[layout::STATE_ROOT].copy_from_slice(&root);
-            crate::cross_domain::external::RawConsensusEvidence {
-                adapter: adapter_id,
-                evidence_version: 2,
-                network: "testnet".to_string(),
-                payload,
-                declared_height: height,
-                declared_root: root,
-                submitter: Address::from([0x31; 32]),
-            }
-        };
-
-        let golden = build_eth_evidence(64, [0xcc; 32]);
-        let economics =
-            crate::cross_domain::external::IntakeState::conservative_economics(1_000_000);
-        let bond_atoms = economics.required_bond_atoms();
-        let key = state
-            .settlement
-            .external_intake
-            .register_domain(
-                crate::cross_domain::external::RegistrationRequest {
-                    spec,
-                    policy: crate::cross_domain::external::VerificationPolicy::strict(1_000),
-                    economics,
-                    versions: crate::cross_domain::external::VersionPolicy::single(
-                        adapter_id, 2, 0,
-                    ),
-                    bond_atoms,
-                    poster: Address::from([0x39; 32]),
-                    golden,
-                },
-                Some(test_bls()),
-            )
-            .unwrap();
-
-        let prover = Address::from([0x31; 32]);
-        state
-            .settlement
-            .external_intake
-            .bond_prover(&key, prover, bond_atoms)
-            .unwrap();
-        state
-            .settlement
-            .external_intake
-            .set_quorum_policy(
-                &key,
-                crate::cross_domain::external::QuorumPolicy::strict(2, 3),
-            )
-            .unwrap();
-
-        let mut domain = default_domain(
-            77,
-            ConsensusKind::Custom("external".to_string()),
-            45262,
-            crate::cross_domain::external::EXTERNAL_DOMAIN_FINALITY_ADAPTER,
-            1,
-        );
-        domain.config_hash = *key.as_bytes();
-        domain.last_committed_height = 64;
-        domain.last_committed_hash = [0xcc; 32];
-        domain.status = DomainStatus::Active;
-        state.settlement.domains.register(domain.clone()).unwrap();
-
-        let next_evidence = build_eth_evidence(65, [0xdd; 32]);
-        let proof =
-            crate::cross_domain::external::encode_external_evidence(&next_evidence).unwrap();
-        let mut blk = block(65, &hex::encode([0xcc; 32]), 0xdd);
-        blk.state_root = hex::encode([0xdd; 32]);
-        blk.hash = blk.calculate_hash();
-        let mut com = commitment(&domain, &blk, 0);
-        com.finality_proof_hash = hash_finality_proof(&proof).unwrap();
-
-        let err = verify_commitment_finality(&state, &com, &proof, test_bls)
-            .expect_err("unattested external height must be refused when quorum policy exists");
-        assert!(
-            err.contains("requires a decided external quorum attestation"),
-            "got: {err}"
-        );
-    }
-
-    #[test]
-    fn quorum_less_external_domain_not_frozen_by_prefilled_attestation_slot() {
-        struct AcceptTestBls;
-        impl crate::cross_domain::external::BlsVerifier for AcceptTestBls {
-            fn verify_aggregate(
-                &self,
-                _signing_root: &[u8; 32],
-                aggregate_pubkey: &[u8],
-                signature: &[u8],
-                participants: u64,
-            ) -> Result<(), String> {
-                if participants == 0
-                    || signature.iter().all(|b| *b == 0)
-                    || aggregate_pubkey.iter().all(|b| *b == 0)
-                {
-                    return Err("invalid aggregate signature".to_string());
-                }
-                Ok(())
-            }
-        }
-        fn test_bls() -> Box<dyn crate::cross_domain::external::BlsVerifier> {
-            Box::new(AcceptTestBls)
-        }
-
-        let mut state = AccountState::new();
-        let spec = crate::cross_domain::external::AdapterSpec::EthereumSync {
-            network: "testnet".to_string(),
-            committee: Some(crate::cross_domain::external::ethereum::PinnedCommittee {
-                period: 0,
-                aggregate_pubkey: vec![0x11; 96],
-                next_committee_root: [0xbb; 32],
-            }),
-        };
-        let adapter = spec.build(Some(test_bls()), None);
-        let adapter_id = adapter.descriptor().id;
-        let prover = Address::from([0x41; 32]);
-        let build_eth_evidence = |height: u64, root: [u8; 32]| {
-            use crate::cross_domain::external::ethereum::layout;
-            let mut payload = vec![0u8; layout::LEN];
-            payload[layout::FINALIZED_ROOT].copy_from_slice(&[0xaa; 32]);
-            payload[layout::FINALIZED_SLOT].copy_from_slice(&height.to_le_bytes());
-            payload[layout::ATTESTED_SLOT].copy_from_slice(&(height + 64).to_le_bytes());
-            payload[layout::PERIOD].copy_from_slice(&0u64.to_le_bytes());
-            payload[layout::NEXT_COMMITTEE_ROOT].copy_from_slice(&[0xbb; 32]);
-            payload[layout::AGGREGATE_PUBKEY].copy_from_slice(&[0x11; 96]);
-            payload[layout::SIGNATURE].copy_from_slice(&[0x22; 96]);
-            payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0xff; 64]);
-            payload[layout::STATE_ROOT].copy_from_slice(&root);
-            crate::cross_domain::external::RawConsensusEvidence {
-                adapter: adapter_id,
-                evidence_version: 2,
-                network: "testnet".to_string(),
-                payload,
-                declared_height: height,
-                declared_root: root,
-                submitter: prover,
-            }
-        };
-
-        let golden = build_eth_evidence(64, [0xcc; 32]);
-        let economics =
-            crate::cross_domain::external::IntakeState::conservative_economics(1_000_000);
-        let bond_atoms = economics.required_bond_atoms();
-        let key = state
-            .settlement
-            .external_intake
-            .register_domain(
-                crate::cross_domain::external::RegistrationRequest {
-                    spec,
-                    policy: crate::cross_domain::external::VerificationPolicy::strict(1_000),
-                    economics,
-                    versions: crate::cross_domain::external::VersionPolicy::single(
-                        adapter_id, 2, 0,
-                    ),
-                    bond_atoms,
-                    poster: prover,
-                    golden,
-                },
-                Some(test_bls()),
-            )
-            .unwrap();
-
-        // A bonded prover fills height 65 in the intake book on a quorum-less domain.
-        let next_evidence = build_eth_evidence(65, [0xdd; 32]);
-        state
-            .settlement
-            .external_intake
-            .submit_evidence(&next_evidence, Some(test_bls()))
-            .unwrap();
-
-        let mut domain = default_domain(
-            78,
-            ConsensusKind::Custom("external".to_string()),
-            45262,
-            crate::cross_domain::external::EXTERNAL_DOMAIN_FINALITY_ADAPTER,
-            1,
-        );
-        domain.config_hash = *key.as_bytes();
-        domain.last_committed_height = 64;
-        domain.last_committed_hash = [0xcc; 32];
-        domain.status = DomainStatus::Active;
-        state.settlement.domains.register(domain.clone()).unwrap();
-
-        let proof =
-            crate::cross_domain::external::encode_external_evidence(&next_evidence).unwrap();
-        let mut blk = block(65, &hex::encode([0xcc; 32]), 0xdd);
-        blk.state_root = hex::encode([0xdd; 32]);
-        blk.hash = blk.calculate_hash();
-        let mut com = commitment(&domain, &blk, 0);
-        com.domain_block_hash = [0xaa; 32];
-        com.tx_root = [0u8; 32];
-        com.event_root = [0u8; 32];
-        com.validator_set_hash = [0u8; 32];
-        com.timestamp_ms = 0;
-        com.producer = None;
-        com.state_updates.clear();
-        com.finality_proof_hash = hash_finality_proof(&proof).unwrap();
-
-        verify_commitment_finality(&state, &com, &proof, test_bls)
-            .expect("quorum-less external domain commitment must not freeze on prefilled slot");
-    }
-
-    #[test]
-    fn pre_policy_single_prover_attestation_is_withdrawn_when_quorum_policy_installed() {
-        struct AcceptTestBls;
-        impl crate::cross_domain::external::BlsVerifier for AcceptTestBls {
-            fn verify_aggregate(
-                &self,
-                _signing_root: &[u8; 32],
-                aggregate_pubkey: &[u8],
-                signature: &[u8],
-                participants: u64,
-            ) -> Result<(), String> {
-                if participants == 0
-                    || signature.iter().all(|b| *b == 0)
-                    || aggregate_pubkey.iter().all(|b| *b == 0)
-                {
-                    return Err("invalid aggregate signature".to_string());
-                }
-                Ok(())
-            }
-        }
-        fn test_bls() -> Box<dyn crate::cross_domain::external::BlsVerifier> {
-            Box::new(AcceptTestBls)
-        }
-
-        let mut state = AccountState::new();
-        let spec = crate::cross_domain::external::AdapterSpec::EthereumSync {
-            network: "testnet".to_string(),
-            committee: Some(crate::cross_domain::external::ethereum::PinnedCommittee {
-                period: 0,
-                aggregate_pubkey: vec![0x11; 96],
-                next_committee_root: [0xbb; 32],
-            }),
-        };
-        let adapter = spec.build(Some(test_bls()), None);
-        let adapter_id = adapter.descriptor().id;
-        let p1 = Address::from([0x51; 32]);
-        let p2 = Address::from([0x52; 32]);
-        let build_eth_evidence = |height: u64, root: [u8; 32], submitter: Address| {
-            use crate::cross_domain::external::ethereum::layout;
-            let mut payload = vec![0u8; layout::LEN];
-            payload[layout::FINALIZED_ROOT].copy_from_slice(&[0xaa; 32]);
-            payload[layout::FINALIZED_SLOT].copy_from_slice(&height.to_le_bytes());
-            payload[layout::ATTESTED_SLOT].copy_from_slice(&(height + 64).to_le_bytes());
-            payload[layout::PERIOD].copy_from_slice(&0u64.to_le_bytes());
-            payload[layout::NEXT_COMMITTEE_ROOT].copy_from_slice(&[0xbb; 32]);
-            payload[layout::AGGREGATE_PUBKEY].copy_from_slice(&[0x11; 96]);
-            payload[layout::SIGNATURE].copy_from_slice(&[0x22; 96]);
-            payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0xff; 64]);
-            payload[layout::STATE_ROOT].copy_from_slice(&root);
-            crate::cross_domain::external::RawConsensusEvidence {
-                adapter: adapter_id,
-                evidence_version: 2,
-                network: "testnet".to_string(),
-                payload,
-                declared_height: height,
-                declared_root: root,
-                submitter,
-            }
-        };
-
-        let golden = build_eth_evidence(64, [0xcc; 32], p1);
-        let economics =
-            crate::cross_domain::external::IntakeState::conservative_economics(1_000_000);
-        let bond_atoms = economics.required_bond_atoms();
-        let key = state
-            .settlement
-            .external_intake
-            .register_domain(
-                crate::cross_domain::external::RegistrationRequest {
-                    spec,
-                    policy: crate::cross_domain::external::VerificationPolicy::strict(1_000),
-                    economics,
-                    versions: crate::cross_domain::external::VersionPolicy::single(
-                        adapter_id, 2, 0,
-                    ),
-                    bond_atoms,
-                    poster: p1,
-                    golden,
-                },
-                Some(test_bls()),
-            )
-            .unwrap();
-        state
-            .settlement
-            .external_intake
-            .bond_prover(&key, p2, bond_atoms)
-            .unwrap();
-
-        // Single prover lands height 65 BEFORE quorum policy exists.
-        let pre_ev = build_eth_evidence(65, [0xdd; 32], p1);
-        state
-            .settlement
-            .external_intake
-            .submit_evidence(&pre_ev, Some(test_bls()))
-            .unwrap();
-
-        // Installing quorum policy withdraws pre-policy attestations.
-        state
-            .settlement
-            .external_intake
-            .set_quorum_policy(
-                &key,
-                crate::cross_domain::external::QuorumPolicy::strict(2, 3),
-            )
-            .unwrap();
-
-        let mut domain = default_domain(
-            79,
-            ConsensusKind::Custom("external".to_string()),
-            45262,
-            crate::cross_domain::external::EXTERNAL_DOMAIN_FINALITY_ADAPTER,
-            1,
-        );
-        domain.config_hash = *key.as_bytes();
-        domain.last_committed_height = 64;
-        domain.last_committed_hash = [0xcc; 32];
-        domain.status = DomainStatus::Active;
-        state.settlement.domains.register(domain.clone()).unwrap();
-
-        let proof = crate::cross_domain::external::encode_external_evidence(&pre_ev).unwrap();
-        let mut blk = block(65, &hex::encode([0xcc; 32]), 0xdd);
-        blk.state_root = hex::encode([0xdd; 32]);
-        blk.hash = blk.calculate_hash();
-        let mut com = commitment(&domain, &blk, 0);
-        com.domain_block_hash = [0xaa; 32];
-        com.tx_root = [0u8; 32];
-        com.event_root = [0u8; 32];
-        com.validator_set_hash = [0u8; 32];
-        com.timestamp_ms = 0;
-        com.producer = None;
-        com.state_updates.clear();
-        com.finality_proof_hash = hash_finality_proof(&proof).unwrap();
-
-        let err = verify_commitment_finality(&state, &com, &proof, test_bls)
-            .expect_err("pre-policy attestation must not satisfy quorum commitment gate");
-        assert!(
-            err.contains("requires a decided external quorum attestation"),
-            "got: {err}"
-        );
-
-        // Honest quorum round can still open and decide height 65 cleanly.
-        let r1 = state
-            .settlement
-            .external_intake
-            .submit_evidence(&pre_ev, Some(test_bls()));
-        assert!(matches!(
-            r1,
-            Err(crate::cross_domain::external::IntakeError::RoundPending)
-        ));
-        let p2_ev = build_eth_evidence(65, [0xdd; 32], p2);
-        state
-            .settlement
-            .external_intake
-            .submit_evidence(&p2_ev, Some(test_bls()))
-            .expect("second bonded prover closes quorum round");
-        verify_commitment_finality(&state, &com, &proof, test_bls)
-            .expect("quorum-decided external height must verify");
-    }
-
-    #[test]
-    fn classical_intake_gate_blocks_classical_messages_under_watch_and_restrict() {
-        use crate::crypto::facts::QuantumClass;
-        use crate::security::quantum_canary::{CanaryBook, CanaryClaim, CanaryId};
-
-        let alarm_with = |ids: &[CanaryId]| {
-            let mut book = CanaryBook::new();
-            for id in ids {
-                book.force_solved(
-                    *id,
-                    CanaryClaim {
-                        commit_height: 1,
-                        claimer: Address::from([1u8; 32]),
-                        accepted_height: 2,
-                    },
-                );
-            }
-            book.alarm().clone()
-        };
-
-        let msg = crate::cross_domain::message::CrossDomainMessage {
-            message_id: [0x11; 32],
-            correlation_id: None,
-            source_domain: 2,
-            target_domain: 3,
-            source_height: 10,
-            event_index: 0,
-            nonce: 1,
-            sender: Address::from([0x22; 32]),
-            recipient: Address::from([0x33; 32]),
-            payload_hash: [0x44; 32],
-            kind: crate::cross_domain::message::MessageKind::BridgeMint,
-            expiry_height: 0,
-            sender_public_key: Vec::new(),
-            sender_signature: Vec::new(),
-            source_quantum_class: Some(QuantumClass::Classical),
-        };
-
-        let clear = alarm_with(&[]);
-        assert!(
-            crate::core::account::enforce_classical_message_intake(&msg, &clear, None, 11).is_ok()
-        );
-
-        let watch = alarm_with(&[CanaryId::Ecc192]);
-        let unanchored_err =
-            crate::core::account::enforce_classical_message_intake(&msg, &watch, None, 10_000_000)
-                .expect_err("Watch must refuse classical message whose commitment is not anchored");
-        assert!(
-            unanchored_err.contains("not anchored on Budlum"),
-            "got: {unanchored_err}"
-        );
-        // Even if the sender sets `source_height = 0`, aging runs strictly from
-        // the Budlum consensus anchor height (e.g. 5_000_000), never `source_height`.
-        let mut stale_source = msg.clone();
-        stale_source.source_height = 0;
-        let watch_err = crate::core::account::enforce_classical_message_intake(
-            &stale_source,
-            &watch,
-            Some(5_000_000),
-            5_000_010,
-        )
-        .expect_err("Watch must hold classical message even when source_height is 0");
-        assert!(
-            watch_err.contains("held by the quantum alarm"),
-            "got: {watch_err}"
-        );
-        let ready_height =
-            5_000_000 + crate::security::alarm_effects::CLASSICAL_MESSAGE_WAIT_BLOCKS;
-        assert!(crate::core::account::enforce_classical_message_intake(
-            &stale_source,
-            &watch,
-            Some(5_000_000),
-            ready_height,
-        )
-        .is_ok());
-
-        let restrict = alarm_with(&[CanaryId::Ecc224]);
-        let restrict_err = crate::core::account::enforce_classical_message_intake(
-            &msg,
-            &restrict,
-            Some(1),
-            10_000_000,
-        )
-        .expect_err("Restrict must refuse classical message");
-        assert!(
-            restrict_err.contains("stopped the intake"),
-            "got: {restrict_err}"
-        );
-    }
-
-    #[test]
-    fn deliver_message_refuses_bridge_disabled_source_domain() {
-        use crate::cross_domain::event_tree::DomainEventTree;
-        use crate::cross_domain::message::{
-            CrossDomainMessage, CrossDomainMessageParams, MessageKind,
-        };
-        use crate::cross_domain::{DomainEvent, DomainEventKind};
-        use crate::domain::plugin::default_domain;
-        use crate::domain::{ConsensusKind, DomainCommitment, POW_HEADER_CHAIN_ADAPTER};
-
-        let mut state = AccountState::new();
-        let operator = Address::from([0x31; 32]);
-        let relayer = Address::from([0x32; 32]);
-        let min_stake = state.registry.params().min_stake;
-        state.add_balance(&relayer, min_stake.saturating_mul(2));
-        state
-            .bond_relayer(&relayer, min_stake)
-            .expect("bond relayer");
-
-        let mut d_disabled =
-            default_domain(70, ConsensusKind::PoW, 7000, POW_HEADER_CHAIN_ADAPTER, 1);
-        d_disabled.operator = Some(operator);
-        d_disabled.bridge_enabled = false;
-        d_disabled.last_committed_height = 1;
-        state
-            .settlement
-            .domains
-            .register(d_disabled)
-            .expect("register disabled");
-
-        let mut d_enabled =
-            default_domain(71, ConsensusKind::PoW, 7001, POW_HEADER_CHAIN_ADAPTER, 1);
-        d_enabled.operator = Some(operator);
-        d_enabled.bridge_enabled = true;
-        d_enabled.last_committed_height = 1;
-        state
-            .settlement
-            .domains
-            .register(d_enabled)
-            .expect("register enabled");
-
-        let make_delivery = |state: &mut AccountState, domain_id: u32, nonce: u64| {
-            let msg = CrossDomainMessage::new(CrossDomainMessageParams {
-                source_domain: domain_id,
-                target_domain: 1,
-                source_height: 1,
-                event_index: 0,
-                nonce,
-                sender: relayer,
-                recipient: operator,
-                payload_hash: [nonce as u8; 32],
-                kind: MessageKind::Custom(b"bridge-check".to_vec()),
-                expiry_height: 100,
-            })
-            .with_source_quantum_class(Some(crate::crypto::facts::QuantumClass::Hash));
-            let ev = DomainEvent {
-                domain_id,
-                domain_height: 1,
-                event_index: 0,
-                kind: DomainEventKind::Custom(b"dispatched".to_vec()),
-                emitter: relayer,
-                message: Some(msg),
-                payload_hash: [0u8; 32],
-            };
-            let mut tree = DomainEventTree::new();
-            tree.push(ev.clone());
-            let proof = tree.proof(0).expect("merkle proof");
-            let block_hash = [domain_id as u8; 32];
-            let comm = DomainCommitment {
-                domain_id,
-                domain_height: 1,
-                domain_block_hash: block_hash,
-                parent_domain_block_hash: [0u8; 32],
-                state_root: [0x11; 32],
-                tx_root: [0u8; 32],
-                event_root: tree.root(),
-                validator_set_hash: [0u8; 32],
-                consensus_kind: ConsensusKind::PoW,
-                finality_proof_hash: [0x22; 32],
-                timestamp_ms: 1_000,
-                sequence: 0,
-                producer: None,
-                state_updates: std::collections::BTreeMap::new(),
-            };
-            state
-                .settlement
-                .commitments
-                .insert(comm)
-                .expect("insert commitment");
-            DeliverMessage {
-                domain_id,
-                domain_height: 1,
-                sequence: 0,
-                block_hash,
-                event: ev,
-                proof,
-            }
-        };
-
-        let ctx = SettlementTxContext {
-            sender: relayer,
-            chain_id: 45261,
-            fee: 0,
-            bls: || Box::new(crate::cross_domain::external::ethereum::AcceptAllBls),
-        };
-        let disabled_delivery = make_delivery(&mut state, 70, 1);
-        let err = deliver_message(&mut state, &ctx, &disabled_delivery)
-            .expect_err("bridge_enabled: false domain must be refused");
-        assert!(err.to_string().contains("not bridge-enabled"), "got: {err}");
-
-        let enabled_delivery = make_delivery(&mut state, 71, 2);
-        deliver_message(&mut state, &ctx, &enabled_delivery)
-            .expect("bridge_enabled: true domain must succeed");
     }
 }

@@ -10,10 +10,10 @@ workspace = true
 
 [dependencies]
 bud-proof = { path = "../bud-proof" }
-p3-matrix = "=0.8.0"
-p3-field = "=0.8.0"
-p3-goldilocks = "=0.8.0"
-p3-keccak-air = "=0.8.0"
+p3-matrix = "=0.7.0"
+p3-field = "=0.7.0"
+p3-goldilocks = "=0.7.0"
+p3-keccak-air = "=0.7.0"
 
 [dev-dependencies]
 tiny-keccak = { version = "2.0", features = ["keccak"] }

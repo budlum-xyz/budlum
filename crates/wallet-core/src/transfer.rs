@@ -40,7 +40,7 @@ impl UnsignedTransfer {
 
     /// The hash of the V7 composite transaction (`BDLM_TX_V7`).
     #[must_use]
-    /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
     pub fn signing_hash_v7(&self) -> [u8; 32] {
         self.signing_hash_for(SIGNATURE_VERSION_V7, b"BDLM_TX_V7")
     }

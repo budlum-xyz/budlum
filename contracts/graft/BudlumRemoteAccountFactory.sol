@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
-// EIP-2537/Cancun+ target chains support EIP-3855 PUSH0 natively.
-// aderyn-fp-next-line(push-zero-opcode)
-pragma solidity 0.8.26;
+pragma solidity ^0.8.24;
 
 import {BudlumPaymentReceiver, GraftPayment, IBudlumFinality, PaymentProof} from "./BudlumPaymentReceiver.sol";
 
 /// @title BudlumRemoteAccount
-/// @notice A Graft level 3 account (8.3): an account on this chain that a
-///         Budlum user controls with Budlum proofs alone.
+/// @notice A Graft level 3 account (8.3): an account on
+///         this chain that a Budlum user controls with Budlum proofs alone.
+///         The user holds no ETH and no key on this chain. An application
+///         sees the account itself as `msg.sender`.
+///
+///         Authorization rides a Graft payment to this account's Graft row:
+///         the payment's payer must be the account's Budlum owner and its
+///         memo hash must be `callAuthorization(target, value, data, nonce)`.
+///         A solver relays the proof and pays the gas; the payment itself is
+///         the user's signed, finalized Budlum transaction.
 contract BudlumRemoteAccount is BudlumPaymentReceiver {
-    uint256 private constant POST_CALL_GAS_RESERVE = 5_000;
-
     bytes32 public immutable budlumOwner;
     uint256 public nonce;
 
@@ -18,8 +22,6 @@ contract BudlumRemoteAccount is BudlumPaymentReceiver {
 
     error NotOwner(bytes32 payer);
     error WrongAuthorization();
-    error InvalidCallTarget();
-    error InsufficientRelayGas();
     error CallFailed(bytes reason);
 
     constructor(IBudlumFinality finality_, bytes32 graftId_, bytes32 budlumOwner_)
@@ -30,6 +32,7 @@ contract BudlumRemoteAccount is BudlumPaymentReceiver {
 
     receive() external payable {}
 
+    /// @notice The memo hash a Budlum payment carries to authorize one call.
     function callAuthorization(address target, uint256 value, bytes calldata data, uint256 callNonce)
         public
         view
@@ -40,13 +43,11 @@ contract BudlumRemoteAccount is BudlumPaymentReceiver {
         );
     }
 
+    /// @notice Make the call a finalized Budlum payment authorized.
     function execute(PaymentProof calldata proof, address target, uint256 value, bytes calldata data)
         external
         returns (bytes memory result)
     {
-        if (msg.sender == address(0) || target == address(0)) {
-            revert InvalidCallTarget();
-        }
         GraftPayment calldata payment = _consumePayment(proof);
         if (payment.payer != budlumOwner) {
             revert NotOwner(payment.payer);
@@ -55,14 +56,9 @@ contract BudlumRemoteAccount is BudlumPaymentReceiver {
         if (payment.memoHash != callAuthorization(target, value, data, callNonce)) {
             revert WrongAuthorization();
         }
-        uint256 availableGas = gasleft();
-        if (availableGas <= POST_CALL_GAS_RESERVE) {
-            revert InsufficientRelayGas();
-        }
         nonce = callNonce + 1;
-        uint256 callGas = availableGas - POST_CALL_GAS_RESERVE;
         bool ok;
-        (ok, result) = target.call{gas: callGas, value: value}(data);
+        (ok, result) = target.call{value: value}(data);
         if (!ok) {
             revert CallFailed(result);
         }
@@ -72,7 +68,8 @@ contract BudlumRemoteAccount is BudlumPaymentReceiver {
 
 /// @title BudlumRemoteAccountFactory
 /// @notice Deploys one `BudlumRemoteAccount` per Budlum owner at a
-///         deterministic CREATE2 address.
+///         deterministic CREATE2 address, so the address is known before the
+///         account exists and can receive funds first.
 contract BudlumRemoteAccountFactory {
     IBudlumFinality public immutable finality;
 
@@ -83,19 +80,21 @@ contract BudlumRemoteAccountFactory {
     }
 
     function _bytecode(bytes32 graftId, bytes32 budlumOwner) internal view returns (bytes memory) {
-        return bytes.concat(
+        return abi.encodePacked(
             type(BudlumRemoteAccount).creationCode, abi.encode(finality, graftId, budlumOwner)
         );
     }
 
-    function accountAddress(bytes32 graftId, bytes32 budlumOwner) external view returns (address) {
+    /// @notice The address `deploy(graftId, budlumOwner)` creates.
+    function accountAddress(bytes32 graftId, bytes32 budlumOwner) public view returns (address) {
         bytes32 salt = keccak256(abi.encode(graftId, budlumOwner));
         bytes32 digest = keccak256(
-            bytes.concat(bytes1(0xff), bytes20(address(this)), salt, keccak256(_bytecode(graftId, budlumOwner)))
+            abi.encodePacked(bytes1(0xff), address(this), salt, keccak256(_bytecode(graftId, budlumOwner)))
         );
         return address(uint160(uint256(digest)));
     }
 
+    /// @notice Deploy the account; anyone may pay for it.
     function deploy(bytes32 graftId, bytes32 budlumOwner) external returns (address account) {
         bytes32 salt = keccak256(abi.encode(graftId, budlumOwner));
         account = address(new BudlumRemoteAccount{salt: salt}(finality, graftId, budlumOwner));

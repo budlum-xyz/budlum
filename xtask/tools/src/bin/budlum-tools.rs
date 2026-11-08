@@ -34,9 +34,9 @@
 //! | `--self-test` | (new: the canary of every tool) |
 
 use budlum_tools::{
-    ai_test_verifier, audit_deps, backup_drill, checked_repo_root, contracts, dep_snapshot, devnet,
-    docker_smoke, multinode_smoke, prepush, propagation, resource_sample, sarif, sbom, seed_corpus,
-    smoke_rpc, testnet_genesis, testnet_rehearsal,
+    ai_test_verifier, audit_deps, backup_drill, checked_repo_root, contracts, devnet, docker_smoke,
+    multinode_smoke, prepush, propagation, resource_sample, sbom, seed_corpus, smoke_rpc,
+    testnet_genesis, testnet_rehearsal,
 };
 use budlum_tools::{
     audit_guard, clippy_extra_report, fsf_fit, pq_measure, stark_soundness, step_reachability,
@@ -51,11 +51,11 @@ fn usage() -> String {
      \x20 devnet                prepare a local two-node devnet\n\
      \x20 seed-corpus [dir]     write the ZKVM fuzz seeds\n\
      \x20 backup-drill          take a backup, restore it, verify integrity\n\
-     \x20 audit-deps            cargo audit over both lockfiles, plus the report\n\
-     \x20 generate-sbom         CycloneDX SBOM (pinned cargo-cyclonedx)\n\
-     \x20 smoke-rpc             start a node and probe bud_chainId\n\
-     \x20 docker-smoke-mainnet  image smoke: mainnet refuses, devnet boots\n\
-     \x20 devnet-multinode-smoke  4-node compose smoke (needs docker)\n\
+     \x20 audit-deps            cargo audit over both lockfiles, plus the report
+     \x20 generate-sbom         CycloneDX SBOM (pinned cargo-cyclonedx)
+     \x20 smoke-rpc             start a node and probe bud_chainId
+     \x20 docker-smoke-mainnet  image smoke: mainnet refuses, devnet boots
+     \x20 devnet-multinode-smoke  4-node compose smoke (needs docker)
      \x20 audit-guard           review boundary audit of workflows and history\n\
      \x20 step-reachability     which workflow steps can run (guards that point nowhere)\n\
      \x20 clippy-extra-report   per-lint tally and addresses from clippy JSON\n\
@@ -68,8 +68,6 @@ fn usage() -> String {
      \x20 ai-test-verifier      answer open AI requests, attestation only\n\
      \x20 resource-sample       CPU, memory, disk, network of a running node\n\
      \x20 propagation-sim       p95 block propagation and the witness budget\n\
-     \x20 sarif                 convert JSON/text scanner reports to SARIF 2.1.0\n\
-     \x20 dependency-snapshot   build or submit Cargo.lock GitHub dependency snapshot\n\
      \x20 --self-test           run the tool canaries, including testnet-rehearsal\n\
      \x20 --list                print the tool names\n"
         .to_string()
@@ -91,8 +89,6 @@ fn run_self_tests() {
         ("propagation-sim", propagation::self_test()),
         ("resource-sample", resource_sample::self_test()),
         ("ai-test-verifier", ai_test_verifier::self_test()),
-        ("sarif", sarif::self_test()),
-        ("dependency-snapshot", dep_snapshot::self_test()),
     ] {
         match result {
             Ok(msg) => println!("{msg}"),
@@ -172,8 +168,6 @@ fn main() {
                 "propagation-sim",
                 "resource-sample",
                 "ai-test-verifier",
-                "sarif",
-                "dependency-snapshot",
             ] {
                 println!("{name}");
             }
@@ -214,8 +208,6 @@ fn main() {
         Some(&"testnet-rehearsal") => {
             testnet_rehearsal::run(&root, refs.get(1..).unwrap_or_default())
         }
-        Some(&"sarif") => sarif::run(&root, refs.get(1..).unwrap_or_default()),
-        Some(&"dependency-snapshot") => dep_snapshot::run(&root, refs.get(1..).unwrap_or_default()),
         Some(name) => {
             eprintln!("FAIL: there is no tool named `{name}`.\n");
             eprint!("{}", usage());

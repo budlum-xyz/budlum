@@ -162,13 +162,6 @@ impl ExternalDomainRegistry {
         self.domains.get(key)
     }
 
-    /// Mutable registration handle for intake policy transitions (such as
-    /// withdrawing pre-policy single-prover attestations when a quorum policy
-    /// is installed).
-    pub fn domain_mut(&mut self, key: &DomainKey) -> Option<&mut DomainRegistration> {
-        self.domains.get_mut(key)
-    }
-
     pub fn domains(&self) -> impl Iterator<Item = &DomainRegistration> {
         self.domains.values()
     }
@@ -470,7 +463,6 @@ impl ExternalDomainRegistry {
             prover_bond.as_ref(),
             evidence,
             policy,
-            false,
         );
 
         match refusal {
@@ -553,45 +545,6 @@ impl ExternalDomainRegistry {
             prover_bond.as_ref(),
             evidence,
             policy,
-            false,
-        )
-        .map(|(attestation, _observed)| attestation)
-    }
-
-    /// Evaluates evidence for domain commitment verification without writing
-    /// the intake book. Because `SubmitCommitment` does not insert into
-    /// `reg.attestations`, an already-recorded intake attestation at
-    /// `(height, version)` must not block commitment verification (otherwise a
-    /// single bonded prover on a quorum-less domain could fill the next slot
-    /// and freeze settlement), while tombstoned/slashed claims remain refused.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`RegistryError`] if the domain is unknown, not serving, fails
-    /// version/bond/adapter checks, or names a slashed claim.
-    pub fn evaluate_for_commitment(
-        &self,
-        adapter: &dyn ExternalFinalityAdapter,
-        evidence: &RawConsensusEvidence,
-        policy: &VerificationPolicy,
-    ) -> Result<FinalityAttestation, RegistryError> {
-        let domain = DomainKey::from_parts(&adapter.descriptor().id, &evidence.network);
-        let Some(reg) = self.domains.get(&domain) else {
-            return Err(RegistryError::UnknownDomain(hex(domain.as_bytes())));
-        };
-        let descriptor = reg.record.descriptor.clone();
-        let versions = reg.versions.clone();
-        let economics = reg.economics;
-        let prover_bond = reg.provers.get(&evidence.submitter).cloned();
-        self.check(
-            adapter,
-            &descriptor,
-            &versions,
-            &economics,
-            prover_bond.as_ref(),
-            evidence,
-            policy,
-            true,
         )
         .map(|(attestation, _observed)| attestation)
     }
@@ -642,14 +595,6 @@ impl ExternalDomainRegistry {
         reg.attestations.insert(slot, attestation.clone());
         reg.attestation_provers
             .insert(attestation.evidence_digest, submitter);
-        reg.attestation_provers.insert(
-            quorum_decided_marker(
-                attestation.height,
-                attestation.evidence_version,
-                &attestation.state_root,
-            ),
-            submitter,
-        );
         reg.record.attestations_accepted = reg.record.attestations_accepted.saturating_add(1);
         reg.record.last_accepted_height = Some(attestation.height);
         reg.record.last_verified_at = Some(height);
@@ -761,7 +706,6 @@ impl ExternalDomainRegistry {
         prover: Option<&ProverBond>,
         evidence: &RawConsensusEvidence,
         policy: &VerificationPolicy,
-        allow_decided_slot: bool,
     ) -> Result<(FinalityAttestation, CryptoFacts), RegistryError> {
         // 1. The adapter must be the one this domain is bound to. Without this
         //    an adapter could be swapped under a domain that already has a
@@ -802,12 +746,10 @@ impl ExternalDomainRegistry {
             &evidence.declared_root,
         );
         if self.domains.get(&domain).is_some_and(|reg| {
-            reg.attestation_provers.contains_key(&claim_tombstone)
-                || (!allow_decided_slot
-                    && (reg
-                        .attestations
-                        .contains_key(&(evidence.declared_height, evidence.evidence_version))
-                        || reg.attestation_provers.contains_key(&evidence.digest())))
+            reg.attestations
+                .contains_key(&(evidence.declared_height, evidence.evidence_version))
+                || reg.attestation_provers.contains_key(&evidence.digest())
+                || reg.attestation_provers.contains_key(&claim_tombstone)
         }) {
             return Err(RegistryError::DuplicateAttestation {
                 height: evidence.declared_height,
@@ -984,29 +926,6 @@ impl ExternalDomainRegistry {
             .retain(|_, a| a.evidence_digest != evidence_digest);
         Ok((taken, reward))
     }
-}
-
-impl DomainRegistration {
-    /// Returns `true` iff `(height, version, state_root)` is currently in the
-    /// attestation book AND was committed by a quorum round (`commit_attestation`).
-    #[must_use]
-    pub fn is_quorum_decided(&self, height: u64, version: u32, state_root: &[u8; 32]) -> bool {
-        self.attestations
-            .get(&(height, version))
-            .is_some_and(|att| &att.state_root == state_root)
-            && self
-                .attestation_provers
-                .contains_key(&quorum_decided_marker(height, version, state_root))
-    }
-}
-
-fn quorum_decided_marker(height: u64, version: u32, state_root: &[u8; 32]) -> [u8; 32] {
-    crate::core::hash::hash_fields_bytes(&[
-        b"BDLM_EXTERNAL_QUORUM_DECIDED_V1".as_slice(),
-        &height.to_le_bytes(),
-        &version.to_le_bytes(),
-        state_root.as_slice(),
-    ])
 }
 
 fn slashed_claim_tombstone(height: u64, version: u32, state_root: &[u8; 32]) -> [u8; 32] {
@@ -1430,40 +1349,5 @@ mod tests {
                 .is_none(),
             "latest_attestation must stay empty after rejected replay"
         );
-    }
-    #[test]
-    fn quorum_decided_slot_evaluates_for_commitment_until_slashed() {
-        let (mut registry, key, att) = registered();
-        let prover = Address::from([7u8; 32]);
-        let challenger = Address::from([8u8; 32]);
-        let evidence = Fix.golden_evidence().expect("golden");
-        let policy = VerificationPolicy::strict(10);
-
-        // Intake evaluation still refuses a slot already occupied.
-        let dup_err = registry.evaluate(&Fix, &evidence, &policy).unwrap_err();
-        assert!(matches!(
-            dup_err,
-            RegistryError::DuplicateAttestation { .. }
-        ));
-
-        // Commitment evaluation allows an already-occupied intake slot (whether
-        // quorum-decided or single-prover) while still checking adapter, version
-        // window, and prover bond.
-        let evaluated = registry
-            .evaluate_for_commitment(&Fix, &evidence, &policy)
-            .expect("existing slot must evaluate cleanly for commitment");
-        assert_eq!(evaluated.state_root, att.state_root);
-
-        // Once fraud-slashed, commitment evaluation must still refuse the claim.
-        registry
-            .slash(&key, prover, att.evidence_digest, 50, challenger)
-            .expect("slash succeeds");
-        let slashed_err = registry
-            .evaluate_for_commitment(&Fix, &evidence, &policy)
-            .unwrap_err();
-        assert!(matches!(
-            slashed_err,
-            RegistryError::DuplicateAttestation { .. }
-        ));
     }
 }

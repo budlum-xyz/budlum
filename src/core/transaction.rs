@@ -92,14 +92,6 @@ pub const MAX_V8_SIGNERS: usize = 16;
 /// door lands; until then the account-identity absorb in this file pins it.
 pub const ML_DSA_87_SCHEME_ID: &str = "ml-dsa-87-fips204-v1";
 
-/// Wire-level owner/signature cap for V6 threshold authorizations, kept
-/// available even when the `wallet-ml-dsa` verifier backend is disabled.
-pub(crate) const MAX_V6_THRESHOLD_OWNERS: usize = 16;
-
-#[cfg(feature = "wallet-ml-dsa")]
-const _: [(); MAX_V6_THRESHOLD_OWNERS] =
-    [(); crate::account_abstraction::threshold_mldsa::MAX_THRESHOLD_OWNERS];
-
 /// The address of a multisig account: the ML-DSA profile, owner set and threshold.
 ///
 /// The address is derived from the set itself. The threshold has to enter the
@@ -358,26 +350,8 @@ impl BridgeBurnTx {
     ///
     /// A missing authorization, a key that is not the holder, or a signature
     /// that does not open over the authorization hash.
-    /// Convenience: kept for the CLI and stateless callers; chain execution calls
-    /// [`Self::verify_holder_authorization_in`].
-    #[cfg(test)]
     pub fn verify_holder_authorization(
         &self,
-        holder: crate::core::address::Address,
-        chain_id: u64,
-    ) -> Result<(), String> {
-        self.verify_holder_authorization_in(
-            &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
-            holder,
-            chain_id,
-        )
-    }
-
-    /// WIRING: wired into `Executor` bridge-burn verification so a quantum-alarm
-    /// disable of classical or ML-DSA-87 schemes takes effect immediately.
-    pub fn verify_holder_authorization_in(
-        &self,
-        scheme_registry: &crate::crypto::scheme::SchemeStatusRegistry,
         holder: crate::core::address::Address,
         chain_id: u64,
     ) -> Result<(), String> {
@@ -385,9 +359,6 @@ impl BridgeBurnTx {
             return Err("a bridge burn carries no holder authorization".into());
         }
         if self.holder_public_key.len() == 32 {
-            if !scheme_registry.scheme_verifies(crate::crypto::scheme::SchemeId::ED25519) {
-                return Err("bridge burn holder scheme Ed25519 is disabled".to_string());
-            }
             let mut pk = [0u8; 32];
             pk.copy_from_slice(&self.holder_public_key);
             if crate::core::address::Address::from(pk) != holder {
@@ -409,8 +380,7 @@ impl BridgeBurnTx {
         if addr != holder {
             return Err("bridge burn authorization is not from the transfer's holder".to_string());
         }
-        crate::crypto::primitives::verify_ml_dsa_87_signature_in(
-            scheme_registry,
+        crate::crypto::primitives::verify_ml_dsa_87_signature(
             crate::crypto::ctx::BRIDGE_V1,
             &self.authorization_hash(chain_id),
             &self.holder_signature,
@@ -847,65 +817,6 @@ pub struct Transaction {
     pub tx_type: TransactionType,
 }
 
-fn deserialize_bounded_vec<'de, D, T: Deserialize<'de>, const MAX: usize>(
-    deserializer: D,
-) -> Result<Vec<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    struct BoundedSeqVisitor<T, const MAX: usize>(std::marker::PhantomData<T>);
-
-    impl<'de, T: Deserialize<'de>, const MAX: usize> serde::de::Visitor<'de>
-        for BoundedSeqVisitor<T, MAX>
-    {
-        type Value = Vec<T>;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(formatter, "a sequence of at most {MAX} elements")
-        }
-
-        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-        where
-            A: serde::de::SeqAccess<'de>,
-        {
-            if let Some(hint) = seq.size_hint() {
-                if hint > MAX {
-                    return Err(serde::de::Error::invalid_length(hint, &self));
-                }
-            }
-            let cap = seq.size_hint().unwrap_or(0).min(MAX);
-            let mut out = Vec::with_capacity(cap);
-            while let Some(item) = seq.next_element()? {
-                if out.len() >= MAX {
-                    return Err(serde::de::Error::invalid_length(out.len() + 1, &self));
-                }
-                out.push(item);
-            }
-            Ok(out)
-        }
-    }
-
-    deserializer.deserialize_seq(BoundedSeqVisitor::<T, MAX>(std::marker::PhantomData))
-}
-
-fn deserialize_bounded_owners<'de, D>(deserializer: D) -> Result<Vec<Vec<u8>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    deserialize_bounded_vec::<D, Vec<u8>, { crate::crypto::address_v3::MAX_MULTISIG_OWNERS }>(
-        deserializer,
-    )
-}
-
-type RawOwnerSignatures = Vec<(Vec<u8>, Vec<u8>)>;
-
-fn deserialize_bounded_signatures<'de, D>(deserializer: D) -> Result<RawOwnerSignatures, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    deserialize_bounded_vec::<D, (Vec<u8>, Vec<u8>), { MAX_V6_THRESHOLD_OWNERS }>(deserializer)
-}
-
 /// The owner set and signatures that authorize a V6 transaction.
 ///
 /// # Why the owner set lives inside the transaction
@@ -920,13 +831,11 @@ pub struct MultisigAuthorizationV6 {
     /// Explicit algorithm/profile id. Empty or unknown ids are refused; the
     /// verifier must never infer a scheme from a key length alone.
     pub scheme_id: String,
-    /// The owner ML-DSA-87 public keys (or V8 32-byte owner leaves).
-    #[serde(deserialize_with = "deserialize_bounded_owners")]
+    /// The owner ML-DSA-87 public keys.
     pub owners: Vec<Vec<u8>>,
     /// The number of valid signatures required.
     pub threshold: u32,
     /// `(owner public key, signature)` pairs.
-    #[serde(deserialize_with = "deserialize_bounded_signatures")]
     pub signatures: Vec<(Vec<u8>, Vec<u8>)>,
 }
 /// The witness of a transaction: everything that authorizes the body and is
@@ -941,8 +850,7 @@ pub struct TxWitness {
     pub signer_public_key: Vec<u8>,
     /// The single signature (V5, V7) or empty.
     pub signature: Vec<u8>,
-    /// The V6/V8 owner signatures, empty for other versions.
-    #[serde(deserialize_with = "deserialize_bounded_signatures")]
+    /// The V6 owner signatures, empty for other versions.
     pub authorization_signatures: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
@@ -2176,10 +2084,6 @@ impl Transaction {
             debug!("V6 multisig policy is unsatisfiable");
             return false;
         };
-        if auth.signatures.len() > MAX_THRESHOLD_OWNERS {
-            debug!("V6 signature count exceeds the maximum owner set size");
-            return false;
-        }
         let mut signatures = Vec::with_capacity(auth.signatures.len());
         for (key, sig) in &auth.signatures {
             let Ok(public_key) = <[u8; ML_DSA_87_PUBLIC_KEY_LEN]>::try_from(key.as_slice()) else {
@@ -5703,27 +5607,6 @@ mod v29_signing_tests {
             tx.amount = tx.amount.saturating_add(1);
             tx.hash = tx.calculate_hash();
             assert!(!tx.verify(), "the amount is signed");
-        }
-
-        #[test]
-        fn a_v6_transaction_carrying_more_signatures_than_max_owners_is_refused() {
-            use crate::account_abstraction::threshold_mldsa::MAX_THRESHOLD_OWNERS;
-
-            let (keys, owners) = owner_set(2);
-            let mut tx = tx_for(multisig_address(&owners, 2));
-            tx.sign_v6(&owners, 2, &[&keys[0], &keys[1]]);
-            let sample_sig = tx.authorization.as_ref().unwrap().signatures[0].clone();
-            tx.authorization.as_mut().unwrap().signatures =
-                vec![sample_sig; MAX_THRESHOLD_OWNERS + 1];
-            assert!(
-                !tx.verify(),
-                "V6 must reject signature vectors larger than MAX_THRESHOLD_OWNERS before allocating"
-            );
-            let encoded = bincode::serialize(&tx).unwrap();
-            assert!(
-                bincode::deserialize::<Transaction>(&encoded).is_err(),
-                "bounded serde deserializer must refuse oversized V6 signature vectors"
-            );
         }
     }
 }

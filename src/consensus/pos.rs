@@ -1,6 +1,6 @@
 use super::{
-    affordable_leader_round, now_millis, ConsensusEngine, ConsensusError, RoundPriceBook,
-    MAX_LEADER_ROUNDS, MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS,
+    affordable_leader_round, now_millis, ConsensusEngine, ConsensusError, MAX_LEADER_ROUNDS,
+    MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS,
 };
 use crate::core::account::AccountState;
 use crate::core::address::Address;
@@ -90,12 +90,10 @@ use tracing::{info, warn};
 /// signature. Named so `PoSEngine`'s fields stay readable without an
 /// `allow(clippy::type_complexity)`.
 type SeenBlocks = HashMap<(Address, u64), (BlockHeader, Vec<u8>)>;
-type SignedRounds = HashMap<(u64, u64, u64, u64, String), String>;
 
 pub struct PoSEngine {
     pub config: PoSConfig,
     seen_blocks: RwLock<SeenBlocks>,
-    signed_rounds: RwLock<SignedRounds>,
     pub slashing_evidence: RwLock<Vec<SlashingEvidence>>,
     checkpoints: RwLock<Vec<Checkpoint>>,
     /// Epoch-boundary checkpoints awaiting a quorum certificate.
@@ -111,7 +109,6 @@ pub struct PoSEngine {
     epoch_seed: RwLock<[u8; 32]>,
     /// This node's Filiz Chain, when it produces with one.
     filiz_chain: Option<Arc<crate::consensus::filiz::FilizChain>>,
-    round_prices: RoundPriceBook,
 }
 impl PoSEngine {
     /// `PoSConfig::epoch_length` is a public field and nothing rejects zero
@@ -128,7 +125,6 @@ impl PoSEngine {
         PoSEngine {
             config,
             seen_blocks: RwLock::new(HashMap::new()),
-            signed_rounds: RwLock::new(HashMap::new()),
             slashing_evidence: RwLock::new(Vec::new()),
             checkpoints: RwLock::new(Vec::new()),
             pending_checkpoints: RwLock::new(Vec::new()),
@@ -136,7 +132,6 @@ impl PoSEngine {
             signer: None,
             epoch_seed: RwLock::new([0u8; 32]),
             filiz_chain: None,
-            round_prices: RoundPriceBook::new(),
         }
     }
 
@@ -148,7 +143,6 @@ impl PoSEngine {
         PoSEngine {
             config,
             seen_blocks: RwLock::new(HashMap::new()),
-            signed_rounds: RwLock::new(HashMap::new()),
             slashing_evidence: RwLock::new(Vec::new()),
             checkpoints: RwLock::new(Vec::new()),
             pending_checkpoints: RwLock::new(Vec::new()),
@@ -156,7 +150,6 @@ impl PoSEngine {
             signer: Some(signer),
             epoch_seed: RwLock::new([0u8; 32]),
             filiz_chain: None,
-            round_prices: RoundPriceBook::new(),
         }
     }
 
@@ -608,19 +601,10 @@ impl PoSEngine {
                         // `ROUND_TIMEOUT_MS` - and validation re-prices the
                         // claim against the block timestamp floor
                         // `parent + MIN_BLOCK_INTERVAL_MS + round * ROUND_TIMEOUT_MS`.
-                        // Validation prices a claim from the parent stamp
-                        // alone; this cap is the producer's own, stricter
-                        // schedule (it also counts how long ago *this* node
-                        // adopted the parent), so a block this node proposes is
-                        // always one it would itself accept, and a schedule it
-                        // runs later than validation still cannot reject a
-                        // peer's block.
+                        // The same pricing function validation enforces, so
+                        // propose and verify cannot drift apart.
                         let round_cap = chain.last().map_or(MAX_LEADER_ROUNDS, |prev| {
-                            self.round_prices.claimable_round_for(
-                                &prev.hash,
-                                prev.timestamp,
-                                now_millis(),
-                            )
+                            affordable_leader_round(prev.timestamp, now_millis())
                         });
                         let filiz_reveal = self.own_filiz_reveal(validator, epoch)?;
                         let mut elected = false;
@@ -765,19 +749,6 @@ pub fn slashing_evidence_is_valid(evidence: &SlashingEvidence) -> bool {
     if evidence.header1.hash == evidence.header2.hash {
         return false;
     }
-    // Two headers at one height are only an equivocation when they claim the
-    // same leader round on the same parent. The round is folded into `nonce`
-    // (and priced into `timestamp`), so a producer that re-proposes a height
-    // whose earlier block was orphaned signs a different hash without
-    // equivocating; treating that pair as double signing burns an honest
-    // validator's bond.
-    if evidence.header1.nonce != evidence.header2.nonce
-        || evidence.header1.previous_hash != evidence.header2.previous_hash
-        || evidence.header1.epoch != evidence.header2.epoch
-        || evidence.header1.slot != evidence.header2.slot
-    {
-        return false;
-    }
     evidence.header1.verify_signature(&evidence.signature1)
         && evidence.header2.verify_signature(&evidence.signature2)
 }
@@ -820,52 +791,10 @@ impl ConsensusEngine for PoSEngine {
     ) -> Result<(), ConsensusError> {
         self.preview_common(block, state, chain)?;
 
-        // Producer-side double-sign guard: never sign a second distinct block
-        // for an `(index, round, previous_hash)` position already signed or
-        // recorded in `seen_blocks`.
-        let candidate_hash = block.calculate_hash();
-        if let Some(producer) = block.producer {
-            if let Ok(seen) = self.seen_blocks.read() {
-                if let Some((existing, _)) = seen.get(&(producer, block.index)) {
-                    if existing.nonce == block.nonce
-                        && existing.previous_hash == block.previous_hash
-                        && existing.epoch == block.epoch
-                        && existing.slot == block.slot
-                        && existing.hash != candidate_hash
-                    {
-                        return Err(ConsensusError(format!(
-                            "Refusing to double-sign PoS block at height {} round {}",
-                            block.index, block.nonce
-                        )));
-                    }
-                }
-            }
-        }
-        let round_key = (
-            block.index,
-            block.epoch,
-            block.slot,
-            block.nonce,
-            block.previous_hash.clone(),
-        );
-        if let Ok(signed) = self.signed_rounds.read() {
-            if let Some(prev_hash) = signed.get(&round_key) {
-                if *prev_hash != candidate_hash {
-                    return Err(ConsensusError(format!(
-                        "Refusing to double-sign PoS block at height {} round {}",
-                        block.index, block.nonce
-                    )));
-                }
-            }
-        }
-
         if let Some(signer) = &self.signer {
             block
                 .sign_with_signer(signer.as_ref())
                 .map_err(|e| ConsensusError(format!("HSM block signing failed: {e}")))?;
-            if let Ok(mut signed) = self.signed_rounds.write() {
-                signed.insert(round_key, block.hash.clone());
-            }
             return Ok(());
         }
 
@@ -885,9 +814,6 @@ impl ConsensusEngine for PoSEngine {
                         .map_err(ConsensusError)?;
                 } else {
                     block.sign(&keys.sig_key);
-                }
-                if let Ok(mut signed) = self.signed_rounds.write() {
-                    signed.insert(round_key, block.hash.clone());
                 }
                 return Ok(());
             }
@@ -1011,25 +937,22 @@ impl ConsensusEngine for PoSEngine {
                                 block.timestamp, floor
                             )));
                         }
-                        // The floor compares two values the producer writes,
-                        // so it does not price the round on its own: a
-                        // timestamp up to `MAX_FUTURE_BLOCK_TIME_MS` ahead makes
-                        // rounds 0..=5 affordable at once, and every validator
-                        // elected in one of those rounds could publish a valid
-                        // competing block for the slot (CWE-807).
-                        //
-                        // The price is therefore the shared parent stamp against
-                        // this node's clock, and *only* those two: a claim priced
-                        // from when this node adopted the parent split an
-                        // eight-validator network permanently (RT-001), because
-                        // the same block cleared the gate on the node that
-                        // committed the parent and was refused on the next one.
-                        // `affordable_leader_round` has no local input at all;
-                        // see its documentation for how the ladder is still
-                        // priced, and how the future bound keeps one producer
-                        // from running the ladder open.
-                        let now_ms = now_millis();
-                        let affordable = affordable_leader_round(prev.timestamp, now_ms);
+                        // The floor compares two values the producer writes
+                        // (`block.timestamp` against `parent.timestamp`), so it
+                        // does not price the round: a timestamp up to
+                        // `MAX_FUTURE_BLOCK_TIME_MS` ahead makes rounds 0..=5
+                        // affordable at once, and every validator elected in
+                        // one of those rounds could publish a valid competing
+                        // block for the slot (CWE-807). Price the claim against
+                        // this node's clock, with the function the producer
+                        // clamps itself with.
+                        // Priced from the parent's stamp, which every node
+                        // holding the parent reads the same way: a node-local
+                        // sighting put the same claim on different sides of
+                        // the boundary wherever nodes booted or synced seconds
+                        // apart, and a claim refused here is a block refused
+                        // for good. A future stamp buys no round, on any node.
+                        let affordable = affordable_leader_round(prev.timestamp, now_millis());
                         if round > affordable {
                             return Err(ConsensusError(format!(
                                 "PoS leader round {round} claimed before it elapsed: only \
@@ -1151,12 +1074,6 @@ impl ConsensusEngine for PoSEngine {
             ));
         }
         Ok(())
-    }
-    fn note_block_seen(&self, block_hash: &str, at_ms: u128) {
-        self.round_prices.note_tip_block(block_hash, at_ms);
-    }
-    fn round_price_sightings(&self) -> Vec<(String, u128)> {
-        self.round_prices.snapshot()
     }
     fn consensus_type(&self) -> &'static str {
         "PoS"
@@ -1288,33 +1205,35 @@ impl ConsensusEngine for PoSEngine {
             .write()
             .map_err(|_| ConsensusError("Lock error on seen_blocks".into()))?;
 
-        let same_round_conflict = seen_blocks.get(&key).and_then(|existing| {
-            (existing.0.hash != header.hash
-                && existing.0.nonce == header.nonce
-                && existing.0.previous_hash == header.previous_hash
-                && existing.0.epoch == header.epoch
-                && existing.0.slot == header.slot)
-                .then(|| existing.clone())
-        });
-        let identical_seen = seen_blocks
-            .get(&key)
-            .is_some_and(|existing| existing.0.hash == header.hash);
-
-        if let Some(existing) = same_round_conflict {
-            warn!(
-                "DOUBLE-SIGN: {} signed two blocks for slot {} round {}!",
-                producer, header.index, header.nonce
-            );
-            // The persisted seen-block record is the double-sign
-            // evidence across restarts, so the FIRST header must stay
-            // the durable one.
-            let evidence = SlashingEvidence::new(existing.0, header, existing.1, signature);
-            let mut slashing_evidence = self
-                .slashing_evidence
-                .write()
-                .map_err(|_| ConsensusError("Lock error on slashing_evidence".into()))?;
-            slashing_evidence.push(evidence);
-        } else if !identical_seen {
+        if let Some(existing) = seen_blocks.get(&key) {
+            if existing.0.hash != header.hash {
+                warn!(
+                    "DOUBLE-SIGN: {} signed two blocks for slot {}!",
+                    producer, header.index
+                );
+                // The persisted seen-block record is the double-sign
+                // evidence across restarts, so the FIRST header must stay
+                // the durable one. Persisting unconditionally here would
+                // overwrite `SEEN:{producer}:{height}` with the second,
+                // conflicting signature before this comparison runs; after
+                // a restart only the second signature would survive and the
+                // equivocation could never be proven. `load_state` refills
+                // `seen_blocks` from storage at startup, so the in-memory
+                // view is authoritative and the write is skipped on a
+                // conflict.
+                let evidence = SlashingEvidence::new(
+                    existing.0.clone(),
+                    header,
+                    existing.1.clone(),
+                    signature,
+                );
+                let mut slashing_evidence = self
+                    .slashing_evidence
+                    .write()
+                    .map_err(|_| ConsensusError("Lock error on slashing_evidence".into()))?;
+                slashing_evidence.push(evidence);
+            }
+        } else {
             if block.index > 0 && block.index.is_multiple_of(epoch_length) {
                 // The boundary block is parked, not checkpointed.
                 // A checkpoint written at local commit time splits the net
@@ -1447,15 +1366,7 @@ impl ConsensusEngine for PoSEngine {
                 .read()
                 .map_err(|_| ConsensusError("Lock error on seen_blocks".into()))?;
             match seen_blocks.get(&(producer, header.index)) {
-                Some(entry)
-                    if entry.0.hash != header.hash
-                        && entry.0.nonce == header.nonce
-                        && entry.0.previous_hash == header.previous_hash
-                        && entry.0.epoch == header.epoch
-                        && entry.0.slot == header.slot =>
-                {
-                    entry.clone()
-                }
+                Some(entry) if entry.0.hash != header.hash => entry.clone(),
                 _ => return Ok(()),
             }
         };
@@ -2065,41 +1976,5 @@ mod tests {
             small < engine.calculate_leadership_threshold(17_000, 17_000),
             "a 1/17 holder is not a certainty; it is a 1/17 chance"
         );
-    }
-
-    #[test]
-    fn later_round_or_different_parent_reproposal_is_not_double_signing() {
-        let engine = PoSEngine::new(PoSConfig::default(), None);
-        let alice = KeyPair::generate().unwrap();
-        let mut first = Block::new(10, "parent-a".into(), vec![]);
-        first.nonce = 0;
-        first.sign(&alice);
-        engine.record_block(&first, None).unwrap();
-
-        let mut next_round = Block::new(10, "parent-a".into(), vec![]);
-        next_round.nonce = 1;
-        next_round.timestamp = first.timestamp + 4_000;
-        next_round.sign(&alice);
-        let ev_round = SlashingEvidence::new(
-            BlockHeader::from_block(&first),
-            BlockHeader::from_block(&next_round),
-            first.signature.clone().unwrap(),
-            next_round.signature.clone().unwrap(),
-        );
-        assert!(!slashing_evidence_is_valid(&ev_round));
-        engine.observe_received_block(&next_round).unwrap();
-        engine.record_block(&next_round, None).unwrap();
-        assert!(engine.slashing_evidence.read().unwrap().is_empty());
-
-        let mut other_parent = Block::new(10, "parent-b".into(), vec![]);
-        other_parent.nonce = 1;
-        other_parent.sign(&alice);
-        let ev_parent = SlashingEvidence::new(
-            BlockHeader::from_block(&next_round),
-            BlockHeader::from_block(&other_parent),
-            next_round.signature.clone().unwrap(),
-            other_parent.signature.clone().unwrap(),
-        );
-        assert!(!slashing_evidence_is_valid(&ev_parent));
     }
 }

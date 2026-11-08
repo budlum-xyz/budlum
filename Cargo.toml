@@ -143,7 +143,7 @@ sha2_010 = { package = "sha2", version = "0.10" }
 # the CVE-2026-24850 and RUSTSEC-2025-0144 fixes) and `libcrux-ml-dsa` (portable
 # backend only: `simd128` and `simd256` stay off, so the AVX2 advisories
 # RUSTSEC-2026-0125 and RUSTSEC-2026-0126 have no code path here).
-ml-dsa = { version = "=0.1.2", features = ["alloc", "rand_core", "zeroize"] }
+ml-dsa = { version = "=0.1.1", features = ["alloc", "rand_core", "zeroize"] }
 libcrux-ml-dsa = { version = "=0.0.11", default-features = false, features = ["std", "mldsa65", "mldsa87"] }
 # SLH-DSA (FIPS 205): recovery key, Root Seal, cold committee. One library, so
 # the ACVP vectors in `tests/vectors/pq` are mandatory.
@@ -349,86 +349,15 @@ expect_used = "deny"
 # boundary stopped casting altogether when the bridge amount became u64;
 # each lint moves to deny when its ratchet count reaches zero.
 
-# SLH-DSA-SHAKE-256s, ML-DSA, and Plonky3 STARK proofs execute millions of
-# sponge, lattice-NTT, and Goldilocks-field operations per test. Unoptimized
-# debug builds make single tests take minutes (and hours under ASan/TSan).
-# Optimizing the pure math/hash dependencies keeps node code under the debug
-# profile while letting sanitizer and unit suites finish within budget.
-# Generic RustCrypto / Plonky3 types (`slh_dsa::SigningKey<Shake256s>`,
-# `ml_dsa::SigningKey<MlDsa87>`, Plonky3 AIRs) monomorphize inside the test
-# crate itself; `opt-level = 1` keeps `debug-assertions` and `overflow-checks`
-# enabled while eliminating 400x unoptimized sponge/NTT loop blowups in CI,
-# ASan, TSan, and cargo-mutants.
-[profile.test]
-opt-level = 1
-
+# SLH-DSA-SHAKE-256s signs with a few million SHAKE-256 calls. The cold
+# committee and Root Seal tests sign, and an unoptimized hash core would make
+# one signature take minutes. Only the hashing crates are optimized; the node
+# code under test keeps the debug profile.
 [profile.dev.package.keccak]
-opt-level = 3
-[profile.dev.package.digest]
-opt-level = 3
-[profile.dev.package.block-buffer]
-opt-level = 3
-[profile.dev.package.crypto-common]
-opt-level = 3
-[profile.dev.package.hybrid-array]
-opt-level = 3
-[profile.dev.package.generic-array]
-opt-level = 3
-[profile.dev.package.sponge-cursor]
-opt-level = 3
-[profile.dev.package.ctutils]
-opt-level = 3
-[profile.dev.package.subtle]
-opt-level = 3
-[profile.dev.package.hmac]
-opt-level = 3
-[profile.dev.package.module-lattice]
-opt-level = 3
-[profile.dev.package.sha2]
 opt-level = 3
 [profile.dev.package.sha3]
 opt-level = 3
-[profile.dev.package.shake]
-opt-level = 3
-[profile.dev.package.turboshake]
-opt-level = 3
 [profile.dev.package.slh-dsa]
-opt-level = 3
-[profile.dev.package.ml-dsa]
-opt-level = 3
-[profile.dev.package.libcrux-ml-dsa]
-opt-level = 3
-[profile.dev.package.libcrux-sha3]
-opt-level = 3
-[profile.dev.package.bls12_381]
-opt-level = 3
-[profile.dev.package.p3-air]
-opt-level = 3
-[profile.dev.package.p3-challenger]
-opt-level = 3
-[profile.dev.package.p3-commit]
-opt-level = 3
-[profile.dev.package.p3-dft]
-opt-level = 3
-[profile.dev.package.p3-field]
-opt-level = 3
-[profile.dev.package.p3-fri]
-opt-level = 3
-[profile.dev.package.p3-goldilocks]
-opt-level = 3
-[profile.dev.package.p3-keccak]
-opt-level = 3
-[profile.dev.package.p3-matrix]
-opt-level = 3
-[profile.dev.package.p3-mds]
-opt-level = 3
-[profile.dev.package.p3-merkle-tree]
-opt-level = 3
-[profile.dev.package.p3-poseidon1]
-opt-level = 3
-[profile.dev.package.p3-poseidon2]
-opt-level = 3
-[profile.dev.package.p3-symmetric]
 opt-level = 3
 
 [profile.release]

@@ -707,28 +707,6 @@ impl IntakeState {
                 reason: "fewer provers are bonded than the threshold needs",
             });
         }
-        // Attestations accepted before this policy existed were decided by a
-        // single prover rather than a quorum round. Withdraw them so they
-        // neither satisfy the commitment gate nor block honest rounds at those
-        // `(height, version)` slots.
-        if let Some(reg) = self.registry.domain_mut(key) {
-            let withdrawn_digests: Vec<[u8; 32]> = reg
-                .attestations
-                .values()
-                .map(|att| att.evidence_digest)
-                .collect();
-            for digest in withdrawn_digests {
-                let was_slashed = reg
-                    .provers
-                    .values()
-                    .flat_map(|b| &b.slashings)
-                    .any(|s| s.evidence_digest == digest);
-                if !was_slashed {
-                    reg.attestation_provers.remove(&digest);
-                }
-            }
-            reg.attestations.clear();
-        }
         self.quorum.set_policy(*key, policy);
         Ok(())
     }

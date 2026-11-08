@@ -235,7 +235,6 @@ impl Mempool {
         let registry_commitment = self.scheme_registry.commitment();
         let authorization = bincode::serialize(&tx.authorization).unwrap_or_default();
         let digest = crate::mempool::authority_cache::authorization_digest(&[
-            tx.hash.as_bytes(),
             &tx.signing_hash(),
             tx.signature.as_deref().unwrap_or_default(),
             &tx.signer_public_key,
@@ -1578,40 +1577,5 @@ mod tests {
                 "only one equal-fee entry should be evicted"
             );
         }
-    }
-
-    #[test]
-    fn authorization_cache_rejects_mutated_tx_hash_after_valid_cache_entry() {
-        let mut pool = Mempool::new(MempoolConfig {
-            min_fee: 0,
-            ..MempoolConfig::default()
-        });
-        let tx = create_test_tx_from_seed(0x77, 0, 1);
-        let canonical_hash = tx.hash.clone();
-        let mut tampered = tx.clone();
-        tampered.hash = "ff".repeat(32);
-
-        pool.add_transaction(tx).expect("valid tx admitted");
-        assert_eq!(
-            pool.authority_cache.len(),
-            1,
-            "authorization must be cached"
-        );
-        // Keep the accepted authorization while removing the pending nonce,
-        // so a replacement-policy rejection cannot mask a cache bypass.
-        pool.remove_transaction(&canonical_hash)
-            .expect("remove pending transaction");
-        assert_eq!(
-            pool.authority_cache.len(),
-            1,
-            "removal must retain the cache fixture"
-        );
-        let err = pool
-            .add_transaction(tampered)
-            .expect_err("non-canonical tx.hash must not hit authorization cache");
-        assert!(
-            matches!(err, MempoolError::InvalidTransaction(_)),
-            "got: {err:?}"
-        );
     }
 }

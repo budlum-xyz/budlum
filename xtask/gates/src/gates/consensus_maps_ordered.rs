@@ -459,13 +459,13 @@ fn scan_file(path: &std::path::Path, rel: &str) -> Result<Vec<Finding>, String> 
         let scope: Vec<String> = module_stack.iter().map(|(n, _)| n.clone()).collect();
         line_scopes.push(scope.clone());
         block_depth += brace_delta(sline);
-        if let Some((name, ty)) = alias_decl(sline) {
-            aliases.insert((scope.clone(), name), ty);
+        if let Some((name, typ)) = alias_decl(sline) {
+            aliases.insert((scope.clone(), name), typ);
         }
         if let Some((name, kind)) = field_kind_collection(sline) {
             declared.insert((scope, name), kind);
-        } else if let Some((name, ty)) = field_kind_any(sline) {
-            declared.insert((scope, name), ty);
+        } else if let Some((name, typ)) = field_kind_any(sline) {
+            declared.insert((scope, name), typ);
         }
         while module_stack
             .last()

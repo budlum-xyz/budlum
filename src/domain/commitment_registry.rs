@@ -7,8 +7,6 @@ pub struct DomainCommitmentRegistry {
     #[serde(with = "crate::core::map_keys")]
     commitments: BTreeMap<(DomainId, u64, u64), DomainCommitment>,
     seen_blocks: BTreeSet<(DomainId, u64, Hash32)>,
-    #[serde(default, with = "crate::core::map_keys")]
-    accepted_at_height: BTreeMap<(DomainId, u64, u64), u64>,
 }
 
 impl DomainCommitmentRegistry {
@@ -16,19 +14,10 @@ impl DomainCommitmentRegistry {
         Self {
             commitments: BTreeMap::new(),
             seen_blocks: BTreeSet::new(),
-            accepted_at_height: BTreeMap::new(),
         }
     }
 
     pub fn insert(&mut self, commitment: DomainCommitment) -> Result<(), String> {
-        self.insert_at_height(commitment, 0)
-    }
-
-    pub fn insert_at_height(
-        &mut self,
-        commitment: DomainCommitment,
-        budlum_height: u64,
-    ) -> Result<(), String> {
         let key = (
             commitment.domain_id,
             commitment.domain_height,
@@ -56,26 +45,7 @@ impl DomainCommitmentRegistry {
 
         self.seen_blocks.insert(block_key);
         self.commitments.insert(key, commitment);
-        self.accepted_at_height.insert(key, budlum_height);
         Ok(())
-    }
-
-    pub fn accepted_height(
-        &self,
-        domain_id: DomainId,
-        domain_height: u64,
-        sequence: u64,
-    ) -> Option<u64> {
-        self.accepted_at_height
-            .get(&(domain_id, domain_height, sequence))
-            .copied()
-    }
-
-    pub fn earliest_accepted_height(&self, domain_id: DomainId, domain_height: u64) -> Option<u64> {
-        self.accepted_at_height
-            .range((domain_id, domain_height, 0)..=(domain_id, domain_height, u64::MAX))
-            .map(|(_, &h)| h)
-            .min()
     }
 
     pub fn commitments_for_global_block(&self) -> Vec<DomainCommitment> {
@@ -131,8 +101,6 @@ impl DomainCommitmentRegistry {
         let commitment = self
             .commitments
             .remove(&(domain_id, domain_height, sequence))?;
-        self.accepted_at_height
-            .remove(&(domain_id, domain_height, sequence));
         self.seen_blocks
             .remove(&(domain_id, domain_height, commitment.domain_block_hash));
         Some(commitment)

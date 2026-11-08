@@ -1,0 +1,230 @@
+// The wire contract between the Execution Coordinator (node process) and an
+// execution-environment worker (one binary per environment).
+// One frame is a big-endian u32 length followed by one `Envelope`; the
+// largest frame is 16 MiB. Every envelope starts with the ABI version (field 1),
+// so a mismatched peer is refused before the body is interpreted.
+syntax = "proto3";
+
+package budlum.execution.v1;
+
+message Envelope {
+  // Always field 1 so it is the first thing on the wire.
+  uint32 abi_version = 1;
+  uint64 request_id = 2;
+  oneof body {
+    Hello hello = 10;
+    ValidateDeployRequest validate_deploy_request = 11;
+    ValidateDeployResponse validate_deploy_response = 12;
+    ExecuteRequest execute_request = 13;
+    ExecuteResponse execute_response = 14;
+    QueryRequest query_request = 15;
+    QueryResponse query_response = 16;
+    HostRequest host_request = 17;
+    HostResponse host_response = 18;
+  }
+}
+
+// The handshake. The coordinator sends it first; the worker answers with its
+// own environment id.
+message Hello {
+  uint32 ee = 1;
+}
+
+message Identity {
+  uint32 ee = 1;
+  bytes id = 2;
+}
+
+// A u128 amount (attoBUD).
+message Amount {
+  uint64 hi = 1;
+  uint64 lo = 2;
+}
+
+message BlockContext {
+  uint64 chain_id = 1;
+  uint64 height = 2;
+  uint64 timestamp_ms = 3;
+}
+
+enum CallKind {
+  CALL_KIND_UNSPECIFIED = 0;
+  CALL_KIND_CALL = 1;
+  CALL_KIND_DEPLOY = 2;
+}
+
+message Call {
+  CallKind kind = 1;
+  Identity caller = 2;
+  Identity target = 3;
+  Amount value = 4;
+  bytes input = 5;
+  uint64 gas_limit = 6;
+  uint32 depth = 7;
+  bytes tx_hash = 8;
+}
+
+enum OutcomeStatus {
+  OUTCOME_STATUS_UNSPECIFIED = 0;
+  OUTCOME_STATUS_SUCCESS = 1;
+  OUTCOME_STATUS_REVERT = 2;
+  OUTCOME_STATUS_OUT_OF_GAS = 3;
+  OUTCOME_STATUS_INVALID_CODE = 4;
+}
+
+message Outcome {
+  OutcomeStatus status = 1;
+  bytes output = 2;
+  uint64 gas_used = 3;
+}
+
+// A deterministic panic caught inside the engine.
+message Fault {
+  uint32 ee = 1;
+  bytes panic_digest = 2;
+}
+
+enum RefusalCode {
+  REFUSAL_CODE_UNSPECIFIED = 0;
+  REFUSAL_CODE_INVALID_CODE = 1;
+  REFUSAL_CODE_UNSUPPORTED = 2;
+  REFUSAL_CODE_TOO_LARGE = 3;
+  REFUSAL_CODE_DENIED = 4;
+}
+
+message Refusal {
+  RefusalCode code = 1;
+  string message = 2;
+}
+
+message ValidateDeployRequest {
+  bytes code = 1;
+}
+
+message ValidateDeployResponse {
+  oneof result {
+    CodeInfo info = 1;
+    Refusal refusal = 2;
+  }
+}
+
+message CodeInfo {
+  bytes code_hash = 1;
+  string abi_tag = 2;
+}
+
+message ExecuteRequest {
+  BlockContext ctx = 1;
+  Call call = 2;
+}
+
+message ExecuteResponse {
+  oneof result {
+    Outcome outcome = 1;
+    Fault fault = 2;
+  }
+}
+
+message QueryRequest {
+  BlockContext ctx = 1;
+  Identity target = 2;
+  bytes input = 3;
+}
+
+message QueryResponse {
+  oneof result {
+    bytes output = 1;
+    Refusal refusal = 2;
+  }
+}
+
+message Log {
+  Identity emitter = 1;
+  repeated bytes topics = 2;
+  bytes data = 3;
+}
+
+message UniversalCall {
+  uint32 to_ee = 1;
+  Identity from = 2;
+  Identity target = 3;
+  Amount value = 4;
+  bytes input = 5;
+  uint64 gas_limit = 6;
+  bool is_static = 7;
+}
+
+message UniversalResult {
+  bool success = 1;
+  bytes output = 2;
+  uint64 gas_used = 3;
+}
+
+// A worker holds no state: every read, write and cross-environment call goes
+// back to the coordinator as a host request while an execute is in flight.
+message HostRequest {
+  oneof op {
+    HostRead read = 1;
+    HostWrite write = 2;
+    UniversalCall universal_call = 3;
+    Log emit_log = 4;
+    HostCharge charge = 5;
+    Identity bud_balance = 6;
+    HostTransfer bud_transfer = 7;
+  }
+}
+
+message HostRead {
+  string namespace = 1;
+  bytes key = 2;
+}
+
+message HostWrite {
+  string namespace = 1;
+  bytes key = 2;
+  // False means delete the key.
+  bool has_value = 3;
+  bytes value = 4;
+}
+
+message HostCharge {
+  uint64 bgu = 1;
+}
+
+message HostTransfer {
+  Identity from = 1;
+  Identity to = 2;
+  Amount attos = 3;
+}
+
+enum HostErrorCode {
+  HOST_ERROR_CODE_UNSPECIFIED = 0;
+  HOST_ERROR_CODE_OUT_OF_GAS = 1;
+  HOST_ERROR_CODE_DENIED = 2;
+  HOST_ERROR_CODE_NOT_FOUND = 3;
+  HOST_ERROR_CODE_INVALID = 4;
+  HOST_ERROR_CODE_INSUFFICIENT = 5;
+  HOST_ERROR_CODE_DEPTH_EXCEEDED = 6;
+}
+
+message HostError {
+  HostErrorCode code = 1;
+  string message = 2;
+}
+
+message HostResponse {
+  oneof result {
+    HostReadResult read = 1;
+    HostEmpty ok = 2;
+    UniversalResult universal = 3;
+    Amount balance = 4;
+    HostError error = 5;
+  }
+}
+
+message HostReadResult {
+  bool has_value = 1;
+  bytes value = 2;
+}
+
+message HostEmpty {}

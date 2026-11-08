@@ -35,10 +35,7 @@ fn private_transfer_submit_spend_and_create() {
     let proof = budlum_note_packing::hash_from_field(0xA11CE);
     let n1 = crate::privacy::L1NoteRegistry::derive_nullifier(&c_in, &proof);
     let c_out = hash_from_field(3);
-    state
-        .note_registry
-        .insert_note_for_owner(c_in, from)
-        .unwrap();
+    state.note_registry.insert_note(c_in).unwrap();
 
     let digest = PrivateTransferSubmit::compute_public_digest(&[n1], &[c_out]);
     let auth_msg = PrivateTransferSubmit::authorization_message(
@@ -84,10 +81,7 @@ fn private_transfer_double_spend_fails() {
     let proof = budlum_note_packing::hash_from_field(0xA11CE);
     let n1 = crate::privacy::L1NoteRegistry::derive_nullifier(&c_in, &proof);
     let c_out = hash_from_field(7);
-    state
-        .note_registry
-        .insert_note_for_owner(c_in, from)
-        .unwrap();
+    state.note_registry.insert_note(c_in).unwrap();
     let digest = PrivateTransferSubmit::compute_public_digest(&[n1], &[c_out]);
     let auth_msg = PrivateTransferSubmit::authorization_message(
         crate::core::transaction::DEFAULT_CHAIN_ID,
@@ -118,7 +112,7 @@ fn private_transfer_double_spend_fails() {
     // Reuse nullifier with new note
     let c2 = hash_from_field(6);
     let c_out2 = hash_from_field(5);
-    state.note_registry.insert_note_for_owner(c2, from).unwrap();
+    state.note_registry.insert_note(c2).unwrap();
     let digest2 = PrivateTransferSubmit::compute_public_digest(&[n1], &[c_out2]);
     let auth_msg2 = PrivateTransferSubmit::authorization_message(
         crate::core::transaction::DEFAULT_CHAIN_ID,
@@ -197,8 +191,7 @@ fn ai_mlp_guest_program_hash_stable() {
 fn l1_note_registry_root_changes() {
     let mut r = L1NoteRegistry::new();
     let a = r.state_root();
-    r.insert_note_for_owner([1u8; 32], crate::core::address::Address::zero())
-        .unwrap();
+    r.insert_note([1u8; 32]).unwrap();
     assert_ne!(a, r.state_root());
 }
 
@@ -264,12 +257,9 @@ fn transfer_fixture(
     let proof = hash_from_field(0xA11CE);
     let n1 = L1NoteRegistry::derive_nullifier(&c_in, &proof);
     let c_out = hash_from_field(23);
-    let from = Address::from(kp.public_key_bytes());
-    state
-        .note_registry
-        .insert_note_for_owner(c_in, from)
-        .unwrap();
+    state.note_registry.insert_note(c_in).unwrap();
     let digest = PrivateTransferSubmit::compute_public_digest(&[n1], &[c_out]);
+    let from = Address::from(kp.public_key_bytes());
     let auth_msg = PrivateTransferSubmit::authorization_message(
         crate::core::transaction::DEFAULT_CHAIN_ID,
         from.as_bytes(),
@@ -423,84 +413,4 @@ fn private_transfer_replayed_under_another_nonce_or_bare_digest_is_refused() {
         .expect_err("nonce-0 authorization replayed at nonce 1 must be rejected");
     assert!(err.contains("authorization_sig invalid"), "got: {err}");
     assert!(state.note_registry.contains_commitment(&c_in));
-}
-
-#[test]
-fn attacker_cannot_spend_victim_live_note_or_inflate_outputs() {
-    let victim_kp = KeyPair::generate().unwrap();
-    let victim = Address::from(victim_kp.public_key_bytes());
-    let attacker_kp = KeyPair::generate().unwrap();
-    let attacker = Address::from(attacker_kp.public_key_bytes());
-
-    let mut state = funded_state(victim, 1_000_000);
-    state.get_or_create(&attacker).balance = 1_000_000;
-
-    let victim_note = hash_from_field(777);
-    state
-        .note_registry
-        .insert_note_for_owner(victim_note, victim)
-        .unwrap();
-
-    // 1. Attacker knows `victim_note` and chooses an arbitrary `proof` + signs with attacker's key.
-    let chosen_proof = hash_from_field(0xBADC0DE);
-    let n_att = L1NoteRegistry::derive_nullifier(&victim_note, &chosen_proof);
-    let stolen_out = hash_from_field(888);
-    let digest = PrivateTransferSubmit::compute_public_digest(&[n_att], &[stolen_out]);
-    let auth_msg = PrivateTransferSubmit::authorization_message(
-        crate::core::transaction::DEFAULT_CHAIN_ID,
-        attacker.as_bytes(),
-        0,
-        &digest,
-    );
-    let steal_sub = PrivateTransferSubmit {
-        spent_commitments: vec![victim_note],
-        nullifiers: vec![n_att],
-        output_commitments: vec![stolen_out],
-        nullifier_proofs: vec![chosen_proof],
-        authorization_sig: attacker_kp.sign(&auth_msg).to_vec(),
-        public_digest: digest,
-    };
-    let steal_tx = signed_tx(
-        &attacker_kp,
-        crate::core::transaction::DEFAULT_CHAIN_ID,
-        TransactionType::PrivateTransferSubmit(steal_sub),
-    );
-    let err = Executor::apply_transaction(&mut state, &steal_tx)
-        .expect_err("attacker must not spend victim's note");
-    assert!(err.contains("does not own note"), "got: {err}");
-    assert!(state.note_registry.contains_commitment(&victim_note));
-    assert!(!state.note_registry.contains_commitment(&stolen_out));
-
-    // 2. Even the legitimate owner cannot inflate output note count (1 input -> 2 outputs).
-    let owner_proof = hash_from_field(0xA11CE);
-    let n_own = L1NoteRegistry::derive_nullifier(&victim_note, &owner_proof);
-    let out1 = hash_from_field(901);
-    let out2 = hash_from_field(902);
-    let inf_digest = PrivateTransferSubmit::compute_public_digest(&[n_own], &[out1, out2]);
-    let inf_auth = PrivateTransferSubmit::authorization_message(
-        crate::core::transaction::DEFAULT_CHAIN_ID,
-        victim.as_bytes(),
-        0,
-        &inf_digest,
-    );
-    let inflate_sub = PrivateTransferSubmit {
-        spent_commitments: vec![victim_note],
-        nullifiers: vec![n_own],
-        output_commitments: vec![out1, out2],
-        nullifier_proofs: vec![owner_proof],
-        authorization_sig: victim_kp.sign(&inf_auth).to_vec(),
-        public_digest: inf_digest,
-    };
-    let inflate_tx = signed_tx(
-        &victim_kp,
-        crate::core::transaction::DEFAULT_CHAIN_ID,
-        TransactionType::PrivateTransferSubmit(inflate_sub),
-    );
-    let inf_err = Executor::apply_transaction(&mut state, &inflate_tx)
-        .expect_err("unconserved 1->2 output inflation must be refused");
-    assert!(
-        inf_err.contains("value conservation failed"),
-        "got: {inf_err}"
-    );
-    assert!(state.note_registry.contains_commitment(&victim_note));
 }

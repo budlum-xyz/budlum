@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet, 'arena/**']
+    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, 'arena/**']
 
 concurrency:
   group: solidity-${{ github.ref }}
@@ -28,7 +28,7 @@ jobs:
       # and must not drift with a floating compiler download.
       - name: Install solc 0.8.26
         run: |
-          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/solc \
+          curl -sSL -o /tmp/solc \
             https://github.com/ethereum/solidity/releases/download/v0.8.26/solc-static-linux
           echo "d5f23436f443edb85d8e76906d12f0a86ce0490e7663a9e608efeb7a93f149ef  /tmp/solc" \
             | sha256sum -c -
@@ -66,7 +66,7 @@ jobs:
       # the pinned solc above.
       - name: Install Foundry v1.3.5
         run: |
-          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/foundry.tgz \
+          curl -sSL -o /tmp/foundry.tgz \
             https://github.com/foundry-rs/foundry/releases/download/v1.3.5/foundry_v1.3.5_linux_amd64.tar.gz
           echo "9746c51f76c57ee2b099aa67d8b6fb8a93c82175671b654b1b8fd8ddba8e3b42  /tmp/foundry.tgz" \
             | sha256sum -c -
@@ -76,7 +76,7 @@ jobs:
 
       - name: Install solc 0.8.26 for forge
         run: |
-          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/solc \
+          curl -sSL -o /tmp/solc \
             https://github.com/ethereum/solidity/releases/download/v0.8.26/solc-static-linux
           echo "d5f23436f443edb85d8e76906d12f0a86ce0490e7663a9e608efeb7a93f149ef  /tmp/solc" \
             | sha256sum -c -

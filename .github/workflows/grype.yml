@@ -25,7 +25,7 @@ name: Grype
 
 on:
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet]
+    branches: [main, fix/architecture-tip-adlari]
   push:
     branches: [main]
   schedule:
@@ -56,7 +56,7 @@ jobs:
       - name: Install grype v0.116.0 (version + sha256 pinned)
         run: |
           set -euo pipefail
-          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/grype.tar.gz \
+          curl -sSfL -o /tmp/grype.tar.gz \
             https://github.com/anchore/grype/releases/download/v0.116.0/grype_0.116.0_linux_amd64.tar.gz
           echo "40aff724297312f91ea390d003bed8d8651c74cc7f5b26732db80b3a408d2fc5  /tmp/grype.tar.gz" | sha256sum -c -
           mkdir -p /tmp/grype-bin
@@ -107,7 +107,7 @@ jobs:
 
       - name: Upload SARIF (Security tab)
         if: always()
-        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: grype.sarif
           category: grype

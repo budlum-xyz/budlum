@@ -106,10 +106,6 @@ pub struct GraftPayment {
     pub origin_recipient: Vec<u8>,
     pub memo_hash: [u8; 32],
     pub paid_at_block: u64,
-    #[serde(default)]
-    pub target_chain_id: u64,
-    #[serde(default)]
-    pub target_receiver: Vec<u8>,
 }
 
 impl GraftPayment {
@@ -129,11 +125,6 @@ impl GraftPayment {
             &self.origin_recipient,
             &self.memo_hash,
             &self.paid_at_block.to_le_bytes(),
-            &self.target_chain_id.to_le_bytes(),
-            &u64::try_from(self.target_receiver.len())
-                .unwrap_or(u64::MAX)
-                .to_le_bytes(),
-            &self.target_receiver,
         ])
     }
 }
@@ -192,10 +183,6 @@ pub enum GraftTx {
         amount: u64,
         memo_hash: [u8; 32],
         origin_recipient: Vec<u8>,
-        #[serde(default)]
-        target_chain_id: u64,
-        #[serde(default)]
-        target_receiver: Vec<u8>,
     },
     /// Pause, resume or retire the application (owner only; retiring is
     /// final).
@@ -359,28 +346,14 @@ pub enum GraftProofError {
     Opening,
     #[error("the proof carries no state root opening for its checkpoint")]
     NoStateRootBody,
-    #[error("the checkpoint lies outside the active payment window")]
-    Window,
-    #[error("the payment was made to a different Graft application")]
-    Application,
-    #[error("the payment names a different chain or receiver than this deployment")]
-    Receiver,
     #[error("the header is not the one the finalized checkpoint commits: {0}")]
     Header(String),
 }
 
 /// Check a Graft payment proof against a finalized checkpoint the caller
 /// already trusts (a [`crate::light_client::VerifiedCheckpoint`] reached
-/// from its trust anchor) for one specific deployment. The chain checked
-/// is: the payment's application and chain/receiver binding -> finalized
-/// checkpoint -> state root -> global header -> Graft root -> payment
-/// window -> payment.
-///
-/// `expected_graft_id` is the verifying application's own Graft id, and
-/// `expected_target_chain_id` / `expected_target_receiver` are that
-/// deployment's chain and receiver (zero and empty when the payment names
-/// none). A payment made to another application, chain or receiver is
-/// refused.
+/// from its trust anchor). The chain checked is: finalized checkpoint ->
+/// state root -> global header -> Graft root -> payment window -> payment.
 ///
 /// # Errors
 ///
@@ -388,32 +361,15 @@ pub enum GraftProofError {
 pub fn verify_graft_payment(
     proof: &GraftPaymentProof,
     checkpoint: &crate::light_client::VerifiedCheckpoint,
-    expected_graft_id: [u8; 32],
-    expected_target_chain_id: u64,
-    expected_target_receiver: &[u8],
 ) -> Result<(), GraftProofError> {
     if proof.path.leaf != proof.payment.leaf_hash() {
         return Err(GraftProofError::Leaf);
-    }
-    if proof.payment.graft_id != expected_graft_id {
-        return Err(GraftProofError::Application);
-    }
-    if proof.payment.target_chain_id != expected_target_chain_id
-        || proof.payment.target_receiver.as_slice() != expected_target_receiver
-    {
-        return Err(GraftProofError::Receiver);
     }
     if !proof.path.verify(proof.opening.payments_root) {
         return Err(GraftProofError::Path);
     }
     if proof.header.graft_root != Some(proof.opening.root()) {
         return Err(GraftProofError::Opening);
-    }
-    if proof.header.checkpoint_height < proof.payment.paid_at_block
-        || proof.header.checkpoint_height - proof.payment.paid_at_block
-            > GRAFT_PAYMENT_WINDOW as u64
-    {
-        return Err(GraftProofError::Window);
     }
     let body = proof
         .state_root_body
@@ -749,13 +705,6 @@ pub fn execute_graft_tx(
             if state.settlement.domains.get(*domain_key).is_none() {
                 return Err(refused("Graft domain_key is not a registered domain"));
             }
-            if let Some(executor) = state.settlement.graft.executors.get(domain_key) {
-                if executor.len() != origin_app.len() {
-                    return Err(refused(
-                        "the Graft application's identifier width does not match its domain's executor",
-                    ));
-                }
-            }
             let registration_fee = state.registry.params().graft_registration_fee;
             let funded = state
                 .spendable_balance(&ctx.sender)
@@ -865,21 +814,12 @@ pub fn execute_graft_tx(
             amount,
             memo_hash,
             origin_recipient,
-            target_chain_id,
-            target_receiver,
         } => {
             if *amount == 0 {
                 return Err(refused("Graft payment amount must be non-zero"));
             }
             if !identifier_ok(origin_recipient) {
                 return Err(refused("Graft origin_recipient length is invalid"));
-            }
-            if target_receiver.len() > MAX_GRAFT_IDENTIFIER_BYTES
-                || (*target_chain_id != 0) != (!target_receiver.is_empty())
-            {
-                return Err(refused(
-                    "Graft target_chain_id and target_receiver must be set together",
-                ));
             }
             let app = state
                 .settlement
@@ -905,8 +845,6 @@ pub fn execute_graft_tx(
                 origin_recipient: origin_recipient.clone(),
                 memo_hash: *memo_hash,
                 paid_at_block: block,
-                target_chain_id: *target_chain_id,
-                target_receiver: target_receiver.clone(),
             });
             Ok(())
         }
@@ -972,20 +910,13 @@ pub fn execute_graft_tx(
             if app.status != GraftStatus::Active {
                 return Err(refused("Graft application is not active"));
             }
-            let executor = state
+            if !state
                 .settlement
                 .graft
                 .executors
-                .get(&app.domain_key)
-                .cloned()
-                .ok_or_else(|| refused("the Graft application's domain has no executor"))?;
-            // The executor emits the application's identifier in the
-            // fulfilment preimage, so an application whose identifier is a
-            // different width than the executor's own can never be fulfilled.
-            if executor.len() != app.origin_app.len() {
-                return Err(refused(
-                    "the Graft application's identifier width does not match its domain's executor",
-                ));
+                .contains_key(&app.domain_key)
+            {
+                return Err(refused("the Graft application's domain has no executor"));
             }
             if *call_hash == [0u8; 32] {
                 return Err(refused("Graft call_hash cannot be zero"));
@@ -1367,8 +1298,6 @@ mod tests {
             amount: 300,
             memo_hash: [0u8; 32],
             origin_recipient: vec![0x01],
-            target_chain_id: 1,
-            target_receiver: vec![0x22; 20],
         };
         execute_graft_tx(&mut state, &ctx(user), &pay).unwrap();
         assert_eq!(state.get_balance(&mirror_account(id)), 300);
@@ -1712,8 +1641,6 @@ mod tests {
                         amount: 1,
                         memo_hash: [0u8; 32],
                         origin_recipient: vec![1],
-                        target_chain_id: 0,
-                        target_receiver: Vec::new(),
                     })),
                 ),
             )
@@ -1814,130 +1741,5 @@ mod tests {
             signature: hex::decode(SIGNATURE).unwrap(),
         };
         assert!(execute_graft_tx(&mut state, &ctx(registrant), &other_payout).is_err());
-    }
-
-    #[test]
-    fn non_matching_origin_app_width_is_refused_before_escrow() {
-        let operator = Address::from([0x01; 32]);
-        let user = Address::from([0x03; 32]);
-        let mut state = state_with_domain(operator);
-        state.add_balance(&user, 10_000);
-        // Register a 32-byte app before an executor exists, then set a 20-byte executor.
-        let wide_app = vec![0xAA; 32];
-        execute_graft_tx(
-            &mut state,
-            &ctx(user),
-            &GraftTx::Register {
-                domain_key: DOMAIN,
-                origin_app: wide_app.clone(),
-                manifest_hash: [0x11; 32],
-            },
-        )
-        .unwrap();
-        execute_graft_tx(
-            &mut state,
-            &ctx(operator),
-            &GraftTx::SetExecutor {
-                domain_key: DOMAIN,
-                executor: vec![0x77; 20],
-            },
-        )
-        .unwrap();
-        let open = GraftTx::OpenIntent {
-            graft_id: graft_id(DOMAIN, &wide_app),
-            call_hash: [0x22; 32],
-            value: 0,
-            max_payment: 1_000,
-            solver_fee_cap: 100,
-            service_price: 200,
-            origin_beneficiary: vec![0x33; 20],
-            deadline_block: 0,
-        };
-        assert!(
-            execute_graft_tx(&mut state, &ctx(user), &open).is_err(),
-            "an intent whose app identifier width differs from the executor's must be refused"
-        );
-        // Registering a new mismatched-width app after the executor is set is refused too.
-        assert!(execute_graft_tx(
-            &mut state,
-            &ctx(user),
-            &GraftTx::Register {
-                domain_key: DOMAIN,
-                origin_app: vec![0xBB; 32],
-                manifest_hash: [0x11; 32],
-            },
-        )
-        .is_err());
-    }
-    #[test]
-    fn offchain_graft_verifier_binds_application_chain_and_receiver() {
-        let payment = GraftPayment {
-            payment_id: [0x11; 32],
-            graft_id: [0x22; 32],
-            payer: Address::from([0x33; 32]),
-            recipient: Address::from([0x44; 32]),
-            amount: 500,
-            origin_recipient: vec![0x55; 20],
-            memo_hash: [0x66; 32],
-            paid_at_block: 10,
-            target_chain_id: 8453,
-            target_receiver: vec![0x77; 20],
-        };
-        let leaf = payment.leaf_hash();
-        let proof = GraftPaymentProof {
-            payment,
-            path: crate::cross_domain::event_tree::MerkleProof {
-                leaf,
-                index: 0,
-                siblings: Vec::new(),
-            },
-            opening: GraftRootOpening {
-                payments_root: leaf,
-                rest_hash: [0x88; 32],
-            },
-            header: crate::settlement::GlobalBlockHeader {
-                version: 7,
-                global_height: 15,
-                previous_global_hash: [0u8; 32],
-                chain_id: 45261,
-                timestamp_ms: 1_000,
-                domain_registry_root: [0u8; 32],
-                domain_commitment_root: [0u8; 32],
-                message_root: [0u8; 32],
-                bridge_state_root: [0u8; 32],
-                replay_nonce_root: [0u8; 32],
-                proposer: None,
-                settlement_finality_root: [0u8; 32],
-                storage_root: None,
-                ai_root: None,
-                identity_root: None,
-                checkpoint_height: 15,
-                external_intake_root: None,
-                graft_root: None,
-                delegation_root: None,
-            },
-            block_height: 15,
-            state_root: "00".repeat(32),
-            state_root_body: None,
-        };
-        let cp = crate::light_client::VerifiedCheckpoint {
-            height: 15,
-            block_hash: "00".repeat(32),
-            set_hash: "00".repeat(32),
-            epoch: 0,
-            state_root: "00".repeat(32),
-        };
-        assert_eq!(
-            verify_graft_payment(&proof, &cp, [0x99; 32], 8453, &[0x77; 20]),
-            Err(GraftProofError::Application)
-        );
-        assert_eq!(
-            verify_graft_payment(&proof, &cp, [0x22; 32], 1, &[0x77; 20]),
-            Err(GraftProofError::Receiver)
-        );
-        assert_eq!(
-            verify_graft_payment(&proof, &cp, [0x22; 32], 8453, &[0x99; 20]),
-            Err(GraftProofError::Receiver)
-        );
     }
 }

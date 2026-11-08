@@ -1,103 +1,34 @@
 name: Testnet Rehearsal
 
-# The full local testnet rehearsal on chain 45261:
-# - `testnet-native-e2e` (`budlum-tools testnet-rehearsal --local`) boots the
-#   PoS validator ring, RPC listener, faucet, explorer indexer, and CLI module
-#   scenarios natively on Ubuntu.
-# - `rehearsal` (`budlum-tools testnet-rehearsal --compose`) boots the full
-#   Docker Compose + Prometheus + Grafana stack from ops/testnet-local.yml.
+# The full local testnet rehearsal: four PoS
+# validators, the RPC node, the faucet and the explorer API from
+# ops/testnet-local.yml, and the module scenarios of
+# `xtask/tools testnet-rehearsal --compose`. It runs every night and on
+# demand; pull requests run its preflight through `budlum-tools --self-test`.
+# The report is kept as an artifact whether the run passes or fails.
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [main, consensus-of-consensuses, testnet-quantum, testnet]
   schedule:
     - cron: "17 2 * * *"
   workflow_dispatch:
 
 concurrency:
   group: testnet-rehearsal-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  testnet-native-e2e:
-    name: Testnet Native E2E (chain 45261)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install protoc
-        run: |
-          set -euo pipefail
-          PROTOC_VER=29.3
-          case "$(uname -m)" in
-            aarch64|arm64)
-              PROTOC_ARCH=linux-aarch_64
-              PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-              ;;
-            *)
-              PROTOC_ARCH=linux-x86_64
-              PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-              ;;
-          esac
-          if ! command -v protoc >/dev/null 2>&1 || [ "$(protoc --version | awk '{print $2}')" != "${PROTOC_VER}" ]; then
-            curl -sSL --retry 3 --retry-delay 2 \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VER}/protoc-${PROTOC_VER}-${PROTOC_ARCH}.zip" \
-              -o /tmp/protoc.zip
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
-        with:
-          toolchain: "1.97.1"
-      - name: Cache Cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-testnet-native-${{ hashFiles('**/Cargo.lock') }}
-      - name: Build testnet binaries and tools
-        env:
-          CARGO_INCREMENTAL: "0"
-          CARGO_PROFILE_DEV_OPT_LEVEL: "1"
-        run: |
-          set -euo pipefail
-          cargo build --locked --bin budlum-core --bin bud --bin budlum-faucet --bin budlum-indexer
-          cargo build --release --locked --manifest-path xtask/tools/Cargo.toml
-      - name: Rehearsal tool canary
-        run: ./xtask/tools/target/release/budlum-tools --self-test
-      - name: Native Ubuntu chain 45261 E2E rehearsal
-        run: |
-          set -euo pipefail
-          ./xtask/tools/target/release/budlum-tools testnet-rehearsal \
-            --local --bin-dir target/debug --report target/testnet-native-rehearsal.md
-      - name: Keep native rehearsal report
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: testnet-native-rehearsal-report
-          path: target/testnet-native-rehearsal.md
-          if-no-files-found: warn
-
   rehearsal:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
         with:
           toolchain: "1.97.1"
       - name: Rehearsal (build, start, scenarios, report)

@@ -303,8 +303,8 @@ pub fn self_test() -> Result<String, String> {
         &tmp,
         &root,
         "src/settlement/domains.rs",
-        "        validate_commitment_state_updates(state, &com)?;\n",
-        "",
+        "        validate_commitment_state_updates(state, &com)?;\n        for (addr, new_nonce)",
+        "        for (addr, new_nonce)",
         "a settlement door that applies unvalidated nonce writes passed",
     )?;
 

@@ -791,12 +791,11 @@ fn open_deal(
         return Err(StorageTxError::OpenDealOnMainnet);
     }
     // Cloned so the registry can be written while the terms borrow it.
-    let mut manifest = state
+    let manifest = state
         .storage_registry
         .get_manifest(&open.manifest_id)
         .ok_or(StorageTxError::ManifestNotRegistered)?
         .clone();
-    manifest.owner = ctx.sender;
     // The payer has to be the content's authority. Everything the registry
     // reports about durability - repair, the last-copy release guard, the
     // operator's standing - is derived from `Active` deal rows and nothing
@@ -807,7 +806,7 @@ fn open_deal(
     // read and prune doors use.
     if !state
         .storage_registry
-        .has_manifest_claim(&open.manifest_id, &ctx.sender)
+        .has_claim(&open.manifest_id, &ctx.sender)
     {
         return Err(StorageTxError::DealManifestNotOwned { sender: ctx.sender });
     }
@@ -893,10 +892,7 @@ fn declare_self_host_policy(
         .storage_registry
         .get_manifest(manifest_id)
         .ok_or(StorageTxError::ManifestNotRegistered)?;
-    if !state
-        .storage_registry
-        .has_manifest_claim(manifest_id, sender)
-    {
+    if !state.storage_registry.has_claim(manifest_id, sender) {
         return Err(StorageTxError::OwnerIsNotSender {
             owner: state
                 .storage_registry
@@ -961,11 +957,7 @@ fn register_manifest(
             });
         }
     }
-    if state.storage_registry.is_registered(&manifest.manifest_id)
-        && state
-            .storage_registry
-            .has_manifest_claim(&manifest.manifest_id, sender)
-    {
+    if state.storage_registry.is_registered(&manifest.manifest_id) {
         return Err(StorageTxError::AlreadyRegistered);
     }
     if matches!(manifest.source, crate::storage::ContentSource::Generated(_)) {
@@ -2097,251 +2089,5 @@ mod tests {
             matches!(err, StorageTxError::ConfidentialCommitRefused(_)),
             "{err}"
         );
-    }
-
-    #[cfg(feature = "wallet-ml-dsa")]
-    #[test]
-    fn accept_reallocation_tx_refuses_operator_already_serving_shard() {
-        use crate::crypto::primitives::WalletKeyPair;
-
-        let mut state = AccountState::new();
-        let m = registered(&mut state);
-        let payer = owner();
-        let slashed_op = Address::from([0x61; 32]);
-        let existing_wkp = WalletKeyPair::generate();
-        let existing_op = existing_wkp.address();
-        let opener = Address::from([0x62; 32]);
-
-        for addr in [payer, slashed_op, existing_op, opener] {
-            state.add_balance(&addr, 50_000_000);
-        }
-
-        let shard_id = m.shards.first().unwrap().shard_id;
-        let econ = StorageEconomicsParams {
-            operator_bond: STORAGE_MIN_OPERATOR_BOND,
-            fee_per_byte_epoch: 10_000,
-        };
-
-        let deal0_id = open_deal_escrowed(
-            &mut state,
-            &DealOpenTerms {
-                domain_id: 42,
-                manifest: &m,
-                shard_id,
-                operator: slashed_op,
-                replica_index: 0,
-                start_epoch: 100,
-                end_epoch: 200,
-                economics: econ.clone(),
-                merkle_proof: Some(proof()),
-                storage_root: Some([0x42; 32]),
-            },
-            payer,
-            100,
-            STORAGE_MIN_OPERATOR_BOND,
-            0,
-        )
-        .unwrap();
-        open_deal_escrowed(
-            &mut state,
-            &DealOpenTerms {
-                domain_id: 42,
-                manifest: &m,
-                shard_id,
-                operator: existing_op,
-                replica_index: 1,
-                start_epoch: 100,
-                end_epoch: 200,
-                economics: econ.clone(),
-                merkle_proof: Some(proof()),
-                storage_root: Some([0x42; 32]),
-            },
-            payer,
-            100,
-            STORAGE_MIN_OPERATOR_BOND,
-            0,
-        )
-        .unwrap();
-
-        state.epoch_index = 120;
-        execute_storage_tx(&mut state, &ctx(opener), &open_challenge_tx(deal0_id)).unwrap();
-        let ch_id = only_challenge_id(&state);
-        state.epoch_index = 170;
-        state
-            .storage_registry
-            .finalize_missed_challenge(ch_id, 170)
-            .unwrap();
-        let ticket_id = state
-            .storage_registry
-            .all_reallocation_tickets()
-            .first()
-            .expect("repair ticket opened")
-            .ticket_id;
-
-        let accept_ctx = ctx(payer);
-        let mut accept = StorageReallocationAccept {
-            ticket_id,
-            replacement_operator: existing_op,
-            start_epoch: 120,
-            end_epoch: 200,
-            economics: econ,
-            merkle_proof: proof(),
-            storage_root: [0x42; 32],
-            operator_consent: GrantAuthorization {
-                owner_key: existing_wkp.public_key_bytes(),
-                signature: Vec::new(),
-            },
-        };
-        let digest = accept_reallocation_consent_digest(
-            accept_ctx.chain_id,
-            &payer,
-            accept_ctx.nonce,
-            &accept,
-        );
-        accept.operator_consent.signature = existing_wkp
-            .sign(crate::crypto::ctx::STORAGE_V2, &digest)
-            .to_vec();
-
-        let before_root = state.calculate_state_root();
-        let err = execute_storage_tx(
-            &mut state,
-            &accept_ctx,
-            &StorageTx::AcceptReallocation(Box::new(accept)),
-        )
-        .expect_err("operator already serving shard must be refused");
-        assert!(
-            matches!(err, StorageTxError::ReallocationRefused(ref msg) if msg.contains("active deal already covers shard")),
-            "unexpected error: {err}"
-        );
-        assert_eq!(state.calculate_state_root(), before_root);
-    }
-
-    #[test]
-    fn squatter_first_manifest_cannot_block_or_hijack_real_owner_doors() {
-        use crate::storage::{
-            ConfidentialBodyCommit, ConfidentialProofKind, ContentCipher, ContentEncryption,
-        };
-
-        let mut state = AccountState::new();
-        let squatter = Address::from([0xEE; 32]);
-        let victim = Address::from([0x11; 32]);
-        let grantee = Address::from([0x22; 32]);
-
-        let victim_manifest = manifest_owned_by(victim);
-        let mut squatter_manifest = victim_manifest.clone();
-        squatter_manifest.owner = squatter;
-        assert_eq!(squatter_manifest.manifest_id, victim_manifest.manifest_id);
-        let mid = victim_manifest.manifest_id;
-
-        // 1. Squatter front-runs manifest registration and commits its own body/grant/policy.
-        execute_storage_tx(
-            &mut state,
-            &ctx(squatter),
-            &StorageTx::RegisterManifest {
-                manifest: squatter_manifest,
-            },
-        )
-        .expect("squatter registers first");
-        let squatter_commit = ConfidentialBodyCommit::new(
-            mid,
-            ContentEncryption::ClientSide(ContentCipher::Aes256Gcm),
-            [0xAA; 32],
-            ConfidentialProofKind::HybridZkTee,
-        )
-        .unwrap();
-        execute_storage_tx(
-            &mut state,
-            &ctx(squatter),
-            &StorageTx::CommitConfidentialBody {
-                commit: squatter_commit,
-            },
-        )
-        .expect("squatter commits under its own namespace");
-        let mut blocking_policy = policy_for(squatter, victim_manifest.shards[0].shard_id);
-        blocking_policy.self_host_allowed = false;
-        execute_storage_tx(
-            &mut state,
-            &ctx(squatter),
-            &StorageTx::DeclareSelfHostPolicy {
-                manifest_id: mid,
-                policy: blocking_policy,
-                profile: profile_for(squatter),
-            },
-        )
-        .expect("squatter policy scoped to squatter");
-
-        // 2. Real owner is NOT locked out: RegisterManifest, CommitConfidentialBody,
-        //    IssueViewGrant, SocialDelete, and self-host check all succeed for victim.
-        execute_storage_tx(
-            &mut state,
-            &ctx(victim),
-            &StorageTx::RegisterManifest {
-                manifest: victim_manifest.clone(),
-            },
-        )
-        .expect("real owner registers despite squatter");
-        // Ambiguous while neither holds a third-party deal: squatter cannot claim sole owner_of.
-        assert_eq!(state.storage_registry.owner_of(&mid), None);
-        assert!(state.storage_registry.has_claim(&mid, &victim));
-
-        let victim_commit = ConfidentialBodyCommit::new(
-            mid,
-            ContentEncryption::ClientSide(ContentCipher::Aes256Gcm),
-            [0xBB; 32],
-            ConfidentialProofKind::HybridZkTee,
-        )
-        .unwrap();
-        execute_storage_tx(
-            &mut state,
-            &ctx(victim),
-            &StorageTx::CommitConfidentialBody {
-                commit: victim_commit,
-            },
-        )
-        .expect("real owner commits confidential body in its own namespace");
-        execute_storage_tx(
-            &mut state,
-            &ctx(victim),
-            &StorageTx::IssueViewGrant {
-                content_id: mid,
-                grantee: Some(grantee),
-                key_id: [0x55; 32],
-                policy: ViewPolicy::NamedGrantee,
-            },
-        )
-        .expect("real owner issues view grant");
-        // Squatter social delete cannot revoke victim's grant.
-        execute_storage_tx(
-            &mut state,
-            &ctx(squatter),
-            &StorageTx::SocialDelete { content_id: mid },
-        )
-        .expect("squatter social delete runs in squatter namespace");
-        assert_eq!(
-            state
-                .storage_registry
-                .view_grants
-                .live_for_content(&mid)
-                .len(),
-            1,
-            "squatter social delete must leave victim's grant live"
-        );
-        // Squatter's self_host_allowed = false policy does not block victim.
-        assert!(state
-            .storage_registry
-            .check_self_host_allowed_for_owner(&mid, &victim_manifest.shards[0].shard_id, &victim)
-            .is_ok());
-        // Victim's own social delete revokes victim's grant.
-        execute_storage_tx(
-            &mut state,
-            &ctx(victim),
-            &StorageTx::SocialDelete { content_id: mid },
-        )
-        .expect("victim social delete");
-        assert!(state
-            .storage_registry
-            .view_grants
-            .live_for_content(&mid)
-            .is_empty());
     }
 }

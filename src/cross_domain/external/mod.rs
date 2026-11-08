@@ -112,7 +112,6 @@ pub use evm_hybrid::{
 pub use external_tx::{
     execute_external_domain_tx, ExternalDomainTx, ExternalDomainTxContext, ExternalDomainTxError,
 };
-pub(crate) use intake::live_policy_clock;
 pub use intake::{AdapterSpec, IntakeEntry, IntakeError, IntakeState, RegistrationRequest};
 pub use intake_quorum::{
     QuorumRound, QuorumRounds, RoundEntry, RoundError, RoundKey, RoundProgress, RoundState,

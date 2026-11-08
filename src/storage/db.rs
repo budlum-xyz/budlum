@@ -770,7 +770,7 @@ impl Storage {
     /// # Errors
     ///
     /// Propagates `std::io::Error` from the read.
-    /// WIRING: called from `Blockchain::validate_candidate_chain` so locally witness-pruned blocks are not rejected during fork-choice replay.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn is_witness_pruned(&self, height: u64) -> std::io::Result<bool> {
         Ok(self
             .db
@@ -1051,23 +1051,6 @@ impl Storage {
             .insert("CANONICAL_HEIGHT", height.to_string().as_bytes())?;
         self.db.flush()?;
         Ok(())
-    }
-
-    pub(crate) fn save_round_price_sightings(
-        &self,
-        sightings: &[(String, u128)],
-    ) -> std::io::Result<()> {
-        let val = encode(&sightings.to_vec())?;
-        self.db.insert("ROUND_PRICE_SIGHTINGS", val)?;
-        self.db.flush()?;
-        Ok(())
-    }
-
-    pub(crate) fn load_round_price_sightings(&self) -> std::io::Result<Vec<(String, u128)>> {
-        match self.db.get("ROUND_PRICE_SIGHTINGS")? {
-            Some(bytes) => decode(&bytes),
-            None => Ok(Vec::new()),
-        }
     }
     /// # Errors
     ///

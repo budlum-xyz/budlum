@@ -35,7 +35,6 @@ jobs:
   rustsec-drift:
     name: RustSec drift (fresh advisory DB vs unchanged locks)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -47,7 +46,7 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: watchdog-rustsec
       # Binary-pinned by --locked; the advisory DB is refreshed on every run
@@ -77,7 +76,6 @@ jobs:
   main-health-pulse:
     name: Main health pulse (locks / workflows / regen gate)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -92,12 +90,12 @@ jobs:
       - name: Install actionlint v1.7.12 (sha256 pinned)
         run: |
           set -euo pipefail
-          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/actionlint.tar.gz \
+          curl -sSfL -o /tmp/actionlint.tar.gz \
             https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
           echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  /tmp/actionlint.tar.gz" | sha256sum -c -
           sudo tar -xzf /tmp/actionlint.tar.gz -C /usr/local/bin actionlint
           actionlint --version
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: watchdog-pulse
       - name: Lockfiles still match their manifests on main
@@ -116,15 +114,14 @@ jobs:
         run: actionlint
       - name: Build the gate binary
         run: cargo build --release --manifest-path xtask/gates/Cargo.toml
-      - name: State-recovery door still wired on main
-        run: ./xtask/gates/target/release/budlum-gates state-recovery-door
-      - name: State-recovery gate canaries still caught
-        run: ./xtask/gates/target/release/budlum-gates state-recovery-door --self-test
+      - name: Regen-health door still wired on main
+        run: ./xtask/gates/target/release/budlum-gates regen-health-door
+      - name: Regen-health gate canaries still caught
+        run: ./xtask/gates/target/release/budlum-gates regen-health-door --self-test
 
   summary:
     name: Watchdog summary
     runs-on: ubuntu-latest
-    timeout-minutes: 20
     needs: [rustsec-drift, main-health-pulse]
     if: always()
     permissions:
@@ -134,9 +131,6 @@ jobs:
         with:
           persist-credentials: false
       - name: Compose summary
-        env:
-          RUSTSEC_DRIFT_RESULT: ${{ needs.rustsec-drift.result }}
-          MAIN_HEALTH_PULSE_RESULT: ${{ needs.main-health-pulse.result }}
         run: |
           set -euo pipefail
           {
@@ -145,8 +139,8 @@ jobs:
             echo "- run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             echo "- sha: ${GITHUB_SHA}"
             echo "- schedule: every 6h (workflow_dispatch also available)"
-            echo "- rustsec-drift: ${RUSTSEC_DRIFT_RESULT}"
-            echo "- main-health-pulse: ${MAIN_HEALTH_PULSE_RESULT}"
+            echo "- rustsec-drift: ${{ needs.rustsec-drift.result }}"
+            echo "- main-health-pulse: ${{ needs.main-health-pulse.result }}"
             echo
             echo "Red pulses are findings about drift *between* code changes; investigate the named job first."
           } > watchdog-summary.md

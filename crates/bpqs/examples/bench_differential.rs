@@ -69,8 +69,27 @@ impl BenchRng {
             pos: 32,
         }
     }
+}
 
-    fn fill(&mut self, dest: &mut [u8]) {
+impl rand_core::RngCore for BenchRng {
+    fn next_u32(&mut self) -> u32 {
+        let mut buf = [0u8; 4];
+        self.fill_bytes(&mut buf);
+        u32::from_le_bytes(buf)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut buf = [0u8; 8];
+        self.fill_bytes(&mut buf);
+        u64::from_le_bytes(buf)
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.fill_bytes(dest);
+        Ok(())
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
         for slot in dest.iter_mut() {
             if self.pos == 32 {
                 let mut h = Sha3_256::new();
@@ -87,28 +106,7 @@ impl BenchRng {
     }
 }
 
-impl rand_core::TryRng for BenchRng {
-    type Error = core::convert::Infallible;
-
-    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
-        let mut buf = [0u8; 4];
-        self.fill(&mut buf);
-        Ok(u32::from_le_bytes(buf))
-    }
-
-    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
-        let mut buf = [0u8; 8];
-        self.fill(&mut buf);
-        Ok(u64::from_le_bytes(buf))
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
-        self.fill(dest);
-        Ok(())
-    }
-}
-
-impl rand_core::TryCryptoRng for BenchRng {}
+impl rand_core::CryptoRng for BenchRng {}
 
 const MSG: &[u8] = b"bench: repeatable differential payload, not an anchor draft";
 

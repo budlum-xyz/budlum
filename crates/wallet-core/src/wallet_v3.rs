@@ -70,7 +70,7 @@ impl WalletV3 {
     ///
     /// [`WalletError::InvalidWordCount`] for any count but 24 (12 words are
     /// refused), [`WalletError::InvalidMnemonic`] for a bad checksum.
-    /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
     pub fn from_mnemonic(mnemonic: &str, password: &str) -> Result<Self, WalletError> {
         let words = mnemonic.split_whitespace().count();
         if words != WORD_COUNT {
@@ -105,7 +105,7 @@ impl WalletV3 {
     /// # Errors
     ///
     /// [`WalletError::InvalidSeed`] when a component cannot be derived.
-    /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
     pub fn address_list(&self, account: u32, count: u32) -> Result<Vec<[u8; 32]>, WalletError> {
         (0..count)
             .map(|index| self.account(account, index).map(|a| a.address))

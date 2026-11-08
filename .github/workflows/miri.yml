@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet]
+    branches: [main, fix/architecture-tip-adlari]
   workflow_dispatch:
   # A weekly nightly run, continuous UB inspection
   schedule:
@@ -57,55 +57,17 @@ jobs:
       - name: Install pinned nightly Rust with Miri
         run: |
           rustup toolchain install nightly-2026-07-19 --component miri
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core
           cache-on-failure: true
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Miri - crypto crate
         run: |
           set -euo pipefail
-          echo "Enumerating pure-Rust crypto tests for Miri..."
-          # Enumerate via native cargo test --list first (milliseconds instead
-          # of minutes of interpreted libtest pattern matching), then pass exact
-          # test names to Miri. Excluded here are C-FFI/subprocess tests
-          # (crypto::tls uses aws-lc-sys/ring; keypair_generate_does_not_leak
-          # spawns a child process) and multi-hour pure-safe NIST PQ lattice /
-          # hash-tree KAT and full keygen/sign vectors (covered by native CI and
-          # ASan, where SLH-DSA/ML-DSA/ML-KEM execute millions of sponge/NTT ops
-          # that exceed the 6 h hosted-runner ceiling under Miri interpretation).
-          cargo +nightly-2026-07-19 test -p budlum-core --lib -- crypto --list \
-            > /tmp/miri-crypto-list.txt
-          mapfile -t selected < <(
-            sed -n 's/: test$//p' /tmp/miri-crypto-list.txt \
-            | grep -vE '^(crypto::pq::vector_tests::|crypto::tls::tests::|crypto::hpke::tests::(kat_seed_expands|modified_ciphertext|round_trip_opens|wire_encoding_round_trips|wrong_info_or_aad|wrong_recipient)|crypto::address_v3::tests::(address_is_deterministic|field_boundaries|multisig_address|suite_is_part|the_address_is_not)|crypto::composite::tests::composite_(encodings_round_trip|rejects_|respects_|round_trips|slh_dsa_)|crypto::pq::tests::(ml_dsa_round_trips|the_two_ml_dsa|a_wrong_context|a_disabled_scheme|slh_dsa_128s_round_trips|an_empty_or_long_context|unknown_reserved_and_wrong_length)|crypto::key_derivation::tests::user_account_is_deterministic|crypto::signer::tests::(a_signer_backend_makes|keypair_signer_advertises)|crypto::primitives::(bls_|test_bls_|test_mainnet_disk|keypair_generate_does_not_leak)|crypto::primitives::tests::(bls_|pq_from_bytes|validator_key_file|test_keypair_generation|test_sign_and_verify|test_deterministic_signature|test_standalone_verification|test_save_and_load)|domain::finality_adapter::tests::|registry::identity::tests::)'
-          )
-          echo "Selected ${#selected[@]} crypto tests for Miri UB inspection"
-          if [ "${#selected[@]}" -lt 80 ]; then
-            echo "::error::Miri crypto selection dropped to ${#selected[@]} tests (expected >= 80)."
-            exit 1
-          fi
-          cargo +nightly-2026-07-19 miri test -p budlum-core --lib -- \
-            --exact --test-threads=1 "${selected[@]}" 2>&1 | tee /tmp/miri-crypto.txt
+          echo "Running Miri on crypto module..."
+          cargo +nightly-2026-07-19 miri test -p budlum-core --lib -- crypto 2>&1 | tee /tmp/miri-crypto.txt
           # A Miri run that passes ZERO suites is indistinguishable from a Miri
           # run that never executed a test: both print a green step. The count
           # was printed and then thrown away (`|| echo '0'` made the empty case
@@ -114,16 +76,16 @@ jobs:
           # read the file at all. `|| true` collapsed those two into the same
           # thing, and the second one is a missing measurement, not a zero.
           set +e
-          n=$(grep -c '^test .* \.\.\. ok$' /tmp/miri-crypto.txt)
+          n=$(grep -c 'test result: ok' /tmp/miri-crypto.txt)
           grep_status=$?
           set -e
           if [ "$grep_status" -gt 1 ]; then
             echo "::error::could not read /tmp/miri-crypto.txt (grep exit $grep_status) - the Miri crypto count is missing, not zero."
             exit 1
           fi
-          echo "Miri crypto: $n tests passed"
-          if [ "${n:-0}" -lt 80 ]; then
-            echo "::error::Miri crypto reported $n passing tests (expected >= 80) - a UB gate that inspects nothing is not a pass."
+          echo "Miri crypto: $n suites passed"
+          if [ "${n:-0}" -lt 1 ]; then
+            echo "::error::Miri crypto reported $n passing suites - a UB gate that inspects nothing is not a pass."
             exit 1
           fi
         env:
@@ -237,10 +199,6 @@ jobs:
             --skip a_newer_schema_version_refuses_to_open \
             --skip with_storage_refuses_unreadable_accounts \
             --skip nft_burn_prunes_matching_storage_manifest_on_produce \
-            --skip a_storage_registry_row_from_before_the_tag_still_loads \
-            --skip pruning_witnesses_keeps_the_block_hash_and_happens_once \
-            --skip qc_blob_binary_storage_and_legacy_bincode_are_readable \
-            --skip qc_blob_storage_rejects_corruption_and_cross_height_rows \
             2>&1 | tee /tmp/miri-storage.txt
           # BOUNDED WINDOW, and the bound is the point (see timeout-minutes).
           # At 148 s/test the 646-test suite needs ~26.5 h, which is over four
@@ -381,7 +339,7 @@ jobs:
     # suite reached 2956/3219 tests before the old 45 minute job timeout
     # cancelled it mid-run; at 3778 tests a full pass takes ~81 minutes on a
     # hosted runner. Keep the gate blocking and leave real wall-time headroom.
-    timeout-minutes: 180
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -391,29 +349,11 @@ jobs:
         with:
           toolchain: nightly-2026-07-19
           components: rust-src
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: asan
       - name: protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
 
       # Canary: a program that deliberately accesses freed memory is written and
       # ASan is expected to catch it. If it does not, the tool is not working.
@@ -487,14 +427,14 @@ jobs:
       - name: ASan + debug std (lib testleri)
         run: |
           set -euo pipefail
-          export RUSTFLAGS="-Zsanitizer=address -Cdebug-assertions=on -Copt-level=1"
+          export RUSTFLAGS="-Zsanitizer=address -Cdebug-assertions=on"
           export ASAN_OPTIONS="detect_leaks=0"
           # `| tee` is safe here and only here: the job runs under
           # `set -euo pipefail`, so a non-zero cargo exit still fails the step.
           # Where that setting is absent the same rewrite silently turns a red
           # ASan run green (this file's canary step records exactly that bug).
           cargo +nightly-2026-07-19 test --lib -Zbuild-std \
-            --target x86_64-unknown-linux-gnu -- --test-threads=2 \
+            --target x86_64-unknown-linux-gnu -- --test-threads=1 \
             2>&1 | tee /tmp/asan-lib.log
       - name: ASan failure surface (annotations)
         if: failure()

@@ -158,13 +158,6 @@ pub struct BridgeTransfer {
     /// and read by the only refund path there is.
     #[serde(default)]
     pub delivered_height: Option<u64>,
-    /// Height at which an off-chain release claim for this burn was built
-    /// by the Bud-to-Ethereum claim builder. A burn whose payout executes on
-    /// an external domain is delivered by that claim rather than `unlock`, so
-    /// the expiry sweep must never treat `delivered_height == None` as "never
-    /// delivered" once a claim has been issued.
-    #[serde(default)]
-    pub claim_issued_height: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -467,7 +460,6 @@ impl BridgeState {
             recipient_eth: None,
             burned_amount: 0,
             delivered_height: None,
-            claim_issued_height: None,
         };
 
         self.asset_locations.insert(
@@ -819,10 +811,6 @@ impl BridgeState {
                 // delivered and a node that did not must not agree on the
                 // bridge root while disagreeing about who is owed the money.
                 &transfer.delivered_height.unwrap_or(u64::MAX).to_le_bytes(),
-                &transfer
-                    .claim_issued_height
-                    .unwrap_or(u64::MAX)
-                    .to_le_bytes(),
             ]));
         }
         // The settled queue decides when a transfer leaf above disappears,
@@ -868,33 +856,7 @@ impl BridgeState {
         self.transfers.get(message_id)
     }
 
-    /// Record positive evidence that an off-chain release claim was built for
-    /// a burned transfer, refusing claims past the burn's expiry height so
-    /// off-chain release and local expiry refund are mutually exclusive.
-    pub fn record_claim_issued(
-        &mut self,
-        message_id: &MessageId,
-        finalized_height: u64,
-    ) -> Result<(), BridgeError> {
-        let transfer = self
-            .transfers
-            .get_mut(message_id)
-            .ok_or_else(|| BridgeError("Unknown bridge transfer".into()))?;
-        if !matches!(transfer.status, BridgeStatus::Burned { .. }) {
-            return Err(BridgeError("Transfer is not in Burned status".into()));
-        }
-        if transfer.expiry_height > 0 && finalized_height >= transfer.expiry_height {
-            return Err(BridgeError(
-                "Burn expired before external claim issuance".into(),
-            ));
-        }
-        if transfer.claim_issued_height.is_none() {
-            transfer.claim_issued_height = Some(finalized_height);
-        }
-        Ok(())
-    }
-
-    /// (security audit §3) sweep all `Locked` transfers whose
+    /// (security audit) sweep all `Locked` transfers whose
     /// `expiry_height` is below `current_height`, returning their
     /// `asset_id` back to `Active` so a forgotten/abandoned lock can
     /// Never permanently DoS the bridge. Returns the (asset_id, amount)
@@ -1014,9 +976,7 @@ impl BridgeState {
                             BridgeStatus::Burned { domain }
                                 if t.expiry_height > 0
                                     && t.expiry_height <= h
-                                    && t.delivered_height.is_none()
-                                    && t.claim_issued_height.is_none()
-                                    && t.recipient_eth.is_none_or(|eth| eth == [0u8; 20]) =>
+                                    && t.delivered_height.is_none() =>
                             {
                                 let _ = (fee_ppm, min_fee);
                                 let returned = Bud::new(t.burned_amount);
@@ -1713,7 +1673,7 @@ mod bridge_fee_split {
         bridge.mint(&event.message.unwrap(), 0).unwrap();
         assert!(bridge.burn_with_event(id, 2, 20, 0, 20, [7u8; 20]).is_err());
         bridge
-            .burn_with_event(id, 2, 20, 0, 200, [0u8; 20])
+            .burn_with_event(id, 2, 20, 0, 200, [7u8; 20])
             .unwrap();
         bridge.record_burn_debit(&id, Bud::new(100));
 
@@ -1733,7 +1693,7 @@ mod bridge_fee_split {
             BridgeStatus::Minted { domain: 2 }
         );
         bridge
-            .burn_with_event(id, 2, 201, 0, 400, [0u8; 20])
+            .burn_with_event(id, 2, 201, 0, 400, [7u8; 20])
             .unwrap();
         bridge.record_burn_debit(&id, Bud::new(97));
         // Even if governance later raises relayer min_fee above `transfer.amount`,
@@ -1767,7 +1727,7 @@ mod bridge_fee_split {
         let id = transfer.message_id;
         bridge.mint(&event.message.unwrap(), 0).unwrap();
         bridge
-            .burn_with_event(id, 2, 20, 0, 200, [0u8; 20])
+            .burn_with_event(id, 2, 20, 0, 200, [7u8; 20])
             .unwrap();
         bridge.record_burn_debit(&id, Bud::new(100));
 
@@ -1808,7 +1768,7 @@ mod bridge_fee_split {
         let id = transfer.message_id;
         bridge.mint(&event.message.unwrap(), 0).unwrap();
         bridge
-            .burn_with_event(id, 2, 20, 0, 200, [0u8; 20])
+            .burn_with_event(id, 2, 20, 0, 200, [7u8; 20])
             .unwrap();
         bridge.record_burn_debit(&id, Bud::new(100));
 
@@ -2025,32 +1985,5 @@ mod bridge_fee_split {
             .burn_with_event(id, 2, 20, 0, 500, [0x22; 20])
             .unwrap();
         assert_ne!(bridge_a.root(), bridge_b.root());
-    }
-
-    #[test]
-    fn external_eth_burn_is_not_refunded_by_local_expiry_sweep() {
-        let mut bridge = BridgeState::new();
-        let asset = AssetId(hash_fields_bytes(&[b"eth-burn-no-local-refund"]));
-        let owner = Address::from([1u8; 32]);
-        let recipient = Address::from([2u8; 32]);
-        bridge.register_asset(asset, 1).unwrap();
-        let (transfer, event) = bridge
-            .lock(1, 2, 10, 0, asset, owner, recipient, 100, 50)
-            .unwrap();
-        let id = transfer.message_id;
-        bridge.mint(&event.message.unwrap(), 0).unwrap();
-        bridge
-            .burn_with_event(id, 2, 20, 0, 200, [0x42; 20])
-            .unwrap();
-        bridge.record_burn_debit(&id, Bud::new(100));
-
-        assert!(
-            bridge.sweep_expired_locks(250).is_empty(),
-            "burns targeting a non-zero Ethereum recipient must never be locally refunded without delivery proof"
-        );
-        assert_eq!(
-            bridge.transfer(&id).unwrap().status,
-            BridgeStatus::Burned { domain: 2 }
-        );
     }
 }

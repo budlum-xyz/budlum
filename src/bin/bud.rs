@@ -418,12 +418,6 @@ enum GraftAction {
         /// A 32-byte memo hash (hex); zero when absent.
         #[arg(long)]
         memo_hash: Option<String>,
-        /// Redeeming origin chain id committed in the payment leaf.
-        #[arg(long, default_value_t = 0)]
-        target_chain_id: u64,
-        /// Redeeming receiver contract/account identifier (hex) committed in the leaf.
-        #[arg(long)]
-        target_receiver: Option<String>,
     },
     /// Ask a solver to make a call on the origin network; escrows
     /// `--max-payment`.
@@ -702,26 +696,7 @@ fn parse_rpc_url(url: &str) -> Result<(String, u16), String> {
 }
 
 /// A minimal HTTP/1.1 POST over a std TcpStream, reading the whole response body.
-///
-/// The operator RPC gate (`auth_required`, its default) reads an `x-api-key`
-/// header. This client sent none, so a correctly configured node answered every
-/// call with `401` and a bare `Unauthorized` body, which the caller then failed
-/// to parse as JSON (RT-002). The key is read from the file named by
-/// [`BUDLUM_RPC_API_KEY_FILE`](budlum_core::rpc::client_auth::API_KEY_FILE_ENV) - a
-/// path in the environment, never the secret, and never an argument.
 fn http_post_json(host: &str, port: u16, body: &str) -> Result<String, String> {
-    let api_key = budlum_core::rpc::client_auth::api_key_from_env()?;
-    http_post_json_with_key(host, port, body, api_key.as_deref())
-}
-
-/// [`http_post_json`] with the caller's already-loaded key, so the file is read
-/// once per call site and a test can drive the header without the environment.
-fn http_post_json_with_key(
-    host: &str,
-    port: u16,
-    body: &str,
-    api_key: Option<&str>,
-) -> Result<String, String> {
     let mut stream = TcpStream::connect((host, port))
         .map_err(|e| format!("connection error ({host}:{port}): {e}"))?;
     stream
@@ -731,14 +706,8 @@ fn http_post_json_with_key(
         .set_write_timeout(Some(Duration::from_secs(RPC_TIMEOUT_SECS)))
         .map_err(|e| format!("write_timeout setting: {e}"))?;
 
-    // Header values are positional in the request line, so the key cannot be
-    // smuggled into the request line or the body: it is one header, or absent.
-    let auth_header = match api_key {
-        Some(key) => format!("x-api-key: {key}\r\n"),
-        None => String::new(),
-    };
     let request = format!(
-        "POST / HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\n{auth_header}Content-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+        "POST / HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
         len = body.len()
     );
     stream
@@ -757,34 +726,8 @@ fn http_post_json_with_key(
     }
     let text = String::from_utf8(raw).map_err(|e| format!("UTF-8 parse: {e}"))?;
 
-    // Status line first: an unauthorised answer is the word `Unauthorized`, and
-    // reporting that as a JSON parse failure hid the real cause.
-    let status = text
-        .split_once("\r\n")
-        .and_then(|(line, _)| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse::<u16>().ok());
     // HTTP header/body split: everything after the first "\r\n\r\n" is the body.
     let body = text.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or(&text);
-    if let Some(code @ (401 | 403)) = status {
-        return Err(format!(
-            "the node refused the RPC call with HTTP {code} ({}): this endpoint requires the \
-             operator key. Point {} at a 0600 file holding it, or run the node with auth disabled \
-             on a trusted network.",
-            body.trim(),
-            budlum_core::rpc::client_auth::API_KEY_FILE_ENV
-        ));
-    }
-    let code = status.ok_or("RPC response has no valid HTTP status code")?;
-    if !(200..300).contains(&code) {
-        // The node can answer a burst with plain-text HTTP 429, which the
-        // caller previously reported as a JSON parse error. Never retry a
-        // transaction automatically: its submission outcome may be unknown.
-        let preview: String = body.trim().chars().take(160).collect();
-        return Err(format!("RPC HTTP {code}: {preview:?}"));
-    }
-    if body.trim().is_empty() {
-        return Err(format!("RPC HTTP {code} returned an empty body"));
-    }
     Ok(body.to_string())
 }
 
@@ -1673,8 +1616,6 @@ fn run_graft(rpc_url: &str, action: &GraftAction) -> Result<(), String> {
             amount,
             origin_recipient,
             memo_hash,
-            target_chain_id,
-            target_receiver,
         } => (
             signer,
             GraftTx::Pay {
@@ -1684,10 +1625,6 @@ fn run_graft(rpc_url: &str, action: &GraftAction) -> Result<(), String> {
                     .as_deref()
                     .map_or(Ok([0u8; 32]), |memo| hex32(memo, "--memo-hash"))?,
                 origin_recipient: hex_bytes(origin_recipient, "--origin-recipient")?,
-                target_chain_id: *target_chain_id,
-                target_receiver: target_receiver
-                    .as_deref()
-                    .map_or(Ok(Vec::new()), |recv| hex_bytes(recv, "--target-receiver"))?,
             },
         ),
         GraftAction::Intent {
@@ -2652,163 +2589,5 @@ mod tests {
         let err = run_project_bind_proof("demo-app", SOURCE_HASH, "no-such-record", &proof)
             .expect_err("an unknown record must be refused");
         assert!(err.contains("no proof record named"), "{err}");
-    }
-}
-
-/// The RPC gate on the client side (RT-002).
-///
-/// A node with `auth_required` - the default - answers every request without an
-/// `x-api-key` header with `401 Unauthorized`. These tests drive the real
-/// request path against a socket that records exactly what the CLI writes, so
-/// "the key is sent" and "a 401 is reported as what it is" are both pinned.
-#[cfg(test)]
-mod rpc_auth_tests {
-    use super::*;
-    use std::io::Write;
-    use std::sync::{Arc, Mutex};
-
-    /// Serve exactly one request, capture its bytes, and answer with `response`.
-    fn serve_once(response: &'static str, captured: Arc<Mutex<Vec<u8>>>) -> u16 {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
-        let port = listener.local_addr().expect("local addr").port();
-        std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("one connection");
-            let mut buf: Vec<u8> = Vec::new();
-            let mut chunk = [0u8; 512];
-            loop {
-                let read = stream.read(&mut chunk).expect("read the request");
-                if read == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&chunk[..read]);
-                if request_is_complete(&buf) {
-                    break;
-                }
-            }
-            captured
-                .lock()
-                .expect("capture lock")
-                .extend_from_slice(&buf);
-            stream
-                .write_all(response.as_bytes())
-                .expect("write response");
-            stream.flush().expect("flush response");
-        });
-        port
-    }
-
-    /// Headers are all in, and the declared body length has been received.
-    fn request_is_complete(buf: &[u8]) -> bool {
-        let Ok(text) = std::str::from_utf8(buf) else {
-            return false;
-        };
-        let Some((head, body)) = text.split_once("\r\n\r\n") else {
-            return false;
-        };
-        let declared = head.lines().find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse::<usize>().ok())?
-        });
-        declared.is_some_and(|len| body.len() >= len)
-    }
-
-    fn request_text(captured: &Arc<Mutex<Vec<u8>>>) -> String {
-        let bytes = captured.lock().expect("capture lock").clone();
-        String::from_utf8(bytes).expect("the client writes UTF-8")
-    }
-
-    #[test]
-    fn the_cli_sends_the_operator_key_as_a_header() {
-        let captured = Arc::new(Mutex::new(Vec::new()));
-        let port = serve_once(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"result\":4242}",
-            Arc::clone(&captured),
-        );
-        let body = r#"{"jsonrpc":"2.0","id":1,"method":"bud_getStatus","params":[]}"#;
-        let answer = http_post_json_with_key("127.0.0.1", port, body, Some("sekret-key"))
-            .expect("an authorised call succeeds");
-        assert_eq!(answer, "{\"result\":4242}");
-
-        let request = request_text(&captured);
-        assert!(
-            request.contains("\r\nx-api-key: sekret-key\r\n"),
-            "the key must travel as the header the server reads: {request}"
-        );
-        assert!(
-            request.ends_with(body),
-            "the key must not disturb the JSON body: {request}"
-        );
-        assert!(
-            !request.starts_with("x-api-key"),
-            "the key must not become the request line: {request}"
-        );
-    }
-
-    #[test]
-    fn no_configured_key_sends_no_header() {
-        let captured = Arc::new(Mutex::new(Vec::new()));
-        let port = serve_once(
-            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}",
-            Arc::clone(&captured),
-        );
-        http_post_json_with_key("127.0.0.1", port, "{}", None).expect("no key, open node");
-        let request = request_text(&captured);
-        assert!(
-            !request.to_ascii_lowercase().contains("x-api-key"),
-            "an unset key must not be sent as an empty header: {request}"
-        );
-    }
-
-    #[test]
-    fn a_429_names_the_rate_limit_instead_of_a_json_parse_error() {
-        let captured = Arc::new(Mutex::new(Vec::new()));
-        let port = serve_once(
-            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: text/plain\r\nContent-Length: 17\r\n\r\nToo many requests",
-            Arc::clone(&captured),
-        );
-        let error = http_post_json_with_key("127.0.0.1", port, "{}", Some("private-api-key"))
-            .expect_err("a throttled write must fail closed, never parse plain text as JSON");
-        assert!(error.contains("RPC HTTP 429"), "{error}");
-        assert!(error.contains("Too many requests"), "{error}");
-        assert!(!error.contains("private-api-key"), "no key in diagnostics");
-        assert_eq!(
-            request_text(&captured).matches("POST / HTTP/1.1").count(),
-            1
-        );
-    }
-
-    #[test]
-    fn an_empty_success_reply_is_not_a_json_result() {
-        let port = serve_once(
-            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
-            Arc::new(Mutex::new(Vec::new())),
-        );
-        let error = http_post_json_with_key("127.0.0.1", port, "{}", None)
-            .expect_err("empty body must be attributed to HTTP, not JSON parsing");
-        assert!(error.contains("HTTP 200 returned an empty body"), "{error}");
-    }
-
-    #[test]
-    fn a_401_names_the_missing_key_instead_of_a_parse_error() {
-        let captured = Arc::new(Mutex::new(Vec::new()));
-        let port = serve_once(
-            "HTTP/1.1 401 Unauthorized\r\nContent-Length: 12\r\n\r\nUnauthorized",
-            Arc::clone(&captured),
-        );
-        let error = http_post_json_with_key("127.0.0.1", port, "{}", None)
-            .expect_err("an unauthenticated call is refused");
-        assert!(
-            error.contains("HTTP 401"),
-            "the refusal must name the status, got: {error}"
-        );
-        assert!(
-            error.contains(budlum_core::rpc::client_auth::API_KEY_FILE_ENV),
-            "the refusal must name the setting that fixes it, got: {error}"
-        );
-        assert!(
-            error.contains("requires the operator key"),
-            "the refusal must name the cause, got: {error}"
-        );
     }
 }

@@ -109,7 +109,6 @@ updates:
       - "/crates/note-packing"
       - "/crates/wallet-core"
       - "/xtask/gates"
-      - "/xtask/release"
       - "/xtask/tools"
     schedule:
       interval: "weekly"

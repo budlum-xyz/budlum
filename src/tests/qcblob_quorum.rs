@@ -59,7 +59,7 @@ fn snapshot_3_validators(epoch: u64, keys: &[PqKeyPair]) -> ValidatorSetSnapshot
         .enumerate()
         .map(|(i, key)| ValidatorEntry {
             address: validator_address(i as u8),
-            stake: if i < 2 { 1_000_001 } else { 1_000_000 },
+            stake: 1_000_000,
             bls_public_key: Vec::new(),
             pop_signature: Vec::new(),
             pq_public_key: key.public_key_bytes().to_vec(),
@@ -99,7 +99,7 @@ fn chain_ready_for_checkpoint() -> (Blockchain, String, Vec<PqKeyPair>) {
     // validator set, so the current index moves off the derived epoch the
     // same way other fixtures pin it - the certificate rule above still
     // derives the epoch from the height, and the signatures still carry it.
-    bc.state.epoch_index = epoch + 1;
+    bc.state.epoch_index = epoch.wrapping_sub(1);
     bc.validator_snapshots
         .insert(epoch, snapshot_3_validators(epoch, &keys));
 
@@ -160,7 +160,7 @@ fn the_fixture_reaches_the_quorum_check_and_not_an_earlier_rejection() {
         .expect_err("one signature out of three must not be accepted");
 
     assert!(
-        err.contains("QcBlob quorum not met:"),
+        err.contains("unique verified signers"),
         "the fixture fails before the quorum check is reached: {err}"
     );
 }
@@ -173,7 +173,7 @@ fn import_qc_blob_rejects_empty_signature_set() {
         .import_qc_blob(blob_with_distinct_sigs(0, &hash, &keys))
         .expect_err("a blob with no signatures at all must be refused");
 
-    assert!(err.contains("QcBlob quorum not met:"), "got: {err}");
+    assert!(err.contains("unique verified signers"), "got: {err}");
     assert!(
         bc.get_qc_blob(CHECKPOINT_HEIGHT).is_none(),
         "a refused blob must not be stored"
@@ -190,7 +190,7 @@ fn import_qc_blob_rejects_below_quorum_signature_count() {
         .expect_err("one signature out of three is below quorum");
 
     assert!(
-        err.contains("QcBlob quorum not met: 1 signers (need 2), stake 1000001 (need 2000002)"),
+        err.contains("1 unique verified signers, need at least 2"),
         "got: {err}"
     );
     assert!(

@@ -1,20 +1,67 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
-// EIP-2537/Cancun+ target chains support EIP-3855 PUSH0 natively.
-// aderyn-fp-next-line(push-zero-opcode)
-pragma solidity 0.8.26;
+pragma solidity ^0.8.24;
 
 import {BudlumHash} from "../lib/BudlumHash.sol";
 import {BudlumOutboundEmitter} from "../lib/BudlumOutbound.sol";
 
 /// @title GraftExecutor
-/// @notice Executes an intent on this chain and emits the fulfilment log.
+/// @notice A solver makes the call a Budlum Graft intent asked for through
+///         this contract, with its own gas and value (
+///         8.5). The contract emits the fulfilment event Budlum's
+///         `GraftTx::Fulfill` door checks against the intent
+///         (src/settlement/graft.rs, `fulfilled_payload_hash`):
+///
+///         kind           budlum/graft/fulfilled/v1
+///         sender         this contract (the domain's named executor)
+///         correlation    the intent id
+///         payload hash   H("BDLM_GRAFT_FULFILLED_EVENT_V1", intent_id,
+///                        len, origin_app, call_hash, value, len,
+///                        beneficiary, solver)
+///
+///         `origin_app` is the 20-byte target, `call_hash` is
+///         keccak256(calldata), and `solver` is the solver's Budlum address.
+///         A call that fails reverts: no event, no settlement, and the
+///         solver keeps the risk it took by filling early.
+///
+///         The `solver` field is not a caller argument. The executing key on
+///         this chain and the receiving Budlum key are different keys, so the
+///         executor cannot verify a Budlum signature here and must not let a
+///         caller name a solver freely: an unclaimed field let a bonded
+///         relayer replay another solver's delivery under its own name, or
+///         emit an event naming a solver that never authorised it. Each
+///         origin-chain account binds one Budlum solver key once
+///         (`registerSolverKey`), the binding is immutable, and `execute`
+///         reads it - so a fulfilment is always attributable to the account
+///         that authorised the payout.
+///
+///         There is no owner, no pause and no upgrade path.
 contract GraftExecutor is BudlumOutboundEmitter {
     bytes internal constant FULFILLED_KIND = "budlum/graft/fulfilled/v1";
-    uint64 private constant EVM_ADDRESS_BYTE_LEN = 20;
-    uint256 private constant FULFILLED_PAYLOAD_FIELDS = 9;
-    uint256 private constant POST_CALL_GAS_RESERVE = 8_000;
 
+    /// One fulfilment per intent *per executing account*: a second call for the
+    /// same intent by the same account would be a second event it could try to
+    /// collect on.
+    ///
+    /// Scoped by `msg.sender`, never by the bound solver key. A global flag made
+    /// the id first-come-first-served, so any account could burn an intent id
+    /// with a cheap call and leave the real solver unable to fulfil. Keying the
+    /// slot by the solver key only moved that attack: [`registerSolverKey`] is
+    /// permissionless and proves nothing, so any account could bind the awarded
+    /// solver's Budlum address, `execute` the intent with its own harmless
+    /// target, and spend that solver's slot - the awarded solver then reverts
+    /// `AlreadyFulfilled` forever and cannot emit the event the settlement door
+    /// requires, so the deadline arrives and anyone may collect the liveness
+    /// slash of its bond. An account can only ever use up its own slot, and the
+    /// settlement door removes the intent on the first proven fulfilment, so
+    /// two accounts of one solver still cannot collect twice.
     mapping(bytes32 => mapping(address => bool)) public fulfilled;
+
+    /// The Budlum address an origin-chain account authors fulfilments for.
+    ///
+    /// Set once by [`registerSolverKey`] and never re-pointed: a bound account
+    /// that could move its binding could emit a fulfilment naming somebody
+    /// else's solver key, and the settlement door would have no way to tell
+    /// that apart from the solver itself.
     mapping(address => bytes32) public solverKey;
 
     event BudlumGraftFulfilled(
@@ -35,6 +82,11 @@ contract GraftExecutor is BudlumOutboundEmitter {
     error SolverKeyAlreadyBound(address account, bytes32 current);
     error SolverKeyIsZero();
 
+    /// @notice Bind this account to the Budlum solver address its fulfilments
+    ///         name. One-time, permissionless and free: binding costs a
+    ///         transaction, not a deposit, and a wrong binding costs the
+    ///         account every settlement it would have earned.
+    /// @param budlumSolver The solver's Budlum address.
     function registerSolverKey(bytes32 budlumSolver) external {
         if (budlumSolver == bytes32(0)) {
             revert SolverKeyIsZero();
@@ -47,15 +99,20 @@ contract GraftExecutor is BudlumOutboundEmitter {
         emit SolverKeyRegistered(msg.sender, budlumSolver);
     }
 
+    /// @notice Make the call for `intentId` and emit the fulfilment.
+    /// @param intentId The Budlum intent id.
+    /// @param target The origin application (the Graft row's `origin_app`).
+    /// @param data The call data; its keccak256 is the intent's `call_hash`.
+    /// @param beneficiary The intent's `origin_beneficiary` bytes.
     function execute(
         bytes32 intentId,
         address target,
         bytes calldata data,
         bytes calldata beneficiary
     ) external payable returns (bytes memory result) {
-        if (msg.sender == address(0) || target == address(0)) {
-            revert CallFailed(intentId, "invalid address");
-        }
+        // The solver this fulfilment pays is the caller's binding, never a
+        // caller-supplied argument: the executor cannot authenticate a Budlum
+        // address, so it must not accept one it was merely told about.
         bytes32 budlumSolver = solverKey[msg.sender];
         if (budlumSolver == bytes32(0)) {
             revert SolverKeyNotBound(msg.sender);
@@ -66,17 +123,14 @@ contract GraftExecutor is BudlumOutboundEmitter {
         if (msg.value > type(uint64).max) {
             revert ValueTooLarge(msg.value);
         }
+        // A call to an address with no code "succeeds" and proves nothing, and
+        // it is what a griefer would use to burn an id cheaply.
         if (target.code.length == 0) {
             revert CallFailed(intentId, "target has no code");
         }
-        uint256 availableGas = gasleft();
-        if (availableGas <= POST_CALL_GAS_RESERVE) {
-            revert CallFailed(intentId, "insufficient gas");
-        }
         fulfilled[intentId][msg.sender] = true;
-        uint256 callGas = availableGas - POST_CALL_GAS_RESERVE;
         bool ok;
-        (ok, result) = target.call{gas: callGas, value: msg.value}(data);
+        (ok, result) = target.call{value: msg.value}(data);
         if (!ok) {
             revert CallFailed(intentId, result);
         }
@@ -101,6 +155,7 @@ contract GraftExecutor is BudlumOutboundEmitter {
         );
     }
 
+    /// @notice `fulfilled_payload_hash` of src/settlement/graft.rs.
     function fulfilledPayloadHash(
         bytes32 intentId,
         address target,
@@ -109,34 +164,35 @@ contract GraftExecutor is BudlumOutboundEmitter {
         bytes memory beneficiary,
         bytes32 budlumSolver
     ) public pure returns (bytes32) {
-        bytes[] memory fields = new bytes[](FULFILLED_PAYLOAD_FIELDS);
+        bytes[] memory fields = new bytes[](9);
         fields[0] = "BDLM_GRAFT_FULFILLED_EVENT_V1";
-        fields[1] = bytes.concat(intentId);
-        fields[2] = BudlumHash.le64(EVM_ADDRESS_BYTE_LEN);
-        fields[3] = bytes.concat(bytes20(target));
-        fields[4] = bytes.concat(callHash);
+        fields[1] = abi.encodePacked(intentId);
+        fields[2] = BudlumHash.le64(20);
+        fields[3] = abi.encodePacked(target);
+        fields[4] = abi.encodePacked(callHash);
         fields[5] = BudlumHash.le64(value);
         fields[6] = BudlumHash.le64(uint64(beneficiary.length));
         fields[7] = beneficiary;
-        fields[8] = bytes.concat(budlumSolver);
+        fields[8] = abi.encodePacked(budlumSolver);
         return BudlumHash.hashFields(fields);
     }
 }
 
 /// @title BudlumGraftClaimer
-/// @notice What an origin application inherits to name its Budlum payout (`GraftTx::Claim`).
+/// @notice What an origin application inherits to name its Budlum payout
+///         (`GraftTx::Claim`). The application decides who may call
+///         `_claimBudlumPayout`; the event is the application's own word.
 abstract contract BudlumGraftClaimer is BudlumOutboundEmitter {
     bytes internal constant CLAIM_KIND = "budlum/graft/claim/v1";
-    uint256 private constant GRAFT_APP_FIELDS = 4;
-    uint256 private constant CLAIM_PAYLOAD_FIELDS = 3;
-    uint256 private constant U32_BYTE_LEN = 4;
-    uint256 private constant BITS_PER_BYTE = 8;
 
+    /// readable form of the claim.
     event BudlumGraftClaim(bytes32 indexed graftId, bytes32 payout);
 
+    /// @notice `graft_id` of src/settlement/graft.rs for this application on
+    ///         the Budlum domain `domainKey`.
     function budlumGraftId(uint32 domainKey) public view returns (bytes32) {
-        bytes memory origin = bytes.concat(bytes20(address(this)));
-        bytes[] memory fields = new bytes[](GRAFT_APP_FIELDS);
+        bytes memory origin = abi.encodePacked(address(this));
+        bytes[] memory fields = new bytes[](4);
         fields[0] = "BDLM_GRAFT_APP_V1";
         fields[1] = _le32(domainKey);
         fields[2] = BudlumHash.le64(uint64(origin.length));
@@ -144,11 +200,12 @@ abstract contract BudlumGraftClaimer is BudlumOutboundEmitter {
         return BudlumHash.hashFields(fields);
     }
 
+    /// @notice `claim_payload_hash` of src/settlement/graft.rs.
     function claimPayloadHash(bytes32 graftId, bytes32 payout) public pure returns (bytes32) {
-        bytes[] memory fields = new bytes[](CLAIM_PAYLOAD_FIELDS);
+        bytes[] memory fields = new bytes[](3);
         fields[0] = "BDLM_GRAFT_CLAIM_EVENT_V1";
-        fields[1] = bytes.concat(graftId);
-        fields[2] = bytes.concat(payout);
+        fields[1] = abi.encodePacked(graftId);
+        fields[2] = abi.encodePacked(payout);
         return BudlumHash.hashFields(fields);
     }
 
@@ -159,9 +216,9 @@ abstract contract BudlumGraftClaimer is BudlumOutboundEmitter {
     }
 
     function _le32(uint32 value) private pure returns (bytes memory out) {
-        out = new bytes(U32_BYTE_LEN);
-        for (uint256 i = 0; i < U32_BYTE_LEN; i++) {
-            out[i] = bytes1(uint8(value >> (BITS_PER_BYTE * i)));
+        out = new bytes(4);
+        for (uint256 i = 0; i < 4; i++) {
+            out[i] = bytes1(uint8(value >> (8 * i)));
         }
     }
 }

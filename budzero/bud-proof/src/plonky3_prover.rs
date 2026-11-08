@@ -131,7 +131,6 @@ fn build_config() -> MyConfig {
         // provable (no assumption) over the cubic extension with the grinding below.
         // Change it only together with `docs/pq/MEASUREMENTS.md`.
         num_queries: 76,
-        batch_proof_of_work_bits: 0,
         commit_proof_of_work_bits: 16,
         query_proof_of_work_bits: 16,
         mmcs: challenge_mmcs,
@@ -146,7 +145,6 @@ fn build_config() -> MyConfig {
         fri_params.max_log_arity as u64,
         fri_params.log_final_poly_len as u64,
         fri_params.num_queries as u64,
-        fri_params.batch_proof_of_work_bits as u64,
         fri_params.commit_proof_of_work_bits as u64,
         fri_params.query_proof_of_work_bits as u64,
     ];
@@ -10433,7 +10431,7 @@ mod tests {
     fn zk_flag_is_pinned() {
         const {
             assert!(
-                !<MyPcs as p3_commit::UnivariateStarkPcs<MyExtensionField, MyChallenger>>::ZK,
+                !<MyPcs as p3_commit::Pcs<MyExtensionField, MyChallenger>>::ZK,
                 "the proof system PCS now claims ZK. Budlum's docs and the \
                  bud_stark prover both state that these proofs do not hide the \
                  witness; update that story before pinning the new value here."

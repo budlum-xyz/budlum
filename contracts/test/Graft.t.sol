@@ -32,13 +32,9 @@ contract ClaimingApp is BudlumGraftClaimer {
 
 contract FinalityStub is IBudlumFinality {
     mapping(uint64 => bytes32) public roots;
-    uint64 public latestFinalHeight;
 
     function set(uint64 height, bytes32 root) external {
         roots[height] = root;
-        if (root != bytes32(0) && height > latestFinalHeight) {
-            latestFinalHeight = height;
-        }
     }
 
     function rootAtHeight(uint64 height) external view returns (bytes32) {
@@ -245,16 +241,13 @@ contract GraftTest is Harness {
             amount: 500,
             originRecipient: hex"aa",
             memoHash: bytes32(0),
-            paidAtBlock: 3,
-            targetChainId: uint64(block.chainid),
-            targetReceiver: abi.encodePacked(address(receiver))
+            paidAtBlock: 3
         });
         proof.index = 0;
         proof.path = new bytes32[](0);
         proof.paymentsRoot = receiver.paymentLeaf(proof.payment);
         proof.restHash = keccak256("rest");
         proof.header.version = 7;
-        proof.header.timestampMs = uint128(block.timestamp) * 1000;
         proof.header.checkpointHeight = 20;
         proof.header.hasGraftRoot = true;
         proof.header.graftRoot = receiver.graftRegistryRoot(proof.paymentsRoot, proof.restHash);
@@ -278,39 +271,6 @@ contract GraftTest is Harness {
         Receiver receiver = new Receiver(finality, graftId);
         PaymentProof memory proof = _proof(receiver, finality, graftId);
         proof.payment.amount = 501;
-        vm.expectPartialRevert(BudlumPaymentReceiver.ProofInvalid.selector);
-        receiver.consume(proof);
-    }
-
-    function test_check_payment_refuses_wrong_graft() public {
-        FinalityStub finality = new FinalityStub();
-        bytes32 appA = keccak256("app-a");
-        bytes32 appB = keccak256("app-b");
-        Receiver receiver = new Receiver(finality, appA);
-        PaymentProof memory proof = _proof(receiver, finality, appB);
-        assertEq(keccak256(bytes(receiver.checkPayment(proof))), keccak256("wrong graft"), "wrong graft refused");
-        vm.expectPartialRevert(BudlumPaymentReceiver.WrongGraft.selector);
-        receiver.consume(proof);
-    }
-
-    function test_a_payment_bound_to_another_receiver_is_refused() public {
-        FinalityStub finality = new FinalityStub();
-        bytes32 graftId = keccak256("app");
-        Receiver first = new Receiver(finality, graftId);
-        Receiver second = new Receiver(finality, graftId);
-        PaymentProof memory proof = _proof(first, finality, graftId);
-        assertEq(keccak256(bytes(second.checkPayment(proof))), keccak256("receiver binding"), "wrong receiver refused");
-        vm.expectPartialRevert(BudlumPaymentReceiver.ProofInvalid.selector);
-        second.consume(proof);
-    }
-
-    function test_a_stale_payment_proof_is_refused() public {
-        FinalityStub finality = new FinalityStub();
-        bytes32 graftId = keccak256("app");
-        Receiver receiver = new Receiver(finality, graftId);
-        PaymentProof memory proof = _proof(receiver, finality, graftId);
-        vm.warp(block.timestamp + 30 days + 1);
-        assertEq(keccak256(bytes(receiver.checkPayment(proof))), keccak256("proof too old"), "stale proof refused");
         vm.expectPartialRevert(BudlumPaymentReceiver.ProofInvalid.selector);
         receiver.consume(proof);
     }

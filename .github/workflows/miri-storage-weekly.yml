@@ -38,37 +38,19 @@ jobs:
       - name: Install pinned nightly Rust with Miri
         run: |
           rustup toolchain install nightly-2026-07-19 --component miri
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: miri-storage-weekly-${{ matrix.shard_index }}
           cache-on-failure: true
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Miri storage shard ${{ matrix.shard_index }} of 24
         run: |
           set -euo pipefail
           shard='${{ matrix.shard_index }}'
           shards=24
           echo "Enumerating storage tests for shard $shard/$shards..."
-          cargo +nightly-2026-07-19 test -p budlum-core --lib -- storage --list \
+          cargo +nightly-2026-07-19 miri test -p budlum-core --lib -- storage --list \
             2>&1 | tee /tmp/miri-storage-list.txt
           mapfile -t tests < <(sed -n 's/: test$//p' /tmp/miri-storage-list.txt)
           total_listed=${#tests[@]}
@@ -120,10 +102,6 @@ jobs:
             a_newer_schema_version_refuses_to_open
             with_storage_refuses_unreadable_accounts
             nft_burn_prunes_matching_storage_manifest_on_produce
-            a_storage_registry_row_from_before_the_tag_still_loads
-            pruning_witnesses_keeps_the_block_hash_and_happens_once
-            qc_blob_binary_storage_and_legacy_bincode_are_readable
-            qc_blob_storage_rejects_corruption_and_cross_height_rows
           )
 
           # Pass the selected tests as exact libtest filters. The previous

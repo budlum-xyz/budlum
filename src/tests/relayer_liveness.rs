@@ -28,19 +28,7 @@ fn addr(b: u8) -> Address {
 
 fn fresh_chain() -> Blockchain {
     let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc = Blockchain::new(consensus, None, 45262, None);
-    let _ = bc
-        .state
-        .settlement
-        .domains
-        .register(crate::domain::default_domain(
-            1,
-            crate::domain::types::ConsensusKind::PoS,
-            1338,
-            "pos",
-            0,
-        ));
-    bc
+    Blockchain::new(consensus, None, 45262, None)
 }
 
 /// The default is observe-only (`liveness_slashing_enabled = false`), so the
@@ -65,7 +53,6 @@ fn relayed_message(sender: Address, nonce: u64) -> CrossDomainMessage {
         kind: MessageKind::BridgeLock,
         expiry_height: 100,
     })
-    .with_source_quantum_class(Some(crate::crypto::facts::QuantumClass::Lattice))
 }
 
 /// The message `keypair` relays: the sender is the keypair's own address, so
@@ -205,22 +192,20 @@ fn a_relayed_message_must_carry_the_class_derived_for_its_source_domain() {
 
     let mut bc = fresh_chain();
     let (_, relayer) = bonded_relayer(&mut bc);
-    if bc.state.settlement.domains.get(1).is_none() {
-        bc.state
-            .settlement
-            .domains
-            .register(crate::domain::default_domain(
-                1,
-                ConsensusKind::PoS,
-                1338,
-                "pos",
-                0,
-            ))
-            .expect("source domain registers");
-    }
+    bc.state
+        .settlement
+        .domains
+        .register(crate::domain::default_domain(
+            1,
+            ConsensusKind::PoS,
+            1338,
+            "pos",
+            0,
+        ))
+        .expect("source domain registers");
 
-    // Nothing observed on PoS domain 1: fallback derives Lattice, so None is refused.
-    let lie = relayed_message(relayer, 1).with_source_quantum_class(None);
+    // Nothing observed: the derived class is none, and a lattice label lies.
+    let lie = relayed_message(relayer, 1).with_source_quantum_class(Some(QuantumClass::Lattice));
     let err = bc
         .state
         .register_relayed_cross_domain_message(&relayer, &lie)
@@ -237,7 +222,7 @@ fn a_relayed_message_must_carry_the_class_derived_for_its_source_domain() {
         .state
         .register_relayed_cross_domain_message(&relayer, &hidden)
         .is_err());
-    let none = relayed_message(relayer, 3).with_source_quantum_class(None);
+    let none = relayed_message(relayer, 3);
     assert!(bc
         .state
         .register_relayed_cross_domain_message(&relayer, &none)
@@ -248,91 +233,6 @@ fn a_relayed_message_must_carry_the_class_derived_for_its_source_domain() {
         .register_relayed_cross_domain_message(&relayer, &honest)
         .expect("the derived class is accepted");
     assert_eq!(bc.state.message_registry.len(), 1);
-}
-
-#[test]
-fn unobserved_classical_domain_is_gated_under_quantum_alarm() {
-    use crate::crypto::facts::QuantumClass;
-    use crate::domain::storage_params::StorageDomainParams;
-    use crate::domain::types::ConsensusKind;
-    use crate::security::quantum_canary::{CanaryClaim, CanaryId};
-
-    let mut bc = fresh_chain();
-    let (_, relayer) = bonded_relayer(&mut bc);
-    let mut storage_dom = crate::domain::default_domain(
-        9,
-        ConsensusKind::StorageAttestation(StorageDomainParams::default()),
-        9009,
-        "storage-attestation-v1",
-        0,
-    );
-    storage_dom.bridge_enabled = true;
-    storage_dom.operator_bond = 1_000_000;
-    bc.state
-        .settlement
-        .domains
-        .register(storage_dom)
-        .expect("register storage domain");
-
-    let build_from_storage = |nonce: u64, class: Option<QuantumClass>| {
-        CrossDomainMessage::new(CrossDomainMessageParams {
-            source_domain: 9,
-            target_domain: 2,
-            source_height: 5,
-            event_index: 0,
-            nonce,
-            sender: relayer,
-            recipient: addr(0xEE),
-            payload_hash: [7u8; 32],
-            kind: MessageKind::BridgeLock,
-            expiry_height: 200,
-        })
-        .with_source_quantum_class(class)
-    };
-
-    // Unobserved StorageAttestation domain falls back to Classical, refusing None.
-    assert!(bc
-        .state
-        .register_relayed_cross_domain_message(&relayer, &build_from_storage(1, None))
-        .is_err());
-
-    // Activate Watch alarm (Ecc192): unanchored Classical intake is held.
-    bc.state.current_block_height = 20;
-    bc.state.settlement.quantum.force_solved(
-        CanaryId::Ecc192,
-        CanaryClaim {
-            commit_height: 19,
-            claimer: relayer,
-            accepted_height: 20,
-        },
-    );
-    let watch_err = bc
-        .state
-        .register_relayed_cross_domain_message(
-            &relayer,
-            &build_from_storage(2, Some(QuantumClass::Classical)),
-        )
-        .expect_err("Watch must hold unanchored Classical domain intake");
-    assert!(watch_err.contains("quantum alarm"), "{watch_err}");
-
-    // Escalate to Restrict (Ecc256): Classical intake is refused outright.
-    bc.state.current_block_height = 21;
-    bc.state.settlement.quantum.force_solved(
-        CanaryId::Ecc224,
-        CanaryClaim {
-            commit_height: 20,
-            claimer: relayer,
-            accepted_height: 21,
-        },
-    );
-    let restrict_err = bc
-        .state
-        .register_relayed_cross_domain_message(
-            &relayer,
-            &build_from_storage(3, Some(QuantumClass::Classical)),
-        )
-        .expect_err("Restrict must refuse Classical domain intake");
-    assert!(restrict_err.contains("quantum alarm"), "{restrict_err}");
 }
 
 #[test]

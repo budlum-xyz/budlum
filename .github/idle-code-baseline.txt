@@ -1420,7 +1420,9 @@ src/domain/storage_deal.rs	fn	live_shard_count
 src/domain/storage_deal.rs	fn	may_hold_primary
 src/domain/storage_deal.rs	fn	permanence_floor
 src/domain/storage_deal.rs	fn	renew_deal
+src/domain/storage_deal.rs	fn	required_opener_bond
 src/domain/storage_deal.rs	fn	required_replicas_for
+src/domain/storage_deal.rs	fn	storage_challenge_proofs_are_checkable
 src/domain/storage_deal.rs	fn	storage_deal_leaf_hash
 src/domain/storage_deal.rs	fn	validate_merkle_proof_format
 src/domain/storage_deal.rs	fn	validate_shard_membership

@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
-// EIP-2537/Cancun+ target chains support EIP-3855 PUSH0 natively.
-// aderyn-fp-next-line(push-zero-opcode)
-pragma solidity 0.8.26;
+pragma solidity ^0.8.24;
 
-import {IBudlumFinality} from "../external-domain/BudlumFinalityVerifier.sol";
 import {BudlumHash} from "../lib/BudlumHash.sol";
+
+/// @notice The part of `BudlumFinalityVerifier` a receiver reads.
+interface IBudlumFinality {
+    function rootAtHeight(uint64 height) external view returns (bytes32);
+    function heightFinal(uint64 height) external view returns (bool);
+}
 
 /// @notice A Budlum Graft payment as `GraftPayment` (src/settlement/graft.rs).
 struct GraftPayment {
@@ -16,11 +19,10 @@ struct GraftPayment {
     bytes originRecipient;
     bytes32 memoHash;
     uint64 paidAtBlock;
-    uint64 targetChainId;
-    bytes targetReceiver;
 }
 
-/// @notice A Budlum checkpoint header (`GlobalBlockHeader`, V7).
+/// @notice A Budlum checkpoint header (`GlobalBlockHeader`, V7). Optional
+///         roots carry a presence flag, as the Budlum preimage tags them.
 struct GlobalHeader {
     uint16 version;
     uint64 globalHeight;
@@ -32,6 +34,7 @@ struct GlobalHeader {
     bytes32 messageRoot;
     bytes32 bridgeStateRoot;
     bytes32 replayNonceRoot;
+    /// 32 bytes, or empty when the header has no proposer.
     bytes proposer;
     bytes32 settlementFinalityRoot;
     bool hasStorageRoot;
@@ -61,19 +64,18 @@ struct PaymentProof {
 }
 
 /// @title BudlumPaymentReceiver
-/// @notice On-chain check of a Budlum Graft payment (8.5, level 1 in a contract).
+/// @notice On-chain check of a Budlum Graft payment (8.5,
+///         level 1 in a contract). The chain checked is the one
+///         `verify_graft_payment` checks in Rust:
+///
+///         finalized Budlum state root (from BudlumFinalityVerifier)
+///           = H("BDLM_STATE_ROOT_GLOBAL_HEADER_V1", body, header hash)
+///         header.graft_root = H("BDLM_GRAFT_REGISTRY_V2", payments_root, rest)
+///         payment leaf --path--> payments_root
+///
+///         An application inherits it and calls `_consumePayment`, which
+///         refuses a payment for another Graft row and a payment used once.
 abstract contract BudlumPaymentReceiver {
-    uint256 private constant PAYMENT_LEAF_FIELDS = 13;
-    uint256 private constant OPENING_TRIPLE_FIELDS = 3;
-    uint256 private constant HEADER_V7_FIELDS = 20;
-    uint256 private constant U128_BYTE_LEN = 16;
-    uint256 private constant EVM_ADDRESS_BYTE_LEN = 20;
-    uint256 private constant BITS_PER_BYTE = 8;
-    uint64 private constant MAX_PAYMENT_WINDOW_BLOCKS = 1e4;
-    uint256 private constant MAX_PROOF_AGE_SECONDS = 30 days;
-    uint8 private constant TAG_ABSENT = 0;
-    uint8 private constant TAG_PRESENT = 1;
-
     IBudlumFinality public immutable finality;
     bytes32 public immutable graftId;
 
@@ -108,10 +110,9 @@ abstract contract BudlumPaymentReceiver {
         return proof.payment;
     }
 
+    /// @notice The first link of the proof that does not hold, or "" when
+    ///         every link holds.
     function checkPayment(PaymentProof calldata proof) public view returns (string memory) {
-        if (proof.payment.graftId != graftId) {
-            return "wrong graft";
-        }
         (bool fits, bytes32 window) =
             BudlumHash.rootFromProof(paymentLeaf(proof.payment), proof.index, proof.path);
         if (!fits || window != proof.paymentsRoot) {
@@ -121,32 +122,9 @@ abstract contract BudlumPaymentReceiver {
             || proof.header.graftRoot != graftRegistryRoot(proof.paymentsRoot, proof.restHash)) {
             return "graft root opening";
         }
-        // Consensus-committed deployment binding: targetChainId and
-        // targetReceiver live in GraftTx::Pay and BDLM_GRAFT_PAYMENT_LEAF_V1.
-        if (uint256(proof.payment.targetChainId) != block.chainid
-            || proof.payment.targetReceiver.length != EVM_ADDRESS_BYTE_LEN
-            || address(bytes20(proof.payment.targetReceiver)) != address(this))
-        {
-            return "receiver binding";
-        }
-        if (proof.header.checkpointHeight < proof.payment.paidAtBlock
-            || proof.header.checkpointHeight - proof.payment.paidAtBlock > MAX_PAYMENT_WINDOW_BLOCKS)
-        {
-            return "payment window";
-        }
-        // The finality mappings are append-only, so without an age bound a
-        // stored proof stays redeemable after the payment has left the window.
-        uint256 headerSeconds = uint256(proof.header.timestampMs) / 1000;
-        if (headerSeconds > block.timestamp || block.timestamp - headerSeconds > MAX_PROOF_AGE_SECONDS) {
-            return "proof too old";
-        }
         uint64 height = proof.header.checkpointHeight;
         if (!finality.heightFinal(height)) {
             return "checkpoint not final";
-        }
-        uint64 latest = finality.latestFinalHeight();
-        if (latest < height || (latest > proof.payment.paidAtBlock && latest - proof.payment.paidAtBlock > MAX_PAYMENT_WINDOW_BLOCKS)) {
-            return "proof too old";
         }
         bytes32 stateRoot = stateRootFromOpening(proof.stateRootBody, headerHash(proof.header));
         if (finality.rootAtHeight(height) != stateRoot) {
@@ -155,58 +133,59 @@ abstract contract BudlumPaymentReceiver {
         return "";
     }
 
+    /// @notice `GraftPayment::leaf_hash`.
     function paymentLeaf(GraftPayment calldata p) public pure returns (bytes32) {
-        bytes[] memory fields = new bytes[](PAYMENT_LEAF_FIELDS);
+        bytes[] memory fields = new bytes[](10);
         fields[0] = "BDLM_GRAFT_PAYMENT_LEAF_V1";
-        fields[1] = bytes.concat(p.paymentId);
-        fields[2] = bytes.concat(p.graftId);
-        fields[3] = bytes.concat(p.payer);
-        fields[4] = bytes.concat(p.recipient);
+        fields[1] = abi.encodePacked(p.paymentId);
+        fields[2] = abi.encodePacked(p.graftId);
+        fields[3] = abi.encodePacked(p.payer);
+        fields[4] = abi.encodePacked(p.recipient);
         fields[5] = BudlumHash.le64(p.amount);
         fields[6] = BudlumHash.le64(uint64(p.originRecipient.length));
         fields[7] = p.originRecipient;
-        fields[8] = bytes.concat(p.memoHash);
+        fields[8] = abi.encodePacked(p.memoHash);
         fields[9] = BudlumHash.le64(p.paidAtBlock);
-        fields[10] = BudlumHash.le64(p.targetChainId);
-        fields[11] = BudlumHash.le64(uint64(p.targetReceiver.length));
-        fields[12] = p.targetReceiver;
         return BudlumHash.hashFields(fields);
     }
 
+    /// @notice `GraftRootOpening::root`.
     function graftRegistryRoot(bytes32 paymentsRoot, bytes32 restHash) public pure returns (bytes32) {
-        bytes[] memory fields = new bytes[](OPENING_TRIPLE_FIELDS);
+        bytes[] memory fields = new bytes[](3);
         fields[0] = "BDLM_GRAFT_REGISTRY_V2";
-        fields[1] = bytes.concat(paymentsRoot);
-        fields[2] = bytes.concat(restHash);
+        fields[1] = abi.encodePacked(paymentsRoot);
+        fields[2] = abi.encodePacked(restHash);
         return BudlumHash.hashFields(fields);
     }
 
+    /// @notice `AccountState::root_from_opening`.
     function stateRootFromOpening(bytes32 body, bytes32 summary) public pure returns (bytes32) {
         if (summary == bytes32(0)) {
             return body;
         }
-        bytes[] memory fields = new bytes[](OPENING_TRIPLE_FIELDS);
+        bytes[] memory fields = new bytes[](3);
         fields[0] = "BDLM_STATE_ROOT_GLOBAL_HEADER_V1";
-        fields[1] = bytes.concat(body);
-        fields[2] = bytes.concat(summary);
+        fields[1] = abi.encodePacked(body);
+        fields[2] = abi.encodePacked(summary);
         return BudlumHash.hashFields(fields);
     }
 
+    /// @notice `GlobalBlockHeader::calculate_hash_bytes` (V7).
     function headerHash(GlobalHeader calldata h) public pure returns (bytes32) {
-        bytes[] memory fields = new bytes[](HEADER_V7_FIELDS);
+        bytes[] memory fields = new bytes[](20);
         fields[0] = "BDLM_GLOBAL_BLOCK_V7";
         fields[1] = _le16(h.version);
         fields[2] = BudlumHash.le64(h.globalHeight);
-        fields[3] = bytes.concat(h.previousGlobalHash);
+        fields[3] = abi.encodePacked(h.previousGlobalHash);
         fields[4] = BudlumHash.le64(h.chainId);
         fields[5] = _le128(h.timestampMs);
-        fields[6] = bytes.concat(h.domainRegistryRoot);
-        fields[7] = bytes.concat(h.domainCommitmentRoot);
-        fields[8] = bytes.concat(h.messageRoot);
-        fields[9] = bytes.concat(h.bridgeStateRoot);
-        fields[10] = bytes.concat(h.replayNonceRoot);
+        fields[6] = abi.encodePacked(h.domainRegistryRoot);
+        fields[7] = abi.encodePacked(h.domainCommitmentRoot);
+        fields[8] = abi.encodePacked(h.messageRoot);
+        fields[9] = abi.encodePacked(h.bridgeStateRoot);
+        fields[10] = abi.encodePacked(h.replayNonceRoot);
         fields[11] = h.proposer;
-        fields[12] = bytes.concat(h.settlementFinalityRoot);
+        fields[12] = abi.encodePacked(h.settlementFinalityRoot);
         fields[13] = _tagged(h.hasStorageRoot, h.storageRoot);
         fields[14] = _tagged(h.hasAiRoot, h.aiRoot);
         fields[15] = _tagged(h.hasIdentityRoot, h.identityRoot);
@@ -217,18 +196,19 @@ abstract contract BudlumPaymentReceiver {
         return BudlumHash.hashFields(fields);
     }
 
+    /// `presence_tagged`: one presence byte, then the root or zeros.
     function _tagged(bool present, bytes32 root) private pure returns (bytes memory) {
-        return present ? bytes.concat(bytes1(TAG_PRESENT), root) : bytes.concat(bytes1(TAG_ABSENT), bytes32(0));
+        return present ? abi.encodePacked(uint8(1), root) : abi.encodePacked(uint8(0), bytes32(0));
     }
 
     function _le16(uint16 value) private pure returns (bytes memory) {
-        return bytes.concat(bytes1(uint8(value)), bytes1(uint8(value >> BITS_PER_BYTE)));
+        return abi.encodePacked(uint8(value), uint8(value >> 8));
     }
 
     function _le128(uint128 value) private pure returns (bytes memory out) {
-        out = new bytes(U128_BYTE_LEN);
-        for (uint256 i = 0; i < U128_BYTE_LEN; i++) {
-            out[i] = bytes1(uint8(value >> (BITS_PER_BYTE * i)));
+        out = new bytes(16);
+        for (uint256 i = 0; i < 16; i++) {
+            out[i] = bytes1(uint8(value >> (8 * i)));
         }
     }
 }
