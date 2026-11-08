@@ -84,6 +84,7 @@ pub mod evm_hybrid;
 pub mod external_tx;
 pub mod intake;
 pub mod intake_quorum;
+pub mod phase_a_dual;
 pub mod profile;
 pub mod prover;
 pub mod quorum;
