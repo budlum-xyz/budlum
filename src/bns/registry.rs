@@ -134,7 +134,7 @@ impl BnsRegistry {
         let expires_at = current_epoch
             .checked_add(duration)
             .ok_or(BnsError::InvalidName)?;
-        let record = NameRecord::new(name.clone(), owner, expires_at);
+        let record = NameRecord::try_new(name.clone(), owner, current_epoch, expires_at)?;
         self.names.insert(name, record);
         Ok(())
     }
@@ -510,5 +510,32 @@ mod tests {
         d.register("alice.bud".into(), owner, 1, 10).unwrap();
         d.register("bob.bud".into(), owner, 1, 10).unwrap();
         assert_ne!(c.root(), d.root(), "the name count is committed");
+    }
+
+    #[test]
+    fn bns_default_matches_new_base_cost_and_root() {
+        let from_default = BnsRegistry::default();
+        let from_new = BnsRegistry::new();
+        assert_eq!(from_default.base_cost, 100);
+        assert_eq!(from_default.base_cost, from_new.base_cost);
+        assert_eq!(from_default.root(), from_new.root());
+    }
+
+    #[test]
+    fn bns_resolves_bud3_content() {
+        let owner = Address::from([0x31; 32]);
+        let stranger = Address::from([0x32; 32]);
+        let bud3_cid = crate::storage::bud3::content_id::ContentId::public(b"site-index-html");
+        let cid = ContentId(bud3_cid.digest);
+
+        let mut reg = BnsRegistry::new();
+        reg.register("portal.bud".into(), owner, 1, 10).unwrap();
+        assert_eq!(
+            reg.set_content("portal.bud", &stranger, cid, 2),
+            Err(BnsError::NotOwner)
+        );
+        reg.set_content("portal.bud", &owner, cid, 2).unwrap();
+        assert_eq!(reg.resolve_content("portal.bud", 5), Some(cid));
+        assert_eq!(reg.resolve_content("portal.bud", 11), None);
     }
 }

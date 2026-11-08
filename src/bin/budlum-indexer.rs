@@ -9,9 +9,10 @@
 //! What the index holds (history the node does not keep in a queryable
 //! form): blocks by height and hash, transactions by hash, every address's
 //! transactions, and each block producer's record (blocks produced, first and
-//! last height). Current-state reads (domains, global headers, BNS names,
-//! B.U.D. manifests) are answered from the node, so they are never stale
-//! copies. The contract is `docs/explorer-api.openapi.yaml`.
+//! last height). Current-state reads (domains, global headers and BNS names)
+//! are answered from the node, so they are never stale copies. The legacy
+//! manifest route is retired until the explorer moves to B.U.D. 3.0 objects.
+//! The contract is `docs/explorer-api.openapi.yaml`.
 //!
 //! # Usage
 //!
@@ -542,7 +543,6 @@ fn node_backed(parts: &[&str]) -> bool {
             | ["v1", "external-domains"]
             | ["v1", "global-headers", _]
             | ["v1", "bns", _]
-            | ["v1", "manifests", _]
     )
 }
 
@@ -624,9 +624,12 @@ async fn route(
         ["v1", "bns", name] => {
             from_node(node, "bud_bnsResolveFull", serde_json::json!([name])).await
         }
-        ["v1", "manifests", id] => {
-            from_node(node, "bud_storageGetManifest", serde_json::json!([id])).await
-        }
+        ["v1", "manifests", _] => json_response(
+            StatusCode::GONE,
+            &serde_json::json!({
+                "error": "legacy manifests are retired; no B.U.D. 3.0 explorer object route is exposed yet"
+            }),
+        ),
         _ => json_response(
             StatusCode::NOT_FOUND,
             &serde_json::json!({"error": "unknown path; see docs/explorer-api.openapi.yaml"}),
@@ -826,7 +829,6 @@ mod tests {
             vec!["v1", "external-domains"],
             vec!["v1", "global-headers", "12"],
             vec!["v1", "bns", "alice"],
-            vec!["v1", "manifests", "abc"],
         ] {
             assert!(node_backed(&parts), "{parts:?} answers from the node");
         }
@@ -837,8 +839,9 @@ mod tests {
             vec!["v1", "txs", "abc"],
             vec!["v1", "addresses", "aa", "txs"],
             vec!["v1", "producers"],
+            vec!["v1", "manifests", "abc"],
         ] {
-            assert!(!node_backed(&parts), "{parts:?} answers from the index");
+            assert!(!node_backed(&parts), "{parts:?} must not call the node");
         }
     }
 

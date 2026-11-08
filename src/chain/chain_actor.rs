@@ -4,7 +4,7 @@ use crate::consensus::qc::{QcBlob, QcFaultProof};
 use crate::core::address::Address;
 use crate::core::block::Block;
 use crate::core::transaction::Transaction;
-use crate::storage::merkle_trie::AccountProofBundle;
+use crate::persistence::state_trie::AccountProofBundle;
 use tokio::sync::{mpsc, oneshot};
 
 /// Direction filter for agent payment queries.
@@ -54,7 +54,7 @@ pub enum ChainCommand {
     /// balance is, this answers what the node can *prove* about it.
     GetAccountProof(
         Address,
-        oneshot::Sender<Option<crate::storage::merkle_trie::AccountProofBundle>>,
+        oneshot::Sender<Option<crate::persistence::state_trie::AccountProofBundle>>,
     ),
     AddTransaction(Transaction, oneshot::Sender<Result<(), String>>),
     AddTransactionBundle(
@@ -68,6 +68,8 @@ pub enum ChainCommand {
     TxPrecheck(Transaction, oneshot::Sender<serde_json::Value>),
     GetChainId(oneshot::Sender<u64>),
     GetBaseFee(oneshot::Sender<u64>),
+    /// The fee floor one transaction must clear.
+    GetRequiredFee(Box<Transaction>, oneshot::Sender<u64>),
     GetValidatorSetHash(oneshot::Sender<String>),
     GetMempoolSize(oneshot::Sender<usize>),
     /// Whether the mempool still holds the transaction with this hash.
@@ -131,12 +133,20 @@ pub enum ChainCommand {
         oneshot::Sender<Option<crate::chain::finality::FinalityCert>>,
     ),
     GetPqStageObservation(
-        crate::domain::regeneration_stage::Stage,
+        crate::chain::state_recovery::stage::Stage,
         u64,
         oneshot::Sender<crate::chain::blockchain::PqStageObservation>,
     ),
     GetPqSealedHeights(u64, oneshot::Sender<(Option<u64>, Option<u64>)>),
     GetQuantumView(oneshot::Sender<serde_json::Value>),
+    GetValidatorDirectory(
+        crate::validators::DirectoryQuery,
+        oneshot::Sender<serde_json::Value>,
+    ),
+    GetBud3(
+        crate::storage::bud3::registry::Bud3Query,
+        oneshot::Sender<serde_json::Value>,
+    ),
     GetValidatorAddress(oneshot::Sender<Option<Address>>),
     GetAggregatorState(oneshot::Sender<crate::chain::finality::AggregatorState>),
     GetStateRoot(u64, oneshot::Sender<Option<String>>),
@@ -486,6 +496,18 @@ pub enum ChainCommand {
         document: String,
         response: oneshot::Sender<Result<(), String>>,
     },
+    ObjectLayerCharter {
+        domain_id: u32,
+        response: oneshot::Sender<Option<crate::object_layer::DomainCharter>>,
+    },
+    ObjectLayerAssetClass {
+        class_id: crate::object_layer::AssetClassId,
+        response: oneshot::Sender<Option<(crate::object_layer::registry::AssetClass, u128)>>,
+    },
+    ObjectLayerAsset {
+        asset_id: crate::object_layer::AssetId,
+        response: oneshot::Sender<Option<crate::object_layer::registry::UniqueAsset>>,
+    },
     BnsCalculateCost {
         name: String,
         duration: u64,
@@ -727,6 +749,17 @@ impl ChainHandle {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetBaseFee(tx)).await;
         rx.await.unwrap_or(1)
+    }
+
+    /// The fee floor `candidate` must clear under the current state. `None`
+    /// when the chain actor did not answer.
+    pub async fn get_required_fee(&self, candidate: Transaction) -> Option<u64> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetRequiredFee(Box::new(candidate), tx))
+            .await;
+        rx.await.ok()
     }
 
     pub async fn get_validator_set_hash(&self) -> String {
@@ -1316,10 +1349,10 @@ impl ChainHandle {
     }
 
     /// The commitment this node holds and the post-quantum canonical
-    /// commitment with its seal, for one regeneration stage and height.
+    /// commitment with its seal, for one recovery stage and height.
     pub async fn pq_stage_observation(
         &self,
-        stage: crate::domain::regeneration_stage::Stage,
+        stage: crate::chain::state_recovery::stage::Stage,
         height: u64,
     ) -> crate::chain::blockchain::PqStageObservation {
         let (tx, rx) = oneshot::channel();
@@ -1333,6 +1366,30 @@ impl ChainHandle {
                 canonical: None,
                 seal: None,
             })
+    }
+
+    /// A read of the validator directory: one validator, the relays or the
+    /// gateways.
+    pub async fn validator_directory(
+        &self,
+        query: crate::validators::DirectoryQuery,
+    ) -> serde_json::Value {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetValidatorDirectory(query, tx))
+            .await;
+        rx.await.unwrap_or(serde_json::Value::Null)
+    }
+
+    /// A read of the B.U.D. 3.0 registry: one object or one validator's shares.
+    pub async fn bud3(
+        &self,
+        query: crate::storage::bud3::registry::Bud3Query,
+    ) -> serde_json::Value {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetBud3(query, tx)).await;
+        rx.await.unwrap_or(serde_json::Value::Null)
     }
 
     /// The quantum alarm and the observed crypto facts of the native domains.
@@ -2233,6 +2290,51 @@ impl ChainHandle {
         rx.await.map_err(|_| "chain actor closed".to_string())?
     }
 
+    pub async fn object_layer_charter(
+        &self,
+        domain_id: u32,
+    ) -> Option<crate::object_layer::DomainCharter> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::ObjectLayerCharter {
+                domain_id,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn object_layer_asset_class(
+        &self,
+        class_id: crate::object_layer::AssetClassId,
+    ) -> Option<(crate::object_layer::registry::AssetClass, u128)> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::ObjectLayerAssetClass {
+                class_id,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn object_layer_asset(
+        &self,
+        asset_id: crate::object_layer::AssetId,
+    ) -> Option<crate::object_layer::registry::UniqueAsset> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::ObjectLayerAsset {
+                asset_id,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
     pub async fn bns_calculate_cost(&self, name: String, duration: u64) -> u64 {
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -2393,7 +2495,7 @@ impl ChainHandle {
 /// The compare is one pass over the accounts and is far cheaper than a build.
 struct ProofTrieCache {
     leaves: Vec<([u8; 32], u64, u64)>,
-    trie: crate::storage::merkle_trie::MerkleTrie,
+    trie: crate::persistence::state_trie::MerkleTrie,
 }
 
 pub struct ChainActor {
@@ -2438,7 +2540,7 @@ impl ChainActor {
     /// stale trie would produce a proof that verifies against its own root and
     /// describes state that no longer exists - worse than no proof, because it
     /// is a correct-looking answer to the wrong question.
-    fn account_proof(&mut self, addr: &Address) -> crate::storage::merkle_trie::AccountProofBundle {
+    fn account_proof(&mut self, addr: &Address) -> crate::persistence::state_trie::AccountProofBundle {
         let accounts = &self.blockchain.state.accounts;
         let fresh = self.proof_trie.as_ref().is_some_and(|cached| {
             cached.leaves.len() == accounts.len()
@@ -2453,18 +2555,18 @@ impl ChainActor {
                 .iter()
                 .map(|(a, acct)| (a.0, acct.balance, acct.nonce))
                 .collect();
-            let mut trie = crate::storage::merkle_trie::MerkleTrie::new();
+            let mut trie = crate::persistence::state_trie::MerkleTrie::new();
             for (a, balance, nonce) in &leaves {
                 trie.insert(a, *balance, *nonce);
             }
             self.proof_trie = Some(ProofTrieCache { leaves, trie });
         }
         match self.proof_trie.as_ref() {
-            Some(cached) => crate::storage::merkle_trie::prove_from_trie(&cached.trie, &addr.0),
+            Some(cached) => crate::persistence::state_trie::prove_from_trie(&cached.trie, &addr.0),
             // Unreachable: the branch above assigns it. Written as a fallback
             // rather than an unwrap so a future edit that breaks the
             // invariant costs one rebuild instead of stopping the node.
-            None => crate::storage::merkle_trie::prove_account(
+            None => crate::persistence::state_trie::prove_account(
                 self.blockchain
                     .state
                     .accounts
@@ -2601,6 +2703,9 @@ impl ChainActor {
                 }
                 ChainCommand::GetBaseFee(tx) => {
                     let _ = tx.send(self.blockchain.state.base_fee);
+                }
+                ChainCommand::GetRequiredFee(candidate, tx) => {
+                    let _ = tx.send(self.blockchain.state.required_fee(&candidate));
                 }
                 ChainCommand::GetValidatorSetHash(tx) => {
                     let _ = tx.send(self.blockchain.get_validator_set_hash());
@@ -2807,6 +2912,12 @@ impl ChainActor {
                 }
                 ChainCommand::GetQuantumView(tx) => {
                     let _ = tx.send(self.blockchain.quantum_view());
+                }
+                ChainCommand::GetBud3(query, tx) => {
+                    let _ = tx.send(self.blockchain.state.bud3_registry.query_json(&query));
+                }
+                ChainCommand::GetValidatorDirectory(query, tx) => {
+                    let _ = tx.send(self.blockchain.state.validator_directory.query_json(query));
                 }
                 ChainCommand::GetPqSealedHeights(live, tx) => {
                     let res = self.blockchain.pq_sealed_heights(live);
@@ -3692,6 +3803,40 @@ impl ChainActor {
                             &document,
                         )
                         .map_err(|e| e.to_string()),
+                    );
+                }
+                ChainCommand::ObjectLayerCharter {
+                    domain_id,
+                    response,
+                } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .settlement
+                            .object_layer
+                            .charters
+                            .get(&domain_id)
+                            .cloned(),
+                    );
+                }
+                ChainCommand::ObjectLayerAssetClass { class_id, response } => {
+                    let uol = &self.blockchain.state.settlement.object_layer;
+                    let out = uol
+                        .classes
+                        .get(&class_id)
+                        .cloned()
+                        .map(|cl| (cl, uol.recorded_custody(&class_id)));
+                    let _ = response.send(out);
+                }
+                ChainCommand::ObjectLayerAsset { asset_id, response } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .settlement
+                            .object_layer
+                            .unique
+                            .get(&asset_id)
+                            .cloned(),
                     );
                 }
                 ChainCommand::BnsCalculateCost {

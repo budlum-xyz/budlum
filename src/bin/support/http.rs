@@ -34,7 +34,11 @@ fn bucket(ip: IpAddr) -> IpAddr {
         IpAddr::V4(v4) => IpAddr::V4(v4),
         IpAddr::V6(v6) => {
             let mut octets = v6.octets();
-            octets[8..].fill(0);
+            // A checked slice keeps this helper panic-free under the release
+            // profile even if its input type changes later.
+            if let Some(low) = octets.get_mut(8..) {
+                low.fill(0);
+            }
             IpAddr::V6(std::net::Ipv6Addr::from(octets))
         }
     }
@@ -120,7 +124,10 @@ mod tests {
         );
 
         let direct = ClientIdentity::new(true, vec![]).unwrap();
-        assert_eq!(direct.client_ip(first, &HeaderMap::new()), Ok(bucket(first)));
+        assert_eq!(
+            direct.client_ip(first, &HeaderMap::new()),
+            Ok(bucket(first))
+        );
         assert_eq!(
             direct.client_ip(second, &HeaderMap::new()),
             Ok(bucket(first)),

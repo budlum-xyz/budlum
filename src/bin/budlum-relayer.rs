@@ -1023,7 +1023,7 @@ fn block_by_number_params(height: u64) -> serde_json::Value {
 }
 
 /// How a block payload renders a bridge burn transaction (`{:?}` of
-/// `TransactionType::Bridge(BridgeTx::BurnWithEvent(..))`,).
+/// `TransactionType::Bridge(BridgeTx::BurnWithEvent(..))`).
 const BURN_TX_TYPE_PREFIX: &str = "Bridge(BurnWithEvent(";
 
 /// Burn transaction hashes in a block payload.
