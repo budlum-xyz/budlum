@@ -20,9 +20,9 @@ pub struct BudlumxyzRegistry {
     ///
     /// Empty set = nobody is a governor. No governance action populates this
     /// yet, so on a real network the set is empty and
-    /// [`BudlumxyzRegistry::mark_verified_by_governance`] refuses every
+    /// [`Self::mark_verified_by_governance`] refuses every
     /// caller. The badge itself still moves, through
-    /// [`BudlumxyzRegistry::mark_verified_by_proposal`], on the authority of
+    /// [`Self::mark_verified_by_proposal`], on the authority of
     /// a counted vote rather than an address.
     #[serde(default)]
     pub authorized_governors: std::collections::HashSet<Address>,
@@ -39,6 +39,35 @@ pub const MAX_APP_NAME_BYTES: usize = 64;
 /// the same bound the registry validates in this module.
 pub const MAX_APP_URL_BYTES: usize = 256;
 
+fn is_valid_app_url(url: &str) -> bool {
+    let trimmed = url.trim();
+    if trimmed.is_empty()
+        || url.len() > MAX_APP_URL_BYTES
+        || url.chars().any(char::is_control)
+    {
+        return false;
+    }
+    // If a URI scheme is present before any path separator, allow only safe
+    // content/transport schemes (`https://`, `bud://`, `ipfs://`) with a
+    // non-empty target, refusing `javascript:`, `data:`, `vbscript:`, `file:`,
+    // `blob:`, `http:`, etc.
+    let head_end = trimmed.find('/').unwrap_or(trimmed.len());
+    if let Some(colon) = trimmed[..head_end].find(':') {
+        let scheme = &trimmed[..colon];
+        let rest = &trimmed[colon + 1..];
+        let Some(target) = rest.strip_prefix("//") else {
+            return false;
+        };
+        if target.trim().is_empty() || target.chars().any(char::is_whitespace) {
+            return false;
+        }
+        return scheme.eq_ignore_ascii_case("https")
+            || scheme.eq_ignore_ascii_case("bud")
+            || scheme.eq_ignore_ascii_case("ipfs");
+    }
+    true
+}
+
 impl BudlumxyzRegistry {
     pub fn new() -> Self {
         Self::default()
@@ -53,12 +82,10 @@ impl BudlumxyzRegistry {
         manifest_id: Option<crate::storage::content_id::ContentId>,
         epoch: u64,
     ) -> Result<u64, BudlumxyzError> {
-        if name.is_empty()
+        if name.trim().is_empty()
             || name.len() > MAX_APP_NAME_BYTES
-            || website_url.is_empty()
-            || website_url.len() > MAX_APP_URL_BYTES
             || name.chars().any(char::is_control)
-            || website_url.chars().any(char::is_control)
+            || !is_valid_app_url(&website_url)
         {
             return Err(BudlumxyzError::InvalidData);
         }
@@ -103,6 +130,11 @@ impl BudlumxyzRegistry {
         new_url: Option<String>,
         new_manifest: Option<crate::storage::content_id::ContentId>,
     ) -> Result<(), BudlumxyzError> {
+        if let Some(ref url) = new_url {
+            if !is_valid_app_url(url) {
+                return Err(BudlumxyzError::InvalidData);
+            }
+        }
         let app = self.apps.get_mut(&id).ok_or(BudlumxyzError::NotFound)?;
         if &app.developer != caller {
             return Err(BudlumxyzError::NotDeveloper);
@@ -629,5 +661,50 @@ mod tests {
             .register_app("B".into(), dev, AppCategory::Other, "b".into(), None, 1)
             .expect("second registration");
         assert_ne!(a, b, "an incrementing counter must keep producing new ids");
+    }
+
+    #[test]
+    fn app_registry_rejects_xss_schemes_and_overlong_updates() {
+        let mut reg = BudlumxyzRegistry::new();
+        let dev = Address::from([4u8; 32]);
+        for bad in [
+            "javascript:alert(1)",
+            "JAVASCRIPT:alert(1)",
+            "  javascript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "vbscript:msgbox(1)",
+            "http://insecure.example",
+            "https://",
+        ] {
+            assert!(
+                reg.register_app(
+                    "App".into(),
+                    dev,
+                    AppCategory::Other,
+                    bad.into(),
+                    None,
+                    1,
+                )
+                .is_err(),
+                "{bad:?} must be refused on register_app"
+            );
+        }
+        let id = reg
+            .register_app(
+                "Clean".into(),
+                dev,
+                AppCategory::Other,
+                "https://clean.bud".into(),
+                None,
+                1,
+            )
+            .unwrap();
+        assert!(
+            reg.update_app(id, &dev, Some("javascript:alert(1)".into()), None)
+                .is_err()
+        );
+        let overlong = format!("https://{}", "a".repeat(MAX_APP_URL_BYTES));
+        assert!(reg.update_app(id, &dev, Some(overlong), None).is_err());
+        assert_eq!(reg.apps[&id].website_url, "https://clean.bud");
     }
 }
