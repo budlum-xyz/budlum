@@ -300,7 +300,7 @@ pub fn program_hash_from_words(words: &[u64]) -> [u8; 32] {
 /// compared the two and failed every time:
 ///
 /// ```text
-/// SONUC: Err("execution proof program_hash != public_inputs.program_hash")
+/// RESULT: Err("execution proof program_hash != public_inputs.program_hash")
 /// ```
 ///
 /// Everything else in that measurement lined up, the verifier rebuilt the
@@ -441,7 +441,7 @@ mod tests {
 
     /// Wheeler DDC pin: the canonical matmul guest program hash.
     ///
-    /// The same pins are asserted in `xtask/gates/src/gates/regeneration.rs`,
+    /// The same pins are asserted in `xtask/gates/src/gates/canonical_programs_reproduce.rs`,
     /// where the program is reproduced independently from the specification.
     /// The tree produces it here; the gate reproduces it there; both must land
     /// on the same value. If this builder drifts, this test turns red and the
