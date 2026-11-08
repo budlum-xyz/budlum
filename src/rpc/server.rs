@@ -3,8 +3,10 @@ use crate::chain::chain_actor::ChainHandle;
 use crate::core::address::Address;
 use crate::core::block::Block;
 use crate::core::transaction::Transaction;
-use crate::domain::storage_deal::{RetrievalChallengeRequest, RetrievalResponse, StorageDeal};
 use crate::network::node::NodeClient;
+use crate::rpc::compat::aptos::{self, AptosGateway};
+use crate::rpc::compat::ethereum::opening as ethereum;
+use crate::rpc::compat::solana;
 use crate::storage::content_id::ContentId;
 use crate::storage::{emit_hook, NopThreeHook, ThreeEventHook, ThreeHookEvent, ThreeHookKind};
 use bincode;
@@ -22,7 +24,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
-use tower::{Layer, Service, ServiceBuilder};
+use tower::{Layer, Service};
 use tracing::info;
 
 /// Hard ceiling for the per-IP sliding-window map. Without a bound, an attacker
@@ -64,6 +66,16 @@ pub struct RpcSecurityConfig {
     pub trusted_proxies: Vec<String>,
     pub max_request_body_size: Option<u32>,
     pub max_connections: Option<u32>,
+}
+
+/// A 32-byte value from hex, with or without `0x`.
+fn parse_hex32(s: &str) -> Result<[u8; 32], ErrorObjectOwned> {
+    let clean = s.strip_prefix("0x").unwrap_or(s);
+    let bytes = hex::decode(clean)
+        .map_err(|e| ErrorObjectOwned::owned(-32602, format!("Invalid hex: {e}"), None::<()>))?;
+    bytes
+        .try_into()
+        .map_err(|_| ErrorObjectOwned::owned(-32602, "expected 32 bytes", None::<()>))
 }
 
 impl Default for RpcSecurityConfig {
@@ -167,6 +179,7 @@ struct RpcSecurityLayer {
     per_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
     metrics: Option<Arc<crate::core::metrics::Metrics>>,
     mode: RpcMode,
+    remote_addr: Option<SocketAddr>,
 }
 
 impl RpcSecurityLayer {
@@ -180,7 +193,13 @@ impl RpcSecurityLayer {
             per_ip_rates: Arc::new(Mutex::new(HashMap::new())),
             metrics,
             mode,
+            remote_addr: None,
         }
+    }
+
+    fn for_remote_addr(mut self, remote_addr: SocketAddr) -> Self {
+        self.remote_addr = Some(remote_addr);
+        self
     }
 }
 
@@ -194,6 +213,7 @@ impl<S> Layer<S> for RpcSecurityLayer {
             per_ip_rates: self.per_ip_rates.clone(),
             metrics: self.metrics.clone(),
             mode: self.mode.clone(),
+            remote_addr: self.remote_addr,
         }
     }
 }
@@ -205,6 +225,7 @@ struct RpcSecurityService<S> {
     per_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
     metrics: Option<Arc<crate::core::metrics::Metrics>>,
     mode: RpcMode,
+    remote_addr: Option<SocketAddr>,
 }
 
 impl<S, B> Service<HttpRequest<B>> for RpcSecurityService<S>
@@ -222,7 +243,10 @@ where
         self.inner.poll_ready(cx)
     }
 
-    fn call(&mut self, req: HttpRequest<B>) -> Self::Future {
+    fn call(&mut self, mut req: HttpRequest<B>) -> Self::Future {
+        if let Some(remote_addr) = self.remote_addr {
+            req.extensions_mut().insert::<SocketAddr>(remote_addr);
+        }
         if !is_ip_allowed(&self.config, &req) {
             return Box::pin(async { Ok(text_response(StatusCode::FORBIDDEN, "Forbidden")) });
         }
@@ -336,6 +360,9 @@ pub struct RpcServer {
     /// are served through sessions opened by `bud_storageOpenReveal`, never
     /// as raw handle-passing.
     reveal_gateway: Arc<Mutex<crate::storage::RevealGateway>>,
+    /// Bounded, expiring, per-peer filter table of the Ethereum gateway
+    /// (WP-28, 2/N). It is node-local bookkeeping, never consensus state.
+    eth_filters: Arc<Mutex<ethereum::filters::FilterPool>>,
     /// Prometheus metrics handle for RPC latency and rate-limit counters.
     /// If `None`, metrics are silently skipped (e.g. in tests without a
     /// Global registry).
@@ -343,6 +370,200 @@ pub struct RpcServer {
     /// In-process TLS acceptor. `None` serves plain HTTP, which the
     /// mainnet config check allows on loopback only.
     tls: Option<tokio_rustls::TlsAcceptor>,
+    /// Dedicated Aptos REST bind address. Only the public node startup sets
+    /// this; test and embedded servers keep the opt-in default of `None`.
+    aptos_listener: Option<String>,
+    /// Dedicated Solana JSON-RPC/WebSocket bind address.
+    solana_listener: Option<String>,
+    /// Optional full-node proxy target. `None` preserves local named refusals.
+    aptos_upstream: Option<String>,
+}
+
+/// One dedicated, loopback-only Aptos HTTP listener. It reuses the RPC
+/// admission layer and TLS acceptor, but it has no JSON-RPC dispatcher.
+struct AptosListener {
+    addr: String,
+    gateway: AptosGateway,
+    security: RpcSecurityConfig,
+    metrics: Option<Arc<crate::core::metrics::Metrics>>,
+    tls: Option<tokio_rustls::TlsAcceptor>,
+    body_limit: usize,
+}
+
+impl AptosListener {
+    async fn start(self) -> Result<SocketAddr, Box<dyn std::error::Error + Send + Sync>> {
+        use jsonrpsee::server::serve_with_graceful_shutdown;
+
+        let listener = tokio::net::TcpListener::bind(self.addr.clone()).await?;
+        let local_addr = listener.local_addr()?;
+        let connection_limit = self
+            .security
+            .max_connections
+            .unwrap_or(RPC_CONNECTION_LIMIT_CEILING) as usize;
+        let connections = Arc::new(tokio::sync::Semaphore::new(connection_limit));
+        let security = RpcSecurityLayer::new(
+            self.security,
+            self.metrics,
+            RpcMode::Public,
+        );
+        let tls = self.tls;
+        let gateway = self.gateway;
+        let body_limit = self.body_limit;
+        info!(
+            "Aptos REST Server started on {local_addr} ({})",
+            if tls.is_some() { "tls" } else { "plain" }
+        );
+
+        tokio::spawn(async move {
+            loop {
+                let (socket, remote_addr) = match listener.accept().await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::error!("Aptos REST accept failed: {error}");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                };
+                let permit = match connections.clone().acquire_owned().await {
+                    Ok(permit) => permit,
+                    Err(_) => break,
+                };
+                let gateway_for_service = gateway.clone();
+                let service = security.clone().for_remote_addr(remote_addr).layer(
+                    tower::service_fn(move |req: HttpRequest<hyper::body::Incoming>| {
+                        let gateway_for_request = gateway_for_service.clone();
+                        async move {
+                            Ok::<_, std::convert::Infallible>(
+                                gateway_for_request.handle_request(req, body_limit).await,
+                            )
+                        }
+                    },
+                ));
+                match tls.clone() {
+                    Some(acceptor) => {
+                        tokio::spawn(async move {
+                            let _permit = permit;
+                            serve_tls_connection(
+                                acceptor,
+                                socket,
+                                remote_addr,
+                                service,
+                                std::future::pending::<()>(),
+                            )
+                            .await;
+                        });
+                    }
+                    None => {
+                        tokio::spawn(async move {
+                            let _permit = permit;
+                            let _ = serve_with_graceful_shutdown(
+                                socket,
+                                service,
+                                std::future::pending::<()>(),
+                            )
+                            .await;
+                        });
+                    }
+                }
+            }
+        });
+
+        Ok(local_addr)
+    }
+}
+
+
+/// Dedicated Solana JSON-RPC/WebSocket listener with the primary public
+/// listener's admission and transport limits, but only Solana callbacks.
+struct SolanaListener {
+    addr: String,
+    methods: jsonrpsee::core::server::Methods,
+    security: RpcSecurityConfig,
+    metrics: Option<Arc<crate::core::metrics::Metrics>>,
+    tls: Option<tokio_rustls::TlsAcceptor>,
+}
+
+impl SolanaListener {
+    async fn start(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use jsonrpsee::server::{
+            serve_with_graceful_shutdown, stop_channel, BatchRequestConfig, ServerBuilder,
+            ServerConfig,
+        };
+
+        let body_limit = self
+            .security
+            .max_request_body_size
+            .ok_or("validated RPC body limit is missing")?;
+        let connection_limit = self
+            .security
+            .max_connections
+            .unwrap_or(RPC_CONNECTION_LIMIT_CEILING) as usize;
+        let config = ServerConfig::builder()
+            .max_request_body_size(body_limit)
+            .max_connections(connection_limit as u32)
+            .set_batch_request_config(BatchRequestConfig::Limit(100))
+            .build();
+        let builder = ServerBuilder::default().set_config(config).to_service_builder();
+        let listener = tokio::net::TcpListener::bind(self.addr).await?;
+        let local_addr = listener.local_addr()?;
+        let connections = Arc::new(tokio::sync::Semaphore::new(connection_limit));
+        let security = RpcSecurityLayer::new(self.security, self.metrics, RpcMode::Public);
+        let (stop_handle, server_handle) = stop_channel();
+        let methods = self.methods;
+        let tls = self.tls;
+        info!(
+            "Solana compatibility RPC started on {local_addr} ({})",
+            if tls.is_some() { "tls" } else { "plain" }
+        );
+
+        tokio::spawn(async move {
+            let _keep_server_alive = server_handle;
+            loop {
+                let (socket, remote_addr) = tokio::select! {
+                    result = listener.accept() => match result {
+                        Ok(value) => value,
+                        Err(error) => {
+                            tracing::error!("Solana RPC accept failed: {error}");
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            continue;
+                        }
+                    },
+                    _ = stop_handle.clone().shutdown() => break,
+                };
+                let permit = match connections.clone().acquire_owned().await {
+                    Ok(permit) => permit,
+                    Err(_) => break,
+                };
+                let builder_for_service = builder.clone();
+                let methods_for_service = methods.clone();
+                let stop_for_service = stop_handle.clone();
+                let service = security.clone().for_remote_addr(remote_addr).layer(
+                    tower::service_fn(move |req: HttpRequest<hyper::body::Incoming>| {
+                        let mut service = builder_for_service
+                            .clone()
+                            .build(methods_for_service.clone(), stop_for_service.clone());
+                        async move { service.call(req).await }
+                    }),
+                );
+                let stopped = stop_handle.clone().shutdown();
+                match tls.clone() {
+                    Some(acceptor) => {
+                        tokio::spawn(async move {
+                            let _permit = permit;
+                            serve_tls_connection(acceptor, socket, remote_addr, service, stopped).await;
+                        });
+                    }
+                    None => {
+                        tokio::spawn(async move {
+                            let _permit = permit;
+                            let _ = serve_with_graceful_shutdown(socket, service, stopped).await;
+                        });
+                    }
+                }
+            }
+        });
+        Ok(())
+    }
 }
 
 impl RpcServer {
@@ -353,8 +574,12 @@ impl RpcServer {
             security: RpcSecurityConfig::default(),
             mode: RpcMode::Public,
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
+            eth_filters: Arc::new(Mutex::new(ethereum::filters::FilterPool::new())),
             metrics: None,
             tls: None,
+            aptos_listener: None,
+            solana_listener: None,
+            aptos_upstream: None
         }
     }
 
@@ -369,8 +594,12 @@ impl RpcServer {
             security,
             mode: RpcMode::Public,
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
+            eth_filters: Arc::new(Mutex::new(ethereum::filters::FilterPool::new())),
             metrics: None,
             tls: None,
+            aptos_listener: None,
+            solana_listener: None,
+            aptos_upstream: None
         }
     }
 
@@ -386,8 +615,12 @@ impl RpcServer {
             security,
             mode,
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
+            eth_filters: Arc::new(Mutex::new(ethereum::filters::FilterPool::new())),
             metrics: None,
             tls: None,
+            aptos_listener: None,
+            solana_listener: None,
+            aptos_upstream: None
         }
     }
 
@@ -402,6 +635,26 @@ impl RpcServer {
         self
     }
 
+    /// Open the dedicated Aptos REST listener when this public server runs.
+    /// The address is validated before either listener starts.
+    pub fn with_aptos_listener(mut self, addr: String) -> Self {
+        self.aptos_listener = Some(addr);
+        self
+    }
+
+    /// Open the dedicated Solana JSON-RPC/WebSocket listener on the public server.
+    pub fn with_solana_listener(mut self, addr: String) -> Self {
+        self.solana_listener = Some(addr);
+        self
+    }
+
+    /// Proxy known Aptos routes to this full-node `/v1` URL. Validation and
+    /// HTTP-client construction happen before either listener starts.
+    pub fn with_aptos_upstream(mut self, url: String) -> Self {
+        self.aptos_upstream = Some(url);
+        self
+    }
+
     pub async fn run(self, addr: String) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use jsonrpsee::core::server::Methods;
         use jsonrpsee::server::BatchRequestConfig;
@@ -410,12 +663,19 @@ impl RpcServer {
         };
 
         validate_rpc_security_config(&self.security)?;
+        let aptos_body_limit = self
+            .security
+            .max_request_body_size
+            .ok_or("validated RPC body limit is missing")? as usize;
         let tls = self.tls.clone();
-        let http_middleware = ServiceBuilder::new().layer(RpcSecurityLayer::new(
+        // Wrap the combined REST/JSON-RPC service, not only jsonrpsee's inner
+        // dispatcher. Otherwise the compatibility branch would bypass IP,
+        // origin, rate and authentication admission on the shared listener.
+        let security = RpcSecurityLayer::new(
             self.security.clone(),
             self.metrics.clone(),
             self.mode.clone(),
-        ));
+        );
 
         // jsonrpsee 0.26 moved the transport limits off the server builder and
         // onto `ServerConfig`; the defaults are unchanged, so only the values
@@ -435,15 +695,62 @@ impl RpcServer {
         // oversized batches are rejected wholesale instead of partially
         // executed (jsonrpsee drops the whole batch at `Limit`).
         config = config.set_batch_request_config(BatchRequestConfig::Limit(100));
-        let builder = ServerBuilder::default()
-            .set_config(config.build())
-            .set_http_middleware(http_middleware);
+        let builder = ServerBuilder::default().set_config(config.build());
 
         let mode_label = match self.mode {
             RpcMode::Public => "public",
             RpcMode::Operator => "operator",
         };
         validate_operator_bind_address(&self.mode, &addr)?;
+        aptos::check_routes().map_err(|problem| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Aptos REST route classification refused this listener: {problem}"),
+            )
+        })?;
+        if self.mode != RpcMode::Public
+            && (self.aptos_listener.is_some() || self.solana_listener.is_some())
+        {
+            return Err("dedicated compatibility listeners belong to the public RPC server".into());
+        }
+        if let Some(aptos_addr) = self.aptos_listener.as_ref() {
+            if aptos_addr == &addr {
+                return Err("Aptos REST and JSON-RPC listeners need distinct addresses".into());
+            }
+            aptos::validate_listener(aptos_addr)?;
+        }
+        if let Some(solana_addr) = self.solana_listener.as_ref() {
+            if solana_addr == &addr {
+                return Err("Solana compatibility and primary listeners need distinct addresses".into());
+            }
+            aptos::validate_listener(solana_addr)?;
+        }
+        if let (Some(aptos_addr), Some(solana_addr)) =
+            (self.aptos_listener.as_ref(), self.solana_listener.as_ref())
+        {
+            if aptos_addr == solana_addr {
+                return Err("Aptos and Solana compatibility listeners need distinct addresses".into());
+            }
+        }
+        let serve_aptos_on_primary =
+            self.mode == RpcMode::Public && self.aptos_listener.is_none();
+        let mut aptos_gateway = AptosGateway::new(self.chain.clone(), self.node.clone());
+        if let Some(upstream) = self.aptos_upstream.as_deref() {
+            aptos_gateway = aptos_gateway.with_upstream(
+                aptos::AptosUpstream::parse(upstream).map_err(|problem| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, problem)
+                })?,
+            );
+        }
+        let dedicated_aptos = self.aptos_listener.as_ref().map(|aptos_addr| AptosListener {
+            addr: aptos_addr.clone(),
+            gateway: aptos_gateway.clone(),
+            security: self.security.clone(),
+            metrics: self.metrics.clone(),
+            tls: self.tls.clone(),
+            body_limit: aptos_body_limit,
+        });
+        let dedicated_solana_addr = self.solana_listener.clone();
         // Every served method must be classified (`src/rpc/method_class.rs`).
         let methods: Methods = self.into_rpc().into();
         crate::rpc::method_class::check_served_methods(methods.method_names()).map_err(|e| {
@@ -452,6 +759,13 @@ impl RpcServer {
                 format!("RPC method classification refused this listener: {e}"),
             )
         })?;
+        let solana_methods = if dedicated_solana_addr.is_some() {
+            Some(solana::dedicated_methods(&methods).map_err(|problem| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, problem)
+            })?)
+        } else {
+            None
+        };
         let svc_builder = builder.to_service_builder();
         let listener = tokio::net::TcpListener::bind(addr.clone()).await?;
         let (stop_handle, server_handle) = stop_channel();
@@ -479,13 +793,24 @@ impl RpcServer {
                 let stop_handle_for_service = stop_handle.clone();
                 let svc_builder_for_service = svc_builder.clone();
                 let methods_for_service = methods.clone();
-                let svc = tower::service_fn(move |mut req: HttpRequest<hyper::body::Incoming>| {
-                    req.extensions_mut().insert::<SocketAddr>(remote_addr);
-                    let mut svc = svc_builder_for_service
-                        .clone()
-                        .build(methods_for_service.clone(), stop_handle_for_service.clone());
-                    async move { svc.call(req).await }
-                });
+                let aptos_for_service = aptos_gateway.clone();
+                let svc = security.clone().for_remote_addr(remote_addr).layer(
+                    tower::service_fn(move |req: HttpRequest<hyper::body::Incoming>| {
+                        let is_aptos =
+                            serve_aptos_on_primary && aptos::owns_path(req.uri().path());
+                        let aptos_for_request = aptos_for_service.clone();
+                        let mut svc = svc_builder_for_service
+                            .clone()
+                            .build(methods_for_service.clone(), stop_handle_for_service.clone());
+                        async move {
+                            if is_aptos {
+                                Ok(aptos_for_request.handle_request(req, aptos_body_limit).await)
+                            } else {
+                                svc.call(req).await
+                            }
+                        }
+                    },
+                ));
 
                 let shutdown = stop_handle.clone().shutdown();
                 match tls.clone() {
@@ -505,6 +830,21 @@ impl RpcServer {
             }
         });
 
+        if let Some(dedicated_aptos) = dedicated_aptos {
+            dedicated_aptos.start().await?;
+        }
+        if let (Some(solana_addr), Some(methods)) = (dedicated_solana_addr, solana_methods) {
+            SolanaListener {
+                addr: solana_addr,
+                methods,
+                security: self.security.clone(),
+                metrics: self.metrics.clone(),
+                tls: self.tls.clone(),
+            }
+            .start()
+            .await?;
+        }
+
         Ok(())
     }
 
@@ -518,6 +858,13 @@ impl RpcServer {
                 None::<()>,
             ))
         }
+    }
+
+    async fn finish_template(
+        &self,
+        tx: crate::core::transaction::Transaction,
+    ) -> Result<crate::core::transaction::Transaction, ErrorObjectOwned> {
+        finish_template(&self.chain, tx).await
     }
 
     fn to_hex(n: u64) -> String {
@@ -705,7 +1052,7 @@ impl RpcServer {
     }
 
     fn account_proof_to_json(
-        bundle: &crate::storage::merkle_trie::AccountProofBundle,
+        bundle: &crate::persistence::state_trie::AccountProofBundle,
     ) -> serde_json::Value {
         serde_json::json!({
             // Named `proofRoot`, not `stateRoot`: this commits to the same
@@ -894,27 +1241,32 @@ fn request_came_from_trusted_proxy<B>(config: &RpcSecurityConfig, req: &HttpRequ
 }
 
 fn extract_client_ip<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> Option<IpAddr> {
-    // Security model:
-    // 1. Prefer the real socket peer address when available.
-    // 2. Only honor forwarding headers if the socket peer is itself trusted.
-    // This closes both previous failure modes:
-    // - direct requests no longer self-DoS when allow-lists are enabled,
-    // - proxy headers are no longer trusted purely because `trusted_proxies`
-    //   Is non-empty.
     let direct_ip = extract_direct_client_ip(req);
 
     if !config.trusted_proxies.is_empty() && request_came_from_trusted_proxy(config, req) {
-        if let Some(forwarded_ip) = req
-            .headers()
-            .get("x-forwarded-for")
-            .and_then(|value| value.to_str().ok())
-            // Rightmost entry: the one the trusted proxy itself appended.
-            // Entries to its left are client-supplied and can be forged.
-            .and_then(|value| value.split(',').next_back())
-            .map(str::trim)
-            .and_then(|ip| ip.parse::<IpAddr>().ok())
-        {
-            return Some(forwarded_ip);
+        // All header lines form one chain in wire order. Only explicitly
+        // configured proxy addresses may be skipped; a wildcard trusts the
+        // socket peer but must not make every forwarded hop trusted.
+        if req.headers().contains_key("x-forwarded-for") {
+            let values = req.headers().get_all("x-forwarded-for");
+            let mut lines: Vec<_> = values.iter().collect();
+            while let Some(line) = lines.pop() {
+                let value = line.to_str().ok()?;
+                let last = value.split(',').next_back()?;
+                let prefix = value.rsplit_once(',').map(|(prefix, _)| prefix);
+                for entry in std::iter::once(last)
+                    .chain(prefix.into_iter().flat_map(|prefix| prefix.rsplit(',')))
+                {
+                    let ip = entry.trim().parse::<IpAddr>().ok()?;
+                    if !config.trusted_proxies.iter().any(|proxy| {
+                        proxy.parse::<IpAddr>().is_ok_and(|trusted| trusted == ip)
+                    }) {
+                        return Some(ip);
+                    }
+                }
+            }
+            // A malformed or entirely trusted chain cannot identify a client.
+            return None;
         }
 
         if let Some(real_ip) = req
@@ -1032,12 +1384,15 @@ pub(crate) fn cors_outcome<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) 
     else {
         return CorsOutcome::NotApplicable;
     };
-    if config
-        .cors_origins
-        .iter()
-        .any(|allowed| allowed == "*" || allowed == origin)
-    {
+    // An origin listed by name is echoed: that is the one value the
+    // operator approved. A `*` entry answers with the literal `*` and never
+    // echoes the caller's header back: a reflected wildcard turns
+    // "any origin" into "this exact origin", which caches and credential
+    // rules treat as a named grant.
+    if config.cors_origins.iter().any(|allowed| allowed == origin) {
         CorsOutcome::Allow(origin.to_string())
+    } else if config.cors_origins.iter().any(|allowed| allowed == "*") {
+        CorsOutcome::Allow("*".to_string())
     } else {
         CorsOutcome::Deny
     }
@@ -1081,7 +1436,7 @@ const MAX_SOCIAL_FEED_LIMIT: usize = 200;
 const MAX_SUBSCRIPTION_FEEDS: usize = 128;
 
 /// Take one of the node's subscription feed slots, or `None` when full.
-fn feed_slot() -> Option<tokio::sync::OwnedSemaphorePermit> {
+pub(crate) fn feed_slot() -> Option<tokio::sync::OwnedSemaphorePermit> {
     static FEED_SLOTS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
         std::sync::OnceLock::new();
     let slots = FEED_SLOTS
@@ -1097,6 +1452,43 @@ fn clamp_feed_limit(limit: usize) -> usize {
 /// data assets, grants, rankings, slashing history), so response size and
 /// serialization cost do not grow with chain state.
 const MAX_LIST_RESPONSE_ITEMS: usize = 1000;
+
+/// Finish a `*_prepare_*` transaction template: the nonce is
+/// the sender's next nonce and the fee is the admission floor the chain
+/// enforces (`AccountState::required_fee`), with `max_fee == fee` as
+/// flat-fee mode requires. The templates used to carry hard-coded fees
+/// (500, 1000, 2000, `MIN_TX_FEE`) and a nonce of 0, so a wallet that
+/// signed one as given was refused, or overpaid.
+async fn finish_template(
+    chain: &ChainHandle,
+    mut tx: crate::core::transaction::Transaction,
+) -> Result<crate::core::transaction::Transaction, ErrorObjectOwned> {
+    tx.nonce = chain.get_nonce(&tx.from).await;
+    let fee = chain
+        .get_required_fee(tx.clone())
+        .await
+        .ok_or_else(|| ErrorObjectOwned::owned(-32603, "chain actor did not answer", None::<()>))?;
+    tx.fee = fee;
+    tx.max_fee = fee;
+    tx.priority_fee = 0;
+    Ok(tx)
+}
+
+/// Serialize one RPC result value. A value that cannot be encoded is an
+/// explicit `-32603` error naming what failed, never a silent `null`
+/// A `null` reads as "absent", which is a different answer.
+pub(crate) fn to_json<T: serde::Serialize>(
+    what: &str,
+    value: &T,
+) -> Result<serde_json::Value, ErrorObjectOwned> {
+    serde_json::to_value(value).map_err(|e| {
+        ErrorObjectOwned::owned(
+            -32603,
+            format!("{what} serialization failed: {e}"),
+            None::<()>,
+        )
+    })
+}
 
 fn cap_list_response<T>(mut items: Vec<T>) -> Vec<T> {
     items.truncate(MAX_LIST_RESPONSE_ITEMS);
@@ -1141,13 +1533,21 @@ fn is_per_ip_rate_limited(
             // Seen client instead of globally rejecting all new IPs. This keeps
             // The map bounded without letting a rotational-IP attacker pin the
             // Table forever and deny unrelated clients.
-            if let Some(oldest_ip) = rates
+            //
+            // The evicted client is the one with the fewest requests in its
+            // window (oldest first among equals), never a busy one
+            // because evicting a client at its quota resets its window,
+            // so an attacker rotating addresses could buy a fresh quota for
+            // its own saturated address by filling the table.
+            if let Some(quietest) = rates
                 .iter()
-                .filter_map(|(client, window)| window.front().map(|first| (*client, *first)))
-                .min_by_key(|(_, first)| *first)
-                .map(|(client, _)| client)
+                .filter_map(|(client, window)| {
+                    window.front().map(|first| (*client, window.len(), *first))
+                })
+                .min_by_key(|(_, len, first)| (*len, *first))
+                .map(|(client, _, _)| client)
             {
-                rates.remove(&oldest_ip);
+                rates.remove(&quietest);
             }
         }
         if rates.len() >= MAX_TRACKED_RPC_CLIENTS {
@@ -1502,33 +1902,6 @@ fn parse_seal_seed(seed_hex: Option<String>) -> Result<Option<[u8; 32]>, ErrorOb
     Ok(Some(seed))
 }
 
-fn storage_deal_to_json(deal: &StorageDeal) -> serde_json::Value {
-    serde_json::json!({
-        "dealId": deal.deal_id,
-        "domainId": deal.domain_id,
-        "manifestId": format!("0x{}", hex::encode(deal.manifest_id.0)),
-        "shardId": format!("0x{}", hex::encode(deal.shard_id.0)),
-        "operator": format!("0x{}", deal.operator.to_hex()),
-        "replicaIndex": deal.replica_index,
-        "startEpoch": deal.deal_start_epoch,
-        "endEpoch": deal.deal_end_epoch,
-        "status": format!("{:?}", deal.status),
-    })
-}
-
-fn storage_economics_event_to_json(
-    event: &crate::chain::blockchain::StorageEconomicsEvent,
-) -> serde_json::Value {
-    serde_json::json!({
-        "epoch": event.epoch,
-        "dealId": event.deal_id,
-        "operator": format!("0x{}", event.operator.to_hex()),
-        "amount": event.amount,
-        "balanceEffect": event.balance_effect,
-        "kind": format!("{:?}", event.kind),
-    })
-}
-
 #[jsonrpsee::core::async_trait]
 impl BudlumApiServer for RpcServer {
     async fn chain_id(&self) -> Result<String, ErrorObjectOwned> {
@@ -1740,8 +2113,20 @@ impl BudlumApiServer for RpcServer {
         // So the estimate is the fee floor the caller's transaction must
         // Clear. If the caller already set a fee at or above the floor, that
         // Fee is what will be charged and it is returned unchanged.
-        let base_fee = self.chain.get_base_fee().await;
-        Ok(Self::to_hex(tx.fee.max(base_fee)))
+        //
+        // The floor is `AccountState::required_fee`, the same function the
+        // admission rule uses: base fee plus the proportional cut
+        // on a transfer, the escalating fee on a governance proposal. A
+        // floor of `base_fee` alone under-quoted both, and the wallet's
+        // transaction was then refused for a fee the RPC had just suggested.
+        let required = self
+            .chain
+            .get_required_fee(tx.clone())
+            .await
+            .ok_or_else(|| {
+                ErrorObjectOwned::owned(-32603, "chain actor did not answer", None::<()>)
+            })?;
+        Ok(Self::to_hex(tx.fee.max(required)))
     }
 
     async fn tx_precheck(&self, tx: Transaction) -> Result<serde_json::Value, ErrorObjectOwned> {
@@ -1983,13 +2368,13 @@ impl BudlumApiServer for RpcServer {
         let items: Vec<serde_json::Value> = profiles
             .into_iter()
             .map(|(profile, summary)| {
-                serde_json::json!({
+                Ok(serde_json::json!({
                     "domainKey": format!("0x{}", hex::encode(profile.domain.as_bytes())),
                     "summary": summary,
-                    "profile": serde_json::to_value(&profile).unwrap_or(serde_json::Value::Null),
-                })
+                    "profile": to_json("Profile", &profile)?,
+                }))
             })
-            .collect();
+            .collect::<Result<_, ErrorObjectOwned>>()?;
         Ok(serde_json::json!({ "domains": items }))
     }
 
@@ -2318,11 +2703,9 @@ impl BudlumApiServer for RpcServer {
                 let slashings: Vec<serde_json::Value> = bond
                     .slashings
                     .iter()
-                    .map(|s: &crate::cross_domain::external::Slashing| {
-                        serde_json::to_value(s).unwrap_or(serde_json::Value::Null)
-                    })
-                    .collect();
-                serde_json::json!({
+                    .map(|s: &crate::cross_domain::external::Slashing| to_json("Slashing", s))
+                    .collect::<Result<_, ErrorObjectOwned>>()?;
+                Ok(serde_json::json!({
                     "prover": format!("0x{}", hex::encode(bond.prover.as_bytes())),
                     "bondAtoms": bond.bond_atoms.to_string(),
                     "liveAtoms": bond.live_atoms().to_string(),
@@ -2331,9 +2714,9 @@ impl BudlumApiServer for RpcServer {
                     "accepted": bond.accepted,
                     "refused": bond.refused,
                     "slashings": slashings,
-                })
+                }))
             })
-            .collect();
+            .collect::<Result<_, ErrorObjectOwned>>()?;
         let latest = registration.latest_attestation();
         // "No backing yet" is a visible state, not an absent field: shown
         // with the same value an adapter reports before its first cycle.
@@ -3435,163 +3818,8 @@ impl BudlumApiServer for RpcServer {
     }
 
     // === B.U.D. Storage RPC implementations ====================
-    // The storage registry is owned by the chain layer; every RPC below is a
-    // Thin delegation to `self.chain` so the registry has a single writer and
-    // Block-application accounting stays authoritative. The RPC server used to
-    // Hold its own `Arc<Mutex<StorageRegistry>>`; that field became
-    // Write-only after the chain took ownership and has been removed rather
-    // Than left as a second, silently diverging copy.
-
-    async fn storage_register_manifest(
-        &self,
-        manifest: crate::storage::ContentManifest,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // this method registered a manifest into the storage registry
-        // (folded into the state root) on this node alone, outside a block.
-        // The method stays so a client gets a pointer instead of "method not
-        // found".
-        self.require_operator("bud_storageRegisterManifest")?;
-        let _ = manifest;
-        Err(Self::door_refusal(
-            "Out-of-block manifest registration is refused: it changed the storage registry \
-             on this node alone. The manifest owner sends a signed Storage transaction \
-             (StorageTx::RegisterManifest) through bud_sendRawTransaction.",
-        ))
-    }
-
-    async fn storage_verify_encoding(
-        &self,
-        data_hex: String,
-        manifest: crate::storage::ContentManifest,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Generated / Three has no body on the network. Re-encoding a recipe
-        // as if it were held bytes would launder a custody claim under the
-        // encode path.
-        if matches!(
-            manifest.source,
-            crate::storage::generated::ContentSource::Generated(_)
-                | crate::storage::generated::ContentSource::SealedGenerated(_)
-                | crate::storage::generated::ContentSource::Derived(_)
-        ) {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                "verify_encoding refuses recipe sources (Generated/SealedGenerated/Derived): there is no body to re-encode",
-                None::<()>,
-            ));
-        }
-        let hex = data_hex.strip_prefix("0x").unwrap_or(data_hex.as_str());
-        // Same cap as the QR feed calls: the re-encode below is a full
-        // erasure encode, so the body size bounds its CPU cost.
-        if hex.len() / 2 > crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                format!(
-                    "body over verify cap {}",
-                    crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES
-                ),
-                None::<()>,
-            ));
-        }
-        let data = hex::decode(hex).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("data_hex decode failed: {e}"), None::<()>)
-        })?;
-        // The encode is CPU bound: keep it off the async workers.
-        let (manifest, verdict) = tokio::task::spawn_blocking(move || {
-            let verdict = crate::storage::verify_object_encoding(&data, &manifest);
-            (manifest, verdict)
-        })
-        .await
-        .map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32603,
-                format!("verify_encoding task failed: {e}"),
-                None::<()>,
-            )
-        })?;
-        verdict.map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("verify_encoding failed: {e}"), None::<()>)
-        })?;
-        Ok(serde_json::json!({
-            "ok": true,
-            "manifestId": format!("0x{}", hex::encode(manifest.manifest_id.0)),
-            "scheme": {
-                "k": manifest.erasure.k,
-                "n": manifest.erasure.n,
-            },
-            "totalSize": manifest.total_size,
-        }))
-    }
-
-    async fn storage_qr_feed_preview(
-        &self,
-        data_hex: String,
-        block_len: u16,
-        manifest: Option<crate::storage::ContentManifest>,
-        seal_seed: Option<String>,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let hex = data_hex.strip_prefix("0x").unwrap_or(data_hex.as_str());
-        let data = hex::decode(hex).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("data_hex decode failed: {e}"), None::<()>)
-        })?;
-        if data.len() > crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                format!(
-                    "body of {} bytes over emit cap {}",
-                    data.len(),
-                    crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES
-                ),
-                None::<()>,
-            ));
-        }
-        let policy = crate::storage::emit::EmitPolicy {
-            block_len,
-            seal_seed: parse_seal_seed(seal_seed)?,
-            ..crate::storage::emit::EmitPolicy::default()
-        };
-        let feed = crate::storage::emit::qr_feed_preview(&data, &policy, manifest.as_ref())
-            .map_err(emit_reject)?;
-        Ok(qr_feed_json(&feed))
-    }
-
-    async fn storage_qr_feed_frames(
-        &self,
-        data_hex: String,
-        block_len: u16,
-        first_frame: u32,
-        count: u32,
-        seal_seed: Option<String>,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let hex = data_hex.strip_prefix("0x").unwrap_or(data_hex.as_str());
-        let data = hex::decode(hex).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("data_hex decode failed: {e}"), None::<()>)
-        })?;
-        if data.len() > crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                format!(
-                    "body of {} bytes over emit cap {}",
-                    data.len(),
-                    crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES
-                ),
-                None::<()>,
-            ));
-        }
-        let policy = crate::storage::emit::EmitPolicy {
-            block_len,
-            seal_seed: parse_seal_seed(seal_seed)?,
-            ..crate::storage::emit::EmitPolicy::default()
-        };
-        let (frames, fold) =
-            crate::storage::emit::qr_feed_frames_burst(&data, &policy, first_frame, count)
-                .map_err(emit_reject)?;
-        Ok(serde_json::json!({
-            "firstFrame": first_frame,
-            "count": frames.len(),
-            "fold": format!("0x{}", hex::encode(fold)),
-            "frames": frames.iter().map(hex::encode).collect::<Vec<String>>(),
-        }))
-    }
+    // This surface keeps temporary grant and reveal operations. Legacy
+    // manifest, deal, challenge, and encoding RPCs are not registered.
 
     async fn storage_issue_view_grant(
         &self,
@@ -4004,511 +4232,6 @@ impl BudlumApiServer for RpcServer {
         Ok(gw.close(session_id))
     }
 
-    async fn storage_register_confidential_commit(
-        &self,
-        content_id: String,
-        encryption: String,
-        ciphertext_root: String,
-        proof_kind: String,
-        authorization: Option<serde_json::Value>,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        self.require_operator("bud_storageRegisterConfidentialCommit")?;
-        let content_id = parse_content_id(&content_id)?;
-        // The recorded owner is never typed by the caller: it is derived from
-        // the key and then proven by the signature the registry checks. Handing
-        // only a derived address here is what would let a holder of somebody
-        // else's public key register a commit under that address.
-        let auth = parse_grant_auth(authorization.as_ref())?;
-        // Refuse at the boundary when this node cannot check ML-DSA-87 at all:
-        // that is an operator fault, and a client must not be told to fix a key
-        // it did get right. The registry derives the same address again; this
-        // pre-flight only chooses the error code.
-        auth.derived_owner().map_err(grant_auth_error)?;
-        let encryption = match encryption.to_ascii_lowercase().as_str() {
-            "aes-256-gcm" | "aes256gcm" => crate::storage::ContentEncryption::ClientSide(
-                crate::storage::ContentCipher::Aes256Gcm,
-            ),
-            "chacha20-poly1305" | "chacha20poly1305" => {
-                crate::storage::ContentEncryption::ClientSide(
-                    crate::storage::ContentCipher::ChaCha20Poly1305,
-                )
-            }
-            "xchacha20-poly1305" | "xchacha20poly1305" => {
-                crate::storage::ContentEncryption::ClientSide(
-                    crate::storage::ContentCipher::XChaCha20Poly1305,
-                )
-            }
-            "plaintext" => crate::storage::ContentEncryption::Plaintext,
-            other => {
-                return Err(ErrorObjectOwned::owned(
-                    -32602,
-                    format!("unknown encryption {other}"),
-                    None::<()>,
-                ));
-            }
-        };
-        let ciphertext_root = parse_hex32_field(&ciphertext_root, "ciphertext_root")?;
-        let proof_kind = match proof_kind.to_ascii_lowercase().as_str() {
-            "retrieval" | "retrievalchallenge" | "retrieval_challenge" => {
-                crate::storage::ConfidentialProofKind::RetrievalChallenge
-            }
-            "zk" | "zkstorage" | "zk_storage_proof" => {
-                crate::storage::ConfidentialProofKind::ZkStorageProof
-            }
-            "tee" | "teeattested" | "tee_attested" => {
-                crate::storage::ConfidentialProofKind::TeeAttested
-            }
-            "hybrid" | "hybridzktee" | "hybrid_zk_tee" => {
-                crate::storage::ConfidentialProofKind::HybridZkTee
-            }
-            other => {
-                return Err(ErrorObjectOwned::owned(
-                    -32602,
-                    format!("unknown proof_kind {other}"),
-                    None::<()>,
-                ));
-            }
-        };
-        let commit = crate::storage::ConfidentialBodyCommit::new(
-            content_id,
-            encryption,
-            ciphertext_root,
-            proof_kind,
-        )
-        .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
-        let commitment = self
-            .chain
-            .register_confidential_commit(commit, auth)
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
-        Ok(serde_json::json!({
-            "commitment": format!("0x{}", hex::encode(commitment)),
-            "contentId": format!("0x{}", hex::encode(content_id.0)),
-        }))
-    }
-
-    async fn storage_get_confidential_commit(
-        &self,
-        content_id: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let content_id = parse_content_id(&content_id)?;
-        let commit = self
-            .chain
-            .get_confidential_commit(content_id)
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
-        // The address whose signature opens this body, read from the registry
-        // rather than echoed back from the request. A wallet signs a grant
-        // against exactly this value, so the node that will refuse the grant has
-        // to be the node that can report it.
-        let owner = self
-            .chain
-            .confidential_owner(content_id)
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
-        match commit {
-            None => Ok(serde_json::json!({ "found": false })),
-            Some(c) => Ok(serde_json::json!({
-                "found": true,
-                "contentId": format!("0x{}", hex::encode(c.content_id.0)),
-                "encryption": c.encryption.to_string(),
-                "ciphertextRoot": format!("0x{}", hex::encode(c.ciphertext_root)),
-                "proofKind": format!("{:?}", c.proof_kind),
-                "commitment": format!("0x{}", hex::encode(c.commitment())),
-                "owner": owner.map(|a| a.to_hex()),
-            })),
-        }
-    }
-
-    async fn storage_open_deal(
-        &self,
-        domain_id: u32,
-        manifest: crate::storage::ContentManifest,
-        shard_id: String,
-        operator: String,
-        payer: String,
-        replica_index: u8,
-        start_epoch: u64,
-        end_epoch: u64,
-        economics: crate::domain::storage_deal::StorageEconomicsParams,
-        domain_params: crate::domain::storage_params::StorageDomainParams,
-        merkle_proof: Option<Vec<u8>>,
-        storage_root: Option<crate::domain::Hash32>,
-        request_id: u64,
-        payer_signature: String,
-        operator_signature: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // this method opened a deal and moved the payer escrow and the
-        // operator bond on this node alone, outside a block.
-        self.require_operator("bud_storageOpenDeal")?;
-        let _ = (
-            domain_id,
-            manifest,
-            shard_id,
-            operator,
-            payer,
-            replica_index,
-            start_epoch,
-            end_epoch,
-            economics,
-            domain_params,
-            merkle_proof,
-            storage_root,
-            request_id,
-            payer_signature,
-            operator_signature,
-        );
-        Err(Self::door_refusal(
-            "Out-of-block deal opening is refused: it moved escrow and bond on this node \
-             alone. The payer sends a signed Storage transaction (StorageTx::OpenDeal, \
-             carrying the operator's consent) through bud_sendRawTransaction.",
-        ))
-    }
-
-    async fn storage_accept_reallocation(
-        &self,
-        ticket_id: u64,
-        replacement_operator: String,
-        payer: String,
-        start_epoch: u64,
-        end_epoch: u64,
-        economics: crate::domain::storage_deal::StorageEconomicsParams,
-        domain_params: crate::domain::storage_params::StorageDomainParams,
-        merkle_proof: Option<Vec<u8>>,
-        storage_root: Option<crate::domain::Hash32>,
-        request_id: u64,
-        payer_signature: String,
-        operator_signature: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // this method filled a repair ticket and moved the payer escrow
-        // and the replacement operator bond on this node alone, outside a
-        // block.
-        self.require_operator("bud_storageAcceptReallocation")?;
-        let _ = (
-            ticket_id,
-            replacement_operator,
-            payer,
-            start_epoch,
-            end_epoch,
-            economics,
-            domain_params,
-            merkle_proof,
-            storage_root,
-            request_id,
-            payer_signature,
-            operator_signature,
-        );
-        Err(Self::door_refusal(
-            "Out-of-block repair acceptance is refused: it moved escrow and bond on this node \
-             alone. The payer sends a signed Storage transaction \
-             (StorageTx::AcceptReallocation, carrying the replacement operator's consent) \
-             through bud_sendRawTransaction.",
-        ))
-    }
-
-    async fn storage_get_manifest(
-        &self,
-        manifest_id: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let id = parse_content_id(&manifest_id)?;
-
-        // Shard ids are the handles a reader fetches bytes with, so listing
-        // them for content someone is selling hands out the content to
-        // anyone willing to skip the payment path. Pollen decides that, and
-        // it is asked before anything is serialised.
-        //
-        // The manifest's shape stays public: size and shard count leak
-        // nothing a buyer could not see in the listing, and an operator
-        // needs them to decide whether to serve. What is withheld is the
-        // shard list itself.
-        let protecting_asset = self.chain.pollen_asset_for_content(id).await;
-
-        if let Some(manifest) = self.chain.get_storage_manifest(id).await {
-            let shards: Vec<serde_json::Value> = if protecting_asset.is_some() {
-                Vec::new()
-            } else {
-                manifest
-                    .shards
-                    .iter()
-                    .map(|s| {
-                        serde_json::json!({
-                            "shardId": format!("0x{}", hex::encode(s.shard_id.0)),
-                            "size": s.size,
-                        })
-                    })
-                    .collect()
-            };
-            return Ok(serde_json::json!({
-                "manifestId": format!("0x{}", hex::encode(id.0)),
-                "found": true,
-                "totalSize": manifest.total_size,
-                "shardCount": manifest.shard_count,
-                // An operator deciding whether to serve these bytes, and a
-                // reader deciding whether a failed parse means "wrong key" or
-                // "corrupt shard", both need the declaration. Without it here
-                // the only honest answer either could give is "unknown".
-                "encryption": manifest.encryption.to_string(),
-                // Told plainly rather than by an empty list, so a caller
-                // knows to present a grant instead of concluding the object
-                // has no shards.
-                "protected": protecting_asset.is_some(),
-                "protectingAsset": protecting_asset
-                    .map(|a| format!("0x{}", hex::encode(a.0))),
-                "shards": shards,
-            }));
-        }
-
-        // The fallback path reaches the same shard ids through the deal
-        // records, so it has to answer to the same rule. Closing one and
-        // leaving the other would move the leak rather than fix it.
-        let deals = self.chain.get_storage_deals_by_manifest(id).await;
-        let shards: Vec<serde_json::Value> = if protecting_asset.is_some() {
-            Vec::new()
-        } else {
-            deals
-                .iter()
-                .map(|d| {
-                    serde_json::json!({
-                        "shardId": format!("0x{}", hex::encode(d.shard_id.0)),
-                        "size": d.shard_bytes,
-                    })
-                })
-                .collect()
-        };
-        Ok(serde_json::json!({
-            "manifestId": format!("0x{}", hex::encode(id.0)),
-            "found": !deals.is_empty(),
-            "dealsObserved": deals.len(),
-            "protected": protecting_asset.is_some(),
-            "protectingAsset": protecting_asset
-                .map(|a| format!("0x{}", hex::encode(a.0))),
-            "shards": shards,
-        }))
-    }
-
-    async fn storage_get_deals_by_manifest(
-        &self,
-        manifest_id: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let id = parse_content_id(&manifest_id)?;
-        let deals_raw = self.chain.get_storage_deals_by_manifest(id).await;
-        // A deal record carries its shard id, which is the handle bytes are
-        // fetched with, so this endpoint leaks the same thing
-        // `storage_get_manifest` does and answers to the same rule. The
-        // count stays public: how many operators hold an object is an
-        // economic fact a buyer can already read from the listing.
-        let protecting_asset = self.chain.pollen_asset_for_content(id).await;
-        let count = deals_raw.len();
-        let deals: Vec<serde_json::Value> = if protecting_asset.is_some() {
-            Vec::new()
-        } else {
-            deals_raw
-                .into_iter()
-                .map(|deal| storage_deal_to_json(&deal))
-                .collect()
-        };
-        Ok(serde_json::json!({
-            "manifestId": format!("0x{}", hex::encode(id.0)),
-            "count": count,
-            "protected": protecting_asset.is_some(),
-            "protectingAsset": protecting_asset
-                .map(|a| format!("0x{}", hex::encode(a.0))),
-            "deals": deals,
-        }))
-    }
-
-    async fn storage_get_deals_by_shard(
-        &self,
-        manifest_id: String,
-        shard_id: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let mid = parse_content_id(&manifest_id)?;
-        let sid = parse_content_id(&shard_id)?;
-        let deals_raw = self.chain.get_storage_deals_by_shard(mid, sid).await;
-        // Closed for the same reason as the two endpoints above. This one
-        // matters even though the caller already knows the shard id: the
-        // deal record names the operators holding it, which is the second
-        // half of fetching bytes without paying.
-        let protecting_asset = self.chain.pollen_asset_for_content(mid).await;
-        let count = deals_raw.len();
-        let deals: Vec<serde_json::Value> = if protecting_asset.is_some() {
-            Vec::new()
-        } else {
-            deals_raw
-                .into_iter()
-                .map(|deal| storage_deal_to_json(&deal))
-                .collect()
-        };
-        Ok(serde_json::json!({
-            "manifestId": format!("0x{}", hex::encode(mid.0)),
-            "shardId": format!("0x{}", hex::encode(sid.0)),
-            "count": count,
-            "protected": protecting_asset.is_some(),
-            "protectingAsset": protecting_asset
-                .map(|a| format!("0x{}", hex::encode(a.0))),
-            "deals": deals,
-        }))
-    }
-
-    async fn storage_get_challenges(
-        &self,
-        deal_id: u64,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let mut challenges: Vec<_> = self
-            .chain
-            .get_storage_challenges()
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))?
-            .into_iter()
-            .filter(|challenge| challenge.deal_id == deal_id)
-            .collect();
-        challenges.sort_by_key(|challenge| challenge.challenge_id);
-        Ok(serde_json::json!({
-            "dealId": deal_id,
-            "count": challenges.len(),
-            "challenges": challenges
-                .iter()
-                .map(|challenge| serde_json::json!({
-                    "challengeId": challenge.challenge_id,
-                    "byteStart": challenge.byte_start,
-                    "byteEnd": challenge.byte_end,
-                    "challengeEpoch": challenge.challenge_epoch,
-                    "deadlineEpoch": challenge.deadline_epoch,
-                    "opener": format!("0x{}", challenge.opener.to_hex()),
-                    "openerBond": challenge.opener_bond,
-                }))
-                .collect::<Vec<_>>(),
-        }))
-    }
-
-    async fn storage_open_challenge(
-        &self,
-        request: RetrievalChallengeRequest,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // this method opened a challenge and debited the opener bond on
-        // this node alone, outside a block, with a range drawn from this
-        // node's tip.
-        self.require_operator("bud_storageOpenChallenge")?;
-        let _ = request;
-        Err(Self::door_refusal(
-            "Out-of-block challenge opening is refused: it changed the storage registry and \
-             a balance on this node alone. The opener sends a signed Storage transaction \
-             (StorageTx::OpenChallenge) through bud_sendRawTransaction; the block draws the \
-             byte range.",
-        ))
-    }
-
-    async fn storage_answer_challenge(
-        &self,
-        response: RetrievalResponse,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // this method settled a challenge (and its slash) on this node
-        // alone, outside a block.
-        self.require_operator("bud_storageAnswerChallenge")?;
-        let _ = response;
-        Err(Self::door_refusal(
-            "Out-of-block challenge answers are refused: they settled a challenge and its \
-             slash on this node alone. The deal's operator sends a signed Storage transaction \
-             (StorageTx::AnswerChallenge) through bud_sendRawTransaction.",
-        ))
-    }
-
-    async fn storage_get_economics_summary(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        self.chain
-            .get_storage_economics_summary()
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))
-    }
-
-    async fn storage_get_economics_events(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let events = self
-            .chain
-            .get_storage_economics_events()
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))?;
-        Ok(serde_json::json!({
-            "count": events.len(),
-            "events": events.iter().map(storage_economics_event_to_json).collect::<Vec<_>>(),
-        }))
-    }
-
-    async fn storage_get_operator_economics(
-        &self,
-        operator: Address,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        self.chain
-            .get_storage_operator_economics(operator)
-            .await
-            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))
-    }
-
-    async fn storage_get_outcome(
-        &self,
-        challenge_id: u64,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        match self.chain.get_storage_outcome(challenge_id).await {
-            Some(r) => Ok(serde_json::json!({
-                "challengeId": r.challenge_id,
-                "dealId": r.deal_id,
-                "outcome": format!("{:?}", r.outcome),
-                "finalizedEpoch": r.finalized_epoch,
-                "slashedBond": r.slashed_bond,
-                "proofKind": RETRIEVAL_OUTCOME_PROOF_KIND,
-                "proof_kind": RETRIEVAL_OUTCOME_PROOF_KIND,
-            })),
-            None => Ok(serde_json::Value::Null),
-        }
-    }
-
-    async fn storage_repair_band(
-        &self,
-        margin: u32,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let band: crate::chain::chain_actor::StorageRepairBand =
-            self.chain.get_storage_repair_band(margin).await;
-        let entry = |(manifest_id, live, k): &(crate::storage::ContentId, u32, u32)| {
-            serde_json::json!({
-                "manifestId": Self::to_0x_hash(hex::encode(manifest_id.0)),
-                "liveShards": live,
-                "k": k,
-            })
-        };
-        let repairable: Vec<serde_json::Value> = band.repairable.iter().map(entry).collect();
-        let unrecoverable: Vec<serde_json::Value> = band.unrecoverable.iter().map(entry).collect();
-        Ok(serde_json::json!({
-            "margin": band.margin,
-            "repairableCount": repairable.len(),
-            "repairable": repairable,
-            // Separate on purpose: below `k` no repair can restore the object,
-            // so this list needs an operator alarm, not a replacement deal.
-            "unrecoverableCount": unrecoverable.len(),
-            "unrecoverable": unrecoverable,
-        }))
-    }
-
-    async fn storage_active_operators(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Permissionless read of active STORAGE_OPERATOR (RoleId 5) members.
-        // Same surface as bud_registryActiveMembers; no admin gate.
-        let role = crate::registry::role::roles::STORAGE_OPERATOR;
-        let members = self.chain.get_registry_active_members(role).await;
-        let list: Vec<serde_json::Value> = members
-            .iter()
-            .map(|reg| {
-                serde_json::json!({
-                    "address": Self::to_0x_hash(reg.account.to_hex()),
-                    "stake": reg.stake,
-                    "role": "storage_operator",
-                })
-            })
-            .collect();
-        Ok(serde_json::json!({
-            "roleId": role.value(),
-            "role": "storage_operator",
-            "count": list.len(),
-            "operators": list,
-        }))
-    }
-
     async fn bns_resolve(&self, name: String) -> Result<Option<String>, ErrorObjectOwned> {
         let addr = self.chain.bns_resolve(name).await;
         Ok(addr.map(|a| Self::to_0x_hash(a.to_hex())))
@@ -4639,6 +4362,51 @@ impl BudlumApiServer for RpcServer {
         }
     }
 
+    async fn get_charter(&self, domain_id: u32) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let Some(charter) = self.chain.object_layer_charter(domain_id).await else {
+            return Ok(serde_json::Value::Null);
+        };
+        serde_json::to_value(charter)
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
+    }
+
+    async fn get_asset_class(
+        &self,
+        class_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean = class_id.strip_prefix("0x").unwrap_or(&class_id);
+        let raw = hex::decode(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid class_id hex: {e}"), None::<()>)
+        })?;
+        let bytes: [u8; 32] = raw.try_into().map_err(|_| {
+            ErrorObjectOwned::owned(-32602, "class_id must be 32 bytes", None::<()>)
+        })?;
+        let id = crate::object_layer::AssetClassId(bytes);
+        let Some((class, recorded_custody)) = self.chain.object_layer_asset_class(id).await else {
+            return Ok(serde_json::Value::Null);
+        };
+        Ok(serde_json::json!({
+            "class": class,
+            "recordedCustody": recorded_custody.to_string(),
+        }))
+    }
+
+    async fn get_asset(&self, asset_id: String) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean = asset_id.strip_prefix("0x").unwrap_or(&asset_id);
+        let raw = hex::decode(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid asset_id hex: {e}"), None::<()>)
+        })?;
+        let bytes: [u8; 32] = raw.try_into().map_err(|_| {
+            ErrorObjectOwned::owned(-32602, "asset_id must be 32 bytes", None::<()>)
+        })?;
+        let id = crate::object_layer::AssetId(bytes);
+        let Some(asset) = self.chain.object_layer_asset(id).await else {
+            return Ok(serde_json::Value::Null);
+        };
+        serde_json::to_value(asset)
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
+    }
+
     async fn subscribe(
         &self,
         pending: jsonrpsee::PendingSubscriptionSink,
@@ -4734,6 +4502,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsRegister,
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "name": name,
@@ -4758,8 +4527,17 @@ impl BudlumApiServer for RpcServer {
         let data = bincode::serialize(&(parent_name.clone(), sub_label.clone(), owner_addr))
             .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
 
+        // The executor requires the parent's owner as the sender
+        // (`register_subdomain` compares it with `tx.from`); a zero sender
+        // made the template unsignable.
+        let parent_owner = self
+            .chain
+            .bns_resolve_full(parent_name.clone())
+            .await
+            .map(|resolved| resolved.owner)
+            .ok_or_else(|| ErrorObjectOwned::owned(-32602, "Unknown parent name", None::<()>))?;
         let tx = crate::core::transaction::Transaction {
-            from: Address::zero(),
+            from: parent_owner,
             to: Address::zero(),
             amount: 0,
             fee: 500,
@@ -4779,6 +4557,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsRegisterSubdomain,
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "parent": parent_name,
@@ -4838,6 +4617,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsSetContent,
         };
+        let tx = self.finish_template(tx).await?;
         Ok(serde_json::json!({
             "name": name,
             "owner": owner,
@@ -4887,6 +4667,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsRenew,
         };
+        let tx = self.finish_template(tx).await?;
         Ok(serde_json::json!({
             "name": name,
             "owner": owner,
@@ -4944,6 +4725,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsTransfer,
         };
+        let tx = self.finish_template(tx).await?;
         Ok(serde_json::json!({
             "name": name,
             "owner": owner,
@@ -5056,6 +4838,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::NftMint,
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "author": author,
@@ -5099,6 +4882,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::NftBurn,
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "owner": owner,
@@ -5139,6 +4923,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::NftBoost { nft_id, amount },
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "booster": booster,
@@ -5197,6 +4982,7 @@ impl BudlumApiServer for RpcServer {
                 price,
             },
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "seller": seller,
@@ -5240,6 +5026,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::AiPurchaseData { offer_id },
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "buyer": buyer,
@@ -5529,6 +5316,7 @@ impl BudlumApiServer for RpcServer {
                 manifest_id: m_id,
             },
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "developer": developer,
@@ -5582,6 +5370,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::UniversalRelay(ext_tx),
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "from": from,
@@ -5591,9 +5380,8 @@ impl BudlumApiServer for RpcServer {
 
     async fn gateway_fetch_content(&self, name: String) -> Result<String, ErrorObjectOwned> {
         // Security check (HIGH): Pollen-protected content must not be
-        // fetchable over this RPC without an AccessGrant. Same pattern as the
-        // storage_get_manifest and storage_get_deals_* handlers: if a
-        // protecting asset exists, access is refused.
+        // fetchable over this RPC without an AccessGrant. If a protecting
+        // asset exists, access is refused.
         //
         // Security check (HIGH): the check used to look at storage_root only,
         // so a record with content_id set and storage_root unset skipped the
@@ -5603,7 +5391,7 @@ impl BudlumApiServer for RpcServer {
         let resolved = self.chain.bns_resolve_full(name.clone()).await;
         for cid in resolved
             .as_ref()
-            .map(crate::gateway::pollen_guard_ids)
+            .map(crate::storage::content_gateway::pollen_guard_ids)
             .unwrap_or_default()
         {
             if self.chain.pollen_asset_for_content(cid).await.is_some() {
@@ -5614,8 +5402,11 @@ impl BudlumApiServer for RpcServer {
                 ));
             }
         }
-        let gateway =
-            crate::gateway::BudGateway::new(self.chain.clone(), Some(self.node.clone()), None);
+        let gateway = crate::storage::content_gateway::BudGateway::new(
+            self.chain.clone(),
+            Some(self.node.clone()),
+            None,
+        );
         let data = gateway.fetch_name_content(&name).await.map_err(|e| {
             ErrorObjectOwned::owned(
                 -32000,
@@ -5637,7 +5428,7 @@ impl BudlumApiServer for RpcServer {
         let resolved = self.chain.bns_resolve_full(name.clone()).await;
         for cid in resolved
             .as_ref()
-            .map(crate::gateway::pollen_guard_ids)
+            .map(crate::storage::content_gateway::pollen_guard_ids)
             .unwrap_or_default()
         {
             if self.chain.pollen_asset_for_content(cid).await.is_some() {
@@ -5651,8 +5442,11 @@ impl BudlumApiServer for RpcServer {
         let parsed = parse_render_format(&format).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid render format: {e}"), None::<()>)
         })?;
-        let gateway =
-            crate::gateway::BudGateway::new(self.chain.clone(), Some(self.node.clone()), None);
+        let gateway = crate::storage::content_gateway::BudGateway::new(
+            self.chain.clone(),
+            Some(self.node.clone()),
+            None,
+        );
         let (bytes, id) = gateway
             .render_name_content(&name, &parsed)
             .await
@@ -5670,7 +5464,7 @@ impl BudlumApiServer for RpcServer {
         &self,
         name: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        crate::gateway::validate_passport_name(&name).map_err(|e| {
+        crate::wallet::identity_profile::validate_passport_name(&name).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid passport name: {e}"), None::<()>)
         })?;
         let resolved = self.chain.bns_resolve_full(name.clone()).await;
@@ -5686,7 +5480,7 @@ impl BudlumApiServer for RpcServer {
         let data_assets = self.chain.pollen_get_data_assets().await;
         let access_grants = self.chain.pollen_get_access_grants().await;
         let sale_authorizations = self.chain.pollen_get_sale_authorizations().await;
-        let profile = crate::gateway::build_passport_profile(
+        let profile = crate::wallet::identity_profile::build_passport_profile(
             name,
             resolved,
             manifest,
@@ -5707,7 +5501,7 @@ impl BudlumApiServer for RpcServer {
         &self,
         name: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        crate::gateway::validate_passport_name(&name).map_err(|e| {
+        crate::wallet::identity_profile::validate_passport_name(&name).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid passport name: {e}"), None::<()>)
         })?;
         let resolved = self.chain.bns_resolve_full(name.clone()).await;
@@ -5723,7 +5517,7 @@ impl BudlumApiServer for RpcServer {
         let data_assets = self.chain.pollen_get_data_assets().await;
         let access_grants = self.chain.pollen_get_access_grants().await;
         let sale_authorizations = self.chain.pollen_get_sale_authorizations().await;
-        let profile = crate::gateway::build_passport_profile(
+        let profile = crate::wallet::identity_profile::build_passport_profile(
             name,
             resolved,
             manifest,
@@ -5733,13 +5527,14 @@ impl BudlumApiServer for RpcServer {
         );
         let height = self.chain.get_height().await;
         let bundle =
-            crate::gateway::try_build_passport_proof_bundle(&profile, height).map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32603,
-                    format!("failed to build passport proof bundle: {e}"),
-                    None::<()>,
-                )
-            })?;
+            crate::wallet::identity_profile::try_build_passport_proof_bundle(&profile, height)
+                .map_err(|e| {
+                    ErrorObjectOwned::owned(
+                        -32603,
+                        format!("failed to build passport proof bundle: {e}"),
+                        None::<()>,
+                    )
+                })?;
         serde_json::to_value(bundle).map_err(|e| {
             ErrorObjectOwned::owned(
                 -32603,
@@ -5762,7 +5557,7 @@ impl BudlumApiServer for RpcServer {
         let data_assets = self.chain.pollen_get_data_assets().await;
         let access_grants = self.chain.pollen_get_access_grants().await;
         let sale_authorizations = self.chain.pollen_get_sale_authorizations().await;
-        let context = crate::gateway::build_wallet_context(
+        let context = crate::explorer_evidence::build_wallet_context(
             address,
             balance,
             nonce,
@@ -5800,7 +5595,7 @@ impl BudlumApiServer for RpcServer {
             .get_ai_model(crate::ai::types::AiModelId(arr))
             .await
         {
-            Some(spec) => Ok(serde_json::to_value(&spec).unwrap_or(serde_json::Value::Null)),
+            Some(spec) => to_json("AI model", &spec),
             None => Ok(serde_json::Value::Null),
         }
     }
@@ -5881,6 +5676,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::AiModelRegister(spec),
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "model_id": model_id.to_hex(),
@@ -6078,6 +5874,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::AiInferenceRequest(req.clone()),
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "request_id": req.request_id.to_hex(),
@@ -6178,6 +5975,7 @@ impl BudlumApiServer for RpcServer {
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::AiInferenceResult(res),
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "verifier": v_addr.to_hex(),
@@ -6225,7 +6023,7 @@ impl BudlumApiServer for RpcServer {
             .get_ai_outcome(crate::ai::types::AiRequestId(arr))
             .await
         {
-            Some(outcome) => Ok(serde_json::to_value(&outcome).unwrap_or(serde_json::Value::Null)),
+            Some(outcome) => to_json("AI outcome", &outcome),
             None => Ok(serde_json::Value::Null),
         }
     }
@@ -6433,6 +6231,7 @@ impl BudlumApiServer for RpcServer {
                 verifier: v_addr,
             },
         };
+        let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
             "submitter": submitter,
@@ -6884,6 +6683,53 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
+    async fn get_validator(&self, owner: String) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean = owner.strip_prefix("0x").unwrap_or(&owner);
+        let owner = Address::from_hex(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
+        })?;
+        Ok(self
+            .chain
+            .validator_directory(crate::validators::DirectoryQuery::One(owner))
+            .await)
+    }
+
+    async fn storage_get_object(
+        &self,
+        commitment: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let key = parse_hex32(&commitment)?;
+        Ok(self
+            .chain
+            .bud3(crate::storage::bud3::registry::Bud3Query::Object(key))
+            .await)
+    }
+
+    async fn storage_get_custody(
+        &self,
+        validator: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let key = parse_hex32(&validator)?;
+        Ok(self
+            .chain
+            .bud3(crate::storage::bud3::registry::Bud3Query::Custody(key))
+            .await)
+    }
+
+    async fn list_relays(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Ok(self
+            .chain
+            .validator_directory(crate::validators::DirectoryQuery::Relays)
+            .await)
+    }
+
+    async fn list_gateways(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Ok(self
+            .chain
+            .validator_directory(crate::validators::DirectoryQuery::Gateways)
+            .await)
+    }
+
     async fn get_quantum_alarm(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         Ok(self.chain.quantum_view().await)
     }
@@ -6966,6 +6812,588 @@ impl BudlumApiServer for RpcServer {
         let chain_id = self.chain.get_chain_id().await;
         Ok(Self::ai_readiness_json(chain_id, active_operators.len()))
     }
+
+    // ---- Ethereum JSON-RPC compatibility gateway (WP-28, 1/2) ----
+    //
+    // Every answer here is a chain fact or a refusal that names the
+    // Budlum door (see `src/rpc/compat/ethereum/opening.rs`).
+    async fn web3_client_version(&self) -> Result<String, ErrorObjectOwned> {
+        let chain_id = self.chain.get_chain_id().await;
+        Ok(format!("budlum-core/v{}/chain-{chain_id}", env!("CARGO_PKG_VERSION")))
+    }
+
+    async fn compat_net_version(&self) -> Result<String, ErrorObjectOwned> {
+        Ok(self.chain.get_chain_id().await.to_string())
+    }
+
+    async fn compat_net_listening(&self) -> Result<bool, ErrorObjectOwned> {
+        Ok(true)
+    }
+
+    async fn eth_chain_id(&self) -> Result<String, ErrorObjectOwned> {
+        Ok(Self::to_hex(self.chain.get_chain_id().await))
+    }
+
+    async fn eth_syncing(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Ok(serde_json::json!(self.node.is_syncing()))
+    }
+
+    async fn eth_block_number(&self) -> Result<String, ErrorObjectOwned> {
+        let height = self.chain.get_height().await;
+        Ok(Self::to_hex(height))
+    }
+
+    async fn eth_gas_price(&self) -> Result<String, ErrorObjectOwned> {
+        Ok(Self::to_hex(self.chain.get_base_fee().await))
+    }
+
+    async fn eth_max_priority_fee_per_gas(&self) -> Result<String, ErrorObjectOwned> {
+        Ok("0x0".to_string())
+    }
+
+    async fn eth_accounts(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Ok(serde_json::json!([]))
+    }
+
+    async fn eth_get_balance(
+        &self,
+        _address: String,
+        _block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getBalance", "bud_getBalance"))
+    }
+
+    async fn eth_get_code(
+        &self,
+        _address: String,
+        _block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getCode", "bud_getAccountProof"))
+    }
+
+    async fn eth_get_storage_at(
+        &self,
+        _address: String,
+        _position: String,
+        _block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getStorageAt", "bud_getAccountProof"))
+    }
+
+    async fn eth_get_transaction_count(
+        &self,
+        _address: String,
+        _block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getTransactionCount", "bud_getNonce"))
+    }
+
+    async fn eth_call(
+        &self,
+        _call: serde_json::Value,
+        _block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_call", "bud_txPrecheck"))
+    }
+
+    async fn eth_estimate_gas(
+        &self,
+        _call: serde_json::Value,
+        _block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_estimateGas", "bud_estimateGas"))
+    }
+
+    async fn eth_create_access_list(
+        &self,
+        _call: serde_json::Value,
+        _block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_createAccessList", "bud_txPrecheck"))
+    }
+
+    async fn eth_fee_history(
+        &self,
+        _block_count: String,
+        _newest_block: String,
+        _reward_percentiles: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_feeHistory", "bud_gasPrice"))
+    }
+
+    async fn eth_send_raw_transaction(
+        &self,
+        _raw: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_sendRawTransaction", "bud_sendRawTransaction"))
+    }
+
+    async fn eth_get_block_by_number(
+        &self,
+        _block: String,
+        _full: Option<bool>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getBlockByNumber", "bud_getBlockByNumber"))
+    }
+
+    async fn eth_get_block_by_hash(
+        &self,
+        _hash: String,
+        _full: Option<bool>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getBlockByHash", "bud_getBlockByHash"))
+    }
+
+    async fn eth_get_block_transaction_count_by_number(
+        &self,
+        _block: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable(
+            "eth_getBlockTransactionCountByNumber",
+            "bud_getBlockByNumber",
+        ))
+    }
+
+    async fn eth_get_block_transaction_count_by_hash(
+        &self,
+        _hash: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getBlockTransactionCountByHash", "bud_getBlockByHash"))
+    }
+
+    async fn eth_get_transaction_by_hash(
+        &self,
+        _hash: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getTransactionByHash", "bud_getTransactionByHash"))
+    }
+
+    async fn eth_get_transaction_by_block_number_and_index(
+        &self,
+        _block: String,
+        _index: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable(
+            "eth_getTransactionByBlockNumberAndIndex",
+            "bud_getBlockByNumber",
+        ))
+    }
+
+    async fn eth_get_transaction_receipt(
+        &self,
+        _hash: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getTransactionReceipt", "bud_getTransactionReceipt"))
+    }
+
+    async fn eth_get_block_receipts(
+        &self,
+        _block: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getBlockReceipts", "bud_getBlockByNumber"))
+    }
+
+    async fn eth_get_logs(
+        &self,
+        _filter: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::ee_unavailable("eth_getLogs", "bud_getTransactionReceipt"))
+    }
+
+    // WP-28, 2/N: the five filter methods use one bounded, expiring,
+    // per-connection table. The owner is the server-assigned connection id;
+    // stateful calls without it fail closed. No handler invents log data
+    // before WP-27, and foreign uninstalls are indistinguishable from misses.
+
+    async fn eth_new_filter(
+        &self,
+        ext: &jsonrpsee::Extensions,
+        filter: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let peer = ethereum::filters::peer_of(ext)
+            .map_err(|error| ethereum::filter_error("eth_newFilter", error))?;
+        let spec = serde_json::to_string(&filter).unwrap_or_default();
+        let mut pool = self
+            .eth_filters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let id = pool
+            .create(
+                &peer,
+                ethereum::filters::FilterKind::Log,
+                &spec,
+                ethereum::filters::now_secs(),
+            )
+            .map_err(|error| ethereum::filter_error("eth_newFilter", error))?;
+        Ok(serde_json::Value::String(id))
+    }
+
+    async fn eth_new_block_filter(
+        &self,
+        ext: &jsonrpsee::Extensions,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let peer = ethereum::filters::peer_of(ext)
+            .map_err(|error| ethereum::filter_error("eth_newBlockFilter", error))?;
+        let mut pool = self
+            .eth_filters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let id = pool
+            .create(
+                &peer,
+                ethereum::filters::FilterKind::Block,
+                "{}",
+                ethereum::filters::now_secs(),
+            )
+            .map_err(|error| ethereum::filter_error("eth_newBlockFilter", error))?;
+        Ok(serde_json::Value::String(id))
+    }
+
+    async fn eth_get_filter_changes(
+        &self,
+        ext: &jsonrpsee::Extensions,
+        filter_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let peer = ethereum::filters::peer_of(ext)
+            .map_err(|error| ethereum::filter_error("eth_getFilterChanges", error))?;
+        let mut pool = self
+            .eth_filters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let changes = pool
+            .changes(&peer, &filter_id, ethereum::filters::now_secs())
+            .map_err(|error| ethereum::filter_error("eth_getFilterChanges", error))?;
+        Ok(serde_json::json!(changes))
+    }
+
+    async fn eth_get_filter_logs(
+        &self,
+        ext: &jsonrpsee::Extensions,
+        filter_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let peer = ethereum::filters::peer_of(ext)
+            .map_err(|error| ethereum::filter_error("eth_getFilterLogs", error))?;
+        let mut pool = self
+            .eth_filters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let changes = pool
+            .changes(&peer, &filter_id, ethereum::filters::now_secs())
+            .map_err(|error| ethereum::filter_error("eth_getFilterLogs", error))?;
+        Ok(serde_json::json!(changes))
+    }
+
+    async fn eth_uninstall_filter(
+        &self,
+        ext: &jsonrpsee::Extensions,
+        filter_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let peer = ethereum::filters::peer_of(ext)
+            .map_err(|error| ethereum::filter_error("eth_uninstallFilter", error))?;
+        let mut pool = self
+            .eth_filters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let removed = match pool.uninstall(&peer, &filter_id, ethereum::filters::now_secs()) {
+            Ok(removed) => removed,
+            Err(
+                ethereum::filters::FilterError::UnknownFilter
+                | ethereum::filters::FilterError::ForeignFilter
+                | ethereum::filters::FilterError::Expired,
+            ) => false,
+            Err(error) => {
+                return Err(ethereum::filter_error("eth_uninstallFilter", error));
+            }
+        };
+        Ok(serde_json::Value::Bool(removed))
+    }
+
+    async fn debug_trace_transaction(
+        &self,
+        _hash: String,
+        _options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("debug_traceTransaction")?;
+        Err(ethereum::ee_unavailable("debug_traceTransaction", "bud_getTransactionReceipt"))
+    }
+
+    async fn debug_trace_call(
+        &self,
+        _call: serde_json::Value,
+        _block: Option<String>,
+        _options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("debug_traceCall")?;
+        Err(ethereum::ee_unavailable("debug_traceCall", "bud_txPrecheck"))
+    }
+
+    async fn eth_get_proof(
+        &self,
+        _address: String,
+        _keys: serde_json::Value,
+        _block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(ethereum::proof_is_not_an_mpt_proof())
+    }
+
+    // ---- Solana JSON-RPC compatibility gateway (WP-31, 1/N) ----
+    //
+    // Every success is a node or chain fact. Unwired state mappings name the
+    // native door instead of translating native accounts into invented SVM state.
+
+    async fn solana_get_health(&self) -> Result<String, ErrorObjectOwned> {
+        Ok("ok".to_string())
+    }
+
+    async fn solana_get_version(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Ok(serde_json::json!({
+            "solana-core": format!("budlum-core/{}", env!("CARGO_PKG_VERSION")),
+        }))
+    }
+
+    async fn solana_get_genesis_hash(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::not_exposed("getGenesisHash", "bud_getBlockByNumber"))
+    }
+
+    async fn solana_get_slot(
+        &self,
+        config: Option<solana::subscriptions::SlotConfig>,
+    ) -> Result<u64, ErrorObjectOwned> {
+        let commitment = config.unwrap_or_default().commitment.unwrap_or_default();
+        Ok(match commitment {
+            solana::subscriptions::Commitment::Processed => self.chain.get_height().await,
+            solana::subscriptions::Commitment::Finalized => self.chain.get_finalized_height().await,
+        })
+    }
+
+    async fn solana_get_block_height(
+        &self,
+        config: Option<solana::subscriptions::SlotConfig>,
+    ) -> Result<u64, ErrorObjectOwned> {
+        let commitment = config.unwrap_or_default().commitment.unwrap_or_default();
+        Ok(match commitment {
+            solana::subscriptions::Commitment::Processed => self.chain.get_height().await,
+            solana::subscriptions::Commitment::Finalized => self.chain.get_finalized_height().await,
+        })
+    }
+
+    async fn solana_get_epoch_info(
+        &self,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::not_exposed("getEpochInfo", "bud_getStatus"))
+    }
+
+    async fn solana_get_latest_blockhash(
+        &self,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::not_exposed("getLatestBlockhash", "bud_getBlockByNumber"))
+    }
+
+    async fn solana_is_blockhash_valid(
+        &self,
+        _blockhash: String,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::not_exposed("isBlockhashValid", "bud_getBlockByNumber"))
+    }
+
+    async fn solana_get_balance(
+        &self,
+        _address: String,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getBalance", "bud_getBalance"))
+    }
+
+    async fn solana_get_account_info(
+        &self,
+        _address: String,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getAccountInfo", "bud_getAccountProof"))
+    }
+
+    async fn solana_get_multiple_accounts(
+        &self,
+        _addresses: Vec<String>,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getMultipleAccounts", "bud_getAccountProof"))
+    }
+
+    async fn solana_get_program_accounts(
+        &self,
+        _program_id: String,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getProgramAccounts", "bud_getAccountProof"))
+    }
+
+    async fn solana_get_token_accounts_by_owner(
+        &self,
+        _owner: String,
+        _token_accounts_filter: serde_json::Value,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable(
+            "getTokenAccountsByOwner",
+            "bud_getAccountProof",
+        ))
+    }
+
+    async fn solana_get_token_account_balance(
+        &self,
+        _token_account: String,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getTokenAccountBalance", "bud_getBalance"))
+    }
+
+    async fn solana_get_token_supply(
+        &self,
+        _mint: String,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getTokenSupply", "bud_getStatus"))
+    }
+
+    async fn solana_get_minimum_balance_for_rent_exemption(
+        &self,
+        _data_size: u64,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable(
+            "getMinimumBalanceForRentExemption",
+            "bud_getStatus",
+        ))
+    }
+
+    async fn solana_get_fee_for_message(
+        &self,
+        _message: String,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getFeeForMessage", "bud_gasPrice"))
+    }
+
+    async fn solana_get_recent_prioritization_fees(
+        &self,
+        _addresses: Option<Vec<String>>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable(
+            "getRecentPrioritizationFees",
+            "bud_gasPrice",
+        ))
+    }
+
+    async fn solana_send_transaction(
+        &self,
+        _transaction: String,
+        _options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("sendTransaction", "bud_sendRawTransaction"))
+    }
+
+    async fn solana_simulate_transaction(
+        &self,
+        _transaction: String,
+        _options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("simulateTransaction", "bud_txPrecheck"))
+    }
+
+    async fn solana_get_signature_statuses(
+        &self,
+        _signatures: Vec<String>,
+        _options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable(
+            "getSignatureStatuses",
+            "bud_getTransactionReceipt",
+        ))
+    }
+
+    async fn solana_get_signatures_for_address(
+        &self,
+        _address: String,
+        _options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable(
+            "getSignaturesForAddress",
+            "bud_getTransactionByHash",
+        ))
+    }
+
+    async fn solana_get_transaction(
+        &self,
+        _signature: String,
+        _options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getTransaction", "bud_getTransactionByHash"))
+    }
+
+    async fn solana_get_block(
+        &self,
+        _slot: u64,
+        _options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::ee_unavailable("getBlock", "bud_getBlockByNumber"))
+    }
+
+    async fn solana_request_airdrop(
+        &self,
+        _address: String,
+        _lamports: u64,
+        _config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Err(solana::faucet_unavailable("requestAirdrop"))
+    }
+
+    async fn solana_account_subscribe(
+        &self,
+        pending: jsonrpsee::PendingSubscriptionSink,
+        _address: String,
+        _config: Option<serde_json::Value>,
+    ) -> jsonrpsee::core::SubscriptionResult {
+        solana::subscriptions::reject_svm(pending, "accountSubscribe", "bud_getAccountProof").await
+    }
+
+    async fn solana_signature_subscribe(
+        &self,
+        pending: jsonrpsee::PendingSubscriptionSink,
+        _signature: String,
+        _config: Option<serde_json::Value>,
+    ) -> jsonrpsee::core::SubscriptionResult {
+        solana::subscriptions::reject_svm(pending, "signatureSubscribe", "bud_getTransactionReceipt").await
+    }
+
+    async fn solana_slot_subscribe(
+        &self,
+        pending: jsonrpsee::PendingSubscriptionSink,
+        config: Option<solana::subscriptions::SlotConfig>,
+    ) -> jsonrpsee::core::SubscriptionResult {
+        solana::subscriptions::accept_slots(pending, self.chain.clone(), config).await
+    }
+
+    async fn solana_logs_subscribe(
+        &self,
+        pending: jsonrpsee::PendingSubscriptionSink,
+        _filter: serde_json::Value,
+        _config: Option<serde_json::Value>,
+    ) -> jsonrpsee::core::SubscriptionResult {
+        solana::subscriptions::reject_svm(pending, "logsSubscribe", "bud_getTransactionReceipt").await
+    }
+
+    async fn solana_program_subscribe(
+        &self,
+        pending: jsonrpsee::PendingSubscriptionSink,
+        _program_id: String,
+        _config: Option<serde_json::Value>,
+    ) -> jsonrpsee::core::SubscriptionResult {
+        solana::subscriptions::reject_svm(pending, "programSubscribe", "bud_getAccountProof").await
+    }
 }
 
 /// Turn the on-the-wire format string into a `RenderFormat`.
@@ -7013,7 +7441,7 @@ mod tests {
     }
 
     #[test]
-    fn p21_f01_default_config_has_a_rate_limit() {
+    fn default_config_has_a_rate_limit() {
         assert!(RpcSecurityConfig::default().rate_limit_per_minute.is_some());
     }
 
@@ -7123,22 +7551,22 @@ mod tests {
     /// the body of a header-less response from JavaScript.
     #[test]
     fn allowed_origin_is_reflected_into_the_response() {
-        let config = cors_config(&["https://budscan.example"]);
-        let req = request_from_origin("https://budscan.example");
+        let config = cors_config(&["https://budlum-explorer.example"]);
+        let req = request_from_origin("https://budlum-explorer.example");
         let outcome = cors_outcome(&config, &req);
         assert_eq!(
             outcome,
-            CorsOutcome::Allow("https://budscan.example".into())
+            CorsOutcome::Allow("https://budlum-explorer.example".into())
         );
 
         let mut response = text_response(StatusCode::OK, "ok");
-        apply_cors_headers(&mut response, "https://budscan.example");
+        apply_cors_headers(&mut response, "https://budlum-explorer.example");
         assert_eq!(
             response
                 .headers()
                 .get("access-control-allow-origin")
                 .and_then(|v| v.to_str().ok()),
-            Some("https://budscan.example")
+            Some("https://budlum-explorer.example")
         );
         // A cache must not serve one origin's response to another.
         assert_eq!(
@@ -7155,7 +7583,7 @@ mod tests {
 
     #[test]
     fn unlisted_origin_is_denied_and_gets_no_headers() {
-        let config = cors_config(&["https://budscan.example"]);
+        let config = cors_config(&["https://budlum-explorer.example"]);
         let req = request_from_origin("https://saldirgan.example");
         let outcome = cors_outcome(&config, &req);
         assert_eq!(outcome, CorsOutcome::Deny);
@@ -7170,6 +7598,128 @@ mod tests {
             .is_none());
     }
 
+    /// A `*` configuration answers with the literal `*`; the
+    /// caller's `Origin` header is never echoed back.
+    #[test]
+    fn cors_wildcard_does_not_reflect_headers() {
+        let config = cors_config(&["*"]);
+        let req = request_from_origin("https://saldirgan.example");
+        assert_eq!(cors_outcome(&config, &req), CorsOutcome::Allow("*".into()));
+        // A named origin next to `*` still gets its own name back.
+        let config = cors_config(&["*", "https://budlum-explorer.example"]);
+        let req = request_from_origin("https://budlum-explorer.example");
+        assert_eq!(
+            cors_outcome(&config, &req),
+            CorsOutcome::Allow("https://budlum-explorer.example".into())
+        );
+    }
+
+    /// A prepared template carries the sender's next nonce and the
+    /// admission fee floor, with `max_fee == fee`, whatever the hard-coded
+    /// values in the template were.
+    #[tokio::test]
+    async fn prepare_templates_carry_valid_nonce_and_fee() {
+        use crate::chain::chain_actor::ChainCommand;
+        let (sender, mut rx) = tokio::sync::mpsc::channel(4);
+        let chain = ChainHandle::new(sender);
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    ChainCommand::GetNonce(_, reply) => {
+                        let _ = reply.send(7);
+                    }
+                    ChainCommand::GetRequiredFee(_, reply) => {
+                        let _ = reply.send(13);
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let mut template = crate::core::transaction::Transaction::new(
+            Address::from([1; 32]),
+            Address::zero(),
+            0,
+            Vec::new(),
+        );
+        template.fee = 500;
+        template.max_fee = 500;
+        template.nonce = 0;
+        let done = finish_template(&chain, template).await.unwrap();
+        assert_eq!(done.nonce, 7);
+        assert_eq!(done.fee, 13);
+        assert_eq!(done.max_fee, 13);
+        assert_eq!(done.priority_fee, 0);
+    }
+
+    /// the fee a `Prepare` template is given must be one the chain
+    /// will accept, not the `fee = 0` the template struct was built with.
+    ///
+    /// The finding is that 14 `Prepare` handlers returned `Transaction::new(..)`
+    /// verbatim, so the wallet signed a transaction with nonce 0 and fee 0 and
+    /// the node refused it at admission for exactly the two fields the RPC had
+    /// left at their defaults. The canary is the fixture: the template starts at
+    /// `fee = 500, max_fee = 500, nonce = 0` and the chain reports a required
+    /// fee of 13 and a nonce of 7, so an unwired template keeps 500/0.
+    ///
+    /// This is the binding half; `prepare_templates_carry_valid_nonce_and_fee`
+    /// above is the pre-existing behavioural test.
+    #[tokio::test]
+    async fn a_prepared_template_is_admissible_by_the_chain() {
+        use crate::chain::chain_actor::ChainCommand;
+        let (sender, mut rx) = tokio::sync::mpsc::channel(4);
+        let chain = ChainHandle::new(sender);
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    ChainCommand::GetNonce(_, reply) => {
+                        let _ = reply.send(7);
+                    }
+                    ChainCommand::GetRequiredFee(_, reply) => {
+                        let _ = reply.send(13);
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        // Every template starts with the two fields the finding names unset,
+        // plus a fee that is neither the floor nor zero: if `finish_template`
+        // is not on the path, the stale 500 survives and this fails.
+        let mut stale = crate::core::transaction::Transaction::new(
+            Address::from([1; 32]),
+            Address::zero(),
+            0,
+            Vec::new(),
+        );
+        stale.fee = 500;
+        stale.max_fee = 500;
+        stale.nonce = 0;
+
+        let prepared = finish_template(&chain, stale).await.expect("template");
+        assert_eq!(prepared.nonce, 7, "the sender's next nonce, not the default 0");
+        assert_eq!(prepared.fee, 13, "the admission floor, not the stale 500");
+        assert_eq!(
+            prepared.max_fee, prepared.fee,
+            "flat-fee mode requires max_fee == fee"
+        );
+        assert_eq!(
+            prepared.priority_fee, 0,
+            "flat-fee mode rejects any priority fee"
+        );
+    }
+
+    /// A value that cannot be encoded is an explicit error, not a
+    /// `null` that reads as "absent".
+    #[test]
+    fn rpc_serialization_error_is_explicit() {
+        let mut unencodable = std::collections::BTreeMap::new();
+        unencodable.insert((1u8, 2u8), 3u8);
+        let err = to_json("Probe", &unencodable).unwrap_err();
+        assert_eq!(err.code(), -32603);
+        assert!(err.message().contains("Probe serialization failed"));
+        assert_eq!(to_json("Ok", &5u8).unwrap(), serde_json::json!(5));
+    }
+
     /// With CORS unconfigured no header is emitted - the default is closed.
     #[test]
     fn empty_cors_list_emits_no_headers() {
@@ -7177,7 +7727,7 @@ mod tests {
             api_key: Some("secret".into()),
             ..Default::default()
         };
-        let req = request_from_origin("https://budscan.example");
+        let req = request_from_origin("https://budlum-explorer.example");
         assert_eq!(cors_outcome(&config, &req), CorsOutcome::NotApplicable);
     }
 
@@ -7188,17 +7738,17 @@ mod tests {
         let mut req = HttpRequest::builder()
             .method(hyper::Method::OPTIONS)
             .uri("/")
-            .header("origin", "https://budscan.example")
+            .header("origin", "https://budlum-explorer.example")
             .header("access-control-request-method", "POST")
             .body(())
             .unwrap();
         assert!(is_cors_preflight(&req));
 
         // No identity header, and the allow decision still has to be reachable.
-        let config = cors_config(&["https://budscan.example"]);
+        let config = cors_config(&["https://budlum-explorer.example"]);
         assert!(!is_authorized(&config, &req));
 
-        let response = preflight_response("https://budscan.example");
+        let response = preflight_response("https://budlum-explorer.example");
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert_eq!(
             response
@@ -7214,6 +7764,7 @@ mod tests {
     }
 
     async fn status_through_layer(
+        &self,
         mode: RpcMode,
         host: Option<&str>,
         origin: Option<&str>,
@@ -7444,6 +7995,53 @@ mod tests {
         assert!(!is_per_ip_rate_limited(&config, &per_ip_rates, ip));
     }
 
+    /// When the table is full, the quietest client is evicted, never
+    /// one that sits at its quota: evicting a saturated client would reset its
+    /// window and hand it a fresh quota.
+    #[test]
+    fn full_table_does_not_evict_a_saturated_client() {
+        let config = RpcSecurityConfig {
+            rate_limit_per_minute: Some(2),
+            ..Default::default()
+        };
+        let per_ip_rates = Arc::new(Mutex::new(HashMap::new()));
+        let saturated = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let now = Instant::now();
+        {
+            let mut rates = per_ip_rates.lock().unwrap();
+            for i in 0..MAX_TRACKED_RPC_CLIENTS {
+                let ip = IpAddr::V4(Ipv4Addr::new(
+                    10,
+                    ((i >> 8) & 0xff) as u8,
+                    (i & 0xff) as u8,
+                    1,
+                ));
+                let mut window = VecDeque::new();
+                // Every client but the saturated one made one recent request;
+                // the saturated one is the oldest and at its quota.
+                let first = now - Duration::from_secs(50) + Duration::from_millis(i as u64);
+                window.push_back(first);
+                if ip == saturated {
+                    window.push_back(first);
+                }
+                rates.insert(ip, window);
+            }
+        }
+        let newcomer = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+        assert!(is_per_ip_rate_limited(
+            &config,
+            &per_ip_rates,
+            Some(newcomer)
+        ));
+        assert!(per_ip_rates.lock().unwrap().contains_key(&saturated));
+        // The saturated client is still refused.
+        assert!(!is_per_ip_rate_limited(
+            &config,
+            &per_ip_rates,
+            Some(saturated)
+        ));
+    }
+
     #[test]
     fn rate_limit_table_evicts_oldest_client_instead_of_globally_rejecting() {
         let config = RpcSecurityConfig {
@@ -7493,6 +8091,83 @@ mod tests {
         assert!(is_ip_allowed(&config, &req));
     }
 
+    ///  lock, quota half. A client behind a proxy may forge every entry
+    /// to the left of the one its proxy appended. The quota is keyed on the
+    /// appended address, so three forgeries spend three requests of one window
+    /// and the fourth is refused. An implementation that took the leftmost entry
+    /// would hand a fresh bucket to every forged address.
+    #[test]
+    fn a_forged_forwarded_for_entry_buys_no_fresh_quota() {
+        let config = RpcSecurityConfig {
+            trusted_proxies: vec!["*".into()],
+            allowed_ips: vec!["10.0.0.1".into()],
+            rate_limit_per_minute: Some(2),
+            ..Default::default()
+        };
+        let per_ip_rates = Arc::new(Mutex::new(HashMap::new()));
+        let real = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+        for forged in ["10.0.0.1", "10.0.0.2"] {
+            let mut req = request_with_remote(SocketAddr::from(([203, 0, 113, 9], 40000)));
+            req.headers_mut().insert(
+                "x-forwarded-for",
+                HeaderValue::from_str(&format!("{forged}, 198.51.100.7")).unwrap(),
+            );
+            assert_eq!(
+                extract_client_ip(&config, &req),
+                Some(real),
+                "the forged {forged} entry must not become the client"
+            );
+            assert!(
+                !is_ip_allowed(&config, &req),
+                "the forged {forged} entry must not read as an allow-listed client"
+            );
+            assert!(
+                is_per_ip_rate_limited(&config, &per_ip_rates, Some(real)),
+                "the {forged} forgery must not reset the window"
+            );
+        }
+        assert!(
+            !is_per_ip_rate_limited(&config, &per_ip_rates, Some(real)),
+            "one client, one bucket: the third request of a window of two is refused"
+        );
+        assert_eq!(
+            per_ip_rates.lock().unwrap().len(),
+            1,
+            "a forged address may not create its own bucket"
+        );
+    }
+
+    ///  lock. The comparison walks the expected key on every call and
+    /// folds the length difference into the accumulator, so a candidate of the
+    /// wrong length is refused without an early return and without the
+    /// same-buffer self-comparison that measured shorter than a real mismatch.
+    #[test]
+    fn the_api_key_compare_never_early_returns_on_length() {
+        let expected = "secret-value";
+        for candidate in [
+            "",
+            "s",
+            "secret",
+            "secret-valu",
+            "secret-value",
+            "secret-valuf",
+            "secret-value-and-more",
+        ] {
+            assert_eq!(
+                constant_time_eq_str(candidate, expected),
+                candidate == expected,
+                "candidate {candidate:?}"
+            );
+        }
+        // An empty candidate and an empty expectation are the one case where the
+        // loop body never runs: the length fold alone decides.
+        assert!(constant_time_eq_str("", ""));
+        assert!(!constant_time_eq_str("x", ""));
+        // A one byte difference at the end is refused, as is the same length
+        // with a different byte: neither answer is allowed to be cheaper.
+        assert!(!constant_time_eq_str("secret-valud", expected));
+    }
+
     #[test]
     fn spoofed_forwarded_headers_are_ignored_without_trusted_proxy_match() {
         let config = RpcSecurityConfig {
@@ -7530,6 +8205,49 @@ mod tests {
     }
 
     #[test]
+    fn forwarded_ip_and_quota_are_bound() {
+        let config = RpcSecurityConfig {
+            allowed_ips: vec!["203.0.113.7".into()],
+            trusted_proxies: vec!["127.0.0.1".into(), "192.0.2.10".into()],
+            rate_limit_per_minute: Some(1),
+            ..Default::default()
+        };
+        let mut req = request_with_remote(SocketAddr::from(([127, 0, 0, 1], 9000)));
+        req.headers_mut().append(
+            "x-forwarded-for",
+            HeaderValue::from_static("198.51.100.99, 203.0.113.7"),
+        );
+        req.headers_mut().append(
+            "x-forwarded-for",
+            HeaderValue::from_static("192.0.2.10"),
+        );
+        let client = Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
+        assert_eq!(extract_client_ip(&config, &req), client);
+        assert!(is_ip_allowed(&config, &req));
+        let rates = Arc::new(Mutex::new(HashMap::new()));
+        assert!(is_per_ip_rate_limited(&config, &rates, client));
+        assert!(!is_per_ip_rate_limited(&config, &rates, extract_client_ip(&config, &req)));
+
+        req.headers_mut().insert("x-forwarded-for", HeaderValue::from_static("bad"));
+        req.headers_mut().insert("x-real-ip", HeaderValue::from_static("203.0.113.7"));
+        assert_eq!(extract_client_ip(&config, &req), None);
+        assert!(!is_ip_allowed(&config, &req));
+        assert!(!is_per_ip_rate_limited(&config, &rates, extract_client_ip(&config, &req)));
+    }
+
+    #[test]
+    fn constant_time_eq_checks_length_and_distinct_buffers() {
+        let expected = String::from("secret-token");
+        let matching = String::from("secret-token");
+        assert!(constant_time_eq_str(&matching, &expected));
+        assert!(!constant_time_eq_str("secret-tokeN", &expected));
+        assert!(!constant_time_eq_str("secret", &expected));
+        assert!(!constant_time_eq_str("secret-token-more", &expected));
+        assert!(!constant_time_eq_str("", &expected));
+        assert!(constant_time_eq_str("", ""));
+    }
+
+    #[test]
     fn trusted_proxy_headers_are_honored_only_for_trusted_socket_peer() {
         let config = RpcSecurityConfig {
             allowed_ips: vec!["10.0.0.5".into()],
@@ -7544,6 +8262,185 @@ mod tests {
             Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)))
         );
         assert!(is_ip_allowed(&config, &req));
+    }
+}
+
+/// the API-key comparison must not leak key length.
+///
+/// The earlier shape compared the two buffers and, on a length mismatch,
+/// dummy-compared `b` against itself (`a_b.ct_eq(a_b)`). Those are the same
+/// pointer, so LLVM at `-C opt-level=3` can fold the whole loop away and the
+/// mismatch path becomes measurably faster than the match path; the `/t/ = 45,78`
+/// timing ratio in the finding is that gap. The rule now has a correctness
+/// half and a shape half, and the shape half is what keeps the fold away.
+#[cfg(test)]
+mod api_key_comparison_tests {
+    use super::constant_time_eq_str;
+
+    /// Correctness: every one of these must answer exactly `<`, `==` and `>`
+    /// the way `str::eq` would, including the empty string on both sides.
+    #[test]
+    fn the_comparison_is_a_correct_equality() {
+        for (a, b) in [
+            ("secret-value", "secret-value"),
+            ("secret-value", "secret-valuf"),
+            ("secret-value", "secret-valu"),
+            ("secret-value", "x"),
+            ("x", "secret-value"),
+            ("", ""),
+            ("", "x"),
+            ("x", ""),
+            ("0123456789abcdef", "0123456789abcdee"),
+        ] {
+            assert_eq!(
+                constant_time_eq_str(a, b),
+                a == b,
+                "a={a:?} b={b:?} must answer like `==`"
+            );
+        }
+    }
+
+    /// The work depends on the expected value's length, never on the
+    /// candidate's. A short candidate must still walk the whole expected
+    /// buffer: with the self-comparison shape the loop had no second buffer to
+    /// walk, and the assembler removed it.
+    ///
+    /// This is asserted as a shape, not a timer: the function is
+    /// `black_box`-ed on every accumulated byte, so the loop is opaque to the
+    /// optimiser, and the observable consequence is that one byte of the
+    /// candidate changes the answer while a shorter candidate is still refused.
+    #[test]
+    fn a_length_mismatch_is_refused_without_a_self_comparison() {
+        let expected = "the-expected-api-key-of-some-length";
+        // Every truncation is refused, including the ones that agree on their
+        // whole prefix: a prefix match must not be accepted.
+        for cut in 0..expected.len() {
+            assert!(
+                !constant_time_eq_str(&expected[..cut], expected),
+                "a {cut}-byte prefix must not be accepted as the key"
+            );
+        }
+        // And an extension is refused too: length is folded into the
+        // accumulator, it is not a prefix rule.
+        let longer = format!("{expected}x");
+        assert!(!constant_time_eq_str(&longer, expected));
+        assert!(constant_time_eq_str(expected, expected));
+    }
+}
+
+/// the client identity behind a trusted proxy is the address the
+/// proxy itself appended, and the IP quota is keyed on that identity.
+///
+/// The finding has two halves and both were exploitable on their own:
+///
+///  * `extract_client_ip` trusted the **leftmost** `X-Forwarded-For` entry, so
+///    a client could set the header and pick its own identity, walk straight
+///    through an `allowed_ips` list and mint a fresh quota per request.
+///  * the rate table evicted FIFO, so an attacker rotating addresses could push
+///    a saturated address out of the table and buy it a fresh window.
+///
+/// A test that only checked the header parse would stay green if the quota
+/// went back to a shared bucket, so this one drives both through one config.
+#[cfg(test)]
+mod client_identity_tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    fn request_with_remote(remote: SocketAddr) -> HttpRequest<()> {
+        let mut req = HttpRequest::builder().uri("/").body(()).unwrap();
+        req.extensions_mut().insert(remote);
+        req
+    }
+
+    #[test]
+    fn the_quota_is_keyed_on_the_proxy_appended_address() {
+        let proxy = SocketAddr::from(([127, 0, 0, 1], 9000));
+        let config = RpcSecurityConfig {
+            rate_limit_per_minute: Some(1),
+            allowed_ips: vec!["203.0.113.7".into()],
+            trusted_proxies: vec!["127.0.0.1".into()],
+            ..Default::default()
+        };
+        let per_ip_rates = Arc::new(Mutex::new(HashMap::new()));
+
+        // The client prepends a forged address and the proxy appends the real
+        // one. The forged entry must not be the identity.
+        let mut spoofed = request_with_remote(proxy);
+        spoofed.headers_mut().insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("203.0.113.7, 198.51.100.9"),
+        );
+        assert_eq!(
+            extract_client_ip(&config, &spoofed),
+            Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9))),
+            "the rightmost entry is the one the trusted proxy appended"
+        );
+        // The forged entry would have passed the allow-list; the real one does
+        // not, which is the point of the finding.
+        assert!(!is_ip_allowed(&config, &spoofed));
+
+        // The quota is keyed on the real identity: one request is admitted and
+        // the second from the same client is refused.
+        let real = extract_client_ip(&config, &spoofed);
+        assert!(is_per_ip_rate_limited(&config, &per_ip_rates, real));
+        assert!(!is_per_ip_rate_limited(&config, &per_ip_rates, real));
+
+        // A different client behind the same proxy still has its own quota:
+        // the table is per identity, not per proxy.
+        let other = Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10)));
+        assert!(is_per_ip_rate_limited(&config, &per_ip_rates, other));
+    }
+
+    /// The other half: filling the table does not evict a client that is at its
+    /// quota, so a rotation cannot buy a saturated address a fresh window.
+    #[test]
+    fn a_full_table_evicts_the_quietest_client_not_the_busiest() {
+        let config = RpcSecurityConfig {
+            rate_limit_per_minute: Some(2),
+            ..Default::default()
+        };
+        let per_ip_rates = Arc::new(Mutex::new(HashMap::new()));
+        let saturated = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let quiet = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let now = Instant::now();
+        {
+            let mut rates = per_ip_rates.lock().unwrap();
+            let mut saturated_window = VecDeque::new();
+            saturated_window.push_back(now - Duration::from_secs(10));
+            saturated_window.push_back(now - Duration::from_secs(5));
+            rates.insert(saturated, saturated_window);
+            let mut quiet_window = VecDeque::new();
+            quiet_window.push_back(now - Duration::from_secs(40));
+            rates.insert(quiet, quiet_window);
+            // The rest of the table, so the ceiling is reached on the next
+            // unknown address.
+            for i in 0..(MAX_TRACKED_RPC_CLIENTS - 2) {
+                let ip = IpAddr::V4(Ipv4Addr::new(
+                    11,
+                    ((i >> 8) & 0xff) as u8,
+                    (i & 0xff) as u8,
+                    1,
+                ));
+                let mut window = VecDeque::new();
+                window.push_back(now - Duration::from_secs(20) + Duration::from_millis(i as u64));
+                rates.insert(ip, window);
+            }
+        }
+
+        let newcomer = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+        assert!(
+            is_per_ip_rate_limited(&config, &per_ip_rates, Some(newcomer)),
+            "the newcomer takes the quiet client's slot"
+        );
+        let rates = per_ip_rates.lock().unwrap();
+        assert!(
+            rates.contains_key(&saturated),
+            "a client at its quota must keep its window: evicting it hands it a fresh quota"
+        );
+        assert!(
+            !rates.contains_key(&quiet),
+            "the quietest client is the one evicted"
+        );
     }
 }
 

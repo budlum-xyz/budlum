@@ -10,7 +10,7 @@
 //! `bud_submitZkProof`), a gossip side channel that applied commitments as
 //! they arrived, and a startup pass that rewrote bootstrap domain statuses.
 //! The node that ran them held a registry no peer could reproduce (testnet
-//!,).
+//!).
 //!
 //! This module moves them into the block. The registries live in
 //! `AccountState::settlement`; the functions below are the only writers, and
@@ -98,6 +98,9 @@ pub enum SettlementTx {
     /// settlement chain, and its target domain reads it from the global
     /// header's message root.
     DeliverMessage(Box<DeliverMessage>),
+
+    /// Universal Object Layer state write (closed by `ACTIVATION` until M7).
+    ObjectLayer(Box<crate::object_layer::ObjectLayerTx>),
 }
 
 /// Equality by wire encoding: the payloads carry proof types that define no
@@ -490,6 +493,18 @@ pub fn verify_commitment_finality_observed(
                     commitment.domain_id
                 ));
             };
+            let serves = state
+                .settlement
+                .external_intake
+                .registry
+                .domain(&key)
+                .is_some_and(|reg| reg.record.state.serves());
+            if !serves {
+                return Err(format!(
+                    "Domain {} external registry entry is not in a serving state",
+                    commitment.domain_id
+                ));
+            }
             let pairing = matches!(
                 entry.spec,
                 crate::cross_domain::external::AdapterSpec::EthereumSync { .. }
@@ -1034,6 +1049,9 @@ pub fn submit_zk_proof(
             submission.public_inputs.chain_id
         ));
     }
+    if crate::prover::is_empty_or_halt_only_program(&submission.program) {
+        return Err("empty or bare Halt program cannot attest a ZK domain state root".into());
+    }
     // The program allowlist: does this program have the right to advance
     // this domain? Empty is fail-closed.
     let claimed_domain = submission.domain();
@@ -1345,7 +1363,54 @@ pub fn execute_settlement_tx(
             crate::settlement::shared_security::execute_shared_security_tx(state, ctx, shared_tx)
         }
         SettlementTx::DeliverMessage(delivery) => deliver_message(state, ctx, delivery),
+        SettlementTx::ObjectLayer(uol_tx) => execute_object_layer_tx(state, ctx, uol_tx),
     }
+}
+
+fn execute_object_layer_tx(
+    state: &mut AccountState,
+    ctx: &SettlementTxContext,
+    tx: &crate::object_layer::ObjectLayerTx,
+) -> Result<(), SettlementTxError> {
+    struct IntakeFinality<'a>(&'a crate::domain::DomainCommitmentRegistry);
+    impl crate::object_layer::registry::HomeFinality for IntakeFinality<'_> {
+        fn event_is_proven(&self, proof: &crate::object_layer::registry::HomeEventProof) -> bool {
+            if proof.inclusion.is_empty() {
+                return false;
+            }
+            self.0
+                .get(proof.domain, proof.home_height)
+                .is_some_and(|c| c.block_hash == proof.home_block_hash)
+        }
+    }
+    let height = state.current_block_height;
+    let domain_registry = state.settlement.domain_registry.clone();
+    let commitment_registry = state.settlement.commitment_registry.clone();
+    let finality = IntakeFinality(&commitment_registry);
+    let domain_active = |id: DomainId| {
+        domain_registry
+            .get(id)
+            .is_some_and(|d| d.status == DomainStatus::Active)
+    };
+    let uol_ctx = crate::object_layer::tx::TxContext {
+        height,
+        signer: ctx.sender,
+        activation: crate::object_layer::ACTIVATION,
+        finality: &finality,
+        domain_active: &domain_active,
+    };
+    tx.apply(&mut state.settlement.object_layer, &uol_ctx)
+        .map_err(|err| match err {
+            crate::object_layer::tx::TxRefusal::Closed => {
+                SettlementTxError::Refused("object_layer_closed".into())
+            }
+            crate::object_layer::tx::TxRefusal::StepNotOpen => {
+                SettlementTxError::Refused("object_layer_step_not_open".into())
+            }
+            crate::object_layer::tx::TxRefusal::Refused(r) => {
+                SettlementTxError::Refused(format!("object_layer_refused: {r:?}"))
+            }
+        })
 }
 
 pub(crate) fn execute_relayer_intent_tx(
