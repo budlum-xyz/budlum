@@ -20,6 +20,7 @@
 //! The base layer is RLP, the MPT verifier and the KAT vectors; receipt, header
 //! and sync-committee verification are built on top of it.
 
+pub mod account_proof;
 pub mod adapter;
 pub mod bud_to_eth;
 pub mod header;
