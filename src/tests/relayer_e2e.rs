@@ -332,17 +332,27 @@ fn full_internal_relay_cycle_lock_mint() {
     tree.push(lock_event.clone());
     let proof = tree.proof(0).unwrap();
 
-    // 5b. The source domain anchors its event root on-chain via a domain
-    // Commitment; relay proofs are verified against that committed root.
+    // 5b. The source domain anchors its event root on-chain via an applied
+    // Domain commitment chain 1..=10; relay proofs verify against that tip.
     {
-        let mut b = crate::core::block::Block::new(10, bc.last_block().hash.clone(), vec![]);
-        b.state_root = "22".repeat(32);
-        b.tx_root = b.calculate_tx_root();
-        b.hash = b.calculate_hash();
-        let commitment =
-            crate::domain::DomainCommitment::from_block(&domains[0], &b, tree.root(), [0u8; 32], 0)
-                .unwrap();
-        bc.submit_domain_commitment(commitment).unwrap();
+        let mut parent_hash = bc.last_block().hash.clone();
+        for h in 1..=10u64 {
+            let mut b = crate::core::block::Block::new(h, parent_hash, vec![]);
+            b.state_root = "22".repeat(32);
+            b.tx_root = b.calculate_tx_root();
+            b.hash = b.calculate_hash();
+            parent_hash = b.hash.clone();
+            let event_root = if h == 10 { tree.root() } else { [0u8; 32] };
+            let commitment = crate::domain::DomainCommitment::from_block(
+                &domains[0],
+                &b,
+                event_root,
+                [0u8; 32],
+                h - 1,
+            )
+            .unwrap();
+            bc.submit_domain_commitment(commitment).unwrap();
+        }
     }
 
     // 6. Submit relay proof on Budlum
@@ -429,16 +439,26 @@ fn relayer_invalid_proof_is_rejected() {
     tree.push(lock_event.clone());
     let proof = tree.proof(0).unwrap();
 
-    // Anchor the source domain event root on-chain.
+    // Anchor the source domain event root on-chain via an applied 1..=10 chain.
     {
-        let mut b = crate::core::block::Block::new(10, bc.last_block().hash.clone(), vec![]);
-        b.state_root = "22".repeat(32);
-        b.tx_root = b.calculate_tx_root();
-        b.hash = b.calculate_hash();
-        let commitment =
-            crate::domain::DomainCommitment::from_block(&domains[0], &b, tree.root(), [0u8; 32], 0)
-                .unwrap();
-        bc.submit_domain_commitment(commitment).unwrap();
+        let mut parent_hash = bc.last_block().hash.clone();
+        for h in 1..=10u64 {
+            let mut b = crate::core::block::Block::new(h, parent_hash, vec![]);
+            b.state_root = "22".repeat(32);
+            b.tx_root = b.calculate_tx_root();
+            b.hash = b.calculate_hash();
+            parent_hash = b.hash.clone();
+            let event_root = if h == 10 { tree.root() } else { [0u8; 32] };
+            let commitment = crate::domain::DomainCommitment::from_block(
+                &domains[0],
+                &b,
+                event_root,
+                [0u8; 32],
+                h - 1,
+            )
+            .unwrap();
+            bc.submit_domain_commitment(commitment).unwrap();
+        }
     }
 
     // Tamper the proof leaf so it no longer verifies against the committed
@@ -517,16 +537,26 @@ fn full_internal_relay_cycle_burn_unlock() {
     let proof = tree.proof(0).unwrap();
 
     // 4b. The source domain anchors its event root on-chain (burn emitted at
-    // Domain 2, height 20); relay proof verifies against the committed root.
+    // Domain 2, height 20); relay proof verifies against the applied tip.
     {
-        let mut b = crate::core::block::Block::new(20, bc.last_block().hash.clone(), vec![]);
-        b.state_root = "22".repeat(32);
-        b.tx_root = b.calculate_tx_root();
-        b.hash = b.calculate_hash();
-        let commitment =
-            crate::domain::DomainCommitment::from_block(&domains[1], &b, tree.root(), [0u8; 32], 0)
-                .unwrap();
-        bc.submit_domain_commitment(commitment).unwrap();
+        let mut parent_hash = bc.last_block().hash.clone();
+        for h in 1..=20u64 {
+            let mut b = crate::core::block::Block::new(h, parent_hash, vec![]);
+            b.state_root = "22".repeat(32);
+            b.tx_root = b.calculate_tx_root();
+            b.hash = b.calculate_hash();
+            parent_hash = b.hash.clone();
+            let event_root = if h == 20 { tree.root() } else { [0u8; 32] };
+            let commitment = crate::domain::DomainCommitment::from_block(
+                &domains[1],
+                &b,
+                event_root,
+                [0u8; 32],
+                h - 1,
+            )
+            .unwrap();
+            bc.submit_domain_commitment(commitment).unwrap();
+        }
     }
 
     // 5. Submit relay proof
