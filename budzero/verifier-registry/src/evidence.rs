@@ -97,6 +97,8 @@ pub enum EvidenceError {
     NonConflictingHashes,
     MissingSignature,
     ImpossibleLivenessWindow,
+    /// A liveness proof that expected no duties or missed none proves no offence.
+    EmptyLivenessWindow,
     EmptyProofTag,
     InsufficientInvalidVoteCount,
     BlockHashTooLong,
@@ -116,6 +118,9 @@ impl std::fmt::Display for EvidenceError {
             EvidenceError::MissingSignature => write!(f, "double-sign proof missing a signature"),
             EvidenceError::ImpossibleLivenessWindow => {
                 write!(f, "liveness proof claims more missed than expected")
+            }
+            EvidenceError::EmptyLivenessWindow => {
+                write!(f, "liveness proof expects no duties or misses none")
             }
             EvidenceError::EmptyProofTag => write!(f, "opaque proof has an empty tag"),
             EvidenceError::InsufficientInvalidVoteCount => write!(
@@ -199,10 +204,18 @@ impl SlashingReport {
                 }
             }
             SlashingProof::Liveness {
-                missed, expected, ..
+                window_start_epoch,
+                window_end_epoch,
+                missed,
+                expected,
             } => {
-                if missed > expected {
+                if window_start_epoch > window_end_epoch || missed > expected {
                     return Err(EvidenceError::ImpossibleLivenessWindow);
+                }
+                // `0 of 0` and `0 of N` are not a fault: without this a report
+                // with nothing missed is a structurally valid offence.
+                if *missed == 0 || *expected == 0 {
+                    return Err(EvidenceError::EmptyLivenessWindow);
                 }
             }
             SlashingProof::Other { tag, data } => {
@@ -472,5 +485,25 @@ mod tests {
             None,
         );
         assert_eq!(r.validate_shape(), Err(EvidenceError::ZeroOffender));
+    }
+
+    #[test]
+    fn inverted_liveness_window_is_rejected() {
+        let r = SlashingReport::new(
+            addr(1),
+            roles::RELAYER,
+            SlashingProof::Liveness {
+                window_start_epoch: 12,
+                window_end_epoch: 5,
+                missed: 3,
+                expected: 10,
+            },
+            ProofProvenance::ConsensusVerified,
+            None,
+        );
+        assert_eq!(
+            r.validate_shape(),
+            Err(EvidenceError::ImpossibleLivenessWindow)
+        );
     }
 }
