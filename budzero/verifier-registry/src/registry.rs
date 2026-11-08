@@ -247,6 +247,20 @@ pub struct VerifierRegistry {
     charged_offences: BTreeMap<String, BTreeSet<(u8, u64, u64)>>,
 }
 
+const MAX_VERIFIER_PARAM_AMOUNT: u64 = 1_000_000_000_000_000_000;
+const MAX_VERIFIER_UNBONDING_EPOCHS: u64 = 100_000;
+
+fn validate_registry_params(params: &RegistryParams) -> Result<(), String> {
+    params.validate()?;
+    if params.min_stake > MAX_VERIFIER_PARAM_AMOUNT {
+        return Err("min_stake exceeds the maximum parameter amount".into());
+    }
+    if params.unbonding_epochs > MAX_VERIFIER_UNBONDING_EPOCHS {
+        return Err("unbonding_epochs must be between 1 and 100,000".into());
+    }
+    Ok(())
+}
+
 fn offence_member_key(role: RoleId, account: Address) -> String {
     format!(
         "{}:{}",
@@ -313,10 +327,9 @@ impl VerifierRegistry {
     }
 
     /// Like [`Self::with_params`], but refuses parameters that fail
-    /// [`RegistryParams::validate`] (zero `min_stake` or `unbonding_epochs`,
-    /// ratios above the scale).
+    /// [`RegistryParams::validate`] or exceed protocol ceilings.
     pub fn try_with_params(params: RegistryParams) -> Result<Self, String> {
-        params.validate()?;
+        validate_registry_params(&params)?;
         Ok(Self::with_params(params))
     }
 
@@ -325,7 +338,7 @@ impl VerifierRegistry {
     }
 
     pub fn set_params(&mut self, params: RegistryParams) -> Result<(), String> {
-        params.validate()?;
+        validate_registry_params(&params)?;
         self.params = params;
         Ok(())
     }
@@ -344,6 +357,9 @@ impl VerifierRegistry {
                 required: self.params.min_stake,
                 provided: stake,
             });
+        }
+        if stake > MAX_VERIFIER_PARAM_AMOUNT {
+            return Err(RegistryError::StakeOverflow { account, role });
         }
         let key = (role, account);
         if self.registrations.contains_key(&key) {
@@ -847,6 +863,18 @@ impl VerifierRegistry {
             hasher.update(record.remaining_stake.to_le_bytes());
             hasher.update(record.report.offender.as_bytes());
             hasher.update(record.report.role.as_bytes());
+            let prov_tag = match record.report.provenance {
+                crate::evidence::ProofProvenance::ConsensusVerified => 0u8,
+                crate::evidence::ProofProvenance::Unverified => 1u8,
+            };
+            hasher.update([prov_tag]);
+            match record.report.reporter {
+                Some(rep) => {
+                    hasher.update([1u8]);
+                    hasher.update(rep.as_bytes());
+                }
+                None => hasher.update([0u8]),
+            }
             let (variant_tag, proof_bytes): (u8, Vec<u8>) = match &record.report.proof {
                 SlashingProof::DoubleSign {
                     height,
@@ -1705,5 +1733,61 @@ mod tests {
         reg_a.slash_from_report(&report_a).unwrap();
         reg_b.slash_from_report(&report_b).unwrap();
         assert_ne!(reg_a.state_root(), reg_b.state_root());
+    }
+
+    #[test]
+    fn param_ceilings_and_reporter_root_binding() {
+        use crate::evidence::ProofProvenance;
+
+        let bad_stake = RegistryParams {
+            min_stake: u64::MAX,
+            ..RegistryParams::default()
+        };
+        assert!(VerifierRegistry::try_with_params(bad_stake).is_err());
+
+        let bad_unbond = RegistryParams {
+            unbonding_epochs: u64::MAX,
+            ..RegistryParams::default()
+        };
+        assert!(VerifierRegistry::try_with_params(bad_unbond).is_err());
+
+        let mut reg = VerifierRegistry::new();
+        assert!(matches!(
+            reg.register_master_verifier(addr(0x11), u64::MAX, 0),
+            Err(RegistryError::StakeOverflow { .. })
+        ));
+
+        let mut reg_none = VerifierRegistry::new();
+        let mut reg_some = VerifierRegistry::new();
+        reg_none
+            .register_master_verifier(addr(0xDD), 10_000, 0)
+            .unwrap();
+        reg_some
+            .register_master_verifier(addr(0xDD), 10_000, 0)
+            .unwrap();
+        let proof = SlashingProof::DoubleSign {
+            height: 9,
+            block_hash_1: "11".into(),
+            block_hash_2: "22".into(),
+            signature_1: vec![1],
+            signature_2: vec![2],
+        };
+        let r_none = SlashingReport::new(
+            addr(0xDD),
+            roles::MASTER_VERIFIER,
+            proof.clone(),
+            ProofProvenance::ConsensusVerified,
+            None,
+        );
+        let r_some = SlashingReport::new(
+            addr(0xDD),
+            roles::MASTER_VERIFIER,
+            proof,
+            ProofProvenance::ConsensusVerified,
+            Some(addr(0xEE)),
+        );
+        reg_none.slash_from_report(&r_none).unwrap();
+        reg_some.slash_from_report(&r_some).unwrap();
+        assert_ne!(reg_none.state_root(), reg_some.state_root());
     }
 }
