@@ -379,7 +379,7 @@ mod tests {
         }
     }
 
-    /// PR #97 review: the counter can no longer be pinned at one.
+    /// The counter can no longer be pinned at one.
     ///
     /// One rejected vote has exactly one wire spelling that the vote-auth
     /// preimage covers, so a bonded validator can re-wrap it without limit and
