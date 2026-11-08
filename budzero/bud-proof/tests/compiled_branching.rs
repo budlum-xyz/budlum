@@ -2,9 +2,9 @@
 // invariant, so the workspace-wide panic gate does not apply.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-//! FINDING: the conditional branching the compiler emits could not be proven.
+//! Conditional branching must produce a proof accepted by the verifier.
 //!
-//! Measured with a live `bud-cli run`: EVERY program containing a branch gave
+//! A live `bud-cli run` verifies branchless programs but refuses programs containing a branch:
 //! "Verification of generated proof failed!", while straight-line programs
 //! passed.
 //!
@@ -118,7 +118,7 @@ contract Straight {
     compile_run_prove(source).expect("a branchless program has to be provable");
 }
 
-/// FINDING: a program containing a single `if` could not be proven.
+/// A compiled conditional must be provable.
 #[test]
 fn a_compiled_if_is_proven() {
     let source = r#"
@@ -137,7 +137,7 @@ contract IfOnly {
         .expect("the conditional branching the compiler emits has to be provable");
 }
 
-/// FINDING: a program containing a `while` loop could not be proven.
+/// A compiled loop must be provable.
 #[test]
 fn a_compiled_while_loop_is_proven() {
     let source = r#"
