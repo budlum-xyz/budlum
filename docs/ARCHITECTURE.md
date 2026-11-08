@@ -50,7 +50,7 @@
 - [40. SocialFi NFT lifecycle](#40-socialfi-nft-lifecycle)
 - [41. budlumxyz app registry](#41-budlumxyz-app-registry)
 - [42. Mempool internals](#42-mempool-internals)
-- [43. Developer OS / SDK architecture](#43-developer-os--sdk-architecture)
+- [43. Project Manifest / SDK architecture](#43-project-manifest--sdk-architecture)
 - [44. Gateway: Atlas + Passport evidence](#44-gateway-atlas--passport-evidence)
 - [45. Settlement commitment tree](#45-settlement-commitment-tree)
 - [46. Prover market: proof verification](#46-prover-market-proof-verification)
@@ -1386,11 +1386,11 @@ flowchart TD
   Select --> Expire[Stale tx removed after N blocks]
 ```
 
-## 43. Developer OS / SDK architecture
+## 43. Project Manifest / SDK architecture
 
 ```mermaid
 flowchart LR
-  Manifest[DeveloperOsManifest deterministic] --> Project["Project ID + labels"]
+  Manifest[ProjectManifest deterministic] --> Project["Project ID + labels"]
   Project --> DevNet[Local devnet topology]
   Project --> BudL[BudL package fixtures]
   Project --> Proof[Proof fixtures]
@@ -2019,7 +2019,7 @@ Keccak/SHA3 hasher with program words; it currently finds **7 sites**.
 
 ## 58. Permission at the browser boundary: CORS is not a refusal, it is a delivery decision
 
-For a client running inside a browser, such as Budscan, the node's RPC surface is
+For a client running inside a browser, such as Budlum Explorer, the node's RPC surface is
 determined not only by what the server returns but by whether the browser
 delivers that response to JavaScript. These are two separate decisions and each
 must have its own counterpart in the code.
@@ -2044,7 +2044,7 @@ not carry the authority its name implies.
 
 ```mermaid
 flowchart TD
-  B["Browser: fetch from Budscan"] --> Pre{"Custom header? preflight needed"}
+  B["Browser: fetch from Budlum Explorer"] --> Pre{"Custom header? preflight needed"}
   Pre -->|"yes"| OPT["OPTIONS preflight, no x-api-key"]
   OPT --> Auth1{"before: authentication runs first"}
   Auth1 -->|"401"| Dead["Real request never sent"]
@@ -2308,7 +2308,7 @@ state?* Leaves are ordered by the account map's iteration order, the tree is
 cached and updated incrementally over dirty accounts. Block production and
 validation read this. This root does not change; changing it forks the chain.
 
-**The proving root** (`storage::merkle_trie`) asks: *how do you prove it?* The
+**The proving root** (`persistence::state_trie`) asks: *how do you prove it?* The
 consensus root cannot answer that question, and the reason is not an omission but
 its structure:
 
@@ -2919,7 +2919,7 @@ bytes with `generate_content`, rehashes them with `ContentManifest::from_bytes_s
 compares the identity. If it does not hold, the request is refused.
 
 This is not an internal consistency check but the proof that what the gateway serves is the
-**requested thing**. The same question as Budscan's fifth step: are the fetched bytes the
+**requested thing**. The same question as Budlum Explorer's fifth step: are the fetched bytes the
 requested bytes.
 
 ### Three outcomes, three meanings
