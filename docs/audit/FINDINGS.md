@@ -228,3 +228,9 @@ review. Corrections without their required executed test remain open.
 |---|---|---|---|
 | BLG-365 | High | Closed by non-integration in the integrated tree | The proposed custody query cloned the complete registry and scanned every object to compute an unauthenticated what-if repair plan on each RPC call. That adds attacker-controlled CPU and allocation growth to a read endpoint. `RepairPlan`, its clone-based implementation, the custody-response field and their source locks were not integrated. The live custody query remains read-only without the additional full-registry clone; a bounded non-mutating plan would need a separately reviewed contract. |
 | BLG-366 | Medium | Closed by non-integration; current gate evidence remains pending | The proposed admission report appended hard-coded self-check JSON to object reads rather than enforcing admission in the upload path. Actual lifetime and mobile-quota guards are already called by `upload.rs` and `registry.rs`, and the placement RPC derives values from the registered object and placement row. The parallel report module and response-field change were not integrated and do not close BLG-270 or BLG-271. |
+
+## Directive-boundary metadata follow-up
+
+| Finding | Severity | State | Evidence and correction |
+|---|---|---|---|
+| BLG-367 | Medium | Open; locally corrected, pinned gate CI pending | The directive exclusion used `symlink_metadata(...).is_ok()`, so permission, `ENOTDIR` and other metadata errors were treated as absence instead of failing closed. `require_directive_absent` now accepts only `NotFound`, rejects every present file type and returns other metadata errors. A non-directory-root canary covers the error branch; the expected count is 67. No Rust runner was available. |

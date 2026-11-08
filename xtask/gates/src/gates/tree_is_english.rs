@@ -561,13 +561,22 @@ fn scan(root: &Path) -> Scan {
 /// file not on the baseline carries Turkish, when a baselined file carries
 /// more Turkish than recorded, when a recorded count is stale, or when the
 /// scan would be vacuous.
-pub fn run(root: &Path) -> Result<String, String> {
+fn require_directive_absent(root: &Path) -> Result<(), String> {
     let directive = root.join("THE_BUDLUM_DIREKTIF.md");
-    if fs::symlink_metadata(&directive).is_ok() {
-        return Err(String::from(
+    match fs::symlink_metadata(&directive) {
+        Ok(_) => Err(String::from(
             "THE_BUDLUM_DIREKTIF.md is a binding source, but section 0.1.5 requires it to stay outside the repository",
-        ));
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "cannot inspect {}: {error}",
+            directive.display()
+        )),
     }
+}
+
+pub fn run(root: &Path) -> Result<String, String> {
+    require_directive_absent(root)?;
 
     let result = scan(root);
 
@@ -813,6 +822,23 @@ fn directive_boundary_canaries(clean: &Path, tmp: &Path) -> Result<usize, String
         return Err(String::from(
             "canary: the binding directive path was accepted inside the repository",
         ));
+    }
+
+    // A metadata failure other than absence must not be treated as an absent
+    // path. A regular file used as the root produces ENOTDIR on Unix and an
+    // equivalent metadata error on other platforms.
+    let root_file = tmp.join("directive-root-file");
+    fs::write(&root_file, "not a directory")
+        .map_err(|e| format!("cannot write directive metadata fixture: {e}"))?;
+    ran += 1;
+    match require_directive_absent(&root_file) {
+        Err(message) if message.contains("cannot inspect") => {}
+        result => {
+            let _ = fs::remove_dir_all(tmp);
+            return Err(format!(
+                "canary: directive metadata failure was not fail-closed: {result:?}"
+            ));
+        }
     }
     Ok(ran)
 }
@@ -1155,7 +1181,7 @@ const CANARY_GROUPS: [CanaryGroup; 4] = [
 /// Hard-coded on purpose. A group that stops testing anything still returns
 /// `Ok`, so the only way to notice is to know the number beforehand. Raise it
 /// deliberately when a canary is added; a drop is a defect.
-const EXPECTED_CANARIES: usize = 66;
+const EXPECTED_CANARIES: usize = 67;
 
 pub fn self_test() -> Result<String, String> {
     let tmp = scratch_dir()?;
