@@ -93,6 +93,8 @@ pub struct ExternalDomainTxContext {
 pub enum ExternalDomainTxError {
     #[error("external domains are not enabled on mainnet")]
     MainnetDisabled,
+    #[error("ethereum sync committee finality is closed on testnet")]
+    TestnetSyncCommitteeDisabled,
     #[error("the registration poster must be the transaction sender")]
     PosterIsNotSender,
     #[error("the evidence submitter must be the transaction sender")]
@@ -122,6 +124,13 @@ impl From<IntakeError> for ExternalDomainTxError {
 fn is_mainnet(chain_id: u64) -> bool {
     chain_id
         == crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value()
+}
+
+fn is_testnet(chain_id: u64) -> bool {
+    chain_id
+        == crate::core::chain_config::Network::Testnet
             .chain_id()
             .value()
 }
@@ -196,8 +205,12 @@ fn fundable_bond(
 ) -> Result<u64, ExternalDomainTxError> {
     let bond =
         u64::try_from(bond_atoms).map_err(|_| ExternalDomainTxError::BondTooLarge(bond_atoms))?;
-    let balance = state.get_balance(&ctx.sender);
-    let needed = bond.saturating_add(ctx.fee);
+    // The spendable balance, not the raw one: a bond is a spend, and the
+    // locked part of a vesting account does not fund collateral.
+    let balance = state.spendable_balance(&ctx.sender);
+    let needed = bond
+        .checked_add(ctx.fee)
+        .ok_or(ExternalDomainTxError::BondTooLarge(bond_atoms))?;
     if balance < needed {
         return Err(ExternalDomainTxError::BondUnfunded { needed, balance });
     }
@@ -226,6 +239,9 @@ fn register(
     ctx: &ExternalDomainTxContext,
     request: &RegistrationRequest,
 ) -> Result<(), ExternalDomainTxError> {
+    if is_testnet(ctx.chain_id) && matches!(request.spec, AdapterSpec::EthereumSync { .. }) {
+        return Err(ExternalDomainTxError::TestnetSyncCommitteeDisabled);
+    }
     if request.poster != ctx.sender {
         return Err(ExternalDomainTxError::PosterIsNotSender);
     }
@@ -263,6 +279,9 @@ fn submit_evidence(
     let Some(entry) = intake.entries.get(&key) else {
         return Err(ExternalDomainTxError::UnknownDomain);
     };
+    if is_testnet(ctx.chain_id) && matches!(entry.spec, AdapterSpec::EthereumSync { .. }) {
+        return Err(ExternalDomainTxError::TestnetSyncCommitteeDisabled);
+    }
     let bls = bls_for(&entry.spec, ctx);
     let before = intake.clone();
     match intake.submit_evidence(evidence, bls) {
@@ -370,7 +389,7 @@ mod tests {
     use crate::cross_domain::external::versioning::VersionPolicy;
     use crate::cross_domain::external::DomainState;
 
-    const TESTNET: u64 = 45261;
+    const DEVNET: u64 = 45262;
 
     /// The intake tests' strict fixture verifier: it refuses the corruptions
     /// the admission probes inject, without pairing arithmetic.
@@ -408,7 +427,7 @@ mod tests {
     fn ctx(sender: Address) -> ExternalDomainTxContext {
         ExternalDomainTxContext {
             sender,
-            chain_id: TESTNET,
+            chain_id: DEVNET,
             fee: 10,
             bls: test_bls,
         }
@@ -500,6 +519,39 @@ mod tests {
             .expect("entry");
         assert_eq!(entry.registrant, poster);
         assert!(!state.settlement.is_empty());
+    }
+
+    /// The bond is collateral moved out of the
+    /// sender's balance, so it is a spend. The vesting lock of the team
+    /// account holds against it: locked funds cannot be escrowed as a bond.
+    #[test]
+    fn vesting_gate_covers_external_collateral() {
+        let mut state = AccountState::new();
+        let poster = addr(9);
+        state.add_balance(&poster, bond() * 4);
+        state.team_vesting = Some((
+            poster,
+            crate::tokenomics::VestingSchedule {
+                total: bond() * 4,
+                start_epoch: 0,
+                cliff_epochs: 10,
+                duration_epochs: 100,
+            },
+        ));
+        assert_eq!(
+            state.spendable_balance(&poster),
+            0,
+            "pre-cliff: nothing is spendable"
+        );
+        let tx = ExternalDomainTx::Register(Box::new(request(poster)));
+        let err = execute_external_domain_tx(&mut state, &ctx(poster), &tx).unwrap_err();
+        assert!(
+            matches!(err, ExternalDomainTxError::BondUnfunded { .. }),
+            "unexpected refusal: {err:?}"
+        );
+        assert_eq!(state.get_balance(&poster), bond() * 4);
+        assert!(state.external_bond_escrow.get(&poster).is_none());
+        assert!(state.settlement.is_empty());
     }
 
     #[test]

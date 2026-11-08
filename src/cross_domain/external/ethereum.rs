@@ -127,6 +127,12 @@ pub trait BlsVerifier: Send + Sync {
         signature: &[u8],
         participants: u64,
     ) -> Result<(), String>;
+
+    /// Whether Ethereum sync-committee finality is closed on this verifier's
+    /// network boundary until finality-branch Merkle verification lands.
+    fn sync_committee_closed(&self) -> bool {
+        false
+    }
 }
 
 /// The payload layout. Fixed offsets, declared as constants, because a parser
