@@ -22,6 +22,8 @@ use crate::core::address::Address;
 use crate::crypto::primitives::WalletKeyPair;
 use serde::{Deserialize, Serialize};
 
+pub mod identity_profile;
+
 #[path = "../../crates/wallet-core/src/bip39_wordlist.rs"]
 mod bip39_wordlist;
 
@@ -137,7 +139,9 @@ pub fn mnemonic_from_entropy(entropy: &[u8; 32]) -> String {
 /// Another word count (12-word phrases included), an unknown word, or a
 /// checksum mismatch.
 pub fn entropy_from_mnemonic(mnemonic: &str) -> Result<[u8; 32], WalletError> {
-    let words: Vec<&str> = mnemonic.split_whitespace().collect();
+    use unicode_normalization::UnicodeNormalization;
+    let normalized: zeroize::Zeroizing<String> = zeroize::Zeroizing::new(mnemonic.nfkd().collect());
+    let words: Vec<&str> = normalized.split_whitespace().collect();
     if words.len() != MNEMONIC_WORDS {
         return Err(WalletError::WordCount(words.len()));
     }
@@ -483,6 +487,29 @@ mod tests {
             entropy_from_mnemonic(&unknown),
             Err(WalletError::UnknownWord(_))
         ));
+    }
+
+    #[test]
+    fn wallet_refuses_12_word_seed() {
+        let twelve = format!("{}about", "abandon ".repeat(11));
+        assert_eq!(
+            entropy_from_mnemonic(&twelve),
+            Err(WalletError::WordCount(12))
+        );
+    }
+
+    #[test]
+    fn wallet_mnemonic_is_nfkd_normalised() {
+        // Construct a valid 24-word mnemonic containing compatibility forms
+        // (`\u{FF41}bandon` -> `abandon` under NFKD, separated by ideographic
+        // spaces `\u{3000}` and mixed case) and assert it derives the identical
+        // 32-byte entropy as the canonical ASCII phrase.
+        let zero = [0u8; 32];
+        let canonical = mnemonic_from_entropy(&zero);
+        let compat = canonical
+            .replacen("abandon", "\u{FF41}Bandon", 3)
+            .replace(' ', "\u{3000}");
+        assert_eq!(entropy_from_mnemonic(&compat), Ok(zero));
     }
 
     #[test]
