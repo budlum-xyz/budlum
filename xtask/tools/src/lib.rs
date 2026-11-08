@@ -60,6 +60,7 @@ pub mod docker_smoke;
 pub mod fsf_fit;
 pub mod json;
 pub mod multinode_smoke;
+pub mod placement_table;
 pub mod pq_measure;
 pub mod prepush;
 pub mod propagation;
