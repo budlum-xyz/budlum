@@ -199,7 +199,7 @@ BudL expressions compile to BudZKVM ISA opcodes:
 | BudL | Opcode | Gas | Description |
 |------|--------|-----|----------|
 | `emit Event(...)` | `Log (0x1A)` | 10 | Event emission |
-| `syscall(imm)` | `Syscall (0x1D)` | variable | Host call (AI request and so on) |
+| `syscall(imm)` | `Syscall (0x1D)` | variable | Host call (`0x40` = UEL `UNIVERSAL_CALL`) |
 | `halt` | `Halt (0x00)` | 0 | End of program |
 
 ---
