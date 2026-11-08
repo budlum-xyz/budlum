@@ -98,6 +98,12 @@ const ALLOWED_FILES: &[&str] = &[
     // forbids and the scope words it looks for have to be written in
     // Turkish in its lists. The lists are the only Turkish in the file.
     "xtask/gates/src/gates/pq_claims_are_backed.rs",
+    // The concept map names the retired Turkish architecture names (and their
+    // Turkish replacement terms) so the concept-names gate can find them. The
+    // baseline repeats the first old name of each entry as its key. Neither
+    // file can say what it bans in English.
+    "config/naming/concept_map.toml",
+    ".github/concept-names-baseline.txt",
 ];
 
 /// Path fragments whose contents are a Turkish localisation.
@@ -107,7 +113,7 @@ const ALLOWED_FILES: &[&str] = &[
 /// so that a localisation gains files without the gate having to be edited,
 /// and it is deliberately narrow - only the Turkish locale of the browser,
 /// never a source tree.
-const ALLOWED_DIRS: &[&str] = &["crates/budscan/browser/l10n/tr-TR/"];
+const ALLOWED_DIRS: &[&str] = &["crates/budlum-explorer/browser/l10n/tr-TR/"];
 
 /// The one Turkish word that may appear anywhere: the label on the link to the
 /// Turkish README. Scrubbed before both scans.
@@ -327,6 +333,10 @@ const SKIP_EXTS: &[&str] = &[
     "lock", "svg", "woff", "woff2", "ttf", "webp",
 ];
 
+/// The source of the bilingual storage-claims dictionary. Only exact string
+/// literal entries from its actual phrase list are exempt, not other lines.
+const FORBIDDEN_PHRASES_SOURCE: &str = "xtask/gates/src/gates/bud3_forbidden_phrases.rs";
+
 /// The recorded per-file counts of Turkish lines that still remain.
 const BASELINE_PATH: &str = ".github/turkish-baseline.txt";
 
@@ -434,6 +444,18 @@ fn is_allowed(root: &Path, path: &Path) -> bool {
     ALLOWED_FILES.contains(&rel.as_str()) || ALLOWED_DIRS.iter().any(|dir| rel.starts_with(dir))
 }
 
+/// The bilingual claims guard must be able to name the phrases it bans. Only
+/// an exact, standalone literal drawn from that guard's live list is allowed;
+/// Turkish comments, unrelated literals, and other files are still scanned.
+fn is_dictionary_literal(rel: &str, line: &str) -> bool {
+    rel == FORBIDDEN_PHRASES_SOURCE
+        && line
+            .trim()
+            .strip_prefix('"')
+            .and_then(|text| text.strip_suffix("\","))
+            .is_some_and(|phrase| super::bud3_forbidden_phrases::PHRASES.contains(&phrase))
+}
+
 /// Is this path skipped by extension?
 fn skipped_ext(path: &Path) -> bool {
     path.extension()
@@ -527,6 +549,9 @@ fn scan(root: &Path) -> Scan {
             .to_string_lossy()
             .replace('\\', "/");
         for (lineno, line) in text.lines().enumerate() {
+            if is_dictionary_literal(&rel, line) {
+                continue;
+            }
             let scrubbed = scrub(line);
             let finding = turkish_char(&scrubbed)
                 .map(|c| format!("Turkish character '{c}'"))
@@ -549,10 +574,27 @@ fn scan(root: &Path) -> Scan {
 
 /// # Errors
 ///
-/// Returns a finding when a file not on the baseline carries Turkish, when a
-/// baselined file carries more Turkish than recorded, when a recorded count is
-/// stale, or when the scan would be vacuous.
+/// Returns a finding when the binding directive enters the repository, when a
+/// file not on the baseline carries Turkish, when a baselined file carries
+/// more Turkish than recorded, when a recorded count is stale, or when the
+/// scan would be vacuous.
+fn require_directive_absent(root: &Path) -> Result<(), String> {
+    let directive = root.join("THE_BUDLUM_DIREKTIF.md");
+    match fs::symlink_metadata(&directive) {
+        Ok(_) => Err(String::from(
+            "THE_BUDLUM_DIREKTIF.md is a binding source, but section 0.1.5 requires it to stay outside the repository",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "cannot inspect {}: {error}",
+            directive.display()
+        )),
+    }
+}
+
 pub fn run(root: &Path) -> Result<String, String> {
+    require_directive_absent(root)?;
+
     let result = scan(root);
 
     if result.scanned < VACUITY_FLOOR {
@@ -610,9 +652,9 @@ pub fn run(root: &Path) -> Result<String, String> {
         }
         msg.push_str(
             "\n  The tree is written in English. Translate the line.\n  \
-             Turkish is allowed only in README.tr.md, in a Turkish localisation\n  \
-             directory, and in the word \"Türkçe\", which is the label on the link\n  \
-             pointing at that README.\n  \
+             Turkish is allowed in README.tr.md, in a Turkish localisation\n  \
+             directory, in the README link label \"Türkçe\", and as exact dictionary\n  \
+             entries in the bilingual storage-claims gate.\n  \
              The baseline only shrinks: do not raise a number in ",
         );
         msg.push_str(BASELINE_PATH);
@@ -775,6 +817,47 @@ fn baseline_canaries(clean: &Path, tmp: &Path) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// The binding directive stays outside the repository even if a future copy
+/// contains only English and would otherwise pass the language ratchet.
+///
+/// # Errors
+///
+/// Returns an error when the structural boundary is no longer enforced.
+fn directive_boundary_canaries(clean: &Path, tmp: &Path) -> Result<usize, String> {
+    let mut ran = 0usize;
+    if counted_accepts_with(
+        &mut ran,
+        clean,
+        tmp,
+        "directive-present",
+        "THE_BUDLUM_DIREKTIF.md",
+        "",
+    )? {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "canary: the binding directive path was accepted inside the repository",
+        ));
+    }
+
+    // A metadata failure other than absence must not be treated as an absent
+    // path. A regular file used as the root produces ENOTDIR on Unix and an
+    // equivalent metadata error on other platforms.
+    let root_file = tmp.join("directive-root-file");
+    fs::write(&root_file, "not a directory")
+        .map_err(|e| format!("cannot write directive metadata fixture: {e}"))?;
+    ran += 1;
+    match require_directive_absent(&root_file) {
+        Err(message) if message.contains("cannot inspect") => {}
+        result => {
+            let _ = fs::remove_dir_all(tmp);
+            return Err(format!(
+                "canary: directive metadata failure was not fail-closed: {result:?}"
+            ));
+        }
+    }
+    Ok(ran)
 }
 
 /// Canaries for the two scans themselves: every Turkish character, and the
@@ -981,12 +1064,40 @@ fn exemption_canaries(clean: &Path, tmp: &Path) -> Result<usize, String> {
         clean,
         tmp,
         "l10n",
-        "crates/budscan/browser/l10n/tr-TR/app.ftl",
+        "crates/budlum-explorer/browser/l10n/tr-TR/app.ftl",
         "badge-verified =\n    .value = doğrulandı; kanit dogrulama\n",
     )? {
         let _ = fs::remove_dir_all(tmp);
         return Err(String::from(
             "canary: the Turkish localisation was rejected, but its strings are the product",
+        ));
+    }
+
+    // Android's shipped Turkish strings have the same narrow exemption.
+    if !counted_accepts_with(
+        &mut ran,
+        clean,
+        tmp,
+        "androidl10n",
+        "mobile/android/app/src/main/res/values-tr/strings.xml",
+        "<string name=\"validator\">Doğrulayıcı çalışıyor</string>\n",
+    )? {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "canary: the Android Turkish localisation was rejected",
+        ));
+    }
+    if counted_accepts_with(
+        &mut ran,
+        clean,
+        tmp,
+        "androidl10nspill",
+        "mobile/android/app/src/main/res/values/strings.xml",
+        "<string name=\"validator\">Doğrulayıcı çalışıyor</string>\n",
+    )? {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "canary: the Android localisation exemption leaked into the default locale",
         ));
     }
 
@@ -997,7 +1108,7 @@ fn exemption_canaries(clean: &Path, tmp: &Path) -> Result<usize, String> {
         clean,
         tmp,
         "l10nspill",
-        "crates/budscan/browser/l10n/en-US/app.ftl",
+        "crates/budlum-explorer/browser/l10n/en-US/app.ftl",
         "badge-verified =\n    .value = doğrulandı; kanit dogrulama\n",
     )? {
         let _ = fs::remove_dir_all(tmp);
@@ -1039,6 +1150,28 @@ fn exemption_canaries(clean: &Path, tmp: &Path) -> Result<usize, String> {
     Ok(ran)
 }
 
+fn dictionary_canaries(clean: &Path, tmp: &Path) -> Result<usize, String> {
+    let phrase = super::bud3_forbidden_phrases::PHRASES
+        .iter()
+        .find(|phrase| turkish_char(phrase).is_some())
+        .ok_or_else(|| String::from("canary: the bilingual dictionary has no Turkish phrase"))?;
+    let cases = [
+        ("dictionary-literal", FORBIDDEN_PHRASES_SOURCE, format!("\"{phrase}\",\n"), true),
+        ("dictionary-other-file", "src/other.rs", format!("\"{phrase}\",\n"), false),
+        ("dictionary-comment", FORBIDDEN_PHRASES_SOURCE, format!("// {phrase}\n"), false),
+        ("dictionary-unknown", FORBIDDEN_PHRASES_SOURCE, String::from("\"kullanıcı verisi\",\n"), false),
+        ("dictionary-trailing", FORBIDDEN_PHRASES_SOURCE, format!("\"{phrase}\", // kullanıcı\n"), false),
+    ];
+    let mut ran = 0;
+    for (name, file, body, expected) in cases {
+        let accepted = counted_accepts_with(&mut ran, clean, tmp, name, file, &body)?;
+        if accepted != expected {
+            return Err(format!("canary: {name} accepted={accepted}, expected {expected}"));
+        }
+    }
+    Ok(ran)
+}
+
 /// [`accepts_with`], counting the canary as it runs.
 ///
 /// The count is what makes the split honest: a group that silently runs zero
@@ -1069,13 +1202,18 @@ type CanaryGroup = (&'static str, fn(&Path, &Path) -> Result<usize, String>);
 /// A table rather than one call per line: dropping a line would drop a whole
 /// group of canaries and nothing would go red. The length is reported in the
 /// success message, so a removed group changes the gate's own output.
-const CANARY_GROUPS: [CanaryGroup; 3] = [
+const CANARY_GROUPS: [CanaryGroup; 5] = [
+    (
+        "directive-boundary",
+        directive_boundary_canaries as fn(&Path, &Path) -> Result<usize, String>,
+    ),
     (
         "scan",
         scan_canaries as fn(&Path, &Path) -> Result<usize, String>,
     ),
     ("collision", collision_canaries),
     ("exemption", exemption_canaries),
+    ("dictionary", dictionary_canaries),
 ];
 
 /// How many canaries [`CANARY_GROUPS`] must run in total.
@@ -1083,7 +1221,7 @@ const CANARY_GROUPS: [CanaryGroup; 3] = [
 /// Hard-coded on purpose. A group that stops testing anything still returns
 /// `Ok`, so the only way to notice is to know the number beforehand. Raise it
 /// deliberately when a canary is added; a drop is a defect.
-const EXPECTED_CANARIES: usize = 65;
+const EXPECTED_CANARIES: usize = 72;
 
 pub fn self_test() -> Result<String, String> {
     let tmp = scratch_dir()?;

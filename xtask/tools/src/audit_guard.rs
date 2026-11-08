@@ -395,11 +395,72 @@ fn subject_has_identity(subject: &str) -> bool {
         .contains(&review_identity().to_lowercase())
 }
 
-fn commit_subject_audit(root: &Path, errors: &mut Vec<String>) -> Result<(), String> {
-    let log = git_stdout(root, &["log", "--format=%H%x09%s", "HEAD"])?;
+/// Recognize GitHub's generated merge subject so a branch path is not mistaken
+/// for authored commit text. The caller also requires a two-parent commit.
+fn is_generated_merge_subject(subject: &str) -> bool {
+    let Some(rest) = subject.strip_prefix("Merge pull request #") else {
+        return false;
+    };
+    let Some((number, source)) = rest.split_once(" from ") else {
+        return false;
+    };
+    let Some((owner, branch)) = source.split_once('/') else {
+        return false;
+    };
+    !number.is_empty()
+        && number.bytes().all(|byte| byte.is_ascii_digit())
+        && !owner.is_empty()
+        && !branch.is_empty()
+        && !source.bytes().any(|byte| byte.is_ascii_whitespace())
+}
+
+fn configured_commit_base() -> Option<String> {
+    if let Ok(base_ref) = std::env::var("GITHUB_BASE_REF") {
+        if !base_ref.is_empty() {
+            return Some(format!("origin/{base_ref}"));
+        }
+    }
+    if let Ok(before) = std::env::var("GITHUB_EVENT_BEFORE") {
+        if before.bytes().any(|byte| byte != b'0') {
+            return Some(before);
+        }
+    }
+    None
+}
+
+/// Select commits introduced by this run: after the change base or push's before
+/// SHA. Local runs use `origin/main`, falling back to the last commit there.
+fn commit_subject_range(root: &Path, base_ref: Option<&str>) -> Result<String, String> {
+    if let Some(base_ref) = base_ref {
+        let merge_base = git_stdout(root, &["merge-base", "HEAD", base_ref])?;
+        return Ok(format!("{}..HEAD", merge_base.trim()));
+    }
+
+    let head = git_stdout(root, &["rev-parse", "HEAD"])?;
+    if let Ok(merge_base) = git_stdout(root, &["merge-base", "HEAD", "origin/main"]) {
+        if merge_base.trim() != head.trim() {
+            return Ok(format!("{}..HEAD", merge_base.trim()));
+        }
+    }
+    if let Ok(parent) = git_stdout(root, &["rev-parse", "--verify", "HEAD^"]) {
+        return Ok(format!("{}..HEAD", parent.trim()));
+    }
+    Ok(String::from("HEAD"))
+}
+
+fn commit_subject_audit(
+    root: &Path,
+    base_ref: Option<&str>,
+    errors: &mut Vec<String>,
+) -> Result<(), String> {
+    let range = commit_subject_range(root, base_ref)?;
+    let log = git_stdout(root, &["log", "--format=%H%x09%P%x09%s", &range])?;
     for row in log.lines() {
-        let (sha, subject) = row.split_once('\t').unwrap_or((row, ""));
-        if subject_has_identity(subject) {
+        let (sha, remainder) = row.split_once('\t').unwrap_or((row, ""));
+        let (parents, subject) = remainder.split_once('\t').unwrap_or((remainder, ""));
+        let is_merge_commit = parents.split_whitespace().count() == 2;
+        let generated_merge = is_merge_commit && is_generated_merge_subject(subject);
+        if subject_has_identity(subject) && !generated_merge {
             let short: String = sha.chars().take(12).collect();
             errors.push(format!(
                 "commit {short}: review identity remains in subject"
@@ -573,8 +634,10 @@ fn self_test(root: &Path) -> Report {
     };
     let mut out = format!("audit-guard red-team: PASS ({count} mutations rejected)\n");
     let mut errors = Vec::new();
-    let scanned =
-        active_code_audit(root, &mut errors).and_then(|()| commit_subject_audit(root, &mut errors));
+    let base_ref = configured_commit_base();
+    let scanned = active_code_audit(root, &mut errors).and_then(|()| {
+        commit_subject_audit(root, base_ref.as_deref(), &mut errors)
+    });
     if let Err(e) = scanned {
         return Report {
             stdout: out,
@@ -599,9 +662,10 @@ fn self_test(root: &Path) -> Report {
 
 fn audit(root: &Path) -> Report {
     let mut errors = Vec::new();
+    let base_ref = configured_commit_base();
     let checked = workflow_audit(root, &mut errors).and_then(|n| {
         active_code_audit(root, &mut errors)?;
-        commit_subject_audit(root, &mut errors)?;
+        commit_subject_audit(root, base_ref.as_deref(), &mut errors)?;
         Ok(n)
     });
     let count = match checked {
@@ -620,7 +684,7 @@ fn audit(root: &Path) -> Report {
          - workflows checked: {count}\n\
          - action refs, permissions, checkout credentials, forbidden triggers and push paths checked\n\
          - active code/workflow review identity check: clean\n\
-         - reachable commit subjects review identity check: clean\n"
+         - new commit subjects review identity check: clean\n"
     ))
 }
 
@@ -764,5 +828,60 @@ mod tests {
             name.to_uppercase()
         )));
         assert!(!subject_has_identity("fix: a normal subject"));
+    }
+
+    #[test]
+    fn generated_merge_subjects_are_distinguished_from_authored_subjects() {
+        let generated = format!(
+            "Merge pull request #123 from lubothebook/{}/feature-branch",
+            review_identity().to_lowercase()
+        );
+        assert!(is_generated_merge_subject(&generated));
+        assert!(!is_generated_merge_subject(
+            "Merge pull request #x from lubothebook/arena/branch"
+        ));
+        assert!(!is_generated_merge_subject(
+            "Merge pull request #6 from lubothebook/branch Arena"
+        ));
+    }
+
+    fn run_git(root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git must be available for this test");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn commit_audit_checks_only_commits_after_the_base() {
+        let root = std::env::temp_dir().join(format!(
+            "audit-guard-commit-range-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temporary git repository");
+        run_git(&root, &["init", "-q"]);
+        run_git(&root, &["config", "user.name", "Audit Guard Test"]);
+        run_git(&root, &["config", "user.email", "audit-guard@example.invalid"]);
+        let inherited = format!("Add {}_launcher.py", review_identity().to_lowercase());
+        run_git(&root, &["commit", "--allow-empty", "-m", &inherited]);
+        run_git(&root, &["branch", "base"]);
+        run_git(&root, &["commit", "--allow-empty", "-m", "fix: ordinary change"]);
+
+        let mut errors = Vec::new();
+        commit_subject_audit(&root, Some("base"), &mut errors).expect("commit audit");
+        assert!(errors.is_empty(), "base history is outside the change range: {errors:?}");
+
+        let introduced = format!("fix: {} is forbidden", review_identity());
+        run_git(&root, &["commit", "--allow-empty", "-m", &introduced]);
+        commit_subject_audit(&root, Some("base"), &mut errors).expect("commit audit");
+        assert_eq!(errors.len(), 1, "new violating subject must be found");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
