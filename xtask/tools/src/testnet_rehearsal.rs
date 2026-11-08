@@ -867,7 +867,7 @@ mod tests {
 
     /// Every scenario signs through `bud_args`, so the replay domain is named
     /// once, before the subcommand, and the profile's chain id is what it
-    /// names (`docs/TESTNET.md`, the AF-28 finding).
+    /// names (`docs/TESTNET.md`).
     #[test]
     fn every_bud_call_names_the_chain_it_signs_for() {
         let args = bud_args(&["tx", "send", "--to", "0xab", "--amount", "1"]);
