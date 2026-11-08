@@ -65,7 +65,7 @@ fn xor_block(st: &mut [u64; 25], block: &[u8]) {
 }
 
 /// SHAKE-256 backend behind the [`BpqsHash`] seam: FIPS 202 XOF with the
-/// 0x1F suffix. This is the canonical backend for long-lived use (,
+/// 0x1F suffix. This is the canonical backend for long-lived use (
 ///), exported as [`super::CanonicalHash`]. Distinct function from
 /// [`super::hash::Sha3_256Hash`] (their domain suffixes differ by
 /// construction); SHA3-256 stays as the cross-check, Poseidon2 as the

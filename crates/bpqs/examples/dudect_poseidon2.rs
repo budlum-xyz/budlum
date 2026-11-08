@@ -508,8 +508,12 @@ fn measure(
     // any real leak. The cut is taken on the COMBINED population so the crop
     // cannot itself introduce a class bias.
     let mut all: Vec<f64> = raw.iter().map(|(_, t)| *t).collect();
-    all.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let cut = all[(all.len() as f64 * 0.90) as usize];
+    if all.len() < 4 {
+        return 0.0;
+    }
+    all.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let idx = ((all.len() as f64 * 0.90) as usize).min(all.len() - 1);
+    let cut = all[idx];
 
     let mut c0 = Welch::default();
     let mut c1 = Welch::default();
@@ -772,6 +776,12 @@ fn main() {
     };
     let measurements = arg("--measurements", 200_000);
     let batch = arg("--batch", 24);
+    if measurements < 20 || batch == 0 {
+        eprintln!(
+            "ABORT: --measurements >= 20 (got {measurements}) and --batch >= 1 (got {batch})"
+        );
+        std::process::exit(2);
+    }
 
     println!("dudect timing measurement, Poseidon2 field arithmetic");
     println!(
@@ -930,7 +940,7 @@ fn main() {
     if !confirmed.is_empty() {
         for (seed, first, second) in &confirmed {
             println!(
-                "FINDING: seed {seed:#x} separated TWICE ({first:.2}, then {second:.2}), both > {THRESHOLD:.1}."
+                "seed {seed:#x} separated twice ({first:.2}, then {second:.2}), both > {THRESHOLD:.1}."
             );
         }
         println!("The field operations spend measurably different time on different values.");
