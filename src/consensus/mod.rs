@@ -106,7 +106,7 @@ pub struct RoundPriceBook {
 /// One more than [`MAX_REORG_DEPTH`]: the deepest block a reorg candidate may
 /// fork at is `MAX_REORG_DEPTH` below the tip, and the window has to hold the
 /// tip itself as well.
-const ROUND_PRICE_WINDOW: usize = MAX_REORG_DEPTH + 1;
+pub(crate) const ROUND_PRICE_WINDOW: usize = MAX_REORG_DEPTH + 1;
 
 impl Default for RoundPriceBook {
     fn default() -> Self {
@@ -143,19 +143,38 @@ impl RoundPriceBook {
 
     /// When this node first committed `block_hash`, while it is still inside
     /// the window.
-    ///
-    /// A parent outside the window - deeper history, a block a peer only
-    /// described - has no sighting, and its round price is 0 by
-    /// [`affordable_leader_round`]. That is the strict direction: nothing a
-    /// peer says about a header can price a round.
     #[must_use]
-    pub fn seen_at(&self, block_hash: &str) -> Option<u128> {
+    fn seen_at(&self, block_hash: &str) -> Option<u128> {
         let Ok(seen) = self.seen.lock() else {
             return None;
         };
         seen.iter()
             .find(|(hash, _)| hash == block_hash)
             .map(|(_, at)| *at)
+    }
+
+    /// Resolve the local adoption timestamp for `parent` on `chain`.
+    ///
+    /// When `parent` has not been committed yet (a multi-block sync or reorg
+    /// candidate suffix), walk back through `chain` (bounded by
+    /// `ROUND_PRICE_WINDOW`) to the nearest ancestor this node already
+    /// committed, or fall back to `now_ms` when no block in the window has a
+    /// local sighting. That prevents an uncommitted parent's backdated header
+    /// stamp from unlocking rounds `1..=MAX_LEADER_ROUNDS` via `None`.
+    #[must_use]
+    pub fn chain_seen_at(&self, chain: &[Block], parent: &Block, now_ms: u128) -> u128 {
+        if let Some(at) = self.seen_at(&parent.hash) {
+            return at;
+        }
+        let anchor_pos = chain.iter().rposition(|b| b.hash == parent.hash);
+        let search_end = anchor_pos.map_or(chain.len(), |idx| idx + 1);
+        let search_start = search_end.saturating_sub(ROUND_PRICE_WINDOW);
+        for ancestor in chain[search_start..search_end].iter().rev() {
+            if let Some(at) = self.seen_at(&ancestor.hash) {
+                return at;
+            }
+        }
+        now_ms
     }
 
     /// The highest round this node may *claim*, from the producer's side.
@@ -808,6 +827,42 @@ mod tests {
         assert!(
             !engine.can_reorg(&deep_current, &deep_new),
             "a candidate with no shared block replaces the whole slice"
+        );
+    }
+
+    #[test]
+    fn unseen_candidate_parent_inherits_committed_ancestor_instead_of_header_stamp() {
+        fn block(height: u64, prev: &str, ts: u128) -> Block {
+            let mut b = Block::new_with_chain_id(height, prev.to_string(), vec![], 1);
+            b.timestamp = ts;
+            b.hash = b.calculate_hash();
+            b
+        }
+
+        let now = 500_000_u128;
+        let stale_ts = 100_000_u128;
+        let genesis = block(0, "0", stale_ts);
+        let fork_parent = block(1, &genesis.hash, stale_ts + MIN_BLOCK_INTERVAL_MS);
+        let chain = vec![genesis.clone(), fork_parent.clone()];
+
+        let book = RoundPriceBook::new();
+        book.note_tip_block(&genesis.hash, now);
+
+        let anchor = book.chain_seen_at(&chain, &fork_parent, now);
+        assert_eq!(anchor, now);
+        assert_eq!(
+            affordable_leader_round(fork_parent.timestamp, Some(anchor), now),
+            0,
+            "backdated candidate parent must not unlock rounds 1..=16 before timeout elapses"
+        );
+
+        let fresh_book = RoundPriceBook::new();
+        let fallback_anchor = fresh_book.chain_seen_at(&chain, &fork_parent, now);
+        assert_eq!(fallback_anchor, now);
+        assert_eq!(
+            affordable_leader_round(fork_parent.timestamp, Some(fallback_anchor), now),
+            0,
+            "unseen window must anchor at wall time rather than trusting stale header timestamps"
         );
     }
 }
