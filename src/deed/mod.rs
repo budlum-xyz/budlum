@@ -1,18 +1,20 @@
-//! DeEd domain primitives.
+//! Education domain legacy manifest primitives.
 //!
-//! DeEd is an application domain on Budlum, not a new chain or settlement
-//! layer. This module holds the canonical manifest and the permissionless
-//! role vocabulary. The two roles bond through the `RoleBond` transaction
-//! door (`AccountState::bond_role`); an artifact's bytes are a B.U.D. content
-//! id registered through `StorageTx::RegisterManifest`. Rewards and bridge
-//! wiring are out of scope (: DeEd inherits the
-//! account layer's cryptography and is not developed further).
+//! B.U.D. 3.0 education artifact registration lives in `crate::education_domain`
+//! (`Bud3Tx::RegisterObject`). This module preserves the permissionless role IDs
+//! and deterministic manifest commitment vocabulary inherited by existing domain
+//! state.
 
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
 use crate::registry::role::RoleId;
 use crate::storage::ContentId;
 use serde::{Deserialize, Serialize};
+
+pub mod education_domain;
+pub use education_domain::{
+    EducationArtifact, EducationDomainError, EducationDomainRegistry,
+};
 
 /// Permissionless DeEd participant roles.
 ///
