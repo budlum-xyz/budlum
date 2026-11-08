@@ -153,28 +153,41 @@ impl RoundPriceBook {
             .map(|(_, at)| *at)
     }
 
-    /// Resolve the local adoption timestamp for `parent` on `chain`.
+    /// Effective local adoption time for `chain.last()`, either directly from
+    /// this book or anchored at `now_ms` when `chain.last()` is an uncommitted
+    /// candidate suffix built on a committed ancestor within
+    /// `ROUND_PRICE_WINDOW`.
     ///
-    /// When `parent` has not been committed yet (a multi-block sync or reorg
-    /// candidate suffix), walk back through `chain` (bounded by
-    /// `ROUND_PRICE_WINDOW`) to the nearest ancestor this node already
-    /// committed, or fall back to `now_ms` when no block in the window has a
-    /// local sighting. That prevents an uncommitted parent's backdated header
-    /// stamp from unlocking rounds `1..=MAX_LEADER_ROUNDS` via `None`.
+    /// During multi-block candidate validation (`try_reorg`), intermediate fork
+    /// blocks are not yet committed to [`RoundPriceBook`]. Returning `None` for
+    /// those uncommitted parents would fall back to stale schedule timestamps,
+    /// while returning an ancestor's older sighting would price rounds from
+    /// before the candidate parent existed. Anchoring uncommitted suffix
+    /// parents at `now_ms` lets [`affordable_leader_round`] lower the anchor to
+    /// `parent.timestamp` in normal cadence while refusing both backdated and
+    /// withheld-fork round saturation.
     #[must_use]
-    pub fn chain_seen_at(&self, chain: &[Block], parent: &Block, now_ms: u128) -> u128 {
-        if let Some(at) = self.seen_at(&parent.hash) {
-            return at;
+    pub fn chain_seen_at(&self, chain: &[Block], now_ms: u128) -> Option<u128> {
+        let last = chain.last()?;
+        if let Some(at) = self.seen_at(&last.hash) {
+            return Some(at);
         }
-        let anchor_pos = chain.iter().rposition(|b| b.hash == parent.hash);
-        let search_end = anchor_pos.map_or(chain.len(), |idx| idx + 1);
-        let search_start = search_end.saturating_sub(ROUND_PRICE_WINDOW);
-        for ancestor in chain[search_start..search_end].iter().rev() {
-            if let Some(at) = self.seen_at(&ancestor.hash) {
-                return at;
+        let Ok(seen) = self.seen.lock() else {
+            return None;
+        };
+        let search_floor = chain.len().saturating_sub(ROUND_PRICE_WINDOW);
+        for pair in chain.get(search_floor..)?.windows(2).rev() {
+            let [ancestor, child] = pair else {
+                return None;
+            };
+            if child.previous_hash != ancestor.hash {
+                return None;
+            }
+            if seen.iter().any(|(hash, _)| hash == &ancestor.hash) {
+                return Some(now_ms);
             }
         }
-        now_ms
+        None
     }
 
     /// The highest round this node may *claim*, from the producer's side.
@@ -848,21 +861,29 @@ mod tests {
         let book = RoundPriceBook::new();
         book.note_tip_block(&genesis.hash, now);
 
-        let anchor = book.chain_seen_at(&chain, &fork_parent, now);
-        assert_eq!(anchor, now);
+        let anchor = book.chain_seen_at(&chain, now);
+        assert_eq!(anchor, Some(now));
         assert_eq!(
-            affordable_leader_round(fork_parent.timestamp, Some(anchor), now),
+            affordable_leader_round(fork_parent.timestamp, anchor, now),
             0,
             "backdated candidate parent must not unlock rounds 1..=16 before timeout elapses"
         );
 
-        let fresh_book = RoundPriceBook::new();
-        let fallback_anchor = fresh_book.chain_seen_at(&chain, &fork_parent, now);
-        assert_eq!(fallback_anchor, now);
+        let old_book = RoundPriceBook::new();
+        old_book.note_tip_block(&genesis.hash, now - 50_000);
+        let old_anchor = old_book.chain_seen_at(&chain, now);
+        assert_eq!(old_anchor, Some(now));
         assert_eq!(
-            affordable_leader_round(fork_parent.timestamp, Some(fallback_anchor), now),
+            affordable_leader_round(fork_parent.timestamp, old_anchor, now),
             0,
-            "unseen window must anchor at wall time rather than trusting stale header timestamps"
+            "an old ancestor sighting must not unlock rounds for an uncommitted parent"
+        );
+
+        let fresh_book = RoundPriceBook::new();
+        let fallback_anchor = fresh_book.chain_seen_at(&chain, now);
+        assert_eq!(
+            fallback_anchor, None,
+            "historical replay outside RoundPriceBook falls back to None so valid historical retry blocks verify"
         );
     }
 }
