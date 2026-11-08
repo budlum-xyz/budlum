@@ -42,7 +42,7 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: budlum-core
       - name: Install protoc
@@ -165,7 +165,7 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: budlum-core
       - name: Install protoc
@@ -318,7 +318,7 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: budlum-core
       - name: Install protoc
@@ -402,7 +402,7 @@ jobs:
           # unable to build with the standard library" before TSan ever runs
           # (that is what the 2026-08-31 scheduled run died on).
           components: rust-src
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           # A cache key of its OWN, not the shared `budlum-core` one. Sanitizer
           # builds are ABI-incompatible with ordinary ones, so restoring
@@ -487,17 +487,24 @@ jobs:
           EOF
           cat > /tmp/tsan-canary/src/main.rs <<'EOF'
           // Two threads write to the same address without synchronization. If TSan
-          // does not see this the scan is not trustworthy.
+          // does not see this the scan is not trustworthy. A start barrier holds
+          // both OS threads until both are live so thread A cannot finish its loop
+          // before `spawn` returns for thread B on a 2-vCPU runner.
           fn main() {
               let mut value = 0i64;
               let ptr = std::ptr::addr_of_mut!(value) as usize;
+              let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+              let start_a = std::sync::Arc::clone(&start);
               let a = std::thread::spawn(move || {
+                  start_a.wait();
                   let p = ptr as *mut i64;
-                  for _ in 0..10_000 { unsafe { *p += 1 } }
+                  for _ in 0..50_000 { unsafe { *p += 1 } }
               });
+              let start_b = std::sync::Arc::clone(&start);
               let b = std::thread::spawn(move || {
+                  start_b.wait();
                   let p = ptr as *mut i64;
-                  for _ in 0..10_000 { unsafe { *p += 1 } }
+                  for _ in 0..50_000 { unsafe { *p += 1 } }
               });
               a.join().unwrap();
               b.join().unwrap();
@@ -561,13 +568,16 @@ jobs:
                   .expect("the canary needs a store to borrow a stack frame from");
               let mut value = 0i64;
               let ptr = std::ptr::addr_of_mut!(value) as usize;
+              let start = std::sync::Arc::new(std::sync::Barrier::new(2));
 
               // Thread A: the write happens INSIDE a closure sled invokes, so
               // `sled::tree::Tree::update_and_fetch` sits in this stack.
               let inside = {
                   let db = db.clone();
+                  let s = std::sync::Arc::clone(&start);
                   std::thread::spawn(move || {
-                      for i in 0..20_000u32 {
+                      s.wait();
+                      for i in 0..5_000u32 {
                           let _ = db.update_and_fetch(b"canary", |_old| {
                               let p = ptr as *mut i64;
                               unsafe { *p += 1 }
@@ -577,10 +587,17 @@ jobs:
                   })
               };
               // Thread B: the same address, no sled on this side at all.
-              let outside = std::thread::spawn(move || {
-                  let p = ptr as *mut i64;
-                  for _ in 0..20_000 { unsafe { *p += 1 } }
-              });
+              let outside = {
+                  let s = std::sync::Arc::clone(&start);
+                  std::thread::spawn(move || {
+                      let p = ptr as *mut i64;
+                      s.wait();
+                      for _ in 0..2_000_000 {
+                          unsafe { *p += 1 }
+                          std::hint::black_box(p);
+                      }
+                  })
+              };
               inside.join().expect("join");
               outside.join().expect("join");
               println!("{value}");
@@ -729,7 +746,7 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: budlum-core
       - name: Install protoc
