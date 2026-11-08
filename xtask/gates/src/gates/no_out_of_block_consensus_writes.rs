@@ -53,7 +53,7 @@ const CALLS: &[(&str, Class)] = &[
     // Admitting a bundle touches the pool and its node-local persistence file,
     // never `self.state`: the same class as `add_transaction`, one turn for the
     // whole bundle so the all-or-none promise is the pool's and not the RPC
-    // layer's (AF-19).
+    // layer's.
     ("add_transaction_bundle", NodeLocal),
     ("apply_state_snapshot", Sync),
     ("build_global_header", Read),
@@ -131,9 +131,9 @@ const READ_PREFIXES: &[&str] = &[
 ];
 
 /// Read methods whose names no prefix above covers, matched exactly: an
-/// identity record and credential lookup, a protected-content lookup, and
-/// the coding-audit answer check (`&self`, it judges an answer and stores
-/// nothing).
+/// identity record and credential lookup, a protected-content lookup, the
+/// coding-audit answer check (`&self`, it judges an answer and stores
+/// nothing), and the admission-fee quote (`&self`, it only computes a fee).
 const READ_NAMES: &[&str] = &[
     "record",
     "credential",
@@ -145,6 +145,18 @@ const READ_NAMES: &[&str] = &[
     "deals_for_manifest",
     "deals_for_shard",
     "under_replicated_shards",
+    // The fee floor is a pure `&self` calculation shared by admission and
+    // `bud_estimateGas`. `chain_actor` answers `get_required_fee` with it;
+    // reading the quote never writes consensus state.
+    "required_fee",
+];
+
+/// Read-only queries reached through an explicit sub-registry. The method
+/// name alone is not enough: `query_json` is read-only on these two types,
+/// but that does not make every future `query_json` a state read.
+const READ_CHAINS: &[&str] = &[
+    ".bud3_registry.query_json(",
+    ".validator_directory.query_json(",
 ];
 
 /// Calls on `self.state` inside a `Blockchain` method body that write it.
@@ -281,7 +293,35 @@ fn check_actor_state_access(actor: &str) -> Result<(), String> {
             );
         }
         if let Some(method) = method {
-            if !READ_PREFIXES.iter().any(|p| method.starts_with(p))
+            let chain = actor[at..].trim_start();
+            let nested_read = method == "query_json"
+                && READ_CHAINS.iter().any(|allowed| {
+                    chain.strip_prefix(allowed).is_some_and(|arguments| {
+                        // Walk this call's balanced parentheses. A following
+                        // method on its result is outside the read exception.
+                        let mut depth = 1usize;
+                        let mut end = None;
+                        for (i, byte) in arguments.bytes().enumerate() {
+                            match byte {
+                                b'(' => depth += 1,
+                                b')' => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        end = Some(i + 1);
+                                        break;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        end.is_some_and(|end| {
+                            let tail = arguments[end..].trim_start();
+                            !tail.starts_with('.')
+                        })
+                    })
+                });
+            if !nested_read
+                && !READ_PREFIXES.iter().any(|p| method.starts_with(p))
                 && !READ_NAMES.contains(&method.as_str())
             {
                 return Err(format!(
@@ -510,5 +550,35 @@ mod tests {
         assert!(check_actor_state_access("self.blockchain.state.add_balance(&a, 1);").is_err());
         assert!(check_actor_state_access("self.blockchain.state.epoch_index = 3;").is_err());
         assert!(check_actor_state_access("if self.blockchain.state.epoch_index == 3 {}").is_ok());
+    }
+
+    #[test]
+    fn required_fee_quote_is_a_read_without_widening_the_exception() {
+        assert!(
+            check_actor_state_access("let fee = self.blockchain.state.required_fee(&tx);").is_ok()
+        );
+        assert!(
+            check_actor_state_access("let fee = self.blockchain.state.required_fee_override(&tx);")
+                .is_err(),
+            "the exact read exception must not cover similarly named writes"
+        );
+    }
+
+    #[test]
+    fn subregistry_queries_are_reads_only_on_the_named_paths() {
+        for path in [
+            "self.blockchain.state.bud3_registry.query_json(&query);",
+            "self.blockchain.state.validator_directory.query_json(query);",
+        ] {
+            assert!(check_actor_state_access(path).is_ok(), "{path}");
+        }
+        for path in [
+            "self.blockchain.state.query_json(&query);",
+            "self.blockchain.state.accounts.query_json(&query);",
+            "self.blockchain.state.bud3_registry.query_json_mut(&query);",
+            "self.blockchain.state.bud3_registry.query_json(&query).insert(key, value);",
+        ] {
+            assert!(check_actor_state_access(path).is_err(), "{path}");
+        }
     }
 }

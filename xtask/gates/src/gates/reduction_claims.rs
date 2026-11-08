@@ -1,13 +1,13 @@
 //! A reduction claim states both units (files and bytes) or neither.
 //!
 //! Ported from `scripts/check-reduction-claims-state-both-units.sh`. The
-//! roadmap must quantify shares in both object and byte units, carry the
+//! measurement record must quantify shares in both object and byte units, carry the
 //! DOI citation for the corpus measurement, and record the 447 factor whose
 //! table row actually divides to it.
 
 use std::path::Path;
 
-const DOC: &str = "docs/BUD_STORAGE_ROADMAP.md";
+const DOC: &str = "docs/STORAGE_REDUCTION.md";
 
 fn mentions_object_unit(text: &str) -> bool {
     let lower = text.to_lowercase();
@@ -129,7 +129,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     if !text.contains("10.1145/3656015") {
         return Err(String::from(
-            "the corpus composition measurement has no citation in the roadmap.\n  \
+            "the corpus composition measurement has no citation in the measurement record.\n  \
              The rule this gate enforces rests on a specific published crawl. Without\n  \
              the reference the rule is an assertion, and the next person to reweight\n  \
              the numbers has nothing to check them against.",
@@ -137,7 +137,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
     if !has_number(&text, "447") {
         return Err(String::from(
-            "the roadmap no longer records the size of the discrepancy.\n  \
+            "the measurement record no longer records the size of the discrepancy.\n  \
              447 is the factor between the two units for one class, and it is the whole\n  \
              reason this rule exists.",
         ));
@@ -155,7 +155,7 @@ pub fn run(root: &Path) -> Result<String, String> {
             let rounded = factor.round();
             if (rounded - 447.0).abs() > 0.5 {
                 return Err(format!(
-                    "the roadmap states a factor of 447 but its own table divides to {rounded:.0}."
+                    "the measurement record states a factor of 447 but its own table divides to {rounded:.0}."
                 ));
             }
         }
