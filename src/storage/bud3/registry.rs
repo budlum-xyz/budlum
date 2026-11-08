@@ -44,8 +44,8 @@ pub const FULL_MISSES_TO_LOSS: u64 = 2;
 /// A Mobile share is lost after this many missed windows in a row.
 pub const MOBILE_MISSES_TO_LOSS: u64 = 3;
 
-/// The state-root tag.
-pub const REGISTRY_TAG: &[u8] = b"BDLM_BUD3_REGISTRY_V1";
+/// The state-root tag. V2 commits every serialized field and exact index.
+pub const REGISTRY_TAG: &[u8] = b"BDLM_BUD3_REGISTRY_V2";
 
 /// An object is named by its commitment.
 pub type ObjectKey = [u8; 32];
@@ -1850,7 +1850,7 @@ impl Bud3Registry {
             && self.replacements.is_empty()
     }
 
-    /// The registry state root over every map, in order.
+    /// The registry state root over every serialized field, in deterministic order.
     #[must_use]
     pub fn state_root(&self) -> [u8; 32] {
         let mut acc = hash_fields_bytes(&[REGISTRY_TAG, b"empty"]);
@@ -1860,12 +1860,28 @@ impl Bud3Registry {
             acc = hash_fields_bytes(&all);
         };
         for (k, o) in &self.objects {
+            let content_kind = match o.record.content_id.kind {
+                ContentIdKind::Public => 0u8,
+                ContentIdKind::Sealed => 1u8,
+            };
+            let profile = o.record.profile;
             fold(&[
                 b"obj",
                 k,
                 &o.owner,
+                &[content_kind],
                 &o.record.content_id.digest,
+                &o.record.content_id.len.to_le_bytes(),
                 &o.record.object_len.to_le_bytes(),
+                &o.record.commitment,
+                &profile.id.to_le_bytes(),
+                &[profile.qr_version],
+                &profile.symbol_size.to_le_bytes(),
+                &profile.fps.to_le_bytes(),
+                &profile.k_max.to_le_bytes(),
+                &o.record.codec.to_le_bytes(),
+                &o.record.symbols_per_segment.to_le_bytes(),
+                &(o.record.symbol_roots.len() as u64).to_le_bytes(),
                 &o.expires_at.to_le_bytes(),
                 &(o.references.len() as u64).to_le_bytes(),
                 &o.endowment.fee_record.user_physical_bytes.to_le_bytes(),
@@ -1878,6 +1894,9 @@ impl Bud3Registry {
                 &o.endowment.gateway_paid.to_le_bytes(),
                 &o.endowment.forfeited_to_security_pool.to_le_bytes(),
             ]);
+            for root in &o.record.symbol_roots {
+                fold(&[b"record_root", root]);
+            }
             for r in &o.roots {
                 fold(&[
                     b"root",
@@ -1895,34 +1914,44 @@ impl Bud3Registry {
             }
             for s in &o.shares {
                 let status = [u8::from(s.status == ShareStatus::Confirmed)];
-                let audit = s.open_audit.map_or([0u8; 24], |(a, last)| {
-                    let mut b = [0u8; 24];
-                    for (d, v) in b.iter_mut().zip(
-                        a.position
-                            .to_le_bytes()
-                            .iter()
-                            .chain(a.sub_block.to_le_bytes().iter())
-                            .chain(last.to_le_bytes().iter()),
-                    ) {
-                        *d = *v;
-                    }
-                    b
-                });
+                let class = match s.share.class {
+                    Class::Full => 0u8,
+                    Class::Mobile => 1u8,
+                };
+                let (audit_present, audit_segment, audit_position, audit_sub_block, audit_last) = s
+                    .open_audit
+                    .map_or((0u8, 0u64, 0u64, 0u64, 0u64), |(a, last)| {
+                        (1, a.segment, a.position, a.sub_block, last)
+                    });
                 fold(&[
                     b"share",
                     &s.segment.to_le_bytes(),
                     &s.share.validator,
+                    &[class],
                     &s.share.first_esi.to_le_bytes(),
                     &s.share.symbols.to_le_bytes(),
                     &status,
-                    &audit,
+                    &[audit_present],
+                    &audit_segment.to_le_bytes(),
+                    &audit_position.to_le_bytes(),
+                    &audit_sub_block.to_le_bytes(),
+                    &audit_last.to_le_bytes(),
                     &s.passes.to_le_bytes(),
                     &s.misses.to_le_bytes(),
                     &s.consecutive_misses.to_le_bytes(),
                     &[u8::from(s.lost)],
                     &(s.root as u64).to_le_bytes(),
+                    &s.assigned_epoch.to_le_bytes(),
                 ]);
             }
+        }
+        // The exact index is consensus state after snapshot restoration. The
+        // node-local Bloom filter that accelerates it is deliberately excluded.
+        for (digest, key) in self.public_index.iter() {
+            fold(&[b"public_index", digest, key]);
+        }
+        for (nft, (key, holder)) in &self.nfts {
+            fold(&[b"nft", nft, key, holder]);
         }
         for (k, e) in &self.tombstones {
             fold(&[b"tomb", k, &e.to_le_bytes()]);
@@ -2018,6 +2047,143 @@ mod tests {
             }
         }
         (up, shares)
+    }
+
+    fn assert_entry_changes_root(
+        label: &str,
+        registry: &Bud3Registry,
+        key: &ObjectKey,
+        change: impl FnOnce(&mut ObjectEntry),
+    ) {
+        let mut changed = registry.clone();
+        change(changed.objects.get_mut(key).unwrap());
+        assert_ne!(changed.state_root(), registry.state_root(), "{label}");
+    }
+
+    #[test]
+    fn registry_root_commits_object_and_share_fields() {
+        let (upload, shares) = upload(b"root coverage");
+        let key = upload.record.commitment;
+        let mut registry = Bud3Registry::default();
+        registry
+            .register_object(addr(1), upload.record, shares, 0, 10)
+            .unwrap();
+
+        assert_entry_changes_root("content kind", &registry, &key, |o| {
+            o.record.content_id.kind = ContentIdKind::Sealed;
+        });
+        assert_entry_changes_root("content length", &registry, &key, |o| {
+            o.record.content_id.len += 1;
+        });
+        assert_entry_changes_root("record commitment", &registry, &key, |o| {
+            o.record.commitment[0] ^= 1;
+        });
+        assert_entry_changes_root("profile id", &registry, &key, |o| {
+            o.record.profile.id += 1;
+        });
+        assert_entry_changes_root("QR version", &registry, &key, |o| {
+            o.record.profile.qr_version -= 1;
+        });
+        assert_entry_changes_root("symbol size", &registry, &key, |o| {
+            o.record.profile.symbol_size += 1;
+        });
+        assert_entry_changes_root("frame rate", &registry, &key, |o| {
+            o.record.profile.fps += 1;
+        });
+        assert_entry_changes_root("maximum source symbols", &registry, &key, |o| {
+            o.record.profile.k_max += 1;
+        });
+        assert_entry_changes_root("codec", &registry, &key, |o| {
+            o.record.codec += 1;
+        });
+        assert_entry_changes_root("symbol count", &registry, &key, |o| {
+            o.record.symbols_per_segment += 1;
+        });
+        assert_entry_changes_root("record symbol root", &registry, &key, |o| {
+            o.record.symbol_roots[0][0] ^= 1;
+        });
+        assert_entry_changes_root("share class", &registry, &key, |o| {
+            o.shares[0].share.class = Class::Mobile;
+        });
+        assert_entry_changes_root("assignment epoch", &registry, &key, |o| {
+            o.shares[0].assigned_epoch += 1;
+        });
+        assert_entry_changes_root("zero-valued audit is present", &registry, &key, |o| {
+            o.shares[0].open_audit = Some((
+                Audit {
+                    segment: 0,
+                    position: 0,
+                    sub_block: 0,
+                },
+                0,
+            ));
+        });
+        let mut audited = registry.clone();
+        audited.objects.get_mut(&key).unwrap().shares[0].open_audit = Some((
+            Audit {
+                segment: 0,
+                position: 0,
+                sub_block: 0,
+            },
+            0,
+        ));
+        assert_entry_changes_root("audit segment", &audited, &key, |o| {
+            o.shares[0].open_audit.as_mut().unwrap().0.segment = 1;
+        });
+    }
+
+    #[test]
+    fn registry_root_commits_reference_authority_and_exact_index() {
+        let (upload, shares) = upload(b"bound reference");
+        let key = upload.record.commitment;
+        let digest = upload.record.content_id.digest;
+        let mut registry = Bud3Registry::default();
+        registry
+            .register_object(addr(1), upload.record, shares, 0, 10)
+            .unwrap();
+
+        let mut alice = registry.clone();
+        let mut bob = registry.clone();
+        alice.bind_nft([9; 32], addr(7), &key).unwrap();
+        bob.bind_nft([9; 32], addr(8), &key).unwrap();
+        assert_ne!(alice.state_root(), bob.state_root());
+        assert!(alice.burn_reference(&[9; 32], &addr(7), 1).is_ok());
+        assert_eq!(
+            bob.burn_reference(&[9; 32], &addr(7), 1),
+            Err(RegistryError::NotAuthorized)
+        );
+
+        let mut without_index = registry.clone();
+        without_index.public_index.remove(&digest);
+        assert_ne!(without_index.state_root(), registry.state_root());
+
+        // Even an inconsistent snapshot must not hide orphaned state.
+        let empty = Bud3Registry::default();
+        let mut orphan_nft = empty.clone();
+        orphan_nft.nfts.insert([9; 32], (key, addr(7)));
+        assert!(!orphan_nft.is_empty());
+        assert_ne!(orphan_nft.state_root(), empty.state_root());
+        let mut orphan_index = empty.clone();
+        orphan_index.public_index.insert(digest, key);
+        assert!(!orphan_index.is_empty());
+        assert_ne!(orphan_index.state_root(), empty.state_root());
+    }
+
+    #[test]
+    fn registry_root_survives_snapshot_and_index_rebuild() {
+        let (upload, shares) = upload(b"snapshot root");
+        let key = upload.record.commitment;
+        let mut registry = Bud3Registry::default();
+        registry
+            .register_object(addr(1), upload.record, shares, 0, 10)
+            .unwrap();
+        registry.bind_nft([9; 32], addr(7), &key).unwrap();
+        registry.ack(&key, &addr(10)).unwrap();
+
+        let snapshot = serde_json::to_vec(&registry).unwrap();
+        let restored: Bud3Registry = serde_json::from_slice(&snapshot).unwrap();
+        assert_eq!(registry, restored);
+        assert_eq!(registry.state_root(), restored.state_root());
     }
 
     #[test]
