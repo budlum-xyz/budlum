@@ -49,7 +49,7 @@ not invent those doors or route testnet traffic into the new module.
 
 ## New findings and corrections
 
-### BLG-314 — domain-tag inventory omission (Medium)
+### BLG-314 - domain-tag inventory omission (Medium)
 
 The source declared `BDLM_BUD3_LIVE_STREAM_V1` and
 `BDLM_BUD3_LIVE_END_V1`, but did not add either to the central inventory.
@@ -63,7 +63,7 @@ comparison without the two live additions produces exactly the same four
 differences. Thus #86 adds no inventory drift, but the global domain-tag gate
 is not represented as passing.
 
-### BLG-315 — timestamp saturation and empty-chain success (Medium)
+### BLG-315 - timestamp saturation and empty-chain success (Medium)
 
 The source used `start_ms.saturating_add(LIVE_SEGMENT_MS)`, allowing an upper
 boundary timestamp to collapse the fixed window instead of continuing the

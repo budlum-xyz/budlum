@@ -168,6 +168,13 @@ impl SegmentEncoder {
         self.k
     }
 
+    /// The inclusive largest ESI this encoder can produce after accounting
+    /// for RFC 6330 source-block padding.
+    #[must_use]
+    pub fn max_esi(&self) -> u32 {
+        max_esi(self.k)
+    }
+
     fn wrap(&self, packet: EncodingPacket) -> Symbol {
         let (id, data) = packet.split();
         Symbol {

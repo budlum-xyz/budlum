@@ -140,6 +140,20 @@ pub enum LiveError {
     Object(Bof1Error),
     /// The object commitment could not be computed.
     CommitFailed,
+    /// A per-segment repair-limit table has the wrong length.
+    RepairLimitCountMismatch {
+        /// Number of source-count entries.
+        segments: usize,
+        /// Number of repair-limit entries.
+        limits: usize,
+    },
+    /// A repair limit exceeds the RFC 6330 ESI domain.
+    RepairLimitOutOfRange {
+        /// Segment whose limit is invalid.
+        segment: u64,
+        /// Requested inclusive repair ESI limit.
+        limit: u32,
+    },
 }
 
 /// One produced live segment: the BOF-1 object and its commitment.
@@ -433,14 +447,17 @@ pub enum LiveFrame {
 /// segments with ever-increasing ESIs and no fixed source-to-repair ratio.
 ///
 /// The order is total and deterministic, so the sender and every receiver
-/// agree on it. A zero-entry plan yields nothing; a plan whose repair ESIs
-/// all reach [`MAX_ESI`] terminates.
+/// agree on it. A zero-entry plan yields nothing; a plan terminates after
+/// every segment reaches its inclusive repair limit. [`RatiolessPlan::new`]
+/// uses [`MAX_ESI`]; a real encoder can supply a lower per-segment limit.
 #[derive(Debug, Clone)]
 pub struct RatiolessPlan {
     sources: std::vec::IntoIter<LiveFrame>,
     /// The next repair ESI to emit, per segment (starts at the segment's
     /// source symbol count).
     next_repair_esi: Vec<u32>,
+    /// Inclusive last repair ESI each segment's encoder can produce.
+    repair_limit_esi: Vec<u32>,
     /// Round-robin cursor into `next_repair_esi`.
     cursor: usize,
 }
@@ -449,6 +466,37 @@ impl RatiolessPlan {
     /// Build the plan for segments whose source-symbol counts are `ks`.
     #[must_use]
     pub fn new(ks: &[u32]) -> Self {
+        Self::build(ks, vec![MAX_ESI; ks.len()])
+    }
+
+    /// Build a plan with each segment's inclusive last repair ESI.
+    ///
+    /// `SegmentEncoder::max_esi` accounts for RFC 6330 source-block padding;
+    /// using that value prevents the plan from emitting frames the encoder
+    /// must refuse. Length mismatches and limits above [`MAX_ESI`] are errors.
+    ///
+    /// # Errors
+    /// [`LiveError::RepairLimitCountMismatch`] or
+    /// [`LiveError::RepairLimitOutOfRange`].
+    pub fn with_repair_limits(ks: &[u32], repair_limits: &[u32]) -> Result<Self, LiveError> {
+        if ks.len() != repair_limits.len() {
+            return Err(LiveError::RepairLimitCountMismatch {
+                segments: ks.len(),
+                limits: repair_limits.len(),
+            });
+        }
+        for (index, limit) in repair_limits.iter().copied().enumerate() {
+            if limit > MAX_ESI {
+                return Err(LiveError::RepairLimitOutOfRange {
+                    segment: index as u64,
+                    limit,
+                });
+            }
+        }
+        Ok(Self::build(ks, repair_limits.to_vec()))
+    }
+
+    fn build(ks: &[u32], repair_limit_esi: Vec<u32>) -> Self {
         let mut sources = Vec::new();
         let mut next_repair_esi = Vec::with_capacity(ks.len());
         for (index, k) in ks.iter().enumerate() {
@@ -461,6 +509,7 @@ impl RatiolessPlan {
         Self {
             sources: sources.into_iter(),
             next_repair_esi,
+            repair_limit_esi,
             cursor: 0,
         }
     }
@@ -480,7 +529,7 @@ impl Iterator for RatiolessPlan {
             let index = self.cursor % self.next_repair_esi.len();
             self.cursor = self.cursor.wrapping_add(1);
             let esi = self.next_repair_esi[index];
-            if esi <= MAX_ESI {
+            if esi <= self.repair_limit_esi[index] {
                 self.next_repair_esi[index] = esi + 1;
                 return Some(LiveFrame::Repair {
                     segment: index as u64,
@@ -734,6 +783,33 @@ mod tests {
         sorted.dedup();
         assert_eq!(repairs.len(), sorted.len());
         assert_eq!(sorted.first(), Some(&1));
+    }
+
+    #[test]
+    fn ratioless_plan_honors_per_segment_repair_limits() {
+        let plan = RatiolessPlan::with_repair_limits(&[1], &[1]).unwrap();
+        let frames: Vec<LiveFrame> = plan.collect();
+        assert_eq!(
+            frames,
+            vec![
+                LiveFrame::Source { segment: 0, esi: 0 },
+                LiveFrame::Repair { segment: 0, esi: 1 },
+            ]
+        );
+        assert_eq!(
+            RatiolessPlan::with_repair_limits(&[1], &[]).unwrap_err(),
+            LiveError::RepairLimitCountMismatch {
+                segments: 1,
+                limits: 0,
+            }
+        );
+        assert_eq!(
+            RatiolessPlan::with_repair_limits(&[1], &[MAX_ESI + 1]).unwrap_err(),
+            LiveError::RepairLimitOutOfRange {
+                segment: 0,
+                limit: MAX_ESI + 1,
+            }
+        );
     }
 
     #[test]

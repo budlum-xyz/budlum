@@ -22,6 +22,7 @@
 //! | [`pipeline`] | Upload (content to record and symbols) and view (symbols to checked content) |
 //! | [`fountain`] | RFC 6330 per-segment encoder and decoder, and the streaming encoder |
 //! | [`live`] | Live stream T-Expansion: time segments, the `prev_object` chain, the ratioless send order |
+//! | [`live_broadcast`] | Post-launch live gateway and bounded-subscriber RFC 6330 broadcast driver |
 //! | [`compression_context`] | Post-launch shared compression context, corpus rotation and access tiering |
 //! | [`private_dedup`] | Post-launch threshold-OPRF private cross-owner deduplication |
 //! | [`upload`] | Rate-limited chunked upload sessions, streamed content identity and segment-coded finishes |
@@ -50,6 +51,7 @@ pub mod grants;
 pub mod keys;
 pub mod limits;
 pub mod live;
+pub mod live_broadcast;
 pub mod maintenance;
 pub mod meter;
 pub mod pipeline;
@@ -103,8 +105,12 @@ pub use keys::{
 };
 pub use limits::{Bud3Limits, OpticalProfile, Profile, ProfileId};
 pub use live::{
-    LiveContext, LiveError, LiveFrame, LiveSegment, LiveStream, RatiolessPlan, StreamEnd,
-    ViewerTicket, LIVE_SEGMENT_MS, MAX_JOIN_LATENCY_MS,
+    verify_chain, LiveActivation, LiveContext, LiveError, LiveFrame, LiveSegment, LiveStream,
+    RatiolessPlan, StreamEnd, ViewerTicket, ACTIVATION, LIVE_SEGMENT_MS, MAX_JOIN_LATENCY_MS,
+};
+pub use live_broadcast::{
+    BroadcastDriver, BroadcastError, LiveGateway, LiveGatewayRefusal, MAX_LIVE_PENDING_SYMBOLS,
+    MAX_LIVE_SUBSCRIBERS,
 };
 pub use maintenance::{
     prioritize_shrink_repairs, select_reassignment_holders, Bud3StorageMetrics, SegmentRisk,
