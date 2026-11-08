@@ -116,6 +116,8 @@ pub enum LiveError {
     EmptySegment,
     /// The fixed segment window would exceed the timestamp domain.
     TimestampOverflow,
+    /// The in-memory segment count cannot be represented on the wire.
+    SegmentCountOverflow,
     /// The broadcast has no segment yet.
     EmptyStream,
     /// The newest segment ended more than two segment durations ago, so the
@@ -170,6 +172,16 @@ pub struct LiveSegment {
     pub start_ms: u64,
     /// Exclusive end of the segment window; `start_ms + LIVE_SEGMENT_MS`.
     pub end_ms: u64,
+}
+
+/// Convert an in-memory count without silently truncating the wire index or
+/// the final binding. The generic boundary also lets the regression exercise
+/// values above u64 on hosts whose `usize` is only 64 bits.
+fn checked_segment_count<T>(count: T) -> Result<u64, LiveError>
+where
+    u64: TryFrom<T>,
+{
+    u64::try_from(count).map_err(|_| LiveError::SegmentCountOverflow)
 }
 
 /// The writer side of one live broadcast.
@@ -241,7 +253,8 @@ impl LiveStream {
     /// [`LiveError::Closed`] before the activation height,
     /// [`LiveError::EmptySegment`] for empty content,
     /// [`LiveError::TimestampOverflow`] when the fixed window cannot be
-    /// represented,
+    /// represented, [`LiveError::SegmentCountOverflow`] when the segment
+    /// index cannot be represented,
     /// [`LiveError::NonContiguous`] when `start_ms` does not continue the
     /// timeline.
     pub fn push_segment(
@@ -260,7 +273,7 @@ impl LiveStream {
                 got_start_ms: start_ms,
             });
         }
-        let index = self.segments.len() as u64;
+        let index = checked_segment_count(self.segments.len())?;
         let end_ms = start_ms
             .checked_add(LIVE_SEGMENT_MS)
             .ok_or(LiveError::TimestampOverflow)?;
@@ -335,11 +348,12 @@ impl LiveStream {
     /// # Errors
     ///
     /// [`LiveError::Closed`] before the activation height,
-    /// [`LiveError::EmptyStream`] when the broadcast produced no segment.
+    /// [`LiveError::EmptyStream`] when the broadcast produced no segment,
+    /// [`LiveError::SegmentCountOverflow`] when the count cannot be encoded.
     pub fn finish(self, nft: NftId) -> Result<StreamEnd, LiveError> {
         self.ctx.check_open()?;
         let head = self.segments.last().ok_or(LiveError::EmptyStream)?;
-        let segment_count = self.segments.len() as u64;
+        let segment_count = checked_segment_count(self.segments.len())?;
         let bind_tag = hash_fields_bytes(&[
             LIVE_END_TAG,
             &self.stream_id,
@@ -680,6 +694,16 @@ mod tests {
         // A stream with no segment at all is not joinable.
         let stream = open_stream();
         assert_eq!(stream.viewer_join(0), Err(LiveError::EmptyStream));
+    }
+
+    #[test]
+    fn bud3_live_segment_count_conversion_is_checked() {
+        assert_eq!(checked_segment_count(3usize), Ok(3));
+        assert_eq!(checked_segment_count(u64::MAX), Ok(u64::MAX));
+        assert_eq!(
+            checked_segment_count(u128::from(u64::MAX) + 1),
+            Err(LiveError::SegmentCountOverflow)
+        );
     }
 
     #[test]

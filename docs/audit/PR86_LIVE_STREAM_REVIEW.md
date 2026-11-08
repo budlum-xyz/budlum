@@ -94,6 +94,16 @@ snapshot as a live query or importing duplicate canonical identities.
 | PR86-BLG-298 | Old PR #8/#9 blobs are not evidence about this integrated tree. The committee line was reviewed and adapted through #81. The whole-tree parser still finds 61 baseline error files, so no repository-wide syntax-green claim is made. |
 | PR86-BLG-299 | Local tree-sitter parsing and integration canaries were used here, but they are not a pinned CI syntax gate and do not close the historical control gap. |
 
+## Post-merge segment-count follow-up
+
+The follow-up review found that `push_segment` and `finish` still used
+`segments.len() as u64`. Both now use the same generic `TryFrom` helper and
+return `SegmentCountOverflow` instead of truncating a wire index or final
+binding. `bud3_live_segment_count_conversion_is_checked` exercises that exact
+helper at `u64::MAX` and `u64::MAX + 1`; it remains unexecuted without a Rust
+runner. This is BLG-363 and is separate from BLG-315's timestamp/empty-chain
+correction.
+
 ## Verification actually performed
 
 - Tree-sitter-rust parsed `live.rs`, `bud3/mod.rs` and `domain_tags.rs` with
@@ -119,6 +129,6 @@ snapshot as a live query or importing duplicate canonical identities.
 No `cargo`, `rustc`, `rustfmt` or Clippy executable is available. Accordingly,
 this review does **not** claim formatting, compilation, lint passage, Rust unit
 test passage, fountain/transport interoperability, deterministic execution,
-NFT registry integration, measurements or testnet readiness. Closing BLG-314
-and BLG-315 still requires the pinned gate/Rust CI evidence required by the
-repository's finding protocol.
+NFT registry integration, measurements or testnet readiness. Closing BLG-314,
+BLG-315 and BLG-363 still requires the pinned gate/Rust CI evidence required by
+the repository's finding protocol.
