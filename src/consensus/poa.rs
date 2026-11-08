@@ -575,10 +575,11 @@ impl ConsensusEngine for PoAEngine {
                     // or synced seconds apart, and a claim refused here is a
                     // block refused for good: the mesh kept two chains. A
                     // future stamp still buys no round.
+                    let now_ms = now_millis();
                     let affordable = affordable_leader_round(
                         prev.timestamp,
-                        self.round_prices.seen_at(&prev.hash),
-                        now_millis(),
+                        Some(self.round_prices.chain_seen_at(chain, prev, now_ms)),
+                        now_ms,
                     );
                     if round > affordable {
                         return Err(ConsensusError(format!(

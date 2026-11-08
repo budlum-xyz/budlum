@@ -136,6 +136,7 @@ mod gates {
     pub mod required_tests;
     pub mod rust_literals;
     pub mod security_parameters;
+    pub mod security_quality_wired;
     pub mod security_scans_can_fail;
     pub mod self_derived_ids_cover_every_field;
     pub mod semver;
@@ -674,6 +675,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::ci_workflow_guards::self_test,
+    },
+    Gate {
+        name: "security-quality-tools-are-wired",
+        replaces: None,
+        run: gates::security_quality_wired::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::security_quality_wired::self_test,
     },
     Gate {
         name: "genesis-schema",

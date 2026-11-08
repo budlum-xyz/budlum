@@ -45,7 +45,7 @@ name: Semgrep
 
 on:
   pull_request:
-    branches: [main, fix/architecture-tip-adlari]
+    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum]
   push:
     branches: [main]
   schedule:
