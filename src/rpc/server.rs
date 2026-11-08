@@ -298,6 +298,27 @@ where
     }
 }
 
+/// Serves a plain-HTTP connection while holding `_permit` for the connection's
+/// full lifetime so `max_connections` applies to the custom accept loop.
+async fn serve_plain_connection<S, B>(
+    socket: tokio::net::TcpStream,
+    service: S,
+    stopped: impl std::future::Future<Output = ()> + Send + 'static,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+) where
+    S: tower::Service<HttpRequest<hyper::body::Incoming>, Response = hyper::Response<B>>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send,
+    S::Response: Send,
+    S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    B: hyper::body::Body<Data = hyper::body::Bytes> + Send + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    let _ = jsonrpsee::server::serve_with_graceful_shutdown(socket, service, stopped).await;
+}
+
 pub struct RpcServer {
     chain: ChainHandle,
     node: NodeClient,
@@ -364,9 +385,7 @@ impl RpcServer {
     pub async fn run(self, addr: String) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use jsonrpsee::core::server::Methods;
         use jsonrpsee::server::BatchRequestConfig;
-        use jsonrpsee::server::{
-            serve_with_graceful_shutdown, stop_channel, ServerBuilder, ServerConfig,
-        };
+        use jsonrpsee::server::{stop_channel, ServerBuilder, ServerConfig};
 
         validate_rpc_security_config(&self.security)?;
         let http_middleware = ServiceBuilder::new().layer(RpcSecurityLayer::new(
@@ -402,6 +421,13 @@ impl RpcServer {
             RpcMode::Operator => "operator",
         };
         validate_operator_bind_address(&self.mode, &addr)?;
+        let connection_limit = usize::try_from(
+            self.security
+                .max_connections
+                .unwrap_or(RPC_DEFAULT_CONNECTION_LIMIT),
+        )
+        .unwrap_or(usize::MAX);
+        let connection_permits = Arc::new(tokio::sync::Semaphore::new(connection_limit));
         let methods: Methods = self.into_rpc().into();
         let svc_builder = builder.to_service_builder();
         let listener = tokio::net::TcpListener::bind(addr.clone()).await?;
@@ -424,6 +450,15 @@ impl RpcServer {
                     _ = stop_handle.clone().shutdown() => break,
                 };
 
+                // `builder.to_service_builder()` bypasses jsonrpsee's internal
+                // connection limiter, so enforce `max_connections` directly on
+                // the accepted TCP socket and hold the permit until EOF.
+                let Ok(permit) = connection_permits.clone().try_acquire_owned() else {
+                    tracing::warn!("RPC connection limit reached; dropping {remote_addr}");
+                    drop(socket);
+                    continue;
+                };
+
                 let stop_handle_for_service = stop_handle.clone();
                 let svc_builder_for_service = svc_builder.clone();
                 let methods_for_service = methods.clone();
@@ -435,10 +470,11 @@ impl RpcServer {
                     async move { svc.call(req).await }
                 });
 
-                tokio::spawn(serve_with_graceful_shutdown(
+                tokio::spawn(serve_plain_connection(
                     socket,
                     svc,
                     stop_handle.clone().shutdown(),
+                    permit,
                 ));
             }
         });
