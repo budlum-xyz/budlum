@@ -36,7 +36,7 @@ fn attestation() -> EvmFinalityAttestation {
 }
 
 #[test]
-fn f01_license_and_immutable_key_commitments_are_pinned() {
+fn license_and_immutable_key_commitments_are_pinned() {
     let source = contract_source();
     assert!(source.starts_with("// SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0"));
     assert!(!source.contains("License: Polyfield"));
@@ -50,7 +50,7 @@ fn f01_license_and_immutable_key_commitments_are_pinned() {
 }
 
 #[test]
-fn f02_missing_verifiers_remain_pending_not_accepted() {
+fn missing_verifiers_remain_pending_not_accepted() {
     let source = contract_source();
     assert!(source.contains("pendingRootAtHeight[a.height] = a.stateRoot"));
     assert!(source.contains("pendingAttestationAtHeight[a.height] = digest"));
@@ -70,7 +70,7 @@ fn f02_missing_verifiers_remain_pending_not_accepted() {
 }
 
 #[test]
-fn f03_pairing_probe_and_verification_have_a_realistic_gas_floor() {
+fn pairing_probe_and_verification_have_a_realistic_gas_floor() {
     let source = contract_source();
     assert!(source.contains("GAS_BLS_PAIRING_PROBE = 150_000"));
     assert!(source.contains("staticcall{gas: GAS_BLS_PAIRING_PROBE}"));
@@ -79,7 +79,7 @@ fn f03_pairing_probe_and_verification_have_a_realistic_gas_floor() {
 }
 
 #[test]
-fn f04_signing_root_changes_for_every_bound_field() {
+fn signing_root_changes_for_every_bound_field() {
     let mut base = attestation();
     let root = base.signing_root(11_155_111);
     let digest = base.attestation_digest();
@@ -101,7 +101,7 @@ fn f04_signing_root_changes_for_every_bound_field() {
 }
 
 #[test]
-fn f05_encoder_refuses_compressed_or_missing_points() {
+fn encoder_refuses_compressed_or_missing_points() {
     let mut value = attestation();
     value.g2_generator.truncate(96);
     assert!(matches!(
@@ -128,7 +128,7 @@ fn f05_encoder_refuses_compressed_or_missing_points() {
 }
 
 #[test]
-fn f06_one_pending_attestation_claims_one_height() {
+fn one_pending_attestation_claims_one_height() {
     let source = contract_source();
     assert!(source.contains("mapping(uint64 => bytes32) public pendingRootAtHeight"));
     assert!(source.contains("mapping(uint64 => bytes32) public pendingAttestationAtHeight"));

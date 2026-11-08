@@ -48,7 +48,7 @@ mod tests {
         use crate::network::peer_manager::PeerManager;
         let mut pm = PeerManager::new();
         assert_eq!(pm.max_peers_per_subnet(), 4);
-        let s = [198, 51, 100];
+        let s: [u8; 3] = [198, 51, 100];
         for _ in 0..4 {
             let peer = libp2p::identity::Keypair::generate_ed25519()
                 .public()
