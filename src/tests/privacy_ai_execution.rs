@@ -635,6 +635,12 @@ fn ai_layer_is_closed_on_testnet() {
         TransactionType::AiOperatorBond,
         TransactionType::AiModelDeactivate(crate::ai::types::AiModelId::new([7u8; 32])),
         TransactionType::AiModelReactivate(crate::ai::types::AiModelId::new([7u8; 32])),
+        TransactionType::RoleBond {
+            role: crate::registry::role::roles::AI_VERIFIER.0,
+        },
+        TransactionType::RoleBond {
+            role: crate::registry::role::roles::AI_OPERATOR.0,
+        },
     ];
 
     for tx_type in cases {
@@ -666,4 +672,71 @@ fn ai_layer_is_closed_on_testnet() {
             _ => {}
         }
     }
+}
+
+/// A native contract cannot reopen the closed AI layer through its receipt
+/// marker. The VM program is valid; the network refusal happens before any
+/// grant, request registry, escrow, balance or nonce write.
+#[test]
+fn contract_inference_event_is_closed_on_testnet() {
+    use bud_isa::{Instruction, Opcode};
+    let mut program = Vec::new();
+    for value in [0x00A1_00A1, 7, 1, 10] {
+        program.push(
+            Instruction {
+                opcode: Opcode::Load,
+                rd: 1,
+                rs1: 0,
+                rs2: 0,
+                imm: value,
+            }
+            .encode(),
+        );
+        program.push(
+            Instruction {
+                opcode: Opcode::Log,
+                rd: 0,
+                rs1: 1,
+                rs2: 0,
+                imm: 0,
+            }
+            .encode(),
+        );
+    }
+    program.push(
+        Instruction {
+            opcode: Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode(),
+    );
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    let mut tx = Transaction::new_with_chain_id(
+        from,
+        Address::zero(),
+        0,
+        100,
+        0,
+        program.into_iter().flat_map(u64::to_le_bytes).collect(),
+        crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value(),
+        TransactionType::ContractCall,
+    );
+    tx.sign(&kp);
+    let mut state = funded_state(from, 1_000_000);
+    let before = state.calculate_state_root();
+    let error = Executor::apply_transaction_checked(&mut state, &tx)
+        .expect_err("the native inference event must stay closed");
+    match error {
+        crate::error::BudlumError::Validation { code, .. } => {
+            assert_eq!(code, "ai_layer_testnet_closed");
+        }
+        other => panic!("expected a validation refusal, got {other:?}"),
+    }
+    assert_eq!(state.calculate_state_root(), before);
 }

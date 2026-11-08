@@ -3651,6 +3651,8 @@ impl Blockchain {
         if tx.from == Address::zero() {
             return Err("Genesis transactions cannot be submitted to the mempool".into());
         }
+        Executor::check_transaction_features(self.chain_id, &tx.tx_type)
+            .map_err(|error| error.message().to_string())?;
 
         let (expected_nonce, spendable_balance) = self.projected_sender_state(tx);
         self.state
@@ -3660,6 +3662,9 @@ impl Blockchain {
     pub fn tx_precheck(&self, tx: &Transaction) -> serde_json::Value {
         let mut reasons = Vec::new();
 
+        if let Err(error) = Executor::check_transaction_features(self.chain_id, &tx.tx_type) {
+            reasons.push(error.code().to_string());
+        }
         if tx.chain_id != self.chain_id {
             reasons.push("invalid_chain_id".to_string());
         }
@@ -3913,12 +3918,6 @@ impl Blockchain {
                     .is_active(&tx.from, crate::registry::role::roles::AI_OPERATOR)
                 {
                     reasons.push("ai_operator_unauthorized".to_string());
-                }
-            }
-            crate::core::transaction::TransactionType::PrivateTransferSubmit(_)
-            | crate::core::transaction::TransactionType::PrivacyNoteInsert(_) => {
-                if !crate::core::chain_config::privacy_transfers_enabled(self.chain_id) {
-                    reasons.push("privacy_disabled".to_string());
                 }
             }
             crate::core::transaction::TransactionType::AiDisputeSlash {

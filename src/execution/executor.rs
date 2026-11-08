@@ -105,24 +105,30 @@ fn ai_layer_enabled(chain_id: u64) -> bool {
 /// surface with its own grant, replay and payment rules; it is not gated here.
 
 fn is_ai_layer_transaction(tx_type: &TransactionType) -> bool {
-    matches!(
-        tx_type,
+    match tx_type {
         TransactionType::AiModelRegister(_)
-            | TransactionType::AiInferenceRequest(_)
-            | TransactionType::AiInferenceResult(_)
-            | TransactionType::AiFeeReclaim(_)
-            | TransactionType::AiModelDeactivate(_)
-            | TransactionType::AiModelReactivate(_)
-            | TransactionType::AiRequestCancel(_)
-            | TransactionType::AiDisputeSlash { .. }
-            | TransactionType::AiAgentPayment(_)
-            | TransactionType::AiAgentPaymentRelease(_)
-            | TransactionType::AiAgentPaymentReclaim(_)
-            | TransactionType::AiAttachExecutionProof { .. }
-            | TransactionType::AiOperatorBond
-            | TransactionType::AiOperatorUnbond
-            | TransactionType::AiOperatorWithdraw
-    )
+        | TransactionType::AiInferenceRequest(_)
+        | TransactionType::AiInferenceResult(_)
+        | TransactionType::AiFeeReclaim(_)
+        | TransactionType::AiModelDeactivate(_)
+        | TransactionType::AiModelReactivate(_)
+        | TransactionType::AiRequestCancel(_)
+        | TransactionType::AiDisputeSlash { .. }
+        | TransactionType::AiAgentPayment(_)
+        | TransactionType::AiAgentPaymentRelease(_)
+        | TransactionType::AiAgentPaymentReclaim(_)
+        | TransactionType::AiAttachExecutionProof { .. }
+        | TransactionType::AiOperatorBond
+        | TransactionType::AiOperatorUnbond
+        | TransactionType::AiOperatorWithdraw => true,
+        TransactionType::RoleBond { role }
+        | TransactionType::RoleUnbond { role }
+        | TransactionType::RoleWithdraw { role } => matches!(
+            crate::registry::role::RoleId(*role),
+            crate::registry::role::roles::AI_VERIFIER | crate::registry::role::roles::AI_OPERATOR
+        ),
+        _ => false,
+    }
 }
 
 /// The doors that only settle state the layer already holds.
@@ -144,16 +150,54 @@ fn is_ai_layer_transaction(tx_type: &TransactionType) -> bool {
 /// because `AiOperatorBond`, `AiInferenceRequest` and `AiAgentPayment` stay
 /// closed. `a_bond_taken_before_the_closure_can_still_leave_testnet` is proof.
 fn is_ai_layer_exit(tx_type: &TransactionType) -> bool {
-    matches!(
-        tx_type,
+    match tx_type {
         TransactionType::AiOperatorUnbond
-            | TransactionType::AiOperatorWithdraw
-            | TransactionType::AiFeeReclaim(_)
-            | TransactionType::AiRequestCancel(_)
-            | TransactionType::AiAgentPaymentReclaim(_)
-            | TransactionType::AiAgentPaymentRelease(_)
-            | TransactionType::AiDisputeSlash { .. }
-    )
+        | TransactionType::AiOperatorWithdraw
+        | TransactionType::AiFeeReclaim(_)
+        | TransactionType::AiRequestCancel(_)
+        | TransactionType::AiAgentPaymentReclaim(_)
+        | TransactionType::AiAgentPaymentRelease(_)
+        | TransactionType::AiDisputeSlash { .. } => true,
+        TransactionType::RoleUnbond { role } | TransactionType::RoleWithdraw { role } => matches!(
+            crate::registry::role::RoleId(*role),
+            crate::registry::role::roles::AI_VERIFIER | crate::registry::role::roles::AI_OPERATOR
+        ),
+        _ => false,
+    }
+}
+
+fn check_ai_layer(chain_id: u64) -> BudlumResult<()> {
+    if ai_layer_enabled(chain_id) {
+        Ok(())
+    } else {
+        Err(BudlumError::validation(
+            "ai_layer_testnet_closed",
+            "the on-chain AI inference layer is closed on this chain until proof binding, escrow accounting, verifier authority and registry-root checks are complete and the VL-1 lottery, commit-reveal and integer ranking are wired",
+        ))
+    }
+}
+
+/// One network boundary for execution, mempool admission and RPC precheck.
+/// Entry is closed before an account, fee, note, grant or escrow can change;
+/// settlement of pre-existing AI bonds and escrows remains available.
+pub(crate) fn check_transaction_features(
+    chain_id: u64,
+    tx_type: &TransactionType,
+) -> BudlumResult<()> {
+    if matches!(
+        tx_type,
+        TransactionType::PrivateTransferSubmit(_) | TransactionType::PrivacyNoteInsert(_)
+    ) && !privacy_transfers_enabled(chain_id)
+    {
+        return Err(privacy_closed_refusal(
+            chain_id,
+            "private transfers and note insertion are closed on this network until ownership, value-conservation and membership proofs are wired",
+        ));
+    }
+    if is_ai_layer_transaction(tx_type) && !is_ai_layer_exit(tx_type) {
+        check_ai_layer(chain_id)?;
+    }
+    Ok(())
 }
 
 impl Executor {
@@ -234,6 +278,8 @@ impl Executor {
         state: &mut AccountState,
         tx: &Transaction,
     ) -> BudlumResult<()> {
+        check_transaction_features(tx.chain_id, &tx.tx_type)?;
+
         // The zero address is not a sender: only the canonical genesis
         // transaction may originate from it, and it is rejected everywhere
         // but the genesis block by `validate_and_add_block`. Accepting any
@@ -279,27 +325,9 @@ impl Executor {
             _ => {}
         }
 
-        // The AI layer boundary sits here - after the cheap
-        // shape guards above and before `total_cost` / `get_or_create` -
-        // because that probe *creates* the sender row. A refusal must leave
-        // the state byte-identical (G-4), so no closed door may run after it.
-        //
-        // One guard for the whole layer rather than a check inside each of
-        // the seventeen arms: an arm added later is closed by default, and
-        // `is_ai_layer_transaction` is the single place that has to learn
-        // about it.
-        // The exit doors are exempt: value that entered while the layer was
-        // ungated must still be able to leave (see `is_ai_layer_exit`).
-        if is_ai_layer_transaction(&tx.tx_type)
-            && !is_ai_layer_exit(&tx.tx_type)
-            && !ai_layer_enabled(tx.chain_id)
-        {
-            return Err(BudlumError::validation(
-                "ai_layer_testnet_closed",
-                "the on-chain AI inference layer is closed on this chain until proof binding, escrow accounting, verifier authority and registry-root checks are complete and the VL-1 lottery, commit-reveal and integer ranking are wired",
-            ));
-        }
-
+        // The shared feature boundary ran before any account or cost probe.
+        // These cheap shape checks and the spendable-balance gate still run
+        // before a transaction-specific arm can mutate state.
         let total_cost = tx.checked_liquid_cost().ok_or_else(|| {
             BudlumError::validation(
                 "amount_fee_overflow",
@@ -946,6 +974,9 @@ impl Executor {
                     && receipt.events[0] == 0x00A1_00A1
                     && receipt.events.len() >= 4
                 {
+                    // A native contract receipt is an indirect AI entry door.
+                    // Close it before grant, registry or escrow effects.
+                    check_ai_layer(tx.chain_id)?;
                     let mut model_id = [0u8; 32];
                     model_id[0..8].copy_from_slice(&receipt.events[1].to_le_bytes());
                     let max_fee = receipt.events[2];
@@ -4711,6 +4742,41 @@ mod tests {
                 assert_eq!(state.ai_registry.state_root(), [0u8; 32], "G-4");
             }
         }
+    }
+
+    #[test]
+    fn generic_ai_roles_share_the_boundary_without_closing_exits() {
+        let testnet = crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value();
+        let devnet = crate::core::chain_config::Network::Devnet
+            .chain_id()
+            .value();
+        for role in [
+            crate::registry::role::roles::AI_VERIFIER.0,
+            crate::registry::role::roles::AI_OPERATOR.0,
+        ] {
+            let bond = TransactionType::RoleBond { role };
+            assert_eq!(
+                check_transaction_features(testnet, &bond)
+                    .unwrap_err()
+                    .code(),
+                "ai_layer_testnet_closed"
+            );
+            assert!(check_transaction_features(devnet, &bond).is_ok());
+            for exit in [
+                TransactionType::RoleUnbond { role },
+                TransactionType::RoleWithdraw { role },
+            ] {
+                assert!(is_ai_layer_transaction(&exit));
+                assert!(is_ai_layer_exit(&exit));
+                assert!(check_transaction_features(testnet, &exit).is_ok());
+            }
+        }
+        let ordinary = TransactionType::RoleBond {
+            role: crate::registry::role::roles::VALIDATOR.0,
+        };
+        assert!(check_transaction_features(testnet, &ordinary).is_ok());
     }
 
     #[test]
