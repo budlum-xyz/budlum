@@ -215,3 +215,9 @@ review. Corrections without their required executed test remain open.
 | Finding | Severity | State | Evidence and correction |
 |---|---|---|---|
 | BLG-363 | Medium | Open; locally corrected, pinned Rust CI pending | `push_segment` and `finish` converted `segments.len()` with `as u64`, which could truncate a count on a wider-than-64-bit host and bind the wrong index/final segment count. Both now call the same `TryFrom`-based `checked_segment_count` helper and return `SegmentCountOverflow`. The regression uses that exact generic helper to accept `u64::MAX` and reject `u128::from(u64::MAX) + 1`; no Rust runner was available. BLG-315 remains a distinct timestamp/empty-chain finding. |
+
+## Bloom-filter sizing follow-up
+
+| Finding | Severity | State | Evidence and correction |
+|---|---|---|---|
+| BLG-364 | Medium | Open; locally corrected, pinned Rust CI pending | Bloom-filter sizing used manual ceiling division, triggering the denied `manual_div_ceil` lint and adding an avoidable addition before division. The implementation now uses `bits.div_ceil(64)`; `the_bloom_filter_uses_div_ceil` pins the standard operation and rejects the former expression. No Rust runner was available. |
