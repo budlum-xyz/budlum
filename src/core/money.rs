@@ -7,8 +7,8 @@
 //! entirely to callers and every settle path narrowed it back where nobody
 //! re-checked; the fee legs of the split were narrowed with
 //! `u64::try_from` calls that existed only to undo a widening nobody
-//! needed (F-9); and an unlock path took the fee ceiling check its mint
-//! sibling had (F-8). The type carries the invariant now.
+//! needed; and an unlock path took the fee ceiling check its mint
+//! sibling had. The type carries the invariant now.
 //!
 //! There is deliberately **no `From<u128>` and no `From<u64>`**: a cast
 //! must never silently become money. A wider value arrives through

@@ -215,6 +215,9 @@ impl TxBundle {
             return Err(BundleError::Size(self.members.len()));
         }
         let first = &self.members[0];
+        if first.chain_id == 0 {
+            return Err(BundleError::Mixed(0));
+        }
         // Pass 1: the shape of the set. These are properties of the members
         // the witness commits to, and they are what a relay can break without
         // touching a signature.
@@ -227,6 +230,11 @@ impl TxBundle {
             {
                 return Err(BundleError::Nonce(i));
             }
+        }
+        if !self.witness.authorization_signatures.is_empty() {
+            return Err(BundleError::Signature(
+                "unexpected witness authorization_signatures".to_string(),
+            ));
         }
         // Pass 2: the witness is this sender's key, and this exact set is what
         // it signed.
@@ -426,5 +434,25 @@ mod tests {
         spliced.members[0].signature = theirs.members[0].signature.clone();
         spliced.members[0].signer_public_key = theirs.members[0].signer_public_key.clone();
         assert_eq!(spliced.verify_in(&reg), Err(BundleError::Member(0)));
+    }
+
+    #[test]
+    fn unauthenticated_witness_authorization_bloat_and_zero_chain_refused() {
+        let acct = account();
+        let reg = SchemeStatusRegistry::genesis();
+
+        let mut bloated = bundle(&acct, 2);
+        bloated.witness.authorization_signatures.push(vec![0xAA; 64]);
+        assert!(matches!(
+            bloated.verify_in(&reg),
+            Err(BundleError::Signature(_))
+        ));
+
+        let mut zero_chain = bundle(&acct, 2);
+        for m in &mut zero_chain.members {
+            m.chain_id = 0;
+            m.hash = m.calculate_hash();
+        }
+        assert_eq!(zero_chain.verify_in(&reg), Err(BundleError::Mixed(0)));
     }
 }
