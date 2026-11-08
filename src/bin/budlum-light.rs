@@ -247,7 +247,7 @@ fn main() -> ExitCode {
 mod tests {
     use super::{check_interval, ensure_checkpoints_verified, read_bounded};
 
-    /// BLG-0705: a run that verifies nothing must not end as trusted.
+    ///: a run that verifies nothing must not end as trusted.
     #[test]
     fn an_unverified_run_is_refused() {
         assert!(check_interval(0).is_err());

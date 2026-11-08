@@ -150,7 +150,7 @@ EXPOSE 4001 8545 8546 9090
 # --rpc-operator-listener; a default `docker run` never opens it, so a
 # probe there would mark a live rpc-role node unhealthy. A bare GET of
 # / is not a JSON-RPC request.
-# P61-F03: no `-f`. The image and compose run with RPC auth required and the
+#: no `-f`. The image and compose run with RPC auth required and the
 # probe carries no key, so the listener answers 401; `-f` turned that live
 # answer into an unhealthy container. Without it curl exits 0 on any HTTP
 # response and non-zero only when the port does not answer (connect failure

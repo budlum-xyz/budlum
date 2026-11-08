@@ -25,7 +25,7 @@ pub const GENESIS_TIMESTAMP: u128 = 0;
 /// other scheme. Custom chains (`GenesisConfig::new`) still record the scheme
 /// of the build that created them.
 /// Minimum per-header difficulty (leading zero bits) of a mainnet
-/// bridge-enabled PoW domain (P25-F01). 2^64 hashes per header is out of reach
+/// bridge-enabled PoW domain. 2^64 hashes per header is out of reach
 /// for a self-mined forgery; the cumulative minimum scales with the
 /// confirmation depth.
 ///
@@ -158,7 +158,7 @@ pub struct GenesisConfig {
     #[serde(default)]
     pub tokenomics_addresses: Option<crate::tokenomics::TokenomicsAddresses>,
 
-    /// Address-only PoA authorities (P01-F09).
+    /// Address-only PoA authorities.
     ///
     /// A PoA authority signs with an ordinary Ed25519 key and has no VRF, BLS
     /// or PQ registration, so a plain entry in `validators` lands inactive and
@@ -293,7 +293,7 @@ impl GenesisConfig {
                 );
                 domain.bridge_enabled = cfg.bridge_enabled;
 
-                // P25-F01: the default PoW floor (8 bits, about 1.5k hashes
+                //: the default PoW floor (8 bits, about 1.5k hashes
                 // for six headers) lets anyone mine a "finalized" header
                 // chain for a bridge-enabled domain. On mainnet the floor is
                 // raised to a work level that is not self-mineable.
@@ -365,7 +365,7 @@ impl GenesisConfig {
 
     /// Everything `build_state` credits to balances at genesis - the plain
     /// allocations and the tokenomics distribution - stays within the fixed
-    /// supply (P08-F01). Validator stake is a bond, not a balance credit.
+    /// supply. Validator stake is a bond, not a balance credit.
     ///
     /// Each part was checked alone, so a ceremony could pass every check and
     /// still seed more than `BUD_TOTAL_SUPPLY`.
@@ -448,7 +448,7 @@ impl GenesisConfig {
                     params.annual_burn_ratio_fixed
                 ));
             }
-            // BLG-0077 (P03-F20): the third ratio too. A yield above 100%
+            //: the third ratio too. A yield above 100%
             // per year can never be paid from the schedule and was not
             // checked here at all.
             if params.validator_annual_yield_ratio_fixed > scale {
@@ -706,7 +706,7 @@ impl GenesisConfig {
             }
         }
 
-        // Address-only PoA authorities (P01-F09): active stake-1 entries with
+        // Address-only PoA authorities: active stake-1 entries with
         // no consensus keys, matching what start-up code used to add after the
         // chain was built - which left `validate_candidate_chain` replaying
         // against an empty authority set and failing every reorg and full
@@ -718,7 +718,7 @@ impl GenesisConfig {
                 entry.slashed = false;
             }
         }
-        // P01-F07 (BLG-0012): seed the PoA onboarding trust root from the
+        //: seed the PoA onboarding trust root from the
         // ceremony-declared bootstrap PoA domain authorities when top-level
         // `poa_authorities` is empty, keeping `poa_authorities` as an explicit
         // override for custom chains that declare no bootstrap PoA domain.
@@ -1072,7 +1072,7 @@ mod tests {
         assert_eq!(config.build_state().burn_reserve_address, None);
     }
 
-    /// P08-F01: a ceremony whose plain allocations come on top of a balanced
+    ///: a ceremony whose plain allocations come on top of a balanced
     /// distribution mints more than the fixed supply and is refused.
     #[test]
     fn a_genesis_minting_above_the_fixed_supply_is_refused() {
@@ -1113,7 +1113,7 @@ mod tests {
         assert!(config.validate_tokenomics_supply().is_ok());
     }
 
-    /// BLG-0077: a burn ratio above the fixed-point scale burns more than the
+    ///: a burn ratio above the fixed-point scale burns more than the
     /// fee. The executor then refuses every block that has a transaction.
     #[test]
     fn burn_ratio_above_the_scale_is_refused_at_genesis() {
@@ -1268,7 +1268,7 @@ mod tests {
         );
     }
 
-    /// P01-F07 (BLG-0012): a genesis that lists PoA authorities declares the
+    ///: a genesis that lists PoA authorities declares the
     /// admission gate; an outsider with stake is not in the admitted set.
     #[test]
     fn genesis_poa_authorities_open_the_admission_gate() {
@@ -1379,7 +1379,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("failed to parse {}: {e}", path.display()))
     }
 
-    /// P25-F01: the mainnet bridge-enabled PoW domain must not keep the
+    ///: the mainnet bridge-enabled PoW domain must not keep the
     /// 8-bit default floor.
     #[test]
     fn mainnet_bridge_pow_domain_has_a_non_trivial_difficulty_floor() {

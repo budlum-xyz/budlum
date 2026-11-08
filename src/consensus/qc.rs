@@ -25,7 +25,7 @@ pub struct PqSignatureEntry {
     pub dilithium_signature: Vec<u8>,
 }
 
-/// The disputed attestation an `InvalidDilithiumV1` proof carries (P01-F26).
+/// The disputed attestation an `InvalidDilithiumV1` proof carries.
 ///
 /// Named rather than passed as three loose constructor fields, so
 /// `QcFaultProof::new_invalid_dilithium` stays under the argument limit
@@ -113,7 +113,7 @@ impl QcBlob {
     /// ratio, so a second `(address, signature)` pair hashing to an accepted
     /// leaf is a second story a fault proof can tell about the same slot.
     ///
-    /// The domain tag (P01-F27) puts leaves in their own preimage set: the
+    /// The domain tag puts leaves in their own preimage set: the
     /// inner-node combine tags its inputs differently, so no leaf can stand
     /// in for a node or the other way round.
     ///
@@ -406,14 +406,14 @@ impl QcBlob {
 const MAX_MERKLE_PROOF_ELEMENTS: usize = 32;
 
 impl QcFaultProof {
-    /// Version 2 (P01-F27): proofs are produced and checked against the
+    /// Version 2: proofs are produced and checked against the
     /// domain-tagged Merkle tree. A version-1 proof walked the untagged
     /// combine and no longer reproduces a stored root; `validate` refuses it
     /// by version instead of failing with a confusing root mismatch.
     pub const CURRENT_VERSION: u8 = 2;
 
     /// Build an `InvalidDilithiumV1` fault proof around a disputed
-    /// attestation (P01-F26: the payload is one named value, not three
+    /// attestation (: the payload is one named value, not three
     /// loose arguments).
     fn new_invalid_dilithium(
         epoch: u64,
@@ -438,7 +438,7 @@ impl QcFaultProof {
         }
     }
 
-    /// Test-only constructor for the stubbed ZK kind (P01-F21).
+    /// Test-only constructor for the stubbed ZK kind.
     #[cfg(test)]
     pub fn new_zk_invalid_attestation(
         epoch: u64,
@@ -465,10 +465,10 @@ impl QcFaultProof {
 
     /// Rebuild the committed Merkle root from the proof alone and compare.
     ///
-    /// The walk is `merkle_tree::merkle_root_from_proof` (P01-F25): the
+    /// The walk is `merkle_tree::merkle_root_from_proof`: the
     /// hand-rolled copy that used to live here was the same algorithm
     /// restated, and the two drifted whenever one was fixed. The shared walk
-    /// also carries the domain-tagged node combine (P01-F27), matching the
+    /// also carries the domain-tagged node combine, matching the
     /// tree the root was built with.
     pub fn verify_inclusion(&self, merkle_root: &str) -> Result<(), String> {
         let QcProofKind::InvalidDilithiumV1 {
@@ -505,7 +505,7 @@ impl QcFaultProof {
             siblings.push(digest);
         }
 
-        // BLG-0129 (P05-F22): an index with bits above its path is refused,
+        //: an index with bits above its path is refused,
         // not silently narrowed - one proof must verify under exactly one
         // index.
         let computed = merkle_tree::merkle_root_from_proof(
@@ -633,7 +633,7 @@ impl QcFaultProof {
                 {
                     return Err("Fault proof targets a valid Dilithium signature".into());
                 }
-                // P01-F22: a signature that does NOT verify is not evidence
+                //: a signature that does NOT verify is not evidence
                 // against the named validator. It is equally consistent with a
                 // forged entry that names a non-participant, so slashing on it
                 // would make `bud_submitQcFaultProof` a free, permissionless
@@ -693,7 +693,7 @@ pub fn pq_signing_message(
     msg
 }
 
-/// Test-only attestation helper (P01-F21: production blobs come from the
+/// Test-only attestation helper (: production blobs come from the
 /// validators' own PQ signing paths).
 #[cfg(test)]
 pub fn sign_attestation(
@@ -973,7 +973,7 @@ mod tests {
         let proofs = blob.detect_fault_proofs(&snapshot);
         assert_eq!(proofs.len(), 1);
         assert_eq!(proofs[0].validator_index, 1);
-        // P01-F22: detection still reports the broken entry, but a signature
+        //: detection still reports the broken entry, but a signature
         // that fails to verify is not evidence against the named validator -
         // the same bytes could name a non-participant - so no verdict issues.
         let err = proofs[0].verify_against_blob(&blob, &snapshot).unwrap_err();
@@ -1107,7 +1107,7 @@ mod tests {
 
     /// (security audit §4) the QcFaultProof surface end-to-end: detection
     /// still reports a broken entry, and verification refuses to issue a
-    /// verdict on it (P01-F22 - a failing signature is not evidence against
+    /// verdict on it ( - a failing signature is not evidence against
     /// the named validator). This is the contract `bud_submitQcFaultProof`
     /// exposes.
     #[test]
@@ -1197,7 +1197,7 @@ mod tests {
     }
 
     /// The expensive-path canary: a blob stuffed with entries must be refused
-    /// before any per-entry work runs (P01-F25).
+    /// before any per-entry work runs.
     ///
     /// The invariant is check ORDER, and the refusal reason proves it
     /// deterministically. The blob carries a garbage root and more entries

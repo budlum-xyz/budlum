@@ -37,7 +37,7 @@ The following open-source projects were studied while designing specific
 modules. The in-tree implementations are independent (different language or
 different abstraction level). The entries record the inspiration so a
 reviewer can compare upstream and in-tree; the per-module detail is in
-PROVENANCE_NOTES.md.
+The per-module record lives in this notice file.
 
 JustVugg/colibri
     https://github.com/JustVugg/colibri
@@ -73,9 +73,9 @@ redistributed and no single upstream repository is named here).
 
 Dependencies obtained through Cargo are not vendored into this repository and
 are governed by their own licences. The permitted set is enforced in CI by the
-"License Compliance" job against the allow-list in .quality/deny.toml; a full
+"License Compliance" job against the allow-list in.quality/deny.toml; a full
 per-dependency inventory is written to that job's summary on every run.
 
 Provenance observations for non-trivial in-tree algorithms, including the
 cases where an origin could not be established, are recorded in
-PROVENANCE_NOTES.md. That file is a map for reviewers, not a clearance.
+The per-module record lives in this notice file. That file is a map for reviewers, not a clearance.

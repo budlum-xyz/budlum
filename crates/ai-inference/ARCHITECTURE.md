@@ -9,15 +9,15 @@ This file summarises the layers.
    model registry - operator compute bond - Pollen - B.U.D. - SocialFi
                         ^ hash and reference matching
 [ This repo - the off-chain skeleton ]
-   ai-core   : ModelId (a 32-byte hash, mirroring the AiModelId form),
+   ai-core: ModelId (a 32-byte hash, mirroring the AiModelId form),
                   dataset types, LoRaManifest
-   ai-data   : closed-loop source checking over 3 channels, the record
+   ai-data: closed-loop source checking over 3 channels, the record
                   format, fail-closed hash verification
-   ai-serve  : the serving bridge; the weight name is preserved and
+   ai-serve: the serving bridge; the weight name is preserved and
                   the served name is ours
-   ai-tune   : TunePlan (LoRA in BF16 or FP16, with no FP4), the output hash
+   ai-tune: TunePlan (LoRA in BF16 or FP16, with no FP4), the output hash
                   lock
-   ai-ops    : the CLI skeleton
+   ai-ops: the CLI skeleton
 ```
 
 ## Principles
@@ -136,7 +136,7 @@ the prompt.
 
 Some of the designs here were reached by reading other projects. No code was
 copied and no dependency was added. Those projects are named where
-attribution belongs, in `docs/NOTICE` and `docs/PROVENANCE_NOTES.md`, with
+attribution belongs, in `docs/NOTICE` and `docs/NOTICE`, with
 what was taken and what was not. Types and variants in the tree are named for
 what they select - an engine that pages experts off disk - because a variant
 called after another product tells a reader the tree depends on it: they

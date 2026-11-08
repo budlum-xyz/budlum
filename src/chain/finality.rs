@@ -154,7 +154,7 @@ pub struct Prevote {
     pub chain_id: u64,
     pub voter_id: Address,
     pub sig_bls: Vec<u8>,
-    /// BLG-0083 (P04-F01): an authentication signature over
+    ///: an authentication signature over
     /// [`Prevote::auth_signing_message`] under the voter's registered key.
     /// A vote without a valid `auth_sig` is dropped WITHOUT counting an
     /// invalid-vote tick against anyone: garbage cannot be attributed to a
@@ -174,7 +174,7 @@ pub struct Precommit {
     pub chain_id: u64,
     pub voter_id: Address,
     pub sig_bls: Vec<u8>,
-    /// BLG-0083 (P04-F01): the vote-authentication signature; see
+    ///: the vote-authentication signature; see
     /// [`Prevote::auth_sig`].
     #[serde(default)]
     pub auth_sig: Vec<u8>,
@@ -283,7 +283,7 @@ impl Prevote {
         msg
     }
 
-    /// BLG-0083 (P04-F01): the message the voter authenticates with their
+    ///: the message the voter authenticates with their
     /// registered key. Domain-separated from the vote message so one
     /// signature cannot serve as the other.
     ///
@@ -304,7 +304,7 @@ impl Precommit {
         )
     }
 
-    /// BLG-0083 (P04-F01): the vote-authentication message; shares the exact
+    ///: the vote-authentication message; shares the exact
     /// length-framed V3 encoding with [`Prevote::auth_signing_message`].
     pub fn auth_signing_message(&self) -> Vec<u8> {
         vote_auth_signing_message(&self.signing_message(), &self.sig_bls)
@@ -845,7 +845,7 @@ impl FinalityAggregator {
             voter,
             crate::registry::evidence::SlashingProof::DoubleSign {
                 height: self.checkpoint_height,
-                // BLG-0196 (P10-F06): the kind and the epoch travel with the
+                //: the kind and the epoch travel with the
                 // evidence so any third party can rebuild the signed root and
                 // re-open both signatures; a report that stands only on the
                 // local ConsensusVerified label is not a proof.
@@ -1681,7 +1681,7 @@ mod tests {
         assert!(result.unwrap_err().contains("set hash mismatch"));
     }
 
-    /// A genuine on-curve small-subgroup G2 encoding (BLG-0200 / P10-F10).
+    /// A genuine on-curve small-subgroup G2 encoding (/ ).
     ///
     /// Perturbs the payload bytes of the canonical generator encoding until
     /// one decodes to a curve point that is NOT in the prime-order subgroup.
@@ -1754,7 +1754,7 @@ mod tests {
             "valid pubkey+sig must pass the new subgroup check"
         );
 
-        // BLG-0200 (P10-F10): the case the check exists for - a small-subgroup
+        //: the case the check exists for - a small-subgroup
         // point that DECODES. A pairing with it collapses to a subgroup that
         // verifies against any message, so the gate must reject it by name.
         let attack_pk = small_subgroup_g2_encoding();
@@ -1802,7 +1802,7 @@ mod tests {
             "verify_pop must reject identity key/signature encodings"
         );
 
-        // BLG-0200 (P10-F10): the case the gate exists for. Both encodings
+        //: the case the gate exists for. Both encodings
         // below decode to valid points, so a rejection can only come from the
         // torsion check - exactly the branch that stops a validator from
         // registering a small-subgroup key and farming trivially-passing

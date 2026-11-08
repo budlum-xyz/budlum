@@ -5,7 +5,7 @@ pragma solidity ^0.8.24;
 /// @notice Verifies Budlum's hybrid finality proof (BLS12-381 aggregate +
 ///         post-quantum ML-DSA) on an EVM chain.
 ///
-/// @dev BLG-1074 (P60-F07, decision C now / A at deploy): NOT DEPLOYED AND
+/// @dev (, decision C now / A at deploy): NOT DEPLOYED AND
 ///      NOT TRUSTED. CI compiles this file (solidity.yml is a syntax and
 ///      codegen gate only); nothing deploys it and no Rust path encodes its
 ///      digests. The F01-F06 defects (no trusted key fixed in the contract,

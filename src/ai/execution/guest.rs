@@ -566,7 +566,7 @@ pub fn validate_gas_budget(
     spec: &FixedPointMlpSpec,
     proof_bytes_len: usize,
 ) -> Result<u64, String> {
-    // BLG-0099 (P04-F17): no ceiling parameter. `max_fee` is an escrowed
+    //: no ceiling parameter. `max_fee` is an escrowed
     // balance in fee units and the estimate is in gas units - the two do
     // not compare, and the API that accepted both was the mistake. The
     // size bound is the only gate here; the gas estimate is returned so a
@@ -669,7 +669,7 @@ mod gas_tests {
         assert!(validate_gas_budget(&spec, MAX_PROOF_BYTES + 1).is_err());
     }
 
-    /// BLG-0099 (P04-F17): the fee ceiling is gone with its parameter (fee
+    ///: the fee ceiling is gone with its parameter (fee
     /// units and gas units never compared) - what remains is the size gate
     /// and the estimate it hands back.
     #[test]

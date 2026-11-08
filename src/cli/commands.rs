@@ -281,7 +281,7 @@ pub struct NodeConfig {
     #[arg(long)]
     pub pkcs11_pq_mechanism: Option<String>,
     /// Operator-configured BLS public key (hex), cross-checked against the
-    /// HSM-held PUBLIC_KEY object at startup (P02-F01 decision B).
+    /// HSM-held PUBLIC_KEY object at startup ( decision B).
     #[arg(long)]
     pub pkcs11_bls_public_key: Option<String>,
     /// Operator-configured PQ public key (hex), cross-checked the same way.
@@ -321,7 +321,7 @@ pub struct NodeConfig {
     //
     // `RelayerWorker::with_adapters` existed and nothing called it, because
     // the node carried no way to say what an adapter should point at.
-    // BLG-0135 (P06-F06, decision B): the `--evm-bridge-address` registration
+    // (, decision B): the `--evm-bridge-address` registration
     // is REMOVED. The EVM bridge leg has no live end-to-end route (the
     // off-chain half is a stub that refuses at broadcast), and a registration
     // surface that reads as "production" while the leg cannot operate was the
@@ -534,7 +534,7 @@ pub struct Pkcs11Section {
     /// If absent, BLS signing falls back to software (data object).
     pub bls_mechanism: Option<String>,
     /// Operator-configured BLS/PQ public keys (hex) for the startup
-    /// cross-check (P02-F01 decision B).
+    /// cross-check ( decision B).
     pub bls_public_key: Option<String>,
     pub pq_public_key: Option<String>,
     /// Vendor-native PQ/Dilithium mechanism ID.

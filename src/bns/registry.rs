@@ -438,7 +438,7 @@ impl BnsRegistry {
 mod tests {
     use super::*;
 
-    /// P42-F08: case and look-alike variants, separators and control
+    ///: case and look-alike variants, separators and control
     /// characters are not registrable names.
     #[test]
     fn names_follow_the_lowercase_label_rule() {
@@ -473,7 +473,7 @@ mod tests {
             .unwrap();
     }
 
-    /// P42-F10: an expired record resolves with the flag set and its bindings
+    ///: an expired record resolves with the flag set and its bindings
     /// cleared, so the expired branches of the gateway are reachable.
     #[test]
     fn an_expired_name_resolves_as_expired() {

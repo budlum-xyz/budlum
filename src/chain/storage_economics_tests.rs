@@ -147,7 +147,7 @@ mod tests {
     /// Cursor and pays every epoch since a second time, out of an escrow
     /// Funded once.
     ///
-    /// The scan half of the persist-failure rule. BLG-0190 (P09-F11): the
+    /// The scan half of the persist-failure rule.: the
     /// three paths a test can drive are now EXERCISED at runtime (see
     /// `a_failed_persist_propagates_out_of_the_accounting_paths`); this scan
     /// remains only for `finalize_missed_storage_challenges`, whose path
@@ -198,7 +198,7 @@ mod tests {
         );
     }
 
-    /// BLG-0190 (P09-F11): the persist failure is REAL here - `Storage`
+    ///: the persist failure is REAL here - `Storage`
     /// carries a test-only knob that makes `save_storage_economics_state`
     /// return `io::Error`, and the accounting paths run on a chain with an
     /// actual store attached. A dropped `?` (a `let _ =`) now fails these
@@ -250,7 +250,7 @@ mod tests {
     }
 
     /// The deal-setup half, on a caller-supplied chain (which may or may not
-    /// have storage attached) - BLG-0190 needs the same fixture on a chain
+    /// have storage attached) - needs the same fixture on a chain
     /// with a real store.
     fn blockchain_with_one_deal_in(
         deal_end_epoch: u64,

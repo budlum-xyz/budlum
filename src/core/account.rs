@@ -41,7 +41,7 @@ pub struct PendingDomainUnfreeze {
     pub justification_hash: [u8; 32],
 }
 
-/// BLG-0091 (P04-F09): a governance-queued PoA compliance freeze/unfreeze,
+///: a governance-queued PoA compliance freeze/unfreeze,
 /// applied by `Blockchain::apply_pending_poa_compliance` where the domain
 /// kind can be read from the domain record (never from the transaction).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,7 +326,7 @@ pub struct AccountState {
     pub poa_admitted: BTreeMap<crate::domain::types::DomainId, BTreeSet<Address>>,
     pub message_registry: CrossDomainMessageRegistry,
     pub external_roots: BTreeMap<crate::domain::types::DomainId, crate::domain::types::Hash32>,
-    /// BLG-0155 (P07-F10): the money behind external-domain bonds. Every
+    ///: the money behind external-domain bonds. Every
     /// registration and prover bond DEBITS the poster's balance into this
     /// escrow; a slash moves the penalty to the challenger's balance and
     /// burns the rest; release credits the remainder back. Before this the
@@ -416,11 +416,11 @@ pub struct AccountState {
     /// Populated by executor when `GovernanceAction::UnfreezeConsensusDomain` is executed,
     /// Drained by `Blockchain` after `apply_block_effects`.
     pub pending_domain_unfreezes: Vec<PendingDomainUnfreeze>,
-    /// BLG-0090/0091 (P04-F08/F09): the PoA compliance ledger (screening,
+    /// 0091 (/F09): the PoA compliance ledger (screening,
     /// freeze, travel-rule) in consensus state - rooted and snapshotted
     /// with everything else that decides writes.
     pub poa_compliance: crate::registry::PoaComplianceRegistry,
-    /// BLG-0091: governance-queued compliance freezes/unfreezes awaiting
+    ///: governance-queued compliance freezes/unfreezes awaiting
     /// application (see [`PendingPoaCompliance`]).
     pub pending_poa_freezes: Vec<PendingPoaCompliance>,
     pub pending_poa_unfreezes: Vec<PendingPoaCompliance>,
@@ -1027,7 +1027,7 @@ impl AccountState {
         Ok(amount)
     }
 
-    /// BLG-0092 (P04-F10): bond into a permissionless application role at
+    ///: bond into a permissionless application role at
     /// the registration floor. This is the production registration path for
     /// the verifier family (VERIFIER/MASTER_VERIFIER, AI_VERIFIER, ATTESTER,
     /// CONTENT_VALIDATOR) - RoleIds that had none, leaving the ATTESTER
@@ -1736,7 +1736,7 @@ impl AccountState {
             // bond untouched: quorum weight, the `Unstake` refund and the
             // RPC views all read `validators`, so the offender kept voting
             // with the stake the report had just cut - and an `Unstake`
-            // paid the penalty straight back (P04-F02). Mirror what
+            // paid the penalty straight back. Mirror what
             // `slash_validator` (the QC-fault path) does: cut the bond by
             // the same penalty, mark it slashed, leave the quorum. The
             // slashed flag is also what refuses the later `Unstake` and
@@ -1746,7 +1746,7 @@ impl AccountState {
                     let penalty = outcome.as_ref().map(|o| o.penalty).unwrap_or(0);
                     validator.stake = validator.stake.saturating_sub(penalty);
                     if report.condition() == crate::registry::SlashingCondition::LivenessFault {
-                        // BLG-0087 (P04-F05, decision A+B): a liveness fault is
+                        // (, decision A+B): a liveness fault is
                         // a TIMED jail, not a permanent slash. Writing
                         // `slashed = true` here made the release impossible -
                         // every activation predicate requires `!slashed` - and
@@ -2059,7 +2059,7 @@ impl AccountState {
                 }
             }
             ProposalType::PoaAddAdmin { domain_id, admin } => {
-                // BLG-0089 (P04-F07): governance is the trust root of a
+                //: governance is the trust root of a
                 // permissioned domain - the first admin arrives here, and
                 // later ones can too.
                 //
@@ -2098,7 +2098,7 @@ impl AccountState {
                 }
             }
             ProposalType::PoaRemoveAdmin { domain_id, admin } => {
-                // BLG-0094 (P04-F12): governance may take the last admin -
+                //: governance may take the last admin -
                 // unpermissioning a domain is a recorded decision, not an
                 // admin door action. The same kind gate applies: a domain that
                 // is not PoA and has no admins has nothing to remove, and
@@ -2126,7 +2126,7 @@ impl AccountState {
                 address,
                 reason_hash,
             } => {
-                // BLG-0091 (P04-F09): queued for the blockchain layer, which
+                //: queued for the blockchain layer, which
                 // reads the domain kind from the domain record and verifies
                 // the named admin before the ledger moves.
                 self.pending_poa_freezes.push(PendingPoaCompliance {
@@ -2612,7 +2612,7 @@ impl AccountState {
             })
     }
 
-    /// Total $BUD escrowed as external-domain prover bonds (BLG-0155). A
+    /// Total $BUD escrowed as external-domain prover bonds. A
     /// bond is not a burn: it must keep counting against the fixed cap or
     /// every bond would open fake minting headroom.
     ///
@@ -2626,7 +2626,7 @@ impl AccountState {
     }
 
     /// Escrows an external-domain bond: the amount LEAVES the poster's
-    /// balance and enters [`Self::external_bond_escrow`] (BLG-0155/P07-F10).
+    /// balance and enters [`Self::external_bond_escrow`].
     ///
     /// # Errors
     ///
@@ -2650,7 +2650,7 @@ impl AccountState {
     }
 
     /// Releases escrowed bond back to its owner - the unbond half of the
-    /// lifecycle (BLG-0155). The escrow is the source of truth: a release
+    /// lifecycle. The escrow is the source of truth: a release
     /// can never credit more than what was locked.
     ///
     /// # Errors
@@ -2675,7 +2675,7 @@ impl AccountState {
         Ok(())
     }
 
-    /// Applies a slash to escrowed bond (BLG-0155): `taken` leaves the
+    /// Applies a slash to escrowed bond: `taken` leaves the
     /// escrow, `reward` lands in the challenger's balance, and the rest is
     /// BURNED - a slash that returns the remainder to the slashed prover
     /// would be theatre. Returns `(burned)`.
@@ -3195,7 +3195,7 @@ impl AccountState {
             final_hasher.update(b"invalid_votes_v1");
             final_hasher.update(self.invalid_votes.root());
         }
-        // BLG-0090 (P04-F08): the PoA admission records were consensus gate
+        //: the PoA admission records were consensus gate
         // state in neither the root nor the snapshot digest - hidden today,
         // wide open the moment the write path connected. They fold in as soon
         // as they hold anything (an empty registry leaves the root, and with
@@ -3206,7 +3206,7 @@ impl AccountState {
             final_hasher.update(b"poa_admission_v1");
             final_hasher.update(poa_admission_root);
         }
-        // BLG-0091 (P04-F09): the compliance ledger decides whether an
+        //: the compliance ledger decides whether an
         // operator's audit export is refused; it is state like any other.
         let poa_compliance_root = self.poa_compliance.root();
         if poa_compliance_root != crate::registry::PoaComplianceRegistry::new().root() {
@@ -3220,7 +3220,7 @@ impl AccountState {
                     .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
             );
         }
-        // BLG-0155 (P07-F10): escrowed external bonds are consensus state -
+        //: escrowed external bonds are consensus state -
         // without this fold two nodes could disagree on the state root while
         // agreeing on every balance.
         if !self.external_bond_escrow.is_empty() {
@@ -3312,7 +3312,7 @@ mod tests {
         // Below the floor and unregistered: refused, balance untouched.
         assert!(state.bond_relayer(&who, min - 1).is_err());
         assert_eq!(state.get_balance(&who), min * 3);
-        // Two bonds must add up in the registry (BLG-0086).
+        // Two bonds must add up in the registry.
         state.bond_relayer(&who, min).unwrap();
         state.bond_relayer(&who, 1).unwrap();
         let role = crate::registry::role::roles::RELAYER;
@@ -3350,7 +3350,7 @@ mod tests {
         assert_eq!(state.unbonding_queue[0].amount, 1_000 - cut);
     }
 
-    /// P04-F02: a slashing report must cut the ledger-side validator bond,
+    ///: a slashing report must cut the ledger-side validator bond,
     /// not only the permissionless-registry entry. Quorum weight, the
     /// `Unstake` refund and the RPC views all read `validators`; with only
     /// the registry cut, the offender kept voting with the slashed stake and
@@ -3673,7 +3673,7 @@ mod tests {
         assert_eq!(state.get_balance(&proposer), proposer_before);
     }
 
-    /// BLG-0015: a start-up add must not reset a slashed validator to an
+    ///: a start-up add must not reset a slashed validator to an
     /// active one with stake 1.
     #[test]
     fn ensure_validator_keeps_a_stored_validator() {
@@ -4358,7 +4358,7 @@ mod tests {
         );
     }
 
-    /// BLG-0090/0091 (P04-F08/F09): the PoA gate state is ROOTED - an
+    /// 0091 (/F09): the PoA gate state is ROOTED - an
     /// admission write or a compliance freeze moves the state root, so a
     /// node that skipped them diverges instead of agreeing silently.
     #[test]
@@ -4380,7 +4380,7 @@ mod tests {
         assert_ne!(after_admin, st.calculate_state_root());
     }
 
-    /// BLG-0092 (P04-F10): the verifier family registers through the bond
+    ///: the verifier family registers through the bond
     /// path - the ATTESTER seat gets real stake instead of a permanent zero.
     #[test]
     fn the_verifier_family_registers_through_the_bond_path() {
@@ -4787,7 +4787,7 @@ mod c3_validator_readiness_tests {
         assert!(!v.verify_pop_is_valid(DEFAULT_CHAIN_ID));
     }
 
-    // ---- BLG-0155 (P07-F10): external bond escrow ----
+    // ----: external bond escrow ----
 
     #[test]
     fn a_bond_the_poster_cannot_pay_is_refused() {
