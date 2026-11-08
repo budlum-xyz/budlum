@@ -114,10 +114,10 @@ jobs:
         run: actionlint
       - name: Build the gate binary
         run: cargo build --release --manifest-path xtask/gates/Cargo.toml
-      - name: Regen-health door still wired on main
-        run: ./xtask/gates/target/release/budlum-gates regen-health-door
-      - name: Regen-health gate canaries still caught
-        run: ./xtask/gates/target/release/budlum-gates regen-health-door --self-test
+      - name: State-recovery door still wired on main
+        run: ./xtask/gates/target/release/budlum-gates state-recovery-door
+      - name: State-recovery gate canaries still caught
+        run: ./xtask/gates/target/release/budlum-gates state-recovery-door --self-test
 
   summary:
     name: Watchdog summary
