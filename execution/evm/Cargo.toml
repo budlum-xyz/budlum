@@ -1,0 +1,37 @@
+[package]
+name = "budlum-ee-evm"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+license.workspace = true
+description = "Out-of-process EVM execution-environment worker on revm Osaka (EeId::EVM = 0x01)"
+
+[workspace]
+resolver = "2"
+
+[workspace.package]
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[lints]
+workspace = true
+
+[dependencies]
+budlum-uel-abi = { path = "../../crates/uel-abi" }
+revm = { version = "=43.0.3", default-features = false, features = [
+    "std",
+    "portable",
+    "optional_balance_check",
+    "optional_no_base_fee",
+    "optional_eip3607",
+] }
+sha2 = "0.11"
+
+[profile.release]
+overflow-checks = true
+panic = "unwind"
+lto = true
+codegen-units = 1
