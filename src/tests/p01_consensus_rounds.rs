@@ -491,7 +491,9 @@ mod p01_poa_round_pricing_tests {
         let round = 6u64;
 
         let mut parent = Block::genesis();
-        parent.timestamp = now_ms.saturating_sub(600_000);
+        // Within ROUND_LADDER_SPAN_MS (49 s) and past round 6 (19 s): mesh
+        // sightings seconds apart agree on the shared parent stamp.
+        parent.timestamp = now_ms.saturating_sub(30_000);
         parent.hash = parent.calculate_hash();
         let mut block = Block::new(1, parent.hash.clone(), vec![]);
         block.timestamp = parent
@@ -501,11 +503,6 @@ mod p01_poa_round_pricing_tests {
         block.producer = Some(address);
         block.nonce = round;
 
-        // The same claim under three sightings - the parent adopted the moment
-        // it was stamped, adopted ten minutes late, and never adopted at all -
-        // prices the same way. Ten minutes is past round 6 on every node, so
-        // the pricing gate lets the claim through and any later refusal is
-        // about something else.
         for seen in [Some(parent.timestamp), Some(now_ms), None] {
             let engine = PoAEngine::new(PoAConfig::default(), None);
             if let Some(at) = seen {
@@ -515,8 +512,8 @@ mod p01_poa_round_pricing_tests {
             {
                 assert!(
                     !error.0.contains("claimed before it elapsed"),
-                    "the stamp is the shared anchor; sighting {seen:?} must not \
-                     change the price, got: {error:?}"
+                    "within the active ladder window the stamp is the shared anchor; \
+                     sighting {seen:?} must not change the price, got: {error:?}"
                 );
             }
         }
@@ -542,6 +539,92 @@ mod p01_poa_round_pricing_tests {
         assert!(
             error.0.contains("claimed before it elapsed"),
             "the refusal must be the wall-clock price of the round, got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn poa_refuses_round_16_on_newly_adopted_stale_parent() {
+        let (state, address) = single_authority_state();
+        let now_ms = crate::consensus::now_millis();
+        let round = crate::consensus::MAX_LEADER_ROUNDS;
+
+        let mut stale_parent = Block::genesis();
+        stale_parent.timestamp = now_ms.saturating_sub(120_000);
+        stale_parent.hash = stale_parent.calculate_hash();
+
+        let mut block = Block::new(1, stale_parent.hash.clone(), vec![]);
+        block.timestamp = stale_parent
+            .timestamp
+            .saturating_add(MIN_BLOCK_INTERVAL_MS)
+            .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
+        block.producer = Some(address);
+        block.nonce = round;
+
+        let engine = PoAEngine::new(PoAConfig::default(), None);
+        engine.note_block_seen(&stale_parent.hash, now_ms);
+        let error = engine
+            .validate_block(&block, &[stale_parent], &state)
+            .expect_err("a newly adopted stale parent must not unlock round 16 in PoA");
+        assert!(
+            error.0.contains("claimed before it elapsed"),
+            "expected round-pricing refusal on newly adopted stale parent, got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn pos_refuses_round_16_on_newly_adopted_stale_parent() {
+        use crate::consensus::pos::{PoSConfig, PoSEngine};
+        use crate::crypto::primitives::ValidatorKeys;
+
+        let keys = ValidatorKeys::generate().unwrap();
+        let address = Address::from(keys.sig_key.public_key_bytes());
+        let mut state = AccountState::new();
+        state.add_validator(address, 2_000);
+        let bls = keys.bls_key.as_ref().expect("fixture has BLS keys");
+        let pop = bls.generate_pop(crate::core::transaction::DEFAULT_CHAIN_ID, &address);
+        if let Some(validator) = state.get_validator_mut(&address) {
+            validator.vrf_public_key = keys.vrf_key.public.to_bytes().to_vec();
+            validator.bls_public_key = bls.public_key.clone();
+            validator.pop_signature = pop;
+            validator.pq_public_key = keys
+                .pq_key
+                .as_ref()
+                .expect("fixture has PQ keys")
+                .public_key_bytes()
+                .to_vec();
+            validator.active = true;
+        }
+
+        let now_ms = crate::consensus::now_millis();
+        let round = crate::consensus::MAX_LEADER_ROUNDS;
+
+        let mut stale_parent = Block::genesis();
+        stale_parent.timestamp = now_ms.saturating_sub(120_000);
+        stale_parent.hash = stale_parent.calculate_hash();
+
+        let mut block = Block::new(1, stale_parent.hash.clone(), vec![]);
+        block.slot = block.index;
+        block.timestamp = stale_parent
+            .timestamp
+            .saturating_add(MIN_BLOCK_INTERVAL_MS)
+            .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
+        block.producer = Some(address);
+        block.nonce = round;
+        block.validator_set_hash = state
+            .consensus_validator_set_hash(block.chain_id)
+            .expect("fixture keys are consensus-ready");
+        block.vrf_output = vec![0u8; 32];
+        block.vrf_proof = vec![0u8; 64];
+        block.sign(&keys.sig_key);
+
+        let engine = PoSEngine::new(PoSConfig::default(), None);
+        engine.note_block_seen(&stale_parent.hash, now_ms);
+        let error = engine
+            .validate_block(&block, &[stale_parent], &state)
+            .expect_err("a newly adopted stale parent must not unlock round 16 in PoS");
+        assert!(
+            error.0.contains("claimed before it elapsed"),
+            "expected PoS round-pricing refusal on newly adopted stale parent, got: {error:?}"
         );
     }
 
