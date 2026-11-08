@@ -1,6 +1,5 @@
 //! The one EVM log shape a contract uses to speak to Budlum, and its
-//! translation into a cross-domain message (,,
-//!).
+//! translation into a cross-domain message.
 //!
 //! `contracts/lib/BudlumOutbound.sol` declares
 //!
