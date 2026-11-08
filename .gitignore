@@ -21,10 +21,7 @@ __pycache__/
 /contracts/cache/
 .claude/settings.local.json
 
-# The binding planning directive stays outside the repository tree (directive
-# section 0.1.5). Keep a copy outside the checkout; ignore it at any depth.
+# External planning and launcher files must not be added to the repository.
 THE_BUDLUM_DIREKTIF.md
-# Also pin the explicit root form: the repository lock test requires this
-# anchored rule, while the rule above retains the broader accidental-upload guard.
 /THE_BUDLUM_DIREKTIF.md
 /arena_claude.py
