@@ -20,7 +20,7 @@
 //! The sync committee, 512 validators over a period of about 27 hours, is
 //! verified here as a BLS12-381 aggregate over the caller-supplied state.
 //! That state is NOT yet authenticated to a finalized beacon state
-//! (BLG-0137/P06-F08, decision B interim): the rotation refuses without the
+//! (, decision B interim): the rotation refuses without the
 //! finality branch, and this module makes no PoS finality claim beyond what
 //! the supplied state and aggregate prove.
 //!
@@ -86,7 +86,7 @@ pub enum SyncCommitteeError {
     /// state is for, so the 512 keys are not the ones that signed it.
     PeriodMismatch { slot_period: u64, state_period: u64 },
     /// Period rotation without the branch that proves `next_sync_committee`
-    /// to the finalized state (BLG-0137, decision B interim).
+    /// to the finalized state (decision B interim).
     RotationBranchRequired,
 }
 
@@ -121,7 +121,7 @@ impl std::fmt::Display for SyncCommitteeError {
             SyncCommitteeError::RotationBranchRequired => write!(
                 f,
                 "sync: period rotation refused - no branch proving next_sync_committee \
-                 to the finalized state (BLG-0137 interim)"
+                 to the finalized state (interim)"
             ),
         }
     }
@@ -364,7 +364,7 @@ fn merkleize_chunks(chunks: &[[u8; 32]]) -> [u8; 32] {
 impl BeaconBinding {
     /// The sync-committee period the signed slot belongs to.
     ///
-    /// BLG-0138 (P06-F09): the committee in force is the one at the
+    ///: the committee in force is the one at the
     /// SIGNATURE slot, which is the block after the signed header. For the
     /// last slot of a period `slot / N` named the previous period and refused
     /// a genuine aggregate; the signature slot is `slot + 1`.
@@ -456,7 +456,7 @@ pub fn verify_execution_block_finality(
 /// The period rotation: on a finalized header, `next_sync_committee` becomes
 /// the current one.
 ///
-/// BLG-0137 (P06-F08, decision B interim): a rotation without the branch
+/// (, decision B interim): a rotation without the branch
 /// that proves `next_sync_committee` to the finalized state is REFUSED. The
 /// previous unconditional swap let any holder of a `SyncCommitteeState`
 /// inject a chosen committee on the next period - the finding's "controlled
@@ -578,7 +578,7 @@ mod tests {
         );
     }
 
-    /// BLG-0137 (P06-F08, decision B interim): rotation without the branch
+    /// (, decision B interim): rotation without the branch
     /// proving `next_sync_committee` to the finalized state REFUSES. The old
     /// test pinned the unconditional swap - a controlled committee handed in
     /// on a `SyncCommitteeState` became the signer on the next period. What
@@ -694,7 +694,7 @@ mod tests {
         assert_eq!(err, SyncCommitteeError::InvalidPubkey);
     }
 
-    /// BLG-0138 (P06-F09): the committee that signs the last slot of a
+    ///: the committee that signs the last slot of a
     /// period is the next period's (the signature slot is one later).
     #[test]
     fn the_last_slot_of_a_period_belongs_to_the_next_committee() {

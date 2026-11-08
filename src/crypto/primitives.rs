@@ -880,7 +880,7 @@ impl WalletKeyPair {
             .expanded_key()
             .sign_randomized(message, b"", &mut rand::rng())
             .unwrap_or_else(|_| {
-                // P02-F20: the deterministic fallback stays (a dead OS rng
+                //: the deterministic fallback stays (a dead OS rng
                 // must not strand a transaction mid-flight), but it is no
                 // longer silent. Hedged signing is the FIPS 204 posture and
                 // losing it is an incident, not a quiet detail.
@@ -989,7 +989,7 @@ pub fn verify_ml_dsa_87_signature(
 mod tests {
     use super::*;
 
-    // ---- BLG-0046 (F10): key-file parsing is exact. ----
+    // ---- (F10): key-file parsing is exact. ----
 
     #[test]
     fn bls_from_bytes_refuses_a_zero_scalar() {
@@ -1101,7 +1101,7 @@ mod tests {
     }
     #[test]
     fn test_save_and_load() {
-        // BLG-0053 (F17): a fixed /tmp path is shared between parallel test
+        // (F17): a fixed /tmp path is shared between parallel test
         // processes; every run gets its own tempdir now.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_budlum_key");
@@ -1137,7 +1137,7 @@ fn stdout_has_64_hex_run(stdout: &[u8]) -> bool {
 /// (security audit §7) the public-key hex must NOT be printed to stdout by
 /// `KeyPair::generate`.
 ///
-/// BLG-0053 (F17): the old test claimed to capture stdout but never did. The
+/// (F17): the old test claimed to capture stdout but never did. The
 /// check now runs `generate` inside a child process whose raw stdout is
 /// fully captured, so any printed 64-hex public key is observable. A canary
 /// test proves the detector itself works (red-green).

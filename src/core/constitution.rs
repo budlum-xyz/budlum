@@ -297,7 +297,7 @@ mod tests {
         );
     }
 
-    /// P20-F08: a guardrail slot must hold the parameter of its own key.
+    ///: a guardrail slot must hold the parameter of its own key.
     #[test]
     fn p20_f08_guardrail_slot_with_foreign_parameter_is_rejected() {
         let mut registry = ConstitutionRegistry::new();

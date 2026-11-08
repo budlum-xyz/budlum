@@ -419,7 +419,7 @@ pub struct CodingAudit {
 /// it ever sees - so a pass is a spot check, not a proof of storage. Nothing in
 /// consensus reads `Passed`: deals stay `Active`, bonds do not move and repair
 /// is not suppressed by it, so an audit that passes buys the operator nothing
-/// it did not already have ([BLG-0152 S2]).
+/// it did not already have (S2]).
 ///
 /// The commitment is what makes the first half true. Before it, a memorised
 /// consistent column of some other object passed every audit, because the
@@ -4064,7 +4064,7 @@ impl StorageRegistry {
         // challenge slash settles only an `Active` deal, so expiring under an
         // open challenge would strand the opener's bond and make silence
         // unpunishable. Held until the challenge closes, and the next epoch's
-        // sweep expires it then - the same rule the prune applies (BLG-0365).
+        // sweep expires it then - the same rule the prune applies.
         let open_challenges = self
             .challenges
             .values()
@@ -4520,7 +4520,7 @@ impl StorageRegistry {
     /// only settles `Active` deals, so a prune that flipped them straight to
     /// `Expired` made the bond - and the operator's whole stake for serving
     /// the object until its owner burned it - vanish from circulation
-    /// (P23-F01). The caller credits the returns; the content is gone by
+    ///. The caller credits the returns; the content is gone by
     /// definition here, so the strand guard `expire_deal` applies does not.
     /// Fees for the partial epoch in progress are not settled: accrual is
     /// per completed epoch, the same rule a slashed deal follows.
@@ -4536,7 +4536,7 @@ impl StorageRegistry {
             .map(|d| (d.deal_id, d.operator, d.economics.operator_bond))
             .collect();
 
-        // BLG-0365 (P24-F06): an open retrieval challenge is a live question
+        //: an open retrieval challenge is a live question
         // about these exact bytes. Pruning under it would expire the deal,
         // `finalize_missed_challenge` would then refuse with DealNotActive,
         // and the challenge would never close - the opener's bond stuck, the
@@ -5001,7 +5001,7 @@ mod tests {
         assert_ne!(before, reg.root(), "a live grant must reach the state root");
     }
 
-    /// P28-F16: a captured issue authorisation cannot be replayed after the
+    ///: a captured issue authorisation cannot be replayed after the
     /// grant is revoked, and a signature made for another chain is refused.
     #[cfg(feature = "wallet-ml-dsa")]
     #[test]
@@ -6257,7 +6257,7 @@ mod tests {
 
     #[test]
     fn a_full_id_counter_refuses_instead_of_overflowing() {
-        // P23-F15: the counters used a bare `+= 1`. With overflow checks on
+        //: the counters used a bare `+= 1`. With overflow checks on
         // that is a panic, so a full counter must be a clean refusal.
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
@@ -7226,7 +7226,7 @@ mod tests {
         assert!(matches!(err, StorageError::InvalidMerkleProof(_)));
     }
 
-    /// BLG-0365 (P24-F06): prune defers while a retrieval challenge is open
+    ///: prune defers while a retrieval challenge is open
     /// on one of the deals, and proceeds once the challenge has been
     /// finalized (the deal leaves Active with it).
     #[test]
@@ -7421,7 +7421,7 @@ mod tests {
         // Prune the content.
         let (pruned, bond_returns) = reg.prune_content(&manifest_id, 150);
         assert_eq!(pruned, 2);
-        // P23-F01: every expired deal hands its operator bond back to the
+        //: every expired deal hands its operator bond back to the
         // caller for settlement; the old u64-only return dropped them.
         assert_eq!(bond_returns.len(), 2);
         assert!(bond_returns.iter().all(|(_, bond)| *bond > 0));
@@ -8454,7 +8454,7 @@ mod tests {
             let (mut reg, _, manifest) = coded();
             let id = open(&mut reg, &manifest, 1);
             let rec = stored(&reg, id);
-            // BLG-0365 refuses a prune under an open audit, so the
+            // refuses a prune under an open audit, so the
             // gone-manifest state is entered directly, as the expiry
             // sweep leaves it.
             reg.manifests.remove(&manifest.manifest_id);
@@ -8477,7 +8477,7 @@ mod tests {
             let id = open(&mut reg, &manifest, 1);
             let rec = stored(&reg, id);
             let (column, parity, proof) = honest(&encoded, &rec.audit);
-            // BLG-0365 refuses a prune under an open audit, so the
+            // refuses a prune under an open audit, so the
             // gone-manifest state is entered directly, as the expiry
             // sweep leaves it.
             reg.manifests.remove(&manifest.manifest_id);
@@ -8499,7 +8499,7 @@ mod tests {
             let id = open(&mut reg, &manifest, 1);
             let rec = stored(&reg, id);
             let (column, parity, proof) = honest(&encoded, &rec.audit);
-            // BLG-0365 refuses a prune under an open audit, so the
+            // refuses a prune under an open audit, so the
             // gone-manifest state is entered directly, as the expiry
             // sweep leaves it.
             reg.manifests.remove(&manifest.manifest_id);

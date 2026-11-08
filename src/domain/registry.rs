@@ -107,7 +107,7 @@ impl ConsensusDomainRegistry {
         }
         // A new registration starts Active. Frozen and Retired are reached
         // only through `transition_status_checked`; registering straight into
-        // them would skip the lifecycle guard (P25-F10). Restoring persisted
+        // them would skip the lifecycle guard. Restoring persisted
         // state is the one caller exempt from this, by the argument on
         // `restore_persisted`.
         if require_active && domain.status != DomainStatus::Active {

@@ -352,7 +352,7 @@ impl RelayerExternalResult {
         hasher.update([u8::from(self.success)]);
         if let Some(ref msg) = self.message {
             hasher.update(msg.message_id);
-            // P18-F03: the executor acts on these message fields (bridge
+            //: the executor acts on these message fields (bridge
             // state, unlock domain, correlation). Left out of the leaf, a
             // valid anchored result could be reused with a different kind or
             // correlation id and settle a transfer it never proved.
@@ -572,7 +572,7 @@ pub enum TransactionType {
     /// the enum body's identifiers to resolve carried payload types.)
     PoaOnboarding(crate::registry::poa_onboarding::PoAOnboardingTx),
     /// Bond into a permissionless application role of the verifier family
-    /// (BLG-0092 / P04-F10): the role id and the bond amount in the signed
+    /// (/ ): the role id and the bond amount in the signed
     /// header, nothing else. The five role seats that had no production
     /// registration path - without one, the ATTESTER stake stayed at zero
     /// and the storage-attestation authority check never ran.
@@ -1682,7 +1682,7 @@ fn encode_message(message: &crate::cross_domain::message::CrossDomainMessage, ou
     encode_message_kind(&message.kind, out);
     put_u64(out, message.expiry_height);
 }
-/// Canonical preimage of a PoA admission transaction (BLG-0089).
+/// Canonical preimage of a PoA admission transaction.
 ///
 /// Operation tag, domain id, and the addresses/commitments/reasons each arm
 /// carries - every field the execution body reads is under the signature, so
@@ -1956,7 +1956,7 @@ fn encode_identity_tx(tx: &crate::registry::IdentityTx, out: &mut Vec<u8>) {
         } => {
             put_u8(out, 1);
             encode_credential_commitment(credential, out);
-            // BLG-0095: the consent is committed whole, key and signature
+            //: the consent is committed whole, key and signature
             // included, so a relay cannot strip it or swap another valid one.
             match consent {
                 Some(consent) => {
@@ -3245,7 +3245,7 @@ mod relayer_result_leaf_tests {
         }
     }
 
-    /// P18-F03: a valid anchored result cannot be reused under another
+    ///: a valid anchored result cannot be reused under another
     /// message kind, correlation id, or domain pair.
     #[test]
     fn leaf_binds_message_kind_correlation_and_domains() {

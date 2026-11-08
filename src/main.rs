@@ -622,7 +622,7 @@ async fn main() {
         eprintln!("ERROR: {e}");
         std::process::exit(1);
     }
-    // P01-F23: min-stake is a consensus rule. A node started with a
+    //: min-stake is a consensus rule. A node started with a
     // divergent `--min-stake` would validate leaders and validators against a
     // parameter the rest of the network does not share and split off - while
     // the staking executor kept enforcing the network parameter, so the two
@@ -757,7 +757,7 @@ async fn main() {
                 config.pkcs11_key_label.clone(),
             )
         };
-        // P02-F01 decision B: operator-configured consensus public keys are
+        // decision B: operator-configured consensus public keys are
         // cross-checked against the HSM-held objects at startup and then
         // pinned as the announced identity.
         let decode_expected = |raw: Option<&str>, what: &str| -> Option<Vec<u8>> {
@@ -1645,13 +1645,13 @@ async fn main() {
         let relayer = budlum_core::relayer::RelayerWorker::new(chain.clone(), relayer_addr)
             .with_cursor_path(Some(cursor_path));
 
-        // BLG-0135 (P06-F06, decision B): the `--evm-bridge-address`
+        // (, decision B): the `--evm-bridge-address`
         // registration is removed. The EVM bridge leg has no live end-to-end
         // route - the off-chain half refuses at broadcast - so there is no
         // configuration to register and nothing safe to default. Outbound
         // EVM relay stays off until the real receipt flow lands.
         tracing::info!(
-            "Relayer: outbound EVM relay is disabled (BLG-0135): the EVM bridge leg has no \
+            "Relayer: outbound EVM relay is disabled: the EVM bridge leg has no \
              live end-to-end route. The worker will observe relay requests and refuse to \
              submit results."
         );

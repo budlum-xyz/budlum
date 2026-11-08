@@ -888,7 +888,7 @@ mod tests {
     }
 
     /// A finalized header that `verify_header_chain` never linked to the
-    /// anchor is refused, even with a valid certificate (audit P18-F07).
+    /// anchor is refused, even with a valid certificate (audit ).
     #[test]
     fn checkpoint_requires_a_header_linked_to_the_anchor() {
         let (snapshot, sks) = make_bls_snapshot(4, 1000);
@@ -929,7 +929,7 @@ mod tests {
         ));
     }
 
-    /// The next checkpoint height is computed in closed form (audit P18-F08):
+    /// The next checkpoint height is computed in closed form (audit ):
     /// a huge target must not loop height by height.
     #[test]
     fn next_checkpoint_height_is_closed_form() {

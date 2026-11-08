@@ -39,7 +39,7 @@
 //! # WIRING STATUS - read this before trusting anything below
 //!
 //! **Wired through [`intake`]** - with the limit spelled out here
-//! (BLG-0166/P07-F21): the attestation is NOT part of any block or header
+//!: the attestation is NOT part of any block or header
 //! yet. `state_digest` is an RPC value a consumer can compare; nothing in
 //! consensus commits it until the `GlobalBlockHeader` root lands. The two
 //! consensus decisions the earlier version of this notice deferred were
@@ -62,7 +62,7 @@
 //! [`EXTERNAL_DOMAIN_FINALITY_ADAPTER`]. Re-derive before believing, as
 //! always: `grep -rn 'external_intake' src/ --include='*.rs'`.
 //!
-//! **Limit of that claim (P07-F21).** The call sites are wired, but the
+//! **Limit of that claim.** The call sites are wired, but the
 //! attestations are not part of any block or header: the digest is an RPC
 //! value only, and the intake is written outside block execution. Two nodes
 //! agree on it only if they saw the same calls. This is the external-roots
@@ -596,7 +596,7 @@ mod tests {
     // profile
     // ---------------------------------------------------------------------
 
-    /// BLG-0161 (P07-F16): a fork lands only on a version the adapter
+    ///: a fork lands only on a version the adapter
     /// accepts, and a policy whose every window has sunset cannot serve.
     #[test]
     fn a_fork_only_lands_on_a_version_the_adapter_accepts() {
@@ -838,7 +838,7 @@ mod tests {
         );
     }
 
-    /// BLG-0141 (P06-F13): the reward is paid out of the slashed bond, so a
+    ///: the reward is paid out of the slashed bond, so a
     /// floor larger than the slash is capped at the slash.
     #[test]
     fn a_challenge_reward_never_exceeds_what_was_slashed() {
@@ -1106,7 +1106,7 @@ mod tests {
 
     /// Builds a well-formed evidence sample for the sync adapter.
     /// The committee the sync tests pin: matches `sync_evidence`'s payload
-    /// key and period (BLG-0130/P06-F01).
+    /// key and period.
     fn test_committee() -> crate::cross_domain::external::ethereum::PinnedCommittee {
         crate::cross_domain::external::ethereum::PinnedCommittee {
             period: 0,
@@ -1135,7 +1135,7 @@ mod tests {
         let descriptor = adapter.descriptor();
         RawConsensusEvidence {
             adapter: descriptor.id,
-            // BLG-0131 (P06-F02): the ethereum-sync evidence format is v2.
+            //: the ethereum-sync evidence format is v2.
             evidence_version: 2,
             network: "testnet".to_string(),
             payload: payload.clone(),
