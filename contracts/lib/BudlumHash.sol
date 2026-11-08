@@ -72,6 +72,9 @@ library BudlumHash {
         bytes32 sentinel = oddSentinel();
         for (uint256 i = 0; i < siblings.length; i++) {
             if (siblings[i] == sentinel) {
+                if (idx % 2 != 0) {
+                    return (false, bytes32(0));
+                }
                 cur = merklePromote(cur);
             } else if (idx % 2 == 0) {
                 cur = merkleNode(cur, siblings[i]);
