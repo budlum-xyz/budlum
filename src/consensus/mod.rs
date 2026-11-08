@@ -127,15 +127,21 @@ impl RoundPriceBook {
 
     /// Record that `block_hash` was committed at `now_ms`.
     ///
-    /// Called from the chain commit path, and from a restore for the tip a
-    /// node loads from disk. A poisoned lock is treated as "no adoption
-    /// recorded" rather than as a panicking consensus path.
+    /// Called from the chain commit path, and from restore/reorg/snapshot
+    /// paths across the active `ROUND_PRICE_WINDOW` suffix. A poisoned lock
+    /// is treated as "no adoption recorded" rather than as a panicking
+    /// consensus path.
     pub fn note_tip_block(&self, block_hash: &str, now_ms: u128) {
         let Ok(mut seen) = self.seen.lock() else {
             return;
         };
-        if seen.iter().any(|(hash, _)| hash == block_hash) {
-            // First sighting wins: a re-commit cannot backdate the price.
+        if let Some(pos) = seen.iter().position(|(hash, _)| hash == block_hash) {
+            // First sighting wins: a re-commit cannot backdate the price, while
+            // refreshing entry order ensures window re-seeding after a reorg
+            // evicts orphaned fork blocks ahead of live canonical ancestors.
+            if let Some(existing) = seen.remove(pos) {
+                seen.push_back(existing);
+            }
             return;
         }
         seen.push_back((block_hash.to_string(), now_ms));
@@ -147,13 +153,54 @@ impl RoundPriceBook {
     /// When this node first committed `block_hash`, while it is still inside
     /// the window.
     #[must_use]
-    pub fn seen_at(&self, block_hash: &str) -> Option<u128> {
+    fn seen_at(&self, block_hash: &str) -> Option<u128> {
         let Ok(seen) = self.seen.lock() else {
             return None;
         };
         seen.iter()
             .find(|(hash, _)| hash == block_hash)
             .map(|(_, at)| *at)
+    }
+
+    /// Effective local adoption time for `chain.last()`, either directly from
+    /// this book or propagated forward from the nearest committed ancestor in
+    /// `chain` within `ROUND_PRICE_WINDOW`.
+    ///
+    /// During multi-block candidate validation (`try_reorg`), intermediate fork
+    /// blocks are not yet committed to [`RoundPriceBook`]. Returning `None` for
+    /// those uncommitted parents would fall back to stale schedule timestamps
+    /// and let a two-block fork `[F1(round=0), F2(round=16)]` bypass leader
+    /// round timeouts immediately after the fork ancestor landed (CWE-807).
+    /// Walking back up to `ROUND_PRICE_WINDOW` blocks anchors every candidate
+    /// child to the real local adoption time of the fork ancestor plus the
+    /// mandatory consensus round-step durations of the uncommitted suffix,
+    /// without mutating the book during validation and without rejecting
+    /// legitimately timed multi-block forks.
+    #[must_use]
+    pub fn chain_seen_at(&self, chain: &[Block]) -> Option<u128> {
+        let Ok(seen) = self.seen.lock() else {
+            return None;
+        };
+        let mut idx = chain.len().checked_sub(1)?;
+        let search_floor = chain.len().saturating_sub(ROUND_PRICE_WINDOW);
+        let mut suffix_floor_ms = 0u128;
+        loop {
+            let block = &chain[idx];
+            if let Some((_, at)) = seen.iter().find(|(hash, _)| hash == &block.hash) {
+                return Some(at.saturating_add(suffix_floor_ms));
+            }
+            if idx <= search_floor {
+                return None;
+            }
+            if block.previous_hash != chain[idx - 1].hash {
+                return None;
+            }
+            let round = u128::from(block.nonce.min(MAX_LEADER_ROUNDS));
+            suffix_floor_ms = suffix_floor_ms
+                .saturating_add(MIN_BLOCK_INTERVAL_MS)
+                .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(round));
+            idx -= 1;
+        }
     }
 
     /// The highest round this node may *claim*, from the producer's side.
@@ -716,6 +763,44 @@ mod tests {
             Some(10_000 + u128::from(ROUND_PRICE_WINDOW as u64) + 4)
         );
         assert_eq!(ROUND_PRICE_WINDOW, MAX_REORG_DEPTH + 1);
+    }
+
+    #[test]
+    fn chain_seen_at_propagates_committed_ancestor_adoption_across_candidate_suffix() {
+        let now = 1_700_000_000_000u128;
+        let stale_base = now - 600_000;
+        let book = RoundPriceBook::new();
+
+        let mut ancestor = Block::new_with_chain_id(10, "prev-9".to_string(), vec![], 1);
+        ancestor.timestamp = stale_base;
+        ancestor.hash = ancestor.calculate_hash();
+        book.note_tip_block(&ancestor.hash, now);
+
+        // Uncommitted round-0 fork child F1 built on the just-adopted stale ancestor.
+        let mut fork_1 = Block::new_with_chain_id(11, ancestor.hash.clone(), vec![], 1);
+        fork_1.timestamp = ancestor.timestamp + MIN_BLOCK_INTERVAL_MS;
+        fork_1.nonce = 0;
+        fork_1.hash = fork_1.calculate_hash();
+
+        let prefix = vec![ancestor.clone(), fork_1.clone()];
+        let effective_seen = book.chain_seen_at(&prefix);
+        assert_eq!(
+            effective_seen,
+            Some(now + MIN_BLOCK_INTERVAL_MS),
+            "uncommitted candidate parent must inherit ancestor adoption + mandatory step"
+        );
+        assert_eq!(
+            affordable_leader_round(fork_1.timestamp, effective_seen, now),
+            0,
+            "a 2-block candidate fork must not unlock higher rounds on F2 immediately"
+        );
+        // Once real wall time advances past F1's 1s step + 1s interval + 2*3s timeouts,
+        // legitimate fork recovery reaches round 2.
+        let later = now + MIN_BLOCK_INTERVAL_MS + MIN_BLOCK_INTERVAL_MS + 2 * ROUND_TIMEOUT_MS;
+        assert_eq!(
+            affordable_leader_round(fork_1.timestamp, effective_seen, later),
+            2
+        );
     }
 
     #[test]

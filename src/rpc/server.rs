@@ -337,6 +337,28 @@ async fn serve_tls_connection<S, B>(
     }
 }
 
+/// Serves a plain-HTTP connection while holding `_permit` for the connection's
+/// full lifetime so `max_connections` applies symmetrically to plain and TLS
+/// listeners.
+async fn serve_plain_connection<S, B>(
+    socket: tokio::net::TcpStream,
+    service: S,
+    stopped: impl std::future::Future<Output = ()>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+) where
+    S: tower::Service<HttpRequest<hyper::body::Incoming>, Response = hyper::Response<B>>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send,
+    S::Response: Send,
+    S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    B: hyper::body::Body<Data = hyper::body::Bytes> + Send + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    let _ = jsonrpsee::server::serve_with_graceful_shutdown(socket, service, stopped).await;
+}
+
 pub struct RpcServer {
     chain: ChainHandle,
     node: NodeClient,
@@ -415,9 +437,7 @@ impl RpcServer {
     pub async fn run(self, addr: String) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use jsonrpsee::core::server::Methods;
         use jsonrpsee::server::BatchRequestConfig;
-        use jsonrpsee::server::{
-            serve_with_graceful_shutdown, stop_channel, ServerBuilder, ServerConfig,
-        };
+        use jsonrpsee::server::{stop_channel, ServerBuilder, ServerConfig};
 
         validate_rpc_security_config(&self.security)?;
         let tls = self.tls.clone();
@@ -466,7 +486,7 @@ impl RpcServer {
                 format!("RPC method classification refused this listener: {e}"),
             )
         })?;
-        let tls_permits = Arc::new(tokio::sync::Semaphore::new(connection_cap));
+        let connection_permits = Arc::new(tokio::sync::Semaphore::new(connection_cap));
         let svc_builder = builder.to_service_builder();
         let listener = tokio::net::TcpListener::bind(addr.clone()).await?;
         let (stop_handle, server_handle) = stop_channel();
@@ -491,6 +511,13 @@ impl RpcServer {
                     _ = stop_handle.clone().shutdown() => break,
                 };
 
+                let Ok(permit) = connection_permits.clone().try_acquire_owned() else {
+                    tracing::debug!(
+                        "RPC connection from {remote_addr} dropped: max_connections reached"
+                    );
+                    continue;
+                };
+
                 let stop_handle_for_service = stop_handle.clone();
                 let svc_builder_for_service = svc_builder.clone();
                 let methods_for_service = methods.clone();
@@ -505,12 +532,6 @@ impl RpcServer {
                 let shutdown = stop_handle.clone().shutdown();
                 match tls.clone() {
                     Some(acceptor) => {
-                        let Ok(permit) = tls_permits.clone().try_acquire_owned() else {
-                            tracing::debug!(
-                                "RPC TLS connection from {remote_addr} dropped: max_connections reached"
-                            );
-                            continue;
-                        };
                         tokio::spawn(serve_tls_connection(
                             acceptor,
                             socket,
@@ -521,7 +542,7 @@ impl RpcServer {
                         ));
                     }
                     None => {
-                        tokio::spawn(serve_with_graceful_shutdown(socket, svc, shutdown));
+                        tokio::spawn(serve_plain_connection(socket, svc, shutdown, permit));
                     }
                 }
             }
