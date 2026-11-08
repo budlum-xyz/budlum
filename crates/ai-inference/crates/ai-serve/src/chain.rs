@@ -1,6 +1,6 @@
 //! The fail-closed budlum node RPC boundary.
 //!
-//! On-chain operations (model registration, the operator bond, and Pollen
+//! On-chain operations (model registration, the operator bond, and DataMarket
 //! grant checks) go through this interface. The skeleton has no real HTTP
 //! client: until a connection is established no chain query counts as
 //! successful, and permission rules are not copied into this crate.
@@ -17,11 +17,11 @@ pub enum RpcError {
     MalformedResponse(String),
 }
 
-/// The chain query interface. A Pollen lookup binds the exact grant, asset,
+/// The chain query interface. A DataMarket lookup binds the exact grant, asset,
 /// content digest, and consumer together; an asset-only query cannot
 /// authorise a caller's chosen grant reference or content bytes.
 pub trait ChainClient {
-    /// Is this exact Pollen grant active for this asset, content, and consumer now?
+    /// Is this exact DataMarket grant active for this asset, content, and consumer now?
     ///
     /// Implementations must return `true` only when the named grant is active,
     /// belongs to `asset_id`, resolves to `content_id`, and authorises
@@ -31,7 +31,7 @@ pub trait ChainClient {
     /// # Errors
     ///
     /// Returns [`RpcError`] when the node cannot answer or the response is malformed.
-    fn pollen_grant_active(
+    fn data_market_grant_active(
         &self,
         grant_id: &Hash32,
         asset_id: &Hash32,
@@ -52,12 +52,12 @@ pub trait ChainClient {
     fn operator_bond(&self, operator: &Hash32) -> Result<u64, RpcError>;
 }
 
-/// Why a Pollen input could not be authorised.
+/// Why a DataMarket input could not be authorised.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrantAuthorizationError {
     /// The source is malformed or does not identify its exact grant.
     InvalidSource(SourceError),
-    /// This entry point is only for Pollen-backed input.
+    /// This entry point is only for DataMarket-backed input.
     WrongSourceKind { found: SourceKind },
     /// The chain did not confirm the grant query.
     Chain(RpcError),
@@ -74,17 +74,17 @@ pub enum GrantAuthorizationError {
 }
 
 /// A short-lived capability created only after the chain confirms an exact
-/// Pollen grant. Callers should obtain one immediately before reading the
+/// DataMarket grant. Callers should obtain one immediately before reading the
 /// input and must not cache it across requests or epochs.
 #[derive(Debug, PartialEq, Eq)]
-pub struct AuthorizedPollenInput {
+pub struct AuthorizedDataMarketInput {
     grant_id: Hash32,
     asset_id: Hash32,
     content_id: Hash32,
     consumer: Hash32,
 }
 
-impl AuthorizedPollenInput {
+impl AuthorizedDataMarketInput {
     /// The grant the node confirmed.
     #[must_use]
     pub const fn grant_id(&self) -> &Hash32 {
@@ -110,7 +110,7 @@ impl AuthorizedPollenInput {
     }
 }
 
-/// Query the chain for the exact grant named by a Pollen source.
+/// Query the chain for the exact grant named by a DataMarket source.
 ///
 /// `SourceRef::grant_epochs_remaining` is only a local shape/early-rejection
 /// hint. The node query is authoritative and must be repeated for each input
@@ -121,17 +121,17 @@ impl AuthorizedPollenInput {
 ///
 /// # Errors
 ///
-/// Returns [`GrantAuthorizationError`] for a malformed source, a non-Pollen
+/// Returns [`GrantAuthorizationError`] for a malformed source, a non-DataMarket
 /// source, an RPC failure, or a grant that is not active for the exact tuple.
-fn authorize_pollen_input<C: ChainClient>(
+fn authorize_data_market_input<C: ChainClient>(
     chain: &C,
     source: &SourceRef,
     consumer: &Hash32,
-) -> Result<AuthorizedPollenInput, GrantAuthorizationError> {
+) -> Result<AuthorizedDataMarketInput, GrantAuthorizationError> {
     source
         .validate()
         .map_err(GrantAuthorizationError::InvalidSource)?;
-    if source.kind != SourceKind::PollenGrant {
+    if source.kind != SourceKind::DataMarketGrant {
         return Err(GrantAuthorizationError::WrongSourceKind { found: source.kind });
     }
     let Some(grant_id) = source.grant_id else {
@@ -149,7 +149,7 @@ fn authorize_pollen_input<C: ChainClient>(
         ));
     };
     let active = chain
-        .pollen_grant_active(&grant_id, &asset_id, &source.content_id, consumer)
+        .data_market_grant_active(&grant_id, &asset_id, &source.content_id, consumer)
         .map_err(GrantAuthorizationError::Chain)?;
     if !active {
         return Err(GrantAuthorizationError::InactiveGrant {
@@ -158,7 +158,7 @@ fn authorize_pollen_input<C: ChainClient>(
             content_id: source.content_id,
         });
     }
-    Ok(AuthorizedPollenInput {
+    Ok(AuthorizedDataMarketInput {
         grant_id,
         asset_id,
         content_id: source.content_id,
@@ -166,7 +166,7 @@ fn authorize_pollen_input<C: ChainClient>(
     })
 }
 
-/// Run an input read only after the chain authorizes its exact Pollen grant.
+/// Run an input read only after the chain authorizes its exact DataMarket grant.
 ///
 /// This keeps the permission query adjacent to the read operation. The
 /// callback is never called for an invalid, inactive, revoked, expired, or
@@ -176,16 +176,16 @@ fn authorize_pollen_input<C: ChainClient>(
 ///
 /// Returns [`GrantAuthorizationError`] without calling `read` when the source
 /// is invalid or the chain does not confirm the exact tuple.
-pub fn with_authorized_pollen_input<C, R>(
+pub fn with_authorized_data_market_input<C, R>(
     chain: &C,
     source: &SourceRef,
     consumer: &Hash32,
-    read: impl FnOnce(&AuthorizedPollenInput) -> R,
+    read: impl FnOnce(&AuthorizedDataMarketInput) -> R,
 ) -> Result<R, GrantAuthorizationError>
 where
     C: ChainClient,
 {
-    let authorization = authorize_pollen_input(chain, source, consumer)?;
+    let authorization = authorize_data_market_input(chain, source, consumer)?;
     Ok(read(&authorization))
 }
 
@@ -194,7 +194,7 @@ where
 pub struct NotConnected;
 
 impl ChainClient for NotConnected {
-    fn pollen_grant_active(
+    fn data_market_grant_active(
         &self,
         _grant_id: &Hash32,
         _asset_id: &Hash32,
@@ -231,7 +231,7 @@ mod tests {
     }
 
     impl ChainClient for TestChain {
-        fn pollen_grant_active(
+        fn data_market_grant_active(
             &self,
             grant_id: &Hash32,
             asset_id: &Hash32,
@@ -279,7 +279,7 @@ mod tests {
     fn skeleton_chain_is_fail_closed() {
         let chain = NotConnected;
         assert_eq!(
-            chain.pollen_grant_active(&[3; 32], &[8; 32], &[1; 32], &[2; 32]),
+            chain.data_market_grant_active(&[3; 32], &[8; 32], &[1; 32], &[2; 32]),
             Err(RpcError::NotConnected)
         );
         assert_eq!(
@@ -288,9 +288,9 @@ mod tests {
         );
         assert_eq!(chain.operator_bond(&[1; 32]), Err(RpcError::NotConnected));
         assert_eq!(
-            authorize_pollen_input(
+            authorize_data_market_input(
                 &chain,
-                &SourceRef::pollen_grant([8; 32], [3; 32], [1; 32], 2),
+                &SourceRef::data_market_grant([8; 32], [3; 32], [1; 32], 2),
                 &[2; 32]
             ),
             Err(GrantAuthorizationError::Chain(RpcError::NotConnected))
@@ -304,8 +304,8 @@ mod tests {
         let content_id = [1; 32];
         let consumer = [2; 32];
         let chain = active_test_chain(grant_id, asset_id, content_id, consumer);
-        let source = SourceRef::pollen_grant(asset_id, grant_id, content_id, 5);
-        let authorized = authorize_pollen_input(&chain, &source, &consumer)
+        let source = SourceRef::data_market_grant(asset_id, grant_id, content_id, 5);
+        let authorized = authorize_data_market_input(&chain, &source, &consumer)
             .expect("the exact active grant is confirmed by the chain");
         assert_eq!(authorized.grant_id(), &grant_id);
         assert_eq!(authorized.asset_id(), &asset_id);
@@ -323,8 +323,8 @@ mod tests {
         let consumer = [2; 32];
         let chain = active_test_chain(grant_id, asset_id, content_id, consumer);
         let reads = Cell::new(0);
-        let source = SourceRef::pollen_grant(asset_id, grant_id, content_id, 5);
-        let result = with_authorized_pollen_input(&chain, &source, &consumer, |authorized| {
+        let source = SourceRef::data_market_grant(asset_id, grant_id, content_id, 5);
+        let result = with_authorized_data_market_input(&chain, &source, &consumer, |authorized| {
             reads.set(reads.get() + 1);
             (*authorized.asset_id(), *authorized.content_id())
         })
@@ -332,9 +332,9 @@ mod tests {
         assert_eq!(result, (asset_id, content_id));
         assert_eq!(reads.get(), 1);
 
-        let wrong_asset = SourceRef::pollen_grant([5; 32], grant_id, content_id, 5);
+        let wrong_asset = SourceRef::data_market_grant([5; 32], grant_id, content_id, 5);
         assert!(
-            with_authorized_pollen_input(&chain, &wrong_asset, &consumer, |_| {
+            with_authorized_data_market_input(&chain, &wrong_asset, &consumer, |_| {
                 reads.set(reads.get() + 1);
             })
             .is_err()
@@ -343,7 +343,7 @@ mod tests {
 
         let disconnected = NotConnected;
         assert!(
-            with_authorized_pollen_input(&disconnected, &source, &consumer, |_| {
+            with_authorized_data_market_input(&disconnected, &source, &consumer, |_| {
                 reads.set(reads.get() + 1);
             })
             .is_err()
@@ -359,60 +359,60 @@ mod tests {
         let consumer = [2; 32];
         let chain = active_test_chain(grant_id, asset_id, content_id, consumer);
 
-        let wrong_grant = SourceRef::pollen_grant(asset_id, [4; 32], content_id, 5);
+        let wrong_grant = SourceRef::data_market_grant(asset_id, [4; 32], content_id, 5);
         assert!(matches!(
-            authorize_pollen_input(&chain, &wrong_grant, &consumer),
+            authorize_data_market_input(&chain, &wrong_grant, &consumer),
             Err(GrantAuthorizationError::InactiveGrant { .. })
         ));
 
-        let wrong_asset = SourceRef::pollen_grant([5; 32], grant_id, content_id, 5);
+        let wrong_asset = SourceRef::data_market_grant([5; 32], grant_id, content_id, 5);
         assert!(matches!(
-            authorize_pollen_input(&chain, &wrong_asset, &consumer),
+            authorize_data_market_input(&chain, &wrong_asset, &consumer),
             Err(GrantAuthorizationError::InactiveGrant { .. })
         ));
 
-        let wrong_content = SourceRef::pollen_grant(asset_id, grant_id, [7; 32], 5);
+        let wrong_content = SourceRef::data_market_grant(asset_id, grant_id, [7; 32], 5);
         assert!(matches!(
-            authorize_pollen_input(&chain, &wrong_content, &consumer),
+            authorize_data_market_input(&chain, &wrong_content, &consumer),
             Err(GrantAuthorizationError::InactiveGrant { .. })
         ));
 
         let wrong_consumer = [6; 32];
-        let source = SourceRef::pollen_grant(asset_id, grant_id, content_id, 5);
+        let source = SourceRef::data_market_grant(asset_id, grant_id, content_id, 5);
         assert!(matches!(
-            authorize_pollen_input(&chain, &source, &wrong_consumer),
+            authorize_data_market_input(&chain, &source, &wrong_consumer),
             Err(GrantAuthorizationError::InactiveGrant { .. })
         ));
 
         let mut expired = active_test_chain(grant_id, asset_id, content_id, consumer);
         expired.current_epoch = 12;
         assert!(matches!(
-            authorize_pollen_input(&expired, &source, &consumer),
+            authorize_data_market_input(&expired, &source, &consumer),
             Err(GrantAuthorizationError::InactiveGrant { .. })
         ));
     }
 
     #[test]
-    fn malformed_or_non_pollen_sources_are_refused() {
+    fn malformed_or_non_data_market_sources_are_refused() {
         let chain = active_test_chain([3; 32], [8; 32], [1; 32], [2; 32]);
-        let mut missing_asset = SourceRef::pollen_grant([8; 32], [3; 32], [1; 32], 5);
+        let mut missing_asset = SourceRef::data_market_grant([8; 32], [3; 32], [1; 32], 5);
         missing_asset.asset_id = None;
         assert_eq!(
-            authorize_pollen_input(&chain, &missing_asset, &[2; 32]),
+            authorize_data_market_input(&chain, &missing_asset, &[2; 32]),
             Err(GrantAuthorizationError::InvalidSource(
                 SourceError::MissingAssetId
             ))
         );
-        let mut missing_id = SourceRef::pollen_grant([8; 32], [3; 32], [1; 32], 5);
+        let mut missing_id = SourceRef::data_market_grant([8; 32], [3; 32], [1; 32], 5);
         missing_id.grant_id = None;
         assert_eq!(
-            authorize_pollen_input(&chain, &missing_id, &[2; 32]),
+            authorize_data_market_input(&chain, &missing_id, &[2; 32]),
             Err(GrantAuthorizationError::InvalidSource(
                 SourceError::MissingGrantId
             ))
         );
         assert_eq!(
-            authorize_pollen_input(&chain, &SourceRef::storage_deal([1; 32]), &[2; 32]),
+            authorize_data_market_input(&chain, &SourceRef::storage_deal([1; 32]), &[2; 32]),
             Err(GrantAuthorizationError::WrongSourceKind {
                 found: SourceKind::StorageDeal
             })

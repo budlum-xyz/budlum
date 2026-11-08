@@ -88,13 +88,13 @@ pub enum DatasetError {
 
 /// The closed-circuit source kinds: the only three channels AI inference layer can read.
 ///
-/// - `PollenGrant`  - an authorised read through a Pollen `AccessGrant` /
+/// - `DataMarketGrant`  - an authorised read through a DataMarket `AccessGrant` /
 ///   `TrainingDataGrant`
 /// - `StorageDeal`  - content labelled as an AI dataset in B.U.D. storage
 /// - `SocialRef`    - in-network content coming over the `SocialFi` bridge
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
-    PollenGrant,
+    DataMarketGrant,
     StorageDeal,
     SocialRef,
 }
@@ -104,17 +104,17 @@ pub enum SourceKind {
 pub struct SourceRef {
     pub kind: SourceKind,
     pub content_id: Hash32,
-    /// Pollen's on-chain data-asset identity. It is distinct from `content_id`:
+    /// DataMarket's on-chain data-asset identity. It is distinct from `content_id`:
     /// the grant is issued to the asset, while the bytes are checked against
     /// the content digest. `None` for `StorageDeal` and `SocialRef`.
     pub asset_id: Option<Hash32>,
-    /// The exact on-chain Pollen grant authorising this input.
+    /// The exact on-chain DataMarket grant authorising this input.
     ///
-    /// `None` for `StorageDeal` and `SocialRef` sources. A Pollen source without
+    /// `None` for `StorageDeal` and `SocialRef` sources. A DataMarket source without
     /// this identifier cannot be authorised: asking whether *some* grant for
     /// this asset is active does not prove the grant named by the input is.
     pub grant_id: Option<Hash32>,
-    /// The number of epochs left on a Pollen training grant (matching the
+    /// The number of epochs left on a DataMarket training grant (matching the
     /// budlum `TrainingDataGrant` epoch limit). This is a local shape check;
     /// the chain query remains authoritative for current activity.
     pub grant_epochs_remaining: Option<u64>,
@@ -132,16 +132,16 @@ impl SourceRef {
         }
     }
 
-    /// Construct a Pollen source with separate asset, grant, and content identities.
+    /// Construct a DataMarket source with separate asset, grant, and content identities.
     #[must_use]
-    pub fn pollen_grant(
+    pub fn data_market_grant(
         asset_id: Hash32,
         grant_id: Hash32,
         content_id: Hash32,
         epochs_remaining: u64,
     ) -> Self {
         Self {
-            kind: SourceKind::PollenGrant,
+            kind: SourceKind::DataMarketGrant,
             content_id,
             asset_id: Some(asset_id),
             grant_id: Some(grant_id),
@@ -167,14 +167,14 @@ impl SourceRef {
     ///
     /// # Errors
     ///
-    /// Returns [`SourceError`] for zero identities, missing/expired Pollen
-    /// grant data, or grant fields attached to a non-Pollen source.
+    /// Returns [`SourceError`] for zero identities, missing/expired DataMarket
+    /// grant data, or grant fields attached to a non-DataMarket source.
     pub fn validate(&self) -> Result<(), SourceError> {
         if self.content_id == [0u8; 32] {
             return Err(SourceError::ZeroContentId);
         }
         match self.kind {
-            SourceKind::PollenGrant => {
+            SourceKind::DataMarketGrant => {
                 let Some(asset_id) = self.asset_id else {
                     return Err(SourceError::MissingAssetId);
                 };
@@ -213,21 +213,21 @@ impl SourceRef {
 pub enum SourceError {
     /// All-zero `content_id` does not identify content.
     ZeroContentId,
-    /// A Pollen source did not name its data asset.
+    /// A DataMarket source did not name its data asset.
     MissingAssetId,
     /// All-zero `asset_id` does not identify a data asset.
     ZeroAssetId,
-    /// A non-Pollen source carried a Pollen asset ID.
+    /// A non-DataMarket source carried a DataMarket asset ID.
     UnexpectedAssetId,
-    /// A Pollen source did not name its exact grant.
+    /// A DataMarket source did not name its exact grant.
     MissingGrantId,
     /// All-zero `grant_id` does not identify an on-chain grant.
     ZeroGrantId,
-    /// A Pollen grant is absent, expired, or has no remaining-epoch hint.
+    /// A DataMarket grant is absent, expired, or has no remaining-epoch hint.
     ExpiredOrMissingGrant,
-    /// A non-Pollen source carried a Pollen grant ID.
+    /// A non-DataMarket source carried a DataMarket grant ID.
     UnexpectedGrantId,
-    /// A non-Pollen source carried Pollen grant epochs.
+    /// A non-DataMarket source carried DataMarket grant epochs.
     UnexpectedGrantEpochs,
 }
 
@@ -287,7 +287,7 @@ mod tests {
         assert!(deal.grant_epochs_remaining.is_none());
         assert!(deal.validate().is_ok());
 
-        let grant = SourceRef::pollen_grant([3; 32], [2; 32], [1; 32], 3);
+        let grant = SourceRef::data_market_grant([3; 32], [2; 32], [1; 32], 3);
         assert_eq!(grant.asset_id, Some([3; 32]));
         assert_eq!(grant.grant_id, Some([2; 32]));
         assert_eq!(grant.grant_epochs_remaining, Some(3));
@@ -308,7 +308,7 @@ mod tests {
 
     #[test]
     fn source_identity_and_grant_shape_are_validated() {
-        let mut source = SourceRef::pollen_grant([3; 32], [2; 32], [1; 32], 3);
+        let mut source = SourceRef::data_market_grant([3; 32], [2; 32], [1; 32], 3);
         source.asset_id = None;
         assert_eq!(source.validate(), Err(SourceError::MissingAssetId));
 

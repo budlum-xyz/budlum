@@ -16,7 +16,7 @@
 //!   `xtask/gates/src/gates/coverage.rs`, next to the code it protects.
 //! * `BLG-029` - a forged left-hand `x-forwarded-for` entry is ignored. Pinned
 //!   by `forwarded_headers_are_ignored_without_a_trusted_proxy` in
-//!   `audit_findings_locks.rs` and by the extraction test in `src/rpc/server.rs`.
+//!   `security_invariant_tests.rs` and by the extraction test in `src/rpc/server.rs`.
 //!
 //! Most of these tests read a file rather than call a function, and that is the
 //! point: the property under lock lives in a configuration file or in the shape

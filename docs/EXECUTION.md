@@ -210,15 +210,3 @@ STARK proving on every call (`BLG-248`).
 - `0x08` PolkaVM (`execution/polkavm/`, `budlum-ee-polkavm`, RV32EM interpreter with
   JIT disabled, `ee/polkavm/state`, closed on testnet `45261` until height `60_000`,
   `polkavm_is_closed_on_testnet`, `uel_conformance_polkavm`).
-
-
-
-
-
-
-
-
-
-
-
-

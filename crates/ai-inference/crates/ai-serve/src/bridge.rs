@@ -257,7 +257,7 @@ mod tests {
     struct FixedChain(bool);
 
     impl ChainClient for FixedChain {
-        fn pollen_grant_active(
+        fn data_market_grant_active(
             &self,
             _grant_id: &Hash32,
             _asset_id: &Hash32,
