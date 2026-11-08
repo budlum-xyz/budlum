@@ -22,11 +22,16 @@ extend-exclude = [
   "proto/",          # the wire schema - changing a word breaks the protocol
   "fuzz/corpus/",    # fuzzer produced binary seeds, not text
   "fuzz/artifacts/",
+  "arena_claude.py",
   "repo-lubot/patches/",  # git format-patch output: the text is another repo's
                           # commit message, re-verified verbatim by `git am`, not
                           # hand-edited here. A typo inside it is fixed upstream in
                           # the crate, never by editing the mirror and calling it
                           # an export.
+  "config/naming/concept_map.toml",
+  ".github/concept-names-baseline.txt",
+  "docs/NAMING.md",
+  "xtask/gates/src/gates/bud3_forbidden_phrases.rs",
 ]
 
 [default]
@@ -101,7 +106,7 @@ probleme = "probleme"
 Sur = "Sur"
 lik = "lik"
 foto = "foto"
-# -- added during the budscan round -------------------------------
+# -- added during the budlum-explorer round -------------------------------
 # All three are Turkish words; the English typos dictionary reads them as
 # "admin", "offset" and "vector" respectively. Verified by mutation: removing these
 # lines turns the gate red with 7 findings, so the calibration is not vacuous.
@@ -147,6 +152,8 @@ PN = "PN"           # typos splits the acronym PNG and offers ON for the PN half
 Ponit = "Ponit"
 
 # -- Deliberate test data and a filter name ----------------------------------
+# abd   : mutated opaque payload in src/storage/bud3/bof1.rs, not English prose.
+abd = "abd"
 # tru   : json.rs negative test input, a deliberately truncated "true" literal.
 # paeth : the PNG Paeth predictor (src/storage/qr_video.rs), named after its author.
 tru = "tru"

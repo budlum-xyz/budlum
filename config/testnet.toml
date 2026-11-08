@@ -61,5 +61,32 @@ listener = "127.0.0.1:19090"
 key_file = "./secrets/testnet-validator.key"
 backend = "softhsm"
 
+# the signer the first run needs. src/cli/commands.rs
+# canonicalises "softhsm" to "pkcs11", and src/main.rs requires the module
+# path and the PIN environment name on that path. ops/softhsm2.conf supplies
+# the token directory through SOFTHSM2_CONF; ops/TESTNET_FIRST_RUN.md
+# initialises the token. The PIN value is never stored in this file.
+[validator.signer]
+backend = "softhsm"
+
+[validator.signer.pkcs11]
+module_path = "/usr/lib/softhsm/libsofthsm2.so"
+slot_id = 0
+token_pin_env = "BUDLUM_HSM_PIN"
+
 [features]
 pruning = false
+
+[compat.ethereum]
+enabled = true
+listener = "127.0.0.1:18547"
+operator_listener = "127.0.0.1:18557"
+max_filters = 1024
+max_filters_per_peer = 32
+filter_ttl_secs = 300
+max_subscriptions = 512
+
+[compat.cosmos]
+enabled = true
+listener = "127.0.0.1:18550"
+rest_listener = "127.0.0.1:18551"
