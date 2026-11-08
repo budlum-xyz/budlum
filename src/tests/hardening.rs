@@ -125,7 +125,7 @@ mod hardening_tests {
     #[test]
     fn test_db_repair_index() {
         use crate::core::block::Block;
-        use crate::storage::db::Storage;
+        use crate::persistence::db::Storage;
 
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test_repair.db");

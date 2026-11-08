@@ -73,9 +73,17 @@ mod tests {
         let params = BeaconChainParams {
             fork_version: [0x04, 0, 0, 0],
             genesis_validators_root: [0x42; 32],
+            finalized_root_gindex:
+                crate::cross_domain::evm::sync_committee::FINALIZED_ROOT_GINDEX_DENEB,
         };
-        let err = verify_execution_block_finality(&state, &agg, &binding, &params, &block)
-            .expect_err("low-participation aggregate must be rejected");
+        let finality = crate::cross_domain::evm::sync_committee::fixtures::finality_for(
+            &binding,
+            params.finalized_root_gindex,
+            64,
+        );
+        let err =
+            verify_execution_block_finality(&state, &agg, &binding, &finality, &params, &block)
+                .expect_err("low-participation aggregate must be rejected");
         match err {
             SyncCommitteeError::InsufficientParticipation {
                 participating,
