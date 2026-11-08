@@ -1,0 +1,381 @@
+// The B.U.D. 3.0 symbol protocol and upload stream.
+//
+// Directive section 6.4 (Y1 to Y16) is the upload, section 6.5 (G1 to G8) is the
+// view, and section 6.13 is the repair exchange. This file is the wire contract
+// between a client, a gateway and a custody holder. It is deliberately smaller
+// than the object it describes: an object travels as symbols, and the object's
+// own header is BOF-1 in `src/storage/bud3/bof1.rs`, not a protobuf message.
+//
+// # Why no message here repeats a BOF-1 field
+//
+// BOF-1 is the canonical object format (section 6.3.2), and its header is
+// covered by the object commitment. A protobuf `ObjectHeader` beside it would be
+// a second encoding of the same fields, and the first time the two disagreed the
+// network would have two objects with one name. What crosses this wire is the
+// object's *bytes*, as symbols, and the commitments that let a reader check
+// them. Fields are added, never removed or renumbered (section 6.10.1).
+//
+// # Framing
+//
+// Every message is sent as one frame: a big-endian `u32` length followed by the
+// encoded message, with a 16 MiB ceiling, the same frame the execution ABI uses.
+// The `abi_version` field is always field 1 so a mismatched peer is refused
+// before any other byte is interpreted.
+//
+// # Testnet closures
+//
+// Bit 1 (live) and bit 3 (context manifest) of the BOF-1 flags are refused at
+// testnet activation (section 6.3.2 and 6.17). The corresponding messages here
+// carry no field for them: a closed feature has no wire shape, so it cannot be
+// re-enabled by a client that ignores a flag.
+syntax = "proto3";
+
+package budlum.storage.v3;
+
+// The protocol version of every message in this file. A peer speaking another
+// version is refused, because a field added in v2 has no meaning to a v1 reader.
+enum ProtocolVersion {
+  // Absent: a peer that did not state a version is refused.
+  PROTOCOL_VERSION_UNSPECIFIED = 0;
+  // Version 1 of this file.
+  PROTOCOL_VERSION_V1 = 1;
+}
+
+// The profile an object is coded with (section 6.17). P0 is the canonical
+// profile; P1 is the optical profile and is derived per request, never stored.
+message Profile {
+  // The registered profile id. P0 = 0.
+  uint32 id = 1;
+  // QR version of one frame.
+  uint32 qr_version = 2;
+  // Symbol size in bytes: the payload of one QR frame.
+  uint32 symbol_size = 3;
+  // Frames per second of the optical video.
+  uint32 fps = 4;
+  // Source symbols per segment.
+  uint32 k_max = 5;
+}
+
+// One coded symbol of one segment: the unit a custody holder stores and the
+// payload of one QR frame (section 6.2, "Sembol").
+message Symbol {
+  // Segment index in the object.
+  uint64 segment = 1;
+  // Encoding symbol id inside the segment. Below `k` it is a source symbol,
+  // at or above `k` it is a repair symbol.
+  uint32 esi = 2;
+  // Exactly `symbol_size` bytes.
+  bytes data = 3;
+}
+
+// What the chain records for one object (section 6.4 Y15). It is the object's
+// identity and its placement, never its bytes: no field here is variable with
+// the content's length except the roots, one per segment.
+message ObjectRecord {
+  // SHA-256 and length for public content, keyed HMAC-SHA-256 and length for
+  // sealed content (section 6.2).
+  bytes content_id = 1;
+  // The object length in bytes, header included.
+  uint64 object_len = 2;
+  // The object commitment: a Merkle root over the segment digests.
+  bytes commitment = 3;
+  // The profile the object is coded with.
+  Profile profile = 4;
+  // The A0 codec id the payload carries (section 6.6).
+  uint32 codec = 5;
+  // Symbols per segment the placement holds, at least `k + 2`.
+  uint32 symbols_per_segment = 6;
+  // The symbol root of every segment, in segment order.
+  repeated bytes symbol_roots = 7;
+}
+
+// A custody holder's share of one segment: the different ESIs it holds and the
+// root it can prove them against (sections 6.9 and 6.11).
+message CustodyShare {
+  // The object the share belongs to.
+  bytes commitment = 1;
+  // Segment index in that object.
+  uint64 segment = 2;
+  // The ESIs this holder carries, ascending and distinct.
+  repeated uint32 esi = 3;
+  // The symbol root the ESIs fold to.
+  bytes symbol_root = 4;
+}
+
+// The placement of one segment: who holds it and how deep the durability runs
+// (section 6.9.3). The bucket is a governance input, so it is read from genesis
+// rather than computed on the consensus path.
+message PlacementGroup {
+  // Segment index in the object.
+  uint64 segment = 1;
+  // Full validators that hold a share.
+  uint32 n_full = 2;
+  // Symbols each Full holder carries.
+  uint32 s_full = 3;
+  // Mobile validators that hold a share.
+  uint32 n_mobile = 4;
+  // Symbols each Mobile holder carries.
+  uint32 s_mobile = 5;
+  // Shares the segment may lose and still decode.
+  uint32 f = 6;
+  // The holders' validator addresses, in rendezvous rank order.
+  repeated bytes holder = 7;
+}
+
+// ---------------------------------------------------------------------------
+// Upload stream (section 6.4, Y1 to Y16)
+// ---------------------------------------------------------------------------
+
+message UploadOpenRequest {
+  // The protocol version the client speaks.
+  ProtocolVersion version = 1;
+  // The length the client intends to upload, so the gateway can refuse a stamp
+  // before a byte arrives.
+  uint64 content_len = 2;
+  // The profile the object will be coded with.
+  Profile profile = 3;
+  // The codec the client already selected, or 0 to let the node select.
+  uint32 codec = 4;
+}
+
+// The session the client appends to, and how much it may still send.
+message UploadOpenResponse {
+  // The session id; every later message of this upload names it.
+  bytes session_id = 1;
+  // Bytes the session may still append before the daily limit refuses it.
+  uint64 remaining_bytes = 2;
+  // Unix seconds after which the session is refused (section 6.21.1).
+  uint64 expires_at = 3;
+}
+
+// One chunk of the upload, appended at a stated offset.
+message UploadAppendRequest {
+  // The session the chunk belongs to.
+  bytes session_id = 1;
+  // The offset this chunk starts at. A gap or an overlap is refused; the
+  // session is a byte stream, not a set of pieces.
+  uint64 offset = 2;
+  // The chunk. Large files are sent as consecutive appends; the memory ceiling
+  // of section 6.4 rule 1 is two segments.
+  bytes chunk = 3;
+}
+
+// How much of the session has been accepted.
+message UploadAppendResponse {
+  // Bytes accepted so far in the session.
+  uint64 accepted = 1;
+}
+
+// Y15: the session finished, the object is coded, and this is what the client
+// signs into `RegisterObject`.
+message UploadFinishRequest {
+  // The session being finished.
+  bytes session_id = 1;
+}
+
+// The finished upload: the record to register and where its symbols went.
+message UploadFinishResponse {
+  // The record the client registers. Its commitment is the upload's own, so a
+  // gateway cannot finish an upload with another object's record.
+  ObjectRecord record = 1;
+  // Where the symbols went, one group per segment.
+  repeated PlacementGroup placement = 2;
+}
+
+// Accepting a share: the holder names the segments it took and the roots it
+// holds them against (section 6.22.1, `CustodyAck`).
+message CustodyAckRequest {
+  // The protocol version the holder speaks.
+  ProtocolVersion version = 1;
+  // The shares this holder accepted, one per segment.
+  repeated CustodyShare share = 2;
+}
+
+// Which shares were recorded.
+message CustodyAckResponse {
+  // Shares the node accepted into custody.
+  uint32 accepted = 1;
+  // Segments whose root did not match the one the placement recorded.
+  repeated uint64 rejected_segment = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Symbol protocol (sections 6.13 and 6.4 Y3)
+// ---------------------------------------------------------------------------
+
+// A holder asks for the symbols it is missing, by segment and ESI range.
+message SymbolRequest {
+  // The protocol version the requester speaks.
+  ProtocolVersion version = 1;
+  // The object the symbols belong to.
+  bytes commitment = 2;
+  // The segment the requester is missing symbols of.
+  uint64 segment = 3;
+  // The requested ESI range, inclusive at `from`, exclusive at `to`.
+  uint32 from_esi = 4;
+  // The exclusive end of the requested ESI range.
+  uint32 to_esi = 5;
+}
+
+// The symbols a holder carries for one segment.
+message SymbolResponse {
+  // The object the symbols belong to.
+  bytes commitment = 1;
+  // The segment these symbols are of.
+  uint64 segment = 2;
+  // The symbols, with ESIs inside the requested range. A holder that does not
+  // carry an ESI omits it rather than inventing one.
+  repeated Symbol symbols = 3;
+}
+
+// A repair: the repairer names the new ESI range and the root it folds to
+// (section 6.13). Repair symbols are never written in the object.
+message RecordRepairRequest {
+  // The protocol version the repairer speaks.
+  ProtocolVersion version = 1;
+  // The object the repair was made for.
+  bytes commitment = 2;
+  // The segment that gained repair symbols.
+  uint64 segment = 3;
+  // The inclusive start of the new ESI range.
+  uint32 from_esi = 4;
+  // The exclusive end of the new ESI range.
+  uint32 to_esi = 5;
+  // The root the repaired segment now folds to.
+  bytes new_symbol_root = 6;
+}
+
+// Whether the repair was recorded.
+message RecordRepairResponse {
+  // True when the new root was accepted into custody.
+  bool accepted = 1;
+}
+
+// Y10 and Y11 at the edge: the client states the object it wrote from the video
+// so the node can compare it with the one its own encoder wrote. A mismatch is
+// refused, not reconciled (section 6.4 rule 2).
+message TwoPathCheckRequest {
+  // The protocol version the client speaks.
+  ProtocolVersion version = 1;
+  // The object both paths claim to have written.
+  bytes commitment = 2;
+  // The commitment the video path produced.
+  bytes from_video_commitment = 3;
+  // The video commitment the encoder path produced (section 6.15).
+  bytes from_encoder_commitment = 4;
+  // The frame rate the commitment was folded at.
+  uint32 fps = 5;
+}
+
+// Whether the two paths wrote the same object.
+message TwoPathCheckResponse {
+  // True when the encoder and the video agree byte for byte.
+  bool agree = 1;
+  // The first segment whose frames disagree, when `agree` is false.
+  uint64 first_bad_segment = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Custody proofs (section 6.11.2)
+// ---------------------------------------------------------------------------
+
+// One proof: the leaf, the path to the symbol root, and the sibling hashes.
+message CustodyProof {
+  // The object the proof is about.
+  bytes commitment = 1;
+  // The segment the proven symbol is of.
+  uint64 segment = 2;
+  // The encoding symbol id the proof opens.
+  uint32 esi = 3;
+  // The symbol's leaf hash.
+  bytes leaf = 4;
+  // The path from the leaf to the root, leaf side first.
+  repeated bytes path = 5;
+  // The root the path claims to reach.
+  bytes root = 6;
+}
+
+// The RPC door for a proof batch: it carries the batch the holder signed.
+message CustodyProofBatchRequest {
+  // The protocol version the holder speaks.
+  ProtocolVersion version = 1;
+  // The batch of proofs, one per audited segment.
+  CustodyProofBatch batch = 2;
+}
+
+// A batch of proofs from one holder, one per audited segment. An empty batch is
+// refused: a holder that answers nothing has not answered.
+message CustodyProofBatch {
+  // The protocol version the holder speaks.
+  ProtocolVersion version = 1;
+  // The holder's validator address.
+  bytes validator = 2;
+  // The epoch the batch is for. A batch for another epoch is refused.
+  uint64 epoch = 3;
+  // One proof per audited segment; an empty batch is refused.
+  repeated CustodyProof proof = 4;
+}
+
+// How many proofs in the batch reached their root.
+message CustodyProofBatchResponse {
+  // Proofs that verified.
+  uint32 accepted = 1;
+  // The segments whose proof did not reach the root, in the order given.
+  repeated uint64 rejected_segment = 2;
+}
+
+// ---------------------------------------------------------------------------
+// View (section 6.5, G1 to G8)
+// ---------------------------------------------------------------------------
+
+message OpenRevealRequest {
+  // The protocol version the client speaks.
+  ProtocolVersion version = 1;
+  // The content the client wants to watch.
+  bytes content_id = 2;
+  // The client asks for logical frames, never for the object's bytes.
+  Profile profile = 3;
+}
+
+// The opened session and the record its frames must check against.
+message OpenRevealResponse {
+  // The session id every later message names.
+  bytes session_id = 1;
+  // The record the node holds for this content.
+  ObjectRecord record = 2;
+  // The ESIs the node can serve now, per segment, so the client knows what it
+  // is waiting for instead of polling an empty range.
+  repeated SymbolResponse available = 3;
+}
+
+// One slice of the logical video. The pixels are the client's, produced by the
+// presentation layer from these frames; no PNG crosses this wire.
+message RevealFramesRequest {
+  // The session being read from.
+  bytes session_id = 1;
+  // Seconds of the video, inclusive at `from_second`.
+  uint32 from_second = 2;
+  // The exclusive end of the requested seconds.
+  uint32 to_second = 3;
+}
+
+// The frames of the requested seconds.
+message RevealFramesResponse {
+  // The session these frames belong to.
+  bytes session_id = 1;
+  // The frames of the requested seconds, in play order.
+  repeated Symbol frames = 2;
+}
+
+// Ends a reveal session. The node stops serving frames for it.
+message CloseRevealRequest {
+  // The session being closed.
+  bytes session_id = 1;
+}
+
+// How the session ended.
+message CloseRevealResponse {
+  // Whether the session ended with the node's own view of the object, i.e.
+  // every segment it served was checked against the commitment.
+  bool closed = 1;
+}
