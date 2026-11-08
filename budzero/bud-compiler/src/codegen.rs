@@ -312,6 +312,10 @@ impl Codegen {
                         self.generate_stmt(s, &mut else_scope, storage);
                     }
                 }
+                // A `let` in a branch is invisible after it (child scope), so
+                // its register is free again: the then branch starts where
+                // the else branch started, and nothing leaks past the `if`.
+                self.next_reg = saved_reg;
                 let jump_to_end_idx = self.instructions.len();
                 self.emit(Opcode::Jmp, 0, 0, 0, 0);
 
@@ -321,6 +325,7 @@ impl Codegen {
                     self.generate_stmt(s, &mut then_scope, storage);
                 }
                 let end_idx = self.instructions.len();
+                self.next_reg = saved_reg;
 
                 self.patch_jump(
                     jump_to_then_idx,
@@ -355,6 +360,8 @@ impl Codegen {
                 );
 
                 let end_idx = self.instructions.len();
+                // The body's `let`s end with the body.
+                self.next_reg = saved_reg;
                 self.patch_jump(
                     jump_to_body_idx,
                     (body_start_idx as i32) - (jump_to_body_idx as i32),
