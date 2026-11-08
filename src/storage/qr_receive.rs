@@ -345,9 +345,9 @@ mod tests {
         assert_eq!(rx.finish_packed().unwrap(), packed);
     }
 
-    /// P29-F01: a self-consistent forged stream framed under the pinned
+    ///: a self-consistent forged stream framed under the pinned
     /// commitment is refused at finish, and after a reset the honest stream
-    /// recovers (P29-F02 recovery).
+    /// recovers ( recovery).
     #[test]
     fn a_forged_stream_is_refused_at_finish_and_reset_recovers() {
         let honest = pack_payload(PayloadKind::ContentBytes, b"honest-body-bytes-honest").unwrap();

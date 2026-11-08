@@ -749,7 +749,7 @@ mod integration_tests {
             .verified_qc_blobs
             .insert(invalid_blob.checkpoint_height, invalid_blob);
 
-        // P01-F22: an unverifiable signature is not evidence against the
+        //: an unverifiable signature is not evidence against the
         // named validator - garbage bytes naming anyone are free to produce,
         // so acting on them would make the permissionless challenge RPC a
         // frame-up rail. The challenge is refused and neither finality nor

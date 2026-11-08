@@ -59,7 +59,7 @@ impl From<QrMatrixError> for QrPngError {
 /// what stops a hostile IHDR from declaring a geometry our encoder never
 /// produces (see `qr_video::decode_png_grey`, which re-uses this ceiling).
 /// The largest honest side is (177 + 8) * 4 = 740 px, so 1024 leaves headroom
-/// while bounding a hostile frame to a few MiB of raw pixels (P29-F03).
+/// while bounding a hostile frame to a few MiB of raw pixels.
 pub const MAX_PNG_SIDE_PX: u32 = 1024;
 
 /// Render matrix to a deterministic RGB8 PNG.

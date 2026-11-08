@@ -168,7 +168,7 @@ fn bridge_lock_mint_burn_unlock_lifecycle() {
     let _ = message_id; // silence unused warning (kept for the regression witness)
 }
 
-/// BLG-0108 (P05-F01): a full lock/mint/burn/unlock cycle conserves the
+///: a full lock/mint/burn/unlock cycle conserves the
 /// total supply. Burn is the debit half of mint: without it, each cycle
 /// mints one transfer amount out of thin air (the F01 inflation bug).
 #[test]
@@ -214,7 +214,7 @@ fn bridge_lock_mint_burn_unlock_conserves_supply() {
         .lock_bridge_transfer(1, 2, 20, 0, asset_id(), owner, recipient, 400, 1_000)
         .expect("lock");
     let lock_message = lock_event.message.clone().expect("lock carries a message");
-    // The lock debits the owner into escrow (BLG-0118): the units leave the
+    // The lock debits the owner into escrow: the units leave the
     // live balances and sit in the transfer row until the mint credits them,
     // so conservation counts the escrow.
     let escrowed = bc
@@ -249,7 +249,7 @@ fn bridge_lock_mint_burn_unlock_conserves_supply() {
     assert_eq!(
         sum(&bc),
         start - held,
-        "burn must debit the minted units (BLG-0108)"
+        "burn must debit the minted units "
     );
 
     // Unlock on the source side: the owner is credited back what was burned.

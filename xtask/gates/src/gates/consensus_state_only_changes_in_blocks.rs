@@ -114,7 +114,7 @@ fn check_root_covers_and_nonces_are_block_scoped(
     }
 
     let arm = slice_of(ex, "TransactionType::StateUpdate { domain_id", "Ok(())")?;
-    // The arm is RETIRED (431d7fb, BLG-0286 / P18-F01): it refuses every
+    // The arm is RETIRED (431d7fb, / ): it refuses every
     // StateUpdate instead of validating and writing, so the strongest form
     // of the block-scoping claim is that the arm carries the refusal and
     // contains no nonce write at all. A write that reappears here without

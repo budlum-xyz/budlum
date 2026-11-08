@@ -134,15 +134,11 @@ const SKIP_EXTS: &[&str] = &[
 ];
 
 fn rel_path(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
+    path.strip_prefix(root).unwrap_or(path).to_string_lossy.replace('\\', "/")
 }
 
 fn skipped_ext(path: &Path) -> bool {
-    path.extension()
-        .is_some_and(|e| SKIP_EXTS.contains(&e.to_string_lossy().to_ascii_lowercase().as_str()))
+    path.extension.is_some_and(|e| SKIP_EXTS.contains(&e.to_string_lossy.to_ascii_lowercase.as_str))
 }
 
 /// Directory names that mark imported third-party source.
@@ -162,55 +158,55 @@ fn walk_into(dir: &Path, in_surface: bool, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    let mut entries: Vec<_> = entries.flatten().collect();
+    let mut entries: Vec<_> = entries.flatten.collect;
     entries.sort_by_key(std::fs::DirEntry::file_name);
     for entry in entries {
-        let path = entry.path();
-        let Ok(kind) = entry.file_type() else {
+        let path = entry.path;
+        let Ok(kind) = entry.file_type else {
             continue;
         };
-        if kind.is_symlink() {
+        if kind.is_symlink {
             continue;
         }
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if kind.is_dir() {
-            let skip = SKIP_DIRS.contains(&name.as_ref())
-                && !(in_surface && BUILD_OUTPUT_DIRS.contains(&name.as_ref()));
+        let name = entry.file_name;
+        let name = name.to_string_lossy;
+        if kind.is_dir {
+            let skip = SKIP_DIRS.contains(&name.as_ref)
+                && !(in_surface && BUILD_OUTPUT_DIRS.contains(&name.as_ref));
             if !skip {
-                let inside = in_surface || SURFACE_DIRS.contains(&name.as_ref());
+                let inside = in_surface || SURFACE_DIRS.contains(&name.as_ref);
                 walk_into(&path, inside, out);
             }
-        } else if kind.is_file() && !skipped_ext(&path) {
+        } else if kind.is_file && !skipped_ext(&path) {
             out.push(path);
         }
     }
 }
 
 fn sorted_walk(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
+    let mut out = Vec::new;
     walk_into(root, false, &mut out);
-    out.sort();
+    out.sort;
     out
 }
 
 fn is_word_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric()
+    b.is_ascii_alphanumeric
 }
 
 fn contains_term(haystack_lower: &str, term_lower: &str) -> bool {
-    let bytes = haystack_lower.as_bytes();
-    let term = term_lower.as_bytes();
+    let bytes = haystack_lower.as_bytes;
+    let term = term_lower.as_bytes;
     let mut from = 0usize;
     while let Some(pos) = haystack_lower[from..].find(term_lower) {
         let at = from + pos;
-        let end = at + term.len();
+        let end = at + term.len;
         let before_ok = at == 0 || !is_word_byte(bytes[at - 1]);
-        let after_ok = end >= bytes.len() || !is_word_byte(bytes[end]);
+        let after_ok = end >= bytes.len || !is_word_byte(bytes[end]);
         if before_ok && after_ok {
             return true;
         }
-        from = at + term.len();
+        from = at + term.len;
     }
     false
 }
@@ -222,17 +218,15 @@ fn is_allowed_reference(rel: &str) -> bool {
         || rel == SELF_PATH
         || rel == "docs/NOTICE"
         || rel == "docs/NOTICE.md"
-        || rel == "docs/PROVENANCE_NOTES.md"
+        || rel == "docs/NOTICE"
         || rel == "LICENSE.md"
         || rel.ends_with(&format!("/{BOUNDARY_NOTE}"))
         || (rel.starts_with("docs/FSF_")
-            && std::path::Path::new(rel)
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("md")))
+            && std::path::Path::new(rel).extension.is_some_and(|e| e.eq_ignore_ascii_case("md")))
 }
 
 fn is_import_surface(rel: &str) -> bool {
-    let lower = rel.to_ascii_lowercase();
+    let lower = rel.to_ascii_lowercase;
     lower.starts_with("vendor/")
         || lower.starts_with("third_party/")
         || lower.starts_with("third-party/")
@@ -246,7 +240,7 @@ fn is_import_surface(rel: &str) -> bool {
 }
 
 fn has_boundary_note(root: &Path, file: &Path) -> bool {
-    let mut dir = file.parent();
+    let mut dir = file.parent;
     while let Some(d) = dir {
         // One note at the repo root would cover every import surface, so the
         // walk stops before the root. An empty note records nothing.
@@ -254,30 +248,27 @@ fn has_boundary_note(root: &Path, file: &Path) -> bool {
             break;
         }
         let note = d.join(BOUNDARY_NOTE);
-        if note.metadata().is_ok_and(|m| m.is_file() && m.len() > 0) {
+        if note.metadata.is_ok_and(|m| m.is_file && m.len > 0) {
             return true;
         }
-        dir = d.parent();
+        dir = d.parent;
     }
     false
 }
 
 fn controlled_hits(rel: &str, text: &str) -> Vec<String> {
     if is_allowed_reference(rel) {
-        return Vec::new();
+        return Vec::new;
     }
-    let lower = text.to_ascii_lowercase();
-    let mut hits = Vec::new();
+    let lower = text.to_ascii_lowercase;
+    let mut hits = Vec::new;
     for project in CONTROLLED {
-        if project
-            .terms
-            .iter()
-            .any(|term| contains_term(&lower, &term.to_ascii_lowercase()))
+        if project.terms.iter.any(|term| contains_term(&lower, &term.to_ascii_lowercase))
         {
             hits.push(format!(
                 "{rel}: names {} ({}) outside the clean-room/provenance boundary: {}",
                 project.name,
-                project.boundary.label(),
+                project.boundary.label,
                 project.reason
             ));
         }
@@ -287,24 +278,17 @@ fn controlled_hits(rel: &str, text: &str) -> Vec<String> {
 
 fn path_hits(rel: &str) -> Vec<String> {
     if is_allowed_reference(rel) {
-        return Vec::new();
+        return Vec::new;
     }
-    let lower: String = rel
-        .to_ascii_lowercase()
-        .chars()
-        .map(|c| if matches!(c, '_' | '-') { ' ' } else { c })
-        .collect();
-    let mut hits = Vec::new();
+    let lower: String = rel.to_ascii_lowercase.chars.map(|c| if matches!(c, '_' | '-') { ' ' } else { c }).collect;
+    let mut hits = Vec::new;
     for project in CONTROLLED {
-        if project
-            .terms
-            .iter()
-            .any(|term| contains_term(&lower, &term.to_ascii_lowercase()))
+        if project.terms.iter.any(|term| contains_term(&lower, &term.to_ascii_lowercase))
         {
             hits.push(format!(
                 "{rel}: path names {} ({}) without an import-boundary record",
                 project.name,
-                project.boundary.label()
+                project.boundary.label
             ));
         }
     }
@@ -313,19 +297,15 @@ fn path_hits(rel: &str) -> Vec<String> {
 
 fn copyleft_hits(root: &Path, path: &Path, rel: &str, text: &str) -> Vec<String> {
     if !is_import_surface(rel) || has_boundary_note(root, path) {
-        return Vec::new();
+        return Vec::new;
     }
-    let lower = text.to_ascii_lowercase();
-    COPYLEFT_MARKERS
-        .iter()
-        .filter(|marker| lower.contains(*marker))
-        .map(|marker| {
+    let lower = text.to_ascii_lowercase;
+    COPYLEFT_MARKERS.iter.filter(|marker| lower.contains(*marker)).map(|marker| {
             format!(
                 "{rel}: imported-looking source contains `{}` but no {BOUNDARY_NOTE} records the boundary",
                 *marker
             )
-        })
-        .collect()
+        }).collect
 }
 
 fn check_fit_doc(text: &str) -> Vec<String> {
@@ -336,11 +316,7 @@ fn check_fit_doc(text: &str) -> Vec<String> {
         "design-only",
         "docs/FSF_ADAPTATION_PLAN.md",
     ];
-    required
-        .iter()
-        .filter(|needle| !text.contains(**needle))
-        .map(|needle| format!("{FIT_DOC}: missing clean-room phrase `{needle}`"))
-        .collect()
+    required.iter.filter(|needle| !text.contains(**needle)).map(|needle| format!("{FIT_DOC}: missing clean-room phrase `{needle}`")).collect
 }
 
 fn check_plan_doc(text: &str) -> Vec<String> {
@@ -351,11 +327,7 @@ fn check_plan_doc(text: &str) -> Vec<String> {
         "import-boundary gate",
         "No FSF upstream code has been imported",
     ];
-    required
-        .iter()
-        .filter(|needle| !text.contains(**needle))
-        .map(|needle| format!("{PLAN_DOC}: missing phased-adaptation phrase `{needle}`"))
-        .collect()
+    required.iter.filter(|needle| !text.contains(**needle)).map(|needle| format!("{PLAN_DOC}: missing phased-adaptation phrase `{needle}`")).collect
 }
 
 fn read_required(root: &Path, rel: &str) -> Result<String, String> {
@@ -367,7 +339,7 @@ fn read_required(root: &Path, rel: &str) -> Result<String, String> {
 ///
 /// Returns every clean-room boundary violation found in the tree.
 pub fn run(root: &Path) -> Result<String, String> {
-    let mut problems = Vec::new();
+    let mut problems = Vec::new;
     problems.extend(check_fit_doc(&read_required(root, FIT_DOC)?));
     problems.extend(check_plan_doc(&read_required(root, PLAN_DOC)?));
 
@@ -389,19 +361,19 @@ pub fn run(root: &Path) -> Result<String, String> {
         ));
     }
 
-    if problems.is_empty() {
+    if problems.is_empty {
         return Ok(format!(
             "FSF clean-room boundaries held: {scanned} text files scanned, {} controlled project families guarded",
-            CONTROLLED.len()
+            CONTROLLED.len
         ));
     }
 
-    let mut msg = format!("{} FSF clean-room boundary problem(s):\n", problems.len());
-    for problem in problems.iter().take(MAX_REPORTED) {
+    let mut msg = format!("{} FSF clean-room boundary problem(s):\n", problems.len);
+    for problem in problems.iter.take(MAX_REPORTED) {
         let _ = writeln!(msg, "  - {problem}");
     }
-    if problems.len() > MAX_REPORTED {
-        let _ = writeln!(msg, "  ... and {} more", problems.len() - MAX_REPORTED);
+    if problems.len > MAX_REPORTED {
+        let _ = writeln!(msg, "... and {} more", problems.len - MAX_REPORTED);
     }
     msg.push_str(
         "Budlum may learn from FSF-listed projects, but source imports require an explicit boundary record.\n",
@@ -412,31 +384,31 @@ pub fn run(root: &Path) -> Result<String, String> {
 /// # Errors
 ///
 /// Returns the first canary whose boundary expectation is wrong.
-pub fn self_test() -> Result<String, String> {
-    if !controlled_hits("src/settlement/taler.rs", "pub struct Receipt;").is_empty() {
+pub fn self_test -> Result<String, String> {
+    if !controlled_hits("src/settlement/taler.rs", "pub struct Receipt;").is_empty {
         return Err(String::from(
             "canary 1: allowed path test used a bad expectation",
         ));
     }
-    if path_hits("src/settlement/taler.rs").is_empty() {
+    if path_hits("src/settlement/taler.rs").is_empty {
         return Err(String::from(
             "canary 2: a product path named after GNU Taler was not caught",
         ));
     }
-    if controlled_hits("src/settlement/receipt.rs", "// GNU Taler receipt model").is_empty() {
+    if controlled_hits("src/settlement/receipt.rs", "// GNU Taler receipt model").is_empty {
         return Err(String::from(
             "canary 3: product code naming a design-only project was not caught",
         ));
     }
-    if !controlled_hits(FIT_DOC, "GNU Taler is design-only").is_empty() {
+    if !controlled_hits(FIT_DOC, "GNU Taler is design-only").is_empty {
         return Err(String::from("canary 4: the FSF fit doc was not exempt"));
     }
-    if !controlled_hits("docs/FSF_TALER_BRIEF.md", "GNU Taler design brief").is_empty() {
+    if !controlled_hits("docs/FSF_TALER_BRIEF.md", "GNU Taler design brief").is_empty {
         return Err(String::from(
             "canary 5: FSF design briefs must be allowed to name their source",
         ));
     }
-    if controlled_hits("docs/ARCHITECTURE.md", "GNUnet routing was copied").is_empty() {
+    if controlled_hits("docs/ARCHITECTURE.md", "GNUnet routing was copied").is_empty {
         return Err(String::from(
             "canary 6: ordinary docs cannot become an import boundary",
         ));
@@ -451,8 +423,7 @@ pub fn self_test() -> Result<String, String> {
         Path::new("/nonexistent-root/vendor/x/COPYING"),
         "vendor/x/COPYING",
         "GNU AFFERO GENERAL PUBLIC LICENSE",
-    )
-    .is_empty()
+    ).is_empty
     {
         return Err(String::from(
             "canary 8: copyleft import without a boundary note was not caught",
@@ -463,8 +434,7 @@ pub fn self_test() -> Result<String, String> {
         Path::new("/nonexistent-root/src/lib.rs"),
         "src/lib.rs",
         "GNU GENERAL PUBLIC LICENSE",
-    )
-    .is_empty()
+    ).is_empty
     {
         return Err(String::from(
             "canary 9: normal source text was treated as a vendored bundle",
@@ -472,12 +442,11 @@ pub fn self_test() -> Result<String, String> {
     }
     if !check_fit_doc(
         "phase 0\nnot a completed implementation\ndoes **not** copy upstream project code\ndesign-only\ndocs/FSF_ADAPTATION_PLAN.md",
-    )
-    .is_empty()
+    ).is_empty
     {
         return Err(String::from("canary 10: complete fit-doc wording failed"));
     }
-    if check_plan_doc("Phase 1\nPhase 2\nimport-boundary gate").is_empty() {
+    if check_plan_doc("Phase 1\nPhase 2\nimport-boundary gate").is_empty {
         return Err(String::from("canary 11: incomplete adaptation plan passed"));
     }
 
@@ -489,21 +458,21 @@ mod boundary_tests {
     use super::*;
 
     #[test]
-    fn root_or_empty_note_is_no_boundary_and_build_dirs_in_vendor_are_read() {
-        let root = std::env::temp_dir().join(format!("fsf-boundary-{}", std::process::id()));
+    fn root_or_empty_note_is_no_boundary_and_build_dirs_in_vendor_are_read {
+        let root = std::env::temp_dir.join(format!("fsf-boundary-{}", std::process::id));
         let nested = root.join("vendor/x/build");
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(nested.join("a.c"), "gpl-3.0").unwrap();
-        std::fs::write(root.join(BOUNDARY_NOTE), "root note").unwrap();
-        std::fs::write(root.join("vendor").join(BOUNDARY_NOTE), "").unwrap();
+        std::fs::create_dir_all(&nested).unwrap;
+        std::fs::write(nested.join("a.c"), "gpl-3.0").unwrap;
+        std::fs::write(root.join(BOUNDARY_NOTE), "root note").unwrap;
+        std::fs::write(root.join("vendor").join(BOUNDARY_NOTE), "").unwrap;
         let file = nested.join("a.c");
         let root_only = has_boundary_note(&root, &file);
-        std::fs::write(root.join("vendor/x").join(BOUNDARY_NOTE), "real note").unwrap();
+        std::fs::write(root.join("vendor/x").join(BOUNDARY_NOTE), "real note").unwrap;
         let with_note = has_boundary_note(&root, &file);
         let walked = sorted_walk(&root);
-        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::remove_dir_all(&root).unwrap;
         assert!(!root_only);
         assert!(with_note);
-        assert!(walked.iter().any(|p| p.ends_with("vendor/x/build/a.c")));
+        assert!(walked.iter.any(|p| p.ends_with("vendor/x/build/a.c")));
     }
 }

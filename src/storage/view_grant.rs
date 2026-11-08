@@ -826,7 +826,7 @@ mod tests {
         ContentId([b; 32])
     }
 
-    /// P28-F17: a stored registry whose three fields disagree is refused.
+    ///: a stored registry whose three fields disagree is refused.
     #[test]
     fn a_registry_row_whose_fields_disagree_is_refused_on_load() {
         let mut reg = ViewGrantRegistry::new();
@@ -876,7 +876,7 @@ mod tests {
         reg.revoke(id, addr(2), 10).unwrap();
     }
 
-    /// P28-F19: the digest and the commitment share one tag table, and the
+    ///: the digest and the commitment share one tag table, and the
     /// bytes stay what they were on chain.
     #[test]
     fn confidential_proof_and_cipher_tags_are_frozen() {
@@ -945,7 +945,7 @@ mod tests {
         );
     }
 
-    /// P28-F16: chain id and nonce enter every signed digest.
+    ///: chain id and nonce enter every signed digest.
     #[test]
     fn signed_digests_bind_chain_id_and_nonce() {
         let issue = |c: u64, n: u64| {

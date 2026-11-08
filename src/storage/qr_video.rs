@@ -317,7 +317,7 @@ fn decode_png_grey(png: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
             return Err("png crc".into());
         }
         off = crc_end;
-        // BLG-0431: CRC-valid chunks still need a valid PNG grammar.
+        //: CRC-valid chunks still need a valid PNG grammar.
         if !saw_ihdr && chunk_kind != b"IHDR" {
             return Err("ihdr must be first".into());
         }

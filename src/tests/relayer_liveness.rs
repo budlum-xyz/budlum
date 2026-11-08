@@ -55,7 +55,7 @@ fn relayed_message(sender: Address, nonce: u64) -> CrossDomainMessage {
     })
 }
 
-/// BLG-0113 (P05-F06): the sender envelope is mandatory at the relayed
+///: the sender envelope is mandatory at the relayed
 /// door - a key whose address IS the sender signs the message id.
 fn signed_relayed_message(
     keypair: &crate::crypto::primitives::KeyPair,
@@ -95,7 +95,7 @@ fn active_relayer_can_submit_cross_domain_message() {
     assert_eq!(bc.state.message_registry.len(), 1);
 }
 
-/// BLG-0113 (P05-F06): an unsigned message - or one signed by somebody who
+///: an unsigned message - or one signed by somebody who
 /// is not the declared sender - is refused at the door even when the
 /// named sender IS an active relayer. That spoof is the finding.
 #[test]
@@ -533,7 +533,7 @@ fn liveness_slash_applied_through_blockchain_flow() {
         assert_eq!(bc.record_liveness_epoch(e, &present), 0);
     }
     assert_eq!(bc.record_liveness_epoch(k, &present), 1);
-    // A liveness fault is a timed jail (BLG-0087, decision B): the validator
+    // A liveness fault is a timed jail (decision B): the validator
     // leaves the active set but is not slashed, so its release is possible.
     let jailed = bc.state.validators.get(&v).expect("still a validator");
     assert!(jailed.jailed && !jailed.active && !jailed.slashed);

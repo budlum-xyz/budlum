@@ -7,7 +7,7 @@
 //! | site | order |
 //! |---|---|
 //! | `record_block` on a double sign | `seen_blocks` then `slashing_evidence` |
-//! | `record_block` on a first boundary sighting (P01-F04 parking) | `seen_blocks` then `pending_checkpoints` |
+//! | `record_block` on a first boundary sighting ( parking) | `seen_blocks` then `pending_checkpoints` |
 //! | `serialize_state` | `checkpoints` then `slashing_evidence` |
 //!
 //! Read those three as edges and they form a total order:
@@ -82,7 +82,7 @@ mod model {
             *evidence += 1;
         }
 
-        /// `record_block`, first-sighting branch at a boundary (P01-F04):
+        /// `record_block`, first-sighting branch at a boundary:
         /// `seen_blocks` is held across the parking write, which takes
         /// `pending_checkpoints`. The promotion into `checkpoints` happens
         /// later, with no nesting (see `note_finalized_height`).

@@ -64,11 +64,11 @@ const ATTRIBUTION_FILES: &[&str] = &["LICENSE.md", "NOTICE.md", "THIRD-PARTY.md"
 ///
 /// Measured on this checkout: the attribution register is `docs/NOTICE` - no
 /// extension, inside `docs/` - and the reading register is
-/// `docs/PROVENANCE_NOTES.md`. Neither matched the root-relative list above, so
+/// `docs/NOTICE`. Neither matched the root-relative list above, so
 /// a gate wired straight from the old file would have failed on the tree's own
 /// licence compliance, which is the one outcome its header says is worse than
 /// having no gate at all. The stems, not the paths, are the invariant.
-const ATTRIBUTION_STEMS: &[&str] = &["LICENSE", "NOTICE", "THIRD-PARTY", "PROVENANCE_NOTES"];
+const ATTRIBUTION_STEMS: &[&str] = &["LICENSE", "NOTICE", "THIRD-PARTY"];
 
 /// Audit mirrors: their entire content is a record of which external projects
 /// were read and what was taken from them. Exempting them is not tolerating a
@@ -82,15 +82,10 @@ fn is_exempt(rel: &str) -> bool {
     if rel == SELF_PATH || ATTRIBUTION_FILES.contains(&rel) {
         return true;
     }
-    if LOG_DIRS.iter().any(|d| rel.starts_with(*d)) {
+    if LOG_DIRS.iter.any(|d| rel.starts_with(*d)) {
         return true;
     }
-    let stem = rel
-        .rsplit('/')
-        .next()
-        .unwrap_or(rel)
-        .trim_end_matches(".md")
-        .trim_end_matches(".txt");
+    let stem = rel.rsplit('/').next.unwrap_or(rel).trim_end_matches(".md").trim_end_matches(".txt");
     ATTRIBUTION_STEMS.contains(&stem)
 }
 
@@ -125,15 +120,14 @@ const MAX_REPORTED: usize = 20;
 
 /// Is `path` skipped by extension?
 fn skipped_ext(path: &Path) -> bool {
-    path.extension()
-        .is_some_and(|e| SKIP_EXTS.contains(&e.to_string_lossy().to_ascii_lowercase().as_str()))
+    path.extension.is_some_and(|e| SKIP_EXTS.contains(&e.to_string_lossy.to_ascii_lowercase.as_str))
 }
 
 /// Files under `root`, sorted, so findings are reported in a stable order.
 fn sorted_walk(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
+    let mut out = Vec::new;
     walk_into(root, &mut out);
-    out.sort();
+    out.sort;
     out
 }
 
@@ -141,21 +135,21 @@ fn walk_into(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
+    for entry in entries.flatten {
+        let path = entry.path;
         // `file_type` rather than `metadata`: a symlink to a directory is not
         // followed, since following one can walk outside the repository or
         // loop forever.
-        let Ok(kind) = entry.file_type() else {
+        let Ok(kind) = entry.file_type else {
             continue;
         };
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if kind.is_dir() {
-            if !SKIP_DIRS.contains(&name_str.as_ref()) {
+        let name = entry.file_name;
+        let name_str = name.to_string_lossy;
+        if kind.is_dir {
+            if !SKIP_DIRS.contains(&name_str.as_ref) {
                 walk_into(&path, out);
             }
-        } else if kind.is_file() && !skipped_ext(&path) {
+        } else if kind.is_file && !skipped_ext(&path) {
             out.push(path);
         }
     }
@@ -175,25 +169,19 @@ fn contains_word(haystack_lower: &str, needle: &str) -> bool {
     let mut from = 0usize;
     while let Some(offset) = haystack_lower[from..].find(needle) {
         let at = from + offset;
-        let end = at + needle.len();
+        let end = at + needle.len;
         // Underscores are deliberately *not* word characters here. In Rust a
         // name leaks as `spawn_colibri_process` far more often than as a bare
         // word, and treating `_` as part of the word would let every
         // `snake_case` identifier through - which is the common case, not the
         // edge case. Alphanumerics still bind, so `jcodex` is not a `jcode`
         // hit and the list stays safe to grow.
-        let before_ok = haystack_lower[..at]
-            .chars()
-            .next_back()
-            .is_none_or(|c| !c.is_alphanumeric());
-        let after_ok = haystack_lower[end..]
-            .chars()
-            .next()
-            .is_none_or(|c| !c.is_alphanumeric());
+        let before_ok = haystack_lower[..at].chars.next_back.is_none_or(|c| !c.is_alphanumeric);
+        let after_ok = haystack_lower[end..].chars.next.is_none_or(|c| !c.is_alphanumeric);
         if before_ok && after_ok {
             return true;
         }
-        from = at + needle.len();
+        from = at + needle.len;
     }
     false
 }
@@ -202,35 +190,35 @@ fn contains_word(haystack_lower: &str, needle: &str) -> bool {
 /// `ColibriEngine`? The name must start a word and the next character must start
 /// a new capitalised word, so `jcodex` and `Jcodes` stay clear.
 fn contains_camel(line: &str, needle: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
-    let bytes = line.as_bytes();
+    let lower = line.to_ascii_lowercase;
+    let bytes = line.as_bytes;
     let mut from = 0usize;
     while let Some(offset) = lower[from..].find(needle) {
         let at = from + offset;
-        let end = at + needle.len();
-        let starts_word = at == 0 || !bytes[at - 1].is_ascii_alphanumeric();
+        let end = at + needle.len;
+        let starts_word = at == 0 || !bytes[at - 1].is_ascii_alphanumeric;
         let next_is_upper = bytes.get(end).is_some_and(u8::is_ascii_uppercase);
         if starts_word && next_is_upper {
             return true;
         }
-        from = at + needle.len();
+        from = at + needle.len;
     }
     false
 }
 
 /// Scan one file's text. Returns `(name, line number, trimmed line)` per hit.
 fn findings_in(rel: &str, text: &str) -> Vec<(&'static str, usize, String)> {
-    let mut out = Vec::new();
+    let mut out = Vec::new;
     if is_exempt(rel) {
         return out;
     }
-    for (line_no, line) in text.lines().enumerate() {
-        let lower = line.to_lowercase();
+    for (line_no, line) in text.lines.enumerate {
+        let lower = line.to_lowercase;
         for (name, _) in FORBIDDEN {
             if contains_word(&lower, name) || contains_camel(line, name) {
                 // Characters, not bytes: `String::truncate(120)` panics inside
                 // a multi-byte character.
-                let shown: String = line.trim().chars().take(120).collect();
+                let shown: String = line.trim.chars.take(120).collect;
                 out.push((*name, line_no + 1, shown));
             }
         }
@@ -240,10 +228,7 @@ fn findings_in(rel: &str, text: &str) -> Vec<(&'static str, usize, String)> {
 
 /// Why a name is forbidden, for the failure message.
 fn reason(name: &str) -> &'static str {
-    FORBIDDEN
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map_or("read during research", |(_, why)| *why)
+    FORBIDDEN.iter.find(|(n, _)| *n == name).map_or("read during research", |(_, why)| *why)
 }
 
 /// # Errors
@@ -251,7 +236,7 @@ fn reason(name: &str) -> &'static str {
 /// Returns the list of places a researched product is named.
 pub fn run(root: &Path) -> Result<String, String> {
     let mut scanned = 0usize;
-    let mut findings: Vec<(String, &'static str, usize, String)> = Vec::new();
+    let mut findings: Vec<(String, &'static str, usize, String)> = Vec::new;
 
     for path in sorted_walk(root) {
         let Ok(text) = std::fs::read_to_string(&path) else {
@@ -259,13 +244,9 @@ pub fn run(root: &Path) -> Result<String, String> {
             continue;
         };
         scanned += 1;
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
+        let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy.replace('\\', "/");
         for (name, line, text) in findings_in(&rel, &text) {
-            findings.push((rel.clone(), name, line, text));
+            findings.push((rel.clone, name, line, text));
         }
     }
 
@@ -278,20 +259,20 @@ pub fn run(root: &Path) -> Result<String, String> {
         ));
     }
 
-    if !findings.is_empty() {
+    if !findings.is_empty {
         let mut msg = format!(
             "{} place(s) name a product that was read for research:\n",
-            findings.len()
+            findings.len
         );
-        for (rel, name, line, text) in findings.iter().take(MAX_REPORTED) {
+        for (rel, name, line, text) in findings.iter.take(MAX_REPORTED) {
             let _ = writeln!(
                 msg,
                 "  {rel}:{line}: {text}\n    `{name}` is {}",
                 reason(name)
             );
         }
-        if findings.len() > MAX_REPORTED {
-            let _ = writeln!(msg, "  ... and {} more", findings.len() - MAX_REPORTED);
+        if findings.len > MAX_REPORTED {
+            let _ = writeln!(msg, "... and {} more", findings.len - MAX_REPORTED);
         }
         msg.push_str(
             "  Rename to what the thing does in our system rather than where the \
@@ -304,42 +285,42 @@ pub fn run(root: &Path) -> Result<String, String> {
     Ok(format!(
         "no researched product is named in {scanned} scanned files \
          ({} names checked)",
-        FORBIDDEN.len()
+        FORBIDDEN.len
     ))
 }
 
 /// # Errors
 ///
 /// Returns the first canary that did not behave.
-pub fn self_test() -> Result<String, String> {
+pub fn self_test -> Result<String, String> {
     // 1. A clean file passes.
-    if !findings_in("src/x.rs", "let engine = StreamingMoe;").is_empty() {
+    if !findings_in("src/x.rs", "let engine = StreamingMoe;").is_empty {
         return Err(String::from("canary 1: a clean line was reported"));
     }
 
     // 2. The name is caught.
-    if findings_in("src/x.rs", "    Colibri,").is_empty() {
+    if findings_in("src/x.rs", "    Colibri,").is_empty {
         return Err(String::from(
             "canary 2: an enum variant named after a researched product was not caught",
         ));
     }
 
     // 3. Case does not hide it.
-    if findings_in("src/x.rs", "// COLIBRI notes").is_empty() {
+    if findings_in("src/x.rs", "// COLIBRI notes").is_empty {
         return Err(String::from(
             "canary 3: an uppercase mention was not caught",
         ));
     }
 
     // 4. snake_case is how it really leaks.
-    if findings_in("src/x.rs", "fn spawn_colibri_process() {}").is_empty() {
+    if findings_in("src/x.rs", "fn spawn_colibri_process {}").is_empty {
         return Err(String::from(
             "canary 4: a snake_case identifier embedding the name was not caught",
         ));
     }
 
     // 5. A word that merely embeds a short name is not a hit.
-    if !findings_in("src/x.rs", "let decoded = jcodex_value;").is_empty() {
+    if !findings_in("src/x.rs", "let decoded = jcodex_value;").is_empty {
         return Err(String::from(
             "canary 5: `jcodex` was reported; the check must respect word boundaries \
              or it will misfire as the list grows",
@@ -347,7 +328,7 @@ pub fn self_test() -> Result<String, String> {
     }
 
     // 6. Attribution files are exempt: a licence may require the name.
-    if !findings_in("NOTICE.md", "Colibri, Apache-2.0").is_empty() {
+    if !findings_in("NOTICE.md", "Colibri, Apache-2.0").is_empty {
         return Err(String::from(
             "canary 6: NOTICE.md was scanned. A gate that forbids attribution \
              pushes the project toward a licence violation to stay green.",
@@ -355,12 +336,12 @@ pub fn self_test() -> Result<String, String> {
     }
 
     // 7. This file names what it forbids and must exempt itself.
-    if !findings_in(SELF_PATH, "    (\"colibri\", \"an on-device MoE engine\"),").is_empty() {
+    if !findings_in(SELF_PATH, "    (\"colibri\", \"an on-device MoE engine\"),").is_empty {
         return Err(String::from("canary 7: the gate reported its own list"));
     }
 
     // 8. Every other gate is still scanned, so the exemption is one file only.
-    if findings_in("xtask/gates/src/gates/other.rs", "// colibri").is_empty() {
+    if findings_in("xtask/gates/src/gates/other.rs", "// colibri").is_empty {
         return Err(String::from(
             "canary 8: the self-exemption leaked to another gate file",
         ));
@@ -369,7 +350,7 @@ pub fn self_test() -> Result<String, String> {
     // 9. The register moved and the rule followed it: `docs/NOTICE` is an
     // attribution file, not a leak. Without this the gate fails the tree's own
     // licence compliance and gets switched off, which is how gates die.
-    if !findings_in("docs/NOTICE", "JustVugg/colibri, Apache-2.0").is_empty() {
+    if !findings_in("docs/NOTICE", "JustVugg/colibri, Apache-2.0").is_empty {
         return Err(String::from(
             "canary 9: the attribution register under docs/ was scanned; the rule is \
              about product surface, not about complying with a licence",
@@ -379,7 +360,7 @@ pub fn self_test() -> Result<String, String> {
     // 10. And the exemption is exactly that narrow: a design doc naming a
     // researched product is still a finding, even in the directory the
     // exemption lives in.
-    if findings_in("docs/ARCHITECTURE.md", "the colibri runtime is reused").is_empty() {
+    if findings_in("docs/ARCHITECTURE.md", "the colibri runtime is reused").is_empty {
         return Err(String::from(
             "canary 10: a non-attribution file in docs/ passed; an exemption that \
              widens to a whole directory is a disabled gate with extra steps",
@@ -394,11 +375,11 @@ mod camel_tests {
     use super::*;
 
     #[test]
-    fn camel_case_use_is_found_and_a_wide_line_does_not_panic() {
-        assert!(!findings_in("src/x.rs", "struct ColibriEngine;").is_empty());
-        assert!(!findings_in("src/x.rs", "let m = JcodeMemory::new();").is_empty());
-        assert!(findings_in("src/x.rs", "let decoded = jcodex_value; let y = Jcodes;").is_empty());
+    fn camel_case_use_is_found_and_a_wide_line_does_not_panic {
+        assert!(!findings_in("src/x.rs", "struct ColibriEngine;").is_empty);
+        assert!(!findings_in("src/x.rs", "let m = JcodeMemory::new;").is_empty);
+        assert!(findings_in("src/x.rs", "let decoded = jcodex_value; let y = Jcodes;").is_empty);
         let wide = format!("a{} colibri", "\u{00f6}".repeat(70));
-        assert_eq!(findings_in("src/x.rs", &wide).len(), 1);
+        assert_eq!(findings_in("src/x.rs", &wide).len, 1);
     }
 }

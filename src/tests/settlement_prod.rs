@@ -2288,7 +2288,7 @@ mod zk_finality_real_proof {
         assert!(bc.submit_verified_domain_commitment(c, fproof).is_err());
     }
 
-    // BLG-0082 (P03-F25): the root folds are pure and deterministic, and the
+    //: the root folds are pure and deterministic, and the
     // empty fold is domain-separated. Pinned so the finding's "roots are pure
     // and deterministic" claim stays true under later refactors.
     #[test]
@@ -2299,7 +2299,7 @@ mod zk_finality_real_proof {
         assert_ne!(merkle_root(&[]), [0u8; 32]);
     }
 
-    // BLG-0082 (P03-F25): live and replay share one fold - `build_global_header`
+    //: live and replay share one fold - `build_global_header`
     // is the single function, and two builds over the same state agree.
     #[test]
     fn live_and_replay_share_the_global_header_fold() {

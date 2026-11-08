@@ -559,7 +559,7 @@ mod gateway_tests {
         }
     }
 
-    /// P30-F04: the expensive half of an open needs no table, so a handler
+    ///: the expensive half of an open needs no table, so a handler
     /// can run it before it takes the gateway lock. The prepared session is
     /// admitted later and is the same session an open would have made.
     #[test]

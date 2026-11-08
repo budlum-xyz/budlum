@@ -164,7 +164,7 @@ pub fn unpack_frame(stream_commitment: &[u8; 32], frame: &[u8]) -> Result<Drop, 
     if frame.len() < drop_end {
         return Err(FrameError::Truncated);
     }
-    // BLG-0431: the length-delimited object must consume the entire frame.
+    //: the length-delimited object must consume the entire frame.
     if frame.len() > drop_end {
         return Err(FrameError::TrailingBytes);
     }

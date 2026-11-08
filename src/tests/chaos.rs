@@ -1102,7 +1102,7 @@ mod chaos_tests {
         let mut tx = Transaction::new_with_fee(alice, bob, 100, 1, 0, vec![]);
         tx.sign(&alice_kp);
 
-        // The executor deliberately does not compare nonces (BLG-0296): the
+        // The executor deliberately does not compare nonces: the
         // ingest gate owns that invariant and `validate_and_add_block` runs
         // it before every application. A caller bypassing the gate owns the
         // nonce, so the honest replay check goes through the same door block

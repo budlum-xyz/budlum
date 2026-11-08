@@ -302,7 +302,7 @@ mod byzantine_settlement_tests {
 
     #[tokio::test]
     async fn state_update_from_a_non_committer_is_refused() {
-        // BLG-0286 (P18-F01): the freeze-the-victim path. A funded attacker
+        //: the freeze-the-victim path. A funded attacker
         // with no validator seat tries the exact move the finding names -
         // push the victim's nonce just under the ceiling, which the old
         // ceiling/monotonicity guards happily waved through.

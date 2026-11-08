@@ -183,7 +183,7 @@ impl FrameMux for RawFrameConcat {
             off = end;
             out.push(fr);
         }
-        // BLG-0431: reject appended data instead of decoding an alias.
+        //: reject appended data instead of decoding an alias.
         if off != blob.len() {
             return Err(CodecError::TrailingBytes);
         }
