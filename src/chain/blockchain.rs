@@ -1057,6 +1057,8 @@ impl Blockchain {
             bc.state.current_block_unix_secs = Self::block_timestamp_secs(last.timestamp);
             bc.state.current_block_entropy =
                 Self::block_context_entropy(&last.previous_hash, &last.vrf_output);
+            bc.consensus
+                .note_block_seen(&last.hash, crate::consensus::now_millis());
         }
 
         bc
@@ -4873,6 +4875,8 @@ impl Blockchain {
         // Made the producer's `liveness` root unreproducible by replay.
 
         self.chain.push(block.clone());
+        self.consensus
+            .note_block_seen(&block.hash, crate::consensus::now_millis());
         // Only what this block actually carried leaves the queues. Retaining
         // the rest is what makes a deferred proof survive a slot it did not
         // fit into: the queue is the only copy the node has once the gossip
@@ -5447,8 +5451,11 @@ impl Blockchain {
 
         // Counter and tx-type metrics must be read before `push` consumes the block.
         let applied_tx_count = block.transactions.len() as u64;
+        let committed_hash = block.hash.clone();
         self.emit_applied_tx_metrics(&block.transactions, ai_outcomes_before);
         self.chain.push(block);
+        self.consensus
+            .note_block_seen(&committed_hash, crate::consensus::now_millis());
 
         if let Some(last_block) = self.chain.last() {
             // Call record_block_with_chain first (chain-aware hooks like PoW difficulty adjustment)
@@ -5840,6 +5847,10 @@ impl Blockchain {
 
         self.chain = new_chain;
         self.state = new_state;
+        if let Some(tip) = self.chain.last() {
+            self.consensus
+                .note_block_seen(&tip.hash, crate::consensus::now_millis());
+        }
 
         // The DISK still holds FINALITY_CERT and
         // QC_BLOB at the reorged heights. Left behind, a later
@@ -6153,6 +6164,21 @@ impl Blockchain {
                 .value()
     }
 
+    fn expected_snapshot_state_root(&self, block: &Block) -> Result<String, String> {
+        if !block.state_root.is_empty() {
+            return Ok(block.state_root.clone());
+        }
+        if block.index == 0 {
+            let mut genesis_state = self.genesis_config.build_state();
+            genesis_state.execution_domain = self.consensus.domain_kind();
+            return Ok(genesis_state.calculate_state_root());
+        }
+        Err(format!(
+            "Snapshot target block at height {} carries an empty state root",
+            block.index
+        ))
+    }
+
     pub fn apply_state_snapshot(
         &mut self,
         snapshot: crate::chain::snapshot::StateSnapshot,
@@ -6254,16 +6280,16 @@ impl Blockchain {
             ));
         }
 
+        let expected_state_root = self.expected_snapshot_state_root(block)?;
         let mut snapshot_state = AccountState::from_snapshot(&snapshot);
         // Snapshot loading replaces the whole state; the domain is not part
         // of a snapshot (a peer's engine is not this node's), so re-stamp it
         // from the local engine before the state goes live.
         snapshot_state.execution_domain = self.consensus.domain_kind();
         let snapshot_state_root = snapshot_state.calculate_state_root();
-        if !block.state_root.is_empty() && snapshot_state_root != block.state_root {
+        if snapshot_state_root != expected_state_root {
             return Err(format!(
-                "Snapshot state root mismatch: expected {}, got {}",
-                block.state_root, snapshot_state_root
+                "Snapshot state root mismatch: expected {expected_state_root}, got {snapshot_state_root}"
             ));
         }
 
@@ -6332,6 +6358,18 @@ impl Blockchain {
             }
         }
 
+        if self.mainnet_requires_signed_remote_snapshot() && v2.genesis_hash.is_empty() {
+            return Err("Mainnet remote V2 snapshots require a non-empty genesis hash".into());
+        }
+        if !v2.genesis_hash.is_empty()
+            && self
+                .chain
+                .first()
+                .is_some_and(|genesis| genesis.hash != v2.genesis_hash)
+        {
+            return Err("V2 snapshot genesis hash mismatch".into());
+        }
+
         let Some(block) = self.chain.get(v2.height as usize) else {
             return Err("V2 snapshot height not in local chain".into());
         };
@@ -6339,13 +6377,13 @@ impl Blockchain {
             return Err("V2 snapshot block hash mismatch".into());
         }
 
+        let expected_state_root = self.expected_snapshot_state_root(block)?;
         let mut v2_state = AccountState::from_snapshot_v2(v2);
         v2_state.execution_domain = self.consensus.domain_kind();
         let state_root = v2_state.calculate_state_root();
-        if !block.state_root.is_empty() && state_root != block.state_root {
+        if state_root != expected_state_root {
             return Err(format!(
-                "V2 snapshot state root mismatch: expected {}, got {}",
-                block.state_root, state_root
+                "V2 snapshot state root mismatch: expected {expected_state_root}, got {state_root}"
             ));
         }
 
@@ -9924,6 +9962,52 @@ mod tests {
         assert_eq!(bc.next_finality_checkpoint(), interval * 2);
         bc.finalized_height = interval + 1;
         assert_eq!(bc.next_finality_checkpoint(), interval * 2);
+    }
+
+    #[test]
+    fn apply_snapshot_rejects_tampered_height_zero_state_and_wrong_genesis_hash() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let restored_account = Address::from([7u8; 32]);
+        let genesis = GenesisConfig::new(45262).with_allocation(restored_account, 250);
+        let mut bc = Blockchain::new_with_genesis(consensus, None, 45262, None, Some(genesis));
+        // Even if a legacy genesis header in memory lacked an explicit state_root,
+        // restoring a snapshot must still bind to the canonical genesis state.
+        bc.chain[0].state_root.clear();
+        let genesis_hash = bc.chain[0].hash.clone();
+
+        let mut forged_state = bc.state.clone();
+        forged_state.add_balance(&Address::from([0xee; 32]), 9_999);
+        let forged_v1 = crate::chain::snapshot::StateSnapshot::from_state(
+            0,
+            genesis_hash.clone(),
+            45262,
+            &forged_state,
+            0,
+            genesis_hash.clone(),
+        );
+        let err = bc
+            .apply_state_snapshot(forged_v1)
+            .expect_err("forged height-0 V1 snapshot must fail state root check");
+        assert!(err.contains("state root mismatch"), "got: {err}");
+
+        let wrong_genesis_v2 = crate::chain::snapshot::StateSnapshotV2::from_state(
+            &bc.state,
+            crate::chain::snapshot::StateSnapshotV2Params {
+                height: 0,
+                block_hash: genesis_hash.clone(),
+                genesis_hash: "ff".repeat(32),
+                chain_id: 45262,
+                finalized_height: 0,
+                finalized_hash: genesis_hash,
+                finality_certificates: vec![],
+            },
+        );
+        let mut carrier = bc.get_state_snapshot(0).unwrap();
+        carrier.snapshot_hash = format!("__v2__{}", hex::encode(wrong_genesis_v2.to_bytes()));
+        let err = bc
+            .apply_state_snapshot(carrier)
+            .expect_err("V2 snapshot with mismatched genesis_hash must fail");
+        assert!(err.contains("genesis hash mismatch"), "got: {err}");
     }
 
     #[test]

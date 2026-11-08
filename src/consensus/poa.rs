@@ -1,6 +1,6 @@
 use super::{
-    affordable_leader_round, now_millis, ConsensusEngine, ConsensusError, MAX_LEADER_ROUNDS,
-    MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS,
+    affordable_leader_round, now_millis, ConsensusEngine, ConsensusError, RoundPriceBook,
+    MAX_LEADER_ROUNDS, MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS,
 };
 use crate::core::account::{AccountState, Validator};
 use crate::core::address::Address;
@@ -95,6 +95,7 @@ pub struct PoAEngine {
     /// same authority, when its key set holds an ML-DSA-65 key. Blocks are
     /// then signed in the composite form, the only one mainnet admits.
     composite: Option<Arc<crate::crypto::composite::CompositeKeypair>>,
+    round_prices: RoundPriceBook,
 }
 
 impl PoAEngine {
@@ -105,6 +106,7 @@ impl PoAEngine {
             signer: None,
             authorities: Vec::new(),
             composite: None,
+            round_prices: RoundPriceBook::new(),
         }
     }
 
@@ -130,6 +132,7 @@ impl PoAEngine {
             signer: Some(signer),
             authorities: Vec::new(),
             composite: None,
+            round_prices: RoundPriceBook::new(),
         }
     }
     pub fn with_config(
@@ -143,6 +146,7 @@ impl PoAEngine {
             signer: None,
             authorities: validators,
             composite: None,
+            round_prices: RoundPriceBook::new(),
         }
     }
 
@@ -350,7 +354,8 @@ impl PoAEngine {
         // validation enforces, so a producer can never claim a round this node
         // would not itself accept.
         let round_cap = parent_timestamp.map_or(MAX_LEADER_ROUNDS, |prev_ts| {
-            affordable_leader_round(prev_ts, now_millis())
+            self.round_prices
+                .claimable_round_for(&block.previous_hash, prev_ts, now_millis())
         });
 
         for round in 0..=round_cap {
@@ -588,13 +593,15 @@ impl ConsensusEngine for PoAEngine {
                     // node's clock with the same function the producer clamps
                     // itself with, so an authority cannot publish a valid block
                     // for a round another authority leads.
-                    // Priced from the parent's stamp, which every node
-                    // holding the parent reads the same way: a node-local
-                    // sighting put the same claim on different sides of the
-                    // boundary wherever nodes booted or synced seconds apart,
-                    // and a claim refused here is a block refused for good.
-                    // A future stamp buys no round, on any node.
-                    let affordable = affordable_leader_round(prev.timestamp, now_millis());
+                    // Priced from the shared parent stamp while within the
+                    // active ladder span, switching to local commit time once
+                    // a parent lags wall time beyond `ROUND_LADDER_SPAN_MS` so
+                    // schedule lag cannot unlock rounds 1..=16 at once (CWE-807).
+                    let affordable = affordable_leader_round(
+                        prev.timestamp,
+                        self.round_prices.seen_at(&prev.hash),
+                        now_millis(),
+                    );
                     if round > affordable {
                         return Err(ConsensusError(format!(
                             "PoA leader round {round} claimed before it elapsed: only round \
@@ -641,6 +648,9 @@ impl ConsensusEngine for PoAEngine {
             ));
         }
         Ok(())
+    }
+    fn note_block_seen(&self, block_hash: &str, at_ms: u128) {
+        self.round_prices.note_tip_block(block_hash, at_ms);
     }
     fn consensus_type(&self) -> &'static str {
         "PoA"
