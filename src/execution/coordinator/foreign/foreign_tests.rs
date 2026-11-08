@@ -1,6 +1,6 @@
 use super::aptos::{
     aptos_ed25519_address, move_alias_scheme_is_disjoint, sign_aptos_ed25519_tx, AptosPayloadKind,
-    BUDLUM_APTOS_CHAIN_ID,
+    BUDLUM_APTOS_CHAIN_ID, PINNED_APTOS_SCHEME_BYTES,
 };
 use super::cosmos::{
     ripemd160, sign_cosmos_tx_direct, CosmosEnvelopeError, BUDLUM_COSMOS_CHAIN_ID,
@@ -561,4 +561,22 @@ fn move_alias_scheme_byte_is_unused() {
     assert!(move_alias_scheme_is_disjoint());
     let sample_ed = aptos_ed25519_address(&[0x44u8; 32]);
     assert_ne!(sample_ed, [0u8; 32]);
+
+    let pinned: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../tests/vectors/aptos/pinned_scheme_ids.json"
+    ))
+    .expect("the pinned Aptos scheme vector is JSON");
+    assert_eq!(
+        pinned["commit"].as_str(),
+        Some("81d89f428fe8e4b69d53b4916993e9a930afc37c"),
+    );
+    let expected: Vec<u8> = pinned["scheme_ids"]
+        .as_array()
+        .expect("scheme id list")
+        .iter()
+        .map(|id| u8::try_from(id.as_u64().expect("integer scheme id")).expect("u8 scheme id"))
+        .collect();
+    assert_eq!(PINNED_APTOS_SCHEME_BYTES, expected.as_slice());
+    assert!(!expected.contains(&MOVE_ALIAS_SCHEME_BYTE));
+    assert_eq!(pinned["reserved_byte_is_used"], serde_json::json!(false));
 }

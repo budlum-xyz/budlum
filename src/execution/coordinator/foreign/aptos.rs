@@ -22,13 +22,20 @@ pub const BUDLUM_APTOS_CHAIN_ID: u8 = 205;
 /// - `0x01`: `MultiEd25519`
 /// - `0x02`: `SingleKey` (`AnyPublicKey`: Ed25519 / Secp256k1 / Secp256r1 / Keyless)
 /// - `0x03`: `MultiKey`
-/// - `0xFC`: `DeriveObjectAddressFromGuid`
-/// - `0xFD`: `DeriveObjectAddressFromSeed`
-/// - `0xFE`: `DeriveResourceAccountAddress`
+/// - `0x04`: `Abstraction`
+/// - `0x05`: `DeriveDomainAbstraction`
+/// - `0xFA`: `NoScheme`
+/// - `0xFB`: `DeriveAuid`
+/// - `0xFC`: `DeriveObjectAddressFromObject`
+/// - `0xFD`: `DeriveObjectAddressFromGuid`
+/// - `0xFE`: `DeriveObjectAddressFromSeed`
+/// - `0xFF`: `DeriveResourceAccountAddress`
 ///
 /// `0xBD` (`MOVE_ALIAS_SCHEME_BYTE`) is outside this table so no Aptos account
 /// authentication key can collide with a native Budlum Move alias.
-pub const PINNED_APTOS_SCHEME_BYTES: &[u8] = &[0x00, 0x01, 0x02, 0x03, 0xFC, 0xFD, 0xFE];
+pub const PINNED_APTOS_SCHEME_BYTES: &[u8] = &[
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF,
+];
 
 /// Returns `true` if `scheme` is used by the pinned Aptos authentication-key table.
 #[must_use]
