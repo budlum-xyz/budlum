@@ -1,0 +1,180 @@
+name: Conformance Nightly
+
+# Execute compatibility suites and compile the standalone settlement endpoint
+# workspaces so cross-environment interfaces are checked by CI.
+
+on:
+  schedule:
+    - cron: "41 2 * * *"
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "contracts/object-layer/**"
+      - "crates/uel-abi/**"
+      - "execution/**"
+      - ".github/workflows/conformance-nightly.yml"
+
+concurrency:
+  group: conformance-nightly-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  uel-conformance:
+    name: UEL Conformance & Calibration (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: execution/conformance
+          shared-key: uel-conformance-${{ matrix.arch }}
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Run conformance suites and gas calibration
+        shell: bash
+        env:
+          CONFORMANCE_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          cargo test --release --manifest-path execution/conformance/Cargo.toml -- --nocapture 2>&1 | tee "conformance-${CONFORMANCE_ARCH}.txt"
+          grep -oE "UEL_EXECUTION_ROOT=[0-9a-f]{64}" "conformance-${CONFORMANCE_ARCH}.txt" | tail -1 | cut -d= -f2 > "uel-root-${CONFORMANCE_ARCH}.hex"
+          test -s "uel-root-${CONFORMANCE_ARCH}.hex"
+          ROOT=$(cat "uel-root-${CONFORMANCE_ARCH}.hex")
+          echo "UEL_EXECUTION_ROOT (${CONFORMANCE_ARCH}): ${ROOT}"
+          test "${#ROOT}" -eq 64
+      - name: Measure parallel block execution timing
+        env:
+          CONFORMANCE_ARCH: ${{ matrix.arch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --release --lib execution::coordinator::scheduler::tests:: -- --nocapture | tee "scheduler-${CONFORMANCE_ARCH}.log"
+          sed -n 's/^PARALLEL_BLOCK_TIMING_JSON=//p' "scheduler-${CONFORMANCE_ARCH}.log" | head -n1 > "parallel-block-timing-${CONFORMANCE_ARCH}.json"
+          test -s "parallel-block-timing-${CONFORMANCE_ARCH}.json"
+      - name: Upload execution_root digest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: uel-root-${{ matrix.arch }}
+          path: |
+            uel-root-${{ matrix.arch }}.hex
+            parallel-block-timing-${{ matrix.arch }}.json
+          if-no-files-found: error
+          retention-days: 30
+
+  uel-cross-arch-root-compare:
+    name: UEL Cross-Arch Root Compare (x86_64 = aarch64)
+    needs: uel-conformance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Collect execution_root artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: uel-root-*
+          merge-multiple: true
+          path: uel-roots
+      - name: Byte-equality gate (uel_cross_arch_roots_equal)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -l uel-roots/
+          for arch in x86_64 aarch64; do
+            if [ ! -s "uel-roots/uel-root-${arch}.hex" ]; then
+              echo "FAIL: missing execution_root artifact for ${arch}"
+              exit 1
+            fi
+          done
+          RX=$(cat uel-roots/uel-root-x86_64.hex)
+          RA=$(cat uel-roots/uel-root-aarch64.hex)
+          echo "x86_64:  ${RX}"
+          echo "aarch64: ${RA}"
+          if [ "${RX}" != "${RA}" ]; then
+            echo "FAIL: UEL execution_root diverges between x86_64 and aarch64!"
+            exit 1
+          fi
+          echo "OK: UEL execution_root is byte-for-byte identical on x86_64 and aarch64."
+
+  cosmwasm-endpoint:
+    name: CosmWasm settlement endpoint compiles
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: contracts/object-layer/cosmwasm
+          shared-key: conformance-cosmwasm
+      - name: Check the CosmWasm endpoint
+        run: |
+          set -euo pipefail
+          cargo check --manifest-path contracts/object-layer/cosmwasm/Cargo.toml --all-targets
+      - name: The endpoint's interface has not drifted
+        run: |
+          set -euo pipefail
+          # The contract must still export the entry points the object layer
+          # calls. A check that only compiles cannot see an entry point that
+          # was renamed, and a renamed entry point is a runtime failure on the
+          # other side of a cross-environment call.
+          for entry in instantiate execute; do
+            if ! grep -rq "fn ${entry}" contracts/object-layer/cosmwasm/src; then
+              echo "::error::the CosmWasm settlement endpoint no longer exports \`${entry}\`"
+              exit 1
+            fi
+          done
+
+  svm-endpoint:
+    name: SVM settlement endpoint compiles
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: contracts/object-layer/svm
+          shared-key: conformance-svm
+      - name: Check the SVM endpoint
+        run: |
+          set -euo pipefail
+          cargo check --manifest-path contracts/object-layer/svm/Cargo.toml --all-targets
+      - name: The endpoint's entry point is still the declared program entry
+        run: |
+          set -euo pipefail
+          if ! grep -rq "entrypoint" contracts/object-layer/svm/src; then
+            echo "::error::the SVM settlement endpoint declares no program entry point"
+            exit 1
+          fi
