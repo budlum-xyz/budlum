@@ -17,7 +17,7 @@
 use budlum_core::core::address::Address;
 use budlum_core::core::transaction::{Transaction, TransactionType};
 use budlum_core::crypto::primitives::KeyPair;
-use budlum_core::developer_os::{DeveloperOsManifest, ProofFixtureStatus};
+use budlum_core::project_manifest::{ProjectManifest, ProofFixtureStatus};
 use clap::{Parser, Subcommand};
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -239,7 +239,7 @@ enum ValidatorAction {
         #[arg(long, required = true)]
         stake_bud: u64,
         /// Fee for each of the two transactions (base units; defaults to the network base fee).
-        #[arg(long)]
+        #[arg(long, value_parser = parse_positive_fee)]
         fee: Option<u64>,
     },
     /// Register this validator's Filiz Chain (`RegisterFiliz`). The node
@@ -253,7 +253,7 @@ enum ValidatorAction {
         #[arg(long, required = true)]
         seed_file: std::path::PathBuf,
         /// Fee (base units; defaults to the network base fee).
-        #[arg(long)]
+        #[arg(long, value_parser = parse_positive_fee)]
         fee: Option<u64>,
     },
     /// Set the commission this validator takes from its delegators'
@@ -267,7 +267,7 @@ enum ValidatorAction {
         #[arg(long, required = true)]
         rate_ppm: u32,
         /// Fee (base units; defaults to the network base fee).
-        #[arg(long)]
+        #[arg(long, value_parser = parse_positive_fee)]
         fee: Option<u64>,
     },
 }
@@ -317,7 +317,7 @@ struct V5Signer {
     #[arg(long)]
     password_file: Option<std::path::PathBuf>,
     /// Fee (base units; defaults to the network base fee via `bud_estimateGas` / `bud_gasPrice`).
-    #[arg(long)]
+    #[arg(long, value_parser = parse_positive_fee)]
     fee: Option<u64>,
 }
 
@@ -639,7 +639,7 @@ enum TxAction {
         #[arg(long)]
         priv_key_file: Option<std::path::PathBuf>,
         /// Transaction fee (base units; defaults to the network base fee via RPC when omitted).
-        #[arg(long)]
+        #[arg(long, value_parser = parse_positive_fee)]
         fee: Option<u64>,
         /// Transaction nonce (fetched from the node with `bud_getNonce` if omitted).
         #[arg(long)]
@@ -891,6 +891,21 @@ fn node_chain_id(rpc_url: &str) -> Result<u64, String> {
     chain_id_binding(node, requested)
 }
 
+/// Reject zero as an explicit fee. Zero remains the unsigned transaction
+/// template's sentinel for a fee that must still be resolved from the network.
+fn parse_positive_fee(value: &str) -> Result<u64, std::io::Error> {
+    let fee = value.parse::<u64>().map_err(|error| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
+    })?;
+    if fee == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "an explicit fee must be greater than zero",
+        ));
+    }
+    Ok(fee)
+}
+
 /// Query the node's live fee floor when `--fee` is omitted.
 ///
 /// Tries `bud_estimateGas` first when a draft transaction is available so
@@ -902,6 +917,9 @@ fn resolve_network_fee(
     draft: Option<&Transaction>,
 ) -> Result<u64, String> {
     if let Some(fee) = explicit_fee {
+        if fee == 0 {
+            return Err(String::from("an explicit fee must be greater than zero"));
+        }
         return Ok(fee);
     }
     if let Some(tx) = draft {
@@ -1107,9 +1125,9 @@ fn parse_digest(field: &str, hex_str: &str) -> Result<[u8; 32], String> {
 /// computed for a manifest that does not pass `validate`. Otherwise a manifest
 /// carrying an invented compiler profile or a zero source hash would also produce
 /// a smooth id, indistinguishable from a real one.
-fn build_manifest(name: &str, source_hash: &str) -> Result<DeveloperOsManifest, String> {
+fn build_manifest(name: &str, source_hash: &str) -> Result<ProjectManifest, String> {
     let digest = parse_digest("--source-hash", source_hash)?;
-    let manifest = DeveloperOsManifest::local_standard(name, digest);
+    let manifest = ProjectManifest::local_standard(name, digest);
     manifest
         .validate()
         .map_err(|e| format!("manifest refused: {e:?}"))?;
@@ -2726,5 +2744,13 @@ mod tests {
             777
         );
         server.join().expect("mock RPC thread");
+    }
+
+    #[test]
+    fn cli_explicit_zero_fee_is_refused_without_contacting_the_network() {
+        let err = parse_positive_fee("0").expect_err("zero must not be accepted as a template");
+        assert!(err.to_string().contains("greater than zero"));
+        let draft = build_transfer(Address::zero(), Address::zero(), 100, 0, 0, 45261);
+        assert!(resolve_network_fee("http://127.0.0.1:1", Some(0), Some(&draft)).is_err());
     }
 }

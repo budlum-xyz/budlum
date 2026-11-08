@@ -24,7 +24,7 @@ pub mod cross_domain;
 pub mod crypto;
 pub mod data_market;
 pub mod deed;
-pub mod developer_os;
+pub mod project_manifest;
 pub mod domain;
 pub mod education_domain;
 pub mod error;

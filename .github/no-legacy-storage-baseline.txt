@@ -22,7 +22,7 @@ src/chain/storage_economics_tests.rs
 src/chain/storage_maintenance.rs
 src/core/account.rs
 src/core/transaction.rs
-src/developer_os.rs
+src/project_manifest.rs
 src/domain/deal_open.rs
 src/domain/mod.rs
 src/domain/storage_deal.rs

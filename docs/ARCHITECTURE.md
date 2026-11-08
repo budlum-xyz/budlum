@@ -50,7 +50,7 @@
 - [40. SocialFi NFT lifecycle](#40-socialfi-nft-lifecycle)
 - [41. budlumxyz app registry](#41-budlumxyz-app-registry)
 - [42. Mempool internals](#42-mempool-internals)
-- [43. Developer OS / SDK architecture](#43-developer-os--sdk-architecture)
+- [43. Project Manifest / SDK architecture](#43-project-manifest--sdk-architecture)
 - [44. Gateway: Atlas + Passport evidence](#44-gateway-atlas--passport-evidence)
 - [45. Settlement commitment tree](#45-settlement-commitment-tree)
 - [46. Prover market: proof verification](#46-prover-market-proof-verification)
@@ -1386,11 +1386,11 @@ flowchart TD
   Select --> Expire[Stale tx removed after N blocks]
 ```
 
-## 43. Developer OS / SDK architecture
+## 43. Project Manifest / SDK architecture
 
 ```mermaid
 flowchart LR
-  Manifest[DeveloperOsManifest deterministic] --> Project["Project ID + labels"]
+  Manifest[ProjectManifest deterministic] --> Project["Project ID + labels"]
   Project --> DevNet[Local devnet topology]
   Project --> BudL[BudL package fixtures]
   Project --> Proof[Proof fixtures]

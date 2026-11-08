@@ -26,8 +26,8 @@
 //! copy standing next to the real one only misleads.
 //!
 //! `fixture.rs` went too: the `ProofFixture` it produced carried the same name
-//! as the verified manifest record in `developer_os.rs` while meaning something
-//! different. One type now lives, in `developer_os.rs`.
+//! as the verified manifest record in `project_manifest.rs` while meaning something
+//! different. One type now lives, in `project_manifest.rs`.
 //!
 //! # What remains
 //!
