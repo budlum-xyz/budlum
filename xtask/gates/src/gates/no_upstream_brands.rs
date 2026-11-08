@@ -64,11 +64,11 @@ const ATTRIBUTION_FILES: &[&str] = &["LICENSE.md", "NOTICE.md", "THIRD-PARTY.md"
 ///
 /// Measured on this checkout: the attribution register is `docs/NOTICE` - no
 /// extension, inside `docs/` - and the reading register is
-/// `docs/PROVENANCE_NOTES.md`. Neither matched the root-relative list above, so
+/// a per-module notice file. Neither matched the root-relative list above, so
 /// a gate wired straight from the old file would have failed on the tree's own
 /// licence compliance, which is the one outcome its header says is worse than
 /// having no gate at all. The stems, not the paths, are the invariant.
-const ATTRIBUTION_STEMS: &[&str] = &["LICENSE", "NOTICE", "THIRD-PARTY", "PROVENANCE_NOTES"];
+const ATTRIBUTION_STEMS: &[&str] = &["LICENSE", "NOTICE", "THIRD-PARTY"];
 
 /// Audit mirrors: their entire content is a record of which external projects
 /// were read and what was taken from them. Exempting them is not tolerating a
