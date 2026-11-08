@@ -248,3 +248,17 @@ fn bud3_source_shapes_match_the_formatter() {
         "the state-root assertion is not rustfmt-shaped"
     );
 }
+
+/// The Android source level, build plugin and runner toolchain must stay compatible.
+#[test]
+fn android_compile_sdk_uses_a_compatible_toolchain() {
+    let app = read("mobile/android/app/build.gradle.kts");
+    assert!(app.contains("compileSdk = 36"));
+    let plugins = read("mobile/android/build.gradle.kts");
+    assert!(plugins.contains("id(\"com.android.application\") version \"8.9.1\""));
+    let workflow = read(".github/workflows/mobile.yml");
+    assert_eq!(workflow.matches("gradle-version: \"8.11.1\"").count(), 2);
+    assert!(workflow.contains("android-gradle:"));
+    assert!(workflow.contains("gradle assembleDebug --no-daemon"));
+    assert!(workflow.contains("gradle testDebugUnitTest --no-daemon"));
+}
