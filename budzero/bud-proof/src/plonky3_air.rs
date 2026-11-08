@@ -1709,6 +1709,17 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 .assert_zero(cur[COL_INIT_ROOT_0 + j].into() - public_inputs[10 + j].into());
         }
 
+        // (1d) Limbs 4..7 of `initial_state_root` (bytes 16..32) carry no commitment:
+        // the memory image takes limbs 0 and 1, the register image limbs 2 and 3. They
+        // were compared with a column the prover fills from the public input itself, so
+        // any value verified as free data. Pinned to zero, which is what every honest
+        // caller (`initial_state_root_of`) already supplies.
+        for j in 4..8 {
+            builder
+                .when_first_row()
+                .assert_zero(cur[COL_INIT_ROOT_0 + j].into());
+        }
+
         // (2) final_state_root: last real row (cpu_active=1, is_halt=1),
         //     COL_FINAL_ROOT_0..7 == public[18..26].
         for j in 0..8 {
@@ -1919,6 +1930,17 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 .when(cpu_active.clone())
                 .assert_zero(cur[COL_EXIT_CODE].into() - expected_exit);
         }
+
+        // (6b) A proven execution is a clean halt: `exit_code` is zero. The column above
+        // was only compared with the public input the prover chose, so a clean run could
+        // be proven as exit code 1 (and the reverse for a forged one). A failing run
+        // cannot be proven at all today (its synthetic Halt row disagrees with
+        // the program lookup); when that is fixed the exit code must be tied to that
+        // row, and this constraint becomes the "success" arm of it.
+        builder
+            .when(is_halt.clone())
+            .when(cpu_active.clone())
+            .assert_zero(cur[COL_EXIT_CODE]);
 
         // (7) chain_id: first row, COL_CHAIN_ID == public[0] (low 32 bits)
         {
