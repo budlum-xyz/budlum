@@ -14,6 +14,7 @@ fn run_bench(account_count: usize, updates: usize, blocks: usize) {
                 public_key: addr,
                 balance: 1000,
                 nonce: 0,
+                frac_attos: 0,
             },
         );
     }
