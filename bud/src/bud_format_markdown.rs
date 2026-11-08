@@ -1,10 +1,10 @@
 //! B.U.D. 2.0 - markdown / AI file compression (2026-08-16)
 //!
 //! Scope: structural compression of markdown/text documents.
-//! Bulgular:
+//! Measurements:
 //!   - HTML -> markdown: 87.5-90 percent token reduction (web2md/Fern measurement) - md is the most efficient
 //!     human-readable format for an LLM.
-//!   - JSON → Markdown tablo: token %20-40 (reinforcementcoding).
+//!   - JSON to Markdown table: 20-40 percent token reduction.
 //!   - llms.txt / llms-full.txt: AI agents fetch the md document in a single request (Fern).
 //!   - Markdown is the compressed form of HTML (structure is kept, tags go away).
 //!
