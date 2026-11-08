@@ -869,7 +869,7 @@ impl ConsensusEngine for PoSEngine {
                         let now_ms = now_millis();
                         let affordable = affordable_leader_round(
                             prev.timestamp,
-                            Some(self.round_prices.chain_seen_at(chain, prev, now_ms)),
+                            self.round_prices.chain_seen_at(chain, now_ms),
                             now_ms,
                         );
                         if round > affordable {
