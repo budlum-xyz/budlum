@@ -234,3 +234,9 @@ review. Corrections without their required executed test remain open.
 | Finding | Severity | State | Evidence and correction |
 |---|---|---|---|
 | BLG-367 | Medium | Open; locally corrected, pinned gate CI pending | The directive exclusion used `symlink_metadata(...).is_ok()`, so permission, `ENOTDIR` and other metadata errors were treated as absence instead of failing closed. `require_directive_absent` now accepts only `NotFound`, rejects every present file type and returns other metadata errors. A non-directory-root canary covers the error branch; the expected count is 67. No Rust runner was available. |
+
+## Concept-pattern boundary follow-up
+
+| Finding | Severity | State | Evidence and correction |
+|---|---|---|---|
+| BLG-368 | Medium | Open; locally corrected, pinned concept-gate CI pending | The proposed unbounded `(?i)lubot` pattern also matches the repository owner name `lubothebook`, creating false naming matches and potentially inflating the ratchet with unrelated URLs and metadata. The current map uses `(?i)\blubot\b`; the source-wide pattern was not restored. No Rust gate runner was available. |
