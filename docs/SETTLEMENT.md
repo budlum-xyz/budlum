@@ -26,10 +26,10 @@ that the message says the specific thing it needs: the intent it executed,
 the payout an application names, or the call a fulfilment made. A real but
 unrelated anchored event settles nothing.
 
-## Graft
+## Remote App Binding (`app_binding`)
 
-`SettlementTx::Graft` is the in-block side of Graft; `docs/GRAFT.md` is the
-integrator guide. In short:
+In-block settlement transactions implement remote app binding (`docs/APP_BINDING.md`
+is the integrator guide; closed on testnet `45261`, open on devnet `45262`). In short:
 
 - `Register` is permissionless and idempotent and names no owner.
 - `Claim` sets the owner from an anchored claim event of the application.
@@ -40,7 +40,8 @@ integrator guide. In short:
 The registry, the payment window, open intents, domain executors and the
 claim replay set are part of the settlement root and of the global header
 (`graft_root`, V7). `bud_getGraftApplication`, `bud_graftPaymentProof` and the
-Graft fields of `bud_getSettlementInfo` are read-only.
+remote-app-binding fields of `bud_getSettlementInfo` are read-only; these
+legacy wire identifiers remain unchanged for compatibility.
 
 ### Relayer intent awards
 
