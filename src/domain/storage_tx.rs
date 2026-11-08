@@ -917,65 +917,14 @@ fn declare_self_host_policy(
 }
 
 fn register_manifest(
-    state: &mut AccountState,
-    sender: &Address,
-    manifest: &ContentManifest,
+    _state: &mut AccountState,
+    _sender: &Address,
+    _manifest: &ContentManifest,
 ) -> Result<(), StorageTxError> {
-    // The id is re-derived from the contents, so a manifest whose id does not
-    // match what it carries never reaches the registry. The signing preimage
-    // commits the whole manifest as well.
-    manifest
-        .validate_untrusted()
-        .map_err(StorageTxError::InvalidManifest)?;
-    // A codeword manifest has to carry its column commitments. The coding
-    // audit proves possession against those roots; without them an answer is
-    // checked for internal consistency alone, which a column of *some*
-    // codeword satisfies - so an operator storing nothing passes every audit
-    // of it. Manifests written before the field exist and keep their older
-    // meaning, but none of them can be registered now: the audit's guarantee
-    // is only as strong as what the manifest committed to.
-    if manifest.erasure.n > manifest.erasure.k {
-        let parity = manifest.erasure.parity_count() as usize;
-        if manifest.column_roots.len() != parity {
-            return Err(StorageTxError::InvalidManifest(format!(
-                "a codeword manifest must commit {parity} column roots, got {}",
-                manifest.column_roots.len()
-            )));
-        }
-    }
-    if manifest.owner != *sender {
-        return Err(StorageTxError::OwnerIsNotSender {
-            owner: manifest.owner,
-            sender: *sender,
-        });
-    }
-    if let Some(asset_owner) = state.marketplace.bound_asset_owner(&manifest.manifest_id) {
-        if asset_owner != *sender {
-            return Err(StorageTxError::OwnerIsNotSender {
-                owner: asset_owner,
-                sender: *sender,
-            });
-        }
-    }
-    if state.storage_registry.is_registered(&manifest.manifest_id) {
-        return Err(StorageTxError::AlreadyRegistered);
-    }
-    if matches!(manifest.source, crate::storage::ContentSource::Generated(_)) {
-        return Err(StorageTxError::GeneratedRegistrationNotPriced);
-    }
-    if matches!(
-        manifest.encryption,
-        crate::storage::ContentEncryption::Plaintext
-    ) {
-        state
-            .marketplace
-            .check_content_may_be_public(&manifest.manifest_id)
-            .map_err(StorageTxError::PaidContentAsPlaintext)?;
-    }
-    state
-        .storage_registry
-        .register_manifest_with_source(manifest)
-        .map_err(|e| StorageTxError::Refused(e.to_string()))
+    // Legacy content registration is closed; B.U.D. 3.0 uses StorageTxV3.
+    Err(StorageTxError::Refused(
+        StorageError::Bud3NotReady.to_string(),
+    ))
 }
 
 #[cfg(test)]
@@ -1008,86 +957,27 @@ mod tests {
     }
 
     #[test]
-    fn the_owner_registers_its_manifest() {
+    fn content_registration_refused_until_bud3_ready() {
         let mut state = AccountState::new();
         let m = manifest_owned_by(owner());
-        execute_storage_tx(
+        let err = execute_storage_tx(
             &mut state,
             &ctx(owner()),
-            &StorageTx::RegisterManifest {
-                manifest: m.clone(),
-            },
+            &StorageTx::RegisterManifest { manifest: m },
         )
-        .expect("the owner registers");
-        assert_eq!(
-            state.storage_registry.get_manifest(&m.manifest_id),
-            Some(&m)
+        .unwrap_err();
+        assert!(
+            matches!(err, StorageTxError::Refused(ref msg) if msg.contains("B.U.D. 3.0")),
+            "expected Bud3NotReady refusal, got {err:?}"
         );
-    }
-
-    #[test]
-    fn a_signer_cannot_register_content_in_someone_elses_name() {
-        let mut state = AccountState::new();
-        let m = manifest_owned_by(owner());
-        let stranger = Address::from([9u8; 32]);
-        let err = execute_storage_tx(
-            &mut state,
-            &ctx(stranger),
-            &StorageTx::RegisterManifest {
-                manifest: m.clone(),
-            },
-        )
-        .unwrap_err();
-        assert!(matches!(err, StorageTxError::OwnerIsNotSender { .. }));
-        assert!(state
-            .storage_registry
-            .get_manifest(&m.manifest_id)
-            .is_none());
-    }
-
-    #[test]
-    fn a_manifest_whose_id_does_not_derive_is_refused() {
-        let mut state = AccountState::new();
-        let mut m = manifest_owned_by(owner());
-        m.manifest_id = crate::storage::ContentId::of(b"chosen by the caller");
-        let err = execute_storage_tx(
-            &mut state,
-            &ctx(owner()),
-            &StorageTx::RegisterManifest {
-                manifest: m.clone(),
-            },
-        )
-        .unwrap_err();
-        assert!(matches!(err, StorageTxError::InvalidManifest(_)));
         assert!(state.storage_registry.is_empty());
-    }
-
-    #[test]
-    fn a_second_registration_is_refused_and_changes_nothing() {
-        let mut state = AccountState::new();
-        let m = manifest_owned_by(owner());
-        let tx = StorageTx::RegisterManifest {
-            manifest: m.clone(),
-        };
-        execute_storage_tx(&mut state, &ctx(owner()), &tx).expect("first");
-        let root = state.storage_registry.root();
-        assert_eq!(
-            execute_storage_tx(&mut state, &ctx(owner()), &tx).unwrap_err(),
-            StorageTxError::AlreadyRegistered
-        );
-        assert_eq!(state.storage_registry.root(), root);
     }
 
     fn registered(state: &mut AccountState) -> ContentManifest {
         let m = manifest_owned_by(owner());
-        execute_storage_tx(
-            state,
-            &ctx(owner()),
-            &StorageTx::RegisterManifest {
-                manifest: m.clone(),
-            },
-        )
-        .expect("register");
+        // Fixture setup for downstream rules; the legacy transaction door is
+        // intentionally closed and is tested separately above.
+        state.storage_registry.register_manifest(&m);
         m
     }
 
@@ -1351,14 +1241,8 @@ mod tests {
             .with_content_size(first.content_size() - 1)
             .expect("resize");
         second.owner = attacker;
-        execute_storage_tx(
-            &mut state,
-            &ctx(attacker),
-            &StorageTx::RegisterManifest {
-                manifest: second.clone(),
-            },
-        )
-        .expect("the attacker registers its own manifest");
+        // Fixture setup for the policy-isolation rule, not a registration-door test.
+        state.storage_registry.register_manifest(&second);
         assert_ne!(second.manifest_id, first.manifest_id);
 
         let mut hostile = policy_for(attacker, shard);
@@ -1393,7 +1277,7 @@ mod tests {
     }
 
     #[test]
-    fn a_generated_source_is_refused_before_anything_is_written() {
+    fn legacy_generated_registration_is_refused_before_anything_is_written() {
         let mut state = AccountState::new();
         let spec = crate::storage::generated::GeneratedSpec {
             generator: crate::storage::generated::GeneratorId::Avatar,
@@ -1409,7 +1293,9 @@ mod tests {
             &StorageTx::RegisterManifest { manifest: m },
         )
         .unwrap_err();
-        assert_eq!(err, StorageTxError::GeneratedRegistrationNotPriced);
+        assert!(
+            matches!(err, StorageTxError::Refused(ref message) if message.contains("B.U.D. 3.0"))
+        );
         assert!(state.storage_registry.is_empty());
     }
 
@@ -1617,7 +1503,7 @@ mod tests {
     }
 
     #[test]
-    fn front_run_manifest_registration_neither_blocks_real_owner_nor_defeats_paid_binding() {
+    fn legacy_registration_closure_preserves_paid_binding_and_retraction_rules() {
         let mut state = AccountState::new();
         let squatter = Address::from([0xAA; 32]);
         let real_owner = owner();
@@ -1635,7 +1521,7 @@ mod tests {
             .marketplace
             .bind_content_to_asset(real_manifest.manifest_id, asset_id, real_owner)
             .unwrap();
-        assert_eq!(
+        assert!(matches!(
             execute_storage_tx(
                 &mut state,
                 &ctx(squatter),
@@ -1644,23 +1530,14 @@ mod tests {
                 },
             )
             .unwrap_err(),
-            StorageTxError::OwnerIsNotSender {
-                owner: real_owner,
-                sender: squatter,
-            }
-        );
+            StorageTxError::Refused(ref message) if message.contains("B.U.D. 3.0")
+        ));
 
         // Conversely, once an account owns a registered manifest, a third party
         // can neither re-register it nor paywall/retract it under `PollenRegisterDataAsset`.
         let mut state2 = AccountState::new();
-        execute_storage_tx(
-            &mut state2,
-            &ctx(real_owner),
-            &StorageTx::RegisterManifest {
-                manifest: real_manifest.clone(),
-            },
-        )
-        .expect("real owner registers manifest");
+        // The paid-binding/retraction rule still needs a registered fixture.
+        state2.storage_registry.register_manifest(&real_manifest);
         assert_eq!(
             state2.storage_registry.owner_of(&real_manifest.manifest_id),
             Some(real_owner)
