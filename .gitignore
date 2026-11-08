@@ -19,3 +19,7 @@ __pycache__/
 # Foundry build output of the Ethereum-side contracts.
 /contracts/out/
 /contracts/cache/
+
+# External planning and launcher files must not be added to the repository.
+THE_BUDLUM_DIREKTIF.md
+/THE_BUDLUM_DIREKTIF.md
