@@ -191,7 +191,7 @@ pub(crate) fn check_transaction_features(
     {
         return Err(privacy_closed_refusal(
             chain_id,
-            "private transfers and note insertion are closed on this network until ownership, value-conservation and membership proofs are wired",
+            "private transfers are disabled on mainnet until full proof verification is wired",
         ));
     }
     if is_ai_layer_transaction(tx_type) && !is_ai_layer_exit(tx_type) {
