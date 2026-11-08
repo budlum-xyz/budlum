@@ -9,7 +9,7 @@ on:
   # the same reason: a filtered-out run reports nothing rather than success,
   # which branch protection reads as still-waiting.
   pull_request:
-    branches: [ main, fix/architecture-tip-adlari ]
+    branches: [ main, fix/architecture-tip-adlari, consensus-of-consensuses ]
   schedule:
     # Weekly hygiene scan (effects of cargo update + new deps)
     - cron: '17 4 * * 1'
@@ -85,6 +85,9 @@ jobs:
   geiger:
     name: "Geiger: unsafe visibility (the first-party 0 evidence layer)"
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     # 35 -> 55: the clean below adds one cold build per workspace until the
     # shared cache saves this job's fresh artifacts again; 35 was sized for a
     # cache-fresh run. The first green run re-establishes the cache and the
@@ -176,3 +179,14 @@ jobs:
             cat "/tmp/geiger-$crate.txt" >> /tmp/geiger2.txt
           done
           cargo run --release --manifest-path ../xtask/gates/Cargo.toml -- geiger /tmp/geiger2.txt
+          cat /tmp/geiger1.txt /tmp/geiger2.txt > /tmp/geiger-all.txt
+          cd ..
+          cargo run --release --manifest-path xtask/tools/Cargo.toml -- sarif --self-test
+          cargo run --release --manifest-path xtask/tools/Cargo.toml -- \
+            sarif cargo-geiger /tmp/geiger-all.txt cargo-geiger.sarif
+      - name: Upload cargo-geiger SARIF (Security tab)
+        if: always()
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: cargo-geiger.sarif
+          category: cargo-geiger
