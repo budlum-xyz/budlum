@@ -8,6 +8,16 @@
 //! supply is conserved: see the economy invariant
 //! `epoch_transition_does_not_mint_validator_yield`. A chain pays only when
 //! its profile enables a pool (`Network::reward_pool`).
+//!
+//! # The three shares (directive section 11.4)
+//!
+//! One epoch budget is split into three shares: 40 percent consensus, 50
+//! percent storage and 10 percent repair and relay ([`RewardPoolSplit`]). The
+//! stake weighted payout of [`pay_epoch`] is the consensus share. The
+//! storage share ([`storage_share`]) and the repair and relay share stay in
+//! the pool account until the payers that read them exist, so the pool never
+//! pays ahead of the work it pays for. Nothing is minted and nothing leaves
+//! the pool without a payer.
 
 use crate::core::address::Address;
 use crate::tokenomics::{bud, BUD_TOTAL_SUPPLY};
@@ -18,6 +28,90 @@ pub const DEFAULT_VALIDATION_REWARD_POOL: u64 = bud(10_000_000);
 /// Default treasury side-pool (2%) tracked separately from validator rewards.
 pub const DEFAULT_TREASURY_POOL: u64 = bud(2_000_000);
 pub const DEFAULT_VALIDATION_POOL_EPOCHS: u64 = 100_000;
+
+/// TESTNET-DEFAULT: the epoch budget is split 40 / 50 / 10 (section 11.4).
+/// The three parts are whole tenths; the storage part carries the remainder,
+/// so the parts always add up to the budget with no rounding drift.
+const POOL_TENTHS_CONSENSUS: u64 = 4;
+const POOL_TENTHS_STORAGE: u64 = 5;
+const POOL_TENTHS_REPAIR_RELAY: u64 = 1;
+const POOL_TENTHS_TOTAL: u64 =
+    POOL_TENTHS_CONSENSUS + POOL_TENTHS_STORAGE + POOL_TENTHS_REPAIR_RELAY;
+
+/// The same schedule `Default` builds, available in a constant context so
+/// the one-argument storage-share interface can be computed without state.
+const DEFAULT_POOL_SCHEDULE: RewardPoolSchedule = RewardPoolSchedule {
+    validation_reward_pool: DEFAULT_VALIDATION_REWARD_POOL,
+    validation_pool_epochs: DEFAULT_VALIDATION_POOL_EPOCHS,
+    treasury_pool: DEFAULT_TREASURY_POOL,
+    reward_pool_start_epoch: 0,
+};
+
+/// One epoch's budget divided into its three destinations, in atoms.
+///
+/// `consensus` pays the seats named in finalized participation records,
+/// `storage` pays custody shares that passed their audits, and
+/// `repair_and_relay` pays approved repair symbols and active relay
+/// reservations (section 11.4). Nothing here mints: the split only divides
+/// the pool account's own pre-funded balance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RewardPoolSplit {
+    pub consensus: u64,
+    pub storage: u64,
+    pub repair_and_relay: u64,
+}
+
+impl RewardPoolSplit {
+    /// The three shares added back together. Equal to the split budget.
+    #[must_use]
+    pub const fn total(&self) -> u64 {
+        self.consensus
+            .saturating_add(self.storage)
+            .saturating_add(self.repair_and_relay)
+    }
+}
+
+/// Divide `budget` into the 40 / 50 / 10 shares.
+///
+/// Integer only: no floating point, no wall clock and no unordered input.
+/// `budget / 10` bounds every multiplication, so this cannot overflow. The
+/// remainder of the division goes to storage, which is the largest share;
+/// `total()` therefore equals `budget` for every `u64` input.
+#[must_use]
+pub const fn split_epoch_budget(budget: u64) -> RewardPoolSplit {
+    let tenth = budget / POOL_TENTHS_TOTAL;
+    let remainder = budget % POOL_TENTHS_TOTAL;
+    RewardPoolSplit {
+        consensus: tenth * POOL_TENTHS_CONSENSUS,
+        storage: tenth * POOL_TENTHS_STORAGE + remainder,
+        repair_and_relay: tenth * POOL_TENTHS_REPAIR_RELAY,
+    }
+}
+
+/// The calendar storage share of `epoch`, in atoms.
+///
+/// This is the one-argument interface the storage-fee path reads
+/// (`reward_pool::storage_share(epoch)`). It reports the calendar part of
+/// `P_e` under the default schedule; extra funds carried over from the
+/// previous epoch are added by the epoch-transition path, not invented here.
+#[must_use]
+pub const fn storage_share(epoch: u64) -> u64 {
+    let budget = DEFAULT_POOL_SCHEDULE.per_epoch_budget(epoch, DEFAULT_VALIDATION_REWARD_POOL);
+    split_epoch_budget(budget).storage
+}
+
+/// The calendar storage share under a caller-supplied schedule and balance.
+///
+/// A chain with a non-default schedule or a partly spent pool uses this form,
+/// so the share is derived from the same budget the epoch transition pays.
+#[must_use]
+pub const fn storage_share_for(
+    epoch: u64,
+    schedule: &RewardPoolSchedule,
+    remaining_pool: u64,
+) -> u64 {
+    split_epoch_budget(schedule.per_epoch_budget(epoch, remaining_pool)).storage
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RewardPoolSchedule {
@@ -59,24 +153,35 @@ impl RewardPoolSchedule {
         Ok(())
     }
 
-    pub fn per_epoch_budget(&self, epoch: u64, remaining_pool: u64) -> u64 {
+    pub const fn per_epoch_budget(&self, epoch: u64, remaining_pool: u64) -> u64 {
         if epoch < self.reward_pool_start_epoch || self.validation_pool_epochs == 0 {
+            return 0;
+        }
+        if epoch - self.reward_pool_start_epoch >= self.validation_pool_epochs {
             return 0;
         }
         let base = self.validation_reward_pool / self.validation_pool_epochs;
         base.min(remaining_pool)
     }
+
+    /// The epoch budget of `per_epoch_budget`, split into its three shares.
+    #[must_use]
+    pub const fn split_epoch_budget(&self, epoch: u64, remaining_pool: u64) -> RewardPoolSplit {
+        split_epoch_budget(self.per_epoch_budget(epoch, remaining_pool))
+    }
 }
 
-/// Deterministically split `remaining_pool` for one epoch across active validator
-/// Stakes. The first address in sorted order receives the rounding remainder.
+/// Deterministically split the consensus share of one epoch budget across
+/// active validator stakes. The first address in sorted order receives the
+/// rounding remainder. The storage share and the repair and relay share are
+/// not paid here (see [`RewardPoolSplit`]).
 pub fn reward_for_epoch(
     schedule: RewardPoolSchedule,
     epoch: u64,
     remaining_pool: u64,
     active_validator_stakes: &[(Address, u64)],
 ) -> Vec<(Address, u64)> {
-    let budget = schedule.per_epoch_budget(epoch, remaining_pool);
+    let budget = schedule.split_epoch_budget(epoch, remaining_pool).consensus;
     if budget == 0 || active_validator_stakes.is_empty() {
         return Vec::new();
     }
@@ -120,6 +225,59 @@ pub fn reward_for_epoch(
     out
 }
 
+/// The consensus share of one epoch's pool budget, in parts per million.
+///
+/// The pool is split 40 / 50 / 10 between the validators that produced the
+/// epoch, the validators that held its content and the repair and relay work
+/// that kept it reachable. Parts per million keep the split in integer
+/// arithmetic: no float ever reaches a balance.
+pub const CONSENSUS_SHARE_PPM: u64 = 400_000;
+/// The storage share of one epoch's pool budget, in parts per million.
+pub const STORAGE_SHARE_PPM: u64 = 500_000;
+/// The repair and relay share of one epoch's pool budget, in parts per million.
+pub const REPAIR_SHARE_PPM: u64 = 100_000;
+/// The scale the three shares are expressed in.
+pub const SHARE_SCALE_PPM: u64 = 1_000_000;
+
+/// One epoch's pool budget, separated into the three destinations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PoolSplit {
+    consensus: u64,
+    storage: u64,
+    repair_relay: u64,
+}
+
+/// One destination's part of `budget`, in parts per million.
+fn share_of(budget: u64, ppm: u64) -> u64 {
+    (u128::from(budget) * u128::from(ppm) / u128::from(SHARE_SCALE_PPM)) as u64
+}
+
+/// Separate `budget` into the fixed shares.
+///
+/// The repair share takes the rounding remainder: a remainder that vanished
+/// would burn tokens the schedule had already committed to the pool, and that
+/// burn is not a decision any of the three destinations made.
+fn split_budget(budget: u64) -> PoolSplit {
+    let consensus = share_of(budget, CONSENSUS_SHARE_PPM);
+    let storage = share_of(budget, STORAGE_SHARE_PPM);
+    let repair_relay = budget.saturating_sub(consensus.saturating_add(storage));
+    PoolSplit {
+        consensus,
+        storage,
+        repair_relay,
+    }
+}
+
+/// The storage share of `epoch`'s pool budget.
+///
+/// WIRING: the storage custody reward path reads this; until it lands, the
+/// storage and repair shares stay in the pool account, where `pay_epoch` cannot
+/// spend them and nothing is minted.
+#[must_use]
+pub fn storage_share(schedule: RewardPoolSchedule, epoch: u64, remaining_pool: u64) -> u64 {
+    split_budget(schedule.per_epoch_budget(epoch, remaining_pool)).storage
+}
+
 pub fn total_epoch_payout(payouts: &[(Address, u64)]) -> u64 {
     payouts
         .iter()
@@ -139,9 +297,11 @@ pub fn reward_pool_account() -> Address {
 /// Pay `closed_epoch` from the pool account to the validators that are
 /// active, not jailed and not slashed, by stake. Returns what was paid.
 ///
-/// The budget is the schedule's per-epoch share, capped by the pool's
-/// balance, so the pool never pays what it does not hold and nothing is
-/// minted. A jailed validator is paid nothing for the epoch.
+/// The amount is the consensus share of the schedule's per-epoch budget,
+/// capped by the pool's balance, so the pool never pays what it does not
+/// hold and nothing is minted. The storage share and the repair and relay
+/// share stay in the pool account. A jailed validator is paid nothing for
+/// the epoch.
 pub fn pay_epoch(
     state: &mut crate::core::account::AccountState,
     schedule: &RewardPoolSchedule,
@@ -291,9 +451,12 @@ mod tests {
             treasury_pool: 0,
             reward_pool_start_epoch: 0,
         };
+        // The epoch budget is 10; the consensus share of it is 4. The 70 / 30
+        // split rounds to 2 and 1, and the remainder of 1 goes to the first
+        // address.
         let payouts = reward_for_epoch(schedule, 0, 100, &[(addr(2), 30), (addr(1), 70)]);
-        assert_eq!(total_epoch_payout(&payouts), 10);
-        assert_eq!(payouts, vec![(addr(1), 7), (addr(2), 3)]);
+        assert_eq!(total_epoch_payout(&payouts), 4);
+        assert_eq!(payouts, vec![(addr(1), 3), (addr(2), 1)]);
     }
 
     #[test]
@@ -310,6 +473,47 @@ mod tests {
         assert_eq!(payouts[0], (addr(1), 1));
         assert_eq!(payouts[1], (addr(2), 0));
         assert_eq!(payouts[2], (addr(9), 0));
+    }
+
+    /// The pool splits 40 / 50 / 10 and the three parts always add back up:
+    /// a remainder that vanished would burn supply the schedule had already
+    /// committed to the pool.
+    #[test]
+    fn pool_split_is_40_50_10() {
+        let budget = bud(10_000);
+        let split = split_budget(budget);
+        assert_eq!(split.consensus, bud(4_000));
+        assert_eq!(split.storage, bud(5_000));
+        assert_eq!(split.repair_relay, bud(1_000));
+        assert_eq!(
+            split.consensus + split.storage + split.repair_relay,
+            budget,
+            "the split must not lose a base unit"
+        );
+
+        // Seven atoms cannot be split by ten millionths without rounding:
+        // 2 and 3 are the floors, and the repair share absorbs the last two.
+        let odd = split_budget(7);
+        assert_eq!(odd.consensus, 2);
+        assert_eq!(odd.storage, 3);
+        assert_eq!(odd.repair_relay, 2);
+        assert_eq!(odd.consensus + odd.storage + odd.repair_relay, 7);
+
+        // The shares follow the schedule's per-epoch budget, capped by what
+        // the pool still holds.
+        let schedule = RewardPoolSchedule {
+            validation_reward_pool: bud(1_000),
+            validation_pool_epochs: 10,
+            treasury_pool: 0,
+            reward_pool_start_epoch: 0,
+        };
+        assert_eq!(storage_share(schedule, 0, bud(1_000)), bud(50));
+        assert_eq!(storage_share(schedule, 0, bud(60)), bud(30));
+        let before_start = RewardPoolSchedule {
+            reward_pool_start_epoch: 10,
+            ..Default::default()
+        };
+        assert_eq!(storage_share(before_start, 9, bud(1_000)), 0);
     }
 
     #[test]
@@ -363,10 +567,11 @@ mod tests {
             + state.get_balance(&addr(2))
             + state.get_balance(&addr(3));
         let paid = pay_epoch(&mut state, &schedule, 0);
-        assert_eq!(paid, bud(10));
+        // The epoch budget is 10 BUD; the consensus share of it is 4 BUD.
+        assert_eq!(paid, bud(4));
         // 3:1 by stake; the jailed validator is paid nothing.
-        assert_eq!(state.get_balance(&addr(1)), bud(10) * 3 / 4);
-        assert_eq!(state.get_balance(&addr(2)), bud(10) / 4);
+        assert_eq!(state.get_balance(&addr(1)), bud(4) * 3 / 4);
+        assert_eq!(state.get_balance(&addr(2)), bud(4) / 4);
         assert_eq!(state.get_balance(&addr(3)), 0);
         let after = state.get_balance(&reward_pool_account())
             + state.get_balance(&addr(1))
@@ -401,21 +606,23 @@ mod tests {
             treasury_pool: 0,
             reward_pool_start_epoch: 0,
         };
-        assert_eq!(pay_epoch(&mut state, &schedule, 1), 1_100);
-        // The delegated share is 100; 10% is commission, so the validator
-        // receives its 1,000 self share plus 10. The delegator's 90 is a
+        // The epoch budget is 1,100; the consensus share of it is 440, and the
+        // other 660 stay in the pool.
+        assert_eq!(pay_epoch(&mut state, &schedule, 1), 440);
+        // The delegated share is 40; 10% is commission, so the validator
+        // receives its 400 self share plus 4. The delegator's 36 is a
         // claimable debt until the delegator signs a claim.
-        assert_eq!(state.get_balance(&validator), 1_010);
+        assert_eq!(state.get_balance(&validator), 404);
         assert_eq!(state.get_balance(&delegator), 0);
-        assert_eq!(state.registry.claimable_reward(delegator, validator), 90);
+        assert_eq!(state.registry.claimable_reward(delegator, validator), 36);
         assert_eq!(
             state
                 .claim_delegator_rewards(&delegator, &validator)
                 .unwrap(),
-            90
+            36
         );
-        assert_eq!(state.get_balance(&delegator), 90);
-        assert_eq!(state.get_balance(&pool), 0);
+        assert_eq!(state.get_balance(&delegator), 36);
+        assert_eq!(state.get_balance(&pool), 660);
     }
 
     /// A reprice is prospective: a commission set in the block that closes an
@@ -449,11 +656,12 @@ mod tests {
             treasury_pool: 0,
             reward_pool_start_epoch: 0,
         };
-        assert_eq!(pay_epoch(&mut state, &schedule, 0), 1_100);
+        // The consensus share of the 1,100 budget is 440.
+        assert_eq!(pay_epoch(&mut state, &schedule, 0), 440);
         // No commission was in force for epoch 0, so the whole delegated
-        // share of 100 is the delegator's claim and the validator keeps 1,000.
-        assert_eq!(state.get_balance(&validator), 1_000);
-        assert_eq!(state.registry.claimable_reward(delegator, validator), 100);
+        // share of 40 is the delegator's claim and the validator keeps 400.
+        assert_eq!(state.get_balance(&validator), 400);
+        assert_eq!(state.registry.claimable_reward(delegator, validator), 40);
     }
 
     #[test]
@@ -467,5 +675,54 @@ mod tests {
         assert_eq!(pay_epoch(&mut state, &schedule, 0), 0);
         assert_eq!(state.get_balance(&addr(1)), 0);
         assert!(balance > 0);
+    }
+
+    /// The 40 / 50 / 10 decision is exact on a round budget.
+    #[test]
+    fn pool_split_is_40_50_10() {
+        let budget = bud(100);
+        let split = split_epoch_budget(budget);
+        assert_eq!(split.consensus, bud(40));
+        assert_eq!(split.storage, bud(50));
+        assert_eq!(split.repair_and_relay, bud(10));
+        assert_eq!(split.total(), budget);
+    }
+
+    /// The split never creates or loses an atom, whatever the remainder.
+    #[test]
+    fn pool_split_conserves_every_remainder() {
+        for budget in 0u64..1_000 {
+            let split = split_epoch_budget(budget);
+            assert_eq!(split.total(), budget, "budget {budget}");
+            assert!(split.consensus <= budget);
+            assert!(split.repair_and_relay <= split.storage);
+        }
+        let largest = split_epoch_budget(u64::MAX);
+        assert_eq!(largest.total(), u64::MAX);
+    }
+
+    /// The interface the storage reward interface reads returns exactly the storage share of the
+    /// same budget, both for the default and for a caller-supplied schedule.
+    #[test]
+    fn storage_share_is_the_storage_part_of_the_epoch_budget() {
+        let schedule = RewardPoolSchedule::default();
+        assert_eq!(DEFAULT_POOL_SCHEDULE, schedule);
+        let remaining = DEFAULT_VALIDATION_REWARD_POOL;
+        for epoch in [0u64, 1, 99_999] {
+            let budget = schedule.per_epoch_budget(epoch, remaining);
+            let expected = split_epoch_budget(budget).storage;
+            assert_eq!(storage_share(epoch), expected, "epoch {epoch}");
+            assert_eq!(storage_share_for(epoch, &schedule, remaining), expected);
+        }
+        assert_eq!(storage_share(100_000), 0, "the schedule is closed");
+        assert_eq!(storage_share_for(100_000, &schedule, remaining), 0);
+        // A spent pool has no storage share, and a future start epoch has no
+        // budget until the schedule opens.
+        assert_eq!(storage_share_for(0, &schedule, 0), 0);
+        let late = RewardPoolSchedule {
+            reward_pool_start_epoch: 10,
+            ..Default::default()
+        };
+        assert_eq!(storage_share_for(9, &late, remaining), 0);
     }
 }
