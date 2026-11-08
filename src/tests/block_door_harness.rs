@@ -14,7 +14,7 @@ use crate::consensus::pow::PoWEngine;
 use crate::core::address::Address;
 use crate::core::transaction::{Transaction, TransactionType};
 use crate::crypto::primitives::KeyPair;
-use crate::storage::db::Storage;
+use crate::persistence::db::Storage;
 use std::sync::Arc;
 
 /// The chain id every harness runs on (the devnet id the restart tests use).
