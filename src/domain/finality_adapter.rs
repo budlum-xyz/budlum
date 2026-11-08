@@ -1845,6 +1845,7 @@ mod tests {
             agg_sig_bls: vec![],
             bitmap: vec![],
             set_hash: snapshot.set_hash.clone(),
+            seat_table_version: 0,
         };
         let pos = PoSFinalityAdapter
             .verify_finality(
@@ -2344,6 +2345,7 @@ mod tests {
                 agg_sig_bls: vec![],
                 bitmap: vec![],
                 set_hash: snapshot.set_hash.clone(),
+                seat_table_version: 0,
             };
             let err = adapter
                 .verify_finality(
@@ -2396,6 +2398,7 @@ mod tests {
                 agg_sig_bls: vec![],
                 bitmap: vec![],
                 set_hash: snapshot.set_hash.clone(),
+                seat_table_version: 0,
             };
             let err = adapter
                 .verify_finality(
@@ -2441,6 +2444,7 @@ mod tests {
             agg_sig_bls: vec![],
             bitmap: vec![],
             set_hash: snapshot.set_hash.clone(),
+            seat_table_version: 0,
         };
         let status = PoSFinalityAdapter
             .verify_finality(
@@ -2500,6 +2504,7 @@ mod tests {
             agg_sig_bls: vec![],
             bitmap: vec![],
             set_hash: snapshot.set_hash.clone(),
+            seat_table_version: 0,
         };
         let status = BftFinalityAdapter::default()
             .verify_finality(
@@ -2551,6 +2556,7 @@ mod tests {
             agg_sig_bls: vec![],
             bitmap: vec![],
             set_hash: snapshot.set_hash.clone(),
+            seat_table_version: 0,
         };
         assert!(matches!(
             adapter
@@ -2574,6 +2580,7 @@ mod tests {
             agg_sig_bls: vec![],
             bitmap: vec![],
             set_hash: snapshot.set_hash.clone(),
+            seat_table_version: 0,
         };
         assert!(matches!(
             adapter
@@ -2615,6 +2622,7 @@ mod tests {
             agg_sig_bls: vec![],
             bitmap,
             set_hash: snapshot.set_hash.clone(),
+            seat_table_version: 0,
         }
     }
 
@@ -2800,6 +2808,7 @@ mod tests {
             agg_sig_bls: vec![],
             bitmap: vec![0b1],
             set_hash: snapshot.set_hash.clone(),
+            seat_table_version: 0,
         };
 
         let err = adapter
@@ -2931,6 +2940,7 @@ mod tests {
             agg_sig_bls: vec![],
             bitmap: vec![0b011],
             set_hash: snapshot.set_hash.clone(),
+            seat_table_version: 0,
         };
         (cert, snapshot, keys)
     }
