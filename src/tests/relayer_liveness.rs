@@ -1,7 +1,7 @@
 //! Tests for this turn's features:
-//!  1. CrossDomainMessage -> relayer registration gating
-//!  2. Slashing-report anti-spam fee (with refund on actionable reports)
-//!  3. Liveness fault detection -> slash via the existing report flow
+//! 1. CrossDomainMessage -> relayer registration gating
+//! 2. Slashing-report anti-spam fee (with refund on actionable reports)
+//! 3. Liveness fault detection -> slash via the existing report flow
 //!
 //! Unit-level behaviour of the liveness tracker itself lives in
 //! `registry::liveness::tests`; here we exercise the wiring through
@@ -17,7 +17,7 @@ use crate::cross_domain::message::{CrossDomainMessage, CrossDomainMessageParams}
 use crate::cross_domain::MessageKind;
 use crate::registry::evidence::{SlashingProof, SlashingReport};
 use crate::registry::role::roles;
-use crate::storage::db::Storage;
+use crate::persistence::db::Storage;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -31,10 +31,8 @@ fn fresh_chain() -> Blockchain {
     Blockchain::new(consensus, None, 45262, None)
 }
 
-/// The default is observe-only (`liveness_slashing_enabled = false`), so the
-/// end-to-end slashing tests opt in explicitly instead of relying on a default
-/// that a later change can flip underneath them.
-fn enable_liveness_slashing(bc: &mut Blockchain) {
+/// Set the deprecated flag to prove it cannot re-enable absence slashing.
+fn set_legacy_liveness_flag(bc: &mut Blockchain) {
     let mut params = *bc.state.registry.params();
     params.liveness_slashing_enabled = true;
     bc.state.registry.set_params(params);
@@ -62,8 +60,8 @@ fn signed_relayed_message(
     nonce: u64,
 ) -> CrossDomainMessage {
     let mut message = relayed_message(Address::from(keypair.public_key_bytes()), nonce);
-    // The door verifies the sender envelope, so the fixture signs what the
-    // sender side signs: an empty envelope is a refusal, not a pass.
+ // The door verifies the sender envelope, so the fixture signs what the
+ // sender side signs: an empty envelope is a refusal, not a pass.
     message.sign_sender_ed25519(keypair);
     message
 }
@@ -110,7 +108,7 @@ fn unregistered_account_cannot_submit_cross_domain_message() {
         .register_relayed_cross_domain_message(&stranger, &relayed_message(stranger, 1))
         .unwrap_err();
     assert!(err.contains("not an active relayer"), "{err}");
-    // No message stored.
+ // No message stored.
     assert_eq!(bc.state.message_registry.len(), 0);
 }
 
@@ -143,7 +141,7 @@ fn a_relayed_message_must_name_its_signer_as_sender() {
     let (keypair, relayer) = bonded_relayer(&mut bc);
     let (_, other_relayer) = bonded_relayer(&mut bc);
 
-    // Naming another relayer: refused by the shape check and by the body.
+ // Naming another relayer: refused by the shape check and by the body.
     let spoof = relayed_message(other_relayer, 1);
     assert!(!relay_tx(&keypair, spoof.clone()).is_valid());
     let err = bc
@@ -152,9 +150,9 @@ fn a_relayed_message_must_name_its_signer_as_sender() {
         .unwrap_err();
     assert!(err.contains("not the transaction signer"), "{err}");
 
-    // A body tampered after the id was computed: the id no longer matches
-    // its preimage, so a pre-registered id cannot be reused for a different
-    // message.
+ // A body tampered after the id was computed: the id no longer matches
+ // its preimage, so a pre-registered id cannot be reused for a different
+ // message.
     let mut tampered = relayed_message(relayer, 1);
     tampered.recipient = addr(0xEF);
     let err = bc
@@ -204,7 +202,7 @@ fn a_relayed_message_must_carry_the_class_derived_for_its_source_domain() {
         ))
         .expect("source domain registers");
 
-    // Nothing observed: the derived class is none, and a lattice label lies.
+ // Nothing observed: the derived class is none, and a lattice label lies.
     let lie = relayed_message(relayer, 1).with_source_quantum_class(Some(QuantumClass::Lattice));
     let err = bc
         .state
@@ -212,8 +210,8 @@ fn a_relayed_message_must_carry_the_class_derived_for_its_source_domain() {
         .unwrap_err();
     assert!(err.contains("derives"), "{err}");
 
-    // A BLS-only domain is classical; a message labelled lattice is refused,
-    // the one labelled classical is accepted.
+ // A BLS-only domain is classical; a message labelled lattice is refused,
+ // the one labelled classical is accepted.
     let mut facts = CryptoFacts::new();
     facts.record(ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG));
     bc.state.settlement.domains.record_observed(1, &facts);
@@ -239,7 +237,7 @@ fn a_relayed_message_must_carry_the_class_derived_for_its_source_domain() {
 fn a_relayed_message_past_its_expiry_is_refused() {
     let mut bc = fresh_chain();
     let (_, relayer) = bonded_relayer(&mut bc);
-    // `relayed_message` expires at height 100.
+ // `relayed_message` expires at height 100.
     bc.state.current_block_height = 101;
     let err = bc
         .state
@@ -255,7 +253,7 @@ fn slashed_relayer_cannot_submit_cross_domain_message() {
     let relayer = addr(0x03);
     bc.state.add_balance(&relayer, 5_000);
     bc.state.bond_relayer(&relayer, 2_000).unwrap();
-    // Slash the relayer role fully.
+ // Slash the relayer role fully.
     bc.state
         .registry
         .slash(
@@ -276,8 +274,8 @@ fn slashed_relayer_cannot_submit_cross_domain_message() {
 
 #[test]
 fn unbonding_relayer_can_still_submit() {
-    // Decision: unbonding is an exit process, not a punishment; the stake is
-    // Still locked and slashable, so the relayer may keep relaying.
+ // Decision: unbonding is an exit process, not a punishment; the stake is
+ // Still locked and slashable, so the relayer may keep relaying.
     let mut bc = fresh_chain();
     let (_, relayer) = bonded_relayer(&mut bc);
     bc.state
@@ -293,8 +291,8 @@ fn unbonding_relayer_can_still_submit() {
 
 #[test]
 fn system_bridge_path_bypasses_relayer_gate() {
-    // The internal primitive (used by bridge lock/burn events) must NOT require
-    // Relayer registration - those messages come from authorized on-chain logic.
+ // The internal primitive (used by bridge lock/burn events) must NOT require
+ // Relayer registration - those messages come from authorized on-chain logic.
     let mut bc = fresh_chain();
     bc.submit_cross_domain_message(relayed_message(addr(0x05), 1))
         .unwrap();
@@ -332,7 +330,7 @@ fn actionable_report_refunds_fee() {
     let reporter = addr(0x12);
     bc.state.add_balance(&offender, 1_000_000);
     bc.state.bond_relayer(&offender, 10_000).unwrap(); // registered so slashable
-                                                       // Register offender as validator too (double-sign is a validator offence).
+ // Register offender as validator too (double-sign is a validator offence).
     bc.state.add_validator(offender, 10_000);
     let fee = bc.state.registry.params().slashing_report_fee;
     bc.state.add_balance(&reporter, fee);
@@ -342,22 +340,22 @@ fn actionable_report_refunds_fee() {
         .submit_registry_slashing_report(double_sign_report(&keys, Some(reporter)))
         .unwrap();
     assert!(outcome.is_some(), "validator should have been slashed");
-    // Fee refunded because the report was actionable.
+ // Fee refunded because the report was actionable.
     assert_eq!(bc.state.get_balance(&reporter), before);
 }
 
 #[test]
 fn an_unprovable_report_is_refused_before_the_fee_is_taken() {
-    // This used to assert the opposite, that the fee was burned, and the
-    // assertion was right about the code and wrong about what the code should
-    // do. Every externally submitted report arrived `Unverified`, every
-    // `Unverified` report was refused, and the refusal burned the fee. The
-    // endpoint could take money and could not produce a slash, so an honest
-    // reporter holding real proof paid to be ignored.
-    //
-    // A report that cannot be checked still must not slash anybody. What
-    // changed is that it no longer costs anything either: refusal happens
-    // before the debit.
+ // This used to assert the opposite, that the fee was burned, and the
+ // assertion was right about the code and wrong about what the code should
+ // do. Every externally submitted report arrived `Unverified`, every
+ // `Unverified` report was refused, and the refusal burned the fee. The
+ // endpoint could take money and could not produce a slash, so an honest
+ // reporter holding real proof paid to be ignored.
+ //
+ // A report that cannot be checked still must not slash anybody. What
+ // changed is that it no longer costs anything either: refusal happens
+ // before the debit.
     let mut bc = fresh_chain();
     let offender = addr(0x13);
     let reporter = addr(0x14);
@@ -386,19 +384,19 @@ fn an_unprovable_report_is_refused_before_the_fee_is_taken() {
         fee,
         "an unprovable report must cost nothing: it proves nothing either way"
     );
-    // Offender untouched.
+ // Offender untouched.
     assert!(bc.state.registry.is_active(&offender, roles::VALIDATOR));
 }
 
 #[test]
 fn a_provable_report_from_a_stranger_slashes_and_refunds() {
-    // The case the endpoint serves: a report whose provenance was already
-    // established by the consensus path (the aggregator verified both
-    // signatures against the validator snapshot at ingest) is actionable.
-    // An `Unverified` report is refused at the RPC boundary now: two valid
-    // signatures over two different hashes are not, on their own, an
-    // equivocation proof, because a validator signs one block per height
-    // and the node does not hold the rival block.
+ // The case the endpoint serves: a report whose provenance was already
+ // established by the consensus path (the aggregator verified both
+ // signatures against the validator snapshot at ingest) is actionable.
+ // An `Unverified` report is refused at the RPC boundary now: two valid
+ // signatures over two different hashes are not, on their own, an
+ // equivocation proof, because a validator signs one block per height
+ // and the node does not hold the rival block.
     let keys = crate::crypto::primitives::KeyPair::generate().unwrap();
     let offender = Address::from(keys.public_key_bytes());
     let reporter = addr(0x1A);
@@ -438,10 +436,10 @@ fn a_provable_report_from_a_stranger_slashes_and_refunds() {
 
 #[test]
 fn a_stranger_cannot_slash_a_validator_by_asserting_provenance() {
-    // The report claims to be consensus-verified. It is not, and the
-    // signatures are somebody else's. If the endpoint believed either claim,
-    // slashing would be a thing any account could do to any validator for the
-    // price of the fee.
+ // The report claims to be consensus-verified. It is not, and the
+ // signatures are somebody else's. If the endpoint believed either claim,
+ // slashing would be a thing any account could do to any validator for the
+ // price of the fee.
     let victim_keys = crate::crypto::primitives::KeyPair::generate().unwrap();
     let attacker_keys = crate::crypto::primitives::KeyPair::generate().unwrap();
     let victim = Address::from(victim_keys.public_key_bytes());
@@ -469,12 +467,12 @@ fn a_stranger_cannot_slash_a_validator_by_asserting_provenance() {
             epoch: None,
             block_hash_1: hex::encode(h1),
             block_hash_2: hex::encode(h2),
-            // Signed by the attacker's key, filed against the victim.
+ // Signed by the attacker's key, filed against the victim.
             signature_1: attacker_keys.sign(&h1).to_vec(),
             signature_2: attacker_keys.sign(&h2).to_vec(),
         },
-        // The RPC layer overwrites this to `Unverified`; asserted here to
-        // show the chain layer does not depend on the RPC layer to do so.
+ // The RPC layer overwrites this to `Unverified`; asserted here to
+ // show the chain layer does not depend on the RPC layer to do so.
         Some(attacker),
     );
 
@@ -512,7 +510,7 @@ fn a_self_asserted_consensus_verified_report_with_forged_data_is_refused() {
 
     let (h1, h2) = ([0x33u8; 32], [0x44u8; 32]);
     let proofs = [
-        // Made-up hashes and signatures.
+ // Made-up hashes and signatures.
         SlashingProof::DoubleSign {
             height: 7,
             kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
@@ -522,7 +520,7 @@ fn a_self_asserted_consensus_verified_report_with_forged_data_is_refused() {
             signature_1: vec![1],
             signature_2: vec![2],
         },
-        // Well formed, but signed by another key.
+ // Well formed, but signed by another key.
         SlashingProof::DoubleSign {
             height: 7,
             kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
@@ -566,13 +564,13 @@ fn report_fee_insufficient_balance_rejected_without_state_change() {
         .submit_registry_slashing_report(double_sign_report(&keys, Some(reporter)))
         .unwrap_err();
     assert!(err.contains("insufficient balance"));
-    // Offender not slashed.
+ // Offender not slashed.
     assert!(bc.state.registry.is_active(&offender, roles::VALIDATOR));
 }
 
 #[test]
 fn consensus_internal_report_pays_no_fee() {
-    // Reporter: None -> no fee charged (used by consensus-generated reports).
+ // Reporter: None -> no fee charged (used by consensus-generated reports).
     let mut bc = fresh_chain();
     let keys = crate::crypto::primitives::KeyPair::generate().unwrap();
     let offender = Address::from(keys.public_key_bytes());
@@ -586,8 +584,8 @@ fn consensus_internal_report_pays_no_fee() {
 
 #[test]
 fn report_against_unregistered_still_refunds_fee() {
-    // Ok(None): verified but offender unregistered -> treated as actionable,
-    // So the honest reporter is refunded (regression of previous-turn noop test).
+ // Ok(None): verified but offender unregistered -> treated as actionable,
+ // So the honest reporter is refunded (regression of previous-turn noop test).
     let mut bc = fresh_chain();
     let reporter = addr(0x18);
     let fee = bc.state.registry.params().slashing_report_fee;
@@ -613,48 +611,41 @@ fn state_with_validator(v: Address, stake: u64) -> AccountState {
 }
 
 #[test]
-fn consecutive_liveness_failures_trigger_slash() {
-    // Use an isolated AccountState with exactly one validator so the count is
-    // Deterministic (fresh_chain seeds a genesis validator).
+fn consecutive_liveness_failures_trigger_suspension() {
     let v = addr(0x21);
     let mut state = state_with_validator(v, 10_000);
     let k = state.registry.params().liveness_max_missed_epochs;
 
     let none: HashSet<Address> = HashSet::new();
-    // Miss k-1 epochs: no report yet.
     for e in 1..k {
         assert!(state.record_liveness_epoch(e, &none).is_empty());
     }
     assert!(state.registry.is_active(&v, roles::VALIDATOR));
-    // K-th consecutive miss produces exactly one report for this validator.
-    let reports = state.record_liveness_epoch(k, &none);
-    assert_eq!(reports.len(), 1);
-    assert_eq!(reports[0].offender, v);
+    let suspended = state.record_liveness_epoch(k, &none);
+    assert_eq!(suspended, vec![v]);
+    assert!(state.liveness.is_suspended(&v));
+    assert_eq!(state.registry.get(&v, roles::VALIDATOR).unwrap().stake, 10_000);
 }
 
 #[test]
-fn liveness_slash_applied_through_blockchain_flow() {
-    // End-to-end: reports generated at the chain level are routed through the
-    // Existing report->slash flow and the target validator ends up slashed.
+fn liveness_suspension_recorded_through_blockchain_flow() {
     let mut bc = fresh_chain();
-    enable_liveness_slashing(&mut bc);
+    set_legacy_liveness_flag(&mut bc);
     let v = addr(0x2A);
     bc.state.add_validator(v, 10_000);
     bc.state.sync_validator_registration(&v);
     let k = bc.state.registry.params().liveness_max_missed_epochs;
 
-    // Everyone participates except `v` (so the genesis validator is unaffected).
     let mut present: HashSet<Address> = bc.state.validators.keys().copied().collect();
     present.remove(&v);
-
     for e in 1..k {
         assert_eq!(bc.record_liveness_epoch(e, &present), 0);
     }
     assert_eq!(bc.record_liveness_epoch(k, &present), 1);
-    // A liveness fault is a timed jail: the validator
-    // leaves the active set but is not slashed, so its release is possible.
-    let jailed = bc.state.validators.get(&v).expect("still a validator");
-    assert!(jailed.jailed && !jailed.active && !jailed.slashed);
+    let validator = bc.state.validators.get(&v).expect("still a validator");
+    assert!(!validator.jailed && !validator.slashed);
+    assert!(bc.state.liveness.is_suspended(&v));
+    assert_eq!(bc.state.registry.get(&v, roles::VALIDATOR).unwrap().stake, 10_000);
 }
 
 #[test]
@@ -670,40 +661,36 @@ fn liveness_counter_resets_on_participation() {
         state.record_liveness_epoch(e, &none);
     }
     assert_eq!(state.liveness.missed_count(&v), k - 1);
-    // Participation resets the streak.
+ // Participation resets the streak.
     state.record_liveness_epoch(k, &present);
     assert_eq!(state.liveness.missed_count(&v), 0);
 }
 
 #[test]
-fn liveness_slash_uses_configured_rate() {
+fn liveness_absence_never_cuts_stake() {
+ // V-4 / liveness tracking: whatever the old liveness ratio was configured to, absence
+ // suspends and leaves the stake exactly where it was.
     let mut bc = fresh_chain();
-    enable_liveness_slashing(&mut bc);
+    set_legacy_liveness_flag(&mut bc);
     let v = addr(0x23);
     let stake = 10_000u64;
     bc.state.add_validator(v, stake);
     bc.state.sync_validator_registration(&v);
     let k = bc.state.registry.params().liveness_max_missed_epochs;
-    let rate = bc.state.registry.params().liveness_slash_ratio_fixed;
-    // Computed by the same function production uses, not by a second copy of
-    // the expression. A test that recomputes the formula by hand agrees with
-    // production only until one of the two changes, and B35 was exactly that:
-    // five copies, two spellings of the narrowing, and a mirror test that
-    // compared them only where they happened to agree.
-    let expected_penalty = crate::core::chain_config::slash_penalty(stake, rate);
 
     let none: HashSet<Address> = HashSet::new();
     for e in 1..=k {
         bc.record_liveness_epoch(e, &none);
     }
     let member = bc.state.registry.get(&v, roles::VALIDATOR).unwrap();
-    assert_eq!(member.stake, stake - expected_penalty);
+    assert_eq!(member.stake, stake, "absence must never slash the stake");
+    assert!(bc.state.liveness.is_suspended(&v));
 }
 
 #[test]
 fn liveness_does_not_affect_double_sign_flow() {
-    // Regression: the double-sign path still slashes at its own (50%) rate,
-    // Unaffected by liveness wiring.
+ // Regression: the double-sign path still slashes at its own (50%) rate,
+ // Unaffected by liveness wiring.
     let mut bc = fresh_chain();
     let keys = crate::crypto::primitives::KeyPair::generate().unwrap();
     let offender = Address::from(keys.public_key_bytes());
@@ -717,7 +704,7 @@ fn liveness_does_not_affect_double_sign_flow() {
     assert_eq!(outcome.penalty, stake / 2);
 }
 
-// --- 4. Quarantine ledger persistence ( acceptance) ----------------------
+// --- 4. Quarantine ledger persistence (acceptance) ----------------------
 
 #[test]
 fn quarantine_ledger_rows_survive_restart_after_slash() {
@@ -747,12 +734,12 @@ fn quarantine_ledger_rows_survive_restart_after_slash() {
         .unwrap()
         .expect("validator should have been slashed");
 
-    // The slash lands in both ledgers before the node drops.
+ // The slash lands in both ledgers before the node drops.
     assert_eq!(bc.quarantine_ledger.quarantined_entities.len(), 1);
     assert_eq!(bc.quarantine_ledger.alarms.len(), 1);
     drop(bc);
 
-    // Same storage path, brand-new node: the rows must still be there.
+ // Same storage path, brand-new node: the rows must still be there.
     let restarted = Blockchain::new(
         Arc::new(PoWEngine::new(0)),
         Some(Storage::new(&db_path).unwrap()),
@@ -800,8 +787,8 @@ fn a_relayed_message_is_registered_by_the_executor_inside_a_block() {
     bc.state.bond_relayer(&relayer, 2_000).unwrap();
     let message = signed_relayed_message(&keypair, 1);
     let mut state = bc.state.clone();
-    // The transaction is signed by the relayer: it pays the fee and it is the
-    // actor the gate names, while the message carries its own sender signature.
+ // The transaction is signed by the relayer: it pays the fee and it is the
+ // actor the gate names, while the message carries its own sender signature.
     let tx = crate::core::transaction::Transaction::new_with_chain_id(
         relayer,
         Address::zero(),
@@ -820,11 +807,11 @@ fn a_relayed_message_is_registered_by_the_executor_inside_a_block() {
     );
     assert_eq!(state.get_nonce(&relayer), 1, "the fee and nonce are paid");
 
-    // An inactive relayer is refused by the same execution.
+ // An inactive relayer is refused by the same execution.
     let stranger = crate::crypto::primitives::KeyPair::generate().unwrap();
     let stranger_addr = Address::from(stranger.public_key_bytes());
     let mut unsigned_state = bc.state.clone();
-    // Funded, so the refusal names the relayer gate rather than the fee.
+ // Funded, so the refusal names the relayer gate rather than the fee.
     unsigned_state.add_balance(&stranger_addr, 1_000);
     let bad = crate::core::transaction::Transaction::new_with_chain_id(
         stranger_addr,
@@ -844,7 +831,7 @@ fn a_relayed_message_is_registered_by_the_executor_inside_a_block() {
         "a refused relay writes nothing"
     );
 
-    // A value-carrying message transaction is refused before anything moves.
+ // A value-carrying message transaction is refused before anything moves.
     let mut value_state = bc.state.clone();
     let mut carrying = crate::core::transaction::Transaction::new_with_chain_id(
         relayer,
