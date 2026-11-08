@@ -60,7 +60,7 @@ impl LlmCache {
                 }
                 if let Ok(row) = serde_json::from_str::<CacheLine>(line) {
                     if row.key.starts_with(&format!("{SCHEMA_VERSION}|")) {
-                        cache.items.insert(row.key, row.parsed);
+                        cache.items.insert(row.key, redact_model_strings(&row.parsed));
                     }
                 }
             }
@@ -210,6 +210,24 @@ mod tests {
         std::fs::write(&p, r#"{"key":"old|m|v|t|h","parsed":{"x":1}}"#).unwrap();
         let c = LlmCache::open(&p, true).unwrap();
         assert!(c.is_empty());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn open_masks_preexisting_cache_entries() {
+        let p = tmp_path("redaction.jsonl");
+        let _ = std::fs::remove_file(&p);
+        let k = LlmCache::key("m", "v", "t", &[9u8; 32]);
+        let raw_secret = format!("ghp_{}", "0123456789abcdefghij0123456789");
+        let raw_line = serde_json::json!({
+            "key": k,
+            "parsed": { "api_key": raw_secret },
+        });
+        std::fs::write(&p, format!("{raw_line}\n")).unwrap();
+        let loaded = LlmCache::open(&p, true).unwrap();
+        let got = loaded.get(&k).unwrap().to_string();
+        assert!(!got.contains(&raw_secret), "{got}");
+        assert!(got.contains(crate::redact::REDACTION_TOKEN), "{got}");
         let _ = std::fs::remove_file(&p);
     }
 }
