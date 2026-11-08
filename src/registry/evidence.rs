@@ -579,7 +579,15 @@ impl SlashingReport {
                         max: MAX_SIGNATURE_LEN,
                     });
                 }
-                if block_hash_1 == block_hash_2 {
+                let norm = |s: &str| -> String {
+                    let trimmed = s.trim();
+                    let body = trimmed
+                        .strip_prefix("0x")
+                        .or_else(|| trimmed.strip_prefix("0X"))
+                        .unwrap_or(trimmed);
+                    body.to_ascii_lowercase()
+                };
+                if norm(block_hash_1) == norm(block_hash_2) {
                     return Err(EvidenceError::NonConflictingHashes);
                 }
                 if signature_1.is_empty() || signature_2.is_empty() {
@@ -587,9 +595,16 @@ impl SlashingReport {
                 }
             }
             SlashingProof::Liveness {
-                missed, expected, ..
+                window_start_epoch,
+                window_end_epoch,
+                missed,
+                expected,
             } => {
-                if missed > expected {
+                if window_start_epoch > window_end_epoch
+                    || missed > expected
+                    || *missed == 0
+                    || *expected == 0
+                {
                     return Err(EvidenceError::ImpossibleLivenessWindow);
                 }
             }
@@ -1185,5 +1200,45 @@ mod tests {
         );
         assert_eq!(r.promote_self_proven(), Err(EvidenceError::Unverified));
         assert_eq!(r.provenance(), ProofProvenance::Unverified);
+    }
+
+    #[test]
+    fn case_aliased_double_sign_and_invalid_liveness_windows_rejected() {
+        let same_block = SlashingReport::new(
+            Address::from([3u8; 32]),
+            roles::VALIDATOR,
+            SlashingProof::DoubleSign {
+                height: 10,
+                kind: DoubleSignKind::BlockHeader,
+                epoch: None,
+                block_hash_1: "0xAA".into(),
+                block_hash_2: "aa".into(),
+                signature_1: vec![1],
+                signature_2: vec![2],
+            },
+            None,
+        );
+        assert_eq!(
+            same_block.validate_shape(),
+            Err(EvidenceError::NonConflictingHashes)
+        );
+
+        for (start, end, missed, expected) in [(10, 5, 3, 10), (0, 10, 0, 10), (0, 10, 0, 0)] {
+            let bad_liv = SlashingReport::new(
+                Address::from([3u8; 32]),
+                roles::VALIDATOR,
+                SlashingProof::Liveness {
+                    window_start_epoch: start,
+                    window_end_epoch: end,
+                    missed,
+                    expected,
+                },
+                None,
+            );
+            assert_eq!(
+                bad_liv.validate_shape(),
+                Err(EvidenceError::ImpossibleLivenessWindow)
+            );
+        }
     }
 }
