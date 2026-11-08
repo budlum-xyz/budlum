@@ -686,10 +686,13 @@ impl ProofReceipt {
         Ok(())
     }
 
-    /// Makbuzu iptal eder.
+    /// Marks an unpaid receipt revoked.
     pub fn revoke(&mut self, reason: String) -> Result<(), String> {
         if reason.is_empty() || reason.len() > 256 {
             return Err("Receipt revoke reason invalid".into());
+        }
+        if matches!(self.status, ReceiptStatus::Paid) {
+            return Err("Paid receipt cannot be revoked".to_string());
         }
         if matches!(self.status, ReceiptStatus::Revoked { .. }) {
             return Err("Receipt is already revoked".to_string());
