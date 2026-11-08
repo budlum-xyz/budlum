@@ -295,6 +295,10 @@ fn main() {
             },
         },
         Command::Help => print!("{HELP}"),
+        Command::Invalid(msg) => {
+            eprintln!("error: {msg}\n\n{HELP}");
+            std::process::exit(2);
+        }
     }
 }
 
