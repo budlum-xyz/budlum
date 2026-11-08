@@ -10,7 +10,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, fix/architecture-tip-adlari]
+    branches: [main]
 
 concurrency:
   group: pkcs11-pq-${{ github.ref }}

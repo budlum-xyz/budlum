@@ -12,7 +12,7 @@ on:
       - 'src/**'
       - '.github/workflows/docker-smoke.yml'  # a change to this workflow triggers smoke+trivy
   pull_request:
-    branches: [ main, fix/architecture-tip-adlari ]
+    branches: [ main ]
   workflow_dispatch:
 
 # Minimal permissions - this workflow only reads (build+scan+smoke).
