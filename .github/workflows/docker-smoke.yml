@@ -3,16 +3,8 @@ name: Docker Smoke
 on:
   push:
     branches: [ main ]
-    paths:
-      - 'ops/Dockerfile'
-      - 'config/mainnet.toml'
-      - 'ops/docker-compose.yml'
-      - 'ops/docker-compose.ci.yml'
-      - 'xtask/tools/**'
-      - 'src/**'
-      - '.github/workflows/docker-smoke.yml'  # a change to this workflow triggers smoke+trivy
   pull_request:
-    branches: [ main, fix/architecture-tip-adlari ]
+    branches: [ main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum ]
   workflow_dispatch:
 
 # Minimal permissions - this workflow only reads (build+scan+smoke).
