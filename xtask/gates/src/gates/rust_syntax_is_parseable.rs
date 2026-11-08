@@ -35,6 +35,10 @@ const SKIP_DIRS: &[&str] = &[
     "Unselected files",
 ];
 
+/// Reject a mispointed or accidentally empty scan instead of certifying a
+/// handful of fixture files as repository-wide coverage.
+const MIN_RUST_FILES: usize = 50;
+
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_REPORTED: usize = 32;
 
@@ -83,11 +87,15 @@ fn rust_files(root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
 /// # Errors
 ///
 /// Returns an error for an unreadable directory/source, an oversized source,
-/// an empty scan, or any `.rs` file that fails `syn::parse_file`.
+/// a scan below [`MIN_RUST_FILES`], or any `.rs` file that fails
+/// `syn::parse_file`.
 pub fn run(root: &Path) -> Result<String, String> {
     let files = rust_files(root)?;
-    if files.is_empty() {
-        return Err(String::from("no Rust sources were scanned"));
+    if files.len() < MIN_RUST_FILES {
+        return Err(format!(
+            "too few Rust sources scanned: {}, need at least {MIN_RUST_FILES}",
+            files.len()
+        ));
     }
     let mut offenders = Vec::new();
     let mut scanned = 0usize;
@@ -142,6 +150,16 @@ pub fn self_test() -> Result<String, String> {
 pub fn answer() -> &'static str { r#\"unbalanced { [ (\"# }\n\
 #[cfg(test)]\nmod tests {\n    #[test]\n    fn ok() { assert_eq!(super::answer().len(), 16); }\n}\n";
         put("src/clean.rs", clean)?;
+        match run(&dir) {
+            Err(message) if message.contains("too few Rust sources") => {}
+            other => return Err(format!("canary: vacuous scan was not refused: {other:?}")),
+        }
+        for index in 0..MIN_RUST_FILES - 1 {
+            put(
+                &format!("src/filler_{index}.rs"),
+                &format!("pub const FILLER_{index}: u64 = {index};\n"),
+            )?;
+        }
         run(&dir).map_err(|e| format!("canary: clean Rust source was refused: {e}"))?;
 
         for (label, broken) in [
@@ -178,7 +196,7 @@ pub fn answer() -> &'static str { r#\"unbalanced { [ (\"# }\n\
     let _ = std::fs::remove_dir_all(&dir);
     result?;
     Ok(String::from(
-        "rust-syntax-is-parseable canary OK: five invalid AST shapes and invalid UTF-8 failed; clean Rust passed.",
+        "rust-syntax-is-parseable canary OK: vacuity, five invalid AST shapes and invalid UTF-8 failed; clean Rust passed.",
     ))
 }
 
