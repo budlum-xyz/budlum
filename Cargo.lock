@@ -665,7 +665,7 @@ version = "0.1.0"
 dependencies = [
  "prost",
  "prost-build",
- "sha2 0.11.0",
+ "sha2 0.11.1",
 ]
 
 [[package]]

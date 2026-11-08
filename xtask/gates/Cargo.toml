@@ -18,6 +18,7 @@ publish = false
 syn = { version = "2", features = ["full", "visit", "printing", "derive", "parsing"] }
 quote = "1"
 serde_json = "1"
+tempfile = "3"
 # The concept-names gate reads config/naming/concept_map.toml (TOML) and the
 # patterns in it are Rust `regex` syntax by contract.
 regex = "1"

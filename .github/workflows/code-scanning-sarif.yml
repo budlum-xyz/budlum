@@ -13,7 +13,7 @@ name: Security SARIF
 
 on:
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses]
+    branches: [main, testnet, consensus-of-consensuses]
   push:
     branches: [main, consensus-of-consensuses, testnet-quantum]
   schedule:

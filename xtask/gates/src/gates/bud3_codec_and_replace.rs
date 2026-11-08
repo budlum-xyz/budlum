@@ -22,10 +22,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     let replace_src = fs::read_to_string(root.join("src/storage/bud3/replace.rs"))
         .map_err(|e| format!("missing src/storage/bud3/replace.rs: {e}"))?;
-    let replace_prod = replace_src
-        .split("#[cfg(test)]")
-        .next()
-        .unwrap_or_default();
+    let replace_prod = replace_src.split("#[cfg(test)]").next().unwrap_or_default();
     for token in [
         "MIN_REPLACE_ATTESTATIONS: usize = 3",
         "FAST_PROBE_MIN_SAVINGS_BPS: u32 = 500",
@@ -59,10 +56,13 @@ pub fn run(root: &Path) -> Result<String, String> {
         return Err("src/storage/bud3/tx.rs missing `StorageTxV3::ReplaceObject`".to_owned());
     }
 
-    Ok("bud3-codec-and-replace: A0 fast probe, access tiering log, and ReplaceObject verified".to_owned())
+    Ok(
+        "bud3-codec-and-replace: A0 fast probe, access tiering log, and ReplaceObject verified"
+            .to_owned(),
+    )
 }
 
-pub fn self_test() -> Result<(), String> {
+pub fn self_test() -> Result<String, String> {
     let dir = std::env::temp_dir().join(format!(
         "budlum_bud3_codec_replace_gate_{}",
         std::process::id()
@@ -88,16 +88,22 @@ pub fn admit_object_replacement() { let _ = bad_repair_slash_amount(0); }
         "pub struct TierTransition; pub struct AccessTierTracker; impl AccessTierTracker { pub const fn testnet_converts_objects() -> bool { false } }",
     )
     .map_err(|e| e.to_string())?;
-    fs::write(dir.join("src/storage/bud3/tx.rs"), "pub enum StorageTxV3 { ReplaceObject }")
-        .map_err(|e| e.to_string())?;
+    fs::write(
+        dir.join("src/storage/bud3/tx.rs"),
+        "pub enum StorageTxV3 { ReplaceObject }",
+    )
+    .map_err(|e| e.to_string())?;
     run(&dir)?;
 
-    let bad = valid_replace.replace("MIN_REPLACE_ATTESTATIONS: usize = 3", "MIN_REPLACE_ATTESTATIONS: usize = 1");
+    let bad = valid_replace.replace(
+        "MIN_REPLACE_ATTESTATIONS: usize = 3",
+        "MIN_REPLACE_ATTESTATIONS: usize = 1",
+    );
     fs::write(dir.join("src/storage/bud3/replace.rs"), bad).map_err(|e| e.to_string())?;
     let res = run(&dir);
     let _ = fs::remove_dir_all(&dir);
     if res.is_ok() {
         return Err("bud3-codec-and-replace accepted < 3 attestations".to_owned());
     }
-    Ok(())
+    Ok("bud3-codec-and-replace self-test OK".to_owned())
 }

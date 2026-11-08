@@ -79,7 +79,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     )
 }
 
-pub fn self_test() -> Result<(), String> {
+pub fn self_test() -> Result<String, String> {
     let dir = std::env::temp_dir().join(format!(
         "budlum_offline_never_slashes_gate_{}",
         std::process::id()
@@ -113,15 +113,12 @@ pub fn record_suspension_epoch() -> SuspensionNotice {
     run(&dir)?;
 
     // Negative canary: touching `stake_atoms` inside `advance_epoch` must fail!
-    let bad_presence = valid_presence.replace(
-        "let _suspended = true;",
-        "let stake_atoms = 0;",
-    );
+    let bad_presence = valid_presence.replace("let _suspended = true;", "let stake_atoms = 0;");
     fs::write(dir.join("src/registry/presence.rs"), bad_presence).map_err(|e| e.to_string())?;
     let res = run(&dir);
     let _ = fs::remove_dir_all(&dir);
     if res.is_ok() {
         return Err("offline-never-slashes accepted stake mutation in advance_epoch".to_owned());
     }
-    Ok(())
+    Ok("offline-never-slashes self-test OK".to_owned())
 }

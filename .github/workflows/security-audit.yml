@@ -24,7 +24,7 @@ name: Security Audit
 
 on:
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses]
+    branches: [main, testnet, consensus-of-consensuses]
   push:
     branches: [main]
   schedule:

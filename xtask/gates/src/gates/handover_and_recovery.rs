@@ -65,7 +65,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     Ok("handover-and-recovery: Section 7.6 AGD, 40-block disaster recovery, and churn suite verified".to_owned())
 }
 
-pub fn self_test() -> Result<(), String> {
+pub fn self_test() -> Result<String, String> {
     let dir = std::env::temp_dir().join(format!(
         "budlum_handover_recovery_gate_{}",
         std::process::id()
@@ -103,12 +103,15 @@ fn finality_stall_enters_recovery_mode() {}
     fs::write(dir.join("tests/churn/main.rs"), valid_churn).map_err(|e| e.to_string())?;
     run(&dir)?;
 
-    let bad = valid_handover.replace("FINALITY_STALL_RECOVERY_BLOCKS: u64 = 40", "FINALITY_STALL_RECOVERY_BLOCKS: u64 = 10");
+    let bad = valid_handover.replace(
+        "FINALITY_STALL_RECOVERY_BLOCKS: u64 = 40",
+        "FINALITY_STALL_RECOVERY_BLOCKS: u64 = 10",
+    );
     fs::write(dir.join("src/registry/handover.rs"), bad).map_err(|e| e.to_string())?;
     let res = run(&dir);
     let _ = fs::remove_dir_all(&dir);
     if res.is_ok() {
         return Err("handover-and-recovery accepted wrong stall threshold".to_owned());
     }
-    Ok(())
+    Ok("handover-and-recovery self-test OK".to_owned())
 }
