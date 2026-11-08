@@ -7,7 +7,7 @@
 //!
 //! The chip proves that the final-round row of each block equals Keccak-f applied to the
 //! preimage of its first row. Binding those two to the rest of a statement (the XOF of
-//! ExpandA, the message hash `mu`) is the job of the AIR that embeds the chip (,
+//! ExpandA, the message hash `mu`) is the job of the AIR that embeds the chip (
 //!); `input_state` and `output_state` read them back from a trace for that.
 
 use bud_proof::plonky3_prover::{prove_chip, verify_chip, ChipProof};
