@@ -100,7 +100,7 @@ impl ContentId {
     /// operator writes to disk; this is a change to what a challenge accepts,
     /// and it removes the free version of the attack: colluding operators now
     /// have to relay each other's live challenges rather than precompute one
-    /// answer set. See `docs/BUD_STORAGE_ROADMAP.md` Gap 2.
+    /// answer set. See `docs/STORAGE.md` (in construction).
     pub fn of_subrange_for_deal(
         chunk: &[u8],
         start: u64,
