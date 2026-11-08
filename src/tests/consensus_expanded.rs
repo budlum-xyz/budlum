@@ -86,9 +86,9 @@ fn test_blockchain_future_timestamp_buffer() {
 /// ours the refusal read `Block timestamp not monotonic`, and the network layer
 /// does not know that string: it is not the fork signal (`Previous hash
 /// mismatch`) that makes the sync loop re-walk its locator, so the node asked
-/// for the same index again every second and never moved. In the devnet run
-/// that closed AF-09 a validator stayed at height 1 while the mesh reached 89,
-/// and its blocks were never on the chain the harness reads.
+/// for the same index again every second and never moved. In a devnet run a
+/// validator stayed at height 1 while the mesh reached 89, and its blocks were
+/// never on the chain the harness reads.
 ///
 /// The refusal an unjoined block earns must be the one the fork path watches,
 /// and the timestamp rule must still fire for a block that *does* name our tip.

@@ -80,7 +80,7 @@ mod consensus_round_tests {
             .unwrap();
         assert_ne!(
             round0, round1,
-            "the round must re-roll the leader seed (P01-F01)"
+            "the round must re-roll the leader seed"
         );
         assert_eq!(round1, round1_again, "the seed must stay deterministic");
     }
@@ -241,7 +241,7 @@ mod consensus_round_tests {
             .expect("recording the boundary block must succeed");
         assert!(
             engine.get_checkpoints().unwrap().is_empty(),
-            "the boundary checkpoint must stay parked until quorum finality (P01-F04)"
+            "the boundary checkpoint must stay parked until quorum finality"
         );
 
         // A finalised height whose chain does not hold the block must drop it,
@@ -304,7 +304,7 @@ mod consensus_round_tests {
         }
         assert!(
             changed,
-            "no slot saw a leader change across rounds - the round term is not bound (P01-F02)"
+            "no slot saw a leader change across rounds - the round term is not bound"
         );
     }
 
@@ -447,7 +447,7 @@ mod consensus_round_tests {
         if result.is_ok() {
             assert!(
                 block.nonce <= MAX_LEADER_ROUNDS,
-                "preview must never claim a round above the cap (P01-F10), got {}",
+                "preview must never claim a round above the cap, got {}",
                 block.nonce
             );
         }

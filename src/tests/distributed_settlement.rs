@@ -15,7 +15,7 @@ mod distributed_settlement_tests {
     use crate::domain::plugin::default_domain;
     use crate::domain::{ConsensusKind, DomainCommitment};
     use crate::network::node::{Node, NodeClient};
-    use crate::storage::db::Storage;
+    use crate::persistence::db::Storage;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;

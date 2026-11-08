@@ -85,6 +85,7 @@ mod byzantine_settlement_tests {
                     agg_sig_bls: vec![0u8; 48],
                     bitmap: vec![1],
                     set_hash: "set".to_string(),
+                    seat_table_version: 0,
                 },
                 validator_snapshot: ValidatorSetSnapshot {
                     epoch: 1,
