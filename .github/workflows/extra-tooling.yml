@@ -24,7 +24,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet]
+    branches: [main]
   schedule:
     - cron: "0 4 * * 1" # weekly, Monday 04:00 UTC
   workflow_dispatch:
@@ -58,26 +58,8 @@ jobs:
         with:
           toolchain: "1.97.1"
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core
       - name: Install cargo-auditable + cargo-audit (version pinned)
@@ -155,7 +137,7 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core
       # A pinned binary rather than building from source. The repository already
@@ -165,13 +147,13 @@ jobs:
       - name: Install cargo-machete + cargo-shear (version + sha256 pinned)
         run: |
           set -euo pipefail
-          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/machete.tar.gz \
+          curl -sSfL -o /tmp/machete.tar.gz \
             https://github.com/bnjbvr/cargo-machete/releases/download/v0.8.0/cargo-machete-v0.8.0-x86_64-unknown-linux-musl.tar.gz
           echo "020f6608f9be1562d1fb601e5808e541ccb8806e7e4dfde27d48bc22254a002c  /tmp/machete.tar.gz" | sha256sum -c -
           tar -xzf /tmp/machete.tar.gz -C /tmp
           install -m755 "$(find /tmp -name cargo-machete -type f | head -1)" /usr/local/bin/cargo-machete
 
-          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/shear.tar.gz \
+          curl -sSfL -o /tmp/shear.tar.gz \
             https://github.com/Boshen/cargo-shear/releases/download/v1.4.1/cargo-shear-x86_64-unknown-linux-musl.tar.gz
           echo "0768ac346bb6ed097b237d75046fb357a43941e5c39f6ebf5746f96a4cb7fe03  /tmp/shear.tar.gz" | sha256sum -c -
           tar -xzf /tmp/shear.tar.gz -C /tmp
@@ -290,26 +272,8 @@ jobs:
         with:
           toolchain: "1.97.1"
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core
       - name: Install cargo-bloat (version pinned)
@@ -378,13 +342,13 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core
       - name: Install taplo (version + sha256 pinned)
         run: |
           set -euo pipefail
-          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/taplo.gz \
+          curl -sSfL -o /tmp/taplo.gz \
             https://github.com/tamasfe/taplo/releases/download/0.9.3/taplo-linux-x86_64.gz
           echo "889efcfa067b179fda488427d3b13ce2d679537da8b9ed8138ba415db7da2a5e  /tmp/taplo.gz" | sha256sum -c -
           gunzip -c /tmp/taplo.gz > /tmp/taplo
@@ -469,7 +433,7 @@ jobs:
       # Because the Rust version is a gate, the canary runs after the Rust install.
       - name: The gate canary (independent of Kani)
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- kani --self-test
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core
 

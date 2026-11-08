@@ -70,8 +70,6 @@ fn absorb(hasher: &mut Sha3_256, field: &[u8]) {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HandoffMember {
     pub address: Vec<u8>,
-    pub bls_public_key: Vec<u8>,
-    pub pop_signature: Vec<u8>,
     pub pq_public_key: Vec<u8>,
     pub stake: u64,
 }
@@ -85,8 +83,6 @@ impl HandoffMember {
             .iter()
             .map(|entry| Self {
                 address: entry.address.as_bytes().to_vec(),
-                bls_public_key: entry.bls_public_key.clone(),
-                pop_signature: entry.pop_signature.clone(),
                 pq_public_key: entry.pq_public_key.clone(),
                 stake: entry.stake,
             })
@@ -95,8 +91,7 @@ impl HandoffMember {
 }
 
 /// The digest of the validator set of `epoch` on `chain_id`: every member's
-/// address, BLS consensus key, PoP signature, ML-DSA-65 key and stake, length
-/// prefixed, in set order.
+/// address, ML-DSA-65 key and stake, length prefixed, in set order.
 #[must_use]
 pub fn set_digest(chain_id: u64, epoch: u64, members: &[HandoffMember]) -> [u8; 32] {
     let mut hasher = Sha3_256::new();
@@ -106,8 +101,6 @@ pub fn set_digest(chain_id: u64, epoch: u64, members: &[HandoffMember]) -> [u8; 
     absorb(&mut hasher, &(members.len() as u64).to_le_bytes());
     for member in members {
         absorb(&mut hasher, &member.address);
-        absorb(&mut hasher, &member.bls_public_key);
-        absorb(&mut hasher, &member.pop_signature);
         absorb(&mut hasher, &member.pq_public_key);
         absorb(&mut hasher, &member.stake.to_le_bytes());
     }
@@ -354,15 +347,10 @@ mod tests {
     fn members(keys: &[crate::crypto::primitives::PqKeyPair]) -> Vec<HandoffMember> {
         keys.iter()
             .enumerate()
-            .map(|(i, key)| {
-                let tag = u8::try_from(i).unwrap_or(0);
-                HandoffMember {
-                    address: vec![tag; 32],
-                    bls_public_key: vec![tag ^ 0xA5; 48],
-                    pop_signature: vec![tag ^ 0x5A; 96],
-                    pq_public_key: key.public_key_bytes().to_vec(),
-                    stake: 10,
-                }
+            .map(|(i, key)| HandoffMember {
+                address: vec![u8::try_from(i).unwrap_or(0); 32],
+                pq_public_key: key.public_key_bytes().to_vec(),
+                stake: 10,
             })
             .collect()
     }
@@ -423,20 +411,6 @@ mod tests {
             swapped.verify_in(&registry, &outgoing, [3; 32]),
             Err(HandoffError::Signature { .. })
         ));
-        let mut forged_bls = incoming.clone();
-        forged_bls[0].bls_public_key[0] ^= 0xFF;
-        assert_eq!(
-            follow_handoffs(
-                &registry,
-                7,
-                4,
-                &outgoing,
-                &[(cert.clone(), forged_bls)],
-                &|_| [3; 32]
-            ),
-            Err(HandoffError::IncomingSet),
-            "swapped BLS key must break incoming-set binding"
-        );
         let mut forged_set = incoming.clone();
         forged_set[1].stake = 99;
         assert_eq!(

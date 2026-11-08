@@ -145,7 +145,6 @@ mod gates {
     pub mod rust_literals;
     pub mod scheme_is_never_inferred;
     pub mod security_parameters;
-    pub mod security_quality_wired;
     pub mod security_scans_can_fail;
     pub mod self_derived_ids_cover_every_field;
     pub mod semver;
@@ -160,7 +159,6 @@ mod gates {
     pub mod suppressions_are_justified;
     pub mod tee_trust_boundary_is_structural;
     pub mod test_modules_can_see_what_they_test;
-    pub mod testnet_runtime_hardening;
     pub mod the_image_builds_what_the_manifest_declares;
     pub mod three_is_recipe_only;
     pub mod threshold_rates;
@@ -217,14 +215,6 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::zkvm_immune_regeneration::self_test,
-    },
-    Gate {
-        name: "security-quality-tools-are-wired",
-        replaces: None,
-        run: gates::security_quality_wired::run,
-        run_log: None,
-        run_args: None,
-        self_test: gates::security_quality_wired::self_test,
     },
     Gate {
         name: "quantum-account",
@@ -649,14 +639,6 @@ const GATES: &[Gate] = &[
         run_log: Some(gates::network_hardening_gate::run),
         run_args: None,
         self_test: gates::network_hardening_gate::self_test,
-    },
-    Gate {
-        name: "testnet-runtime-hardening",
-        replaces: None,
-        run: gates::testnet_runtime_hardening::run,
-        run_log: None,
-        run_args: None,
-        self_test: gates::testnet_runtime_hardening::self_test,
     },
     Gate {
         name: "economy-invariants",

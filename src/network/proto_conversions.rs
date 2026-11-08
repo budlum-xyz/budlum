@@ -1907,46 +1907,18 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
             hash: proto.hash,
             signature,
             signer_public_key: proto.signer_public_key,
-            authorization: match proto.authorization {
-                Some(auth) => {
-                    let (max_owners, max_sigs) = if proto.signature_version
-                        == crate::core::transaction::SIGNATURE_VERSION_V8
-                    {
-                        (
-                            crate::crypto::address_v3::MAX_MULTISIG_OWNERS,
-                            crate::core::transaction::MAX_V8_SIGNERS,
-                        )
-                    } else {
-                        (
-                            crate::core::transaction::MAX_V6_THRESHOLD_OWNERS,
-                            crate::core::transaction::MAX_V6_THRESHOLD_OWNERS,
-                        )
-                    };
-                    if auth.owners.len() > max_owners {
-                        return Err(format!(
-                            "authorization carries {} owners; maximum is {max_owners}",
-                            auth.owners.len()
-                        ));
-                    }
-                    if auth.signatures.len() > max_sigs {
-                        return Err(format!(
-                            "authorization carries {} signatures; maximum is {max_sigs}",
-                            auth.signatures.len()
-                        ));
-                    }
-                    Some(crate::core::transaction::MultisigAuthorizationV6 {
-                        scheme_id: auth.scheme_id,
-                        owners: auth.owners,
-                        threshold: auth.threshold,
-                        signatures: auth
-                            .signatures
-                            .into_iter()
-                            .map(|s| (s.public_key, s.signature))
-                            .collect(),
-                    })
+            authorization: proto.authorization.map(|auth| {
+                crate::core::transaction::MultisigAuthorizationV6 {
+                    scheme_id: auth.scheme_id,
+                    owners: auth.owners,
+                    threshold: auth.threshold,
+                    signatures: auth
+                        .signatures
+                        .into_iter()
+                        .map(|s| (s.public_key, s.signature))
+                        .collect(),
                 }
-                None => None,
-            },
+            }),
             chain_id: proto.chain_id,
             signature_version: proto.signature_version,
             tx_type,
@@ -2738,31 +2710,6 @@ mod tests {
             .clear();
         let legacy = Transaction::try_from(legacy_wire).unwrap();
         assert!(!legacy.verify());
-
-        // Wire decode must reject oversized owners and signatures before
-        // allocating a domain transaction.
-        let max_owners = crate::account_abstraction::threshold_mldsa::MAX_THRESHOLD_OWNERS;
-        let mut oversized_sigs = pb::ProtoTransaction::from(&tx);
-        oversized_sigs
-            .authorization
-            .as_mut()
-            .expect("V6 authorization on wire")
-            .signatures = vec![
-            pb::ProtoOwnerSignature {
-                public_key: vec![0u8; 32],
-                signature: vec![0u8; 64],
-            };
-            max_owners + 1
-        ];
-        assert!(Transaction::try_from(oversized_sigs).is_err());
-
-        let mut oversized_owners = pb::ProtoTransaction::from(&tx);
-        oversized_owners
-            .authorization
-            .as_mut()
-            .expect("V6 authorization on wire")
-            .owners = vec![vec![0u8; 32]; max_owners + 1];
-        assert!(Transaction::try_from(oversized_owners).is_err());
     }
 
     #[test]

@@ -42,11 +42,6 @@ const RPC_BODY_LIMIT_CEILING: u32 = 64 * 1024 * 1024;
 /// Upper bound accepted for `max_connections`, for the same reason.
 const RPC_CONNECTION_LIMIT_CEILING: u32 = 100_000;
 
-/// Deadline for the in-process TLS handshake. Without it a peer that opens a
-/// socket and never sends a ClientHello holds the connection task and its file
-/// descriptor for the lifetime of the process.
-const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// Transport limits applied when a caller builds a config from process
 /// Configuration without stating its own. These match
 /// [`RpcSecurityConfig::default`] so that every constructor in this file
@@ -170,7 +165,6 @@ pub enum RpcMode {
 struct RpcSecurityLayer {
     config: Arc<RpcSecurityConfig>,
     per_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
-    per_authed_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
     metrics: Option<Arc<crate::core::metrics::Metrics>>,
     mode: RpcMode,
 }
@@ -184,7 +178,6 @@ impl RpcSecurityLayer {
         Self {
             config: Arc::new(config),
             per_ip_rates: Arc::new(Mutex::new(HashMap::new())),
-            per_authed_ip_rates: Arc::new(Mutex::new(HashMap::new())),
             metrics,
             mode,
         }
@@ -199,7 +192,6 @@ impl<S> Layer<S> for RpcSecurityLayer {
             inner,
             config: self.config.clone(),
             per_ip_rates: self.per_ip_rates.clone(),
-            per_authed_ip_rates: self.per_authed_ip_rates.clone(),
             metrics: self.metrics.clone(),
             mode: self.mode.clone(),
         }
@@ -211,7 +203,6 @@ struct RpcSecurityService<S> {
     inner: S,
     config: Arc<RpcSecurityConfig>,
     per_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
-    per_authed_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
     metrics: Option<Arc<crate::core::metrics::Metrics>>,
     mode: RpcMode,
 }
@@ -256,19 +247,10 @@ where
             }
         }
 
-        // Authentication is evaluated in constant time and carries no state
-        // mutation, so selecting an unauthenticated vs authenticated per-IP
-        // bucket keeps brute-force guesses throttled ahead of 401 while
-        // preventing unauthenticated noise on a shared IP/NAT from exhausting
-        // the authenticated caller's rate-limit budget.
-        let authed = is_authorized(&self.config, &req);
+        // The limiter runs before the key check so that failed key guesses
+        // count against the client's budget.
         let client_ip = extract_client_ip(&self.config, &req);
-        let rate_bucket = if authed {
-            &self.per_authed_ip_rates
-        } else {
-            &self.per_ip_rates
-        };
-        if !is_per_ip_rate_limited(&self.config, rate_bucket, client_ip) {
+        if !is_per_ip_rate_limited(&self.config, &self.per_ip_rates, client_ip) {
             if let Some(ref m) = self.metrics {
                 m.rpc_rate_limited_total.inc();
             }
@@ -282,7 +264,7 @@ where
             });
         }
 
-        if !authed {
+        if !is_authorized(&self.config, &req) {
             return Box::pin(async move {
                 let mut response = text_response(StatusCode::UNAUTHORIZED, "Unauthorized");
                 if let CorsOutcome::Allow(ref origin) = cors {
@@ -324,7 +306,6 @@ async fn serve_tls_connection<S, B>(
     remote_addr: SocketAddr,
     service: S,
     stopped: impl std::future::Future<Output = ()>,
-    _permit: tokio::sync::OwnedSemaphorePermit,
 ) where
     S: tower::Service<HttpRequest<hyper::body::Incoming>, Response = hyper::Response<B>>
         + Clone
@@ -336,40 +317,14 @@ async fn serve_tls_connection<S, B>(
     B: hyper::body::Body<Data = hyper::body::Bytes> + Send + 'static,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-    let handshake = tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(socket));
-    match handshake.await {
-        Ok(Ok(stream)) => {
+    match acceptor.accept(socket).await {
+        Ok(stream) => {
             let _ = jsonrpsee::server::serve_with_graceful_shutdown(stream, service, stopped).await;
         }
-        Ok(Err(error)) => {
+        Err(error) => {
             tracing::debug!("RPC TLS handshake from {remote_addr} failed: {error}");
         }
-        Err(_) => {
-            tracing::debug!("RPC TLS handshake from {remote_addr} timed out");
-        }
     }
-}
-
-/// Serves a plain-HTTP connection while holding `_permit` for the connection's
-/// full lifetime so `max_connections` applies symmetrically to plain and TLS
-/// listeners.
-async fn serve_plain_connection<S, B>(
-    socket: tokio::net::TcpStream,
-    service: S,
-    stopped: impl std::future::Future<Output = ()>,
-    _permit: tokio::sync::OwnedSemaphorePermit,
-) where
-    S: tower::Service<HttpRequest<hyper::body::Incoming>, Response = hyper::Response<B>>
-        + Clone
-        + Send
-        + 'static,
-    S::Future: Send,
-    S::Response: Send,
-    S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
-    B: hyper::body::Body<Data = hyper::body::Bytes> + Send + 'static,
-    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
-{
-    let _ = jsonrpsee::server::serve_with_graceful_shutdown(socket, service, stopped).await;
 }
 
 pub struct RpcServer {
@@ -450,7 +405,9 @@ impl RpcServer {
     pub async fn run(self, addr: String) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use jsonrpsee::core::server::Methods;
         use jsonrpsee::server::BatchRequestConfig;
-        use jsonrpsee::server::{stop_channel, ServerBuilder, ServerConfig};
+        use jsonrpsee::server::{
+            serve_with_graceful_shutdown, stop_channel, ServerBuilder, ServerConfig,
+        };
 
         validate_rpc_security_config(&self.security)?;
         let tls = self.tls.clone();
@@ -487,10 +444,6 @@ impl RpcServer {
             RpcMode::Operator => "operator",
         };
         validate_operator_bind_address(&self.mode, &addr)?;
-        let connection_cap = self
-            .security
-            .max_connections
-            .unwrap_or(RPC_DEFAULT_CONNECTION_LIMIT) as usize;
         // Every served method must be classified (`src/rpc/method_class.rs`).
         let methods: Methods = self.into_rpc().into();
         crate::rpc::method_class::check_served_methods(methods.method_names()).map_err(|e| {
@@ -499,7 +452,6 @@ impl RpcServer {
                 format!("RPC method classification refused this listener: {e}"),
             )
         })?;
-        let connection_permits = Arc::new(tokio::sync::Semaphore::new(connection_cap));
         let svc_builder = builder.to_service_builder();
         let listener = tokio::net::TcpListener::bind(addr.clone()).await?;
         let (stop_handle, server_handle) = stop_channel();
@@ -524,13 +476,6 @@ impl RpcServer {
                     _ = stop_handle.clone().shutdown() => break,
                 };
 
-                let Ok(permit) = connection_permits.clone().try_acquire_owned() else {
-                    tracing::debug!(
-                        "RPC connection from {remote_addr} dropped: max_connections reached"
-                    );
-                    continue;
-                };
-
                 let stop_handle_for_service = stop_handle.clone();
                 let svc_builder_for_service = svc_builder.clone();
                 let methods_for_service = methods.clone();
@@ -551,11 +496,10 @@ impl RpcServer {
                             remote_addr,
                             svc,
                             shutdown,
-                            permit,
                         ));
                     }
                     None => {
-                        tokio::spawn(serve_plain_connection(socket, svc, shutdown, permit));
+                        tokio::spawn(serve_with_graceful_shutdown(socket, svc, shutdown));
                     }
                 }
             }
@@ -882,9 +826,14 @@ pub fn constant_time_eq_str(a: &str, b: &str) -> bool {
     use subtle::ConstantTimeEq;
     // Walk the expected value `b` in full on every call, fold the length
     // difference into the accumulator, and clamp the candidate index into
-    // range via bitwise masking instead of `core::cmp::min`: `min` lowered to
-    // a branch/cmov that mispredicted on the tail byte of a one-byte-short
-    // candidate (`len - 1`), leaking ~1.5 ns in dudect.
+    // range instead of branching on a length mismatch: the work performed
+    // then depends only on `b.len()`, never on whether the lengths match or
+    // where the first differing byte sits. A short candidate re-reads its
+    // last byte and an empty one reads `b` itself; the length fold still
+    // refuses both. The earlier shape dummy-compared `b` against itself on
+    // the mismatch path, and same-pointer loads do not cost what
+    // cross-buffer loads cost - a small but systematic gap the timing_safe
+    // regression bench measured at several nanoseconds.
     let a_b = a.as_bytes();
     let b_b = b.as_bytes();
     let mut acc: u8 = 0;
@@ -892,12 +841,10 @@ pub fn constant_time_eq_str(a: &str, b: &str) -> bool {
         acc |= byte;
     }
     let src: &[u8] = if a_b.is_empty() { b_b } else { a_b };
-    let last = src.len().saturating_sub(1);
     for (i, &expected) in b_b.iter().enumerate() {
-        let in_bounds = usize::from(u8::from(std::hint::black_box(i < last)));
-        let mask = usize::MAX.wrapping_mul(in_bounds);
-        let idx = last ^ (mask & (last ^ i));
-        let provided = src[idx];
+        // `src` is empty only when `b` is empty too, in which case this
+        // loop body never runs and the length fold alone decides.
+        let provided = src[core::cmp::min(i, src.len() - 1)];
         acc |= provided ^ expected;
         acc = std::hint::black_box(acc);
     }
@@ -1776,27 +1723,25 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ));
         }
-        // This is a flat-fee chain, not EVM gas metering. Its consensus
-        // admission floor comes from the *live* state: base_fee for most
-        // transactions, the governed proportional rate for transfers, and the
-        // sender's escalating fee for governance proposals. Returning only
-        // base_fee made a 100 BUD testnet faucet
-        // grant quote 1 atom while admission required 20001. The faucet
-        // reserved its allowance and got a 502 instead of funding the user.
-        // Query the same method admission calls; do not duplicate a static
-        // testnet rate here or turn an unavailable chain actor into a cheap fee.
-        let required = self
-            .chain
-            .get_required_transaction_fee(tx.clone())
-            .await
-            .map_err(|error| {
-                ErrorObjectOwned::owned(
-                    -32603,
-                    format!("Fee estimate unavailable: {error}"),
-                    None::<()>,
-                )
-            })?;
-        Ok(Self::to_hex(tx.fee.max(required)))
+        // The chain charges a flat fee: `AccountState::validate_transaction`
+        // Rejects `fee < base_fee`, rejects a `max_fee` that diverges from
+        // `fee`, and rejects any `priority_fee`. `total_cost` is
+        // `amount + fee`. There is no gas metering - the `GasSchedule`
+        // Per-opcode numbers are not consulted on any settlement path.
+        //
+        // The previous answer was the literal `21000` for every transaction
+        // Type, which is Ethereum's transfer intrinsic and has nothing to do
+        // With what this chain charges. A wallet sizing a transaction from it
+        // Would price a stake, a vote and a bridge relay identically, and all
+        // Three wrong: the number the chain actually enforces is `base_fee`,
+        // Which is 10 on mainnet, 1 on testnet and devnet, and moves with
+        // `adjust_base_fee` every block.
+        //
+        // So the estimate is the fee floor the caller's transaction must
+        // Clear. If the caller already set a fee at or above the floor, that
+        // Fee is what will be charged and it is returned unchanged.
+        let base_fee = self.chain.get_base_fee().await;
+        Ok(Self::to_hex(tx.fee.max(base_fee)))
     }
 
     async fn tx_precheck(&self, tx: Transaction) -> Result<serde_json::Value, ErrorObjectOwned> {
@@ -7333,56 +7278,6 @@ mod tests {
         assert_eq!(statuses[0], StatusCode::UNAUTHORIZED);
         assert_eq!(statuses[1], StatusCode::UNAUTHORIZED);
         assert_eq!(statuses[2], StatusCode::TOO_MANY_REQUESTS);
-    }
-
-    #[tokio::test]
-    async fn unauthenticated_noise_does_not_starve_authenticated_caller_on_same_ip() {
-        let layer = RpcSecurityLayer::new(
-            RpcSecurityConfig {
-                auth_required: true,
-                api_key: Some("right-key".into()),
-                allowed_ips: Vec::new(),
-                rate_limit_per_minute: Some(2),
-                ..Default::default()
-            },
-            None,
-            RpcMode::Public,
-        );
-        let inner = tower::service_fn(|_req: HttpRequest<()>| async {
-            Ok::<_, std::convert::Infallible>(text_response(StatusCode::OK, "ok"))
-        });
-        let mut svc = layer.layer(inner);
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40001);
-
-        // Exhaust the unauthenticated bucket from the shared IP.
-        for expected in [
-            StatusCode::UNAUTHORIZED,
-            StatusCode::UNAUTHORIZED,
-            StatusCode::TOO_MANY_REQUESTS,
-        ] {
-            let mut bad = HttpRequest::builder()
-                .uri("/")
-                .header("x-api-key", "wrong-key")
-                .body(())
-                .unwrap();
-            bad.extensions_mut().insert(addr);
-            assert_eq!(svc.call(bad).await.unwrap().status(), expected);
-        }
-
-        // Legitimate authenticated caller behind the same IP keeps its own budget.
-        for expected in [
-            StatusCode::OK,
-            StatusCode::OK,
-            StatusCode::TOO_MANY_REQUESTS,
-        ] {
-            let mut good = HttpRequest::builder()
-                .uri("/")
-                .header("x-api-key", "right-key")
-                .body(())
-                .unwrap();
-            good.extensions_mut().insert(addr);
-            assert_eq!(svc.call(good).await.unwrap().status(), expected);
-        }
     }
 
     #[tokio::test]

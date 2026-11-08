@@ -1399,13 +1399,9 @@ async fn main() {
     let mut bootstraps = Vec::new();
     if let Some(ref addr) = config.bootstrap {
         bootstraps.push(addr.clone());
-    }
-    for addr in &config.bootnodes {
-        if !bootstraps.contains(addr) {
-            bootstraps.push(addr.clone());
-        }
-    }
-    if bootstraps.is_empty() {
+    } else if !config.bootnodes.is_empty() {
+        bootstraps.extend(config.bootnodes.clone());
+    } else {
         bootstraps.extend(network.bootnodes());
         bootstraps.extend(network.fallback_bootnodes());
     }

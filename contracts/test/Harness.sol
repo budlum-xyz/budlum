@@ -13,7 +13,6 @@ interface Vm {
     /// error that carries arguments does not revert with four bytes.
     function expectPartialRevert(bytes4 selector) external;
     function roll(uint256 blockNumber) external;
-    function warp(uint256 newTimestamp) external;
     function prank(address sender) external;
     function deal(address who, uint256 amount) external;
     function chainId(uint256 newChainId) external;
