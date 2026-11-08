@@ -1,27 +1,18 @@
-// Bridge lifecycle integration test (security audit). The
-// `bud_lockBridgeTransfer` RPC is removed; the full lock → mint → burn →
-// Unlock happy path is now exercised through the *internal*
-// `Blockchain::lock_bridge_transfer` system path, plus the
-// `apply_bridge_sweep` expiry-sweep.
 #[cfg(test)]
 pub mod bridge_lifecycle;
-// A funded chain that applies door transactions in produced blocks and
-// restarts from its own store: the restart tests write through it.
 #[cfg(test)]
 pub mod block_door_harness;
-// four nodes build the same global header sequence; a restart
-// rebuilds it.
 #[cfg(test)]
 pub mod global_header_sequence;
 pub mod regression_canaries;
-// QcBlob quorum-check unit tests (security audit). The
-// `import_qc_blob` minimum-signature count contract is verified by
-// Replaying the same arithmetic the production code uses, against
-// 3-validator snapshots.
+#[cfg(test)]
+pub mod conformance_locks;
 #[cfg(test)]
 pub mod bench_performance;
 #[cfg(test)]
 pub mod block_reward;
+#[cfg(test)]
+pub mod audit_lane_a;
 // State-machine sharding (Whitepaper v1.3): block-level shards commitment
 // production/validation and atomic cross-shard transfers.
 #[cfg(test)]
@@ -30,10 +21,6 @@ pub mod bns;
 pub mod deed;
 #[cfg(test)]
 pub mod sharding_e2e;
-// Plus: the B.U.D. end-to-end test and the module-independence invariants.
-// A three-actor scenario (operator A, operator B and observer C) with 9
-// permissionless, whitelist and data-sovereignty invariants (plan section 0.5
-// + acceptance criteria).
 #[cfg(test)]
 pub mod bud_e2e;
 #[cfg(test)]
@@ -49,28 +36,18 @@ pub mod manifest_commitment_locks;
 #[cfg(test)]
 pub mod multi_consensus_locks;
 pub mod operator_kill_chaos;
-// P01 consensus-round behaviour and the P01 negative-validation batch. The file
-// existed and no `mod` declared it, so rustc never read it: 558 lines of round
-// tests that grepped like live coverage and ran nowhere.
 #[cfg(test)]
-pub mod p01_consensus_rounds;
+pub mod consensus_round_boundaries;
 #[cfg(test)]
 pub mod poisoned_lock_locks;
 #[cfg(test)]
 pub mod qcblob_quorum;
 #[cfg(test)]
 pub mod wall_clock_locks;
-// Re-enabled (was `#![cfg(false)]`'d ghost-hunting).
-// The permissionless-registry / liveness / invalid-vote state was reinstated
-// On `AccountState`, so these test files now exercise the real code paths
-// Again. They were the regression tests for patch series.
 #[cfg(test)]
 pub mod ai_inference_runtime;
 #[cfg(test)]
 pub mod disaster_recovery;
-// Chaos acceptance for the regeneration/reversion layer: corrupt views and
-// forged audit trails must recover via canonical reversion inside a fixed N
-// blocks, and the compromised-anchor boundary is pinned as documented.
 #[cfg(test)]
 pub mod finality_adversarial;
 #[cfg(test)]
@@ -102,15 +79,11 @@ pub mod private_transfer_fee_market;
 #[cfg(test)]
 pub mod prover;
 #[cfg(test)]
-pub mod regeneration_recovery;
+pub mod state_recovery;
 #[cfg(test)]
 pub mod relayer_liveness;
-// chain relayer proof cryptographic verification + M5 budlumxyz fee + M4 BNS fee
-// Regression gates (Q-A, 2026-07-16).
 #[cfg(test)]
 pub mod relayer_gates;
-// A relayer may stay silent; it may not sign an external outcome it never
-// observed. Pins the worker's refusal paths.
 #[cfg(test)]
 pub mod relayer_worker_locks;
 #[cfg(test)]
@@ -124,16 +97,10 @@ pub mod tokenomics_proptest;
 pub mod vault_tx_door;
 #[cfg(test)]
 pub mod zkvm;
-// The F4 seal (2026-07-17): the SocialFi boost 4 percent B.U.D. operator
-// distribution, remainder determinism, and the operator-less burn fallback
-// regressions.
 #[cfg(test)]
 pub mod adversarial_p2p;
-// The F1 seal (2026-07-17): NftBurn -> storage manifest hard
-// Prune chain-level regression lock (the produce_block path).
 #[cfg(test)]
 pub mod bns_expanded;
-// Universal Relayer E2E integration tests.
 #[cfg(test)]
 pub mod consensus_expanded;
 #[cfg(test)]
@@ -156,10 +123,6 @@ pub mod security_auditor;
 pub mod socialfi;
 #[cfg(test)]
 pub mod target_700;
-// A P0 mainnet gap (2026-07-18): the bridge negative suite - forgery,
-// Replay / anchor-substitution / inactive-relayer / unknown-message reddi.
-// It verifies only the refusal paths already defined; protocol behaviour does
-// not change.
 #[cfg(test)]
 pub mod bridge_negatives;
 pub mod domain_edge_cases;
@@ -167,26 +130,14 @@ pub mod domain_edge_cases;
 pub mod encryption_dao;
 #[cfg(test)]
 pub mod evm_finality_contract;
-// The PoA participant onboarding lifecycle, the whitelist requirement and the
-// KYC expiry test matrix. The isolation seal lives in poa_isolation.rs.
 pub mod poa_onboarding_matrix;
-// P0 mainnet-gap 3/3 (2026-07-19): snapshot-corruption +
-// The crash-recovery chaos suite. Two _gap pins deliberately seal today's
-// behaviour (no snapshot authenticity, v1/v2 cross-shadowing and a silent boot
-// rollback); they are inverted when the product fix is ordered.
 #[cfg(test)]
 pub mod snapshot_chaos;
-// P5 regression lock (2026-07-19): ZK finality fail-open +
-// The relayer escrow silent-failure security seals, which break CI.
-// Reachability premises behind the accepted dependency advisories. These fail
-// when a routine dependency change makes a carried CVE live again.
-// External review pass: locks for the findings that were real, plus the ones
-// that were already handled and should not have to be re-derived.
 #[cfg(test)]
 pub mod advisory_reachability;
 #[cfg(test)]
 pub mod ai_verification_status_locks;
-pub mod audit_findings_locks;
+pub mod security_invariant_tests;
 #[cfg(test)]
 pub mod consensus_rounds;
 #[cfg(test)]
@@ -200,35 +151,95 @@ pub mod hardening_locks;
 pub mod mempool_dos_locks;
 pub mod network_hardening_locks;
 #[cfg(test)]
-pub mod priority_findings;
+pub mod protocol_guardrails;
 #[cfg(test)]
 pub mod regression_lock;
 pub mod slashing_matrix;
-// (2026-07-21) cross-platform consensus determinism digest'i.
-// determinism.yml collects the CONSENSUS_DIGEST line produced by the test in
-// this module across three operating systems and requires byte equality.
 pub mod consensus_digest;
-// (2026-07-21) CI expansion item 1 - the genesis reproducibility probe
-// (`genesis_hash_deterministic`, see determinism.yml).
 #[cfg(test)]
 pub mod genesis_repro;
-// A serialize failure must not fold into empty bytes on a path that feeds a
-// hash: two different values would then commit to the same digest.
 #[cfg(test)]
 pub mod hash_input_serialize_locks;
-// Chain ids must not collide with another chain's registry entry.
 pub mod blockchair_fixture_locks;
 #[cfg(test)]
 pub mod chain_id_registry_locks;
 pub mod consensus_bypass_locks;
-// Differential tests against real chain fixtures (merkle, RLP, halving).
-// The fixture is the single source: config/fixtures/real-chain.json, and the
-// xtask `fixture-integrity` gate verifies the same file.
 #[cfg(test)]
 pub mod block_clock;
 #[cfg(test)]
 pub mod real_chain_fixtures;
-// Effect-asserting locks for the slashing matrix and the overflow rule
-//.
+// Effect-asserting locks for the slashing matrix and the overflow rule.
 #[cfg(test)]
 pub mod refusal_locks;
+
+// Regression locks for fixes already in the tree, one module per area.
+#[cfg(test)]
+pub mod regression_ai_storage;
+#[cfg(test)]
+pub mod regression_bridge;
+#[cfg(test)]
+pub mod regression_chain;
+#[cfg(test)]
+pub mod regression_ops_crypto;
+
+// Validator classes and the single registration door.
+#[cfg(test)]
+pub mod validator_classes;
+
+// The B.U.D. 3.0 storage door end to end.
+#[cfg(test)]
+pub mod bud3_door;
+
+// Prometheus alert rules may only name metrics the node exports.
+#[cfg(test)]
+pub mod alert_rules_reference_existing_metrics;
+#[cfg(test)]
+pub mod alerts_have_runbook_entries;
+
+// Derived object-layer measurement rings and counters.
+#[cfg(test)]
+pub mod object_layer_metrics;
+
+// Readiness series and the operational surfaces that scrape and alert on them.
+#[cfg(test)]
+pub mod backup_covers_persisted_paths;
+#[cfg(test)]
+pub mod caddy_edges_match_the_services;
+#[cfg(test)]
+pub mod compose_topology_matches_services;
+#[cfg(test)]
+pub mod readiness_metrics;
+#[cfg(test)]
+pub mod scrape_topology_covers_the_rules;
+
+// The persistence move is behaviour-neutral.
+#[cfg(test)]
+pub mod persistence_move;
+
+// State transition, vesting, staking, governance, sharding, and snapshot hardening.
+#[cfg(test)]
+pub mod state_hardening;
+
+// Domains, cross-domain bridge, settlement, and testnet feature-matrix locks.
+#[cfg(test)]
+pub mod domains_bridge_settlement;
+
+// Instant Duty Handover and finality recovery.
+#[cfg(test)]
+pub mod handover_recovery;
+
+// Ceremony rehearsal and protocol drills.
+#[cfg(test)]
+pub mod ceremony_and_drills;
+
+// Security, conservation, and privilege-boundary regressions.
+#[cfg(test)]
+pub mod security_review;
+// Object replacement: the second representation of one content id
+// (section 6.14).
+#[cfg(test)]
+pub mod bud3_replace;
+
+// Lane-D configuration, backup-drill and vote-domain regression locks.
+#[cfg(test)]
+pub mod audit_lane_d_locks;
