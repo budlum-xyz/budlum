@@ -209,6 +209,26 @@ pub const MAX_DATA_ASSETS: usize = 100_000;
 /// Convenience: pub so marketplace callers can refuse past the
 /// same bound the registry enforces in this module.
 pub const MAX_ACCESS_GRANTS: usize = 100_000;
+/// Most sale authorizations the registry holds.
+///
+/// Convenience: pub so marketplace callers can refuse past the
+/// same bound the registry enforces in this module.
+pub const MAX_SALE_AUTHORIZATIONS: usize = 100_000;
+/// Most purchase receipts the registry holds.
+///
+/// Convenience: pub so marketplace callers can refuse past the
+/// same bound the registry enforces in this module.
+pub const MAX_PURCHASE_RECEIPTS: usize = 100_000;
+/// Most encryption policy versions the registry holds.
+///
+/// Convenience: pub so marketplace callers can refuse past the
+/// same bound the registry enforces in this module.
+pub const MAX_ENCRYPTION_POLICIES: usize = 1_024;
+/// Most protected-content bindings the registry holds.
+///
+/// Convenience: pub so marketplace callers can refuse past the
+/// same bound the registry enforces in this module.
+pub const MAX_PROTECTED_CONTENT: usize = 100_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MarketplaceRegistry {
@@ -329,7 +349,7 @@ impl MarketplaceRegistry {
             active: true,
         };
         self.offers.insert(id, offer);
-        self.next_offer_id += 1;
+        self.next_offer_id = self.next_offer_id.saturating_add(1);
         Ok(id)
     }
 
@@ -514,6 +534,11 @@ impl MarketplaceRegistry {
 
     pub fn set_encryption_policy(&mut self, policy: EncryptionPolicy) -> Result<(), String> {
         policy.validate()?;
+        if !self.encryption_policies.contains_key(&policy.version)
+            && self.encryption_policies.len() >= MAX_ENCRYPTION_POLICIES
+        {
+            return Err("encryption policy registry is full".into());
+        }
         self.encryption_policies.insert(policy.version, policy);
         Ok(())
     }
@@ -584,6 +609,9 @@ impl MarketplaceRegistry {
             .contains_key(&authorization.authorization_id)
         {
             return Err("SaleAuthorization already registered".into());
+        }
+        if self.sale_authorizations.len() >= MAX_SALE_AUTHORIZATIONS {
+            return Err("sale authorization registry is full".into());
         }
         let id = authorization.authorization_id;
         self.sale_authorizations.insert(id, authorization);
@@ -678,7 +706,7 @@ impl MarketplaceRegistry {
             authorization.terms_hash,
         );
         // Authorization-backed grant: `create_sale_authorization` already
-        // verified the seller signature cryptographically (finding #358), so a
+        // verified the seller signature cryptographically, so a
         // grant issued from a *registered* authorization carries verified
         // owner consent. The owner_signature field is inherited from the
         // verified authorization rather than re-signed over the grant's own
@@ -714,6 +742,9 @@ impl MarketplaceRegistry {
         receipt.validate_shape()?;
         if self.purchase_receipts.contains_key(&receipt.receipt_id) {
             return Err("PollenPurchaseReceipt already registered".into());
+        }
+        if self.purchase_receipts.len() >= MAX_PURCHASE_RECEIPTS {
+            return Err("purchase receipt registry is full".into());
         }
 
         self.sale_authorizations
@@ -836,6 +867,11 @@ impl MarketplaceRegistry {
             return Err(
                 "cannot bind content that does not match the asset's registered manifest".into(),
             );
+        }
+        if self.protected_content.asset_for(&manifest_id).is_none()
+            && self.protected_content.len() >= MAX_PROTECTED_CONTENT
+        {
+            return Err("protected content registry is full".into());
         }
         let owner = asset.owner;
         self.protected_content
@@ -990,8 +1026,8 @@ mod tests {
     /// A deterministic test key pair: the address is the public key, and the
     /// signature comes from this pair.
     ///
-    /// Finding #358 (HIGH): signatures are now verified cryptographically, so tests
-    /// have to produce real ed25519 signatures.
+    /// Signatures are verified cryptographically, so tests have to produce
+    /// real ed25519 signatures.
     fn test_keypair(byte: u8) -> crate::crypto::primitives::KeyPair {
         crate::crypto::primitives::KeyPair::from_seed(&[byte; 32])
             .expect("deterministic test keypair")
@@ -1676,5 +1712,84 @@ mod tests {
         let a = reg.create_offer(seller, cid, 10).expect("first offer");
         let b = reg.create_offer(seller, cid, 20).expect("second offer");
         assert_ne!(a, b, "an incrementing counter must keep producing new ids");
+    }
+
+    #[test]
+    fn data_market_sale_uses_grant() {
+        let mut reg = MarketplaceRegistry::new();
+        let seller = addr(1);
+        let buyer = addr(2);
+        let stranger = addr(3);
+        let bud3_cid = crate::storage::bud3::content_id::ContentId::public(b"market-dataset-v3");
+        let manifest_id = ContentId(bud3_cid.digest);
+        let asset = DataAsset::new(seller, manifest_id, [0x55; 32], true);
+        let asset_id = reg.register_data_asset(asset.clone()).unwrap();
+        reg.bind_protected_content(manifest_id, asset_id, seller)
+            .unwrap();
+
+        // Reading protected content without a grant is refused.
+        assert!(reg
+            .authorize_content_read(&manifest_id, &buyer, None, 12)
+            .is_err());
+
+        // Seller authorizes bounded sale; buyer purchases an AccessGrant.
+        let auth = signed_sale_authorization(&asset);
+        let auth_id = reg.create_sale_authorization(auth).unwrap();
+        let sig = signed_purchase(
+            &reg,
+            auth_id,
+            buyer,
+            buyer,
+            12,
+            5,
+            2,
+            [0xCC; 32],
+            2,
+        );
+        let (grant_id, receipt) = reg
+            .issue_grant_from_sale_authorization(
+                auth_id,
+                buyer,
+                buyer,
+                12,
+                5,
+                2,
+                [0xCC; 32],
+                sig,
+            )
+            .unwrap();
+        assert_eq!(receipt.grant_id, grant_id);
+        assert_eq!(reg.data_assets.get(&asset_id).unwrap().owner, seller);
+
+        // Stranger cannot read with buyer's grant; buyer can read within window.
+        assert!(reg
+            .authorize_content_read(&manifest_id, &stranger, Some(&grant_id), 12)
+            .is_err());
+        assert!(reg
+            .authorize_content_read(&manifest_id, &buyer, Some(&grant_id), 12)
+            .is_ok());
+        assert!(reg
+            .authorize_content_read(&manifest_id, &buyer, Some(&grant_id), 25)
+            .is_err());
+    }
+
+    #[test]
+    fn offer_counter_saturates_and_encryption_policy_cap_holds() {
+        let mut reg = MarketplaceRegistry::new();
+        let seller = addr(1);
+        let cid = ContentId([0xEE; 32]);
+        reg.next_offer_id = u64::MAX;
+        let id = reg.create_offer(seller, cid, 50).unwrap();
+        assert_eq!(id, u64::MAX);
+        assert_eq!(reg.next_offer_id, u64::MAX);
+        assert!(reg.create_offer(seller, cid, 50).is_err());
+
+        for v in 1..=(MAX_ENCRYPTION_POLICIES as u32) {
+            reg.set_encryption_policy(EncryptionPolicy::post_quantum(v, 100, None))
+                .unwrap();
+        }
+        let next_v = (MAX_ENCRYPTION_POLICIES as u32) + 1;
+        let over = EncryptionPolicy::post_quantum(next_v, 100, None);
+        assert!(reg.set_encryption_policy(over).is_err());
     }
 }

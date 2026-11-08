@@ -253,10 +253,13 @@ impl PoaMembershipRegistry {
         use sha3::{Digest, Sha3_256};
         let mut hasher = Sha3_256::new();
         hasher.update(b"BDLM_POA_ADMISSION_ROOT_V1");
+        hasher.update([2u8]);
+        hasher.update((self.admins.len() as u64).to_le_bytes());
         for ((domain, admin), ()) in &self.admins {
             hasher.update(domain.to_le_bytes());
             hasher.update(admin.as_bytes());
         }
+        hasher.update((self.members.len() as u64).to_le_bytes());
         for ((domain, account), member) in &self.members {
             hasher.update(domain.to_le_bytes());
             hasher.update(account.as_bytes());
@@ -269,6 +272,7 @@ impl PoaMembershipRegistry {
                 hasher.update([0u8]);
             }
         }
+        hasher.update((kyc_expiry.len() as u64).to_le_bytes());
         for ((domain, account), expiry) in kyc_expiry {
             hasher.update(domain.to_le_bytes());
             hasher.update(account.as_bytes());
@@ -288,8 +292,13 @@ impl PoaMembershipRegistry {
         if kyc_commitment == [0u8; 32] {
             return Err(PoaMembershipError::MissingKyc);
         }
-        if self.members.contains_key(&(domain, account)) {
-            return Err(PoaMembershipError::AlreadyApplied { account, domain });
+        if let Some(existing) = self.members.get(&(domain, account)) {
+            if matches!(
+                existing.status,
+                MembershipStatus::Pending | MembershipStatus::Approved
+            ) {
+                return Err(PoaMembershipError::AlreadyApplied { account, domain });
+            }
         }
         self.members.insert(
             (domain, account),

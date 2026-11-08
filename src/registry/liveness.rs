@@ -1,39 +1,49 @@
-//! Consensus liveness (downtime) fault detection.
+//! Consensus liveness (downtime) tracking and suspension.
 //!
-//! `crate::registry::evidence::SlashingProof::Liveness` was defined in the previous turn but nothing
-//! Produced it. This module closes that gap: it tracks, per validator, the
-//! Number of *consecutive* epochs in which the validator failed to show the
-//! Expected consensus participation. When that count crosses
-//! [`RegistryParams::liveness_max_missed_epochs`], a canonical
-//! [`SlashingReport`] (proof = `Liveness`, provenance = `ConsensusVerified`) is
-//! Emitted so the *existing* report→slash flow can act on it - no new slashing
-//! Path is introduced.
+//! WP-13 (section 7.8, V-4, KR-08, BLG-251): absence is **never slashed**.
+//! This tracker counts, per validator, the *consecutive* epochs without the
+//! expected consensus participation, and when the count crosses
+//! [`RegistryParams::liveness_max_missed_epochs`] the validator is
+//! **suspended**: it takes no new duty and its stake is untouched. Only
+//! proven double-signing and proven bad repair slash (section 11.7).
+//! `ResumeValidator` lifts a suspension one epoch later.
 //!
 //! ## Counting semantics (consecutive, not cumulative)
 //! The counter is incremented for every epoch a validator misses and **reset to
-//! Zero the moment it participates again**. This deliberately avoids a
-//! Cumulative penalty, which would disproportionately punish validators for
-//! Scattered, transient misses (e.g. brief restarts).
+//! zero the moment it participates again**. This deliberately avoids a
+//! cumulative penalty, which would disproportionately punish validators for
+//! scattered, transient misses (e.g. brief restarts).
 
 use crate::core::address::Address;
-use crate::registry::evidence::SlashingReport;
 use crate::registry::params::RegistryParams;
-use crate::registry::role::roles;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+
+/// Non-slashing suspension emitted when a validator exceeds its absence window (V-4).
+/// Convenience: exposed for epoch-close suspension handling.
+///
+/// Offline validators are suspended (no new duties, seat eligibility suspended),
+/// never slashed: `stake_slashed_atoms` is structurally zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuspensionNotice {
+    pub validator: Address,
+    pub window_start_epoch: u64,
+    pub window_end_epoch: u64,
+    pub missed_epochs: u64,
+    pub stake_slashed_atoms: u64,
+}
 
 /// Per-validator consecutive-miss tracker.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LivenessTracker {
     /// Validator -> consecutive missed epochs (only present while > 0).
     missed: BTreeMap<Address, u64>,
-    /// Epoch at which each validator's current miss-streak began (for the
-    /// Window fields of the emitted proof).
+    /// Epoch at which each validator's current miss-streak began.
     streak_start_epoch: BTreeMap<Address, u64>,
-    /// Once a validator has been reported at the current streak, we suppress
-    /// Re-reporting until it participates again (avoids repeated slashing every
-    /// Epoch while still down).
-    reported: BTreeMap<Address, ()>,
+    /// Once a validator has been suspended at the current streak, we suppress
+    /// re-suspending until it participates again (avoids repeated suspension
+    /// every epoch while still down). Value: the epoch a resume takes effect.
+    reported: BTreeMap<Address, u64>,
 }
 
 impl LivenessTracker {
@@ -55,34 +65,63 @@ impl LivenessTracker {
         validators.len()
     }
 
+    /// Whether the validator is currently suspended.
+    #[must_use]
+    pub fn is_suspended(&self, validator: &Address) -> bool {
+        self.reported.contains_key(validator)
+    }
+
+    /// `ResumeValidator`: lift the suspension one epoch later (section
+    /// 7.8.7). The mobile app sends this by itself.
+    pub fn request_resume(&mut self, validator: &Address, epoch: u64) {
+        self.reported.insert(*validator, epoch.saturating_add(1));
+    }
+
+    /// Apply resumes whose epoch has come; returns the reactivated
+    /// validators and clears their miss streak.
+    pub fn activate_due_resumes(&mut self, epoch: u64) -> Vec<Address> {
+        let due: Vec<Address> = self
+            .reported
+            .iter()
+            .filter(|(_, resume)| **resume <= epoch)
+            .map(|(addr, _)| *addr)
+            .collect();
+        for addr in &due {
+            self.reported.remove(addr);
+            self.missed.remove(addr);
+            self.streak_start_epoch.remove(addr);
+        }
+        due
+    }
+
     /// Record one epoch's worth of participation.
     ///
     /// * `epoch` - the epoch that just completed.
     /// * `expected` - validators that were expected to participate this epoch
     ///   (typically the active validator set).
     /// * `participated` - a predicate returning `true` if the given validator
-    ///   Showed the expected participation this epoch.
-    /// * `params` - governs the threshold and is embedded in emitted proofs.
+    ///   showed the expected participation this epoch.
+    /// * `params` - governs the threshold.
     ///
-    /// Returns a [`SlashingReport`] for every validator whose consecutive-miss
-    /// Count reached the threshold this epoch (and had not already been
-    /// Reported for the current streak).
+    /// Returns every validator whose consecutive-miss count reached the
+    /// threshold this epoch and that was not already suspended (V-4: absence
+    /// suspends, it never produces a slashing report).
     pub fn record_epoch<F>(
         &mut self,
         epoch: u64,
         expected: &[Address],
         mut participated: F,
         params: &RegistryParams,
-    ) -> Vec<SlashingReport>
+    ) -> Vec<Address>
     where
         F: FnMut(&Address) -> bool,
     {
-        let mut reports = Vec::new();
+        let mut suspended_now = Vec::new();
         let threshold = params.liveness_max_missed_epochs;
 
         // Normalize the expected set: a validator named twice in one epoch
         // would otherwise have the same duty counted twice against them.
-        // Miss STATE survives duty-free epochs on purpose: a slashed or
+        // Miss state survives duty-free epochs on purpose: a slashed or
         // jailed validator drops out of the expected set, and its accrued
         // streak must stay exactly where it was, frozen, not vanish.
         let expected_set: std::collections::BTreeSet<Address> = expected.iter().copied().collect();
@@ -100,32 +139,68 @@ impl LivenessTracker {
             if *count == 0 {
                 self.streak_start_epoch.insert(*validator, epoch);
             }
-            *count += 1;
+            *count = count.saturating_add(1);
             let current = *count;
 
-            // Threshold of 0 disables liveness slashing entirely.
+            // Threshold of 0 disables suspension entirely.
+            if threshold > 0 && current >= threshold && !self.reported.contains_key(validator) {
+                self.reported.insert(*validator, u64::MAX);
+                suspended_now.push(*validator);
+            }
+        }
+
+        suspended_now
+    }
+
+    /// Record one epoch's participation under invariant V-4:
+    /// crossing `threshold` consecutive missed epochs emits a [`SuspensionNotice`]
+    /// with `stake_slashed_atoms == 0` instead of a slashing report.
+    pub fn record_suspension_epoch<F>(
+        &mut self,
+        epoch: u64,
+        expected: &[Address],
+        mut participated: F,
+        threshold: u64,
+    ) -> Vec<SuspensionNotice>
+    where
+        F: FnMut(&Address) -> bool,
+    {
+        let mut suspensions = Vec::new();
+        let expected_set: BTreeSet<Address> = expected.iter().copied().collect();
+
+        for validator in &expected_set {
+            if participated(validator) {
+                self.missed.remove(validator);
+                self.streak_start_epoch.remove(validator);
+                self.reported.remove(validator);
+                continue;
+            }
+
+            let count = self.missed.entry(*validator).or_insert(0);
+            if *count == 0 {
+                self.streak_start_epoch.insert(*validator, epoch);
+            }
+            *count = count.saturating_add(1);
+            let current = *count;
+
             if threshold > 0 && current >= threshold && !self.reported.contains_key(validator) {
                 let start = self
                     .streak_start_epoch
                     .get(validator)
                     .copied()
                     .unwrap_or(epoch);
-                reports.push(SlashingReport::consensus_liveness(
-                    *validator,
-                    roles::VALIDATOR,
-                    crate::registry::evidence::SlashingProof::Liveness {
-                        window_start_epoch: start,
-                        window_end_epoch: epoch,
-                        missed: current,
-                        expected: current,
-                    },
-                    None,
-                ));
-                self.reported.insert(*validator, ());
+                suspensions.push(SuspensionNotice {
+                    validator: *validator,
+                    window_start_epoch: start,
+                    window_end_epoch: epoch,
+                    missed_epochs: current,
+                    stake_slashed_atoms: 0,
+                });
+                self.reported.insert(*validator, u64::MAX);
             }
         }
 
-        reports
+        suspensions
     }
 }
 
@@ -137,14 +212,14 @@ impl LivenessTracker {
     pub fn root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        // V3: each map carries its count, so an entry cannot slide from
-        // one map into the next.
+        // V4: each map carries its count, and a suspension also commits its
+        // resume epoch (or the no-resume sentinel), not merely its address.
         //
         // Migration policy: see `BnsRegistry::root` (BDLM_BNS_REGISTRY_V2)
         // for the shared rule - the V-bumped roots activate with the USL
         // genesis, there is no pre-launch mainnet state to migrate, and a
         // post-launch bump needs its migration recorded in the same commit.
-        hasher.update(b"BDLM_LIVENESS_TRACKER_V3");
+        hasher.update(b"BDLM_LIVENESS_TRACKER_V4");
         hasher.update((self.missed.len() as u64).to_le_bytes());
         for (addr, count) in &self.missed {
             hasher.update(addr.0);
@@ -156,8 +231,9 @@ impl LivenessTracker {
             hasher.update(epoch.to_le_bytes());
         }
         hasher.update((self.reported.len() as u64).to_le_bytes());
-        for addr in self.reported.keys() {
+        for (addr, resume) in &self.reported {
             hasher.update(addr.0);
+            hasher.update(resume.to_le_bytes());
         }
         hasher.finalize().into()
     }
@@ -179,7 +255,7 @@ mod tests {
     }
 
     /// A duplicate in the expected set is one duty, not two; a duty-free
-    /// epoch FROZES the miss state instead of extending or clearing it, so
+    /// epoch freezes the miss state instead of extending or clearing it, so
     /// a jailed validator's streak survives the jail term unchanged.
     #[test]
     fn duplicates_count_once_and_duty_free_epochs_freeze_the_streak() {
@@ -188,8 +264,8 @@ mod tests {
         let v = addr(1);
 
         // Named twice, missed once: one strike, not two.
-        let reports = t.record_epoch(1, &[v, v], |_| false, &p);
-        assert!(reports.is_empty());
+        let suspended = t.record_epoch(1, &[v, v], |_| false, &p);
+        assert!(suspended.is_empty());
         assert_eq!(t.missed_count(&v), 1);
 
         // No duty at epoch 2: the strike is frozen, not cleared...
@@ -198,8 +274,8 @@ mod tests {
 
         // ...and not double-counted either: one missed duty after the gap
         // is strike two, not three.
-        let reports = t.record_epoch(3, &[v], |_| false, &p);
-        assert!(reports.is_empty());
+        let suspended = t.record_epoch(3, &[v], |_| false, &p);
+        assert!(suspended.is_empty());
         assert_eq!(t.missed_count(&v), 2);
     }
 
@@ -214,38 +290,31 @@ mod tests {
         b.streak_start_epoch.insert(addr(1), 5);
         assert_ne!(a.root(), b.root());
         let mut c = LivenessTracker::new();
-        c.reported.insert(addr(1), ());
+        c.reported.insert(addr(1), u64::MAX);
         let mut d = LivenessTracker::new();
-        d.reported.insert(addr(1), ());
-        d.reported.insert(addr(2), ());
+        d.reported.insert(addr(1), u64::MAX);
+        d.reported.insert(addr(2), u64::MAX);
         assert_ne!(c.root(), d.root());
         assert_ne!(LivenessTracker::new().root(), c.root());
+        let mut resume_requested = c.clone();
+        resume_requested.reported.insert(addr(1), 7);
+        assert_ne!(c.root(), resume_requested.root());
     }
 
+    /// V-4: crossing the threshold suspends the validator; no slashing
+    /// report is ever produced for absence (WP-13, BLG-251).
     #[test]
     fn triggers_after_threshold_consecutive_misses() {
         let mut t = LivenessTracker::new();
         let p = params(3);
         let v = addr(1);
-        // Two misses: no report yet.
+        // Two misses: no suspension yet.
         assert!(t.record_epoch(1, &[v], |_| false, &p).is_empty());
         assert!(t.record_epoch(2, &[v], |_| false, &p).is_empty());
-        // Third consecutive miss crosses threshold.
-        let reports = t.record_epoch(3, &[v], |_| false, &p);
-        assert_eq!(reports.len(), 1);
-        match &reports[0].proof {
-            crate::registry::evidence::SlashingProof::Liveness {
-                missed,
-                window_start_epoch,
-                window_end_epoch,
-                ..
-            } => {
-                assert_eq!(*missed, 3);
-                assert_eq!(*window_start_epoch, 1);
-                assert_eq!(*window_end_epoch, 3);
-            }
-            other => panic!("expected liveness proof, got {other:?}"),
-        }
+        // Third consecutive miss crosses the threshold: suspension.
+        let suspended = t.record_epoch(3, &[v], |_| false, &p);
+        assert_eq!(suspended, vec![v]);
+        assert!(t.is_suspended(&v));
     }
 
     #[test]
@@ -266,14 +335,29 @@ mod tests {
     }
 
     #[test]
-    fn does_not_re_report_same_streak() {
+    fn does_not_re_suspend_same_streak() {
         let mut t = LivenessTracker::new();
         let p = params(2);
         let v = addr(1);
         t.record_epoch(1, &[v], |_| false, &p);
         assert_eq!(t.record_epoch(2, &[v], |_| false, &p).len(), 1);
-        // Still down at epoch 3 - no duplicate report.
+        // Still down at epoch 3 - no duplicate suspension.
         assert!(t.record_epoch(3, &[v], |_| false, &p).is_empty());
+    }
+
+    /// A resume requested at epoch `e` lifts the suspension at `e + 1`.
+    #[test]
+    fn resume_takes_effect_one_epoch_later() {
+        let mut t = LivenessTracker::new();
+        let p = params(1);
+        let v = addr(1);
+        assert_eq!(t.record_epoch(1, &[v], |_| false, &p), vec![v]);
+        assert!(t.is_suspended(&v));
+        t.request_resume(&v, 5);
+        assert!(t.activate_due_resumes(5).is_empty());
+        assert_eq!(t.activate_due_resumes(6), vec![v]);
+        assert!(!t.is_suspended(&v));
+        assert_eq!(t.missed_count(&v), 0);
     }
 
     #[test]

@@ -874,12 +874,18 @@ impl PermissionlessRegistry {
         report: &SlashingReport,
     ) -> Result<Option<SlashOutcome>, EvidenceError> {
         report.is_actionable()?;
+        // V-4: a downtime/absence claim is never slashable evidence. It is
+        // observed by the suspension tracker instead. Explicit settlement
+        // bonds for an awarded but unexecuted job use a different door.
+        if matches!(
+            &report.proof,
+            crate::registry::evidence::SlashingProof::Liveness { .. }
+        ) {
+            return Ok(None);
+        }
         let condition = report.condition();
-        // A liveness fault no longer lands in
-        // `Slashed`, so the `AlreadySlashed` replay guard does not cover it.
-        // The history is the ledger of what has already been applied: a
-        // repeated liveness report is answered with a no-op instead of a
-        // second stake cut.
+        // History is the ledger of what has already been applied: a repeated
+        // report is answered with a no-op instead of a second stake cut.
         let window_key = permissionless_offence_window(&report.proof);
         let member_key = permissionless_member_key(report.role, report.offender);
         if let Some(wk) = window_key {
@@ -2263,11 +2269,10 @@ mod tests {
         assert!(reg.withdraw(addr(7), roles::VALIDATOR, release).is_ok());
     }
 
-    /// A liveness fault is a timed jail. The
-    /// entry is not Slashed at the registry level, so the release after the
-    /// jail expiry actually works.
+    /// V-4: a liveness/absence report produces no slash outcome, writes no
+    /// history and leaves the full bond untouched.
     #[test]
-    fn a_liveness_fault_does_not_slash_the_registry_entry() {
+    fn a_liveness_report_is_non_actionable_and_never_cuts_stake() {
         let mut reg = PermissionlessRegistry::new();
         reg.register_validator(addr(8), MIN_REGISTRATION_STAKE, 0)
             .unwrap();
@@ -2282,18 +2287,11 @@ mod tests {
             },
             None,
         );
-        let outcome = reg.slash_from_report(&report).unwrap();
-        assert!(outcome.is_some());
+        assert_eq!(reg.slash_from_report(&report).unwrap(), None);
         let entry = reg.registrations.get(&(roles::VALIDATOR, addr(8))).unwrap();
-        assert!(
-            matches!(entry.status, MemberStatus::Active),
-            "a liveness fault must not write Slashed: {:?}",
-            entry.status
-        );
-        assert!(
-            entry.stake < MIN_REGISTRATION_STAKE,
-            "the stake is still cut"
-        );
+        assert!(matches!(entry.status, MemberStatus::Active));
+        assert_eq!(entry.stake, MIN_REGISTRATION_STAKE);
+        assert!(reg.slashing_history().is_empty());
     }
 
     #[test]
@@ -2426,18 +2424,10 @@ mod tests {
         );
     }
 
-    /// A zero-penalty slash must still be recorded, mirroring budzero's
-    /// `verifier-registry`.
-    ///
-    /// A condition whose ratio is zero, such as liveness, makes the slash
-    /// "free": the stake does not change. The earlier code erased that event
-    /// from the history entirely, and having two ledgers give different answers
-    /// for the same entry quietly misled a caller who did not know which one was
-    /// being read. That is the G0 decision of 2026-08-22: record integrity is
-    /// canonical, so the event happened, it entered the record, and its penalty
-    /// is zero.
+    /// Even a zero configured liveness ratio does not turn an absence claim
+    /// into a slash record: absence belongs to suspension, not slashing (V-4).
     #[test]
-    fn a_zero_penalty_slash_is_still_recorded() {
+    fn a_zero_ratio_liveness_report_is_still_not_actionable() {
         let params = RegistryParams {
             liveness_slash_ratio_fixed: 0,
             ..RegistryParams::default()
@@ -2446,7 +2436,6 @@ mod tests {
         let a = addr(23);
         reg.register_relayer(a, MIN_REGISTRATION_STAKE, 0)
             .expect("registration");
-
         let report = crate::registry::evidence::SlashingReport::consensus_liveness(
             a,
             roles::RELAYER,
@@ -2458,24 +2447,9 @@ mod tests {
             },
             None,
         );
-        let outcome = reg
-            .slash_from_report(&report)
-            .expect("the report is actionable")
-            .expect("the slash was applied");
-        assert_eq!(
-            outcome.penalty, 0,
-            "the ratio is zero, so the penalty must be zero"
-        );
-        assert_eq!(
-            reg.slashing_history().len(),
-            1,
-            "the event must enter the record: an offence with a zero penalty is still an offence"
-        );
-        assert_eq!(reg.slashing_history()[0].penalty, 0);
-        assert!(
-            reg.is_active_relayer(&a),
-            "a liveness fault is a timed jail, not a registry Slashed"
-        );
+        assert_eq!(reg.slash_from_report(&report).unwrap(), None);
+        assert!(reg.slashing_history().is_empty());
+        assert_eq!(reg.get(&a, roles::RELAYER).unwrap().stake, MIN_REGISTRATION_STAKE);
     }
 
     /// A slashed member must answer `true` to no question.

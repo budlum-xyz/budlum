@@ -116,6 +116,11 @@ impl std::fmt::Display for PoaComplianceError {
 
 impl std::error::Error for PoaComplianceError {}
 
+/// Maximum compliance audit trail entries retained in memory.
+///
+/// Convenience: pub so compliance callers can observe the audit ring cap.
+pub const MAX_POA_COMPLIANCE_AUDIT_EVENTS: usize = 10_000;
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct PoaComplianceRegistry {
     screenings: BTreeMap<Address, ScreeningRecord>,
@@ -152,6 +157,13 @@ impl PoaComplianceRegistry {
         }
     }
 
+    fn push_audit_event(&mut self, event: ComplianceAuditEvent) {
+        if self.audit_log.len() >= MAX_POA_COMPLIANCE_AUDIT_EVENTS {
+            self.audit_log.remove(0);
+        }
+        self.audit_log.push(event);
+    }
+
     pub fn screen_address(
         &mut self,
         domain: ComplianceDomainKind,
@@ -169,7 +181,7 @@ impl PoaComplianceRegistry {
             updated_block: block,
         };
         self.screenings.insert(address, record);
-        self.audit_log.push(ComplianceAuditEvent {
+        self.push_audit_event(ComplianceAuditEvent {
             action: ComplianceAction::ScreeningUpdated,
             address,
             block,
@@ -203,7 +215,7 @@ impl PoaComplianceRegistry {
                 frozen_at_block: block,
             },
         );
-        self.audit_log.push(ComplianceAuditEvent {
+        self.push_audit_event(ComplianceAuditEvent {
             action: ComplianceAction::AccountFrozen,
             address,
             block,
@@ -230,7 +242,7 @@ impl PoaComplianceRegistry {
         }
         let evidence_hash = Self::ensure_non_zero(reason_hash)?;
         self.freezes.remove(&address);
-        self.audit_log.push(ComplianceAuditEvent {
+        self.push_audit_event(ComplianceAuditEvent {
             action: ComplianceAction::AccountUnfrozen,
             address,
             block,
@@ -260,7 +272,7 @@ impl PoaComplianceRegistry {
                 recorded_block: block,
             },
         );
-        self.audit_log.push(ComplianceAuditEvent {
+        self.push_audit_event(ComplianceAuditEvent {
             action: ComplianceAction::TravelRuleMetadataRecorded,
             address: subject,
             block,
@@ -295,17 +307,20 @@ impl PoaComplianceRegistry {
         use sha3::{Digest, Sha3_256};
         let mut hasher = Sha3_256::new();
         hasher.update(b"BDLM_POA_COMPLIANCE_ROOT_V1");
+        hasher.update((self.screenings.len() as u64).to_le_bytes());
         for (addr, rec) in &self.screenings {
             hasher.update(addr.as_bytes());
             hasher.update([rec.status as u8]);
             hasher.update(rec.oracle_reference_hash);
             hasher.update(rec.updated_block.to_le_bytes());
         }
+        hasher.update((self.freezes.len() as u64).to_le_bytes());
         for (addr, rec) in &self.freezes {
             hasher.update(addr.as_bytes());
             hasher.update(rec.reason_hash);
             hasher.update(rec.frozen_at_block.to_le_bytes());
         }
+        hasher.update((self.travel_rules.len() as u64).to_le_bytes());
         for (tx_hash, rec) in &self.travel_rules {
             // Length first, like every other variable-shaped feed into a
             // consensus preimage: the key is a fixed `[u8; 32]` today, and
@@ -316,6 +331,7 @@ impl PoaComplianceRegistry {
             hasher.update(rec.metadata_hash);
             hasher.update(rec.recorded_block.to_le_bytes());
         }
+        hasher.update((self.audit_log.len() as u64).to_le_bytes());
         for event in &self.audit_log {
             hasher.update([event.action as u8]);
             hasher.update(event.address.as_bytes());
@@ -553,5 +569,22 @@ mod tests {
         assert_ne!(reg.root(), frozen_root, "the audit trail keeps both edges");
         // Determinism: same state, same fold.
         assert_eq!(reg.root(), reg.root());
+    }
+
+    #[test]
+    fn poa_compliance_root_binds_collection_boundaries_and_caps_audit_log() {
+        let mut reg = PoaComplianceRegistry::new();
+        for i in 0..=(MAX_POA_COMPLIANCE_AUDIT_EVENTS as u64) {
+            reg.screen_address(
+                ComplianceDomainKind::PoA,
+                addr((i % 250 + 1) as u8),
+                ScreeningStatus::Clear,
+                hash(1),
+                i + 1,
+            )
+            .unwrap();
+        }
+        assert_eq!(reg.audit_events().len(), MAX_POA_COMPLIANCE_AUDIT_EVENTS);
+        assert_eq!(reg.audit_events()[0].block, 2);
     }
 }
