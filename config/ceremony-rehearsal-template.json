@@ -1,0 +1,37 @@
+{
+  "chain_id": 45261,
+  "pq_scheme": "ml-dsa-65",
+  "allocations": [],
+  "validators": [],
+  "validator_consensus_keys": [],
+  "block_reward": 0,
+  "base_fee": 1,
+  "gas_schedule": {
+    "base_fee": 1,
+    "gas_per_byte": 1,
+    "gas_per_signature": 500,
+    "transfer_gas": 21000,
+    "stake_gas": 35000,
+    "vote_gas": 25000,
+    "contract_call_gas": 35000
+  },
+  "timestamp": 1767225600000,
+  "bud_tokenomics": {
+    "community": 10000000000000,
+    "liquidity": 10000000000000,
+    "ecosystem": 20000000000000,
+    "team": 20000000000000,
+    "burn_reserve": 40000000000000,
+    "epochs_per_year": 210240,
+    "annual_burn_ratio_fixed": 100000,
+    "team_cliff_epochs": 210240,
+    "team_vesting_epochs": 840960,
+    "tx_fee_burn_ratio_fixed": 10000,
+    "block_reward": 0,
+    "validator_annual_yield_ratio_fixed": 50000,
+    "slot_duration_secs": 3,
+    "epoch_length_slots": 50
+  },
+  "ceremony_status": "rehearsal_template",
+  "ceremony_note": "Empty testnet rehearsal-ceremony template. The live artifact is produced by ops/rehearsal/genesis_rehearsal.sh from at least eight validated public operator records. A node refuses this template because it has no validators. Chain id remains 45261 (testnet)."
+}
