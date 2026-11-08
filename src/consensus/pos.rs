@@ -1,6 +1,6 @@
 use super::{
-    affordable_leader_round, now_millis, ConsensusEngine, ConsensusError, MAX_LEADER_ROUNDS,
-    MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS,
+    now_millis, ConsensusEngine, ConsensusError, MAX_LEADER_ROUNDS, MIN_BLOCK_INTERVAL_MS,
+    ROUND_TIMEOUT_MS,
 };
 use crate::core::account::AccountState;
 use crate::core::address::Address;
@@ -218,7 +218,7 @@ impl PoSEngine {
     pub fn add_checkpoint(
         &self,
         block: &Block,
-        storage: Option<&crate::storage::db::Storage>,
+        storage: Option<&crate::persistence::db::Storage>,
     ) -> Result<(), ConsensusError> {
         let checkpoint = Checkpoint {
             block_index: block.index,
@@ -233,7 +233,7 @@ impl PoSEngine {
     fn commit_checkpoint(
         &self,
         checkpoint: &Checkpoint,
-        storage: Option<&crate::storage::db::Storage>,
+        storage: Option<&crate::persistence::db::Storage>,
     ) -> Result<(), ConsensusError> {
         if let Some(store) = storage {
             // Not `let _ =`: a checkpoint that fails to persist is not a
@@ -604,11 +604,15 @@ impl PoSEngine {
                         // The same pricing function validation enforces, so
                         // propose and verify cannot drift apart.
                         let round_cap = chain.last().map_or(MAX_LEADER_ROUNDS, |prev| {
-                            affordable_leader_round(prev.timestamp, now_millis())
+                            crate::validators::handover::proposer_round_for_timestamps(
+                                prev.timestamp,
+                                now_millis(),
+                            )
                         });
                         let filiz_reveal = self.own_filiz_reveal(validator, epoch)?;
                         let mut elected = false;
-                        for round in 0..=round_cap {
+                        let mut round = 0u64;
+                        loop {
                             let seed = self.calculate_seed_with_chain(
                                 block.chain_id,
                                 epoch,
@@ -659,12 +663,8 @@ impl PoSEngine {
                                 // Price the round in the timestamp so the
                                 // validation floor holds for this block too.
                                 if let Some(prev) = chain.last() {
-                                    let floor = prev
-                                        .timestamp
-                                        .saturating_add(MIN_BLOCK_INTERVAL_MS)
-                                        .saturating_add(
-                                            ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)),
-                                        );
+                                    let floor =
+                                        proposal_handover_not_before_ms(prev.timestamp, round);
                                     if block.timestamp < floor {
                                         block.timestamp = floor;
                                     }
@@ -672,6 +672,13 @@ impl PoSEngine {
                                 elected = true;
                                 break;
                             }
+                            let Some(next_round) = proposal_handover_round(round) else {
+                                break;
+                            };
+                            if next_round > round_cap {
+                                break;
+                            }
+                            round = next_round;
                         }
                         if !elected {
                             return Err(ConsensusError(
@@ -731,6 +738,29 @@ impl PoSEngine {
         ))
     }
 }
+/// Instant Task Handover, block-proposal row (directive 7.6): the slot leader
+/// publishes nothing in its round, so the duty passes to the next round's
+/// leader. The round term of the slot seed re-rolls the election
+/// ([`PoSEngine::calculate_seed_with_chain`]), so "the next round's leader" is
+/// round `missed_round + 1` of the same slot. The bound is one round of
+/// [`ROUND_TIMEOUT_MS`] (3 s on testnet). Rounds past [`MAX_LEADER_ROUNDS`]
+/// have no successor: the slot is abandoned instead of waiting.
+#[must_use]
+pub fn proposal_handover_round(missed_round: u64) -> Option<u64> {
+    let next = missed_round.checked_add(1)?;
+    (next <= MAX_LEADER_ROUNDS).then_some(next)
+}
+
+/// The earliest timestamp at which the handover round's block may publish:
+/// the round floor `parent + MIN_BLOCK_INTERVAL_MS + round * ROUND_TIMEOUT_MS`
+/// that `validate_block` enforces on every claim.
+#[must_use]
+pub fn proposal_handover_not_before_ms(parent_timestamp_ms: u128, handover_round: u64) -> u128 {
+    parent_timestamp_ms
+        .saturating_add(MIN_BLOCK_INTERVAL_MS)
+        .saturating_add(u128::from(handover_round).saturating_mul(ROUND_TIMEOUT_MS))
+}
+
 /// The one structural check for double-sign evidence.
 ///
 /// `Blockchain::verify_slashing_evidence` and `PoSEngine::verify_evidence`
@@ -927,10 +957,7 @@ impl ConsensusEngine for PoSEngine {
                 }
                 if round > 0 {
                     if let Some(prev) = chain.last() {
-                        let floor = prev
-                            .timestamp
-                            .saturating_add(MIN_BLOCK_INTERVAL_MS)
-                            .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
+                        let floor = proposal_handover_not_before_ms(prev.timestamp, round);
                         if block.timestamp < floor {
                             return Err(ConsensusError(format!(
                                 "PoS leader round {round} claimed too early: block timestamp {} < floor {}",
@@ -952,7 +979,11 @@ impl ConsensusEngine for PoSEngine {
                         // the boundary wherever nodes booted or synced seconds
                         // apart, and a claim refused here is a block refused
                         // for good. A future stamp buys no round, on any node.
-                        let affordable = affordable_leader_round(prev.timestamp, now_millis());
+                        let affordable =
+                            crate::validators::handover::proposer_round_for_timestamps(
+                                prev.timestamp,
+                                now_millis(),
+                            );
                         if round > affordable {
                             return Err(ConsensusError(format!(
                                 "PoS leader round {round} claimed before it elapsed: only \
@@ -1189,7 +1220,7 @@ impl ConsensusEngine for PoSEngine {
     fn record_block(
         &self,
         block: &Block,
-        storage: Option<&crate::storage::db::Storage>,
+        storage: Option<&crate::persistence::db::Storage>,
     ) -> Result<(), ConsensusError> {
         let epoch_length = self.epoch_length_checked()?;
         let producer = block
@@ -1309,7 +1340,7 @@ impl ConsensusEngine for PoSEngine {
         &self,
         height: u64,
         chain: &[Block],
-        storage: Option<&crate::storage::db::Storage>,
+        storage: Option<&crate::persistence::db::Storage>,
     ) {
         let promoted: Vec<Checkpoint> = {
             let Ok(mut pending) = self.pending_checkpoints.write() else {
@@ -1392,7 +1423,7 @@ impl ConsensusEngine for PoSEngine {
         &self,
         block: &Block,
         chain: &[Block],
-        _storage: Option<&crate::storage::db::Storage>,
+        _storage: Option<&crate::persistence::db::Storage>,
     ) {
         // The block is committed: the evidence it carried has now done its
         // job and leaves the pool. Everything the pool still holds is
@@ -1420,7 +1451,7 @@ impl ConsensusEngine for PoSEngine {
         }
     }
 
-    fn load_state(&self, storage: &crate::storage::db::Storage) -> Result<(), ConsensusError> {
+    fn load_state(&self, storage: &crate::persistence::db::Storage) -> Result<(), ConsensusError> {
         let seen = storage
             .load_all_seen_blocks()
             .map_err(|error| ConsensusError(format!("Failed to load seen PoS blocks: {error}")))?;
@@ -1573,6 +1604,36 @@ mod tests {
     use crate::crypto::primitives::{KeyPair, ValidatorKeys};
     use crate::execution::executor::Executor;
 
+    /// Instant Task Handover, block-proposal row (directive 7.6): the slot
+    /// leader publishes nothing in its round and the duty passes to the next
+    /// round's leader within one round of 3 seconds.
+    #[test]
+    fn proposer_round_handover() {
+        // A missed round hands the duty to the next round's leader.
+        assert_eq!(proposal_handover_round(0), Some(1));
+        assert_eq!(proposal_handover_round(1), Some(2));
+        // The bound is one round: 3 seconds on every network.
+        assert_eq!(ROUND_TIMEOUT_MS, 3 * 1000);
+        // The handover block may not publish before the round floor, and the
+        // verifier prices the claim by wall clock one round later.
+        let parent = 1_000_000u128;
+        let handover_round = proposal_handover_round(0).unwrap();
+        let not_before = proposal_handover_not_before_ms(parent, handover_round);
+        assert_eq!(not_before, parent + MIN_BLOCK_INTERVAL_MS + ROUND_TIMEOUT_MS);
+        assert!(affordable_leader_round(parent, not_before) >= 1);
+        assert!(
+            affordable_leader_round(parent, not_before - 1) < 1,
+            "one second early is still the previous round"
+        );
+        // Rounds past the cap have no successor: the slot is abandoned.
+        assert_eq!(proposal_handover_round(MAX_LEADER_ROUNDS), None);
+        assert_eq!(
+            proposal_handover_round(u64::MAX),
+            None,
+            "the checked increment must not wrap into a valid round"
+        );
+    }
+
     fn create_stake_tx(keypair: &KeyPair, amount: u64, nonce: u64) -> Transaction {
         let from = Address::from(keypair.public_key_bytes());
         let mut tx = Transaction::new_stake(from, amount, nonce);
@@ -1709,7 +1770,7 @@ mod tests {
         };
         let engine = PoSEngine::new(config, None);
         let dir = tempfile::tempdir().unwrap();
-        let storage = crate::storage::db::Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let storage = crate::persistence::db::Storage::new(dir.path().to_str().unwrap()).unwrap();
         let alice = KeyPair::generate().unwrap();
 
         let mut old = Block::new(1, "prev".into(), vec![]);
@@ -1932,10 +1993,9 @@ mod tests {
         );
     }
 
-    /// F-184/185/186: the consensus penalty constants are integer
-    /// fixed-point, not f64 expressions. removed the never-read
-    /// `PoSConfig` knobs this used to assert on; the live constants are the
-    /// `RegistryParams` slash ratios, which are what is pinned now.
+    /// The consensus penalty constants are integer fixed-point, not f64
+    /// expressions. The live constants are the `RegistryParams` slash ratios,
+    /// which are what is pinned here.
     #[test]
     fn pos_default_fixed_point_constants_are_exact_integers() {
         use crate::core::chain_config::FIXED_POINT_SCALE;
