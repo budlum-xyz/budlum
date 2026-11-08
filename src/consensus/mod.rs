@@ -214,7 +214,7 @@ impl RoundPriceBook {
 ///
 /// # The anchor
 ///
-/// While a parent's header stamp is within [`ROUND_LADDER_SPAN_MS`] of wall
+/// While a parent's header stamp is within `ROUND_LADDER_SPAN_MS` of wall
 /// time, `parent_seen_ms` only *lowers* the anchor (`seen.min(stamp)`): in
 /// normal cadence every node holding the parent agrees on the shared stamp, and
 /// a future-dated header still cannot buy the rounds between its stamp and the
