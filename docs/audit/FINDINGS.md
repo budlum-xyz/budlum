@@ -278,3 +278,10 @@ review. Corrections without their required executed test remain open.
 | Finding | Severity | State | Evidence and correction |
 |---|---|---|---|
 | BLG-381 | Medium | Open; locally corrected, pinned gate CI pending | The first integrated structural gate only matched delimiters and selected mangled lines, so mid-expression syntax defects could pass; the proposed full-parser replacement also skipped unreadable/oversized files and directory errors. The canonical gate now uses `syn::parse_file` across every source root plus `build.rs`, fails closed on I/O and size violations, rejects scans below 50 files, and adds vacuity and invalid-UTF-8 canaries. The obsolete heuristic replica was removed. Tree-sitter independently parsed 1,117 current Rust files with zero error files; the Rust/syn gate itself has not run locally. |
+
+## Registry commitment and source-gate follow-ups
+
+| Finding | Severity | State | Evidence and correction |
+|---|---|---|---|
+| BLG-382 | Critical | Open; locally corrected, Rust tests and pinned CI pending | `Bud3Registry::state_root` omitted object identity/profile/codec fields, share class and assignment epoch, audit presence/segment, the exact public index and NFT ownership. Distinct consensus states could therefore share a root, and an orphaned restored index was hidden. The V2 domain-separated root now commits every serialized registry field, including later endowment/grant/replacement state, with field-mutation, orphan-index and snapshot-rebuild tests. The changed Rust files pass tree-sitter; no Rust test or compiler ran locally. |
+| BLG-383 | Medium | Open; locally corrected, gate CI pending | The English-tree gate exempted all of `docs/NAMING.md` and the bilingual claims source, allowing unrelated Turkish prose to hide in those files. Exact Turkish aliases now remain in the linked canonical concept map; only standalone literals present in the live claims dictionary are exempt. Five mutation canaries cover literal/other-file/comment/unknown/trailing cases, raising the expected total to 72. The gate was not executed locally. |
