@@ -92,6 +92,14 @@ pub const MAX_V8_SIGNERS: usize = 16;
 /// door lands; until then the account-identity absorb in this file pins it.
 pub const ML_DSA_87_SCHEME_ID: &str = "ml-dsa-87-fips204-v1";
 
+/// Wire-level owner/signature cap for V6 threshold authorizations, kept
+/// available even when the `wallet-ml-dsa` verifier backend is disabled.
+pub(crate) const MAX_V6_THRESHOLD_OWNERS: usize = 16;
+
+#[cfg(feature = "wallet-ml-dsa")]
+const _: [(); MAX_V6_THRESHOLD_OWNERS] =
+    [(); crate::account_abstraction::threshold_mldsa::MAX_THRESHOLD_OWNERS];
+
 /// The address of a multisig account: the ML-DSA profile, owner set and threshold.
 ///
 /// The address is derived from the set itself. The threshold has to enter the
@@ -873,11 +881,7 @@ fn deserialize_bounded_signatures<'de, D>(deserializer: D) -> Result<RawOwnerSig
 where
     D: serde::Deserializer<'de>,
 {
-    deserialize_bounded_vec::<
-        D,
-        (Vec<u8>, Vec<u8>),
-        { crate::account_abstraction::threshold_mldsa::MAX_THRESHOLD_OWNERS },
-    >(deserializer)
+    deserialize_bounded_vec::<D, (Vec<u8>, Vec<u8>), { MAX_V6_THRESHOLD_OWNERS }>(deserializer)
 }
 
 /// The owner set and signatures that authorize a V6 transaction.

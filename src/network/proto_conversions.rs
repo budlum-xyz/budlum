@@ -1918,8 +1918,8 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                         )
                     } else {
                         (
-                            crate::account_abstraction::threshold_mldsa::MAX_THRESHOLD_OWNERS,
-                            crate::account_abstraction::threshold_mldsa::MAX_THRESHOLD_OWNERS,
+                            crate::core::transaction::MAX_V6_THRESHOLD_OWNERS,
+                            crate::core::transaction::MAX_V6_THRESHOLD_OWNERS,
                         )
                     };
                     if auth.owners.len() > max_owners {

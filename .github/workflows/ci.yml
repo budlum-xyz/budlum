@@ -1932,12 +1932,14 @@ jobs:
           cargo llvm-cov nextest --lib --json --output-path coverage/cov.json
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- coverage coverage/cov.json
           cargo llvm-cov report --cobertura --output-path coverage/cobertura.xml
+          test -s coverage/cobertura.xml
       - name: Upload Cobertura coverage (GitHub Code Quality)
         uses: actions/upload-code-coverage@2b21a77928be8d5168c2b9581a67f2adbebacc52 # v1.4.4
         with:
           file: coverage/cobertura.xml
           language: Rust
           label: code-coverage/llvm-cov
+          fail-on-error: false
       - name: Module analysis canary (not vacuous)
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- module-coverage --self-test
       - name: Module coverage report - budlum (baselines in step 2, NO vacuous gate)

@@ -597,10 +597,11 @@ impl ConsensusEngine for PoAEngine {
                     // active ladder span, switching to local commit time once
                     // a parent lags wall time beyond `ROUND_LADDER_SPAN_MS` so
                     // schedule lag cannot unlock rounds 1..=16 at once (CWE-807).
+                    let now_ms = now_millis();
                     let affordable = affordable_leader_round(
                         prev.timestamp,
-                        self.round_prices.chain_seen_at(chain),
-                        now_millis(),
+                        self.round_prices.chain_seen_at(chain, now_ms),
+                        now_ms,
                     );
                     if round > affordable {
                         return Err(ConsensusError(format!(

@@ -1065,15 +1065,35 @@ impl Blockchain {
     }
 
     /// Populate [`RoundPriceBook`] across the trailing `MAX_REORG_DEPTH + 1`
-    /// canonical blocks so startup restores, reorgs, and snapshot syncs price
-    /// every valid fork point from local adoption time rather than `None`.
-    fn seed_round_price_window(&self) {
+    /// canonical blocks.
+    ///
+    /// Historical blocks below `adopted_from` already have a committed child on
+    /// `self.chain`, so an unseen restore/replay entry records `block.timestamp`
+    /// (clamped to `now`) rather than stamping an old genesis or ancestor as
+    /// freshly adopted right now (which would reject historical retry-round
+    /// blocks during post-restart `try_reorg`). Blocks from `adopted_from`
+    /// onward (the tip on startup/snapshot restore, or `fork_point..` on a
+    /// reorg) are anchored at `now`. Existing sightings in [`RoundPriceBook`]
+    /// are preserved ("first sighting wins").
+    fn seed_round_price_window_from(&self, adopted_from: usize) {
         let now = crate::consensus::now_millis();
         let window = MAX_REORG_DEPTH + 1;
         let start = self.chain.len().saturating_sub(window);
-        for block in &self.chain[start..] {
-            self.consensus.note_block_seen(&block.hash, now);
+        if let Some(slice) = self.chain.get(start..) {
+            for (offset, block) in slice.iter().enumerate() {
+                let index = start.saturating_add(offset);
+                let seen_ms = if index >= adopted_from {
+                    now
+                } else {
+                    block.timestamp.min(now)
+                };
+                self.consensus.note_block_seen(&block.hash, seen_ms);
+            }
         }
+    }
+
+    fn seed_round_price_window(&self) {
+        self.seed_round_price_window_from(self.chain.len().saturating_sub(1));
     }
 
     /// Wall-clock seconds according to the chain, taken from the newest
@@ -5876,7 +5896,7 @@ impl Blockchain {
 
         self.chain = new_chain;
         self.state = new_state;
-        self.seed_round_price_window();
+        self.seed_round_price_window_from(fork_point);
 
         // The DISK still holds FINALITY_CERT and
         // QC_BLOB at the reorged heights. Left behind, a later
@@ -10083,6 +10103,132 @@ mod tests {
             .apply_state_snapshot(carrier)
             .expect_err("V2 snapshot with mismatched genesis_hash must fail");
         assert!(err.contains("genesis hash mismatch"), "got: {err}");
+    }
+
+    #[test]
+    fn restarted_chain_reorg_preserves_historical_retry_rounds() {
+        use crate::consensus::poa::{PoAConfig, PoAEngine};
+        use crate::consensus::{MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS};
+
+        let authority_keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let authority = Address::from(authority_keys.public_key_bytes());
+        let now_ms = crate::consensus::now_millis();
+        let genesis_ts = now_ms.saturating_sub(120_000);
+
+        let mut genesis = GenesisConfig::new(45262);
+        genesis.timestamp = genesis_ts;
+        genesis.block_reward = 0;
+        genesis.poa_authorities = vec![authority];
+        let dir = tempfile::tempdir().unwrap();
+
+        let seal_poa_block = |index: u64,
+                              prev: &str,
+                              ts: u128,
+                              nonce: u64,
+                              state: &AccountState,
+                              chain: &[Block]| {
+            let mut b = Block::new_with_chain_id(index, prev.to_string(), vec![], 45262);
+            b.timestamp = ts;
+            b.producer = Some(authority);
+            b.nonce = nonce;
+            let (mut commit_state, _) =
+                Blockchain::apply_block_effects_with_unfreezes(state, &b, chain).unwrap();
+            Blockchain::apply_block_end_roots(&mut commit_state, &b, chain, 45262);
+            b.state_root = commit_state.calculate_state_root();
+            b.sign(&authority_keys);
+            (b, commit_state)
+        };
+
+        let canonical_b1;
+        let canonical_b2;
+        let state_at_b2;
+        {
+            let store = Storage::new(dir.path().to_str().unwrap()).unwrap();
+            let engine = Arc::new(PoAEngine::new(
+                PoAConfig::default(),
+                Some(authority_keys.clone()),
+            ));
+            let genesis_hash = genesis.build_genesis_block().hash;
+            engine.note_block_seen(&genesis_hash, genesis_ts);
+            let mut node = Blockchain::new_with_genesis(
+                engine,
+                Some(store),
+                45262,
+                None,
+                Some(genesis.clone()),
+            );
+
+            let (b1, _) = seal_poa_block(
+                1,
+                &genesis_hash,
+                genesis_ts + MIN_BLOCK_INTERVAL_MS + 2 * ROUND_TIMEOUT_MS,
+                2,
+                &node.state,
+                &node.chain,
+            );
+            node.validate_and_add_block(b1.clone())
+                .expect("commit retry-round block 1");
+            canonical_b1 = b1;
+
+            let (b2, _) = seal_poa_block(
+                2,
+                &canonical_b1.hash,
+                now_ms.saturating_sub(12_000),
+                0,
+                &node.state,
+                &node.chain,
+            );
+            node.validate_and_add_block(b2.clone())
+                .expect("commit block 2");
+            canonical_b2 = b2;
+            state_at_b2 = node.state.clone();
+        }
+
+        let store = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let restarted_engine = Arc::new(PoAEngine::new(
+            PoAConfig::default(),
+            Some(authority_keys.clone()),
+        ));
+        let mut restarted =
+            Blockchain::new_with_genesis(restarted_engine, Some(store), 45262, None, Some(genesis));
+        let prefix_chain = restarted.chain.clone();
+
+        let (local_b3, _) = seal_poa_block(
+            3,
+            &canonical_b2.hash,
+            now_ms.saturating_sub(10_000),
+            0,
+            &restarted.state,
+            &restarted.chain,
+        );
+        restarted
+            .validate_and_add_block(local_b3)
+            .expect("commit isolated post-restart block 3");
+
+        let (peer_b3, peer_state_3) = seal_poa_block(
+            3,
+            &canonical_b2.hash,
+            now_ms.saturating_sub(9_000),
+            0,
+            &state_at_b2,
+            &prefix_chain,
+        );
+        let mut peer_chain_3 = prefix_chain;
+        peer_chain_3.push(peer_b3.clone());
+        let (peer_b4, _) = seal_poa_block(
+            4,
+            &peer_b3.hash,
+            now_ms.saturating_sub(7_000),
+            0,
+            &peer_state_3,
+            &peer_chain_3,
+        );
+
+        let reorged = restarted
+            .try_reorg_suffix(vec![peer_b3, peer_b4])
+            .expect("post-restart reorg across historical retry-round block 1 must succeed");
+        assert!(reorged);
+        assert_eq!(restarted.chain.len(), 5);
     }
 
     #[test]
