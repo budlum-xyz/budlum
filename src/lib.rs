@@ -13,6 +13,7 @@
 pub mod account_abstraction;
 pub mod ai;
 pub mod ai_inference;
+pub mod app_registry;
 pub mod bns;
 pub mod budlumxyz;
 pub mod chain;
@@ -21,15 +22,19 @@ pub mod consensus;
 pub mod core;
 pub mod cross_domain;
 pub mod crypto;
+pub mod data_market;
 pub mod deed;
-pub mod developer_os;
+pub mod project_manifest;
 pub mod domain;
+pub mod education_domain;
 pub mod error;
 pub mod execution;
-pub mod gateway;
+pub mod explorer_evidence;
 pub mod light_client;
 pub mod mempool;
 pub mod network;
+pub mod object_layer;
+pub mod persistence;
 pub mod pollen;
 pub mod privacy;
 pub mod prover;
@@ -44,6 +49,7 @@ pub mod sharding;
 pub mod socialfi;
 pub mod storage;
 pub mod tokenomics;
+pub mod validators;
 // The V5 command-line wallet; its keys are ML-DSA-87.
 #[cfg(feature = "wallet-ml-dsa")]
 pub mod wallet;
@@ -89,5 +95,27 @@ mod bls_keypair_integrity_test {
             !is_some,
             "all-zero G1 must NOT decode (identity uses a different flag)"
         );
+    }
+
+    /// The test above was green for the wrong reason. All-zero bytes
+    /// are simply not an encoding; the identity point has its own encoding
+    /// (compression and infinity flags, `0xc0` first byte) and that one
+    /// *does* decode. The defence is the verifier's identity check, so that
+    /// is what this test drives: an identity public key with an identity
+    /// signature must be refused for any message.
+    #[test]
+    fn identity_points_are_refused_by_the_verifier() {
+        let identity_pk = G2Affine::identity().to_compressed();
+        let identity_sig = G1Affine::identity().to_compressed();
+        assert_eq!(identity_pk[0], 0xc0);
+        assert!(bool::from(
+            G2Affine::from_compressed(&identity_pk).is_some()
+        ));
+        assert!(crate::chain::finality::verify_bls_sig(
+            &identity_pk,
+            b"any message at all",
+            &identity_sig
+        )
+        .is_err());
     }
 }
