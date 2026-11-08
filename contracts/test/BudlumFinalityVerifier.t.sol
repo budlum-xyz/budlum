@@ -172,4 +172,9 @@ contract BudlumFinalityVerifierTest is Harness {
         vm.expectPartialRevert(BudlumFinalityVerifier.ConflictingRoot.selector);
         bls.verify(_attestation(42, bytes32(uint256(8))));
     }
+
+    function test_zero_state_root_is_refused() public {
+        vm.expectPartialRevert(BudlumFinalityVerifier.SignatureInvalid.selector);
+        verifier.verify(_attestation(42, bytes32(0)));
+    }
 }
