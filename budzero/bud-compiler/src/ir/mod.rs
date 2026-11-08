@@ -395,3 +395,60 @@ pub struct IrProgram {
     /// Name to ID map, for call resolution and display.
     pub function_names: HashMap<String, FunctionId>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ir_identifiers_types_and_effects_classify_instructions() {
+        let v0 = ValueId::new(0);
+        let v1 = ValueId::new(1);
+        let b0 = BlockId::new(0);
+        let l0 = LocalId::new(0);
+        let f0 = FunctionId(0);
+        assert_eq!(v0.index(), 0);
+        assert_eq!(b0.index(), 0);
+        assert_eq!(l0.index(), 0);
+        assert_eq!(f0.index(), 0);
+
+        let c = Instruction::Const {
+            value: 42,
+            ty: IrType::U64,
+        };
+        assert_eq!(c.result_type(), Some(IrType::U64));
+        assert_eq!(c.effect(), Effect::Pure);
+
+        let sw = Instruction::StateWrite {
+            slot: v0,
+            value: v1,
+        };
+        assert_eq!(sw.result_type(), None);
+        assert_eq!(sw.effect(), Effect::StateWrite);
+
+        let cr = Instruction::ContextRead {
+            kind: ContextKind::Sender,
+        };
+        assert_eq!(cr.result_type(), Some(IrType::U64));
+        assert_eq!(cr.effect(), Effect::ContextRead);
+
+        let mut prog = IrProgram::default();
+        prog.function_names.insert("main".into(), f0);
+        prog.functions.push(IrFunction {
+            id: f0,
+            name: "main".into(),
+            params: Vec::new(),
+            ret_ty: IrType::U64,
+            blocks: vec![BasicBlock {
+                id: b0,
+                instrs: vec![InstrNode {
+                    result: Some(v0),
+                    instr: c,
+                }],
+                terminator: Some(Terminator::Return(Some(v0))),
+            }],
+            locals: vec![IrType::U64],
+        });
+        assert!(verify::verify_program(&prog).is_ok());
+    }
+}
