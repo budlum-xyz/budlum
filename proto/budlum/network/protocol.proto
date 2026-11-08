@@ -115,8 +115,8 @@ enum ProtoTransactionType {
     WITHDRAW_DELEGATION = 62;
     // Set the validator's bounded reward commission.
     SET_VALIDATOR_COMMISSION = 63;
-    // Quantum canary claim, step one: the commitment H(canary, proof, claimer)
-    //. Applied in block against the canary book.
+    // Quantum canary claim, step one: the commitment H(canary, proof, claimer).
+    // Applied in block against the canary book.
     CANARY_COMMIT = 64;
     // Quantum canary claim, step two: the proof. The block that accepts a
     // valid reveal applies the alarm effect.
@@ -127,6 +127,11 @@ enum ProtoTransactionType {
     REDELEGATE = 67;
     // Claim the delegator rewards an epoch close credited.
     CLAIM_REWARDS = 68;
+    // The validator door: registration, class change, operator key rotation
+    // and the operator-signed custody quota increase.
+    VALIDATOR = 69;
+    // The B.U.D. 3.0 storage door (StorageTx v3).
+    STORAGE_V3 = 70;
 }
 
 message ProtoTransaction {
@@ -197,6 +202,8 @@ message ProtoTransaction {
         ProtoRedelegate redelegate = 68;
         ProtoBridgeBurn bridge_burn = 69;
         ProtoCrossDomainMessageTx cross_domain_message = 70;
+        ProtoValidatorTx validator = 71;
+        ProtoStorageV3Tx storage_v3 = 72;
     }
     // ML-DSA-87 (FIPS 204) public key for V5 user transactions.
     // For V4 transactions this is empty.
@@ -493,6 +500,18 @@ message ProtoBlockHeader {
     // Producer key of a composite (0x06) or ML-DSA-87 (0x05) block
     // signature; empty for Ed25519.
     bytes producer_public_key = 20;
+    // Seat participation record (directive section 7.5.1). Absent on a block
+    // that is not a checkpoint.
+    ProtoSeatParticipation seat_participation = 21;
+}
+
+// The seats whose precommits for `checkpoint` the proposer collected. The
+// next seat table is derived from this record, so it is consensus data and is
+// folded into the block hash.
+message ProtoSeatParticipation {
+  uint64 checkpoint = 1;
+  // One bit per seat, least significant bit first within each byte.
+  bytes seats = 2;
 }
 
 message ProtoBlock {
@@ -523,6 +542,9 @@ message ProtoBlock {
     repeated bytes slashing_reports = 22;
     // Witness root. Empty when the block carries none.
     bytes witness_root = 23;
+    // Seat participation record (directive section 7.5.1). Absent on a block
+    // that is not a checkpoint.
+    ProtoSeatParticipation seat_participation = 24;
 }
 
 
@@ -595,6 +617,19 @@ message ProtoRoleBond {
 // heights only - the amount and the burner come from the transfer row, which
 // the executor reads from consensus state.
 message ProtoBridgeBurn {
+    bytes data = 1;
+}
+
+// The validator transaction payload: bincode-encoded `validators::ValidatorTx`,
+// the identity and vault convention. The signature preimage is built field by
+// field in core::transaction::encode_validator_tx.
+message ProtoValidatorTx {
+    bytes data = 1;
+}
+
+// A B.U.D. 3.0 storage transaction: the bincode encoding of StorageTxV3. The
+// signature preimage carries the same bytes, length-prefixed.
+message ProtoStorageV3Tx {
     bytes data = 1;
 }
 
@@ -760,6 +795,9 @@ message ProtoFinalityCert {
     bytes bitmap = 5;
     string set_hash = 6;
     string scheme_id = 7;
+    // The seat table version the signers' seats were counted under (directive
+    // section 7.4.4). Zero means the epoch's base table.
+    uint64 seat_table_version = 8;
 }
 
 message ProtoGetQcBlob {
@@ -843,7 +881,7 @@ message ProtoPrivateTransferSubmit {
     repeated bytes output_commitments = 3;
     bytes authorization_sig = 4;
     bytes public_digest = 5;
-    // BLG-0058: one nullifier derivation proof per input.
+    // One nullifier derivation proof per input.
     repeated bytes nullifier_proofs = 6;
 }
 
