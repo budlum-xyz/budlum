@@ -31,7 +31,7 @@ mod settlement_prod_tests {
         ConsensusKind, DomainCommitment, DomainStatus, PoWDomainParameters,
         POW_HEADER_CHAIN_ADAPTER,
     };
-    use crate::storage::db::Storage;
+    use crate::persistence::db::Storage;
     use std::sync::Arc;
 
     fn test_chain() -> Blockchain {
@@ -154,6 +154,7 @@ mod settlement_prod_tests {
             agg_sig_bls: vec![],
             bitmap: vec![0u8],
             set_hash: snapshot.set_hash.clone(),
+            seat_table_version: 0,
         };
         let msg = cert.signing_message();
         let mut agg = G1Projective::identity();
@@ -1186,6 +1187,7 @@ mod settlement_prod_tests {
                 agg_sig_bls: vec![0u8; 48],
                 bitmap: vec![0u8],
                 set_hash: ValidatorSetSnapshot::new(1, vec![]).set_hash,
+                seat_table_version: 0,
             },
             validator_snapshot: ValidatorSetSnapshot::new(1, vec![]),
         };
@@ -1668,7 +1670,7 @@ mod settlement_prod_tests {
         assert_ne!(baseline.calculate_hash(), after.calculate_hash());
     }
 
-    /// F-7 closed the dead `settlement_finality_hashes` input by replacing
+    /// The dead `settlement_finality_hashes` input was closed by replacing
     /// the stored field with a derived window (see the twin test in
     /// `chain/blockchain.rs`). This module is still disabled pending the
     /// devnet FinalityProof rewrite, so the derivation is pinned here only
