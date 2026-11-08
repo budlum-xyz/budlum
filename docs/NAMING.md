@@ -19,7 +19,7 @@ Budlum's architecture names say what a thing does. Metaphor names are retired. T
 | Filiz (faucet) | `faucet` | testnet faucet | operations | `WP-41` |
 | Kiragi, Don, Zemheri | alert level enum with the variants `Advisory`, `Restricted`, `Isolated` (exact code name in the map) | alert level 1, 2, 3 | security | `WP-12` |
 | Mikoriza, Mycorrhiza | `shared_security` | shared security | settlement | `WP-44` |
-| Graft, Aşı | `app_binding` | remote app binding | settlement | `WP-44` |
+| Graft and a [Turkish alias](../config/naming/concept_map.toml) | `app_binding` | remote app binding | settlement | `WP-44` |
 | Pollen | `data_market` | Data Market | application | `WP-23` |
 | Budscan, BudScan | `budlum-explorer` | Budlum Explorer | application | `WP-40` |
 | Atlas | `explorer_evidence` | explorer evidence model | application | `WP-23` |
@@ -36,11 +36,11 @@ Budlum's architecture names say what a thing does. Metaphor names are retired. T
 | Liquid storage | `wide_stripe` | class-aware wide-stripe placement | storage | `WP-20` |
 | Living Threshold, temperature transition | `access_tiering, TierTransition` | access tiering policy | storage | `WP-24` |
 | Mobile Self, Server Admission | (removed) | removed; replaced by the Mobile validator class | storage | `WP-07` |
-| Gonca, Kabuk, Kabuk-A, Kabuk-Z, Öz kökü, Mezar kümesi, Emanet açma, Gonca kanıtı | `sealed_object, ciphertext_chunks, CipherProfile::{Aead, FieldNative}, plaintext_root, deletion_set, EscrowedDisclosure, PredicateProof` | sealed object and its parts | budzero privacy | `WP-56` |
+| Gonca, Kabuk, Kabuk-A, Kabuk-Z and [Turkish aliases](../config/naming/concept_map.toml) | `sealed_object, ciphertext_chunks, CipherProfile::{Aead, FieldNative}, plaintext_root, deletion_set, EscrowedDisclosure, PredicateProof` | sealed object and its parts | budzero privacy | `WP-56` |
 | GT-1 | `private_transfer_v1` | Private Transfer Protocol 1 (PTP-1) | budzero privacy | `WP-56` |
-| Anaç, Anaç kanıtı, Tek kanıt, Kök görünüm | `DomainFinalityProof, BlockAggregateProof, RemoteStateView` | domain finality proof, block aggregate proof, remote state view | budzero | `WP-60` |
-| Fotosentez, DS-0..DS-3, BÇP, YKP, Lubot | `ai_verification, VerificationLevel, DeterministicInferenceProfile, AnswerProofBundle, on_device_assistant` | AI Verification Layer, verification level VL-0..VL-3, Deterministic Inference Profile (DIP), Answer Proof Bundle (APB), on-device assistant | ai | `WP-45` |
-| Gövde, Gövde-RV32, govde-konuk, Cep kanıtçısı | `budzero core, budzero-rv32, budzero-guest, MobileProverProfile` | BudZero core, BudZero RV32, BudZero guest SDK, mobile prover profile | budzero | `WP-56` |
-| Sera, Greenhouse, Floem, Phloem, Ksilem, Xylem, Genotip, Genotype, Fenotip, Phenotype, Tomurcuk, Çiçek, Meyve, Kök Sözleşmesi, Yuva, Nakil | `object_layer and Section 2.2 object layer terms` | Universal Object Layer (UOL) terms | object layer | `WP-49` |
+| [Turkish aliases](../config/naming/concept_map.toml) | `DomainFinalityProof, BlockAggregateProof, RemoteStateView` | domain finality proof, block aggregate proof, remote state view | budzero | `WP-60` |
+| Fotosentez, DS-0..DS-3, YKP, Lubot and a [Turkish alias](../config/naming/concept_map.toml) | `ai_verification, VerificationLevel, DeterministicInferenceProfile, AnswerProofBundle, on_device_assistant` | AI Verification Layer, verification level VL-0..VL-3, Deterministic Inference Profile (DIP), Answer Proof Bundle (APB), on-device assistant | ai | `WP-45` |
+| govde-konuk and [Turkish aliases](../config/naming/concept_map.toml) | `budzero core, budzero-rv32, budzero-guest, MobileProverProfile` | BudZero core, BudZero RV32, BudZero guest SDK, mobile prover profile | budzero | `WP-56` |
+| Sera, Greenhouse, Floem, Phloem, Ksilem, Xylem, Genotip, Genotype, Fenotip, Phenotype, Tomurcuk, Meyve, Yuva, Nakil and [Turkish aliases](../config/naming/concept_map.toml) | `object_layer and Section 2.2 object layer terms` | Universal Object Layer (UOL) terms | object layer | `WP-49` |
 
 Brands and standards that stay: Budlum, BUD (token symbol), BudL, the `bud-*` crate prefix, BUD3, EVM, SVM, Move, CosmWasm, WASM, BNS, SocialFi, PoW, PoS, PoA, BFT, ZK.
