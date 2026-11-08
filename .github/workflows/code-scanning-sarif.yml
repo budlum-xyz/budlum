@@ -13,9 +13,9 @@ name: Security SARIF
 
 on:
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses]
+    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum]
   push:
-    branches: [main, consensus-of-consensuses, testnet-quantum]
+    branches: [main]
   schedule:
     - cron: "30 4 * * 1"
   workflow_dispatch:

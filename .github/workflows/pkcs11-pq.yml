@@ -10,7 +10,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, fix/architecture-tip-adlari]
+    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum]
 
 concurrency:
   group: pkcs11-pq-${{ github.ref }}

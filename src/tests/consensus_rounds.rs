@@ -665,4 +665,42 @@ mod poa_round_pricing_tests {
             "the PoA refusal must be the wall-clock price of the round, got: {error:?}"
         );
     }
+
+    #[test]
+    fn two_block_candidate_fork_on_stale_schedule_cannot_bypass_round_pricing() {
+        let (state, address) = single_authority_state();
+        let engine = PoAEngine::new(PoAConfig::default(), None);
+        let now_ms = crate::consensus::now_millis();
+
+        // Schedule-lagged committed ancestor adopted right now.
+        let mut ancestor = Block::genesis();
+        ancestor.timestamp = now_ms.saturating_sub(600_000);
+        ancestor.hash = ancestor.calculate_hash();
+        engine.note_block_seen(&ancestor.hash, now_ms);
+
+        // Uncommitted candidate block F1 at round 0 (never written to RoundPriceBook).
+        let mut fork_1 = Block::new(1, ancestor.hash.clone(), vec![]);
+        fork_1.timestamp = ancestor.timestamp.saturating_add(MIN_BLOCK_INTERVAL_MS);
+        fork_1.producer = Some(address);
+        fork_1.nonce = 0;
+        fork_1.hash = fork_1.calculate_hash();
+
+        // Candidate child F2 attempting to jump straight to round 6 off uncommitted F1.
+        let round = 6u64;
+        let mut fork_2 = Block::new(2, fork_1.hash.clone(), vec![]);
+        fork_2.timestamp = fork_1
+            .timestamp
+            .saturating_add(MIN_BLOCK_INTERVAL_MS)
+            .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
+        fork_2.producer = Some(address);
+        fork_2.nonce = round;
+
+        let error = engine
+            .validate_block(&fork_2, &[ancestor, fork_1], &state)
+            .expect_err("2-block candidate fork must not unlock round 6 via uncommitted parent");
+        assert!(
+            round_not_elapsed(&error.0),
+            "expected wall-clock round refusal on 2-block candidate fork, got: {error:?}"
+        );
+    }
 }

@@ -1052,16 +1052,28 @@ impl Blockchain {
             }
         }
 
-        // Restored state carries no block clock, so seed it from the tip.
+        // Restored state carries no block clock, so seed it from the tip and
+        // populate the active reorg window in the round-price book.
         if let Some(last) = bc.chain.last() {
             bc.state.current_block_unix_secs = Self::block_timestamp_secs(last.timestamp);
             bc.state.current_block_entropy =
                 Self::block_context_entropy(&last.previous_hash, &last.vrf_output);
-            bc.consensus
-                .note_block_seen(&last.hash, crate::consensus::now_millis());
+            bc.seed_round_price_window();
         }
 
         bc
+    }
+
+    /// Populate [`RoundPriceBook`] across the trailing `MAX_REORG_DEPTH + 1`
+    /// canonical blocks so startup restores, reorgs, and snapshot syncs price
+    /// every valid fork point from local adoption time rather than `None`.
+    fn seed_round_price_window(&self) {
+        let now = crate::consensus::now_millis();
+        let window = MAX_REORG_DEPTH + 1;
+        let start = self.chain.len().saturating_sub(window);
+        for block in &self.chain[start..] {
+            self.consensus.note_block_seen(&block.hash, now);
+        }
     }
 
     /// Wall-clock seconds according to the chain, taken from the newest
@@ -5864,10 +5876,7 @@ impl Blockchain {
 
         self.chain = new_chain;
         self.state = new_state;
-        if let Some(tip) = self.chain.last() {
-            self.consensus
-                .note_block_seen(&tip.hash, crate::consensus::now_millis());
-        }
+        self.seed_round_price_window();
 
         // The DISK still holds FINALITY_CERT and
         // QC_BLOB at the reorged heights. Left behind, a later
@@ -6330,6 +6339,7 @@ impl Blockchain {
         self.finalized_height = snapshot.finalized_height;
         self.finalized_hash = snapshot.finalized_hash;
         self.mempool.set_min_fee(self.state.base_fee);
+        self.seed_round_price_window();
 
         Ok(())
     }
@@ -6423,6 +6433,7 @@ impl Blockchain {
         self.finalized_height = v2.finalized_height;
         self.finalized_hash = v2.finalized_hash.clone();
         self.mempool.set_min_fee(self.state.base_fee);
+        self.seed_round_price_window();
 
         // Restore finality certs from V2 snapshot through the same deduplicating,
         // Total-entry bounded queue used by the live network path.

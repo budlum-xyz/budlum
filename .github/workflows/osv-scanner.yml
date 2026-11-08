@@ -22,7 +22,7 @@ name: OSV Scanner
 
 on:
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses]
+    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum]
   push:
     branches: [main]
   schedule:

@@ -269,6 +269,10 @@ fn build_snapshot_json(
     out
 }
 
+fn github_snapshot_url(repo: &str) -> String {
+    format!("https://api.github.com/repos/{repo}/dependency-graph/snapshots")
+}
+
 fn submit_to_github(snapshot_path: &Path) -> Result<String, String> {
     let repo = std::env::var("GITHUB_REPOSITORY")
         .map_err(|_| "GITHUB_REPOSITORY is not set for --submit".to_string())?;
@@ -277,7 +281,7 @@ fn submit_to_github(snapshot_path: &Path) -> Result<String, String> {
     if repo.is_empty() || token.is_empty() {
         return Err("GITHUB_REPOSITORY and GITHUB_TOKEN must be non-empty".to_string());
     }
-    let url = format!("https://api.github.com/repos/{repo}/dependency-snapshots");
+    let url = github_snapshot_url(&repo);
     let data_arg = format!("@{}", snapshot_path.display());
     let out = Command::new("curl")
         .args([
@@ -443,7 +447,14 @@ source = \"registry+https://github.com/rust-lang/crates.io-index\"
             "unexpected relationships: serde={serde_rel:?}, derive={derive_rel:?}"
         ));
     }
-    Ok("ok: dependency-snapshot self-test (direct + indirect PURLs verified)".to_string())
+    let url = github_snapshot_url("budlum-xyz/budlum");
+    if url != "https://api.github.com/repos/budlum-xyz/budlum/dependency-graph/snapshots" {
+        return Err(format!("unexpected snapshot endpoint URL: {url}"));
+    }
+    Ok(
+        "ok: dependency-snapshot self-test (direct + indirect PURLs + endpoint verified)"
+            .to_string(),
+    )
 }
 
 #[cfg(test)]
