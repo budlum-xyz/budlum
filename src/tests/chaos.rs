@@ -601,6 +601,7 @@ mod chaos_tests {
                     agg_sig_bls: vec![0u8; 48],
                     bitmap: vec![255],
                     set_hash: "snap_hash".to_string(),
+                    seat_table_version: 0,
                 },
                 validator_snapshot: ValidatorSetSnapshot {
                     epoch: i,
@@ -885,6 +886,7 @@ mod chaos_tests {
             tx_ttl_secs: 3600,
             rbf_bump_percent: 10,
             max_pool_bytes: crate::mempool::pool::DEFAULT_MAX_POOL_BYTES,
+            duty_block_bytes: crate::mempool::pool::DEFAULT_DUTY_BLOCK_BYTES,
         };
         let mut pool = Mempool::new(cfg);
 
