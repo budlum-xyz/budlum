@@ -1640,7 +1640,11 @@ impl Node {
                 info!("Reorg to the chain of {peer} done");
             }
             Ok(false) => {
-                strikes.store(0, Ordering::Release);
+                // A zero-work refusal ("not a better chain") proves nothing
+                // about the peer's honesty and must not wipe out backoff
+                // earned from failing reconstructions; otherwise one sync peer
+                // can alternate a failing suffix with a 1-block non-better
+                // suffix and force full-chain reconstruction at the floor rate.
                 info!("Reorg to the chain of {peer} not needed: not a better chain");
             }
             Err(error) => {

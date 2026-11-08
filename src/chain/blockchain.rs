@@ -5570,8 +5570,23 @@ impl Blockchain {
                     block.index, block.chain_id, self.chain_id
                 ));
             }
+            // A block this node pruned itself still carries the witness root
+            // it was built with, but no longer carries the witnesses that root
+            // commits to, so it cannot reproduce it here. Only the local store
+            // prune marker on the exact block this node committed authorises
+            // that exemption: a peer-supplied fork block has no marker and
+            // does not match `self.chain`, so its witness root and signatures
+            // are checked in full.
+            let witness_pruned = self
+                .chain
+                .get(index)
+                .is_some_and(|local| local.hash == block.hash)
+                && self
+                    .storage
+                    .as_ref()
+                    .is_some_and(|store| store.is_witness_pruned(block.index).unwrap_or(false));
             if block.tx_root != block.calculate_tx_root()
-                || !block.witness_root_is_valid()
+                || (!witness_pruned && !block.witness_root_is_valid())
                 || block.hash != block.calculate_hash()
             {
                 return Err(format!(
@@ -5602,14 +5617,16 @@ impl Blockchain {
                         tx_index, block.index
                     ));
                 }
-                projected
-                    .validate_transaction(transaction)
-                    .map_err(|error| {
-                        format!(
-                            "Candidate transaction {} at block {} is invalid: {}",
-                            tx_index, block.index, error
-                        )
-                    })?;
+                if !witness_pruned {
+                    projected
+                        .validate_transaction(transaction)
+                        .map_err(|error| {
+                            format!(
+                                "Candidate transaction {} at block {} is invalid: {}",
+                                tx_index, block.index, error
+                            )
+                        })?;
+                }
                 Executor::apply_transaction_checked(&mut projected, transaction).map_err(
                     |error| {
                         format!(
@@ -5919,6 +5936,15 @@ impl Blockchain {
         // Reorg must never silently downgrade finality to genesis.
         self.finalized_height = previous_finalized_height;
         self.finalized_hash = previous_finalized_hash;
+        if let Some(existing) = self.finality_aggregator.as_ref() {
+            let still_matches = self
+                .chain
+                .get(existing.checkpoint_height as usize)
+                .is_some_and(|block| block.hash == existing.checkpoint_hash);
+            if !still_matches {
+                self.finality_aggregator = None;
+            }
+        }
 
         let mut new_pending = Vec::new();
 
@@ -7356,9 +7382,30 @@ impl Blockchain {
         if interval == 0 {
             return 0;
         }
-        (self.finalized_height / interval)
+        let lowest = (self.finalized_height / interval)
             .saturating_add(1)
-            .saturating_mul(interval)
+            .saturating_mul(interval);
+        // Under healthy progress every node stays on `lowest` until it
+        // finalizes. If a reorg replaces the block at `lowest` after a quorum
+        // fraction already prevoted the abandoned hash, `prevote_is_due`
+        // refuses to sign a second hash at `lowest`, so `lowest` can never
+        // finalize on its own. Once the tip moves a full stall window past
+        // `lowest + FINALITY_VOTE_DEPTH`, every node deterministically steps
+        // to the next checkpoint interval so honest validators sign a fresh
+        // height and transitively finalize `lowest`.
+        let tip = self.chain.len().saturating_sub(1) as u64;
+        let vote_ready = lowest.saturating_add(Self::FINALITY_VOTE_DEPTH);
+        let stall_window = interval.max(8);
+        if tip < vote_ready.saturating_add(stall_window) {
+            return lowest;
+        }
+        let skipped = (tip - vote_ready) / stall_window;
+        let max_eligible =
+            (tip.saturating_sub(Self::FINALITY_VOTE_DEPTH) / interval).saturating_mul(interval);
+        lowest
+            .saturating_add(skipped.saturating_mul(interval))
+            .min(max_eligible)
+            .max(lowest)
     }
 
     /// How many blocks must sit on top of a checkpoint before this node votes
@@ -9962,6 +10009,23 @@ mod tests {
         assert_eq!(bc.next_finality_checkpoint(), interval * 2);
         bc.finalized_height = interval + 1;
         assert_eq!(bc.next_finality_checkpoint(), interval * 2);
+
+        // If a reorg stalls `lowest` (`interval * 2`), once the chain advances
+        // past `lowest + FINALITY_VOTE_DEPTH + stall_window`, every node steps
+        // deterministically to `interval * 3` so honest validators can sign a
+        // fresh height without equivocating.
+        let stall_tip =
+            (interval * 2) + Blockchain::FINALITY_VOTE_DEPTH + interval.max(8) + interval;
+        while (bc.chain.len().saturating_sub(1) as u64) < stall_tip {
+            let h = bc.chain.len() as u64;
+            let prev = bc.chain.last().unwrap().hash.clone();
+            bc.chain
+                .push(Block::new_with_chain_id(h, prev, vec![], 45262));
+        }
+        assert!(
+            bc.next_finality_checkpoint() > interval * 2,
+            "stalled checkpoint must deterministically step forward once past the stall window"
+        );
     }
 
     #[test]
