@@ -23,7 +23,6 @@
 
 use crate::store::{ContentId, ContentStore, StoreError};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// Protocol name for the Bitswap-like exchange.
@@ -89,7 +88,12 @@ impl libp2p::request_response::Codec for BitswapCodec {
     where
         T: futures::AsyncRead + Unpin + Send,
     {
-        read_response_bounded(io, &AGGREGATE_RESPONSE_BYTES, MAX_AGGREGATE_RESPONSE_BYTES).await
+        use futures::AsyncReadExt;
+        let mut buf = Vec::new();
+        io.take(MAX_MESSAGE_SIZE as u64)
+            .read_to_end(&mut buf)
+            .await?;
+        decode_response(&buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
     async fn write_request<T>(
@@ -127,108 +131,6 @@ impl libp2p::request_response::Codec for BitswapCodec {
 
 /// Maximum message size: 16 MiB + overhead for CID and metadata.
 const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024 + 256;
-
-/// Aggregate byte ceiling across all concurrently buffered Bitswap responses on
-/// a node (`4 * MAX_MESSAGE_SIZE`), preventing peers from pinning unbounded
-/// transient chunk buffers across concurrent streams.
-const MAX_AGGREGATE_RESPONSE_BYTES: usize = 4 * MAX_MESSAGE_SIZE;
-
-/// Incremental read quantum used while buffering a Bitswap response.
-const RESPONSE_READ_CHUNK_BYTES: usize = 64 * 1024;
-
-/// Process-wide counter of bytes currently buffered across in-flight
-/// `read_response` futures.
-static AGGREGATE_RESPONSE_BYTES: AtomicUsize = AtomicUsize::new(0);
-
-struct ResponseBudgetGuard<'a> {
-    counter: &'a AtomicUsize,
-    ceiling: usize,
-    reserved: usize,
-}
-
-impl<'a> ResponseBudgetGuard<'a> {
-    fn new(counter: &'a AtomicUsize, ceiling: usize) -> Self {
-        Self {
-            counter,
-            ceiling,
-            reserved: 0,
-        }
-    }
-
-    fn try_reserve(&mut self, additional: usize) -> std::io::Result<()> {
-        if additional == 0 {
-            return Ok(());
-        }
-        let mut cur = self.counter.load(Ordering::Acquire);
-        loop {
-            let Some(next) = cur.checked_add(additional) else {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::OutOfMemory,
-                    "bitswap aggregate response byte budget overflow",
-                ));
-            };
-            if next > self.ceiling {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::OutOfMemory,
-                    "bitswap aggregate response byte budget exceeded",
-                ));
-            }
-            match self
-                .counter
-                .compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Acquire)
-            {
-                Ok(_) => {
-                    self.reserved += additional;
-                    return Ok(());
-                }
-                Err(actual) => cur = actual,
-            }
-        }
-    }
-}
-
-impl Drop for ResponseBudgetGuard<'_> {
-    fn drop(&mut self) {
-        if self.reserved > 0 {
-            self.counter.fetch_sub(self.reserved, Ordering::AcqRel);
-        }
-    }
-}
-
-async fn read_response_bounded<T>(
-    io: &mut T,
-    counter: &AtomicUsize,
-    aggregate_ceiling: usize,
-) -> std::io::Result<BitswapResponse>
-where
-    T: futures::AsyncRead + Unpin + Send,
-{
-    use futures::AsyncReadExt;
-
-    let mut guard = ResponseBudgetGuard::new(counter, aggregate_ceiling);
-    let mut buf = Vec::new();
-    let mut scratch = vec![0u8; RESPONSE_READ_CHUNK_BYTES];
-    let mut limited = io.take(MAX_MESSAGE_SIZE as u64 + 1);
-
-    loop {
-        let n = limited.read(&mut scratch).await?;
-        if n == 0 {
-            break;
-        }
-        if buf.len().saturating_add(n) > MAX_MESSAGE_SIZE {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("bitswap response exceeds {MAX_MESSAGE_SIZE} byte ceiling"),
-            ));
-        }
-        guard.try_reserve(n)?;
-        if let Some(prefix) = scratch.get(..n) {
-            buf.extend_from_slice(prefix);
-        }
-    }
-
-    decode_response(&buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-}
 
 /// Largest request accepted. A valid request is a bincode-encoded content id.
 const MAX_REQUEST_BYTES: usize = 256;
@@ -579,43 +481,5 @@ mod tests {
 
         // Should not error, just return Ok.
         bitswap.handle_response(cid, resp).unwrap();
-    }
-
-    #[test]
-    fn aggregate_response_budget_refuses_excess_and_releases_on_drop() {
-        let counter = AtomicUsize::new(0);
-        let data = vec![0xABu8; 8 * 1024];
-        let cid = ContentId::of(&data);
-        let wire = encode_response(&BitswapResponse {
-            cid,
-            data,
-            not_found: false,
-        })
-        .unwrap();
-
-        // Pre-pinning the budget leaves too little room for `wire`: refused before buffering.
-        let mut held = ResponseBudgetGuard::new(&counter, wire.len() + 100);
-        held.try_reserve(200).unwrap();
-        let mut cursor = futures::io::Cursor::new(wire.clone());
-        let err = futures::executor::block_on(read_response_bounded(
-            &mut cursor,
-            &counter,
-            wire.len() + 100,
-        ))
-        .expect_err("aggregate response budget must refuse over-budget stream");
-        assert_eq!(err.kind(), std::io::ErrorKind::OutOfMemory);
-
-        // Dropping `held` returns the reserved bytes so the stream now succeeds cleanly.
-        drop(held);
-        assert_eq!(counter.load(Ordering::Acquire), 0);
-        let mut ok_cursor = futures::io::Cursor::new(wire.clone());
-        let decoded = futures::executor::block_on(read_response_bounded(
-            &mut ok_cursor,
-            &counter,
-            wire.len() + 100,
-        ))
-        .unwrap();
-        assert_eq!(decoded.cid, cid);
-        assert_eq!(counter.load(Ordering::Acquire), 0);
     }
 }

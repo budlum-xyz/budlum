@@ -440,11 +440,6 @@ pub struct GovernanceState {
     /// them to `ConsensusDomainRegistry` and `QuarantineLedger`.
     #[serde(default)]
     pub applied_domain_unfreezes: Vec<crate::core::account::PendingDomainUnfreeze>,
-    /// Slashing-report digests already consumed by an executed `SlashValidator`
-    /// governance proposal, preventing one historical report from slashing a
-    /// validator more than once.
-    #[serde(default)]
-    pub consumed_slash_evidence: std::collections::BTreeSet<[u8; 32]>,
 }
 
 mod proposer_epoch_count_as_seq {
@@ -509,7 +504,6 @@ impl GovernanceState {
             || !self.proposer_epoch_count.is_empty()
             || self.constitution.has_non_default_updates()
             || !self.applied_domain_unfreezes.is_empty()
-            || !self.consumed_slash_evidence.is_empty()
     }
 
     pub fn root(&self) -> [u8; 32] {
@@ -532,12 +526,6 @@ impl GovernanceState {
                 bincode::serialize(&self.applied_domain_unfreezes)
                     .unwrap_or_else(|_| GOVERNANCE_SERIALIZE_FAILED.to_vec()),
             );
-        }
-        if !self.consumed_slash_evidence.is_empty() {
-            hasher.update(b"consumed_slash_evidence_v1");
-            for digest in &self.consumed_slash_evidence {
-                hasher.update(digest);
-            }
         }
         hasher.finalize().into()
     }
@@ -584,9 +572,6 @@ impl GovernanceState {
             ProposalType::SlashValidator { evidence_hash, .. } => {
                 if evidence_hash == &[0u8; 32] {
                     return Err("SlashValidator evidence_hash must be non-zero".into());
-                }
-                if self.consumed_slash_evidence.contains(evidence_hash) {
-                    return Err("SlashValidator evidence_hash has already been consumed".into());
                 }
             }
             ProposalType::SetEncryptionPolicy(policy) => policy.validate()?,

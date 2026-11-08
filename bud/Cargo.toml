@@ -85,10 +85,10 @@ too_many_arguments = "allow"
 type_complexity = "allow"
 
 [dependencies]
-sha3 = "0.12"
+sha3 = "0.10"
 clap = { version = "4", features = ["derive"] }
-ed25519-dalek = { version = "3", features = ["rand_core"] }
-ml-dsa = { version = "0.1.2", features = ["rand_core"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+ml-dsa = { version = "0.1", features = ["getrandom"] }
 zstd = "0.14"
 # The Shamir split draws its polynomial coefficients from the OS random
 # source; it used to be a dev-only dependency for the MSR tests.
