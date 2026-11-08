@@ -350,7 +350,7 @@ fn kat_file_writer() {
     std::println!("#       regenerated 2026-10-19 for the step-bound chains below)");
     std::println!("# construction: epoch-chained Winternitz (one-time per epoch, q_max=1,");
     std::println!("#       PRF-derived 16B randomizer, MESSAGE_BIND_V1, chain steps bound");
-    std::println!("#       to their absolute position (P02-F19))");
+    std::println!("#       to their absolute position (absolute-position binding)");
     std::println!("# row: ParamsTestFast lane (N=32, LEN=67, T_LOG2=4) - identical hash");
     std::println!("#      discipline to the canonical L5/L3 rows, ceremony depth pruned.");
     std::println!("# pins: root_seed=0xA5*32, window=3, msg='bpqs-backend-differential-payload',");
