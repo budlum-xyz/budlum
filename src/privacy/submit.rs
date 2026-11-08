@@ -28,7 +28,8 @@ pub struct PrivateTransferSubmit {
     /// registry refuses a transfer without them.
     #[serde(default)]
     pub nullifier_proofs: Vec<NoteHash>,
-    /// Wallet authorization over public digest (ed25519, 64 bytes).
+    /// Wallet authorization over the public digest; verified using the
+    /// transaction's signature version.
     pub authorization_sig: Vec<u8>,
     /// Echo of wallet `public_digest` for audit / light clients.
     pub public_digest: [u8; 32],
@@ -72,25 +73,18 @@ impl PrivateTransferSubmit {
                 );
             }
         }
-        // The authorization signature can take one of two shapes: the older
-        // Ed25519 (64 bytes) or ML-DSA-87 (4627 bytes). The length is only a
-        // **shape** check; which one is actually valid is decided in the
-        // `Executor`, from the signature version of the transaction.
-        //
-        // Previously only 64 was accepted. That made a private transfer
-        // authorization **impossible** for an account holding an ML-DSA-87 key
-        // (V5): even when it produced the correct signature, the transaction
-        // fell at the shape gate with "must be 64 bytes". Since ML-DSA-87 is
-        // the default wallet of the chain, this meant the feature did not work
-        // at all in the default configuration.
+        // The transaction's signature version selects the verifier. Accept
+        // legacy single-scheme forms or a structurally valid composite encoding;
+        // the executor verifies the signature itself.
         if self.authorization_sig.len() != ED25519_AUTH_SIG_LEN
             && self.authorization_sig.len() != ML_DSA_87_AUTH_SIG_LEN
+            && crate::crypto::composite::CompositeSignature::decode(&self.authorization_sig)
+                .is_err()
         {
-            return Err(format!(
-                "private transfer: authorization_sig must be {ED25519_AUTH_SIG_LEN} bytes \
-                 (Ed25519) or {ML_DSA_87_AUTH_SIG_LEN} bytes (ML-DSA-87), got {}",
-                self.authorization_sig.len()
-            ));
+            return Err(
+                "private transfer: authorization_sig has an unsupported encoding or length"
+                    .into(),
+            );
         }
         Ok(())
     }
@@ -166,10 +160,6 @@ mod tests {
     }
 
     /// An ML-DSA-87 authorization has to be accepted too.
-    ///
-    /// ML-DSA-87 is the default wallet of the chain. As long as the shape gate
-    /// allowed only 64 bytes, a V5 account could not make a private transfer
-    /// even when it produced the correct signature.
     #[test]
     fn an_ml_dsa_87_authorization_is_accepted() {
         assert!(submit_with_sig(ML_DSA_87_AUTH_SIG_LEN)
@@ -177,16 +167,61 @@ mod tests {
             .is_ok());
     }
 
-    /// A length matching neither shape has to be refused.
+    #[test]
+    fn a_composite_authorization_is_accepted() {
+        use crate::crypto::composite::{CompositeSignature, ED25519_SIGNATURE_LEN};
+        use crate::crypto::scheme::SuiteId;
+
+        let signature = CompositeSignature {
+            suite: SuiteId::USER,
+            pq: vec![0u8; ML_DSA_87_AUTH_SIG_LEN],
+            ed: [0u8; ED25519_SIGNATURE_LEN],
+        }
+        .encode();
+        assert_eq!(
+            signature.len(),
+            3 + ML_DSA_87_AUTH_SIG_LEN + ED25519_SIGNATURE_LEN
+        );
+        assert_eq!(
+            signature.len(),
+            CompositeSignature::encoded_len(SuiteId::USER).expect("known composite suite")
+        );
+        assert!(CompositeSignature::decode(&signature).is_ok());
+
+        let mut submit = submit_with_sig(signature.len());
+        submit.authorization_sig = signature;
+        assert!(submit.validate_shape().is_ok());
+    }
+
+    #[test]
+    fn a_composite_authorization_with_an_unknown_suite_is_refused() {
+        use crate::crypto::composite::{CompositeSignature, ED25519_SIGNATURE_LEN};
+        use crate::crypto::scheme::SuiteId;
+
+        let mut signature = CompositeSignature {
+            suite: SuiteId::USER,
+            pq: vec![0u8; ML_DSA_87_AUTH_SIG_LEN],
+            ed: [0u8; ED25519_SIGNATURE_LEN],
+        }
+        .encode();
+        signature[1..3].copy_from_slice(&u16::MAX.to_be_bytes());
+
+        let mut submit = submit_with_sig(signature.len());
+        submit.authorization_sig = signature;
+        assert!(submit.validate_shape().is_err());
+    }
+
+    /// Unsupported signature lengths have to be refused.
     #[test]
     fn an_authorization_of_any_other_length_is_refused() {
-        for len in [0usize, 1, 63, 65, 4626, 4628] {
+        for len in [0usize, 1, 63, 65, 4626, 4628, 4693, 4695] {
             let err = submit_with_sig(len)
                 .validate_shape()
                 .expect_err("an invalid length has to be refused");
             assert!(err.contains("authorization_sig"), "{err}");
         }
     }
+
     /// A hash that is not a packed field element is refused at the shape gate,
     /// whichever of the three lists it sits in.
     #[test]
