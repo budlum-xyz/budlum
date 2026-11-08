@@ -65,10 +65,9 @@ pub const SCORE_TIMELY: f64 = 0.5;
 pub const PROPAGATION_WINDOW_MS: u128 = 5_000; // 5 seconds
 
 /// Maximum number of duplicate messages a single peer may send before it is
-/// Flagged for automatic banning. The gossip-flood finding explicitly requires
-/// That peers producing an excessive message rate be auto-banned, not merely
-/// Scored. This is the duplicate-flood half of that threshold; the score half
-/// Is `MIN_PEER_SCORE`.
+/// Flagged for automatic banning. A peer that produces an excessive message
+/// rate is auto-banned, not merely scored. This is the duplicate-flood half of
+/// that threshold; the score half is `MIN_PEER_SCORE`.
 pub const MAX_DUPLICATE_COUNT: u64 = 1_000;
 
 /// Score the duplicate penalty regains per second. A relay is charged for
@@ -282,10 +281,10 @@ impl GossipDedup {
     /// Or below `MIN_PEER_SCORE` **or** it has sent more than
     /// `MAX_DUPLICATE_COUNT` duplicate messages (a replay/duplicate flood).
     ///
-    /// Per the gossip-flood finding, peers producing an excessive message rate
-    /// Must be auto-banned, not merely scored. This engine only *decides* the
-    /// Ban; the caller (swarm / peer-manager) is responsible for enforcing the
-    /// Disconnect so the DoS primitive stays self-contained and testable.
+    /// A peer producing an excessive message rate must be auto-banned, not
+    /// merely scored. This engine only *decides* the ban; the caller (swarm /
+    /// peer-manager) is responsible for enforcing the disconnect so the DoS
+    /// primitive stays self-contained and testable.
     pub fn peer_should_be_banned(&self, peer: &libp2p::PeerId) -> bool {
         match self.peer_scores.get(peer) {
             Some(s) => s.score <= MIN_PEER_SCORE || s.duplicate_count >= MAX_DUPLICATE_COUNT,
