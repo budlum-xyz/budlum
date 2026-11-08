@@ -1,4 +1,4 @@
-# Prometheus for ops/testnet-local.yml: the four validators and the RPC node.
+# Prometheus for the eight validator processes in four containers and the RPC node.
 global:
   scrape_interval: 15s
   evaluation_interval: 30s
@@ -17,5 +17,20 @@ scrape_configs:
         labels: { node: "validator3", network: "testnet-local" }
       - targets: ["validator4:9090"]
         labels: { node: "validator4", network: "testnet-local" }
+      - targets: ["validator1:9091"]
+        labels: { node: "validator5", network: "testnet-local" }
+      - targets: ["validator2:9091"]
+        labels: { node: "validator6", network: "testnet-local" }
+      - targets: ["validator3:9091"]
+        labels: { node: "validator7", network: "testnet-local" }
+      - targets: ["validator4:9091"]
+        labels: { node: "validator8", network: "testnet-local" }
       - targets: ["rpc:9090"]
         labels: { node: "rpc", network: "testnet-local" }
+  # The host's node_exporter: `BudlumDiskFillingUp` reads
+  # `node_filesystem_avail_bytes`, which only exists once this job scrapes it.
+  # `host.docker.internal` is Docker's name for the host the containers run on.
+  - job_name: node
+    static_configs:
+      - targets: ["host.docker.internal:9100"]
+        labels: { node: "host", network: "testnet-local" }
