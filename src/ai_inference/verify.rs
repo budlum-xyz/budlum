@@ -58,8 +58,11 @@ pub fn verify_inference_stark(
     expected_inputs: &ExecutionPublicInputs,
     program: &[u64],
 ) -> Result<(), String> {
-    let envelope: ProofEnvelope = bincode::deserialize(proof_bytes)
-        .map_err(|e| format!("AI inference layer STARK: ProofEnvelope deserialize failed: {e}"))?;
+    let envelope: ProofEnvelope = crate::network::bounded_bincode::decode_bounded_bincode(
+        proof_bytes,
+        crate::execution::proof_verifier::MAX_PROOF_BYTES,
+    )
+    .map_err(|e| format!("AI inference layer STARK: ProofEnvelope deserialize failed: {e}"))?;
     DefaultAdapter::verify(&envelope, expected_inputs, program)
         .map_err(|e| format!("AI inference layer STARK: verification failed: {e:?}"))
 }

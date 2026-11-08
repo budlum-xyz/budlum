@@ -17,7 +17,7 @@
 use budlum_core::core::address::Address;
 use budlum_core::core::transaction::{Transaction, TransactionType};
 use budlum_core::crypto::primitives::KeyPair;
-use budlum_core::developer_os::{DeveloperOsManifest, ProofFixtureStatus};
+use budlum_core::project_manifest::{ProjectManifest, ProofFixtureStatus};
 use clap::{Parser, Subcommand};
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -200,6 +200,12 @@ enum Command {
         #[command(subcommand)]
         action: ProjectAction,
     },
+    /// Print and check one epoch's 40 / 50 / 10 security-pool split.
+    RewardPool {
+        /// Epoch whose calendar budget is split.
+        #[arg(long)]
+        epoch: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -232,9 +238,9 @@ enum ValidatorAction {
         /// Stake to bond, in whole BUD (the network's minimum at least).
         #[arg(long, required = true)]
         stake_bud: u64,
-        /// Fee for each of the two transactions (base units).
-        #[arg(long, default_value_t = 1_000)]
-        fee: u64,
+        /// Fee for each of the two transactions (base units; defaults to the network base fee).
+        #[arg(long, value_parser = parse_positive_fee)]
+        fee: Option<u64>,
     },
     /// Register this validator's Filiz Chain (`RegisterFiliz`). The node
     /// must run with the same seed file in `BUDLUM_FILIZ_SEED_FILE`; the
@@ -246,9 +252,9 @@ enum ValidatorAction {
         /// The Filiz seed: 64 hex characters, mode 0600.
         #[arg(long, required = true)]
         seed_file: std::path::PathBuf,
-        /// Fee (base units).
-        #[arg(long, default_value_t = 1_000)]
-        fee: u64,
+        /// Fee (base units; defaults to the network base fee).
+        #[arg(long, value_parser = parse_positive_fee)]
+        fee: Option<u64>,
     },
     /// Set the commission this validator takes from its delegators'
     /// rewards (`SetValidatorCommission`), in parts per million. The chain
@@ -260,8 +266,9 @@ enum ValidatorAction {
         /// Commission in parts per million (100000 = 10 percent).
         #[arg(long, required = true)]
         rate_ppm: u32,
-        #[arg(long, default_value_t = 1_000)]
-        fee: u64,
+        /// Fee (base units; defaults to the network base fee).
+        #[arg(long, value_parser = parse_positive_fee)]
+        fee: Option<u64>,
     },
 }
 
@@ -309,9 +316,9 @@ struct V5Signer {
     /// A file holding the wallet password; else `BUD_WALLET_PASSWORD`.
     #[arg(long)]
     password_file: Option<std::path::PathBuf>,
-    /// Fee (base units).
-    #[arg(long, default_value_t = 1_000)]
-    fee: u64,
+    /// Fee (base units; defaults to the network base fee via `bud_estimateGas` / `bud_gasPrice`).
+    #[arg(long, value_parser = parse_positive_fee)]
+    fee: Option<u64>,
 }
 
 #[derive(Subcommand)]
@@ -485,7 +492,7 @@ enum GraftAction {
         evidence: std::path::PathBuf,
     },
     /// Claim an externally owned application with its EIP-191 signature
-    /// over `eoa_claim_hash` (docs/GRAFT.md, section 4).
+    /// over `eoa_claim_hash` (docs/APP_BINDING.md, section 4).
     ClaimSigned {
         #[command(flatten)]
         signer: V5Signer,
@@ -631,9 +638,9 @@ enum TxAction {
         /// variable must supply it.
         #[arg(long)]
         priv_key_file: Option<std::path::PathBuf>,
-        /// Transaction fee (base units).
-        #[arg(long, default_value_t = 0)]
-        fee: u64,
+        /// Transaction fee (base units; defaults to the network base fee via RPC when omitted).
+        #[arg(long, value_parser = parse_positive_fee)]
+        fee: Option<u64>,
         /// Transaction nonce (fetched from the node with `bud_getNonce` if omitted).
         #[arg(long)]
         nonce: Option<u64>,
@@ -884,6 +891,48 @@ fn node_chain_id(rpc_url: &str) -> Result<u64, String> {
     chain_id_binding(node, requested)
 }
 
+/// Reject zero as an explicit fee. Zero remains the unsigned transaction
+/// template's sentinel for a fee that must still be resolved from the network.
+fn parse_positive_fee(value: &str) -> Result<u64, std::io::Error> {
+    let fee = value.parse::<u64>().map_err(|error| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
+    })?;
+    if fee == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "an explicit fee must be greater than zero",
+        ));
+    }
+    Ok(fee)
+}
+
+/// Query the node's live fee floor when `--fee` is omitted.
+///
+/// Tries `bud_estimateGas` first when a draft transaction is available so
+/// proportional transfer cuts and governance escalations are included, then
+/// falls back to `bud_gasPrice` (`Chain::get_base_fee`).
+fn resolve_network_fee(
+    rpc_url: &str,
+    explicit_fee: Option<u64>,
+    draft: Option<&Transaction>,
+) -> Result<u64, String> {
+    if let Some(fee) = explicit_fee {
+        if fee == 0 {
+            return Err(String::from("an explicit fee must be greater than zero"));
+        }
+        return Ok(fee);
+    }
+    if let Some(tx) = draft {
+        if let Ok(est) = rpc_call(rpc_url, "bud_estimateGas", serde_json::json!([tx])) {
+            if let Ok(parsed) = parse_rpc_u64(&est, "bud_estimateGas") {
+                return Ok(parsed);
+            }
+        }
+    }
+    let raw = rpc_call(rpc_url, "bud_gasPrice", serde_json::json!([]))?;
+    parse_rpc_u64(&raw, "bud_gasPrice")
+}
+
 /// Build an unsigned transfer bound to `chain_id`.
 fn build_transfer(
     from: Address,
@@ -911,7 +960,7 @@ fn run_tx_send(
     to: &str,
     amount: u64,
     priv_key_file: Option<&std::path::Path>,
-    fee: u64,
+    fee: Option<u64>,
     nonce: Option<u64>,
 ) -> Result<(), String> {
     let seed = parse_seed(&load_priv_key(priv_key_file)?)?;
@@ -948,8 +997,11 @@ fn run_tx_send(
         );
     }
 
-    // Build and sign the transaction.
-    let mut tx = build_transfer(from, to_addr, amount, fee, nonce, chain_id);
+    // Build and sign the transaction; default fee comes from the network base fee.
+    let mut tx = build_transfer(from, to_addr, amount, fee.unwrap_or(0), nonce, chain_id);
+    let resolved_fee = resolve_network_fee(rpc_url, fee, Some(&tx))?;
+    tx.fee = resolved_fee;
+    tx.max_fee = resolved_fee;
     tx.sign(&keypair);
 
     let tx_hash = tx.calculate_hash();
@@ -1073,9 +1125,9 @@ fn parse_digest(field: &str, hex_str: &str) -> Result<[u8; 32], String> {
 /// computed for a manifest that does not pass `validate`. Otherwise a manifest
 /// carrying an invented compiler profile or a zero source hash would also produce
 /// a smooth id, indistinguishable from a real one.
-fn build_manifest(name: &str, source_hash: &str) -> Result<DeveloperOsManifest, String> {
+fn build_manifest(name: &str, source_hash: &str) -> Result<ProjectManifest, String> {
     let digest = parse_digest("--source-hash", source_hash)?;
-    let manifest = DeveloperOsManifest::local_standard(name, digest);
+    let manifest = ProjectManifest::local_standard(name, digest);
     manifest
         .validate()
         .map_err(|e| format!("manifest refused: {e:?}"))?;
@@ -1189,7 +1241,7 @@ fn send_signed(
     rpc_url: &str,
     keys: &budlum_core::crypto::primitives::ValidatorKeys,
     amount: u64,
-    fee: u64,
+    fee: Option<u64>,
     tx_type: TransactionType,
     signing: ValidatorSigning,
 ) -> Result<String, String> {
@@ -1204,12 +1256,15 @@ fn send_signed(
         from,
         Address::zero(),
         amount,
-        fee,
+        fee.unwrap_or(0),
         nonce,
         Vec::new(),
         chain_id,
         tx_type,
     );
+    let resolved_fee = resolve_network_fee(rpc_url, fee, Some(&tx))?;
+    tx.fee = resolved_fee;
+    tx.max_fee = resolved_fee;
     // A key set with an ML-DSA-65 key signs the V7 validator form,
     // the only one a mainnet node admits; a legacy set signs V4. Enrolment
     // always signs V4: the V7 binding gate refuses a validator transaction
@@ -1237,7 +1292,7 @@ fn run_validator_join(
     rpc_url: &str,
     key_file: &std::path::Path,
     stake_bud: u64,
-    fee: u64,
+    fee: Option<u64>,
 ) -> Result<(), String> {
     check_key_file_mode(key_file)?;
     let keys = budlum_core::crypto::primitives::ValidatorKeys::load(key_file)
@@ -1330,7 +1385,7 @@ fn run_validator_filiz(
     rpc_url: &str,
     key_file: &std::path::Path,
     seed_file: &std::path::Path,
-    fee: u64,
+    fee: Option<u64>,
 ) -> Result<(), String> {
     check_key_file_mode(key_file)?;
     check_key_file_mode(seed_file)?;
@@ -1365,7 +1420,7 @@ fn run_validator_commission(
     rpc_url: &str,
     key_file: &std::path::Path,
     rate_ppm: u32,
-    fee: u64,
+    fee: Option<u64>,
 ) -> Result<(), String> {
     check_key_file_mode(key_file)?;
     let keys = budlum_core::crypto::primitives::ValidatorKeys::load(key_file)
@@ -1779,7 +1834,9 @@ fn run_genesis_assemble(
     fund: &[String],
     out: &std::path::Path,
 ) -> Result<(), String> {
-    use budlum_core::chain::genesis_ceremony::{assemble, genesis_hash, CeremonyInputs};
+    use budlum_core::chain::genesis_ceremony::{
+        assemble, genesis_hash, supply_audit, CeremonyInputs, SupplyAudit,
+    };
     use budlum_core::core::chain_config::Network;
     let network = match network {
         "testnet" => Network::Testnet,
@@ -1826,11 +1883,18 @@ fn run_genesis_assemble(
             .collect::<Result<_, _>>()?,
     };
     let genesis = assemble(network, inputs)?;
+    // The ceremony publishes the audit report beside the file
+    // and its hash, so every operator can repeat the same `u128` sum.
+    let audit: SupplyAudit = supply_audit(&genesis)?;
     let json = serde_json::to_string_pretty(&genesis).map_err(|e| e.to_string())?;
     std::fs::write(out, json + "\n").map_err(|e| format!("cannot write {}: {e}", out.display()))?;
     println!("validators: {}", genesis.validators.len());
     println!("genesis file: {}", out.display());
     println!("genesis hash: {}", genesis_hash(&genesis));
+    println!(
+        "supply audit: {}",
+        serde_json::to_string(&audit).map_err(|e| e.to_string())?
+    );
     Ok(())
 }
 
@@ -1979,6 +2043,11 @@ fn send_v5(
         }
     };
     tx.chain_id = chain_id;
+    if tx.fee == 0 {
+        let resolved_fee = resolve_network_fee(rpc_url, None, Some(&tx))?;
+        tx.fee = resolved_fee;
+        tx.max_fee = resolved_fee;
+    }
     match key {
         WalletKey::V3(account) => {
             use rand::Rng;
@@ -2006,12 +2075,12 @@ fn send_v5(
 }
 
 /// A header-only transaction of `tx_type` for `send_v5` to complete.
-fn v5_template(tx_type: TransactionType, amount: u64, fee: u64) -> Transaction {
+fn v5_template(tx_type: TransactionType, amount: u64, fee: Option<u64>) -> Transaction {
     Transaction::new_with_chain_id(
         Address::zero(),
         Address::zero(),
         amount,
-        fee,
+        fee.unwrap_or(0),
         0,
         Vec::new(),
         0,
@@ -2141,6 +2210,36 @@ fn run_node_identity(
     Ok(())
 }
 
+/// `bud reward-pool --epoch N`: the operator-facing audit of one epoch's
+/// Network Security Pool split. The command names and checks the three
+/// interfaces the storage-fee path reads, so a split that stops conserving
+/// the budget is refused here rather than discovered in a payout.
+fn run_reward_pool(epoch: u64) -> Result<(), String> {
+    use budlum_core::tokenomics::reward_pool::{
+        split_epoch_budget, storage_share, storage_share_for, RewardPoolSchedule, RewardPoolSplit,
+        DEFAULT_VALIDATION_REWARD_POOL,
+    };
+    let schedule = RewardPoolSchedule::default();
+    let remaining = DEFAULT_VALIDATION_REWARD_POOL;
+    let budget = schedule.per_epoch_budget(epoch, remaining);
+    let split: RewardPoolSplit = split_epoch_budget(budget);
+    if split.total() != budget {
+        return Err("the pool split does not conserve the epoch budget".into());
+    }
+    if storage_share(epoch) != split.storage {
+        return Err("the default storage share disagrees with the split".into());
+    }
+    if storage_share_for(epoch, &schedule, remaining) != split.storage {
+        return Err("the schedule-aware storage share disagrees with the split".into());
+    }
+    println!("epoch: {epoch}");
+    println!("budget_atoms: {budget}");
+    println!("consensus_atoms: {}", split.consensus);
+    println!("storage_atoms: {}", split.storage);
+    println!("repair_and_relay_atoms: {}", split.repair_and_relay);
+    Ok(())
+}
+
 fn main() {
     let cli = Cli::parse();
     set_signing_chain_id(cli.signing_chain_id);
@@ -2155,7 +2254,23 @@ fn main() {
                 key_file: Some(key_file),
                 password_file,
             } => open_wallet_file(key_file, password_file.as_deref()).and_then(|key| {
-                let tx = build_transfer(Address::zero(), parse_address(to)?, *amount, *fee, 0, 0);
+                let draft = build_transfer(
+                    Address::zero(),
+                    parse_address(to)?,
+                    *amount,
+                    fee.unwrap_or(0),
+                    0,
+                    0,
+                );
+                let resolved_fee = resolve_network_fee(&cli.rpc_url, *fee, Some(&draft))?;
+                let tx = build_transfer(
+                    Address::zero(),
+                    parse_address(to)?,
+                    *amount,
+                    resolved_fee,
+                    0,
+                    0,
+                );
                 send_v5(&cli.rpc_url, &key, tx, *nonce)
             }),
             TxAction::Send {
@@ -2353,6 +2468,7 @@ fn main() {
                 proof_hash,
             } => run_project_bind_proof(name, source_hash, fixture, proof_hash),
         },
+        Command::RewardPool { epoch } => run_reward_pool(*epoch),
     };
     if let Err(e) = result {
         eprintln!("error: {e}");
@@ -2589,5 +2705,52 @@ mod tests {
         let err = run_project_bind_proof("demo-app", SOURCE_HASH, "no-such-record", &proof)
             .expect_err("an unknown record must be refused");
         assert!(err.contains("no proof record named"), "{err}");
+    }
+
+    #[test]
+    fn cli_fee_default_reads_network_base_fee() {
+        use std::io::{Read as _, Write as _};
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral loopback listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).expect("read");
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let payload = if req.contains("bud_estimateGas") {
+                    r#"{"jsonrpc":"2.0","error":{"code":-32601,"message":"not wired"},"id":1}"#
+                } else {
+                    assert!(req.contains("bud_gasPrice"), "expected bud_gasPrice: {req}");
+                    r#"{"jsonrpc":"2.0","result":"0x3b","id":1}"#
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                );
+                stream.write_all(resp.as_bytes()).expect("write");
+            }
+        });
+        let rpc_url = format!("http://{addr}");
+        let draft = build_transfer(Address::zero(), Address::zero(), 100, 0, 0, 45261);
+        // When `--fee` is omitted (`None`), `resolve_network_fee` queries the
+        // node and adopts its live base fee (`0x3b` == 59).
+        assert_eq!(resolve_network_fee(&rpc_url, None, Some(&draft)).unwrap(), 59);
+        // Explicit `--fee` overrides without contacting the node.
+        assert_eq!(
+            resolve_network_fee("http://127.0.0.1:1", Some(777), Some(&draft)).unwrap(),
+            777
+        );
+        server.join().expect("mock RPC thread");
+    }
+
+    #[test]
+    fn cli_explicit_zero_fee_is_refused_without_contacting_the_network() {
+        let err = parse_positive_fee("0").expect_err("zero must not be accepted as a template");
+        assert!(err.to_string().contains("greater than zero"));
+        let draft = build_transfer(Address::zero(), Address::zero(), 100, 0, 0, 45261);
+        assert!(resolve_network_fee("http://127.0.0.1:1", Some(0), Some(&draft)).is_err());
     }
 }

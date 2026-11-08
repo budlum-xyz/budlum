@@ -39,6 +39,15 @@ pub fn verify_execution_proof_stark(
     if expected_inputs.program_hash != proof.program_hash {
         return Err("execution proof program_hash != public_inputs.program_hash".into());
     }
+    if expected_inputs.exit_code != 0 {
+        return Err("execution proof attests non-zero exit_code".into());
+    }
+    if expected_inputs.gas_used != proof.gas_used {
+        return Err("execution proof gas_used != public_inputs.gas_used".into());
+    }
+    if expected_inputs.trace_len != proof.steps || proof.steps == 0 {
+        return Err("execution proof steps != public_inputs.trace_len".into());
+    }
     Prover::verify(&envelope, expected_inputs, program)
         .map_err(|e| format!("execution STARK verify failed: {e:?}"))?;
     Ok(())
