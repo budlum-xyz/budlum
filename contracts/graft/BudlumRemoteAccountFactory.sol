@@ -4,7 +4,7 @@ pragma solidity ^0.8.24;
 import {BudlumPaymentReceiver, GraftPayment, IBudlumFinality, PaymentProof} from "./BudlumPaymentReceiver.sol";
 
 /// @title BudlumRemoteAccount
-/// @notice A Graft level 3 account (8.3): an account on
+/// @notice A Graft level 3 account: an account on
 ///         this chain that a Budlum user controls with Budlum proofs alone.
 ///         The user holds no ETH and no key on this chain. An application
 ///         sees the account itself as `msg.sender`.

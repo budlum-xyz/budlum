@@ -18,7 +18,7 @@ interface IBudlumSlashTarget {
 
 /// @title BudlumSlasher
 /// @notice Slashes a Mikoriza operator on Ethereum for a Budlum finality
-///         double vote (10.5): two BLS signatures by the
+///         double vote: two BLS signatures by the
 ///         validator's bound key for different checkpoint hashes at the same
 ///         Budlum chain id, epoch and height.
 ///
