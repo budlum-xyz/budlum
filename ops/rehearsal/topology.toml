@@ -1,0 +1,21 @@
+# Ceremony Rehearsal Network Topology
+
+chain_id = 45262
+genesis_file = "config/rehearsal-genesis.json"
+steady_state_secs = 259200
+
+[counts]
+android_phone_validators = 20
+full_validators = 8
+relay_nodes = 4
+simulated_mobile_validators = 1000
+upload_gateways = 2
+
+[diversity]
+min_cloud_providers = 2
+min_cloud_regions = 3
+providers = ["aws", "hetzner"]
+regions = ["ap-southeast-1", "eu-central-1", "eu-west-1", "us-east-1", "us-west-2"]
+
+[drills]
+required = ["T-1", "T-2", "T-3", "T-4", "T-5", "T-6", "T-7"]
