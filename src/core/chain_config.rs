@@ -11,6 +11,12 @@ pub enum Network {
     Devnet,
 }
 
+/// This legacy path is available only on the development network while
+/// ownership, membership, and value-conservation proofs are not verified.
+pub(crate) fn privacy_transfers_enabled(chain_id: u64) -> bool {
+    chain_id == Network::Devnet.chain_id().value()
+}
+
 impl Network {
     /// EIP-155 chain id.
     ///
@@ -110,6 +116,26 @@ impl Network {
         self.consensus_params().min_stake
     }
 
+    /// The bond floor of a Full validator. Same value as [`Self::min_stake`],
+    /// named for the class split.
+    pub fn min_stake_full(&self) -> u64 {
+        self.consensus_params().min_stake
+    }
+
+    /// The bond floor of a mobile validator (Android or iOS opportunistic).
+    pub fn min_stake_mobile(&self) -> u64 {
+        self.consensus_params().min_stake_mobile
+    }
+
+    /// The bond floor of a validator class on this profile.
+    pub fn class_floor(&self, class: crate::validators::ValidatorClass) -> u64 {
+        if class.holds_seat() {
+            self.min_stake_full()
+        } else {
+            self.min_stake_mobile()
+        }
+    }
+
     pub fn finality_quorum(&self) -> (u64, u64) {
         let params = self.consensus_params();
         (
@@ -126,9 +152,11 @@ impl Network {
         match self {
             Network::Mainnet => ConsensusParams {
                 epoch_len: 100,
-                // 1 BUD (10^6 atoms). Written in BUD so the unit is explicit
-                //; the mainnet value is Ayaz's decision (DECISIONS.md).
+                // 1 BUD (10^6 atoms). Written in BUD so the unit is explicit;
+                // the mainnet value is Ayaz's decision (DECISIONS.md).
                 min_stake: crate::tokenomics::bud(1),
+                // Never above the Full floor.
+                min_stake_mobile: crate::tokenomics::bud(1),
                 slot_ms: 6_000,
                 finality_checkpoint_interval: 10,
                 finality_quorum_numerator: 2,
@@ -140,6 +168,8 @@ impl Network {
                 epoch_len: 50,
                 // TESTNET-DEFAULT: 1,000 BUD.
                 min_stake: crate::tokenomics::bud(1_000),
+                // TESTNET-DEFAULT: 10 BUD for a phone (section 11.6).
+                min_stake_mobile: crate::tokenomics::bud(10),
                 slot_ms: 3_000,
                 finality_checkpoint_interval: 5,
                 finality_quorum_numerator: 2,
@@ -150,6 +180,7 @@ impl Network {
             Network::Devnet => ConsensusParams {
                 epoch_len: 10,
                 min_stake: 1_000,
+                min_stake_mobile: 100,
                 slot_ms: 1_000,
                 finality_checkpoint_interval: 2,
                 finality_quorum_numerator: 1,
@@ -162,8 +193,8 @@ impl Network {
 
     /// The validation reward pool this profile pays from, if any.
     ///
-    /// Testnet: the default schedule, 10M BUD over 100 000 epochs
-    ///. Mainnet waits for Ayaz. Devnet has
+    /// Testnet: the default schedule, 10M BUD over 100 000 epochs.
+    /// Mainnet waits for Ayaz. Devnet has
     /// no distribution to fund a pool from.
     #[must_use]
     pub fn reward_pool(&self) -> Option<crate::tokenomics::reward_pool::RewardPoolSchedule> {
@@ -173,11 +204,11 @@ impl Network {
         }
     }
 
-    /// The Mikoriza (shared security) parameters of this profile.
+    /// The shared-security parameters of this profile.
     ///
     /// The flag is a genesis parameter. Devnet has it on so the rehearsal can
     /// run the path; testnet keeps it off until the end-to-end Sepolia test
-    /// passes (10.7); the mainnet decision is Ayaz's.
+    /// passes; the mainnet decision is Ayaz's.
     /// `max_restaked_share_ppm = 300_000` and one weight atom per allocated
     /// unit are TESTNET-DEFAULT values.
     #[must_use]
@@ -195,6 +226,15 @@ impl Network {
         }
     }
 
+    /// Whether remote app binding (`app_binding`) is enabled on this profile.
+    ///
+    /// Enabled on devnet (`45262`) for integration verification; closed on
+    /// testnet (`45261`) and mainnet (`45260`) per the launch feature matrix.
+    #[must_use]
+    pub const fn app_binding_enabled(&self) -> bool {
+        matches!(self, Network::Devnet)
+    }
+
     pub fn mempool_config(&self) -> crate::mempool::pool::MempoolConfig {
         match self {
             // Mainnet holds five times the default entry count, so the byte
@@ -209,6 +249,10 @@ impl Network {
                 tx_ttl_secs: 1_800,
                 rbf_bump_percent: 15,
                 max_pool_bytes: 512 * 1024 * 1024,
+                // The duty lane's share follows the block budget, and the
+                // block budget is one constant for every network, so it is
+                // the same here as on the testnet.
+                duty_block_bytes: crate::mempool::pool::DEFAULT_DUTY_BLOCK_BYTES,
             },
             Network::Testnet => crate::mempool::pool::MempoolConfig {
                 max_size: 50_000,
@@ -217,6 +261,7 @@ impl Network {
                 tx_ttl_secs: 3_600,
                 rbf_bump_percent: 10,
                 max_pool_bytes: crate::mempool::pool::DEFAULT_MAX_POOL_BYTES,
+                duty_block_bytes: crate::mempool::pool::DEFAULT_DUTY_BLOCK_BYTES,
             },
             Network::Devnet => crate::mempool::pool::MempoolConfig::default(),
         }
@@ -277,8 +322,8 @@ impl std::fmt::Display for Network {
 
 pub const EPOCH_LEN: u64 = 100;
 
-/// The Mikoriza parameters of the profile `chain_id` names; an unknown chain
-/// has the feature off.
+/// The shared-security parameters of the profile `chain_id` names; an unknown
+/// chain has the feature off.
 #[must_use]
 pub fn shared_security_for_chain_id(
     chain_id: u64,
@@ -287,6 +332,13 @@ pub fn shared_security_for_chain_id(
         crate::settlement::shared_security::SharedSecurityParams::DISABLED,
         |network| network.shared_security(),
     )
+}
+
+/// Whether remote app binding (`app_binding`) is enabled for `chain_id`; an
+/// unknown chain keeps the feature closed.
+#[must_use]
+pub fn app_binding_enabled_for_chain_id(chain_id: u64) -> bool {
+    Network::from_chain_id(chain_id).is_some_and(|network| network.app_binding_enabled())
 }
 
 /// The reward pool of the profile `chain_id` names; none for an unknown chain.
@@ -299,6 +351,23 @@ pub fn reward_pool_for_chain_id(
 
 pub fn epoch_len_for_chain_id(chain_id: u64) -> u64 {
     Network::from_chain_id(chain_id).map_or(EPOCH_LEN, |network| network.epoch_len())
+}
+
+/// The wall-clock length of one epoch on `chain_id`, in whole seconds.
+///
+/// `epoch_len` counts slots and `slot_ms` counts milliseconds, so this is the
+/// one conversion a metric that reports epochs as seconds has to use. It is
+/// written as whole seconds because every caller is a scrape: sub-second
+/// precision on a value in the tens of minutes carries no information.
+///
+/// An unknown chain id falls back to the same defaults `epoch_len_for_chain_id`
+/// uses rather than returning zero, which would make a latency of N epochs
+/// report as N x 0 seconds and hide the problem the series exists to show.
+#[must_use]
+pub fn epoch_seconds_for_chain_id(chain_id: u64) -> u64 {
+    let slots = epoch_len_for_chain_id(chain_id);
+    let slot_ms = Network::from_chain_id(chain_id).map_or(SLOT_MS, |network| network.slot_ms());
+    slots.saturating_mul(slot_ms) / 1_000
 }
 
 /// The state machine reads the epoch length from the chain id while the
@@ -459,7 +528,10 @@ pub fn first_placeholder_peer(entries: &[String]) -> Option<String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConsensusParams {
     pub epoch_len: u64,
+    /// The bond floor of a Full validator.
     pub min_stake: u64,
+    /// The bond floor of a mobile validator; never above `min_stake`.
+    pub min_stake_mobile: u64,
     pub slot_ms: u64,
     pub finality_checkpoint_interval: u64,
     pub finality_quorum_numerator: u64,

@@ -139,6 +139,12 @@ pub fn build_bud_to_eth_claim(
     let recipient_eth = transfer
         .recipient_eth
         .ok_or(BudToEthError::InvalidRecipient)?;
+    if recipient_eth == [0u8; 20] {
+        return Err(BudToEthError::InvalidRecipient);
+    }
+    if burn_event_proof.is_empty() || finalized_header_hash == [0u8; 32] {
+        return Err(BudToEthError::FinalityProofMissing);
+    }
 
     Ok(BudToEthClaim {
         message_id: *message_id,
@@ -262,5 +268,65 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, BudToEthError::AmountExceedsCap);
+
+        // Empty burn_event_proof or zero finalized_header_hash is refused.
+        let err = build_bud_to_eth_claim(
+            &bridge,
+            &id,
+            100,
+            [0x11; 32],
+            vec![1],
+            vec![],
+            DEFAULT_BRIDGE_CAP,
+        )
+        .unwrap_err();
+        assert_eq!(err, BudToEthError::FinalityProofMissing);
+
+        let err = build_bud_to_eth_claim(
+            &bridge,
+            &id,
+            100,
+            [0u8; 32],
+            vec![1],
+            vec![2],
+            DEFAULT_BRIDGE_CAP,
+        )
+        .unwrap_err();
+        assert_eq!(err, BudToEthError::FinalityProofMissing);
+
+        let ok = build_bud_to_eth_claim(
+            &bridge,
+            &id,
+            100,
+            [0x11; 32],
+            vec![1],
+            vec![2],
+            DEFAULT_BRIDGE_CAP,
+        )
+        .unwrap();
+        assert_eq!(ok.recipient_eth, [9u8; 20]);
+
+        // Zero Ethereum recipient ([0u8; 20]) is refused so funds never unlock to 0x0.
+        let (t2, ev2) = bridge
+            .lock(1, 2, 30, 1, a, owner, recipient, 100, 500)
+            .unwrap();
+        let id2 = t2.message_id;
+        bridge.mint(&ev2.message.unwrap(), 31).unwrap();
+        if bridge
+            .burn_with_event(id2, 2, 32, 0, 500, [0u8; 20])
+            .is_ok()
+        {
+            let err = build_bud_to_eth_claim(
+                &bridge,
+                &id2,
+                100,
+                [0x11; 32],
+                vec![1],
+                vec![2],
+                DEFAULT_BRIDGE_CAP,
+            )
+            .unwrap_err();
+            assert_eq!(err, BudToEthError::InvalidRecipient);
+        }
     }
 }
