@@ -32,6 +32,12 @@ pub const MAX_CHUNK_SIZE: u32 = 16 * 1024 * 1024; // 16 MiB
 /// Hard lower bound to prevent nonsense "1 byte" domains.
 pub const MIN_CHUNK_SIZE: u32 = 1024; // 1 KiB
 
+/// Convenience: hard upper bound on committed chunks per operator under a domain.
+pub const MAX_COMMITTED_CHUNKS_PER_OPERATOR: u64 = 1_000_000_000;
+
+/// Convenience: hard upper bound on blocks between storage challenges (~30 days).
+pub const MAX_STORAGE_CHALLENGE_INTERVAL: u64 = 2_592_000;
+
 /// Minimum operator bond for a storage deal opened in a block.
 ///
 /// A block carries no domain parameters, so the in-block path uses this
@@ -77,14 +83,30 @@ impl StorageDomainParams {
                 self.chunk_size, MIN_CHUNK_SIZE, MAX_CHUNK_SIZE
             ));
         }
-        if self.max_committed_chunks == 0 {
-            return Err("StorageDomainParams.max_committed_chunks must be > 0".into());
+        if self.max_committed_chunks == 0
+            || self.max_committed_chunks > MAX_COMMITTED_CHUNKS_PER_OPERATOR
+        {
+            return Err(format!(
+                "StorageDomainParams.max_committed_chunks {} out of range [1, {}]",
+                self.max_committed_chunks, MAX_COMMITTED_CHUNKS_PER_OPERATOR
+            ));
         }
-        if self.challenge_interval == 0 {
-            return Err("StorageDomainParams.challenge_interval must be > 0".into());
+        if self.challenge_interval == 0
+            || self.challenge_interval > MAX_STORAGE_CHALLENGE_INTERVAL
+        {
+            return Err(format!(
+                "StorageDomainParams.challenge_interval {} out of range [1, {}]",
+                self.challenge_interval, MAX_STORAGE_CHALLENGE_INTERVAL
+            ));
         }
-        if self.min_operator_bond == 0 {
-            return Err("StorageDomainParams.min_operator_bond must be > 0".into());
+        if self.min_operator_bond == 0
+            || self.min_operator_bond > crate::core::account::MAX_TOTAL_SUPPLY
+        {
+            return Err(format!(
+                "StorageDomainParams.min_operator_bond {} out of range [1, {}]",
+                self.min_operator_bond,
+                crate::core::account::MAX_TOTAL_SUPPLY
+            ));
         }
         Ok(())
     }
@@ -197,5 +219,20 @@ mod tests {
             storage_params_bytes(&good_params()),
             storage_params_bytes(&p2)
         );
+    }
+
+    #[test]
+    fn storage_domain_params_reject_u64_max_ceilings() {
+        let mut chunks_overflow = good_params();
+        chunks_overflow.max_committed_chunks = u64::MAX;
+        assert!(chunks_overflow.validate().is_err());
+
+        let mut interval_overflow = good_params();
+        interval_overflow.challenge_interval = u64::MAX;
+        assert!(interval_overflow.validate().is_err());
+
+        let mut bond_overflow = good_params();
+        bond_overflow.min_operator_bond = u64::MAX;
+        assert!(bond_overflow.validate().is_err());
     }
 }
