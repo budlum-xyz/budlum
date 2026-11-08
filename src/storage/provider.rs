@@ -1,7 +1,7 @@
 //! `StorageProvider` trait and deterministic mock implementation.
 //!
 //! This is the off-chain/on-chain boundary described in
-//! `docs/BUD_STORAGE_ROADMAP.md`: provider implementations move bytes and
+//! the single-storage model in `docs/STORAGE.md`: provider implementations move bytes and
 //! Proofs off-chain, while consensus code keeps the on-chain deal/challenge
 //! Accounting in `domain::storage_deal`.
 //!
@@ -283,7 +283,7 @@ impl StorageProvider for InMemoryStorageProvider {
         // Bound to this deal, not just to the bytes. A plain content hash is
         // identical for every operator holding a replica of the same shard,
         // so one of them could answer for all of them, the outsourcing and
-        // Sybil cases in docs/BUD_STORAGE_ROADMAP.md Gap 2.
+        // Sybil cases are covered by the single-storage model in `docs/STORAGE.md`.
         let range_hash = ContentId::of_subrange_for_deal(
             bytes,
             challenge.byte_start,
