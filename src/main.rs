@@ -16,7 +16,7 @@ use budlum_core::domain::{
 use budlum_core::network::node::Node;
 use budlum_core::network::protocol::NetworkMessage;
 use budlum_core::rpc::{RpcMode, RpcSecurityConfig, RpcServer};
-use budlum_core::storage::db::Storage;
+use budlum_core::persistence::db::Storage;
 
 use clap::Parser;
 use std::path::{Path, PathBuf};
@@ -107,31 +107,90 @@ fn write_database_backup(
     backup_dir: &Path,
     retention_count: usize,
 ) -> std::io::Result<PathBuf> {
+    if retention_count == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "backup retention count must be at least one",
+        ));
+    }
     std::fs::create_dir_all(backup_dir)?;
+    // Serialize creation and pruning across cooperating processes. An in-flight
+    // reservation must not be mistaken for an expired backup by another writer.
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(backup_dir.join(".budlum-backup.lock"))?;
+    lock.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "another backup writer holds the backup lock",
+        ),
+        std::fs::TryLockError::Error(error) => error,
+    })?;
     let timestamp_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(std::io::Error::other)?
         .as_millis();
     let path = backup_dir.join(format!("budlum-{timestamp_ms}.budbak"));
-    storage.create_snapshot(&path)?;
-    Storage::verify_snapshot(&path)?;
+    // Reserve the name rather than replacing an existing verified backup if
+    // two requests arrive in the same millisecond or the clock moves back.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    if let Err(error) = storage.create_snapshot(&path) {
+        let _ = std::fs::remove_file(&path);
+        return Err(error);
+    }
+    // A backup that fails verification must not survive under a backup name:
+    // a later restore could trust the name and not the bytes. Remove it with
+    // the same cleanup as a failed write.
+    if let Err(error) = Storage::verify_snapshot(&path) {
+        let _ = std::fs::remove_file(&path);
+        return Err(error);
+    }
 
-    let mut backups: Vec<PathBuf> = std::fs::read_dir(backup_dir)?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|candidate| {
-            candidate
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("budlum-") && name.ends_with(".budbak"))
-        })
-        .collect();
+    prune_database_backups(backup_dir, &path, retention_count)?;
+    Ok(path)
+}
+
+// Only files bearing our exact numeric timestamp naming scheme are managed.
+// Always retain the just-verified backup, even if the system clock moved back.
+fn prune_database_backups(
+    backup_dir: &Path,
+    current: &Path,
+    retention_count: usize,
+) -> std::io::Result<()> {
+    let mut backups = Vec::new();
+    for entry in std::fs::read_dir(backup_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path == current || !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(timestamp) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("budlum-"))
+            .and_then(|name| name.strip_suffix(".budbak"))
+            .filter(|timestamp| {
+                !timestamp.is_empty() && timestamp.bytes().all(|b| b.is_ascii_digit())
+            })
+            .and_then(|timestamp| timestamp.parse::<u128>().ok())
+        else {
+            continue;
+        };
+        backups.push((timestamp, path));
+    }
     backups.sort();
-    let remove_count = backups.len().saturating_sub(retention_count);
-    for expired in backups.into_iter().take(remove_count) {
+    let remove_count = backups
+        .len()
+        .saturating_sub(retention_count.saturating_sub(1));
+    for (_, expired) in backups.into_iter().take(remove_count) {
         std::fs::remove_file(expired)?;
     }
-    Ok(path)
+    Ok(())
 }
 
 #[tokio::main]
@@ -821,6 +880,20 @@ async fn main() {
                     eprintln!("CRITICAL: consensus public key cross-check failed: {e}");
                     std::process::exit(1);
                 }
+            };
+            // the label the vendor BLS mechanism signs through is
+            // the operator's, not the compiled-in default, so the object the
+            // startup binding test proves a pairing for is the object that
+            // signs.
+            let s = match config.pkcs11_bls_key_label.clone() {
+                Some(label) => match s.with_bls_key_label(label) {
+                    Ok(signer) => signer,
+                    Err(e) => {
+                        eprintln!("CRITICAL: invalid PKCS#11 BLS key label: {e}");
+                        std::process::exit(1);
+                    }
+                },
+                None => s,
             };
             let signer = s.with_vendor_mechanisms(
                 config.pkcs11_bls_mechanism.clone(),
@@ -1697,7 +1770,17 @@ async fn main() {
             rpc_security.clone(),
             RpcMode::Public,
         )
-        .with_metrics(metrics.clone());
+        .with_metrics(metrics.clone())
+        .with_aptos_listener("127.0.0.1:18549".to_string())
+        .with_solana_listener("127.0.0.1:18548".to_string());
+        let pub_server = match std::env::var("BUDLUM_APTOS_UPSTREAM_URL") {
+            Ok(upstream) => pub_server.with_aptos_upstream(upstream),
+            Err(std::env::VarError::NotPresent) => pub_server,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                eprintln!("BUDLUM_APTOS_UPSTREAM_URL must be valid UTF-8");
+                std::process::exit(1);
+            }
+        };
         // In-process TLS: TLS 1.3 with X25519MLKEM768 only. A
         // certificate without its key, or an unusable pair, stops the node
         // here instead of falling back to plain HTTP.
@@ -1845,9 +1928,8 @@ async fn main() {
                                                 .and_then(|v| v.to_str().ok())
                                                 .unwrap_or("");
                                             let bearer = format!("Bearer {key}");
-                                            // F-0003: constant-time comparison, closing a timing side
-                                            // channel. A short-circuiting `!=` leaks both the length and
-                                            // the content of the secret into timing, so
+                                            // Constant-time comparison. A short-circuiting `!=` leaks
+                                            // both the length and the content of the secret into timing, so
                                             // `subtle::ConstantTimeEq` is used instead.
                                             if !budlum_core::rpc::server::constant_time_eq_str(auth_hdr, &bearer)
                                                 && !budlum_core::rpc::server::constant_time_eq_str(api_key_hdr, &key)
@@ -1896,7 +1978,11 @@ async fn main() {
         // Production.
         let cursor_path = std::path::Path::new(&config.db_path).join("relayer-cursor");
         let relayer = budlum_core::relayer::RelayerWorker::new(chain.clone(), relayer_addr)
-            .with_cursor_path(Some(cursor_path));
+            .with_cursor_path(Some(cursor_path))
+            // The reservation gauges are the only live view of the pending
+            // store: without them an operator learns that results are piling
+            // up one file read at a time, on the node they happen to be on.
+            .with_metrics(metrics.clone());
 
         // The `--evm-bridge-address`
         // registration is removed. The EVM bridge leg has no live end-to-end
@@ -2087,9 +2173,74 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        claim_new_key_file, console_producer, daemon_producer_loop_runs, try_load_signing_key,
+        claim_new_key_file, console_producer, daemon_producer_loop_runs, prune_database_backups,
+        try_load_signing_key, write_database_backup,
     };
     use budlum_core::cli::ConsensusType;
+
+    #[test]
+    fn zero_retention_refuses_backup_without_deleting_existing_files() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let db_path = dir.path().join("db");
+        let storage = budlum_core::storage::db::Storage::new(db_path.to_str().unwrap())
+            .expect("open database");
+        let backups = dir.path().join("backups");
+        std::fs::create_dir(&backups).unwrap();
+        let existing = backups.join("budlum-9.budbak");
+        std::fs::write(&existing, b"existing").unwrap();
+        let error = write_database_backup(&storage, &backups, 0).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(std::fs::read(existing).unwrap(), b"existing");
+        assert_eq!(std::fs::read_dir(backups).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn retention_uses_numeric_timestamps_and_preserves_current_and_unknown_files() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "budlum-2.budbak",
+            "budlum-10.budbak",
+            "budlum-1.budbak",
+            "budlum-manual.budbak",
+        ] {
+            std::fs::write(dir.path().join(name), name).unwrap();
+        }
+        let current = dir.path().join("budlum-1.budbak");
+        prune_database_backups(dir.path(), &current, 2).unwrap();
+        assert!(current.exists());
+        assert!(!dir.path().join("budlum-2.budbak").exists());
+        assert!(dir.path().join("budlum-10.budbak").exists());
+        assert!(dir.path().join("budlum-manual.budbak").exists());
+    }
+
+    #[test]
+    fn backup_refuses_concurrent_writer_without_pruning() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage =
+            budlum_core::storage::db::Storage::new(dir.path().join("db").to_str().unwrap())
+                .expect("open database");
+        let backups = dir.path().join("backups");
+        std::fs::create_dir(&backups).unwrap();
+        let existing = backups.join("budlum-1.budbak");
+        std::fs::write(&existing, b"existing").unwrap();
+        let lock = std::fs::File::create(backups.join(".budlum-backup.lock")).unwrap();
+        lock.lock().unwrap();
+        let error = write_database_backup(&storage, &backups, 1).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(std::fs::read(existing).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn backup_returns_a_verified_existing_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage =
+            budlum_core::storage::db::Storage::new(dir.path().join("db").to_str().unwrap())
+                .expect("open database");
+        let path = write_database_backup(&storage, &dir.path().join("backups"), 1)
+            .expect("write backup");
+        assert!(path.is_file());
+        budlum_core::storage::db::Storage::verify_snapshot(path).expect("verify backup");
+    }
 
     #[test]
     fn key_claim_refuses_to_overwrite_an_existing_file() {
