@@ -5,5 +5,6 @@ pub mod finality;
 pub mod genesis;
 pub mod genesis_ceremony;
 pub mod snapshot;
+pub mod state_recovery;
 pub mod storage_economics_tests;
 pub mod storage_maintenance;
