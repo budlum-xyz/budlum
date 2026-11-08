@@ -556,8 +556,8 @@ mod tests {
     /// that height is refused with `Previous hash mismatch`. Charging that as
     /// an invalid block bans an honest validator for an hour at ten
     /// occurrences (`BAN_THRESHOLD` is -100): a four-validator devnet that
-    /// splits a slot then silences the node whose block it needs, which is
-    /// AF-09. The arm must classify the refusal before it penalises, must
+    /// splits a slot then silences the node whose block it needs. The arm must
+    /// classify the refusal before it penalises, must
     /// answer `Ignore` rather than `Reject`, and must keep the banning path for
     /// every other refusal.
     #[test]

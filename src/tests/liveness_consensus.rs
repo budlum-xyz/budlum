@@ -1,13 +1,12 @@
-//! Liveness wired into the real epoch flow (observe mode).
+//! Non-slashing liveness suspension wired into the real epoch flow.
 //!
 //! These tests drive real block production through `Blockchain::produce_block`
 //! (which commits blocks and, at epoch boundaries, runs
 //! `apply_epoch_close_liveness`) - NOT the isolated
 //! `state.record_liveness_epoch` call.
 //!
-//! Decision 2.3 = OBSERVE MODE: crossing the miss threshold is logged/reported
-//! But NEVER slashed. Tests assert both the counter movement AND the absence of
-//! Any slash (stake/registry unchanged).
+//! Crossing the miss threshold suspends new duty but NEVER slashes. Tests
+//! assert the counter movement, suspension and unchanged stake.
 
 use crate::chain::blockchain::{Blockchain, EPOCH_LENGTH};
 use crate::consensus::pow::PoWEngine;
@@ -74,10 +73,10 @@ fn producer_participation_resets_across_epochs() {
     assert_eq!(bc.state.liveness.missed_count(&producer), 0);
 }
 
-// --- Observe mode: threshold crossed, but NO slash (critical) ----------------
+// --- Threshold crossed: suspension, never a slash ------------------------
 
 #[test]
-fn threshold_crossing_reports_but_does_not_slash_when_disabled() {
+fn threshold_crossing_suspends_without_slashing_when_legacy_flag_is_disabled() {
     let producer = addr(1);
     let absentee = addr(2);
     let mut bc = chain_with_validators(producer, absentee);
@@ -106,7 +105,7 @@ fn threshold_crossing_reports_but_does_not_slash_when_disabled() {
     produce_n(&mut bc, producer, EPOCH_LENGTH * 3);
 
     // The miss counter clearly crossed the threshold...
-    assert!(bc.state.liveness.missed_count(&absentee) >= 2);
+    assert_eq!(bc.state.liveness.missed_count(&absentee), 2, "a suspended validator leaves the expected set");
 
     // ...but OBSERVE MODE means NO slash happened:
     let reg = bc.state.registry.get(&absentee, roles::VALIDATOR).unwrap();
@@ -116,7 +115,7 @@ fn threshold_crossing_reports_but_does_not_slash_when_disabled() {
     );
     assert!(
         bc.state.registry.is_active(&absentee, roles::VALIDATOR),
-        "validator must remain active (not jailed/slashed)"
+        "the bonded registry record is not slashed or unbonded"
     );
     // Validator-set stake also unchanged (belt and suspenders).
     assert_eq!(
@@ -139,10 +138,10 @@ fn observe_liveness_epoch_returns_reports_without_slashing() {
     });
     // Absentee is already registered as a validator via add_validator (sync).
 
-    // Nobody participates -> absentee misses; threshold 1 => a report is produced.
+    // Nobody participates -> absentee misses; threshold 1 suspends.
     let empty: HashSet<Address> = HashSet::new();
-    let reported = bc.observe_liveness_epoch(0, &empty);
-    assert!(reported >= 1, "a report should be generated");
+    let suspended = bc.observe_liveness_epoch(0, &empty);
+    assert!(suspended >= 1, "a suspension should be recorded");
 
     // But observe mode applied no slash.
     assert_eq!(
@@ -200,19 +199,20 @@ fn poa_domain_member_is_not_touched_by_liveness_flow() {
 
 // ---: real liveness slashing activation (default OFF) -----------------
 
-/// With slashing ENABLED, crossing the miss threshold through the real epoch
-/// Flow actually slashes the validator (stake cut AND jailed via slash).
+/// V-4 / WP-13: crossing the miss threshold through the real epoch flow
+/// SUSPENDS the validator. The stake is never cut for absence (BLG-251):
+/// only proven double-sign and proven bad repair slash.
 #[test]
-fn threshold_crossing_slashes_when_enabled_through_real_epoch_flow() {
-    use crate::core::chain_config::FIXED_POINT_SCALE;
+fn threshold_crossing_suspends_but_never_slashes_through_real_epoch_flow() {
     let producer = addr(1);
     let absentee = addr(2);
     let mut bc = chain_with_validators(producer, absentee);
 
-    // Enable slashing + low threshold so it triggers within a few epochs.
+    // Low threshold so it triggers within a few epochs. The old
+    // `liveness_slashing_enabled` flag no longer exists as a slash switch:
+    // absence cannot slash, so the flag is irrelevant here.
     bc.state.registry.set_params(RegistryParams {
         liveness_max_missed_epochs: 2,
-        liveness_slashing_enabled: true,
         ..RegistryParams::default()
     });
     let stake_before = bc
@@ -222,54 +222,42 @@ fn threshold_crossing_slashes_when_enabled_through_real_epoch_flow() {
         .unwrap()
         .stake;
     assert_eq!(stake_before, 10_000);
-    assert!(bc.state.registry.is_active(&absentee, roles::VALIDATOR));
 
-    // Produce 3 full epochs; absentee misses >= threshold (2) -> real slash.
+    // Produce 3 full epochs; absentee misses >= threshold (2).
     produce_n(&mut bc, producer, EPOCH_LENGTH * 3);
 
     let reg = bc.state.registry.get(&absentee, roles::VALIDATOR).unwrap();
-    // Stake was actually cut by the configured liveness ratio (1%).
-    let expected_penalty = u64::try_from(
-        (u128::from(stake_before) * u128::from(FIXED_POINT_SCALE) / 100)
-            / u128::from(FIXED_POINT_SCALE),
-    )
-    .expect("a penalty is a fraction of a u64 stake");
     assert_eq!(
-        reg.stake,
-        stake_before - expected_penalty,
-        "stake must be reduced by the configured liveness ratio"
+        reg.stake, stake_before,
+        "absence must never cut the stake (V-4)"
     );
-    // And the offender is in a TIMED jail: out of the
-    // active set, not slashed, so the release loop can bring it back.
-    let jailed = bc
+    // The absentee is suspended: out of the active set, not slashed.
+    let suspended = bc
         .state
         .validators
         .get(&absentee)
         .expect("still a validator");
-    assert!(jailed.jailed, "the absentee must be jailed");
     assert!(
-        !jailed.active,
-        "a jailed validator is out of the active set"
+        !suspended.active,
+        "a suspended validator is out of the active set"
     );
     assert!(
-        !jailed.slashed,
-        "a liveness fault is a timed jail, not a permanent slash"
+        !suspended.slashed,
+        "absence is a suspension, not a slash"
     );
+    assert!(bc.state.liveness.is_suspended(&absentee));
 }
 
-/// The amount cut through the real epoch flow equals exactly the configured
-/// `liveness_slash_ratio_fixed` (default 1%) - same formula as isolated
-/// Test, but driven by the live epoch-close hook.
+/// Absence through the real epoch flow changes no stake at all, whatever
+/// the old liveness ratio was configured to (V-4).
 #[test]
-fn liveness_slash_uses_configured_rate_through_real_epoch_flow() {
-    use crate::core::chain_config::FIXED_POINT_SCALE;
+fn absence_never_reduces_stake_through_real_epoch_flow() {
     let producer = addr(1);
     let absentee = addr(2);
     let mut bc = chain_with_validators(producer, absentee);
 
     bc.state.registry.set_params(RegistryParams {
         liveness_max_missed_epochs: 1,
-        liveness_slashing_enabled: true,
         ..RegistryParams::default()
     });
     let stake_before = bc
@@ -278,18 +266,13 @@ fn liveness_slash_uses_configured_rate_through_real_epoch_flow() {
         .get(&absentee, roles::VALIDATOR)
         .unwrap()
         .stake;
-    let rate = bc.state.registry.params().liveness_slash_ratio_fixed;
-    let expected_penalty = u64::try_from(
-        (u128::from(stake_before) * u128::from(rate)) / u128::from(FIXED_POINT_SCALE),
-    )
-    .expect("a penalty is a fraction of a u64 stake");
 
     // One threshold crossing is enough (threshold = 1).
     produce_n(&mut bc, producer, EPOCH_LENGTH * 2);
 
     let reg = bc.state.registry.get(&absentee, roles::VALIDATOR).unwrap();
-    assert_eq!(reg.stake, stake_before - expected_penalty);
-    assert!(expected_penalty > 0, "1% of 10_000 must be > 0");
+    assert_eq!(reg.stake, stake_before, "absence must not cut the stake");
+    assert!(bc.state.liveness.is_suspended(&absentee));
 }
 
 /// A validator that has already been slashed must stop accruing downtime.
@@ -393,83 +376,62 @@ fn every_liveness_path_expects_the_same_validators() {
     );
 }
 
-/// A liveness slash must carry a term the release loop can see.
+/// A liveness suspension follows the one-epoch resume schedule and never
+/// touches the stake (V-4, WP-13).
 ///
-/// Two functions used to apply this slash and they disagreed. The live one,
-/// `apply_epoch_close_liveness`, set `slashed` and cleared `active` but never
-/// set `jailed`. The unreachable hook set all three. Only the second shape is
-/// releasable: `AccountState::advance_epoch` frees a validator by testing
-/// `jailed && jail_until <= epoch_index`, so an offender punished without the
-/// flag was invisible to that loop and stayed out permanently.
-///
-/// That made the only liveness slashing that actually ran a permanent ban,
-/// for an offence whose evidence is absence. Absence is also what a
-/// partition, a failed disk or a datacentre reboot looks like.
-///
-/// The hook is gone and the live path now writes the term. This pins the
-/// shape rather than the call site, so it keeps holding if the slash moves.
+/// The old liveness path slashed on absence; two functions disagreed on the
+/// jail shape and the live one could leave a permanent ban for an offence
+/// whose evidence is absence. WP-13 removes that path: absence suspends,
+/// `ResumeValidator` reactivates one epoch later, and the stake is never cut.
 #[test]
-fn a_liveness_slash_is_releasable() {
+fn a_liveness_suspension_is_releasable_and_never_slashes() {
     use std::collections::HashSet;
 
     let producer = addr(1);
     let offender = addr(2);
     let mut bc = chain_with_validators(producer, offender);
     bc.state.registry.set_params(RegistryParams {
-        // One missed epoch is enough to report. Zero would disable reporting
-        // entirely: `record_epoch` guards on `threshold > 0`, so a zero
-        // threshold produces no reports and nothing to slash, which reads as
-        // "slashing is off" rather than "slash on the first miss".
+        // One missed epoch is enough to suspend. Zero would disable the
+        // tracker entirely: `record_epoch` guards on `threshold > 0`.
         liveness_max_missed_epochs: 1,
-        liveness_slashing_enabled: true,
         ..RegistryParams::default()
     });
 
-    // Record one epoch in which the offender did not participate. This is the
-    // same `record_epoch` + `slash_from_report` sequence the epoch-close path
-    // runs; driving whole blocks would also exercise proposer selection and
-    // reward accounting, which is not what is under test here.
+    let stake_before = bc
+        .state
+        .registry
+        .get(&offender, roles::VALIDATOR)
+        .unwrap()
+        .stake;
+
+    // Record one epoch in which the offender did not participate.
     let participated: HashSet<Address> = std::iter::once(producer).collect();
     bc.record_liveness_epoch(1, &participated);
 
-    let epoch = bc.state.epoch_index;
+    assert!(bc.state.liveness.is_suspended(&offender));
     let v = bc
         .state
         .get_validator(&offender)
-        .expect("a slashed validator stays in the map; that is where the term lives");
-
-    assert!(
-        !v.slashed,
-        "a liveness fault is a TIMED jail: `slashed` would make \
-         the release loop, which requires `!slashed`, refuse to ever reactivate it"
-    );
-    assert!(
-        v.jailed,
-        "without this flag advance_epoch never considers the validator for \
-         release, and a penalty for being absent becomes permanent"
-    );
+        .expect("a suspended validator stays in the map");
+    assert!(!v.slashed, "absence must never set `slashed` (V-4)");
+    assert!(!v.jailed, "absence is a suspension, not a jail term");
     assert_eq!(
-        v.jail_until,
-        epoch.saturating_add(crate::registry::params::LIVENESS_JAIL_EPOCHS),
-        "the term comes from LIVENESS_JAIL_EPOCHS, so both slashing sites \
-         read one number instead of inventing their own"
-    );
-    assert!(
-        v.jail_until > epoch,
-        "the term must end in the future, or the punishment is decorative"
+        bc.state
+            .registry
+            .get(&offender, roles::VALIDATOR)
+            .unwrap()
+            .stake,
+        stake_before,
+        "absence must never cut the stake"
     );
 
-    // The release loop frees the validator once the term has run out.
-    let until = v.jail_until;
-    bc.state.epoch_index = until;
-    let chain_id = bc.chain_id;
-    bc.state.advance_epoch(0, chain_id);
-    let released = bc
-        .state
-        .get_validator(&offender)
-        .expect("the validator is still in the map");
-    assert!(
-        !released.jailed,
-        "advance_epoch must release a validator whose term has ended"
+    // ResumeValidator lifts the suspension one epoch later.
+    let epoch = bc.state.epoch_index;
+    bc.state.liveness.request_resume(&offender, epoch);
+    assert!(bc.state.liveness.activate_due_resumes(epoch).is_empty());
+    assert_eq!(
+        bc.state.liveness.activate_due_resumes(epoch + 1),
+        vec![offender]
     );
+    assert!(!bc.state.liveness.is_suspended(&offender));
 }
