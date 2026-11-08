@@ -221,3 +221,10 @@ review. Corrections without their required executed test remain open.
 | Finding | Severity | State | Evidence and correction |
 |---|---|---|---|
 | BLG-364 | Medium | Open; locally corrected, pinned Rust CI pending | Bloom-filter sizing used manual ceiling division, triggering the denied `manual_div_ceil` lint and adding an avoidable addition before division. The implementation now uses `bits.div_ceil(64)`; `the_bloom_filter_uses_div_ceil` pins the standard operation and rejects the former expression. No Rust runner was available. |
+
+## Storage admission and repair-query review
+
+| Finding | Severity | State | Evidence and correction |
+|---|---|---|---|
+| BLG-365 | High | Closed by non-integration in the integrated tree | The proposed custody query cloned the complete registry and scanned every object to compute an unauthenticated what-if repair plan on each RPC call. That adds attacker-controlled CPU and allocation growth to a read endpoint. `RepairPlan`, its clone-based implementation, the custody-response field and their source locks were not integrated. The live custody query remains read-only without the additional full-registry clone; a bounded non-mutating plan would need a separately reviewed contract. |
+| BLG-366 | Medium | Closed by non-integration; current gate evidence remains pending | The proposed admission report appended hard-coded self-check JSON to object reads rather than enforcing admission in the upload path. Actual lifetime and mobile-quota guards are already called by `upload.rs` and `registry.rs`, and the placement RPC derives values from the registered object and placement row. The parallel report module and response-field change were not integrated and do not close BLG-270 or BLG-271. |
