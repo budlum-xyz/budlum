@@ -1,3 +1,5 @@
+use std::fmt;
+
 use crate::core::address::Address;
 #[cfg(test)]
 fn test_addr_from_byte(byte: u8) -> crate::core::address::Address {
@@ -644,16 +646,147 @@ pub struct Transaction {
 /// stateless. Instead the set travels with the transaction, and because the
 /// `from` address is derived from the set, a transaction bringing the wrong set
 /// cannot point at somebody else's account: the address will not match.
+/// Maximum owner public keys accepted inside a decoded `MultisigAuthorizationV6`
+/// payload (matches `MAX_THRESHOLD_OWNERS` = 16).
+pub const MAX_V6_AUTHORIZATION_OWNERS: usize = 16;
+
+/// Maximum `(owner_public_key, signature)` entries accepted inside a decoded
+/// `MultisigAuthorizationV6` payload (`MAX_THRESHOLD_OWNERS` = 16).
+pub const MAX_V6_AUTHORIZATION_SIGNATURES: usize = 16;
+
+/// Maximum byte length of `MultisigAuthorizationV6::scheme_id` on the wire.
+pub const MAX_V6_SCHEME_ID_BYTES: usize = 64;
+
+/// Maximum byte length of a single owner public key entry on the wire
+/// (`ML_DSA_87_PUBLIC_KEY_LEN` = 2,592).
+pub const MAX_V6_OWNER_KEY_BYTES: usize = 2592;
+
+/// Maximum byte length of a single signature entry on the wire
+/// (`ML_DSA_87_SIGNATURE_LEN` = 4,627).
+pub const MAX_V6_SIGNATURE_BYTES: usize = 4627;
+
+type RawOwnerSignatures = Vec<(Vec<u8>, Vec<u8>)>;
+
+fn deserialize_bounded_scheme_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    if s.len() > MAX_V6_SCHEME_ID_BYTES {
+        return Err(serde::de::Error::custom(format!(
+            "MultisigAuthorizationV6 scheme_id length {} exceeds max {}",
+            s.len(),
+            MAX_V6_SCHEME_ID_BYTES
+        )));
+    }
+    Ok(s)
+}
+
+fn deserialize_bounded_owners<'de, D>(deserializer: D) -> Result<Vec<Vec<u8>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct BoundedOwnersVisitor;
+    impl<'de> serde::de::Visitor<'de> for BoundedOwnersVisitor {
+        type Value = Vec<Vec<u8>>;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                f,
+                "at most {MAX_V6_AUTHORIZATION_OWNERS} owner public keys of <= {MAX_V6_OWNER_KEY_BYTES} bytes"
+            )
+        }
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let cap = seq
+                .size_hint()
+                .unwrap_or(0)
+                .min(MAX_V6_AUTHORIZATION_OWNERS);
+            let mut out = Vec::with_capacity(cap);
+            while let Some(owner) = seq.next_element::<Vec<u8>>()? {
+                if out.len() >= MAX_V6_AUTHORIZATION_OWNERS {
+                    return Err(serde::de::Error::custom(format!(
+                        "MultisigAuthorizationV6 owners exceeds max {MAX_V6_AUTHORIZATION_OWNERS}"
+                    )));
+                }
+                if owner.len() > MAX_V6_OWNER_KEY_BYTES {
+                    return Err(serde::de::Error::custom(format!(
+                        "MultisigAuthorizationV6 owner key length {} exceeds max {MAX_V6_OWNER_KEY_BYTES}",
+                        owner.len()
+                    )));
+                }
+                out.push(owner);
+            }
+            Ok(out)
+        }
+    }
+    deserializer.deserialize_seq(BoundedOwnersVisitor)
+}
+
+fn deserialize_bounded_owner_signatures<'de, D>(
+    deserializer: D,
+) -> Result<RawOwnerSignatures, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct BoundedSignaturesVisitor;
+    impl<'de> serde::de::Visitor<'de> for BoundedSignaturesVisitor {
+        type Value = RawOwnerSignatures;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                f,
+                "at most {MAX_V6_AUTHORIZATION_SIGNATURES} owner signature pairs"
+            )
+        }
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let cap = seq
+                .size_hint()
+                .unwrap_or(0)
+                .min(MAX_V6_AUTHORIZATION_SIGNATURES);
+            let mut out = Vec::with_capacity(cap);
+            while let Some((pk, sig)) = seq.next_element::<(Vec<u8>, Vec<u8>)>()? {
+                if out.len() >= MAX_V6_AUTHORIZATION_SIGNATURES {
+                    return Err(serde::de::Error::custom(format!(
+                        "MultisigAuthorizationV6 signatures exceeds max {MAX_V6_AUTHORIZATION_SIGNATURES}"
+                    )));
+                }
+                if pk.len() > MAX_V6_OWNER_KEY_BYTES {
+                    return Err(serde::de::Error::custom(format!(
+                        "MultisigAuthorizationV6 signer key length {} exceeds max {MAX_V6_OWNER_KEY_BYTES}",
+                        pk.len()
+                    )));
+                }
+                if sig.len() > MAX_V6_SIGNATURE_BYTES {
+                    return Err(serde::de::Error::custom(format!(
+                        "MultisigAuthorizationV6 signature length {} exceeds max {MAX_V6_SIGNATURE_BYTES}",
+                        sig.len()
+                    )));
+                }
+                out.push((pk, sig));
+            }
+            Ok(out)
+        }
+    }
+    deserializer.deserialize_seq(BoundedSignaturesVisitor)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MultisigAuthorizationV6 {
     /// Explicit algorithm/profile id. Empty or unknown ids are refused; the
     /// verifier must never infer a scheme from a key length alone.
+    #[serde(deserialize_with = "deserialize_bounded_scheme_id")]
     pub scheme_id: String,
     /// The owner ML-DSA-87 public keys.
+    #[serde(deserialize_with = "deserialize_bounded_owners")]
     pub owners: Vec<Vec<u8>>,
     /// The number of valid signatures required.
     pub threshold: u32,
     /// `(owner public key, signature)` pairs.
+    #[serde(deserialize_with = "deserialize_bounded_owner_signatures")]
     pub signatures: Vec<(Vec<u8>, Vec<u8>)>,
 }
 impl Transaction {
@@ -1148,6 +1281,10 @@ impl Transaction {
         }
         if auth.owners.is_empty() || auth.owners.len() > MAX_THRESHOLD_OWNERS {
             debug!("V6 owner set size is out of range");
+            return false;
+        }
+        if auth.signatures.len() > MAX_THRESHOLD_OWNERS {
+            debug!("V6 signature list exceeds MAX_THRESHOLD_OWNERS");
             return false;
         }
         let mut owners = Vec::with_capacity(auth.owners.len());
@@ -3200,7 +3337,7 @@ mod v29_signing_tests {
             assert!(!tx.verify(), "V6 does not exist without an authorization");
         }
 
-        /// What is signed is the transaction itself: change the amount and the authority falls.
+        /// Tampering with the amount invalidates the authorization.
         #[test]
         fn tampering_with_the_amount_invalidates_the_authorization() {
             let (keys, owners) = owner_set(3);
@@ -3209,6 +3346,26 @@ mod v29_signing_tests {
             tx.amount = tx.amount.saturating_add(1);
             tx.hash = tx.calculate_hash();
             assert!(!tx.verify(), "the amount is signed");
+        }
+
+        /// Oversized signature arrays on V6 must be rejected both by `verify()` and by serde decode.
+        #[test]
+        fn a_v6_transaction_with_excessive_signatures_is_refused() {
+            let (keys, owners) = owner_set(3);
+            let mut tx = tx_for(multisig_address(&owners, 2));
+            tx.sign_v6(&owners, 2, &[&keys[0], &keys[1]]);
+            let sample = tx.authorization.as_ref().unwrap().signatures[0].clone();
+            tx.authorization.as_mut().unwrap().signatures =
+                vec![sample; MAX_V6_AUTHORIZATION_SIGNATURES + 1];
+            assert!(
+                !tx.verify(),
+                "V6 verify must reject signature arrays exceeding MAX_THRESHOLD_OWNERS"
+            );
+            let encoded = serde_json::to_vec(&tx).expect("serialize oversized V6");
+            assert!(
+                serde_json::from_slice::<Transaction>(&encoded).is_err(),
+                "bounded deserializer must reject V6 authorization with >16 signatures"
+            );
         }
     }
 }

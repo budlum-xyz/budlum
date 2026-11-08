@@ -27,8 +27,8 @@
 //! | `--self-test` | (new: the canary of every tool) |
 
 use budlum_tools::{
-    audit_deps, backup_drill, checked_repo_root, devnet, docker_smoke, multinode_smoke, prepush,
-    sbom, seed_corpus, smoke_rpc,
+    audit_deps, backup_drill, checked_repo_root, dep_snapshot, devnet, docker_smoke,
+    multinode_smoke, prepush, sarif, sbom, seed_corpus, smoke_rpc,
 };
 use budlum_tools::{audit_guard, clippy_extra_report, fsf_fit, step_reachability};
 
@@ -41,15 +41,17 @@ fn usage() -> String {
      \x20 devnet                prepare a local two-node devnet\n\
      \x20 seed-corpus [dir]     write the ZKVM fuzz seeds\n\
      \x20 backup-drill          take a backup, restore it, verify integrity\n\
-     \x20 audit-deps            cargo audit over both lockfiles, plus the report
-     \x20 generate-sbom         CycloneDX SBOM (pinned cargo-cyclonedx)
-     \x20 smoke-rpc             start a node and probe bud_chainId
-     \x20 docker-smoke-mainnet  image smoke: mainnet refuses, devnet boots
-     \x20 devnet-multinode-smoke  4-node compose smoke (needs docker)
+     \x20 audit-deps            cargo audit over both lockfiles, plus the report\n\
+     \x20 generate-sbom         CycloneDX SBOM (pinned cargo-cyclonedx)\n\
+     \x20 smoke-rpc             start a node and probe bud_chainId\n\
+     \x20 docker-smoke-mainnet  image smoke: mainnet refuses, devnet boots\n\
+     \x20 devnet-multinode-smoke  4-node compose smoke (needs docker)\n\
      \x20 audit-guard           review boundary audit of workflows and history\n\
      \x20 step-reachability     which workflow steps can run (guards that point nowhere)\n\
      \x20 clippy-extra-report   per-lint tally and addresses from clippy JSON\n\
      \x20 fsf-project-fit       generate or check docs/FSF_PROJECT_FIT.md\n\
+     \x20 sarif                 convert JSON/text scanner reports to SARIF 2.1.0\n\
+     \x20 dependency-snapshot   build or submit Cargo.lock GitHub dependency snapshot\n\
      \x20 --self-test           run the canaries of seed-corpus, devnet, backup-drill, pre-push\n\
      \x20 --list                print the tool names\n"
         .to_string()
@@ -63,6 +65,8 @@ fn run_self_tests() {
         ("devnet", devnet::self_test()),
         ("backup-drill", backup_drill::self_test()),
         ("pre-push", prepush::self_test()),
+        ("sarif", sarif::self_test()),
+        ("dependency-snapshot", dep_snapshot::self_test()),
     ] {
         match result {
             Ok(msg) => println!("{msg}"),
@@ -127,6 +131,8 @@ fn main() {
                 "step-reachability",
                 "clippy-extra-report",
                 "fsf-project-fit",
+                "sarif",
+                "dependency-snapshot",
             ] {
                 println!("{name}");
             }
@@ -157,6 +163,8 @@ fn main() {
         }
         Some(&"docker-smoke-mainnet") => docker_smoke::run(&root),
         Some(&"devnet-multinode-smoke") => multinode_smoke::run(&root),
+        Some(&"sarif") => sarif::run(&root, refs.get(1..).unwrap_or_default()),
+        Some(&"dependency-snapshot") => dep_snapshot::run(&root, refs.get(1..).unwrap_or_default()),
         Some(name) => {
             eprintln!("FAIL: there is no tool named `{name}`.\n");
             eprint!("{}", usage());

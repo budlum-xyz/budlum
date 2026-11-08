@@ -1052,10 +1052,10 @@ impl Blockchain {
         // loaded is the only honest one, and without it the next slot would be
         // priced from a header stamp that a lagging schedule left in the past -
         // which is exactly the round this node would then over-claim.
-        if let Some(tip) = bc.chain.last() {
-            bc.consensus
-                .note_block_seen(&tip.hash, crate::consensus::now_millis());
-        }
+        // Seed the round-price window across the restored suffix so neither the
+        // tip nor an ancestor within `ROUND_PRICE_WINDOW` falls back to a
+        // producer-written header stamp after restart.
+        bc.seed_round_price_window(crate::consensus::now_millis());
 
         if !bc.state.governance.applied_domain_unfreezes.is_empty() {
             let applied = bc.state.governance.applied_domain_unfreezes.clone();
@@ -1070,6 +1070,20 @@ impl Blockchain {
         }
 
         bc
+    }
+
+    /// Record local adoption sightings for the trailing `ROUND_PRICE_WINDOW`
+    /// blocks on `self.chain` so newly adopted or restored chains price leader
+    /// rounds across the full reorg window from node-local time rather than
+    /// falling back to producer-written header timestamps.
+    fn seed_round_price_window(&self, at_ms: u128) {
+        let start = self
+            .chain
+            .len()
+            .saturating_sub(crate::consensus::ROUND_PRICE_WINDOW);
+        for block in &self.chain[start..] {
+            self.consensus.note_block_seen(&block.hash, at_ms);
+        }
     }
 
     /// Wall-clock seconds according to the chain, taken from the newest
@@ -6604,10 +6618,7 @@ impl Blockchain {
         // producer-written header stamp - the exact fallback the sighting
         // exists to remove, and on the producer side a source of claims peers
         // reject. The adoption is now, which is when this node took the chain.
-        if let Some(tip) = self.chain.last() {
-            self.consensus
-                .note_block_seen(&tip.hash, crate::consensus::now_millis());
-        }
+        self.seed_round_price_window(crate::consensus::now_millis());
 
         // BLG-0186 (P09-F07): the DISK still holds FINALITY_CERT and
         // QC_BLOB at the reorged heights. Left behind, a later
@@ -7125,6 +7136,7 @@ impl Blockchain {
         self.finalized_height = snapshot.finalized_height;
         self.finalized_hash = snapshot.finalized_hash;
         self.mempool.set_min_fee(self.state.base_fee);
+        self.seed_round_price_window(crate::consensus::now_millis());
 
         Ok(())
     }
@@ -7218,6 +7230,7 @@ impl Blockchain {
         self.finalized_height = v2.finalized_height;
         self.finalized_hash = v2.finalized_hash.clone();
         self.mempool.set_min_fee(self.state.base_fee);
+        self.seed_round_price_window(crate::consensus::now_millis());
 
         // Restore finality certs from V2 snapshot through the same deduplicating,
         // Total-entry bounded queue used by the live network path.

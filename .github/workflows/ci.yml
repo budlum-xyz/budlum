@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, fix/architecture-tip-adlari]
+    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -1832,7 +1832,10 @@ jobs:
     # Tools are version+sha256 pinned (nextest verified byte for byte against the official .sha256 asset).
     name: Coverage (nextest + llvm-cov, ratchet)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      code-quality: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1872,6 +1875,13 @@ jobs:
           mkdir -p coverage
           cargo llvm-cov nextest --lib --json --output-path coverage/cov.json
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- coverage coverage/cov.json
+          cargo llvm-cov report --cobertura --output-path coverage/cobertura.xml
+      - name: Upload Cobertura coverage (GitHub Code Quality)
+        uses: actions/upload-code-coverage@2b21a77928be8d5168c2b9581a67f2adbebacc52 # v1.4.4
+        with:
+          file: coverage/cobertura.xml
+          language: Rust
+          label: code-coverage/llvm-cov
       - name: Module analysis canary (not vacuous)
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- module-coverage --self-test
       - name: Module coverage report - budlum (baselines in step 2, NO vacuous gate)
@@ -2420,6 +2430,10 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- ci-workflow-guards --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- ci-workflow-guards
+      - name: security-quality-tools-are-wired (SARIF, coverage, dependency graph, Wolfi, PR gates) + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- security-quality-tools-are-wired --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- security-quality-tools-are-wired
       # A test name is the claim a reader trusts when counting coverage.
       # `pow_empty_block_rejected_by_validation` asserted is_some();
       # `pos_double_producer_address_rejected` asserted both blocks succeed;
