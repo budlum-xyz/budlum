@@ -33,6 +33,9 @@ pub enum I18nError {
     InvalidTranslationKey(String),
     /// Empty localized text/transcripts are refused so callers fail closed.
     EmptyText,
+    /// Localized text/transcripts containing invisible, bidi override, or
+    /// non-printable control characters are refused.
+    ForbiddenCharacters,
     /// No exact local entry exists for `(key, locale, accessibility mode)`.
     MissingTranslation {
         key: String,
@@ -48,6 +51,9 @@ impl fmt::Display for I18nError {
             Self::InvalidProviderId(id) => write!(f, "invalid local provider id: {id}"),
             Self::InvalidTranslationKey(key) => write!(f, "invalid translation key: {key}"),
             Self::EmptyText => f.write_str("localized text/transcript must not be empty"),
+            Self::ForbiddenCharacters => f.write_str(
+                "localized text/transcript contains forbidden control or bidi characters",
+            ),
             Self::MissingTranslation { key, locale, mode } => write!(
                 f,
                 "missing local translation for key={key}, locale={locale}, mode={mode:?}"
@@ -82,8 +88,14 @@ impl LocaleTag {
             return Err(I18nError::InvalidLocaleTag(tag.to_string()));
         }
 
-        let mut out = Vec::new();
-        for (idx, part) in tag.split('-').enumerate() {
+        let parts: Vec<&str> = tag.split('-').collect();
+        let mut out = Vec::with_capacity(parts.len());
+        let mut seen_script = false;
+        let mut seen_region = false;
+        let mut in_extension = false;
+        let mut singleton_needs_subtag = false;
+
+        for (idx, &part) in parts.iter().enumerate() {
             if part.is_empty() || part.len() > 8 || !part.bytes().all(|b| b.is_ascii_alphanumeric())
             {
                 return Err(I18nError::InvalidLocaleTag(tag.to_string()));
@@ -95,7 +107,21 @@ impl LocaleTag {
                     return Err(I18nError::InvalidLocaleTag(tag.to_string()));
                 }
                 out.push(part.to_ascii_lowercase());
+            } else if part.len() == 1 {
+                if !part.bytes().all(|b| b.is_ascii_alphabetic()) || singleton_needs_subtag {
+                    return Err(I18nError::InvalidLocaleTag(tag.to_string()));
+                }
+                in_extension = true;
+                singleton_needs_subtag = true;
+                out.push(part.to_ascii_lowercase());
+            } else if in_extension {
+                singleton_needs_subtag = false;
+                out.push(part.to_ascii_lowercase());
             } else if part.len() == 4 && part.bytes().all(|b| b.is_ascii_alphabetic()) {
+                if seen_script || seen_region {
+                    return Err(I18nError::InvalidLocaleTag(tag.to_string()));
+                }
+                seen_script = true;
                 // Built by position rather than `chars.next().expect(..)`.
                 // The length check above does guarantee a first character, but
                 // this crate denies `clippy::expect_used`: a proof that lives
@@ -110,11 +136,25 @@ impl LocaleTag {
                     }
                 }
                 out.push(title);
-            } else if part.len() == 2 && part.bytes().all(|b| b.is_ascii_alphabetic()) {
+            } else if (part.len() == 2 && part.bytes().all(|b| b.is_ascii_alphabetic()))
+                || (part.len() == 3 && part.bytes().all(|b| b.is_ascii_digit()))
+            {
+                if seen_region {
+                    return Err(I18nError::InvalidLocaleTag(tag.to_string()));
+                }
+                seen_region = true;
                 out.push(part.to_ascii_uppercase());
-            } else {
+            } else if (5..=8).contains(&part.len())
+                || (part.len() == 4 && part.as_bytes().first().is_some_and(u8::is_ascii_digit))
+            {
                 out.push(part.to_ascii_lowercase());
+            } else {
+                return Err(I18nError::InvalidLocaleTag(tag.to_string()));
             }
+        }
+
+        if singleton_needs_subtag {
+            return Err(I18nError::InvalidLocaleTag(tag.to_string()));
         }
 
         Ok(Self(out.join("-")))
@@ -243,9 +283,7 @@ impl OfflineLocalizationCatalog {
         text: &str,
     ) -> Result<(), I18nError> {
         validate_translation_key(key)?;
-        if text.is_empty() {
-            return Err(I18nError::EmptyText);
-        }
+        ensure_clean_text(text)?;
         self.entries.insert(
             LocalizedKey {
                 key: key.to_string(),
@@ -328,9 +366,7 @@ impl AccessibilityTranscript {
         text: &str,
     ) -> Result<Self, I18nError> {
         validate_provider_id(provider_id)?;
-        if text.is_empty() {
-            return Err(I18nError::EmptyText);
-        }
+        ensure_clean_text(text)?;
         let mut transcript = Self {
             audio_commitment,
             provider_id: provider_id.to_string(),
@@ -355,10 +391,31 @@ impl AccessibilityTranscript {
     }
 }
 
+fn is_forbidden_bidi_or_invisible(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{061C}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2069}'
+            | '\u{FEFF}'
+    ) || (ch.is_control() && !matches!(ch, '\n' | '\t'))
+}
+
+fn ensure_clean_text(text: &str) -> Result<(), I18nError> {
+    if text.trim().is_empty() {
+        return Err(I18nError::EmptyText);
+    }
+    if text.chars().any(is_forbidden_bidi_or_invisible) {
+        return Err(I18nError::ForbiddenCharacters);
+    }
+    Ok(())
+}
+
 fn validate_provider_id(provider_id: &str) -> Result<(), I18nError> {
     let valid = !provider_id.is_empty()
         && provider_id.len() <= 64
-        && !provider_id.contains("://")
+        && !provider_id.contains(':')
         && !provider_id.contains('/')
         && !provider_id.contains('\\')
         && provider_id
@@ -643,5 +700,51 @@ mod tests {
             "Merhaba",
         )
         .is_err());
+    }
+
+    #[test]
+    fn i18n_refuses_scheme_uri_malformed_bcp47_and_bidi_invisibles() {
+        let bad_providers = [
+            "mailto:ops@example",
+            "file:secret",
+            "urn:provider",
+            "data:text",
+        ];
+        for bad_provider in bad_providers {
+            assert!(matches!(
+                OfflineLocalizationCatalog::new(bad_provider),
+                Err(I18nError::InvalidProviderId(_))
+            ));
+        }
+        for bad_locale in ["en-1", "en-x", "en-US-GB", "sr-Latn-Cyrl", "en-US-Latn"] {
+            assert!(
+                LocaleTag::new(bad_locale).is_err(),
+                "malformed BCP-47 tag {bad_locale} must be refused"
+            );
+        }
+        let valid_tag = LocaleTag::new("en-Latn-419-x-local").expect("valid BCP-47");
+        assert_eq!(valid_tag.as_str(), "en-Latn-419-x-local");
+
+        let en = LocaleTag::new("en-US").expect("locale");
+        let mut catalog = OfflineLocalizationCatalog::new("budlum-local-v1").expect("catalog");
+        let ws_res = catalog.insert("k.one", en.clone(), AccessibilityMode::UiText, "   ");
+        assert_eq!(ws_res, Err(I18nError::EmptyText));
+
+        let bad_texts = [
+            "hello\u{202E}dlrow",
+            "zero\u{200B}width",
+            "nul\u{0000}byte",
+        ];
+        for bad_text in bad_texts {
+            let cat_res = catalog.insert("k.one", en.clone(), AccessibilityMode::UiText, bad_text);
+            assert_eq!(cat_res, Err(I18nError::ForbiddenCharacters));
+            let stt_res = AccessibilityTranscript::from_local_stt(
+                "stt-v1",
+                [1; 32],
+                en.clone(),
+                bad_text,
+            );
+            assert_eq!(stt_res, Err(I18nError::ForbiddenCharacters));
+        }
     }
 }
