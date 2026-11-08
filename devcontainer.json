@@ -1,0 +1,17 @@
+{
+  "name": "Budlum + Claude Code (Arena)",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": { "version": "lts" },
+    "ghcr.io/devcontainers/features/rust:1": {}
+  },
+  "containerEnv": {
+    "ANTHROPIC_BASE_URL": "https://api.preview.arena.ai",
+    "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT": "1",
+    "ANTHROPIC_MODEL": "coding-router-preview",
+    "ANTHROPIC_SMALL_FAST_MODEL": "coding-router-preview",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "coding-router-preview",
+    "CLAUDE_CODE_MODEL_CAPABILITIES": "coding-router-preview=-effort"
+  },
+  "postCreateCommand": "npm install -g @anthropic-ai/claude-code"
+}
