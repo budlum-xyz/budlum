@@ -194,9 +194,9 @@ dependencies, so the entire system builds, tests and ships as one tree.
 
 | Path | Contents |
 | --- | --- |
-| [`crates/`](crates) | Standalone workspaces: wallet-core, budscan, ai_inference, note-packing |
+| [`crates/`](crates) | Standalone workspaces: wallet-core, budlum-explorer, ai_inference, note-packing |
 | [`bud/`](bud) | B.U.D. 1.0/2.0/3.0 implementation (its own workspace) |
-| [`docs/`](docs) | Reference docs: ARCHITECTURE, SPECIFICATION, SECURITY, CONTRIBUTING, PROVENANCE_NOTES |
+| [`docs/`](docs) | Reference docs: ARCHITECTURE, SPECIFICATION, SECURITY, CONTRIBUTING, NOTICE |
 | [`config/`](config) | Devnet / testnet / mainnet profiles and genesis templates |
 | [`xtask/gates/`](xtask/gates) | CI gates, every one is self-testing (see [Engineering standards](#engineering-standards)) |
 | [`kani/`](kani) · [`fuzz/`](fuzz) | Model-checking harnesses and fuzz targets ([fuzz README](fuzz/README.md)) |
@@ -314,14 +314,8 @@ mainnet, `45262` devnet). It has no default and the node's `bud_chainId` answer 
 compared against it: a seed controls the same address on every network, so a node that chose
 the id would be choosing where your signature is valid.
 
-The **testnet readiness gate** - clean build and green CI, genesis/config/node start end to
-end, restart persistence with consistent counters, the network layer's size and rate limits,
-RPC auth and rate limiting, consensus and tokenomics, the panic bar, the operator docs and a
-secret-free history - is recorded row by row, with the code location and the test and the CI
-job that runs it, in
-[docs/audit/TESTNET_TRACEABILITY.md](docs/audit/TESTNET_TRACEABILITY.md). Endpoints,
-parameters and the local rehearsal are in [docs/TESTNET.md](docs/TESTNET.md); the gates that
-still stand between testnet and mainnet are in
+Testnet endpoints, parameters and the local rehearsal are in [docs/TESTNET.md](docs/TESTNET.md);
+the gates that still stand between testnet and mainnet are in
 [docs/MAINNET_READINESS.md](docs/MAINNET_READINESS.md).
 
 ### Node roles
@@ -397,6 +391,10 @@ BudZero, determinism, security audit, supply chain, fuzzing, Miri, semver and mo
 - **Determinism.** State roots and block hashes must be reproducible. A dedicated gate proves
   no hashing function iterates an unordered collection, a `HashMap` in a state-root path is
   a chain halt waiting for two nodes to disagree, and the gate catches it at review time.
+- **The README's own claims are checked.** The definition block is pinned byte for byte
+  against the digest the specification states, so a wording change there is a decision and
+  not an edit, and no unfilled value slot or to-do marker may ship: an unfilled value
+  reads as a measurement and is not one. Both checks live in `xtask/gates/`.
 - **The badges cannot lie.** Every badge on this page is checked against the file it
   points at: the test count against what the run measured, the Rust version against
   `rust-toolchain.toml`, the licence against the SPDX id in `Cargo.toml`, and the CI badge
@@ -500,10 +498,9 @@ done, and this page will not imply otherwise.
 | [SECURITY.md](docs/SECURITY.md) | Disclosure policy, supported versions, what to include in a report |
 | [CONTRIBUTING.md](docs/CONTRIBUTING.md) | Development setup, PR expectations, rules for consensus and execution changes |
 | [CODE_OF_CONDUCT.md](docs/CODE_OF_CONDUCT.md) | Community expectations |
-| [PROVENANCE_NOTES.md](docs/PROVENANCE_NOTES.md) | Per-module record of what each non-trivial implementation is based on |
 | [docs/VALIDATOR_ROLES.md](docs/VALIDATOR_ROLES.md) | Node roles and their operational requirements |
 | [docs/AI_VERIFICATION_STATUS.md](docs/AI_VERIFICATION_STATUS.md) | Exactly what the AI layer does and does not verify |
-| [docs/BUD_STORAGE_ROADMAP.md](docs/BUD_STORAGE_ROADMAP.md) | Storage layer roadmap |
+| [docs/STORAGE.md](docs/STORAGE.md) | The single storage system (B.U.D. 3.0), in construction |
 | [budzero/ARCHITECTURE.md](budzero/ARCHITECTURE.md) | BudZKVM ISA, VM, prover and verifier design |
 
 ---

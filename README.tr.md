@@ -196,9 +196,9 @@ dolayısıyla sistemin tamamı tek bir ağaç olarak derlenir, test edilir ve da
 
 | Yol | İçerik |
 | --- | --- |
-| [`crates/`](crates) | Bağımsız çalışma alanları: wallet-core, budscan, ai_inference, note-packing |
+| [`crates/`](crates) | Bağımsız çalışma alanları: wallet-core, budlum-explorer, ai_inference, note-packing |
 | [`bud/`](bud) | B.U.D. 1.0/2.0/3.0 uygulaması (kendi çalışma alanı) |
-| [`docs/`](docs) | Başvuru belgeleri: ARCHITECTURE, SPECIFICATION, SECURITY, CONTRIBUTING, PROVENANCE_NOTES |
+| [`docs/`](docs) | Başvuru belgeleri: ARCHITECTURE, SPECIFICATION, SECURITY, CONTRIBUTING, NOTICE |
 | [`config/`](config) | Devnet / testnet / mainnet profilleri ve genesis şablonları |
 | [`xtask/gates/`](xtask/gates) | CI kapıları; her biri kendi kendini sınar ([Mühendislik standartları](#mühendislik-standartları)) |
 | [`kani/`](kani) · [`fuzz/`](fuzz) | Model denetleme koşum takımları ve fuzz hedefleri ([fuzz README](fuzz/README.md)) |
@@ -317,13 +317,7 @@ ağ, `45262` devnet). Bu bayrağın varsayılanı yoktur ve düğümün `bud_cha
 onunla karşılaştırılır: bir tohum her ağda aynı adresi kontrol ettiği için zincir kimliğini
 düğüm seçseydi imzanızın hangi ağda geçerli olacağını da düğüm seçmiş olurdu.
 
-**Testnet hazırlık kapısı** - temiz derleme ve yeşil CI, genesis/yapılandırma/düğüm
-başlatmanın uçtan uca çalışması, sayaçları tutarlı yeniden başlatma kalıcılığı, ağ
-katmanının boyut ve hız sınırları, RPC kimlik doğrulaması ve hız sınırlama, uzlaşma ve
-tokenomi, panic çıtası, operatör belgeleri ve sırsız bir geçmiş - kod konumu, testi ve onu
-koşturan CI işiyle birlikte satır satır
-[docs/audit/TESTNET_TRACEABILITY.md](docs/audit/TESTNET_TRACEABILITY.md) dosyasındadır. Uç
-noktalar, parametreler ve yerel prova için [docs/TESTNET.md](docs/TESTNET.md); ana ağ öncesi
+Uç noktalar, parametreler ve yerel prova için [docs/TESTNET.md](docs/TESTNET.md); ana ağ öncesi
 kapılar için [docs/MAINNET_READINESS.md](docs/MAINNET_READINESS.md).
 
 ### Düğüm rolleri
@@ -508,10 +502,9 @@ etmeyecektir.
 | [SECURITY.md](docs/SECURITY.md) | Açıklama politikası, desteklenen sürümler, bir raporda nelerin bulunması gerektiği |
 | [CONTRIBUTING.md](docs/CONTRIBUTING.md) | Geliştirme kurulumu, PR beklentileri, konsensüs ve yürütme değişiklikleri için kurallar |
 | [CODE_OF_CONDUCT.md](docs/CODE_OF_CONDUCT.md) | Topluluk beklentileri |
-| [PROVENANCE_NOTES.md](docs/PROVENANCE_NOTES.md) | Her önemsiz olmayan uygulamanın neye dayandığının modül başına kaydı |
 | [docs/VALIDATOR_ROLES.md](docs/VALIDATOR_ROLES.md) | Düğüm rolleri ve işletme gereksinimleri |
 | [docs/AI_VERIFICATION_STATUS.md](docs/AI_VERIFICATION_STATUS.md) | Yapay zeka katmanının tam olarak neyi doğrulayıp neyi doğrulamadığı |
-| [docs/BUD_STORAGE_ROADMAP.md](docs/BUD_STORAGE_ROADMAP.md) | Depolama katmanı yol haritası |
+| [docs/STORAGE.md](docs/STORAGE.md) | Tek depolama sistemi (B.U.D. 3.0), yapım aşamasında |
 | [budzero/ARCHITECTURE.md](budzero/ARCHITECTURE.md) | BudZKVM ISA, VM, kanıtlayıcı ve doğrulayıcı tasarımı |
 
 ---

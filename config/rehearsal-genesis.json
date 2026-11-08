@@ -1,0 +1,106 @@
+{
+  "chain_id": 45262,
+  "pq_scheme": "ml-dsa-65",
+  "allocations": [
+    {
+      "address": "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+      "amount": 2000000000000
+    }
+  ],
+  "validators": [
+    {
+      "address": "0101010101010101010101010101010101010101010101010101010101010101",
+      "name": "rehearsal-full-01",
+      "region": "eu-central-1",
+      "provider": "hetzner",
+      "class": "full",
+      "stake": 10000000000
+    },
+    {
+      "address": "0202020202020202020202020202020202020202020202020202020202020202",
+      "name": "rehearsal-full-02",
+      "region": "eu-central-1",
+      "provider": "aws",
+      "class": "full",
+      "stake": 10000000000
+    },
+    {
+      "address": "0303030303030303030303030303030303030303030303030303030303030303",
+      "name": "rehearsal-full-03",
+      "region": "us-east-1",
+      "provider": "aws",
+      "class": "full",
+      "stake": 10000000000
+    },
+    {
+      "address": "0404040404040404040404040404040404040404040404040404040404040404",
+      "name": "rehearsal-full-04",
+      "region": "us-east-1",
+      "provider": "hetzner",
+      "class": "full",
+      "stake": 10000000000
+    },
+    {
+      "address": "0505050505050505050505050505050505050505050505050505050505050505",
+      "name": "rehearsal-full-05",
+      "region": "ap-southeast-1",
+      "provider": "aws",
+      "class": "full",
+      "stake": 10000000000
+    },
+    {
+      "address": "0606060606060606060606060606060606060606060606060606060606060606",
+      "name": "rehearsal-full-06",
+      "region": "ap-southeast-1",
+      "provider": "hetzner",
+      "class": "full",
+      "stake": 10000000000
+    },
+    {
+      "address": "0707070707070707070707070707070707070707070707070707070707070707",
+      "name": "rehearsal-full-07",
+      "region": "eu-west-1",
+      "provider": "aws",
+      "class": "full",
+      "stake": 10000000000
+    },
+    {
+      "address": "0808080808080808080808080808080808080808080808080808080808080808",
+      "name": "rehearsal-full-08",
+      "region": "us-west-2",
+      "provider": "hetzner",
+      "class": "full",
+      "stake": 10000000000
+    }
+  ],
+  "block_reward": 0,
+  "base_fee": 1,
+  "gas_schedule": {
+    "base_fee": 1,
+    "gas_per_byte": 1,
+    "gas_per_signature": 500,
+    "transfer_gas": 21000,
+    "stake_gas": 35000,
+    "vote_gas": 25000,
+    "contract_call_gas": 35000
+  },
+  "timestamp": 1762387200000,
+  "bud_tokenomics": {
+    "community": 10000000000000,
+    "liquidity": 10000000000000,
+    "ecosystem": 20000000000000,
+    "team": 20000000000000,
+    "burn_reserve": 40000000000000,
+    "epochs_per_year": 210240,
+    "annual_burn_ratio_fixed": 100000,
+    "team_cliff_epochs": 210240,
+    "team_vesting_epochs": 840960,
+    "tx_fee_burn_ratio_fixed": 10000,
+    "block_reward": 0,
+    "validator_annual_yield_ratio_fixed": 50000,
+    "slot_duration_secs": 3,
+    "epoch_length_slots": 50
+  },
+  "ceremony_status": "rehearsal_template",
+  "ceremony_note": "72-hour ceremony rehearsal network profile (chain_id 45262) with 8 Full validators across >= 3 regions and >= 2 cloud providers."
+}
