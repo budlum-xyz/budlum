@@ -1,0 +1,824 @@
+# PR137 source cad686cad8313d73cae988fab179c89f47f34c7a; comparison base 0007279e59bb88007e519365011fdecbe6cf362c
+path	comparison	source_status	disposition
+.github/CODEOWNERS	same	modified	NO CHANGE: byte-identical at review base
+.github/bud3-forbidden-phrases-baseline.txt	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+.github/concept-names-baseline.txt	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+.github/dead-pub-api-baseline.txt	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+.github/dependabot.yml	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+.github/idle-code-baseline.txt	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+.github/no-legacy-storage-baseline.txt	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+.github/rpc-method-coverage-baseline.txt	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+.github/semver-exceptions.txt	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+.github/tsan-suppressions.txt	same	modified	NO CHANGE: byte-identical at review base
+.github/workflows/audit-guard.yml	same	modified	NO CHANGE: byte-identical at review base
+.github/workflows/benchmark.yml	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+.github/workflows/cargo-vet.yml	same	modified	NO CHANGE: byte-identical at review base
+.github/workflows/ci.yml	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+.github/workflows/compatibility.yml	source_only	added	DEFER CI: source checks are pending; workflow needs current toolchain and placeholder-worker exclusions
+.github/workflows/conformance-nightly.yml	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+.github/workflows/dependency-review.yml	same	modified	NO CHANGE: byte-identical at review base
+.github/workflows/determinism.yml	same	modified	NO CHANGE: byte-identical at review base
+.github/workflows/diverse-double-compiling.yml	same	modified	NO CHANGE: byte-identical at review base
+.github/workflows/docker-smoke.yml	same	modified	NO CHANGE: byte-identical at review base
+.github/workflows/fuzz-nightly.yml	same	modified	NO CHANGE: byte-identical at review base
+.github/workflows/grype.yml	same	modified	NO CHANGE: byte-identical at review base
+.github/workflows/miri.yml	same	modified	NO CHANGE: byte-identical at review base
+.github/workflows/mobile-ios.yml	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+.github/workflows/mobile.yml	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+.github/workflows/osv-scanner.yml	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+.github/workflows/pkcs11-pq.yml	same	modified	NO CHANGE: byte-identical at review base
+.github/workflows/rust.yml	same	modified	NO CHANGE: byte-identical at review base
+.github/workflows/security-audit.yml	same	modified	NO CHANGE: byte-identical at review base
+.github/workflows/semgrep.yml	same	modified	NO CHANGE: byte-identical at review base
+.github/workflows/semver.yml	same	modified	NO CHANGE: byte-identical at review base
+.github/workflows/solidity.yml	same	modified	NO CHANGE: byte-identical at review base
+.github/workflows/supply-chain-extra.yml	same	modified	NO CHANGE: byte-identical at review base
+.github/workflows/typos.yml	same	modified	NO CHANGE: byte-identical at review base
+.github/workflows/watchdog.yml	same	modified	NO CHANGE: byte-identical at review base
+.gitignore	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+.quality/typos.toml	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+Cargo.lock	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+Cargo.toml	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+README.md	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+README.tr.md	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+THE_BUDLUM_DIREKTIF.md	absent_both	removed	NO CHANGE: absent from both trees (already removed or rename residue)
+benches/domain_throughput.rs	same	modified	NO CHANGE: byte-identical at review base
+benches/micro/erasure_rows.rs	same	modified	NO CHANGE: byte-identical at review base
+benches/micro/merkle_scaling.rs	same	modified	NO CHANGE: byte-identical at review base
+benches/micro/merkle_update.rs	same	modified	NO CHANGE: byte-identical at review base
+benches/micro/ratio_rayon.rs	same	modified	NO CHANGE: byte-identical at review base
+bud/Cargo.toml	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/FORMAT-V2.md	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/README.md	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/fuzz/Cargo.toml	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/fuzz/fuzz_bud_format.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/kani/kani_bud_format.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/mime.types.bud.json	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bin/bud.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bin/measure_ratios.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud3_live_test.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_fixed_point.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_av2.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_bft.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_block.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_checkpoint.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_container.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_culling.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_das.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_dedup.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_economics.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_edge.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_edition.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_encpact.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_engine.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_erasure.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_fidelitygate.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_fountain.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_governance.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_guardian.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_hardening.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_hw.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_integration.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_lazyrepair.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_lowrank.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_lrc.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_matrix.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_media.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_msr.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_nvc.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_optical.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_optical_transfer.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_pact.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_pipe.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_por.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_prodcost.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_production.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_qos.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_qrmatrix.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_qrvideo.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_r3fix.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_ratioconsensus.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_realcorpus.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_recipe.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_recipe_record.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_regeneration.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_registry.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_repairband.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_revolutionary.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_scrub.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_secure_db.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_securededup.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_segment.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_serviceclass.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_shamir.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_social.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_social2.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_spec.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_telemetry.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_transpile.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_tricore.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_ultra.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_ux.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_video.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_videopipe.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_view.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_wire.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_zkbridge.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/bud_format_zkproof.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/churn.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/cli.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/fidelity.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/gates.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/lib.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/price.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/provider.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/quantum.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/quantum_chain.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/src/ratio.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/tests/test_bud2.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+bud/tests/test_integration.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+budzero/ARCHITECTURE.md	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+budzero/bud-compiler/src/codegen.rs	same	modified	NO CHANGE: byte-identical at review base
+budzero/bud-compiler/src/parser.rs	same	modified	NO CHANGE: byte-identical at review base
+budzero/bud-compiler/tests/regression.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+budzero/bud-proof/src/adapter.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+budzero/bud-proof/src/bud_stark/preprocessed.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+budzero/bud-proof/src/canonical_recovery.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+budzero/bud-proof/src/plonky3_air.rs	same	modified	NO CHANGE: byte-identical at review base
+budzero/bud-proof/src/plonky3_prover.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+budzero/bud-proof/tests/regression.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+budzero/verifier-registry/src/evidence.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+budzero/verifier-registry/src/params.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+budzero/verifier-registry/tests/regression.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+config/naming/concept_map.toml	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+config/rehearsal-genesis.json	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+contracts/graft/BudlumRemoteAccountFactory.sol	same	modified	NO CHANGE: byte-identical at review base
+contracts/mikoriza/BudlumRegistrar.sol	same	modified	NO CHANGE: byte-identical at review base
+contracts/mikoriza/BudlumSlasher.sol	same	modified	NO CHANGE: byte-identical at review base
+contracts/object-layer/BudlumFinalityVerifier.sol	same	added	NO CHANGE: byte-identical at review base
+contracts/object-layer/BudlumSettlementEndpoint.sol	same	added	NO CHANGE: byte-identical at review base
+contracts/object-layer/README.md	same	added	NO CHANGE: byte-identical at review base
+contracts/object-layer/cosmwasm/Cargo.toml	same	added	NO CHANGE: byte-identical at review base
+contracts/object-layer/cosmwasm/src/contract.rs	same	added	NO CHANGE: byte-identical at review base
+contracts/object-layer/cosmwasm/src/lib.rs	same	added	NO CHANGE: byte-identical at review base
+contracts/object-layer/cosmwasm/src/verifier.rs	same	added	NO CHANGE: byte-identical at review base
+contracts/object-layer/move/Move.toml	same	added	NO CHANGE: byte-identical at review base
+contracts/object-layer/move/sources/budlum_verifier.move	same	added	NO CHANGE: byte-identical at review base
+contracts/object-layer/move/sources/settlement_endpoint.move	same	added	NO CHANGE: byte-identical at review base
+contracts/object-layer/svm/Cargo.toml	same	added	NO CHANGE: byte-identical at review base
+contracts/object-layer/svm/src/lib.rs	same	added	NO CHANGE: byte-identical at review base
+contracts/object-layer/svm/src/verifier.rs	same	added	NO CHANGE: byte-identical at review base
+contracts/uel/BudlumUniversal.sol	same	added	NO CHANGE: byte-identical at review base
+crates/ai-inference/crates/ai-core/src/lib.rs	same	modified	NO CHANGE: byte-identical at review base
+crates/ai-inference/crates/ai-core/src/verification.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/ai-inference/crates/ai-tune/src/eval.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/bpqs/Cargo.toml	same	modified	NO CHANGE: byte-identical at review base
+crates/bud-codec/Cargo.lock	same	added	NO CHANGE: byte-identical at review base
+crates/bud-codec/Cargo.toml	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/bud-codec/src/autozstd.rs	source_only	renamed	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/bloom.rs	source_only	renamed	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/catalog.rs	source_only	renamed	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/columnar.rs	source_only	renamed	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/container.rs	source_only	added	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/crop.rs	source_only	renamed	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/dbdelta.rs	source_only	renamed	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/dictionary.rs	source_only	renamed	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/exepdf.rs	source_only	renamed	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/fastcdc.rs	source_only	renamed	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/genomic.rs	source_only	renamed	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/huffman.rs	source_only	renamed	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/jpegre.rs	source_only	renamed	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/lib.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/bud-codec/src/logfield.rs	source_only	renamed	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/markdown.rs	source_only	renamed	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/media.rs	source_only	added	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/model.rs	source_only	renamed	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/multifile.rs	source_only	renamed	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/office.rs	source_only	renamed	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/pcap.rs	source_only	renamed	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/pgm.rs	source_only	renamed	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/pointcloud.rs	source_only	renamed	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/r3fix.rs	source_only	added	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/ratioconsensus.rs	source_only	added	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/real.rs	source_only	renamed	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/registry.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/bud-codec/src/timeseries.rs	source_only	renamed	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/tiny.rs	source_only	renamed	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/wal.rs	source_only	renamed	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/bud-codec/src/wp54_context.rs	source_only	added	DEFER: codec/WP-24/WP-54 implementation requires independent current-crate and legacy-migration review
+crates/budlum-explorer/Cargo.lock	same	renamed	NO CHANGE: byte-identical at review base
+crates/budlum-explorer/Cargo.toml	same	renamed	NO CHANGE: byte-identical at review base
+crates/budlum-explorer/README.md	different	renamed	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/budlum-explorer/browser/README.md	different	renamed	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/budlum-explorer/browser/l10n/en-US/budlum-explorer.ftl	different	renamed	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/budlum-explorer/browser/l10n/tr-TR/budlum-explorer.ftl	different	renamed	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/budlum-explorer/browser/mozconfig	same	renamed	NO CHANGE: byte-identical at review base
+crates/budlum-explorer/browser/patches.txt	different	renamed	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/budlum-explorer/browser/patches/address-bar-verification-badge.patch	different	renamed	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/budlum-explorer/browser/patches/bud-protocol-handler.patch	different	renamed	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/budlum-explorer/browser/patches/name-bar-punycode.patch	different	renamed	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/budlum-explorer/browser/settings/budlum-explorer.cfg	same	renamed	NO CHANGE: byte-identical at review base
+crates/budlum-explorer/browser/settings/policies.json	same	renamed	NO CHANGE: byte-identical at review base
+crates/budlum-explorer/src/arweave.rs	same	renamed	NO CHANGE: byte-identical at review base
+crates/budlum-explorer/src/bin/budlum-explorer.rs	different	renamed	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/budlum-explorer/src/bns_proof.rs	same	renamed	NO CHANGE: byte-identical at review base
+crates/budlum-explorer/src/cid.rs	different	renamed	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/budlum-explorer/src/content_id.rs	different	renamed	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/budlum-explorer/src/ens.rs	same	renamed	NO CHANGE: byte-identical at review base
+crates/budlum-explorer/src/evidence.rs	different	renamed	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/budlum-explorer/src/evm_audit.rs	same	renamed	NO CHANGE: byte-identical at review base
+crates/budlum-explorer/src/fetch.rs	different	renamed	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/budlum-explorer/src/indexer.rs	same	renamed	NO CHANGE: byte-identical at review base
+crates/budlum-explorer/src/lib.rs	different	renamed	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/budlum-explorer/src/light_client.rs	same	renamed	NO CHANGE: byte-identical at review base
+crates/budlum-explorer/src/name_rule.rs	different	renamed	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/budlum-explorer/src/pages.rs	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+crates/budlum-explorer/src/patchset.rs	different	renamed	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/budlum-explorer/src/punycode.rs	same	renamed	NO CHANGE: byte-identical at review base
+crates/budlum-explorer/src/query.rs	different	renamed	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/budlum-explorer/src/resolve.rs	different	renamed	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/budlum-explorer/src/search.rs	different	renamed	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/budlum-types/Cargo.lock	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/budlum-types/Cargo.toml	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/budlum-types/src/class.rs	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+crates/budlum-types/src/lib.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/budlum-types/src/presence.rs	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+crates/note-packing/Cargo.toml	same	modified	NO CHANGE: byte-identical at review base
+crates/note-packing/src/digest4.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/note-packing/src/lib.rs	same	modified	NO CHANGE: byte-identical at review base
+crates/uel-abi/Cargo.lock	same	added	NO CHANGE: byte-identical at review base
+crates/uel-abi/Cargo.toml	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/uel-abi/build.rs	same	added	NO CHANGE: byte-identical at review base
+crates/uel-abi/src/frame.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/uel-abi/src/host.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/uel-abi/src/lib.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/uel-abi/src/mock.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/uel-abi/src/transport.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/uel-abi/src/types.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/uel-abi/src/wire.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/uel-abi/tests/frames.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/uel-abi/tests/transport.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/uel-abi/tests/transport_deadlines.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/uel-abi/tests/transport_host_guards.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/uel-abi/tests/transport_worker_frames.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/wallet-core/src/consent_screen.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+crates/wallet-core/src/lib.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/AI_VERIFICATION_LAYER.md	same	added	NO CHANGE: byte-identical at review base
+docs/APP_BINDING.md	same	added	NO CHANGE: byte-identical at review base
+docs/APTOS_RPC.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/ARCHITECTURE.md	same	modified	NO CHANGE: byte-identical at review base
+docs/BUDZERO_RECURSION_AND_BATCH_PROOFS.md	same	added	NO CHANGE: byte-identical at review base
+docs/BUD_CODEC_CONTEXT_AND_DEDUP.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/CONTRIBUTING.md	same	modified	NO CHANGE: byte-identical at review base
+docs/EVM_MIGRATION.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/EXECUTION.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/EXECUTION_LIMITS.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/GRAFT.md	absent_both	removed	NO CHANGE: absent from both trees (already removed or rename residue)
+docs/LIGHT_CLIENT.md	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+docs/MAINNET_READINESS.md	same	modified	NO CHANGE: byte-identical at review base
+docs/MIGRATION.md	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+docs/MOBILE_DEVICE_MATRIX.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/MOBILE_STORE_DISTRIBUTION.md	same	added	NO CHANGE: byte-identical at review base
+docs/MOBILE_VALIDATOR.md	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+docs/NAMING.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/OBJECT_LAYER.md	same	added	NO CHANGE: byte-identical at review base
+docs/OPERATIONS.md	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/PARALLEL_EXECUTION.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/SETTLEMENT.md	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/SHARED_SECURITY.md	same	renamed	NO CHANGE: byte-identical at review base
+docs/SOLANA_RPC.md	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+docs/STORAGE.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/STORAGE_ENCRYPTION.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/STORAGE_MEASUREMENTS.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/audit/FINDINGS.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/audit/LIVE_STATUS.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/audit/MOBILE_CORE_REVIEW.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/audit/REVIEW_1.md	same	added	NO CHANGE: byte-identical at review base
+docs/audit/REVIEW_2.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/audit/TLG_REPORT.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/audit/live/engine-inventory.md	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+docs/audit/live/lane-a.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/audit/live/lane-b.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/audit/live/lane-c.md	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+docs/audit/live/lane-d.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/audit/live/legacy-storage-inventory.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/budzero/HASH_SUITES.md	same	added	NO CHANGE: byte-identical at review base
+docs/pq/classical_allowlist.toml	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/rehearsal/DRILLS_AND_RUNBOOK.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/rehearsal/RESULTS.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+docs/work/PACKAGES.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+execution/Cargo.toml	source_only	added	REJECT PLACEHOLDER: hash/digest success or verification-only shell is not a real NEAR/Plutus/TVM/UTXO execution environment
+execution/budzero/Cargo.toml	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+execution/budzero/src/main.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+execution/cairo/Cargo.toml	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+execution/cairo/src/main.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+execution/conformance/Cargo.toml	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+execution/conformance/README.md	source_only	added	REJECT PLACEHOLDER: hash/digest success or verification-only shell is not a real NEAR/Plutus/TVM/UTXO execution environment
+execution/conformance/src/lib.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+execution/evm/Cargo.toml	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+execution/evm/src/main.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+execution/evm/src/precompile_universal.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+execution/mock/Cargo.toml	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+execution/mock/src/main.rs	same	added	NO CHANGE: byte-identical at review base
+execution/move-sui/Cargo.toml	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+execution/move-sui/src/main.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+execution/move/Cargo.toml	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+execution/move/deny.toml	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+execution/move/src/main.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+execution/move/src/pointer/mod.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+execution/near/Cargo.toml	source_only	added	REJECT PLACEHOLDER: hash/digest success or verification-only shell is not a real NEAR/Plutus/TVM/UTXO execution environment
+execution/near/src/main.rs	source_only	added	REJECT PLACEHOLDER: hash/digest success or verification-only shell is not a real NEAR/Plutus/TVM/UTXO execution environment
+execution/plutus/Cargo.toml	source_only	added	REJECT PLACEHOLDER: hash/digest success or verification-only shell is not a real NEAR/Plutus/TVM/UTXO execution environment
+execution/plutus/src/main.rs	source_only	added	REJECT PLACEHOLDER: hash/digest success or verification-only shell is not a real NEAR/Plutus/TVM/UTXO execution environment
+execution/polkavm/Cargo.toml	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+execution/polkavm/src/main.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+execution/svm/Cargo.toml	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+execution/svm/src/main.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+execution/svm/src/pointer/mod.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+execution/tvm/Cargo.toml	source_only	added	REJECT PLACEHOLDER: hash/digest success or verification-only shell is not a real NEAR/Plutus/TVM/UTXO execution environment
+execution/tvm/src/main.rs	source_only	added	REJECT PLACEHOLDER: hash/digest success or verification-only shell is not a real NEAR/Plutus/TVM/UTXO execution environment
+execution/utxo/Cargo.toml	source_only	added	REJECT PLACEHOLDER: hash/digest success or verification-only shell is not a real NEAR/Plutus/TVM/UTXO execution environment
+execution/utxo/src/main.rs	source_only	added	REJECT PLACEHOLDER: hash/digest success or verification-only shell is not a real NEAR/Plutus/TVM/UTXO execution environment
+execution/wasm/Cargo.toml	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+execution/wasm/src/budlum_msg.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+execution/wasm/src/main.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+fuzz/Cargo.lock	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+fuzz/Cargo.toml	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+fuzz/README.md	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+fuzz/corpus/bud3_bof1_decode/abc.bof1	same	added	NO CHANGE: byte-identical at review base
+fuzz/corpus/bud3_qr_frame_decode/canonical-frame	same	added	NO CHANGE: byte-identical at review base
+fuzz/corpus/bud3_qr_frame_decode/header-only	same	added	NO CHANGE: byte-identical at review base
+fuzz/corpus/bud3_qr_frame_decode/ignorable-flag-nibble	same	added	NO CHANGE: byte-identical at review base
+fuzz/corpus/bud3_symbol_decode/two.sym	same	added	NO CHANGE: byte-identical at review base
+fuzz/corpus/uel_abi_frame/hello.frame	same	added	NO CHANGE: byte-identical at review base
+fuzz/corpus/uel_abi_frame/host-ok.frame	same	added	NO CHANGE: byte-identical at review base
+fuzz/corpus/uel_abi_frame/oversize-header.frame	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+fuzz/corpus/uel_abi_frame/wrong-version.frame	same	added	NO CHANGE: byte-identical at review base
+fuzz/fuzz_targets/bud3_bof1_decode.rs	same	added	NO CHANGE: byte-identical at review base
+fuzz/fuzz_targets/bud3_qr_frame_decode.rs	same	added	NO CHANGE: byte-identical at review base
+fuzz/fuzz_targets/bud3_symbol_decode.rs	same	added	NO CHANGE: byte-identical at review base
+fuzz/fuzz_targets/consensus_validate.rs	same	modified	NO CHANGE: byte-identical at review base
+fuzz/fuzz_targets/evm_deployment_proof.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+fuzz/fuzz_targets/uel_abi_frame.rs	same	added	NO CHANGE: byte-identical at review base
+fuzz/fuzz_targets/uel_foreign_envelopes.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+kani/Cargo.lock	same	added	NO CHANGE: byte-identical at review base
+kani/Cargo.toml	same	modified	NO CHANGE: byte-identical at review base
+mobile/android/PLAY_DECLARATION.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+mobile/android/README.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+mobile/android/app/build.gradle.kts	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+mobile/android/app/proguard-rules.pro	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+mobile/android/app/src/androidTest/java/dev/budlum/validator/boot/BootReceiverInstrumentedTest.kt	source_only	added	REJECT DUPLICATE PACKAGE: current network.budlum.validator Android implementation is not replaced by dev.budlum.validator copy
+mobile/android/app/src/androidTest/java/dev/budlum/validator/keys/KeyVaultInstrumentedTest.kt	source_only	added	REJECT DUPLICATE PACKAGE: current network.budlum.validator Android implementation is not replaced by dev.budlum.validator copy
+mobile/android/app/src/main/AndroidManifest.xml	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+mobile/android/app/src/main/java/dev/budlum/validator/BudlumApp.kt	source_only	added	REJECT DUPLICATE PACKAGE: current network.budlum.validator Android implementation is not replaced by dev.budlum.validator copy
+mobile/android/app/src/main/java/dev/budlum/validator/MainActivity.kt	source_only	added	REJECT DUPLICATE PACKAGE: current network.budlum.validator Android implementation is not replaced by dev.budlum.validator copy
+mobile/android/app/src/main/java/dev/budlum/validator/boot/BootReceiver.kt	source_only	added	REJECT DUPLICATE PACKAGE: current network.budlum.validator Android implementation is not replaced by dev.budlum.validator copy
+mobile/android/app/src/main/java/dev/budlum/validator/keys/KeyLookup.kt	source_only	added	REJECT DUPLICATE PACKAGE: current network.budlum.validator Android implementation is not replaced by dev.budlum.validator copy
+mobile/android/app/src/main/java/dev/budlum/validator/keys/KeyVault.kt	source_only	added	REJECT DUPLICATE PACKAGE: current network.budlum.validator Android implementation is not replaced by dev.budlum.validator copy
+mobile/android/app/src/main/java/dev/budlum/validator/keys/StrongBoxFallback.kt	source_only	added	REJECT DUPLICATE PACKAGE: current network.budlum.validator Android implementation is not replaced by dev.budlum.validator copy
+mobile/android/app/src/main/java/dev/budlum/validator/notify/Notifications.kt	source_only	added	REJECT DUPLICATE PACKAGE: current network.budlum.validator Android implementation is not replaced by dev.budlum.validator copy
+mobile/android/app/src/main/java/dev/budlum/validator/policy/Policy.kt	source_only	added	REJECT DUPLICATE PACKAGE: current network.budlum.validator Android implementation is not replaced by dev.budlum.validator copy
+mobile/android/app/src/main/java/dev/budlum/validator/service/ValidatorService.kt	source_only	added	REJECT DUPLICATE PACKAGE: current network.budlum.validator Android implementation is not replaced by dev.budlum.validator copy
+mobile/android/app/src/main/java/dev/budlum/validator/storage/ShareStore.kt	source_only	added	REJECT DUPLICATE PACKAGE: current network.budlum.validator Android implementation is not replaced by dev.budlum.validator copy
+mobile/android/app/src/main/java/dev/budlum/validator/work/AuditWorker.kt	source_only	added	REJECT DUPLICATE PACKAGE: current network.budlum.validator Android implementation is not replaced by dev.budlum.validator copy
+mobile/android/app/src/main/java/dev/budlum/validator/work/DeviceState.kt	source_only	added	REJECT DUPLICATE PACKAGE: current network.budlum.validator Android implementation is not replaced by dev.budlum.validator copy
+mobile/android/app/src/main/java/dev/budlum/validator/work/DutyLog.kt	source_only	added	REJECT DUPLICATE PACKAGE: current network.budlum.validator Android implementation is not replaced by dev.budlum.validator copy
+mobile/android/app/src/main/res/values-tr/strings.xml	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+mobile/android/app/src/main/res/values/strings.xml	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+mobile/android/app/src/test/java/dev/budlum/validator/keys/KeyLookupTest.kt	source_only	added	REJECT DUPLICATE PACKAGE: current network.budlum.validator Android implementation is not replaced by dev.budlum.validator copy
+mobile/android/app/src/test/java/dev/budlum/validator/keys/KeyVaultTest.kt	source_only	added	REJECT DUPLICATE PACKAGE: current network.budlum.validator Android implementation is not replaced by dev.budlum.validator copy
+mobile/android/app/src/test/java/dev/budlum/validator/keys/StrongBoxFallbackTest.kt	source_only	added	REJECT DUPLICATE PACKAGE: current network.budlum.validator Android implementation is not replaced by dev.budlum.validator copy
+mobile/android/app/src/test/java/dev/budlum/validator/policy/PolicyEngineTest.kt	source_only	added	REJECT DUPLICATE PACKAGE: current network.budlum.validator Android implementation is not replaced by dev.budlum.validator copy
+mobile/android/app/src/test/java/dev/budlum/validator/storage/ShareStoreTest.kt	source_only	added	REJECT DUPLICATE PACKAGE: current network.budlum.validator Android implementation is not replaced by dev.budlum.validator copy
+mobile/android/build.gradle.kts	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+mobile/android/devicetests/README.md	source_only	added	REJECT DUPLICATE PACKAGE: current network.budlum.validator Android implementation is not replaced by dev.budlum.validator copy
+mobile/android/fdroid/network.budlum.validator.yml	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+mobile/android/gradle.properties	source_only	added	REJECT DUPLICATE PACKAGE: current network.budlum.validator Android implementation is not replaced by dev.budlum.validator copy
+mobile/android/gradle/libs.versions.toml	source_only	added	REJECT DUPLICATE PACKAGE: current network.budlum.validator Android implementation is not replaced by dev.budlum.validator copy
+mobile/android/settings.gradle.kts	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+mobile/core/Cargo.lock	source_only	renamed	DEFER: mobile-core key/FFI surface needs a dedicated compatibility and secret-handling review
+mobile/core/Cargo.toml	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+mobile/core/DB_CHOICE.md	same	added	NO CHANGE: byte-identical at review base
+mobile/core/src/crypto.rs	source_only	added	DEFER: mobile-core key/FFI surface needs a dedicated compatibility and secret-handling review
+mobile/core/src/custody.rs	same	added	NO CHANGE: byte-identical at review base
+mobile/core/src/duty.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+mobile/core/src/error.rs	same	added	NO CHANGE: byte-identical at review base
+mobile/core/src/handover.rs	same	added	NO CHANGE: byte-identical at review base
+mobile/core/src/hash.rs	same	added	NO CHANGE: byte-identical at review base
+mobile/core/src/keys.rs	source_only	added	DEFER: mobile-core key/FFI surface needs a dedicated compatibility and secret-handling review
+mobile/core/src/lib.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+mobile/core/src/policy.rs	same	added	NO CHANGE: byte-identical at review base
+mobile/core/src/presence.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+mobile/core/src/quota.rs	same	added	NO CHANGE: byte-identical at review base
+mobile/core/src/relay.rs	same	added	NO CHANGE: byte-identical at review base
+mobile/core/src/store.rs	same	added	NO CHANGE: byte-identical at review base
+mobile/core/tests/duty_boundaries.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+mobile/core/tests/operator_key.rs	source_only	added	DEFER: mobile-core key/FFI surface needs a dedicated compatibility and secret-handling review
+mobile/ffi/Cargo.lock	source_only	added	DEFER: mobile-core key/FFI surface needs a dedicated compatibility and secret-handling review
+mobile/ffi/Cargo.toml	source_only	added	DEFER: mobile-core key/FFI surface needs a dedicated compatibility and secret-handling review
+mobile/ffi/src/lib.rs	source_only	added	DEFER: mobile-core key/FFI surface needs a dedicated compatibility and secret-handling review
+mobile/ffi/uniffi-bindgen.rs	source_only	added	DEFER: mobile-core key/FFI surface needs a dedicated compatibility and secret-handling review
+mobile/ffi/uniffi.toml	source_only	added	DEFER: mobile-core key/FFI surface needs a dedicated compatibility and secret-handling review
+mobile/ios/APP_STORE.md	source_only	added	DEFER: reconcile with current BudlumValidator iOS implementation and mobile FFI before adding a second app architecture
+mobile/ios/Package.swift	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+mobile/ios/README.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+mobile/ios/Scripts/check_class_parity.py	source_only	added	DEFER: reconcile with current BudlumValidator iOS implementation and mobile FFI before adding a second app architecture
+mobile/ios/Sources/BudlumValidatorKit/BackgroundDuty.swift	source_only	added	DEFER: reconcile with current BudlumValidator iOS implementation and mobile FFI before adding a second app architecture
+mobile/ios/Sources/BudlumValidatorKit/DutyLog.swift	source_only	added	DEFER: reconcile with current BudlumValidator iOS implementation and mobile FFI before adding a second app architecture
+mobile/ios/Sources/BudlumValidatorKit/KeyVault.swift	source_only	added	DEFER: reconcile with current BudlumValidator iOS implementation and mobile FFI before adding a second app architecture
+mobile/ios/Sources/BudlumValidatorKit/MobileCoreBinding.swift	source_only	added	DEFER: reconcile with current BudlumValidator iOS implementation and mobile FFI before adding a second app architecture
+mobile/ios/Sources/BudlumValidatorKit/PolicyEngine.swift	source_only	added	DEFER: reconcile with current BudlumValidator iOS implementation and mobile FFI before adding a second app architecture
+mobile/ios/Sources/BudlumValidatorKit/ShareStore.swift	source_only	added	DEFER: reconcile with current BudlumValidator iOS implementation and mobile FFI before adding a second app architecture
+mobile/ios/Sources/BudlumValidatorKit/ValidatorClass.swift	source_only	added	DEFER: reconcile with current BudlumValidator iOS implementation and mobile FFI before adding a second app architecture
+mobile/ios/Sources/BudlumValidatorUI/BudlumValidatorApp.swift	source_only	added	DEFER: reconcile with current BudlumValidator iOS implementation and mobile FFI before adding a second app architecture
+mobile/ios/Sources/BudlumValidatorUI/DashboardView.swift	source_only	added	DEFER: reconcile with current BudlumValidator iOS implementation and mobile FFI before adding a second app architecture
+mobile/ios/Sources/BudlumValidatorUI/OnboardingView.swift	source_only	added	DEFER: reconcile with current BudlumValidator iOS implementation and mobile FFI before adding a second app architecture
+mobile/ios/Sources/BudlumValidatorUI/SecurityView.swift	source_only	added	DEFER: reconcile with current BudlumValidator iOS implementation and mobile FFI before adding a second app architecture
+mobile/ios/Tests/BudlumValidatorKitTests/BackgroundDutyTests.swift	source_only	added	DEFER: reconcile with current BudlumValidator iOS implementation and mobile FFI before adding a second app architecture
+mobile/ios/Tests/BudlumValidatorKitTests/ClassParametersTests.swift	source_only	added	DEFER: reconcile with current BudlumValidator iOS implementation and mobile FFI before adding a second app architecture
+mobile/ios/Tests/BudlumValidatorKitTests/DutyLogTests.swift	source_only	added	DEFER: reconcile with current BudlumValidator iOS implementation and mobile FFI before adding a second app architecture
+mobile/ios/Tests/BudlumValidatorKitTests/KeyVaultTests.swift	source_only	added	DEFER: reconcile with current BudlumValidator iOS implementation and mobile FFI before adding a second app architecture
+mobile/ios/Tests/BudlumValidatorKitTests/PolicyEngineTests.swift	source_only	added	DEFER: reconcile with current BudlumValidator iOS implementation and mobile FFI before adding a second app architecture
+mobile/ios/Tests/BudlumValidatorKitTests/ShareStoreTests.swift	source_only	added	DEFER: reconcile with current BudlumValidator iOS implementation and mobile FFI before adding a second app architecture
+mobile/ios/devicetests/README.md	source_only	added	DEFER: reconcile with current BudlumValidator iOS implementation and mobile FFI before adding a second app architecture
+mobile/tools/log-analyzer/Cargo.toml	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+mobile/tools/log-analyzer/src/main.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+ops/BACKUP_AND_RESTORE.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+ops/Caddyfile.testnet	same	modified	NO CHANGE: byte-identical at review base
+ops/budlum-core.service	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+ops/monitoring/alerts.yml	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+ops/monitoring/grafana/budlum-testnet.json	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+ops/monitoring/testnet-local-prometheus.yml	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+ops/prometheus.yml	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+ops/rehearsal/README.md	source_only	added	DEFER TOOLING: source audit/rehearsal helpers require current-layout and fail-closed validation before registration
+ops/rehearsal/drills/run_all.sh	source_only	added	DEFER TOOLING: source audit/rehearsal helpers require current-layout and fail-closed validation before registration
+ops/rehearsal/drills/t1_mobile_mass_departure.sh	source_only	added	DEFER TOOLING: source audit/rehearsal helpers require current-layout and fail-closed validation before registration
+ops/rehearsal/drills/t2_full_departure.sh	source_only	added	DEFER TOOLING: source audit/rehearsal helpers require current-layout and fail-closed validation before registration
+ops/rehearsal/drills/t3_seat_stall.sh	source_only	added	DEFER TOOLING: source audit/rehearsal helpers require current-layout and fail-closed validation before registration
+ops/rehearsal/drills/t4_mobile_return.sh	source_only	added	DEFER TOOLING: source audit/rehearsal helpers require current-layout and fail-closed validation before registration
+ops/rehearsal/drills/t5_load.sh	source_only	added	DEFER TOOLING: source audit/rehearsal helpers require current-layout and fail-closed validation before registration
+ops/rehearsal/drills/t6_tooling.sh	source_only	added	DEFER TOOLING: source audit/rehearsal helpers require current-layout and fail-closed validation before registration
+ops/rehearsal/drills/t7_rpc_load.sh	source_only	added	DEFER TOOLING: source audit/rehearsal helpers require current-layout and fail-closed validation before registration
+ops/rehearsal/genesis_rehearsal.py	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+ops/rehearsal/genesis_rehearsal.sh	same	added	NO CHANGE: byte-identical at review base
+ops/rehearsal/rehearsal-topology.toml	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+ops/rehearsal/tests/test_genesis_rehearsal.py	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+ops/scripts/rpc_surface_audit.py	source_only	added	DEFER TOOLING: source audit/rehearsal helpers require current-layout and fail-closed validation before registration
+ops/scripts/tree_compatibility_audit.py	source_only	added	DEFER TOOLING: source audit/rehearsal helpers require current-layout and fail-closed validation before registration
+ops/testnet-local.yml	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+proto/budlum/execution/v1/ee.proto	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+proto/budlum/network/protocol.proto	same	modified	NO CHANGE: byte-identical at review base
+proto/budlum/storage/v3/bud3.proto	same	added	NO CHANGE: byte-identical at review base
+src/account_abstraction/quantum_account.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/account_abstraction/registry.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/ai/answer_proof_bundle.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/ai/mod.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/ai/registry.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/ai/types.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/ai/verification_layer.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/ai/verification_level.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/app_registry/mod.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/bin/bud-migrate.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/bin/bud.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/bin/budlum-domain-producer.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/bin/budlum-faucet.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/bin/budlum-indexer.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/bin/support/http.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/bns/bud3.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/bns/mod.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/chain/blockchain.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/chain/chain_actor.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/chain/finality.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/chain/genesis.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/chain/genesis_ceremony.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/chain/mod.rs	same	modified	NO CHANGE: byte-identical at review base
+src/chain/snapshot.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/chain/state_recovery/health.rs	different	renamed	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/chain/state_recovery/mempool.rs	same	renamed	NO CHANGE: byte-identical at review base
+src/chain/state_recovery/mod.rs	same	added	NO CHANGE: byte-identical at review base
+src/chain/state_recovery/stage.rs	different	renamed	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/chain/state_recovery/tick.rs	same	renamed	NO CHANGE: byte-identical at review base
+src/cli/commands.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/consensus/filiz.rs	same	modified	NO CHANGE: byte-identical at review base
+src/consensus/mod.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/consensus/pos.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/consensus/pow.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/core/account.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/core/address.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/core/block.rs	same	modified	NO CHANGE: byte-identical at review base
+src/core/chain_config.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/core/encoding.rs	same	modified	NO CHANGE: byte-identical at review base
+src/core/governance.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/core/metrics.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/core/transaction.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/cross_domain/bridge_tx.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/cross_domain/evm/account_proof.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/cross_domain/evm/mod.rs	same	modified	NO CHANGE: byte-identical at review base
+src/cross_domain/evm/rlp.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/cross_domain/evm/sync_committee.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/cross_domain/evm/verify.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/cross_domain/external/external_tx.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/cross_domain/external/mod.rs	same	modified	NO CHANGE: byte-identical at review base
+src/cross_domain/external/phase_a_dual.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/cross_domain/external/registry.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/cross_domain/external/zkvm_proof.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/crypto/ctx.rs	same	modified	NO CHANGE: byte-identical at review base
+src/crypto/domain_tags.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/crypto/key_file.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/crypto/mod.rs	same	modified	NO CHANGE: byte-identical at review base
+src/crypto/pkcs11.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/crypto/pq.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/crypto/pq_vector_tests.rs	same	modified	NO CHANGE: byte-identical at review base
+src/crypto/primitives.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/crypto/scheme.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/crypto/signer.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/data_market/mod.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/domain/finality_adapter.rs	same	modified	NO CHANGE: byte-identical at review base
+src/domain/mod.rs	same	modified	NO CHANGE: byte-identical at review base
+src/domain/pq_canonical.rs	same	modified	NO CHANGE: byte-identical at review base
+src/domain/producer.rs	same	modified	NO CHANGE: byte-identical at review base
+src/education_domain/mod.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/budzero_ee/budzero_ee_tests.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/budzero_ee/mod.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/coordinator/alias.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/coordinator/assets/mod.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/coordinator/assets/svm_move_pointers.rs	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+src/execution/coordinator/conformance.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/coordinator/conformance_tests.rs	same	added	NO CHANGE: byte-identical at review base
+src/execution/coordinator/coordinator_tests.rs	same	added	NO CHANGE: byte-identical at review base
+src/execution/coordinator/evm_ee.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/coordinator/foreign/aptos.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/coordinator/foreign/bcs_admission.rs	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+src/execution/coordinator/foreign/cosmos.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/coordinator/foreign/ethereum.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/coordinator/foreign/foreign_tests.rs	same	added	NO CHANGE: byte-identical at review base
+src/execution/coordinator/foreign/mod.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/coordinator/foreign/solana.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/coordinator/foreign/sui.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/coordinator/gas.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/coordinator/migration/dependencies.rs	different	added	RETAIN CURRENT: hardened PR61 migration authority, pricing, proof and quote behavior is not overwritten
+src/execution/coordinator/migration/deployment.rs	different	added	RETAIN CURRENT: hardened PR61 migration authority, pricing, proof and quote behavior is not overwritten
+src/execution/coordinator/migration/fee.rs	different	added	RETAIN CURRENT: hardened PR61 migration authority, pricing, proof and quote behavior is not overwritten
+src/execution/coordinator/migration/mod.rs	different	added	RETAIN CURRENT: hardened PR61 migration authority, pricing, proof and quote behavior is not overwritten
+src/execution/coordinator/migration/storage_root.rs	different	added	RETAIN CURRENT: hardened PR61 migration authority, pricing, proof and quote behavior is not overwritten
+src/execution/coordinator/mod.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/coordinator/move_ee.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/coordinator/overlay.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/coordinator/review_2_attack_tests.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/coordinator/scheduler/mod.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/coordinator/scheduler/tests.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/coordinator/state.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/coordinator/svm_ee.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/coordinator/uel_wp27_wp29_wp30_tests.rs	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+src/execution/coordinator/uel_wp31_wp32_tests.rs	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+src/execution/coordinator/universal_call.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/coordinator/wasm_ee.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/coordinator/worker.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/ee.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/executor.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/mod.rs	same	modified	NO CHANGE: byte-identical at review base
+src/execution/proof_verifier.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/execution/zkvm.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/gateway/atlas.rs	source_only	modified	REJECT RESTORATION: deleted legacy gateway tree is not reintroduced without an explicit migration review
+src/gateway/passport.rs	source_only	modified	REJECT RESTORATION: deleted legacy gateway tree is not reintroduced without an explicit migration review
+src/gateway/service.rs	source_only	modified	REJECT RESTORATION: deleted legacy gateway tree is not reintroduced without an explicit migration review
+src/lib.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/light_client/mod.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/main.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/mempool/duty_lane.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/mempool/lanes.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/mempool/mod.rs	same	modified	NO CHANGE: byte-identical at review base
+src/mempool/pool.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/network/mod.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/network/node.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/network/peer_manager.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/network/proto_conversions.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/network/protocol.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/object_layer/charter.rs	same	added	NO CHANGE: byte-identical at review base
+src/object_layer/family/cosmwasm.rs	same	added	NO CHANGE: byte-identical at review base
+src/object_layer/family/encoding.rs	same	added	NO CHANGE: byte-identical at review base
+src/object_layer/family/evm.rs	same	added	NO CHANGE: byte-identical at review base
+src/object_layer/family/mod.rs	same	added	NO CHANGE: byte-identical at review base
+src/object_layer/family/move.rs	same	added	NO CHANGE: byte-identical at review base
+src/object_layer/family/svm.rs	same	added	NO CHANGE: byte-identical at review base
+src/object_layer/ids.rs	same	added	NO CHANGE: byte-identical at review base
+src/object_layer/mod.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/object_layer/pairs.rs	same	added	NO CHANGE: byte-identical at review base
+src/object_layer/registry.rs	same	added	NO CHANGE: byte-identical at review base
+src/object_layer/rule.rs	same	added	NO CHANGE: byte-identical at review base
+src/object_layer/tests.rs	same	added	NO CHANGE: byte-identical at review base
+src/object_layer/tx.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/persistence/db.rs	different	renamed	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/persistence/mod.rs	same	added	NO CHANGE: byte-identical at review base
+src/persistence/pruning.rs	different	renamed	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/persistence/state_trie.rs	same	renamed	NO CHANGE: byte-identical at review base
+src/persistence/traits.rs	same	renamed	NO CHANGE: byte-identical at review base
+src/persistence/witness_retention.rs	same	renamed	NO CHANGE: byte-identical at review base
+src/prover/mod.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/registry/evidence.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/registry/liveness.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/registry/params.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/registry/permissionless.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/relayer/worker.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/rpc/api.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/rpc/compat/aptos/mod.rs	source_only	added	REJECT DUPLICATE LAYOUT: canonical current src/rpc/compat/aptos.rs remains the module owner
+src/rpc/compat/aptos/move_worker.rs	source_only	added	DEFER: reconcile useful Aptos worker behavior into canonical aptos.rs rather than mounting a duplicate module
+src/rpc/compat/aptos/tests.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/rpc/compat/aptos_coordinator.rs	source_only	added	DEFER: reconcile useful Aptos worker behavior into canonical aptos.rs rather than mounting a duplicate module
+src/rpc/compat/compat_tests.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/rpc/compat/cosmos.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/rpc/compat/ethereum.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/rpc/compat/mod.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/rpc/compat/solana/mod.rs	source_only	added	DEFER: reconcile subscriptions/coordinator behavior into canonical solana.rs with RPC table and runtime tests
+src/rpc/compat/solana/subscriptions.rs	source_only	added	DEFER: reconcile subscriptions/coordinator behavior into canonical solana.rs with RPC table and runtime tests
+src/rpc/compat/solana/tests.rs	source_only	added	DEFER: reconcile subscriptions/coordinator behavior into canonical solana.rs with RPC table and runtime tests
+src/rpc/compat/solana_coordinator.rs	source_only	added	DEFER: reconcile subscriptions/coordinator behavior into canonical solana.rs with RPC table and runtime tests
+src/rpc/compat/starknet/mod.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/rpc/compat/sui/mod.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/rpc/method_class.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/rpc/method_coverage.rs	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+src/rpc/mod.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/rpc/server.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/rpc/tests.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/settlement/domains.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/settlement/graft.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/settlement/proof_market.rs	same	modified	NO CHANGE: byte-identical at review base
+src/settlement/registries.rs	same	modified	NO CHANGE: byte-identical at review base
+src/settlement/root_seal.rs	same	modified	NO CHANGE: byte-identical at review base
+src/settlement/shared_security.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/sharding/mod.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/socialfi/mod.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/socialfi/nft_folders.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/access_tiering.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/admission.rs	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+src/storage/bud3/bof1.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/compression_context.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/content_id.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/content_ref.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/custody.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/dedup_index.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/delete.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/fees.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/fountain.rs	different	added	RETAINED+ADAPTED: current RFC 6330 core retained; public per-encoder max_esi accessor added
+src/storage/bud3/frame.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/grants.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/keys.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/limits.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/live.rs	different	added	RETAINED+ADAPTED: current BLG-315 core retained; per-segment repair-limit constructor added
+src/storage/bud3/live_broadcast.rs	source_only	added	ADAPTED: integrated as unwired WP-55 2/N with sticky errors and encoder-bounded repair plans
+src/storage/bud3/meter.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/mod.rs	different	added	RETAINED+ADAPTED: current exports retained; only live_broadcast and richer live exports added
+src/storage/bud3/pipeline.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/placement.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/predicates.rs	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+src/storage/bud3/private_dedup.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/qr.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/registry.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/repair.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/replace.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/seal.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/segment.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/two_path.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/tx.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/types.rs	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+src/storage/bud3/upload.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/varint.rs	same	added	NO CHANGE: byte-identical at review base
+src/storage/bud3/video.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/view.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/bud3/volume.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/erasure.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/manifest.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/mod.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/pact_binding.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/storage/qr_reemit.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/tests/alert_rules_reference_existing_metrics.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/tests/alerts_have_runbook_entries.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/tests/audit_findings_locks.rs	source_only	modified	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+src/tests/audit_lane_a.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/tests/backup_covers_persisted_paths.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/tests/block_door_harness.rs	same	modified	NO CHANGE: byte-identical at review base
+src/tests/bridge_negatives.rs	same	modified	NO CHANGE: byte-identical at review base
+src/tests/bud3_custody_and_repair.rs	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+src/tests/bud3_door.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/tests/bud3_types.rs	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+src/tests/byzantine_settlement.rs	same	modified	NO CHANGE: byte-identical at review base
+src/tests/caddy_edges_match_the_services.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/tests/chaos.rs	same	modified	NO CHANGE: byte-identical at review base
+src/tests/compose_topology_matches_services.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/tests/conformance_locks.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/tests/disaster_recovery.rs	same	modified	NO CHANGE: byte-identical at review base
+src/tests/distributed_settlement.rs	same	modified	NO CHANGE: byte-identical at review base
+src/tests/finality_adversarial.rs	same	modified	NO CHANGE: byte-identical at review base
+src/tests/finality_live_path.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/tests/global_header_sequence.rs	same	modified	NO CHANGE: byte-identical at review base
+src/tests/hard_prune.rs	same	modified	NO CHANGE: byte-identical at review base
+src/tests/hardening.rs	same	modified	NO CHANGE: byte-identical at review base
+src/tests/hardening_h2_locks.rs	same	modified	NO CHANGE: byte-identical at review base
+src/tests/hardening_h5_h7_locks.rs	same	modified	NO CHANGE: byte-identical at review base
+src/tests/hardening_locks.rs	same	modified	NO CHANGE: byte-identical at review base
+src/tests/integration.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/tests/liveness_consensus.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/tests/load_test.rs	same	modified	NO CHANGE: byte-identical at review base
+src/tests/mod.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/tests/multi_consensus_locks.rs	same	modified	NO CHANGE: byte-identical at review base
+src/tests/p01_consensus_rounds.rs	source_only	modified	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+src/tests/permissionless_e2e.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/tests/persistence_move.rs	same	added	NO CHANGE: byte-identical at review base
+src/tests/readiness_metrics.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/tests/regression_ai_storage.rs	same	added	NO CHANGE: byte-identical at review base
+src/tests/regression_bridge.rs	same	added	NO CHANGE: byte-identical at review base
+src/tests/regression_chain.rs	same	added	NO CHANGE: byte-identical at review base
+src/tests/regression_ops_crypto.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/tests/relayer_e2e.rs	same	modified	NO CHANGE: byte-identical at review base
+src/tests/relayer_liveness.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/tests/replay_audit.rs	same	modified	NO CHANGE: byte-identical at review base
+src/tests/scrape_topology_covers_the_rules.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/tests/settlement_prod.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/tests/snapshot_chaos.rs	same	modified	NO CHANGE: byte-identical at review base
+src/tests/socialfi.rs	same	modified	NO CHANGE: byte-identical at review base
+src/tests/state_recovery.rs	same	renamed	NO CHANGE: byte-identical at review base
+src/tests/tokenomics.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/tests/validator_classes.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/tests/wp14_handover_recovery.rs	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+src/tests/wp17_state_hardening.rs	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+src/tests/wp44_domains_bridge_settlement.rs	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+src/tests/wp46_ceremony_and_drills.rs	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+src/tests/wp48_review2_security.rs	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+src/tokenomics/reward_pool.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/validators/committee.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/validators/handover.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/validators/mod.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+src/validators/presence.rs	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+supply-chain/audits.toml	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+tests/churn/main.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+tests/vectors/aptos/pinned_scheme_ids.json	source_only	added	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+tests/vectors/bud3/bof1/README.md	same	added	NO CHANGE: byte-identical at review base
+tests/vectors/bud3/codec/README.md	same	added	NO CHANGE: byte-identical at review base
+tests/vectors/bud3/corpus/image.png	source_only	renamed	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+tests/vectors/bud3/corpus/text.log	source_only	renamed	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+tests/vectors/bud3/corpus/video.yuv	source_only	renamed	DEFER SOURCE-ONLY SLICE: not imported by the live-broadcast review; requires its owning package review
+tests/vectors/bud3/custody/README.md	same	added	NO CHANGE: byte-identical at review base
+tests/vectors/bud3/fountain/README.md	same	added	NO CHANGE: byte-identical at review base
+tests/vectors/bud3/fountain/p0_k17.sha256	same	added	NO CHANGE: byte-identical at review base
+tests/vectors/bud3/placement/README.md	same	added	NO CHANGE: byte-identical at review base
+tests/vectors/presence/v1/README.md	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+tests/vectors/presence/v1/digest.bin	same	added	NO CHANGE: byte-identical at review base
+tests/vectors/presence/v1/preimage.bin	same	added	NO CHANGE: byte-identical at review base
+xtask/gates/Cargo.lock	same	modified	NO CHANGE: byte-identical at review base
+xtask/gates/Cargo.toml	same	modified	NO CHANGE: byte-identical at review base
+xtask/gates/pins/budzero-tree.pins	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/bud3_custody_proofs.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/bud3_custody_rewards.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/bud3_fee_uses_physical_bytes.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/bud3_forbidden_phrases.rs	same	added	NO CHANGE: byte-identical at review base
+xtask/gates/src/gates/bud3_object_is_universal.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/bud3_placement.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/bud3_proto_is_total.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/bud3_qr_is_presentation.rs	same	added	NO CHANGE: byte-identical at review base
+xtask/gates/src/gates/bud3_repair_fires.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/canonical_programs_reproduce.rs	same	renamed	NO CHANGE: byte-identical at review base
+xtask/gates/src/gates/ci_workflow_guards.rs	same	modified	NO CHANGE: byte-identical at review base
+xtask/gates/src/gates/classical_crypto_is_paired.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/concept_names.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/domain_tags.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/economy_invariants.rs	same	modified	NO CHANGE: byte-identical at review base
+xtask/gates/src/gates/ee_workers_build_with_unwind.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/explorer_parity.rs	different	renamed	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/explorer_patchset.rs	different	renamed	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/geiger.rs	same	modified	NO CHANGE: byte-identical at review base
+xtask/gates/src/gates/indexing_is_not_new.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/license_consistency.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/lock_failures.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/metrics_are_written.rs	same	modified	NO CHANGE: byte-identical at review base
+xtask/gates/src/gates/module_coverage.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/multi_ratio_consensus.rs	current_only	removed	REJECT DELETION IN THIS SLICE: current legacy-removal/gate migration is not replaced by wholesale source deletion
+xtask/gates/src/gates/network_hardening_gate.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/nightly_workflows_are_required.rs	same	added	NO CHANGE: byte-identical at review base
+xtask/gates/src/gates/no_constant_security_verdicts.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/no_float_in_consensus_paths.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/no_idle_code.rs	same	modified	NO CHANGE: byte-identical at review base
+xtask/gates/src/gates/no_legacy_storage.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/no_out_of_block_consensus_writes.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/pq_claims_are_backed.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/pq_ctx_is_bound.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/readme_claims_are_wired.rs	source_only	added	DEFER GATE: reconcile with current README gates and claim inventory before registration
+xtask/gates/src/gates/readme_definition_block_is_verbatim.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/readme_has_no_placeholders.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/refusals_no_mutate.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/relay.rs	same	modified	NO CHANGE: byte-identical at review base
+xtask/gates/src/gates/rust_syntax_is_parseable.rs	source_only	added	REJECT FAIL-OPEN GATE: unreadable, metadata-failing and over-8-MiB Rust files are silently skipped
+xtask/gates/src/gates/slash_expression.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/state_recovery_door.rs	same	renamed	NO CHANGE: byte-identical at review base
+xtask/gates/src/gates/suppressions_are_justified.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/tree_is_english.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/tree_pin.rs	same	modified	NO CHANGE: byte-identical at review base
+xtask/gates/src/gates/workflows_cover_every_workspace.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/src/gates/zkvm_refuses_untrusted_proofs.rs	same	renamed	NO CHANGE: byte-identical at review base
+xtask/gates/src/main.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/gates/tests/repository_locks.rs	different	added	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/release/Cargo.toml	same	modified	NO CHANGE: byte-identical at review base
+xtask/tools/Cargo.toml	same	modified	NO CHANGE: byte-identical at review base
+xtask/tools/src/audit_guard.rs	different	modified	RETAIN CURRENT IN THIS SLICE: source variant not checked out over later integrated corrections
+xtask/tools/src/prepush.rs	same	modified	NO CHANGE: byte-identical at review base
+xtask/tools/src/seed_corpus.rs	same	modified	NO CHANGE: byte-identical at review base
