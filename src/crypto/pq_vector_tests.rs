@@ -168,9 +168,17 @@ fn pq_vectors_acvp_mldsa_sigver() {
                 t.get("id").map(ToString::to_string).unwrap_or_default(),
                 field(t, "reason")
             );
-            // The facade agrees whenever the context policy lets the call through.
-            if !ctx.is_empty() {
+            // The facade agrees whenever the context policy lets the call
+            // through; a vector context that is not a registered Budlum
+            // context is refused by the facade before any key is read,
+            // while the primitive above still checks the vector.
+            if crate::crypto::ctx::is_registered(&ctx) {
                 assert_eq!(verify(scheme, &pk, &msg, &ctx, &sig).is_ok(), expected);
+            } else if !ctx.is_empty() && ctx.len() <= 255 {
+                assert_eq!(
+                    verify(scheme, &pk, &msg, &ctx, &sig),
+                    Err(super::PqError::UnregisteredContext)
+                );
             }
             if expected {
                 valid += 1;
@@ -206,11 +214,17 @@ fn pq_vectors_wycheproof_mldsa() {
                 let (a, b) = (raw(MlDsaBackend::RustCrypto), raw(MlDsaBackend::Libcrux));
                 assert_eq!(a, b, "wycheproof {id}: the two libraries disagree");
                 assert_eq!(a, expected, "wycheproof {id}: {}", field(t, "comment"));
-                if !ctx.is_empty() {
+                if crate::crypto::ctx::is_registered(&ctx) {
                     assert_eq!(
                         verify(scheme, &pk, &msg, &ctx, &sig).is_ok(),
                         expected,
                         "wycheproof {id} through the facade"
+                    );
+                } else if !ctx.is_empty() && ctx.len() <= 255 {
+                    assert_eq!(
+                        verify(scheme, &pk, &msg, &ctx, &sig),
+                        Err(super::PqError::UnregisteredContext),
+                        "wycheproof {id}: an unregistered context is refused"
                     );
                 }
                 total += 1;
