@@ -582,7 +582,7 @@ impl GenesisConfig {
             let network = crate::core::chain_config::Network::from_chain_id(self.chain_id);
             return Err(format!(
                 "Genesis reward_pool.enabled is true on {:?} (chain {}), which has no reward-pool schedule in \
-                 the binary; a mainnet schedule is Ayaz's decision (D-04)",
+                 the binary; a mainnet schedule is an open governance decision",
                 network, self.chain_id
             ));
         }
@@ -813,6 +813,7 @@ impl GenesisConfig {
             storage_root: None,
             shards_root: None,
             witness_root: None,
+            seat_participation: None,
         };
 
         block.tx_root = block.calculate_tx_root();
@@ -1389,6 +1390,74 @@ mod tests {
             .is_err());
     }
 
+    /// The supply audit reads every source in one total: plain allocations,
+    /// the tokenomics categories, the genesis validator stake and the reward
+    /// pool. Each part fitting the supply on its own is not the same as their
+    /// sum fitting it.
+    #[test]
+    fn genesis_supply_audit_counts_every_source() {
+        use crate::tokenomics::{bud, BUD_TOTAL_SUPPLY};
+
+        // Every shipped profile keeps what genesis hands out inside the fixed
+        // supply, whether it seeds a distribution or a plain allocation.
+        let mut testnet = testnet_genesis();
+        testnet.validators = vec![address(0x31), address(0x32)];
+        let mut mainnet = mainnet_genesis();
+        mainnet.tokenomics_addresses = Some(ceremony_tokenomics_addresses());
+        for genesis in [testnet, mainnet, devnet_genesis()] {
+            let state = genesis.build_state();
+            let held = state.circulating_supply()
+                + state.total_staked_supply()
+                + state.total_unbonding_supply()
+                + state.total_registry_role_bonded_supply();
+            assert!(
+                held <= u128::from(BUD_TOTAL_SUPPLY),
+                "genesis seeds {held} base units, above the fixed supply"
+            );
+        }
+
+        // The categories are the distribution, and the audit reads their sum
+        // rather than trusting the rows one at a time.
+        let params = testnet_genesis().bud_tokenomics.expect("testnet tokenomics");
+        assert_eq!(params.total(), BUD_TOTAL_SUPPLY);
+
+        // Stake and pool both come out of the ecosystem share, so a genesis
+        // whose share cannot cover them is refused even while every category
+        // row is individually inside the supply.
+        let mut tight = testnet_genesis();
+        let mut params = tight.bud_tokenomics.expect("testnet tokenomics");
+        let moved = params
+            .ecosystem
+            .checked_sub(bud(1))
+            .expect("the ecosystem share is larger than one BUD");
+        params.ecosystem = bud(1);
+        params.community += moved;
+        tight.bud_tokenomics = Some(params);
+        assert_eq!(
+            tight.bud_tokenomics.expect("tokenomics").total(),
+            BUD_TOTAL_SUPPLY,
+            "the distribution stays balanced"
+        );
+        let error = tight
+            .validate_total_issuance()
+            .expect_err("a pool the ecosystem share cannot cover is refused");
+        assert!(error.contains("exceed the ecosystem share"), "{error}");
+
+        // Without a distribution the stake belongs to no category, so it adds
+        // to the total: the same allocation passes alone and fails once the
+        // stake is counted with it.
+        let mut plain = GenesisConfig::new(Network::Devnet.chain_id().value());
+        plain.validators = vec![address(0x41), address(0x42)];
+        let stake = plain.validator_stake();
+        plain.allocations = vec![(address(0x43), BUD_TOTAL_SUPPLY)];
+        let error = plain
+            .validate_total_issuance()
+            .expect_err("allocations plus stake exceed the fixed supply");
+        assert!(error.contains("above the fixed supply"), "{error}");
+        plain.allocations = vec![(address(0x43), BUD_TOTAL_SUPPLY - 2 * stake)];
+        assert!(plain.validate_total_issuance().is_ok());
+    }
+
     /// A team vesting shorter than its cliff is a cliff without a schedule:
     /// the ceremony refuses it instead of unlocking the allocation at once.
     #[test]
@@ -1818,6 +1887,7 @@ mod tests {
                 agg_sig_bls: vec![],
                 bitmap: vec![],
                 set_hash: snapshot.set_hash.clone(),
+                seat_table_version: 0,
             };
             let status = if kind == "PoS" {
                 crate::domain::PoSFinalityAdapter.verify_finality(
@@ -2128,7 +2198,10 @@ mod mainnet_genesis_tests {
         let error = genesis
             .validate_reward_pool_flag()
             .expect_err("a mainnet pool has no schedule to pay from");
-        assert!(error.contains("D-04"), "error names the decision: {error}");
+        assert!(
+            error.contains("governance decision"),
+            "error names the decision: {error}"
+        );
     }
 
     #[test]

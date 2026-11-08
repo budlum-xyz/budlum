@@ -383,17 +383,29 @@ impl PruningManager {
     }
 
     pub fn save_snapshot_v2(&self, snapshot: &StateSnapshotV2) -> Result<(), String> {
-        use std::fs;
+        use std::fs::{self, File};
+        use std::io::Write as _;
         use std::path::Path;
         let dir = Path::new(&self.snapshot_dir);
         if !dir.exists() {
             fs::create_dir_all(dir).map_err(|e| format!("Failed to create snapshot dir: {e}"))?;
         }
         let filename = format!("snapshot_{}.json", snapshot.height);
+        let tmp_filename = format!(".snapshot_{}.json.tmp", snapshot.height);
         let path = dir.join(filename);
+        let tmp_path = dir.join(tmp_filename);
         let data = serde_json::to_string_pretty(snapshot)
             .map_err(|e| format!("Failed to serialize snapshot v2: {e}"))?;
-        fs::write(&path, data).map_err(|e| format!("Failed to write snapshot v2: {e}"))?;
+        let mut tmp_file =
+            File::create(&tmp_path).map_err(|e| format!("Failed to create snapshot tmp: {e}"))?;
+        tmp_file
+            .write_all(data.as_bytes())
+            .map_err(|e| format!("Failed to write snapshot v2: {e}"))?;
+        tmp_file
+            .sync_all()
+            .map_err(|e| format!("Failed to sync snapshot v2: {e}"))?;
+        drop(tmp_file);
+        fs::rename(&tmp_path, &path).map_err(|e| format!("Failed to commit snapshot v2: {e}"))?;
         println!(
             "Snapshot V2 saved: {} ({} accounts)",
             path.display(),
@@ -536,15 +548,21 @@ pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 /// byte-exact: at 6 and below the two fields cannot affect the digest.
 ///
 /// Schema 10 carries and digests the settlement registries (testnet
-///): state that moved from `Blockchain` into the account
+/// State that moved from `Blockchain` into the account
 /// state when its writes became transaction doors. A node that dropped a
 /// registration would serve a chain that is not the chain's; at 9 and below
 /// the field cannot affect the digest.
 ///
-/// Schema 11 carries and digests the scheme and suite statuses of the chain
-///. A status decides whether a signature family still
+/// Schema 11 carries and digests the scheme and suite statuses of the chain.
+/// A status decides whether a signature family still
 /// verifies, so a node that dropped a `Disabled` mark would accept signatures
 /// the chain refuses; at 10 and below the field cannot affect the digest.
+///
+/// Schema 13 carries and digests the validator directory: the class,
+/// operator key, quota and mobile bond of every registered validator. It is
+/// folded into the state root, so a restore that dropped it would restore a
+/// root that no peer computes. At 12 and below the field cannot affect the
+/// digest and a snapshot without it restores an empty directory.
 ///
 /// Schema 12 carries and digests the reward-pool flag (testnet item 8). It
 /// decides whether the epoch transition pays from the pre-funded pool, which
@@ -553,7 +571,7 @@ pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 /// next epoch boundary. At 11 and below the field cannot affect the digest,
 /// and a snapshot without it restores the network profile's answer - what the
 /// chain did before the flag existed.
-pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 12;
+pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 13;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateSnapshotV2MigrationReport {
@@ -697,6 +715,14 @@ pub struct StateSnapshotV2 {
     /// profile's answer, which is what a chain that predates the flag did.
     #[serde(default)]
     pub reward_pool_enabled: Option<bool>,
+    /// The validator directory (schema-13 bump). `None` reads as empty, which
+    /// is what a chain that predates the validator door had.
+    #[serde(default)]
+    pub validator_directory: Option<crate::validators::ValidatorDirectory>,
+    /// The B.U.D. 3.0 registry. `None` reads as empty, which is what a chain
+    /// that predates the B.U.D. 3.0 door had.
+    #[serde(default)]
+    pub bud3_registry: Option<crate::storage::bud3::registry::Bud3Registry>,
     /// Proof tasks and unpaid receipts.
     ///
     /// `#[serde(default)]` like its neighbours: a snapshot taken before this
@@ -937,6 +963,8 @@ impl StateSnapshotV2 {
             settlement: Some(account_state.settlement.clone()),
             scheme_registry: Some(SchemeRegistrySnapshot::of(&account_state.scheme_registry)),
             reward_pool_enabled: Some(account_state.reward_pool_enabled),
+            validator_directory: Some(account_state.validator_directory.clone()),
+            bud3_registry: Some(account_state.bud3_registry.clone()),
             proof_market: Some(account_state.proof_market.clone()),
             identity: Some(account_state.identity.clone()),
             vault: Some(account_state.vault.clone()),
@@ -1143,8 +1171,8 @@ impl StateSnapshotV2 {
         if self.schema_version >= 6 {
             hash_opt_serializable(&mut hasher, &self.vault);
         }
-        // --- The PoA admission + compliance pair (schema-7 bump, /
-        //). Same gate logic as identity and vault: at 6 and
+        // --- The PoA admission + compliance pair (schema-7 bump, /.
+        // Same gate logic as identity and vault: at 6 and
         //     below these fields cannot affect the digest, at 7 and above a
         //     node that dropped an admission set or a freeze produces a
         //     different hash instead of a quietly-valid snapshot. ---
@@ -1172,6 +1200,10 @@ impl StateSnapshotV2 {
         // Schema 12: the reward-pool flag, gated the same way.
         if self.schema_version >= 12 {
             hash_opt_serializable(&mut hasher, &self.reward_pool_enabled);
+        }
+        // Schema 13: the validator directory, gated the same way.
+        if self.schema_version >= 13 {
+            hash_opt_serializable(&mut hasher, &self.validator_directory);
         }
 
         hasher.finalize().into()
@@ -1327,20 +1359,17 @@ impl StateSnapshotV2 {
         let mut snapshot: StateSnapshotV2 = serde_json::from_slice(data)
             .map_err(|e| format!("Failed to parse snapshot V2: {e}"))?;
         snapshot.migration_report()?;
+        if !snapshot.verify() {
+            return Err(format!(
+                "snapshot schema {} does not match its own digest",
+                snapshot.schema_version
+            ));
+        }
         // C6 legacy import (RFC_GAP1 section 7.3, AllowUnsigned transition window):
         // Schema<4 snapshots arrived with the old digest; the new code recomputes
         // the schema-4 snapshot_hash + AllowUnsigned (devnet transition).
         // A RequireSigned production loader expects a signature (sign_manifest).
         if snapshot.schema_version < CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION {
-            // The old blob must match the digest of ITS OWN schema before it
-            // is rewritten; the rewrite recomputes the hash, so an edited
-            // legacy file would otherwise always pass.
-            if !snapshot.verify() {
-                return Err(format!(
-                    "legacy snapshot schema {} does not match its own digest",
-                    snapshot.schema_version
-                ));
-            }
             snapshot.schema_version = CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION;
             snapshot.snapshot_hash = snapshot.calculate_hash();
         }
@@ -2531,6 +2560,9 @@ mod tests {
     /// Only the keys of the schema-12 change.
     const SCHEMA12_KEYS: &[&str] = &["reward_pool_enabled"];
 
+    /// Only the keys of the schema-13 change.
+    const SCHEMA13_KEYS: &[&str] = &["validator_directory"];
+
     /// Fields rooted in schema-2: known to the old release too, and not a single byte
     /// the fields it must not lose. `snapshot_hash` is deliberately outside:
     /// the seal is recomputed because the version changed.
@@ -2611,6 +2643,7 @@ mod tests {
             agg_sig_bls: vec![1, 2, 3],
             bitmap: vec![0u8],
             set_hash: "set".into(),
+            seat_table_version: 0,
         }
     }
 
@@ -2687,6 +2720,8 @@ mod tests {
             "scheme_registry",
             // the reward-pool flag (schema-12 bump: default-filled AND digested)
             "reward_pool_enabled",
+            // validator directory (schema-13 bump: default-filled AND digested)
+            "validator_directory",
             // identity registry (schema-5 bump: default-filled AND digested)
             "identity",
             // vault folder registry (schema-6 bump: same discipline)
@@ -2729,6 +2764,7 @@ mod tests {
                 SCHEMA10_KEYS,
                 SCHEMA11_KEYS,
                 SCHEMA12_KEYS,
+                SCHEMA13_KEYS,
             ]
             .concat(),
             2,
@@ -2746,6 +2782,7 @@ mod tests {
             SCHEMA10_KEYS,
             SCHEMA11_KEYS,
             SCHEMA12_KEYS,
+            SCHEMA13_KEYS,
         ]
         .concat()
         {
@@ -2861,6 +2898,7 @@ mod tests {
                 SCHEMA10_KEYS,
                 SCHEMA11_KEYS,
                 SCHEMA12_KEYS,
+                SCHEMA13_KEYS,
             ]
             .concat(),
             3,
@@ -2876,6 +2914,7 @@ mod tests {
             SCHEMA10_KEYS,
             SCHEMA11_KEYS,
             SCHEMA12_KEYS,
+            SCHEMA13_KEYS,
         ]
         .concat()
         {
@@ -2967,6 +3006,7 @@ mod tests {
                 SCHEMA10_KEYS,
                 SCHEMA11_KEYS,
                 SCHEMA12_KEYS,
+                SCHEMA13_KEYS,
             ]
             .concat(),
             4,
@@ -2981,6 +3021,7 @@ mod tests {
             SCHEMA10_KEYS,
             SCHEMA11_KEYS,
             SCHEMA12_KEYS,
+            SCHEMA13_KEYS,
         ]
         .concat()
         {
