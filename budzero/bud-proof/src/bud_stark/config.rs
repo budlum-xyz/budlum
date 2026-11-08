@@ -1,7 +1,7 @@
 use core::marker::PhantomData;
 
 use p3_challenger::{CanObserve, CanSample, FieldChallenger};
-use p3_commit::{Pcs, PolynomialSpace, UnivariateStarkPcs};
+use p3_commit::{Pcs, PolynomialSpace};
 use p3_field::{ExtensionField, Field, PrimeCharacteristicRing};
 
 pub type Val<SC> = <<<SC as StarkGenericConfig>::Pcs as Pcs<
@@ -41,7 +41,7 @@ pub type PcsError<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs<
 
 pub trait StarkGenericConfig: Clone {
     /// The [`Pcs`] implementation used to commit to trace polynomials.
-    type Pcs: UnivariateStarkPcs<Self::Challenge, Self::Challenger>;
+    type Pcs: Pcs<Self::Challenge, Self::Challenger>;
     /// The extension field used for challenges and auxiliary traces.
     type Challenge: ExtensionField<Val<Self>>;
     /// The challenger type used for Fiat-Shamir.
@@ -115,7 +115,7 @@ impl<Pcs, Challenge, Challenger> StarkConfig<Pcs, Challenge, Challenger> {
 
 impl<PcsT, Challenge, Challenger> StarkGenericConfig for StarkConfig<PcsT, Challenge, Challenger>
 where
-    PcsT: UnivariateStarkPcs<Challenge, Challenger> + Clone,
+    PcsT: Pcs<Challenge, Challenger> + Clone,
     Challenge: ExtensionField<<PcsT::Domain as PolynomialSpace>::Val> + Clone,
     Challenger: FieldChallenger<<PcsT::Domain as PolynomialSpace>::Val>
         + CanObserve<PcsT::Commitment>

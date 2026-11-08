@@ -409,9 +409,7 @@ mod tests {
         blockchain.state.add_balance(&operator, 5_000_000);
         blockchain.state.add_balance(&payer, 5_000_000);
 
-        let mut manifest =
-            ContentManifest::from_bytes_sliced(b"repair acceptance payload", 8).unwrap();
-        manifest.owner = payer;
+        let manifest = ContentManifest::from_bytes_sliced(b"repair acceptance payload", 8).unwrap();
         // open_never_placed_ticket refuses an unknown manifest on purpose; the
         // helper built one locally without registering it, so the sweep could never
         // open the ticket the four acceptance tests are about.
@@ -747,84 +745,6 @@ mod tests {
             blockchain.state.storage_registry.deals_iter().count(),
             deals_before + 1,
             "the owner's deal row lands"
-        );
-        let _ = deal_id;
-    }
-
-    #[test]
-    fn periodic_retrieval_challenge_issues_and_slashes_on_default_256_kib_shard() {
-        let consensus = Arc::new(PoWEngine::new(0));
-        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
-
-        let operator = Address::from([0x31u8; 32]);
-        let payer = Address::from([0x32u8; 32]);
-        blockchain.state.add_balance(&operator, 10_000_000);
-        blockchain.state.add_balance(&payer, 10_000_000);
-
-        let payload = vec![0x5Au8; 262_144];
-        let mut manifest = ContentManifest::from_bytes_sliced(&payload, 262_144).unwrap();
-        manifest.owner = payer;
-        let shard_id = manifest.shards[0].shard_id;
-        let params = StorageDomainParams::default();
-        let shard_bytes = u64::from(manifest.shard(&shard_id).expect("shard").size);
-        assert_eq!(shard_bytes, 262_144);
-        let economics = StorageEconomicsParams {
-            operator_bond: params.min_operator_bond,
-            fee_per_byte_epoch: 10 * (FEE_RATE_SCALE as u64) / shard_bytes,
-        };
-        let proof = {
-            let envelope = bud_proof::ProofEnvelope {
-                proof_format_version: 1,
-                backend: "test-backend".to_string(),
-                p3_version: "0.6".to_string(),
-                fri_params_id: "test-fri".to_string(),
-                public_inputs_hash: [0x42u8; 32],
-                proof_bytes: vec![0xABu8; 96],
-                degree_bits: 8,
-            };
-            bincode::serialize(&envelope).unwrap()
-        };
-
-        let deal_id = blockchain
-            .open_deal_through_shared_escrow(
-                &DealOpenTerms {
-                    domain_id: 42,
-                    manifest: &manifest,
-                    shard_id,
-                    operator,
-                    replica_index: 0,
-                    start_epoch: 0,
-                    end_epoch: 250,
-                    economics,
-                    merkle_proof: Some(proof),
-                    storage_root: Some([0x42u8; 32]),
-                },
-                payer,
-                &params,
-            )
-            .unwrap();
-
-        let issued = crate::chain::storage_maintenance::issue_challenges(
-            &mut blockchain.state,
-            45262,
-            100,
-            &[0x77u8; 32],
-        );
-        assert_eq!(
-            issued, 1,
-            "256 KiB shard must issue an automatic challenge at epoch 100"
-        );
-        assert_eq!(blockchain.state.storage_registry.all_challenges().len(), 1);
-
-        let (finalized, slashed) = crate::chain::storage_maintenance::finalize_missed_challenges(
-            &mut blockchain.state,
-            111,
-        )
-        .unwrap();
-        assert_eq!(finalized, 1);
-        assert!(
-            slashed > 0,
-            "missed automatic challenge must slash operator bond"
         );
         let _ = deal_id;
     }

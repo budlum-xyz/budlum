@@ -2325,7 +2325,7 @@ mod tests {
         let mut account_state = AccountState::new();
         account_state
             .note_registry
-            .insert_note_for_owner([7u8; 32], Address::zero())
+            .insert_note([7u8; 32])
             .expect("a fresh registry accepts a note");
 
         let mut snapshot = StateSnapshotV2::from_state(
@@ -2845,7 +2845,7 @@ mod tests {
             .unwrap();
         account_state
             .note_registry
-            .insert_note_for_owner([9u8; 32], Address::zero())
+            .insert_note([9u8; 32])
             .expect("a fresh record accepts the note");
         let mut params = legacy_params(64);
         params.finality_certificates = vec![schema2_cert()];

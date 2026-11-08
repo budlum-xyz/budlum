@@ -87,27 +87,46 @@ RUN PROTOC=/usr/bin/protoc cargo build --release --locked && \
     cp target/release/budlum-indexer /usr/local/bin/budlum-indexer
 
 # ── Stage 2: Runtime ────────────────────────────────────────
-FROM cgr.dev/chainguard/wolfi-base@sha256:d13acb327aa77acf2752acea8c08456511a5b8142455cc2fe0f966b960bf64c6
+FROM debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
 
-# Runtime stage migrated from debian:bookworm-slim (which carried 305 unfixed
-# Debian no-dsa Trivy OS advisories) to digest-pinned Chainguard Wolfi glibc
-# runtime. The Stage 1 binaries link only against glibc (`libc.so.6`, `libm.so.6`,
-# `ld-linux-x86-64.so.2`) and `libgcc_s.so.1`, while `coreutils`, `curl`, `grep`,
-# `sed`, `bash` and `shadow` preserve `date +%s%3N` in `ops/docker-compose.yml`
-# ceremony, the `node1` operator RPC healthcheck, and deterministic UID 1000 setup.
-# hadolint ignore=DL3018
-RUN apk add --no-cache \
-    bash \
-    ca-certificates-bundle \
-    coreutils \
-    curl \
-    glibc \
-    grep \
-    libgcc \
+# The base digest is refreshed deliberately, and the packages below are listed
+# explicitly although the image already carries them. Both are fixes for
+# findings in the Security tab, and each one was measured rather than assumed:
+#
+#   * Digest. The previous pin (88200866...) shipped liblzma5 5.4.1-1, which
+#     Trivy flags for DLA-4783-1 / TEMP-1147318-639065 (fixed in 5.4.1-1+deb12u2).
+#     The digest pinned here carries 5.4.1-1+deb12u2, read out of
+#     /var/lib/dpkg/status of the pulled image - not inferred from the tag.
+#   * tzdata. The image - including the digest pinned above - ships
+#     2026c-0+deb12u1, while bookworm-security publishes 2026e-0+deb12u1, the
+#     version DLA-4854-1 names as fixed. A digest bump alone does not move it
+#     (the snapshot in the image predates the upload), so the package is
+#     installed by name after `apt-get update` and apt selects the candidate.
+#   * libpcre2-8-0 and perl-base. The earlier digest shipped 10.42-1 and
+#     5.36.0-7+deb12u3, which Trivy flagged for CVE-2026-86145, CVE-2026-89161
+#     and the perl-base set; the patched revisions are 10.42-1+deb12u2 and
+#     5.36.0-7+deb12u4. The names stay listed so a future digest that slides
+#     back cannot reintroduce them silently.
+#
+# Named installs are what keeps this off `apt-get upgrade` (hadolint DL3005):
+# only the packages with a published fix are moved, the rest of the image stays
+# at the revision the digest pins.
+#
+# What this does NOT do: close the remaining base-image findings. Of the 197
+# Trivy alerts on this image (2026-10-25), 193 name no fixed version at all -
+# Debian has not published a fix for them in bookworm, so no change inside this
+# tree can close one. They are reported on purpose (docker-smoke sets
+# `ignore-unfixed: false` for the SARIF step) and the gate blocks only the
+# fixable ones; that split is deliberate, see .github/workflows/docker-smoke.yml.
+# hadolint ignore=DL3008
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
     openssl \
-    sed \
-    shadow \
-    tzdata
+    curl \
+    libpcre2-8-0 \
+    perl-base \
+    tzdata \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local/bin/budlum-core /usr/local/bin/budlum-core
 # The CLI runs the validator key generation and the genesis ceremony

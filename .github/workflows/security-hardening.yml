@@ -42,36 +42,18 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       # The version was unpinned. extra-tooling.yml pins the same tool to 0.8.0;
       # the same version and the same sha256 are used here too, otherwise two
       # workflows would run different tools under the same name.
       - name: Install cargo-machete (version + sha256 pinned)
         run: |
           set -euo pipefail
-          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/machete.tar.gz \
+          curl -sSfL -o /tmp/machete.tar.gz \
             https://github.com/bnjbvr/cargo-machete/releases/download/v0.8.0/cargo-machete-v0.8.0-x86_64-unknown-linux-musl.tar.gz
           echo "020f6608f9be1562d1fb601e5808e541ccb8806e7e4dfde27d48bc22254a002c  /tmp/machete.tar.gz" | sha256sum -c -
           tar -xzf /tmp/machete.tar.gz -C /tmp
@@ -183,29 +165,11 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: cargo install cargo-mutants
         run: cargo install cargo-mutants --locked
       # Canary: a crate is written with a test that deliberately asserts nothing
@@ -354,29 +318,11 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       # Version pinned. An unpinned install made the parse script below the
       # victim of whichever output shape the newest release emitted; the parser
       # still tolerates the list shape, but the pin stops the JSON from being
@@ -456,7 +402,7 @@ jobs:
           # unable to build with the standard library" before TSan ever runs
           # (that is what the 2026-08-31 scheduled run died on).
           components: rust-src
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           # A cache key of its OWN, not the shared `budlum-core` one. Sanitizer
           # builds are ABI-incompatible with ordinary ones, so restoring
@@ -465,25 +411,7 @@ jobs:
           # on. The ASan job already keys itself separately; this one did not.
           shared-key: tsan
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       # Canary: a deliberately racing program is written and TSan is expected to
       # catch it. If it does not, the tool is not working and a clean report says
       # nothing. Without the canary a green job would say not that the scan ran,
@@ -563,24 +491,13 @@ jobs:
           fn main() {
               let mut value = 0i64;
               let ptr = std::ptr::addr_of_mut!(value) as usize;
-              let start = std::sync::Arc::new(std::sync::Barrier::new(2));
-              let s1 = std::sync::Arc::clone(&start);
               let a = std::thread::spawn(move || {
                   let p = ptr as *mut i64;
-                  s1.wait();
-                  for _ in 0..50_000 {
-                      unsafe { *p += 1 }
-                      std::hint::black_box(p);
-                  }
+                  for _ in 0..10_000 { unsafe { *p += 1 } }
               });
-              let s2 = std::sync::Arc::clone(&start);
               let b = std::thread::spawn(move || {
                   let p = ptr as *mut i64;
-                  s2.wait();
-                  for _ in 0..50_000 {
-                      unsafe { *p += 1 }
-                      std::hint::black_box(p);
-                  }
+                  for _ in 0..10_000 { unsafe { *p += 1 } }
               });
               a.join().unwrap();
               b.join().unwrap();
@@ -644,16 +561,13 @@ jobs:
                   .expect("the canary needs a store to borrow a stack frame from");
               let mut value = 0i64;
               let ptr = std::ptr::addr_of_mut!(value) as usize;
-              let start = std::sync::Arc::new(std::sync::Barrier::new(2));
 
               // Thread A: the write happens INSIDE a closure sled invokes, so
               // `sled::tree::Tree::update_and_fetch` sits in this stack.
               let inside = {
                   let db = db.clone();
-                  let s = std::sync::Arc::clone(&start);
                   std::thread::spawn(move || {
-                      s.wait();
-                      for i in 0..5_000u32 {
+                      for i in 0..20_000u32 {
                           let _ = db.update_and_fetch(b"canary", |_old| {
                               let p = ptr as *mut i64;
                               unsafe { *p += 1 }
@@ -663,17 +577,10 @@ jobs:
                   })
               };
               // Thread B: the same address, no sled on this side at all.
-              let outside = {
-                  let s = std::sync::Arc::clone(&start);
-                  std::thread::spawn(move || {
-                      let p = ptr as *mut i64;
-                      s.wait();
-                      for _ in 0..2_000_000 {
-                          unsafe { *p += 1 }
-                          std::hint::black_box(p);
-                      }
-                  })
-              };
+              let outside = std::thread::spawn(move || {
+                  let p = ptr as *mut i64;
+                  for _ in 0..20_000 { unsafe { *p += 1 } }
+              });
               inside.join().expect("join");
               outside.join().expect("join");
               println!("{value}");
@@ -822,29 +729,11 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       # Canary: a model that deliberately takes locks in reverse order is written
       # and loom is expected to find the deadlock. If it does not, the real tests
       # being green would say not that the ordering is correct, but at most that

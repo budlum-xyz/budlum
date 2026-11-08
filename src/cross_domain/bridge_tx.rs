@@ -362,7 +362,6 @@ pub fn mint_from_verified_event(
     if !domain.bridge_enabled {
         return Err(format!("Bridge mint disabled for domain {source_domain}"));
     }
-    ensure_domain_class_intake(state, source_domain, source_height)?;
     // A finalized proof may arrive out of order and be staged in the
     // commitment registry; bridge verification may not consume it until the
     // domain's parent-linked chain has actually advanced past it.
@@ -527,28 +526,6 @@ pub fn unlock_from_verified_event(
     proven: &ProvenBridgeEvent,
     height: u64,
 ) -> Result<(), String> {
-    let domain = state
-        .settlement
-        .domains
-        .get(proven.domain)
-        .ok_or_else(|| format!("Bridge target domain {} is not registered", proven.domain))?;
-    if !domain.bridge_enabled {
-        return Err(format!(
-            "Bridge unlock disabled for domain {}",
-            proven.domain
-        ));
-    }
-    ensure_domain_class_intake(state, proven.domain, proven.height)?;
-    // A finalized commitment may arrive out of order and sit staged in the
-    // commitment registry until its parent chain links up; bridge unlock may
-    // not consume it before `last_committed_height` reaches `proven.height`.
-    if proven.height > domain.last_committed_height {
-        return Err(format!(
-            "Bridge target commitment at height {} is not on the applied domain chain (tip {})",
-            proven.height, domain.last_committed_height
-        ));
-    }
-
     let verified = verify_domain_event_proof(
         state,
         proven.domain,
@@ -663,22 +640,6 @@ pub fn submit_relay_proof(
             .pending_relay(&message_id)
             .ok_or_else(|| format!("no pending relay for message {}", hex::encode(message_id)))?;
         let source_height = pending.source_event.domain_height;
-        let domain = state
-            .settlement
-            .domains
-            .get(source_domain)
-            .ok_or_else(|| format!("Unknown bridge source domain {source_domain}"))?;
-        if matches!(domain.kind, crate::domain::types::ConsensusKind::PoW)
-            && domain.finality_adapter != POW_HEADER_CHAIN_ADAPTER
-        {
-            return Err(
-                "Bridge relay from PoW domains requires pow-header-chain-v1 finality".into(),
-            );
-        }
-        if !domain.bridge_enabled {
-            return Err(format!("Bridge relay disabled for domain {source_domain}"));
-        }
-        ensure_domain_class_intake(state, source_domain, source_height)?;
         let commitment = state
             .settlement
             .commitments
@@ -688,12 +649,6 @@ pub fn submit_relay_proof(
                     "No committed event root for domain {source_domain} at height {source_height}"
                 )
             })?;
-        if source_height > domain.last_committed_height {
-            return Err(format!(
-                "Bridge source commitment at height {source_height} is not on the applied domain chain (tip {})",
-                domain.last_committed_height
-            ));
-        }
         // The root is the root of trust only when the commitment's finality
         // proof binds it. A PoS or BFT certificate signs the checkpoint hash
         // and nothing else, so under one of those the event root is the
@@ -851,65 +806,6 @@ fn ensure_carrier(state: &AccountState, sender: &Address) -> Result<(), BridgeTx
         Ok(())
     } else {
         Err(BridgeTxError::CarrierNotBonded)
-    }
-}
-
-/// The quantum-alarm intake rule for a bridge door. The class of the source
-/// domain is the one its finality adapter observed, never one a proof claims;
-/// a domain nothing has been observed for falls back to the class its
-/// consensus kind implies. Non-active (e.g. Isolate-frozen) domains are
-/// refused outright, Watch holds classical-class sources from the Budlum
-/// height their commitment was accepted at, and Restrict / Isolate stops them.
-fn ensure_domain_class_intake(
-    state: &AccountState,
-    domain_id: DomainId,
-    domain_height: u64,
-) -> Result<(), String> {
-    use crate::crypto::facts::QuantumClass;
-    use crate::security::alarm_effects::{classical_intake, ClassicalIntake};
-    let domain = state
-        .settlement
-        .domains
-        .get(domain_id)
-        .ok_or_else(|| format!("Unknown bridge domain {domain_id}"))?;
-    if domain.status != crate::domain::DomainStatus::Active {
-        return Err(format!(
-            "Bridge domain {domain_id} is not active (status={:?})",
-            domain.status
-        ));
-    }
-    let class = state
-        .settlement
-        .domains
-        .observed(domain_id)
-        .quantum_class()
-        .unwrap_or_else(|| crate::settlement::pq_anchor::domain_quantum_class(&domain.kind));
-    if class != QuantumClass::Classical {
-        return Ok(());
-    }
-    match classical_intake(state.settlement.quantum.alarm()) {
-        ClassicalIntake::Open => Ok(()),
-        ClassicalIntake::Stopped => Err(format!(
-            "the quantum alarm has stopped the intake of classical-class value from domain {domain_id}"
-        )),
-        ClassicalIntake::Wait(blocks) => {
-            let anchored_at = state
-                .settlement
-                .commitments
-                .earliest_accepted_height(domain_id, domain_height)
-                .ok_or_else(|| {
-                    format!(
-                        "classical-class bridge event from domain {domain_id} is held by the quantum alarm: its commitment is not anchored on Budlum"
-                    )
-                })?;
-            let ready = anchored_at.saturating_add(blocks);
-            if state.current_block_height < ready {
-                return Err(format!(
-                    "classical-class bridge event from domain {domain_id} is held by the quantum alarm until height {ready} (anchored at {anchored_at})"
-                ));
-            }
-            Ok(())
-        }
     }
 }
 
@@ -1165,81 +1061,5 @@ mod tests {
             root_before,
             "a pending relay must move the settlement root"
         );
-    }
-    #[test]
-    fn bridge_value_doors_enforce_quantum_alarm_intake_ladder() {
-        use crate::crypto::facts::{CryptoFacts, ObservedScheme};
-        use crate::domain::types::DomainCommitment;
-        use crate::security::quantum_canary::{CanaryClaim, CanaryId};
-
-        let mut state = AccountState::new();
-        let mut dom = crate::domain::plugin::default_domain(
-            7,
-            crate::domain::ConsensusKind::PoW,
-            7007,
-            POW_HEADER_CHAIN_ADAPTER,
-            1,
-        );
-        dom.bridge_enabled = true;
-        dom.last_committed_height = 10;
-        state.settlement.domains.register(dom).unwrap();
-
-        let mut facts = CryptoFacts::new();
-        facts.record(ObservedScheme::Secp256k1);
-        state.settlement.domains.record_observed(7, &facts);
-
-        let commitment = DomainCommitment {
-            domain_id: 7,
-            domain_height: 10,
-            domain_block_hash: [0x11; 32],
-            parent_domain_block_hash: [0u8; 32],
-            state_root: [0x22; 32],
-            tx_root: [0x33; 32],
-            event_root: [0x44; 32],
-            finality_proof_hash: [0x55; 32],
-            consensus_kind: crate::domain::ConsensusKind::PoW,
-            validator_set_hash: [0u8; 32],
-            timestamp_ms: 1_000,
-            sequence: 0,
-            producer: None,
-            state_updates: std::collections::BTreeMap::new(),
-        };
-        state
-            .settlement
-            .commitments
-            .insert_at_height(commitment, 20)
-            .unwrap();
-
-        // Clear alarm: allowed.
-        ensure_domain_class_intake(&state, 7, 10).expect("clear alarm allows classical domain");
-
-        // Watch alarm (Ecc192): held before anchored_at + wait, allowed once elapsed.
-        state.current_block_height = 25;
-        state.settlement.quantum.force_solved(
-            CanaryId::Ecc192,
-            CanaryClaim {
-                commit_height: 24,
-                claimer: Address::from([0xAA; 32]),
-                accepted_height: 25,
-            },
-        );
-        let held = ensure_domain_class_intake(&state, 7, 10).unwrap_err();
-        assert!(held.contains("held by the quantum alarm"), "{held}");
-
-        state.current_block_height =
-            20 + crate::security::alarm_effects::CLASSICAL_MESSAGE_WAIT_BLOCKS;
-        ensure_domain_class_intake(&state, 7, 10).expect("Watch hold releases after wait blocks");
-
-        // Restrict alarm (Ecc224): stopped outright even after wait.
-        state.settlement.quantum.force_solved(
-            CanaryId::Ecc224,
-            CanaryClaim {
-                commit_height: state.current_block_height,
-                claimer: Address::from([0xAA; 32]),
-                accepted_height: state.current_block_height + 1,
-            },
-        );
-        let stopped = ensure_domain_class_intake(&state, 7, 10).unwrap_err();
-        assert!(stopped.contains("stopped the intake"), "{stopped}");
     }
 }

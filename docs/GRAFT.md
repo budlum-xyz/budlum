@@ -102,19 +102,13 @@ An application checks a payment itself:
 1. `bud_graftPaymentProof(payment_id)` returns the payment, its Merkle path,
    the registry opening, the checkpoint global header and the state root
    opening of the checkpoint block.
-2. `verify_graft_payment(proof, checkpoint, expected_graft_id, expected_target_chain_id, expected_target_receiver)` checks: application and deployment (`target_chain_id`, `target_receiver`) binding -> finalized checkpoint ->
+2. `verify_graft_payment(proof, checkpoint)` checks: finalized checkpoint ->
    state root -> global header -> `graft_root` -> payment window -> payment.
    `checkpoint` is a `VerifiedCheckpoint` the application's light client
    reached from its trust anchor.
 
 A payment is provable once a checkpoint passes after it (every 5 blocks on
-the testnet), and while it stays in the window. `GraftTx::Pay` and `BDLM_GRAFT_PAYMENT_LEAF_V1` commit `target_chain_id` and
-`target_receiver` directly in consensus (`--target-chain-id` and
-`--target-receiver`). On EVM chains, `BudlumPaymentReceiver` checks `graftId`,
-verifies `targetChainId == block.chainid` and `targetReceiver == address(this)`,
-bounds `checkpointHeight - paidAtBlock <= 10_000`, and refuses checkpoint
-headers older than 30 days so consumption is strictly per deployment and proofs
-expire once outside the active window.
+the testnet), and while it stays in the window.
 
 ## 6. Intents (level 2)
 

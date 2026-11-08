@@ -15,7 +15,7 @@ crate-type = ["cdylib", "rlib"]
 # signature scheme. The node already links the same family via the
 # `pq-ml-dsa` validator feature; the wallet pins Category 5 (256-bit
 # quantum security) rather than inheriting Category 3.
-ml-dsa = { version = "=0.1.2", features = ["alloc", "zeroize", "rand_core"] }
+ml-dsa = { version = "=0.1.1", features = ["alloc", "zeroize", "rand_core"] }
 # The shared cryptographic core (`src/crypto.rs` mounts the node own files by
 # path): ML-DSA is verified by a second library, SLH-DSA backs the recovery key
 # and the emergency suite, Ed25519 is the composite signature classical half.
@@ -23,8 +23,8 @@ ml-dsa = { version = "=0.1.2", features = ["alloc", "zeroize", "rand_core"] }
 libcrux-ml-dsa = { version = "=0.0.11", default-features = false, features = ["std", "mldsa65", "mldsa87"] }
 slh-dsa = { version = "=0.2.0-rc.5", features = ["zeroize"] }
 ed25519-dalek = "=3.0.0"
-sha3 = "0.12"
-sha2 = "0.11"
+sha3 = "0.10"
+sha2 = "0.10"
 hex = "0.4"
 zeroize = { version = "=1.9.1", features = ["derive"] }
 # SHAKE256 of the key derivation, the same crate and pin as the root manifest.
@@ -99,9 +99,3 @@ getrandom-wasm = { package = "getrandom", version = "0.4", features = ["wasm_js"
 [profile.release]
 overflow-checks = true
 panic = "abort"
-
-[profile.test]
-opt-level = 1
-
-[profile.dev.package."*"]
-opt-level = 3

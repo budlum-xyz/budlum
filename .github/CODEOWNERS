@@ -13,20 +13,20 @@
 
 # CI and its guardrails: every workflow, the lint/deny tables and the
 # quality gates.
-/.github/workflows/ @lubosruler
-/.quality/ @lubosruler
-/.github/clippy-extra-baseline.txt @lubosruler
-/.github/codeql/ @lubosruler
-/codeql/ @lubosruler
+/.github/workflows/ @lubothebook
+/.quality/ @lubothebook
+/.github/clippy-extra-baseline.txt @lubothebook
+/.github/codeql/ @lubothebook
+/codeql/ @lubothebook
 
 # Supply-chain and policy manifests: a loosened deny or audit table is
 # invisible in a code diff.
-/budzero/deny.toml @lubosruler
-/.cargo/audit.toml @lubosruler
-/supply-chain/ @lubosruler
-/audits.toml @lubosruler
-/.github/dependabot.yml @lubosruler
+/budzero/deny.toml @lubothebook
+/.cargo/audit.toml @lubothebook
+/supply-chain/ @lubothebook
+/audits.toml @lubothebook
+/.github/dependabot.yml @lubothebook
 
 # The dependency surface itself: manifest changes route to the same owner.
-/Cargo.toml @lubosruler
-/Cargo.lock @lubosruler
+/Cargo.toml @lubothebook
+/Cargo.lock @lubothebook

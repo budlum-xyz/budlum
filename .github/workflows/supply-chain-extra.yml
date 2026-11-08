@@ -9,7 +9,7 @@ on:
   # the same reason: a filtered-out run reports nothing rather than success,
   # which branch protection reads as still-waiting.
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet]
+    branches: [ main, fix/architecture-tip-adlari ]
   schedule:
     # Weekly hygiene scan (effects of cargo update + new deps)
     - cron: '17 4 * * 1'
@@ -39,29 +39,11 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: nightly
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Install cargo-udeps (locked; the crates.io version is evidenced in the log)
         run: cargo +nightly install cargo-udeps --locked
       - name: Canary (vacuous-gate protection)
@@ -103,9 +85,6 @@ jobs:
   geiger:
     name: "Geiger: unsafe visibility (the first-party 0 evidence layer)"
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
     # 35 -> 55: the clean below adds one cold build per workspace until the
     # shared cache saves this job's fresh artifacts again; 35 was sized for a
     # cache-fresh run. The first green run re-establishes the cache and the
@@ -119,29 +98,11 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Install cargo-geiger (locked; the crates.io version is evidenced in the log)
         run: cargo install cargo-geiger --locked
       - name: Canary (vacuous-gate protection)
@@ -215,14 +176,3 @@ jobs:
             cat "/tmp/geiger-$crate.txt" >> /tmp/geiger2.txt
           done
           cargo run --release --manifest-path ../xtask/gates/Cargo.toml -- geiger /tmp/geiger2.txt
-          cat /tmp/geiger1.txt /tmp/geiger2.txt > /tmp/geiger-all.txt
-          cd ..
-          cargo run --release --manifest-path xtask/tools/Cargo.toml -- sarif --self-test
-          cargo run --release --manifest-path xtask/tools/Cargo.toml -- \
-            sarif cargo-geiger /tmp/geiger-all.txt cargo-geiger.sarif
-      - name: Upload cargo-geiger SARIF (Security tab)
-        if: always()
-        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
-        with:
-          sarif_file: cargo-geiger.sarif
-          category: cargo-geiger

@@ -63,16 +63,10 @@ const BUDGETS: &[Budget] = &[
         reason: "a build script runs before the crate exists; a failure here must stop the build, and a panic is the only channel cargo reads",
     },
     Budget {
-        file: "budzero/bud-proof/src/bud_stark/preprocessed.rs",
-        lint: "clippy::expect_used",
-        count: 1,
-        reason: "`setup_preprocessed` returns a tuple rather than a `Result`, and Plonky3 0.8 `Pcs::commit_preprocessing` returns `Result<_, InputError>` over a fixed trace whose height was just asserted against `init_degree`",
-    },
-    Budget {
         file: "budzero/bud-proof/src/bud_stark/prover.rs",
         lint: "clippy::expect_used",
-        count: 5,
-        reason: "`prove` does not return a `Result` in this trait (`next_point` plus four Plonky3 0.8 `Pcs` commit/open `InputError` results), so a shape violation the prover itself constructed has nowhere to go; the verifier-side counterpart of these checks is a returned error, which is where adversary-supplied input arrives",
+        count: 1,
+        reason: "`prove` does not return a `Result` in this trait, so a shape violation the prover itself constructed has nowhere to go; the verifier-side counterpart of this check is a returned error, which is where adversary-supplied input arrives",
     },
     Budget {
         file: "budzero/bud-proof/src/bud_stark/prover.rs",
