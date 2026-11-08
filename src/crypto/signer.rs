@@ -177,8 +177,7 @@ mod tests {
 
     #[test]
     fn keypair_signer_advertises_bls_pq_capabilities_only_when_bound() {
-        let keypair = KeyPair::generate().expect("ed25519 key");
-        let signer = KeyPairSigner::new(keypair.clone());
+        let signer = KeyPairSigner::new(KeyPair::generate().expect("ed25519 key"));
         assert!(!signer.has_bls_key());
         assert!(!signer.has_pq_key());
         assert!(signer.bls_public_key().is_none());
@@ -196,6 +195,43 @@ mod tests {
         assert_eq!(signer.pq_public_key(), Some(expected_pq_pk));
     }
 
+    ///  lock, signer half. One Ed25519 key signs blocks, prevotes and
+    /// precommits, and the three must never be interchangeable: a prevote
+    /// replayed as a block signature, or a precommit replayed as a prevote, is
+    /// a consensus forgery made from a legitimate signature. Each half also has
+    /// to verify, so the separation is not produced by a refusal.
+    #[test]
+    fn block_prevote_and_precommit_signatures_are_not_interchangeable() {
+        let keypair = KeyPair::generate().expect("ed25519 key");
+        let signer = KeyPairSigner::new(keypair.clone());
+        let msg = [9u8; 32];
+        let block = signer.sign_block(&msg).expect("block signature");
+        let prevote = signer.sign_prevote(&msg).expect("prevote");
+        let precommit = signer.sign_precommit(&msg).expect("precommit");
+        assert_ne!(block, prevote, "a prevote must not be a block signature");
+        assert_ne!(prevote, precommit, "a precommit must not be a prevote");
+        assert_ne!(block, precommit, "a precommit must not be a block signature");
+
+        // Each is a signature over its own tagged hash, under the same key.
+        let public = signer.public_key_bytes();
+        crate::crypto::primitives::verify_signature(&msg, &block, &public)
+            .expect("the block signature verifies over the bare hash");
+        for (tag, sig) in [
+            (b"BDLM_PREVOTE_ED25519_V1".to_vec(), &prevote),
+            (b"BDLM_PRECOMMIT_ED25519_V1".to_vec(), &precommit),
+        ] {
+            let mut hashed = tag;
+            hashed.extend_from_slice(&msg);
+            let digest = crate::core::hash::calculate_hash_bytes(&hashed);
+            crate::crypto::primitives::verify_signature(&digest, sig, &public)
+                .expect("the vote signature verifies over its own domain");
+            assert!(
+                crate::crypto::primitives::verify_signature(&digest, &block, &public).is_err(),
+                "the block signature must not verify as a vote over the same message"
+            );
+        }
+    }
+
     #[test]
     fn default_consensus_signer_rejects_missing_bls_pq_material() {
         let signer = KeyPairSigner::new(KeyPair::generate().expect("ed25519 key"));
@@ -203,6 +239,64 @@ mod tests {
         assert!(signer
             .pq_sign(crate::crypto::ctx::BLOCK_V6, b"msg")
             .is_err());
+    }
+
+    /// the three consensus messages a validator signs must never be
+    /// interchangeable. One Ed25519 key used to hash the message bare in all
+    /// three, so a signature a validator made as a prevote verified as a
+    /// precommit (and as a block signature) over the same bytes - an
+    /// equivocation that costs nothing to forge, because the honest node
+    /// produced the bytes itself.
+    ///
+    /// Canary: delete the `BDLM_PREVOTE_ED25519_V1` / `BDLM_PRECOMMIT_ED25519_V1`
+    /// tags from the trait defaults and the three signatures become byte-equal.
+    #[test]
+    fn prevote_precommit_and_block_signatures_are_domain_separated() {
+        let signer = KeyPairSigner::new(KeyPair::generate().expect("ed25519 key"));
+        let message: &[u8] = b"the same bytes on all three surfaces";
+        let prevote = signer.sign_prevote(message).expect("prevote");
+        let precommit = signer.sign_precommit(message).expect("precommit");
+        // `sign_block` takes the block hash, which is what a block signature
+        // covers; `sign_prevote`/`sign_precommit` hash the tagged message and
+        // then call it, so the surfaces are compared at that same input.
+        let block = signer
+            .sign_block(&crate::core::hash::calculate_hash_bytes(message))
+            .expect("block signature");
+        assert_ne!(prevote, precommit, "a prevote must not verify as a precommit");
+        assert_ne!(prevote, block, "a prevote must not verify as a block signature");
+        assert_ne!(precommit, block, "a precommit must not verify as a block signature");
+
+        // And each one verifies on the surface it claims: an inequality alone
+        // would also hold if the signer had simply refused to produce one.
+        let verifying = ed25519_dalek::VerifyingKey::from_bytes(&signer.public_key_bytes())
+            .expect("verifying key");
+        for (tag, signature) in [
+            (&b"BDLM_PREVOTE_ED25519_V1"[..], &prevote),
+            (&b"BDLM_PRECOMMIT_ED25519_V1"[..], &precommit),
+        ] {
+            let mut tagged = tag.to_vec();
+            tagged.extend_from_slice(message);
+            let covered = crate::core::hash::calculate_hash_bytes(&tagged);
+            let parsed = ed25519_dalek::Signature::from_slice(signature)
+                .expect("a consensus signature is 64 bytes");
+            ed25519_dalek::Verifier::verify(&verifying, &covered, &parsed)
+                .expect("the tagged message verifies under the signing key");
+        }
+    }
+
+    /// the other half: the address a signer reports is derived from
+    /// its announced public key through `Address::from`, not returned as the
+    /// raw Ed25519 key. The two coincide on Address V5 (the address IS the
+    /// key), so the assertion is that the derivation is the one the rest of the
+    /// tree uses - a backend that returned its key bytes as an opaque address
+    /// would pass a bare equality check and still be wrong on Address V3.
+    #[test]
+    fn the_announced_address_is_the_derived_address() {
+        let keypair = KeyPair::generate().expect("ed25519 key");
+        let expected = Address::from(keypair.public_key_bytes());
+        let signer = KeyPairSigner::new(keypair);
+        assert_eq!(signer.address(), expected);
+        assert_eq!(signer.address(), Address::from(signer.public_key_bytes()));
     }
 
     /// through a signer backend: the composite signature it assembles
@@ -227,5 +321,20 @@ mod tests {
             b"m"
         )
         .is_err());
+    }
+
+    #[test]
+    fn consensus_signer_separates_block_prevote_and_precommit() {
+        let keypair = KeyPair::generate().unwrap();
+        let signer = KeyPairSigner::new(keypair.clone());
+        let payload = [0x42u8; 32];
+        let block_sig = signer.sign_block(&payload).unwrap();
+        let prevote_sig = signer.sign_prevote(&payload).unwrap();
+        let precommit_sig = signer.sign_precommit(&payload).unwrap();
+
+        assert_ne!(block_sig, prevote_sig);
+        assert_ne!(block_sig, precommit_sig);
+        assert_ne!(prevote_sig, precommit_sig);
+        assert_eq!(signer.address(), Address::from(keypair.public_key_bytes()));
     }
 }

@@ -348,7 +348,7 @@ impl ConsensusDomainRegistry {
         Ok(())
     }
 
-    /// Freeze every active native domain whose class is classical (,
+    /// Freeze every active native domain whose class is classical (
     /// the quantum alarm at Isolate). The class is the observed one, or the
     /// one the consensus kind implies when nothing was observed yet. Returns
     /// the ids that moved, in id order.
