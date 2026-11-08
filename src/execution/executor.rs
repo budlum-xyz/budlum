@@ -2042,8 +2042,7 @@ impl Executor {
                     .slash_equivocator(request_id, verifier, current_block)
                     .map_err(|e| BudlumError::validation("ai_dispute_slash_failed", e))?;
                 let slash = state
-                    .registry
-                    .slash_role_only(
+                    .slash_role_destroying(
                         *verifier,
                         crate::registry::role::roles::AI_OPERATOR,
                         crate::registry::permissionless::SlashingCondition::MaliciousBehaviour,
