@@ -1,4 +1,6 @@
-//! Budlum Atlas / bud.scan evidence models.
+//! Budlum explorer / bud.scan evidence models.
+//!
+//! exposed for: explorer evidence queries and RPC handlers.
 //!
 //! Atlas is read-only. It never mutates chain state and it never labels raw,
 //! Unproven UI data as verified.
@@ -24,7 +26,7 @@
 
 use crate::core::address::Address;
 use crate::domain::{ConsensusKind, DomainId, Hash32};
-use crate::pollen::{AccessGrant, DataAsset, SaleAuthorization};
+use crate::pollen::{AccessGrant, AccessGrantStatus, DataAsset, SaleAuthorization};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -71,19 +73,30 @@ pub fn build_wallet_context(
 ) -> AtlasWalletContext {
     let assets_owned = data_assets
         .iter()
-        .filter(|asset| asset.owner == address)
+        .filter(|asset| asset.owner == address && asset.is_active())
         .count();
     let grants_issued = access_grants
         .iter()
-        .filter(|grant| grant.owner == address)
+        .filter(|grant| {
+            grant.owner == address
+                && grant.status == AccessGrantStatus::Active
+                && grant.reads_used < grant.max_reads
+        })
         .count();
     let grants_received = access_grants
         .iter()
-        .filter(|grant| grant.grantee == address)
+        .filter(|grant| {
+            grant.grantee == address
+                && grant.status == AccessGrantStatus::Active
+                && grant.reads_used < grant.max_reads
+        })
         .count();
     let sale_authorizations = sale_authorizations
         .iter()
-        .filter(|authorization| authorization.seller == address)
+        .filter(|authorization| {
+            authorization.seller == address
+                && authorization.grants_issued < authorization.max_grants
+        })
         .count();
 
     AtlasWalletContext {
@@ -106,7 +119,7 @@ pub fn build_wallet_context(
             AtlasEvidenceCard {
                 subject: "pollen_lineage".into(),
                 status: AtlasEvidenceStatus::Derived,
-                source: "Pollen registry indexes".into(),
+                source: "data-market registry indexes".into(),
                 warning: Some(
                     "Atlas derives graph counts from registry commitments; it does not expose data bytes"
                         .into(),
@@ -145,7 +158,7 @@ pub struct EvidenceRecord {
     pub domain_id: DomainId,
     /// Domain height.
     pub domain_height: u64,
-    /// Event indeksi.
+    /// Event index.
     pub event_index: u32,
     /// Event kind.
     pub event_kind: String,
@@ -181,13 +194,13 @@ impl EvidenceRecord {
 /// A node in the wallet context graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalletContextNode {
-    /// Adres.
+    /// Address.
     pub address: Address,
     /// Node kind.
     pub node_type: WalletNodeType,
     /// Number of relations.
     pub connection_count: u32,
-    /// Son aktivite epoch'u.
+    /// Epoch of the most recent activity.
     pub last_active_epoch: u64,
 }
 
@@ -240,9 +253,9 @@ pub enum WalletEdgeType {
     BnsRegistration,
     /// A storage agreement.
     StorageDeal,
-    /// Governance oy.
+    /// A governance vote.
     GovernanceVote,
-    /// A Pollen access grant.
+    /// A data-market access grant.
     PollenGrant,
 }
 
@@ -255,7 +268,7 @@ pub struct WalletContextGraph {
     pub nodes: Vec<WalletContextNode>,
     /// Connecting edges.
     pub edges: Vec<WalletContextEdge>,
-    /// Toplam transfer hacmi (u64 BUD).
+    /// Total transfer volume (u64 BUD).
     pub total_transfer_volume: u64,
     /// Graph depth, in hops.
     pub depth: u32,
@@ -309,7 +322,7 @@ pub struct DomainSummary {
     pub total_events: u64,
     /// Number of active validators.
     pub active_validators: u32,
-    /// Son commit epoch'u.
+    /// Epoch of the latest commitment.
     pub last_commit_epoch: u64,
 }
 
@@ -329,9 +342,9 @@ impl DomainSummary {
 /// The trace result for a cross-domain message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrossDomainTrace {
-    /// Kaynak domain.
+    /// Source domain.
     pub source_domain: DomainId,
-    /// Hedef domain.
+    /// Target domain.
     pub target_domain: DomainId,
     /// Source height.
     pub source_height: u64,
@@ -383,7 +396,7 @@ pub enum MessageTraceStatus {
     Failed,
 }
 
-/// Atlas sorgu motoru.
+/// Atlas query engine.
 #[derive(Debug, Clone, Default)]
 pub struct AtlasQueryEngine {
     /// The evidence ledger.
@@ -397,6 +410,7 @@ impl AtlasQueryEngine {
         Self::default()
     }
 
+    /// exposed for: explorer evidence query engine.
     pub fn insert_evidence_record(&mut self, record: EvidenceRecord) -> Result<(), String> {
         record.validate()?;
         if self.evidence_records.len() >= MAX_ATLAS_EVIDENCE_RECORDS {
@@ -406,24 +420,27 @@ impl AtlasQueryEngine {
         Ok(())
     }
 
+    /// exposed for: explorer evidence query engine.
     pub fn upsert_domain_summary(&mut self, summary: DomainSummary) -> Result<(), String> {
         summary.validate()?;
         if !self.domain_summaries.contains_key(&summary.domain_id)
             && self.domain_summaries.len() >= MAX_ATLAS_DOMAIN_SUMMARIES
         {
-            let oldest = self
+            let stalest = self
                 .domain_summaries
-                .keys()
-                .next()
-                .copied()
-                .ok_or_else(|| "Atlas domain summary index empty".to_string())?;
-            self.domain_summaries.remove(&oldest);
+                .iter()
+                .min_by_key(|(&id, s)| (s.last_commit_epoch, s.current_height, id))
+                .map(|(&id, _)| id)
+                .ok_or_else(|| "domain summary index empty".to_string())?;
+            self.domain_summaries.remove(&stalest);
         }
         self.domain_summaries.insert(summary.domain_id, summary);
         Ok(())
     }
 
     /// Queries evidence records by domain ID.
+    ///
+    /// exposed for: explorer evidence query engine.
     pub fn query_evidence_by_domain(&self, domain_id: DomainId) -> Vec<&EvidenceRecord> {
         self.evidence_records
             .iter()
@@ -432,6 +449,8 @@ impl AtlasQueryEngine {
     }
 
     /// Queries evidence records within a given height range.
+    ///
+    /// exposed for: explorer evidence query engine.
     pub fn query_evidence_by_height_range(
         &self,
         domain_id: DomainId,
@@ -452,11 +471,15 @@ impl AtlasQueryEngine {
     }
 
     /// Returns the summary for one domain.
+    ///
+    /// exposed for: explorer evidence query engine.
     pub fn get_domain_summary(&self, domain_id: DomainId) -> Option<&DomainSummary> {
         self.domain_summaries.get(&domain_id)
     }
 
     /// Returns every domain summary.
+    ///
+    /// exposed for: explorer evidence query engine.
     pub fn all_domain_summaries(&self) -> Vec<&DomainSummary> {
         self.domain_summaries.values().collect()
     }
@@ -691,5 +714,38 @@ mod query_engine_tests {
         }
         assert_eq!(engine.domain_summaries.len(), MAX_ATLAS_DOMAIN_SUMMARIES);
         assert!(engine.get_domain_summary(1).is_none());
+    }
+
+    #[test]
+    fn atlas_keeps_active_domain_1_when_stale_domains_arrive() {
+        let mut engine = AtlasQueryEngine::new();
+        engine
+            .upsert_domain_summary(DomainSummary {
+                domain_id: 1,
+                name: "ethereum".into(),
+                consensus_kind: ConsensusKind::PoS,
+                current_height: 5_000,
+                total_transactions: 100,
+                total_events: 50,
+                active_validators: 16,
+                last_commit_epoch: 500,
+            })
+            .unwrap();
+        for i in 2..=(MAX_ATLAS_DOMAIN_SUMMARIES as u32 + 1) {
+            engine
+                .upsert_domain_summary(DomainSummary {
+                    domain_id: i,
+                    name: format!("stale-{i}"),
+                    consensus_kind: ConsensusKind::PoS,
+                    current_height: 1,
+                    total_transactions: 0,
+                    total_events: 0,
+                    active_validators: 0,
+                    last_commit_epoch: 1,
+                })
+                .unwrap();
+        }
+        assert!(engine.get_domain_summary(1).is_some());
+        assert!(engine.get_domain_summary(2).is_none());
     }
 }
