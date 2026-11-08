@@ -37,6 +37,46 @@ pub const fn bud(whole: u64) -> u64 {
     whole * BUD_UNIT
 }
 
+/// Basis-point denominator for Network Security Pool splits.
+pub const REWARD_SHARE_BPS_SCALE: u64 = 10_000;
+
+/// Network Security Pool share allocated to Full consensus validators (40%).
+pub const CONSENSUS_REWARD_SHARE_BPS: u64 = 4_000;
+
+/// Network Security Pool share allocated to custody share holders across all classes (50%).
+pub const STORAGE_REWARD_SHARE_BPS: u64 = 5_000;
+
+/// Network Security Pool share allocated to Full repair and active relay work (10%).
+pub const REPAIR_RELAY_REWARD_SHARE_BPS: u64 = 1_000;
+
+const _: () = assert!(
+    CONSENSUS_REWARD_SHARE_BPS + STORAGE_REWARD_SHARE_BPS + REPAIR_RELAY_REWARD_SHARE_BPS
+        == REWARD_SHARE_BPS_SCALE
+);
+
+/// Read the 50% custody share out of an epoch's Network Security Pool budget `P_e`.
+#[must_use]
+pub const fn epoch_storage_reward_share(epoch_pool_budget: u64) -> u64 {
+    ((epoch_pool_budget as u128) * (STORAGE_REWARD_SHARE_BPS as u128)
+        / (REWARD_SHARE_BPS_SCALE as u128)) as u64
+}
+
+/// Convenience: read the 40% consensus share out of an epoch's Network Security Pool budget `P_e`.
+#[must_use]
+pub const fn epoch_consensus_reward_share(epoch_pool_budget: u64) -> u64 {
+    ((epoch_pool_budget as u128) * (CONSENSUS_REWARD_SHARE_BPS as u128)
+        / (REWARD_SHARE_BPS_SCALE as u128)) as u64
+}
+
+/// Convenience: read the 10% repair-and-relay share out of `P_e`, absorbing rounding dust so the
+/// three shares sum to `epoch_pool_budget` with zero created or lost base units.
+#[must_use]
+pub const fn epoch_repair_relay_reward_share(epoch_pool_budget: u64) -> u64 {
+    epoch_pool_budget
+        .saturating_sub(epoch_consensus_reward_share(epoch_pool_budget))
+        .saturating_sub(epoch_storage_reward_share(epoch_pool_budget))
+}
+
 /// Recipient categories of the genesis distribution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Allocation {
