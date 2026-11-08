@@ -16,7 +16,7 @@ use budlum_core::domain::{
 use budlum_core::network::node::Node;
 use budlum_core::network::protocol::NetworkMessage;
 use budlum_core::rpc::{RpcMode, RpcSecurityConfig, RpcServer};
-use budlum_core::storage::db::Storage;
+use budlum_core::persistence::db::Storage;
 
 use clap::Parser;
 use std::path::{Path, PathBuf};
@@ -107,41 +107,100 @@ fn write_database_backup(
     backup_dir: &Path,
     retention_count: usize,
 ) -> std::io::Result<PathBuf> {
+    if retention_count == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "backup retention count must be at least one",
+        ));
+    }
     std::fs::create_dir_all(backup_dir)?;
+ // Serialize creation and pruning across cooperating processes. An in-flight
+ // reservation must not be mistaken for an expired backup by another writer.
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(backup_dir.join(".budlum-backup.lock"))?;
+    lock.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "another backup writer holds the backup lock",
+        ),
+        std::fs::TryLockError::Error(error) => error,
+    })?;
     let timestamp_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(std::io::Error::other)?
         .as_millis();
     let path = backup_dir.join(format!("budlum-{timestamp_ms}.budbak"));
-    storage.create_snapshot(&path)?;
-    Storage::verify_snapshot(&path)?;
+ // Reserve the name rather than replacing an existing verified backup if
+ // two requests arrive in the same millisecond or the clock moves back.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    if let Err(error) = storage.create_snapshot(&path) {
+        let _ = std::fs::remove_file(&path);
+        return Err(error);
+    }
+ // A backup that fails verification must not survive under a backup name:
+ // a later restore could trust the name and not the bytes. Remove it with
+ // the same cleanup as a failed write.
+    if let Err(error) = Storage::verify_snapshot(&path) {
+        let _ = std::fs::remove_file(&path);
+        return Err(error);
+    }
 
-    let mut backups: Vec<PathBuf> = std::fs::read_dir(backup_dir)?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|candidate| {
-            candidate
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("budlum-") && name.ends_with(".budbak"))
-        })
-        .collect();
+    prune_database_backups(backup_dir, &path, retention_count)?;
+    Ok(path)
+}
+
+// Only files bearing our exact numeric timestamp naming scheme are managed.
+// Always retain the just-verified backup, even if the system clock moved back.
+fn prune_database_backups(
+    backup_dir: &Path,
+    current: &Path,
+    retention_count: usize,
+) -> std::io::Result<()> {
+    let mut backups = Vec::new();
+    for entry in std::fs::read_dir(backup_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path == current || !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(timestamp) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("budlum-"))
+            .and_then(|name| name.strip_suffix(".budbak"))
+            .filter(|timestamp| {
+                !timestamp.is_empty() && timestamp.bytes().all(|b| b.is_ascii_digit())
+            })
+            .and_then(|timestamp| timestamp.parse::<u128>().ok())
+        else {
+            continue;
+        };
+        backups.push((timestamp, path));
+    }
     backups.sort();
-    let remove_count = backups.len().saturating_sub(retention_count);
-    for expired in backups.into_iter().take(remove_count) {
+    let remove_count = backups
+        .len()
+        .saturating_sub(retention_count.saturating_sub(1));
+    for (_, expired) in backups.into_iter().take(remove_count) {
         std::fs::remove_file(expired)?;
     }
-    Ok(path)
+    Ok(())
 }
 
 #[tokio::main]
 async fn main() {
-    // The Semgrep rule `rust.lang.security.args.args` targets using argv[0] -
-    // the executable path, which an attacker can set freely - as the basis of a
-    // security decision. argv[0] is never read here: subcommand parsing starts
-    // at index 1, the flag loop at index 3, and no authority or identity
-    // decision depends on this vector.
-    // Nosemgrep: rust.lang.security.args.args
+ // The Semgrep rule `rust.lang.security.args.args` targets using argv[0] -
+ // the executable path, which an attacker can set freely - as the basis of a
+ // security decision. argv[0] is never read here: subcommand parsing starts
+ // at index 1, the flag loop at index 3, and no authority or identity
+ // decision depends on this vector.
+ // Nosemgrep: rust.lang.security.args.args
     let args: Vec<String> = std::env::args().collect(); // nosemgrep: rust.lang.security.args.args
     if args.len() >= 3 && args[1] == "genesis" && args[2] == "build" {
         let mut output_path = "./genesis.json".to_string();
@@ -277,7 +336,7 @@ async fn main() {
             }
         }
 
-        // Dev convenience path: never print generated private key material.
+ // Dev convenience path: never print generated private key material.
         if allocations.is_empty() {
             if chain_id
                 != budlum_core::core::chain_config::Network::Devnet
@@ -325,10 +384,10 @@ async fn main() {
         if validators.is_empty() {
             validators = network_defaults.validators.clone();
         }
-        // After the fill above, an empty set means neither the operator nor
-        // the network defaults named a validator. Only devnet may start
-        // without one; any other chain id would get a genesis that no
-        // validator can extend, reported as success.
+ // After the fill above, an empty set means neither the operator nor
+ // the network defaults named a validator. Only devnet may start
+ // without one; any other chain id would get a genesis that no
+ // validator can extend, reported as success.
         if chain_id
             != budlum_core::core::chain_config::Network::Devnet
                 .chain_id()
@@ -350,16 +409,16 @@ async fn main() {
             timestamp: network_defaults.timestamp,
             bud_tokenomics: network_defaults.bud_tokenomics,
             tokenomics_addresses: network_defaults.tokenomics_addresses,
-            // Record which PQ backend produced this file, so a node built with
-            // the other one refuses the chain at startup instead of joining it
-            // and rejecting every peer's validator registration.
+ // Record which PQ backend produced this file, so a node built with
+ // the other one refuses the chain at startup instead of joining it
+ // and rejecting every peer's validator registration.
             pq_scheme: network_defaults.pq_scheme.clone(),
             bootstrap_domains: network_defaults.bootstrap_domains.clone(),
             poa_authorities: Vec::new(),
             anchor_ledger: network_defaults.anchor_ledger.clone(),
-            // The generated file states the flag instead of inheriting it from
-            // the template, so what the chain pays is readable in the file it
-            // was launched from (testnet item 8).
+ // The generated file states the flag instead of inheriting it from
+ // the template, so what the chain pays is readable in the file it
+ // was launched from (testnet item 8).
             reward_pool: network_defaults.reward_pool,
         };
 
@@ -378,10 +437,10 @@ async fn main() {
         return;
     }
 
-    //.1 tooling: `budlum-core keygen --type ed25519 --output <path>`
-    // The counterpart of the ceremony document's step. This used to be a
-    // command that existed in the document and NOT in the binary, which is one
-    // of the claim-versus-evidence matrix entries now closed.
+ //.1 tooling: `budlum-core keygen --type ed25519 --output <path>`
+ // The counterpart of the ceremony document's step. This used to be a
+ // command that existed in the document and NOT in the binary, which is one
+ // of the claim-versus-evidence matrix entries now closed.
     if args.len() >= 2 && args[1] == "keygen" {
         let mut key_type = "ed25519".to_string();
         let mut output: Option<String> = None;
@@ -420,9 +479,9 @@ async fn main() {
             eprintln!("Usage: budlum-core keygen --type ed25519 --output <secret-key-path>");
             std::process::exit(1);
         };
-        // Mainnet key policy (`crypto/primitives.rs`,
-        // `PlaintextDiskKeysForbiddenOnMainnet`): BLS/PQ keys are NOT generated
-        // on disk, only inside a PKCS#11 HSM.
+ // Mainnet key policy (`crypto/primitives.rs`,
+ // `PlaintextDiskKeysForbiddenOnMainnet`): BLS/PQ keys are NOT generated
+ // on disk, only inside a PKCS#11 HSM.
         if key_type != "ed25519" {
             eprintln!(
                 "CRITICAL: '{key_type}' keys cannot be generated on disk; BLS/PQ are generated only inside a PKCS#11 HSM (mainnet policy)."
@@ -448,11 +507,11 @@ async fn main() {
             eprintln!("Error: cannot write public key file {pub_path}: {e}");
             std::process::exit(1);
         });
-        // NOTE, as the counterweight: while the node runs, the public key is
-        // never written to stdout. The separate keygen CLI the operator invokes
-        // explicitly is the sanctioned channel, and the public key and address
-        // are printed deliberately, for the ceremony tables. The secret key and
-        // the file path are NEVER logged.
+ // NOTE, as the counterweight: while the node runs, the public key is
+ // never written to stdout. The separate keygen CLI the operator invokes
+ // explicitly is the sanctioned channel, and the public key and address
+ // are printed deliberately, for the ceremony tables. The secret key and
+ // the file path are NEVER logged.
         let address = Address::from(keypair.public_key_bytes());
         println!("Ed25519 keypair generated (secret key written with 0600 permissions).");
         println!("Public key:  {pub_hex}");
@@ -567,9 +626,9 @@ async fn main() {
             }
         };
         println!("Starting Database Integrity Audit on: {}", config.db_path);
-        // The exit status carries the verdict: automation reading only the
-        // status must not take a failed audit, a failed repair or an audit
-        // that could not run for a clean database.
+ // The exit status carries the verdict: automation reading only the
+ // status must not take a failed audit, a failed repair or an audit
+ // that could not run for a clean database.
         let status = match storage.check_integrity() {
             Ok(errors) if errors.is_empty() => {
                 println!("Integrity Audit PASSED. No corruptions found.");
@@ -638,12 +697,12 @@ async fn main() {
         eprintln!("ERROR: {e}");
         std::process::exit(1);
     }
-    // Min-stake is a consensus rule. A node started with a
-    // divergent `--min-stake` would validate leaders and validators against a
-    // parameter the rest of the network does not share and split off - while
-    // the staking executor kept enforcing the network parameter, so the two
-    // paths disagreed on the same node. The CLI value is now only accepted
-    // when it matches the network parameter; anything else is a hard error.
+ // Min-stake is a consensus rule. A node started with a
+ // divergent `--min-stake` would validate leaders and validators against a
+ // parameter the rest of the network does not share and split off - while
+ // the staking executor kept enforcing the network parameter, so the two
+ // paths disagreed on the same node. The CLI value is now only accepted
+ // when it matches the network parameter; anything else is a hard error.
     if config.min_stake != 1000 && config.min_stake != network_params.min_stake {
         eprintln!(
             "ERROR: --min-stake {} conflicts with the network consensus parameter {} \
@@ -669,22 +728,22 @@ async fn main() {
         .and_then(|s| load_signing_key(s))
         .map(|key| Address::from(key.public_key_bytes()));
 
-    // A mainnet node signs consensus when it holds a validator key, whatever
-    // its role string says. `--role` is self-declared and the custody rules
-    // below used to be keyed on it, so a mainnet node started with another
-    // role and a validator key file signed through the software fallback with
-    // no HSM custody and no post-quantum key at all. The key is the fact; the
-    // role is a label a config file can make up.
+ // A mainnet node signs consensus when it holds a validator key, whatever
+ // its role string says. `--role` is self-declared and the custody rules
+ // below used to be keyed on it, so a mainnet node started with another
+ // role and a validator key file signed through the software fallback with
+ // no HSM custody and no post-quantum key at all. The key is the fact; the
+ // role is a label a config file can make up.
     let mainnet_signs_consensus = config.network
         == budlum_core::core::chain_config::Network::Mainnet
         && (config.role == "validator" || local_signer_address.is_some());
 
-    // `[features] verify_merkle` does not reach the VM: `bud-vm` decodes
-    // with `MainnetActivation::default()` and reads no environment variable
-    // (the old `BUDLUM_VERIFY_MERKLE` hook was removed as a configuration
-    // attack vector). The flag is only refused on mainnet by
-    // `validate_strict_rules`; reporting it as an applied setting would
-    // claim a wiring that does not exist.
+ // `[features] verify_merkle` does not reach the VM: `bud-vm` decodes
+ // with `MainnetActivation::default()` and reads no environment variable
+ // (the old `BUDLUM_VERIFY_MERKLE` hook was removed as a configuration
+ // attack vector). The flag is only refused on mainnet by
+ // `validate_strict_rules`; reporting it as an applied setting would
+ // claim a wiring that does not exist.
     if config.features_verify_merkle {
         println!(
             "   VerifyMerkle: requested by [features] verify_merkle, not applied \
@@ -728,8 +787,8 @@ async fn main() {
                 );
                 std::process::exit(1);
             };
-            // the PKCS#11 3.2 standard mechanism is the first path; a
-            // vendor PQ mechanism is accepted only for a token without 3.2.
+ // the PKCS#11 3.2 standard mechanism is the first path; a
+ // vendor PQ mechanism is accepted only for a token without 3.2.
             let pq_raw = match (
                 config.pkcs11_pq_key_label.as_deref(),
                 config.pkcs11_pq_mechanism.as_deref(),
@@ -743,15 +802,15 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
-            // Parse and floor-check, then ask the vendor policy.
-            //
-            // `validate_vendor_mechanism_id` only proves the string is a
-            // number at or above `CKM_VENDOR_DEFINED`. That leaves two ways
-            // to configure a mainnet validator wrongly and be told nothing:
-            // a mechanism the capability table marks `mainnet_allowed:
-            // false`, and one outside the vendor's own documented range,
-            // which `validate_mechanism_id` refuses for YubiHSM2 above
-            // `0x8000_FFFF`. Both checks existed; neither had a caller.
+ // Parse and floor-check, then ask the vendor policy.
+ //
+ // `validate_vendor_mechanism_id` only proves the string is a
+ // number at or above `CKM_VENDOR_DEFINED`. That leaves two ways
+ // to configure a mainnet validator wrongly and be told nothing:
+ // a mechanism the capability table marks `mainnet_allowed:
+ // false`, and one outside the vendor's own documented range,
+ // which `validate_mechanism_id` refuses for YubiHSM2 above
+ // `0x8000_FFFF`. Both checks existed; neither had a caller.
             let mut mechanisms = vec![("BLS", bls_raw)];
             if let Some(pq_raw) = pq_raw {
                 mechanisms.push(("PQ", pq_raw));
@@ -793,9 +852,9 @@ async fn main() {
                 config.pkcs11_key_label.clone(),
             )
         };
-        // decision B: operator-configured consensus public keys are
-        // cross-checked against the HSM-held objects at startup and then
-        // pinned as the announced identity.
+ // decision B: operator-configured consensus public keys are
+ // cross-checked against the HSM-held objects at startup and then
+ // pinned as the announced identity.
         let decode_expected = |raw: Option<&str>, what: &str| -> Option<Vec<u8>> {
             let raw = raw?.trim().trim_start_matches("0x").to_string();
             match hex::decode(&raw) {
@@ -822,6 +881,20 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
+ // the label the vendor BLS mechanism signs through is
+ // the operator's, not the compiled-in default, so the object the
+ // startup binding test proves a pairing for is the object that
+ // signs.
+            let s = match config.pkcs11_bls_key_label.clone() {
+                Some(label) => match s.with_bls_key_label(label) {
+                    Ok(signer) => signer,
+                    Err(e) => {
+                        eprintln!("CRITICAL: invalid PKCS#11 BLS key label: {e}");
+                        std::process::exit(1);
+                    }
+                },
+                None => s,
+            };
             let signer = s.with_vendor_mechanisms(
                 config.pkcs11_bls_mechanism.clone(),
                 config.pkcs11_pq_mechanism.clone(),
@@ -836,8 +909,8 @@ async fn main() {
                 },
                 None => signer,
             };
-            // The binding challenge must run under the strict policy, not
-            // before it: otherwise a software fallback can pass the probe.
+ // The binding challenge must run under the strict policy, not
+ // before it: otherwise a software fallback can pass the probe.
             let signer = if strict_vendor_native {
                 signer.require_vendor_native_signing()
             } else {
@@ -868,12 +941,12 @@ async fn main() {
                         std::process::exit(1);
                     }
                 }
-                // In strict mainnet mode BLS/PQ secrets must be
-                // Non-extractable vendor-native objects. `has_bls_key` and
-                // `has_pq_key` intentionally report only software fallback
-                // Material, so using them as an admission check would reject
-                // The secure configuration we just required above. The
-                // Vendor-capability gate is the sole mainnet admission check.
+ // In strict mainnet mode BLS/PQ secrets must be
+ // Non-extractable vendor-native objects. `has_bls_key` and
+ // `has_pq_key` intentionally report only software fallback
+ // Material, so using them as an admission check would reject
+ // The secure configuration we just required above. The
+ // Vendor-capability gate is the sole mainnet admission check.
                 println!("PKCS#11 HSM initialized (slot: {slot_id})");
                 Some(Arc::new(signer))
             }
@@ -889,10 +962,10 @@ async fn main() {
     let consensus: Arc<dyn ConsensusEngine> = match consensus_type {
         ConsensusType::PoW => {
             println!("PoW mode - difficulty: {}", config.difficulty);
-            // The retarget target is calibrated to the producer's real tick
-            // interval. Otherwise the default 10s target reads a devnet's 1s
-            // slot as "10x too fast" and quadruples the difficulty every 100
-            // blocks.
+ // The retarget target is calibrated to the producer's real tick
+ // interval. Otherwise the default 10s target reads a devnet's 1s
+ // slot as "10x too fast" and quadruples the difficulty every 100
+ // blocks.
             Arc::new(PoWEngine::calibrated(
                 config.difficulty,
                 config.network.slot_ms(),
@@ -900,8 +973,8 @@ async fn main() {
         }
         ConsensusType::PoS => {
             println!("PoS mode - min stake: {}", config.min_stake);
-            // mainnet elects leaders with the Filiz Chain, which needs
-            // no VRF key in the HSM. A mainnet validator must hold its chain.
+ // mainnet elects leaders with the Filiz Chain, which needs
+ // no VRF key in the HSM. A mainnet validator must hold its chain.
             if mainnet_signs_consensus
                 && !std::env::var(budlum_core::consensus::filiz::FILIZ_SEED_FILE_ENV)
                     .is_ok_and(|path| !path.is_empty())
@@ -916,8 +989,8 @@ async fn main() {
                 min_stake: config.min_stake,
                 epoch_length: network_params.epoch_len,
             };
-            // Mainnet forbids disk-backed ValidatorKeys
-            // (BLS + Dilithium secrets stay plaintext on disk today).
+ // Mainnet forbids disk-backed ValidatorKeys
+ // (BLS + Dilithium secrets stay plaintext on disk today).
             let keys = if config.network == budlum_core::core::chain_config::Network::Mainnet {
                 if config.validator_key_file.is_some() {
                     eprintln!(
@@ -930,16 +1003,16 @@ async fn main() {
                 match budlum_core::crypto::primitives::ValidatorKeys::load(path) {
                     Ok(k) => Some(k),
                     Err(e) => {
-                        // A node told to use a validator key and unable to
-                        // read it used to carry on as a spectator: it joined
-                        // the mesh, voted nothing, produced nothing, and said
-                        // so in one line that scrolled away. Worse than the
-                        // silence, its stake still counted towards the voting
-                        // weight the other validators divide their leader
-                        // threshold by, so a run with this node in the set
-                        // could stall with no node able to win a slot. An
-                        // operator's declared intent is not a hint to fall
-                        // back from: refuse to start.
+ // A node told to use a validator key and unable to
+ // read it used to carry on as a spectator: it joined
+ // the mesh, voted nothing, produced nothing, and said
+ // so in one line that scrolled away. Worse than the
+ // silence, its stake still counted towards the voting
+ // weight the other validators divide their leader
+ // threshold by, so a run with this node in the set
+ // could stall with no node able to win a slot. An
+ // operator's declared intent is not a hint to fall
+ // back from: refuse to start.
                         eprintln!(
                             "CRITICAL: --validator-key-file {path} was set but the keys could not be loaded: {e}; refusing to start as a non-validating node"
                         );
@@ -949,8 +1022,8 @@ async fn main() {
             } else {
                 None
             };
-            // Filiz Chain: the seed comes from the file the
-            // environment names, never from the config or a log.
+ // Filiz Chain: the seed comes from the file the
+ // environment names, never from the config or a log.
             let filiz_chain = std::env::var(budlum_core::consensus::filiz::FILIZ_SEED_FILE_ENV)
                 .ok()
                 .filter(|path| !path.is_empty())
@@ -1011,8 +1084,8 @@ async fn main() {
                     },
                     poa_keypair,
                 );
-                // A validator key set with its ML-DSA-65 key signs composite
-                // blocks; a bare key pair keeps the Ed25519 form.
+ // A validator key set with its ML-DSA-65 key signs composite
+ // blocks; a bare key pair keeps the Ed25519 form.
                 let composite = config
                     .validator_key_file
                     .as_ref()
@@ -1098,12 +1171,12 @@ async fn main() {
         .with_archive_mode(config.features_archive_mode)
     });
 
-    // `Metrics::new` can only fail on a metric name we wrote wrong, which is a
-    // build-time mistake rather than anything a peer can trigger. It used to
-    // panic inside the constructor; the release profile aborts on panic, so
-    // that turned a naming typo into a dead validator. Startup exits with a
-    // readable message instead, matching how the other fatal startup errors
-    // in this function are reported.
+ // `Metrics::new` can only fail on a metric name we wrote wrong, which is a
+ // build-time mistake rather than anything a peer can trigger. It used to
+ // panic inside the constructor; the release profile aborts on panic, so
+ // that turned a naming typo into a dead validator. Startup exits with a
+ // readable message instead, matching how the other fatal startup errors
+ // in this function are reported.
     let metrics = match budlum_core::core::metrics::Metrics::new() {
         Ok(m) => Arc::new(m),
         Err(e) => {
@@ -1112,11 +1185,11 @@ async fn main() {
         }
     };
 
-    // Sharding is a consensus parameter (Whitepaper v1.3): the shards
-    // commitment is part of block validity. Sourcing it from per-node CLI
-    // flags would let two validators apply different validity rules to the
-    // same block (CWE-1287), so any non-default value fails closed
-    // until the parameters are chain-committed in genesis.
+ // Sharding is a consensus parameter (Whitepaper v1.3): the shards
+ // commitment is part of block validity. Sourcing it from per-node CLI
+ // flags would let two validators apply different validity rules to the
+ // same block (CWE-1287), so any non-default value fails closed
+ // until the parameters are chain-committed in genesis.
     if config.sharding_enabled
         || config.sharding_num_shards != 1
         || config.sharding_activation_height != 0
@@ -1143,7 +1216,7 @@ async fn main() {
     .with_metrics(metrics.clone())
     .with_sharding(sharding_config);
 
-    // PQ anchor emission: off unless the node says otherwise.
+ // PQ anchor emission: off unless the node says otherwise.
     match config.anchor.mode.as_deref().unwrap_or("off") {
         "off" => {}
         "devnet" => {
@@ -1190,10 +1263,10 @@ async fn main() {
             if budlum_core::crypto::mainnet_policy::is_software_token_path(module_path) {
                 fail("a software token is not allowed for anchor keys");
             }
-            // The anchor keys are the chain's post-quantum root of trust, and
-            // vendor labels plus a name denylist cannot establish that the
-            // module holding them is hardware. The release pins the module's
-            // bytes; anything else is unknown, and unknown is refused.
+ // The anchor keys are the chain's post-quantum root of trust, and
+ // vendor labels plus a name denylist cannot establish that the
+ // module holding them is hardware. The release pins the module's
+ // bytes; anything else is unknown, and unknown is refused.
             if !budlum_core::crypto::mainnet_policy::is_sanctioned_module_path(module_path) {
                 fail("anchor keys require a PKCS#11 module the release sanctions");
             }
@@ -1249,8 +1322,8 @@ async fn main() {
 
     if let Some((backup_storage, backup_dir, backup_interval, retention_count)) = backup_schedule {
         tokio::spawn(async move {
-            // Blockchain initialization (including genesis) completed before
-            // This task is created, so the first backup is restorable.
+ // Blockchain initialization (including genesis) completed before
+ // This task is created, so the first backup is restorable.
             loop {
                 match write_database_backup(&backup_storage, &backup_dir, retention_count) {
                     Ok(path) => tracing::info!("Verified database backup: {}", path.display()),
@@ -1261,10 +1334,10 @@ async fn main() {
         });
     }
 
-    // The bootstrap domains and their statuses are genesis state
-    // (`GenesisConfig::initial_state`): BFT domains start active, PoA domains
-    // start frozen until domain-local validator state exists, and only a
-    // block changes either. Startup reads them; it no longer rewrites them.
+ // The bootstrap domains and their statuses are genesis state
+ // (`GenesisConfig::initial_state`): BFT domains start active, PoA domains
+ // start frozen until domain-local validator state exists, and only a
+ // block changes either. Startup reads them; it no longer rewrites them.
     let bootstrap_domains = blockchain.state.settlement.domains.domains();
     for domain in bootstrap_domains {
         if domain.kind == ConsensusKind::Bft {
@@ -1338,8 +1411,8 @@ async fn main() {
     }
 
     for validator in &poa_validators {
-        // A restart must not reset a stored authority to stake 1, active and
-        // not slashed.
+ // A restart must not reset a stored authority to stake 1, active and
+ // not slashed.
         blockchain.state.ensure_validator(*validator, 1);
     }
 
@@ -1348,26 +1421,26 @@ async fn main() {
         chain_actor.run().await;
     });
 
-    // 2026-07-18: the dead `_keys` bootstrap was wired to something real. The
-    // ADDRESS of the loaded validator key now enters the producer-candidate
-    // chain. The only behavioural change is that on a successful key load the
-    // address is kept in a variable; the signature and devnet validation rules
-    // are unchanged. The combinator form is for the clippy pedantic/nursery
-    // ratchet.
-    //
-    // The mainnet guard is repeated here rather than assumed. The load above
-    // refuses a disk-backed key file on mainnet, but only inside the PoS
-    // engine arm, and `ValidatorKeys::validate_mainnet_disk_policy` was never
-    // called from any production path at all: it exists, it is tested, and
-    // nothing reaches it. So on mainnet this second load would open the same
-    // file the first one refused, and hand back an address derived from
-    // plaintext BLS and post-quantum secrets sitting on disk.
-    //
-    // The other mainnet key rules in this binary are also spelled
-    // `network == Mainnet && role == "validator"`, which leaves a node started
-    // with any other role reading the key file unchecked. Bootstrapping a
-    // producer candidate is a validator action whatever the role string says,
-    // so the check here is on the network alone.
+ // 2026-07-18: the dead `_keys` bootstrap was wired to something real. The
+ // ADDRESS of the loaded validator key now enters the producer-candidate
+ // chain. The only behavioural change is that on a successful key load the
+ // address is kept in a variable; the signature and devnet validation rules
+ // are unchanged. The combinator form is for the clippy pedantic/nursery
+ // ratchet.
+ //
+ // The mainnet guard is repeated here rather than assumed. The load above
+ // refuses a disk-backed key file on mainnet, but only inside the PoS
+ // engine arm, and `ValidatorKeys::validate_mainnet_disk_policy` was never
+ // called from any production path at all: it exists, it is tested, and
+ // nothing reaches it. So on mainnet this second load would open the same
+ // file the first one refused, and hand back an address derived from
+ // plaintext BLS and post-quantum secrets sitting on disk.
+ //
+ // The other mainnet key rules in this binary are also spelled
+ // `network == Mainnet && role == "validator"`, which leaves a node started
+ // with any other role reading the key file unchecked. Bootstrapping a
+ // producer candidate is a validator action whatever the role string says,
+ // so the check here is on the network alone.
     let mainnet = config.network == budlum_core::core::chain_config::Network::Mainnet;
     let validator_keys_address: Option<Address> = (!mainnet
         && consensus_type == ConsensusType::PoS)
@@ -1406,10 +1479,10 @@ async fn main() {
         bootstraps.extend(network.fallback_bootnodes());
     }
 
-    // Testnet has no public bootnodes yet and mDNS is refused outside devnet,
-    // so a node with neither a bootnode nor a DNS seed would come up and never
-    // meet a peer. Refuse instead of idling; mainnet is held to the stricter
-    // bootnode rule below.
+ // Testnet has no public bootnodes yet and mDNS is refused outside devnet,
+ // so a node with neither a bootnode nor a DNS seed would come up and never
+ // meet a peer. Refuse instead of idling; mainnet is held to the stricter
+ // bootnode rule below.
     if !budlum_core::core::chain_config::has_peer_source(network, &bootstraps, &config.dns_seeds) {
         eprintln!("Refusing to start {network} without a peer source.");
         eprintln!(
@@ -1424,10 +1497,10 @@ async fn main() {
             eprintln!("Set p2p.bootnodes in config/mainnet.toml or pass --bootstrap.");
             std::process::exit(1);
         }
-        // Genesis placeholder reddiyle (cli/commands.rs Rule 4)
-        // Symmetrically fail-closed: a peer carrying a dummy or placeholder
-        // marker is NOT dialled on mainnet. It passes once the ceremony writes
-        // the real multiaddrs.
+ // Genesis placeholder reddiyle (cli/commands.rs Rule 4)
+ // Symmetrically fail-closed: a peer carrying a dummy or placeholder
+ // marker is NOT dialled on mainnet. It passes once the ceremony writes
+ // the real multiaddrs.
         if let Some(bad) = budlum_core::core::chain_config::first_placeholder_peer(&bootstraps) {
             eprintln!("CRITICAL SECURITY FAILURE: Mainnet placeholder bootnode detected: {bad}");
             eprintln!(
@@ -1449,12 +1522,12 @@ async fn main() {
         }
     }
 
-    // Load or generate persistent P2P identity
+ // Load or generate persistent P2P identity
     let identity_key = budlum_core::network::node::load_or_generate_identity_key(
         config.p2p_identity_file.as_deref(),
     );
 
-    // B.U.D. Storage Node Initialization (Monolithic Architecture)
+ // B.U.D. Storage Node Initialization (Monolithic Architecture)
     type StorageParts = (
         Option<Arc<bud_node::BudBitswap>>,
         Option<bud_node::ShardingConfig>,
@@ -1462,11 +1535,11 @@ async fn main() {
     );
     let (storage_node, sharding_config, content_metrics_store): StorageParts =
         if config.storage_enabled {
-            // Content bytes are node-local service state, not consensus state, but
-            // losing them on restart strands the manifests and active deals that
-            // the chain still advertises. Keep the store beside the chain DB and
-            // fail closed if it cannot be opened; silently falling back to memory
-            // would turn a restart into data loss again.
+ // Content bytes are node-local service state, not consensus state, but
+ // losing them on restart strands the manifests and active deals that
+ // the chain still advertises. Keep the store beside the chain DB and
+ // fail closed if it cannot be opened; silently falling back to memory
+ // would turn a restart into data loss again.
             let content_path = std::path::Path::new(&config.db_path).with_extension("content");
             let store = Arc::new(
                 bud_node::FileContentStore::with_default_capacity_at(&content_path).unwrap_or_else(
@@ -1575,14 +1648,14 @@ async fn main() {
         .or(local_signer_address)
         .or(validator_keys_address);
 
-    // A battery-powered node describes itself once, and every budget is
-    // derived from that description. `--mobile-mode` on its own used to mean
-    // exactly two things in `node.rs`, ten peers and slower timers, no matter
-    // what the battery said.
+ // A battery-powered node describes itself once, and every budget is
+ // derived from that description. `--mobile-mode` on its own used to mean
+ // exactly two things in `node.rs`, ten peers and slower timers, no matter
+ // what the battery said.
     if config.mobile_mode {
-        // The profile names the device, and `validate` refuses a zero
-        // address, so a node with no validator key still needs one. The peer
-        // identity is the name this device already answers to on the network.
+ // The profile names the device, and `validate` refuses a zero
+ // address, so a node with no validator key still needs one. The peer
+ // identity is the name this device already answers to on the network.
         let device_address = cli_producer_address.unwrap_or_else(|| {
             Address::from(budlum_core::core::hash::hash_fields_bytes(&[
                 b"BDLM_MOBILE_DEVICE_ID_V1",
@@ -1640,24 +1713,24 @@ async fn main() {
             }
         };
 
-        // (security audit wiring) emit a prominent startup
-        // Warning if the *resolved* `auth_required` is false. This block
-        // Runs regardless of which constructor
-        // (`RpcSecurityConfig::default`, `operator_default`,
-        // `from_env`) produced the config - the check is on the
-        // Resolved value, not the code path. Without this, an operator
-        // Who set `[rpc] auth_required = false` in their TOML (or
-        // Relied on the prior NodeConfig default) would silently ship
-        // An unauthenticated node.
+ // (security audit wiring) emit a prominent startup
+ // Warning if the *resolved* `auth_required` is false. This block
+ // Runs regardless of which constructor
+ // (`RpcSecurityConfig::default`, `operator_default`,
+ // `from_env`) produced the config - the check is on the
+ // Resolved value, not the code path. Without this, an operator
+ // Who set `[rpc] auth_required = false` in their TOML (or
+ // Relied on the prior NodeConfig default) would silently ship
+ // An unauthenticated node.
         if !rpc_security.auth_required {
             tracing::warn!(
                 "[SECURITY] Public RPC is running with auth_required=false: every state-changing method is exposed to the network with no authentication. Close it with --rpc-auth-required=true, or the equivalent config."
             );
         }
-        // Same reasoning for an unrestricted IP allow-list. The runtime
-        // Treats an empty list as "allow all", so a non-empty list
-        // Outside localhost is a strong signal that this is an
-        // Intentional public deployment.
+ // Same reasoning for an unrestricted IP allow-list. The runtime
+ // Treats an empty list as "allow all", so a non-empty list
+ // Outside localhost is a strong signal that this is an
+ // Intentional public deployment.
         let has_localhost_only = !rpc_security.allowed_ips.is_empty()
             && rpc_security
                 .allowed_ips
@@ -1674,9 +1747,9 @@ async fn main() {
             );
         }
 
-        // Public RPC listener. Composed and normalized through one path so
-        // an IPv6 host is bracketed and a malformed listener stops the node
-        // here, with the string in the message, instead of at bind time.
+ // Public RPC listener. Composed and normalized through one path so
+ // an IPv6 host is bracketed and a malformed listener stops the node
+ // here, with the string in the message, instead of at bind time.
         let public_addr = match config.rpc_public_listener.clone() {
             Some(listener) => budlum_core::cli::commands::normalize_listener(&listener),
             None => budlum_core::cli::commands::normalize_listener(&format!(
@@ -1697,10 +1770,20 @@ async fn main() {
             rpc_security.clone(),
             RpcMode::Public,
         )
-        .with_metrics(metrics.clone());
-        // In-process TLS: TLS 1.3 with X25519MLKEM768 only. A
-        // certificate without its key, or an unusable pair, stops the node
-        // here instead of falling back to plain HTTP.
+        .with_metrics(metrics.clone())
+        .with_aptos_listener("127.0.0.1:18549".to_string())
+        .with_solana_listener("127.0.0.1:18548".to_string());
+        let pub_server = match std::env::var("BUDLUM_APTOS_UPSTREAM_URL") {
+            Ok(upstream) => pub_server.with_aptos_upstream(upstream),
+            Err(std::env::VarError::NotPresent) => pub_server,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                eprintln!("BUDLUM_APTOS_UPSTREAM_URL must be valid UTF-8");
+                std::process::exit(1);
+            }
+        };
+ // In-process TLS: TLS 1.3 with X25519MLKEM768 only. A
+ // certificate without its key, or an unusable pair, stops the node
+ // here instead of falling back to plain HTTP.
         let pub_server = match (
             config.rpc_tls_cert_file.as_ref(),
             config.rpc_tls_key_file.as_ref(),
@@ -1733,16 +1816,16 @@ async fn main() {
             }
         });
 
-        // Operator RPC listener (localhost-only, no auth by default).
-        // Security review (HIGH): the operator surface has no authentication, so
-        // binding it off loopback opens operator actions to a remote attacker.
-        // Fail-closed: if a non-loopback address is configured, the node does
-        // not start.
+ // Operator RPC listener (localhost-only, no auth by default).
+ // Security review (HIGH): the operator surface has no authentication, so
+ // binding it off loopback opens operator actions to a remote attacker.
+ // Fail-closed: if a non-loopback address is configured, the node does
+ // not start.
         if let Some(operator_addr) = config.rpc_operator_listener.as_ref() {
-            // Parsed as the socket address it will be bound as: the old
-            // split at the first `:` read `[` out of `[::1]:8546` and
-            // refused the loopback IPv6 form, and would have passed a
-            // `localhost` that resolves wherever /etc/hosts says.
+ // Parsed as the socket address it will be bound as: the old
+ // split at the first `:` read `[` out of `[::1]:8546` and
+ // refused the loopback IPv6 form, and would have passed a
+ // `localhost` that resolves wherever /etc/hosts says.
             let Some(operator_addr) = budlum_core::cli::commands::normalize_listener(operator_addr)
             else {
                 eprintln!(
@@ -1785,9 +1868,9 @@ async fn main() {
     let metrics_bind = config
         .metrics_listener
         .clone()
-        // Security review (LOW): metrics have no auth, so the default bind was
-        // pulled back to loopback. Reaching 0.0.0.0 now takes a deliberate
-        // configuration.
+ // Security review (LOW): metrics have no auth, so the default bind was
+ // pulled back to loopback. Reaching 0.0.0.0 now takes a deliberate
+ // configuration.
         .unwrap_or_else(|| format!("127.0.0.1:{}", config.metrics_port));
     tokio::spawn(async move {
         use http_body_util::Full;
@@ -1804,9 +1887,9 @@ async fn main() {
         };
         println!("Prometheus metrics on {metrics_bind}/metrics");
         loop {
-            // A persistent `accept` error (file descriptor limit reached,
-            // for one) used to spin this loop at full speed. Log it and
-            // yield before the retry.
+ // A persistent `accept` error (file descriptor limit reached,
+ // for one) used to spin this loop at full speed. Log it and
+ // yield before the retry.
             let stream = match listener.accept().await {
                 Ok((stream, _)) => stream,
                 Err(e) => {
@@ -1845,10 +1928,9 @@ async fn main() {
                                                 .and_then(|v| v.to_str().ok())
                                                 .unwrap_or("");
                                             let bearer = format!("Bearer {key}");
-                                            // F-0003: constant-time comparison, closing a timing side
-                                            // channel. A short-circuiting `!=` leaks both the length and
-                                            // the content of the secret into timing, so
-                                            // `subtle::ConstantTimeEq` is used instead.
+ // Constant-time comparison. A short-circuiting `!=` leaks
+ // both the length and the content of the secret into timing, so
+ // `subtle::ConstantTimeEq` is used instead.
                                             if !budlum_core::rpc::server::constant_time_eq_str(auth_hdr, &bearer)
                                                 && !budlum_core::rpc::server::constant_time_eq_str(api_key_hdr, &key)
                                             {
@@ -1872,10 +1954,10 @@ async fn main() {
         }
     });
 
-    // Start Relayer Worker if configured. Without a producer address there is
-    // no identity to attribute relay actions to; the worker is not started
-    // with the zero address in that slot, the same way the block producer
-    // below declines without one.
+ // Start Relayer Worker if configured. Without a producer address there is
+ // no identity to attribute relay actions to; the worker is not started
+ // with the zero address in that slot, the same way the block producer
+ // below declines without one.
     let relayer_identity = if config.role == "relayer" || config.role == "validator" {
         let identity = cli_producer_address;
         if identity.is_none() {
@@ -1888,21 +1970,25 @@ async fn main() {
         None
     };
     if let Some(relayer_addr) = relayer_identity {
-        // Persist the relay cursor next to the chain database. Without a path
-        // The worker resumes from `get_finalized_height()` at boot, so every
-        // Request that finalized while it was down is skipped: the user has
-        // Paid the fee and nothing ever acts on the request. `with_cursor_path`
-        // Existed and was never called, which left the fix inert in
-        // Production.
+ // Persist the relay cursor next to the chain database. Without a path
+ // The worker resumes from `get_finalized_height()` at boot, so every
+ // Request that finalized while it was down is skipped: the user has
+ // Paid the fee and nothing ever acts on the request. `with_cursor_path`
+ // Existed and was never called, which left the fix inert in
+ // Production.
         let cursor_path = std::path::Path::new(&config.db_path).join("relayer-cursor");
         let relayer = budlum_core::relayer::RelayerWorker::new(chain.clone(), relayer_addr)
-            .with_cursor_path(Some(cursor_path));
+            .with_cursor_path(Some(cursor_path))
+ // The reservation gauges are the only live view of the pending
+ // store: without them an operator learns that results are piling
+ // up one file read at a time, on the node they happen to be on.
+            .with_metrics(metrics.clone());
 
-        // The `--evm-bridge-address`
-        // registration is removed. The EVM bridge leg has no live end-to-end
-        // route - the off-chain half refuses at broadcast - so there is no
-        // configuration to register and nothing safe to default. Outbound
-        // EVM relay stays off until the real receipt flow lands.
+ // The `--evm-bridge-address`
+ // registration is removed. The EVM bridge leg has no live end-to-end
+ // route - the off-chain half refuses at broadcast - so there is no
+ // configuration to register and nothing safe to default. Outbound
+ // EVM relay stays off until the real receipt flow lands.
         tracing::info!(
             "Relayer: outbound EVM relay is disabled: the EVM bridge leg has no \
              live end-to-end route. The worker will observe relay requests and refuse to \
@@ -1914,20 +2000,20 @@ async fn main() {
         });
     }
 
-    // 2026-07-18: the daemon block-production loop, for PoS, PoW and PoA.
-    //
-    // Root cause, proven in CI by multinode smoke job 87990206239: the binary
-    // produced blocks only through the interactive stdin "mine" command, so
-    // daemon and compose networks froze at genesis (height=0x0). The loop runs
-    // under both PoS and PoW when a producer address is configured.
-    //
-    // Producer eligibility stays in the engine layer as the single authority:
-    // `preview_common` under PoS (active validator plus VRF leadership, which
-    // needs the daemon's `validator_keys` injected into `PoSEngine`; an
-    // address-only 0x02 CANNOT produce under PoS, see the STATUS_ONLINE
-    // backlog), and `mine` under PoW (difficulty from the CLI flag; smoke runs
-    // difficulty=0). Broadcast goes over the gossipsub "blocks" channel, and
-    // peers run the same deterministic commit path.
+ // 2026-07-18: the daemon block-production loop, for PoS, PoW and PoA.
+ //
+ // Root cause, proven in CI by multinode smoke job 87990206239: the binary
+ // produced blocks only through the interactive stdin "mine" command, so
+ // daemon and compose networks froze at genesis (height=0x0). The loop runs
+ // under both PoS and PoW when a producer address is configured.
+ //
+ // Producer eligibility stays in the engine layer as the single authority:
+ // `preview_common` under PoS (active validator plus VRF leadership, which
+ // needs the daemon's `validator_keys` injected into `PoSEngine`; an
+ // address-only 0x02 CANNOT produce under PoS, see the STATUS_ONLINE
+ // backlog), and `mine` under PoW (difficulty from the CLI flag; smoke runs
+ // difficulty=0). Broadcast goes over the gossipsub "blocks" channel, and
+ // peers run the same deterministic commit path.
     if daemon_producer_loop_runs(consensus_type) {
         if let Some(producer) = cli_producer_address {
             let chain_p = chain.clone();
@@ -1939,32 +2025,32 @@ async fn main() {
             tokio::spawn(async move {
                 let mut tick = tokio::time::interval(std::time::Duration::from_millis(interval_ms));
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                // First instant at which a sync round has been holding this
-                // producer, or `None` when no round was holding it. Cleared on
-                // every tick that produces, so a fresh round starts a fresh
-                // window and a stale one cannot accumulate.
+ // First instant at which a sync round has been holding this
+ // producer, or `None` when no round was holding it. Cleared on
+ // every tick that produces, so a fresh round starts a fresh
+ // window and a stale one cannot accumulate.
                 let mut hold_deadline: Option<tokio::time::Instant> = None;
                 loop {
                     tick.tick().await;
-                    // A node that is catching up produces nothing. Two nodes on
-                    // a mesh that is still forming otherwise build the same
-                    // height at once - each has only genesis, each is the
-                    // leader of the round it happens to reach first - and the
-                    // pair of blocks is a fork below every suffix either node
-                    // can join. In the devnet smoke this is one node booting a
-                    // few seconds late: it produced its own #1 while its first
-                    // sync round was still open, and neither side could reorg
-                    // onto the other. The round is opened on the first
-                    // handshake that reports a taller chain, which is exactly
-                    // the window the guard has to cover.
-                    //
-                    // The hold is bounded. That claim is unverified - any
-                    // handshaked peer can make it, and a peer that never
-                    // answers leaves the round open until the timeout sweep -
-                    // so it may delay this validator but never stop it: a
-                    // window of `PRODUCER_SYNC_HOLD` covers every honest
-                    // catch-up, and producing on a stale tip afterwards costs
-                    // this slot a losing race, not the mesh its liveness.
+ // A node that is catching up produces nothing. Two nodes on
+ // a mesh that is still forming otherwise build the same
+ // height at once - each has only genesis, each is the
+ // leader of the round it happens to reach first - and the
+ // pair of blocks is a fork below every suffix either node
+ // can join. In the devnet smoke this is one node booting a
+ // few seconds late: it produced its own #1 while its first
+ // sync round was still open, and neither side could reorg
+ // onto the other. The round is opened on the first
+ // handshake that reports a taller chain, which is exactly
+ // the window the guard has to cover.
+ //
+ // The hold is bounded. That claim is unverified - any
+ // handshaked peer can make it, and a peer that never
+ // answers leaves the round open until the timeout sweep -
+ // so it may delay this validator but never stop it: a
+ // window of `PRODUCER_SYNC_HOLD` covers every honest
+ // catch-up, and producing on a stale tip afterwards costs
+ // this slot a losing race, not the mesh its liveness.
                     if client_p.is_syncing() {
                         let now = tokio::time::Instant::now();
                         let deadline =
@@ -2009,12 +2095,12 @@ async fn main() {
             loop {
                 line.clear();
                 use tokio::io::AsyncBufReadExt;
-                // `Ok(0)` is end of file: a daemon with stdin closed or
-                // redirected from `/dev/null` gets it on every call, and a
-                // loop that treats it as an empty command spins on one
-                // core for the life of the process. The console is over;
-                // this branch parks so the other `select!` arms keep the
-                // node running.
+ // `Ok(0)` is end of file: a daemon with stdin closed or
+ // redirected from `/dev/null` gets it on every call, and a
+ // loop that treats it as an empty command spins on one
+ // core for the life of the process. The console is over;
+ // this branch parks so the other `select!` arms keep the
+ // node running.
                 match stdin.read_line(&mut line).await {
                     Ok(0) => {
                         tracing::info!("stdin closed; the interactive console is off");
@@ -2030,7 +2116,7 @@ async fn main() {
                     let cmd = line.trim();
                     match cmd {
                         "tx" => {
-                            // Fixed literals for the interactive devnet `tx` command.
+ // Fixed literals for the interactive devnet `tx` command.
                             let alice = Address::from([0x01u8; 32]);
                             let bob = Address::from([0x02u8; 32]);
                             let tx = Transaction::new(
@@ -2087,9 +2173,74 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        claim_new_key_file, console_producer, daemon_producer_loop_runs, try_load_signing_key,
+        claim_new_key_file, console_producer, daemon_producer_loop_runs, prune_database_backups,
+        try_load_signing_key, write_database_backup,
     };
     use budlum_core::cli::ConsensusType;
+
+    #[test]
+    fn zero_retention_refuses_backup_without_deleting_existing_files() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let db_path = dir.path().join("db");
+        let storage = budlum_core::storage::db::Storage::new(db_path.to_str().unwrap())
+            .expect("open database");
+        let backups = dir.path().join("backups");
+        std::fs::create_dir(&backups).unwrap();
+        let existing = backups.join("budlum-9.budbak");
+        std::fs::write(&existing, b"existing").unwrap();
+        let error = write_database_backup(&storage, &backups, 0).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(std::fs::read(existing).unwrap(), b"existing");
+        assert_eq!(std::fs::read_dir(backups).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn retention_uses_numeric_timestamps_and_preserves_current_and_unknown_files() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "budlum-2.budbak",
+            "budlum-10.budbak",
+            "budlum-1.budbak",
+            "budlum-manual.budbak",
+        ] {
+            std::fs::write(dir.path().join(name), name).unwrap();
+        }
+        let current = dir.path().join("budlum-1.budbak");
+        prune_database_backups(dir.path(), &current, 2).unwrap();
+        assert!(current.exists());
+        assert!(!dir.path().join("budlum-2.budbak").exists());
+        assert!(dir.path().join("budlum-10.budbak").exists());
+        assert!(dir.path().join("budlum-manual.budbak").exists());
+    }
+
+    #[test]
+    fn backup_refuses_concurrent_writer_without_pruning() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage =
+            budlum_core::storage::db::Storage::new(dir.path().join("db").to_str().unwrap())
+                .expect("open database");
+        let backups = dir.path().join("backups");
+        std::fs::create_dir(&backups).unwrap();
+        let existing = backups.join("budlum-1.budbak");
+        std::fs::write(&existing, b"existing").unwrap();
+        let lock = std::fs::File::create(backups.join(".budlum-backup.lock")).unwrap();
+        lock.lock().unwrap();
+        let error = write_database_backup(&storage, &backups, 1).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(std::fs::read(existing).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn backup_returns_a_verified_existing_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage =
+            budlum_core::storage::db::Storage::new(dir.path().join("db").to_str().unwrap())
+                .expect("open database");
+        let path = write_database_backup(&storage, &dir.path().join("backups"), 1)
+            .expect("write backup");
+        assert!(path.is_file());
+        budlum_core::storage::db::Storage::verify_snapshot(path).expect("verify backup");
+    }
 
     #[test]
     fn key_claim_refuses_to_overwrite_an_existing_file() {
