@@ -1,0 +1,46 @@
+[package]
+name = "budlum-mobile-ffi"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+description = "UniFFI bindings (Kotlin and Swift) of the Budlum mobile validator core"
+publish = false
+
+[lib]
+name = "budlum_mobile_ffi"
+path = "src/lib.rs"
+# rlib for the Rust tests, cdylib for Android (jniLibs), staticlib for the
+# iOS XCFramework.
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[[bin]]
+# Generates the Kotlin and Swift sources from the built library:
+# cargo run --features cli --bin uniffi-bindgen -- generate --library <lib>
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+required-features = ["cli"]
+
+[features]
+cli = ["uniffi/cli", "uniffi/cargo-metadata"]
+
+[dependencies]
+budlum-mobile-core = { path = "../core" }
+# The section 7.2 class table, exported so the apps hold no copy (K-4).
+budlum-types = { path = "../../crates/budlum-types" }
+uniffi = { version = "=0.32.2", default-features = false }
+# Wipes the operator seed the host vault hands back (section 7.9.6).
+zeroize = "=1.9.1"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unused_import_braces = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[profile.release]
+overflow-checks = true
