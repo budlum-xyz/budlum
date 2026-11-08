@@ -198,7 +198,7 @@ impl std::fmt::Display for ContentEncryption {
 /// Replication is the degenerate case `k = n = shard_count`, where losing one
 /// shard loses part of the object and durability has to come from storing the
 /// whole thing again. Erasure coding reaches the same durability at a fraction
-/// of the stored bytes, which is the point of `docs/BUD_STORAGE_ROADMAP.md`
+/// of the stored bytes, which is the point of the single-storage model in `docs/STORAGE.md`
 /// Gap 3 - and it is what makes Gap 4 expressible at all, because a repair
 /// trigger needs something to reconstruct *from*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1057,7 +1057,7 @@ impl ContentManifest {
     }
 
     /// Look up a shard by `ContentId`. Returns `None` if the shard is not
-    /// In this manifest - used by the `bud_storageGetDealsByShard` query
+    /// In this manifest - used by the removed legacy per-shard deal query
     /// Path and the E2E test (`src/tests/bud_e2e.rs`).
     pub fn shard(&self, shard_id: &ContentId) -> Option<&ShardRef> {
         self.shards.iter().find(|s| &s.shard_id == shard_id)
@@ -1154,8 +1154,8 @@ fn manifest_id_from_parts(
     buf.push(encryption.commitment_tag());
     // The object length is part of the identity: two manifests with the same
     // shard set but different content lengths (e.g. different padding in the
-    // final stripe) must not share an id (MEDIUM, CWE-345; BUDLUM
-    // finding #107). `ContentManifest::content_size()` returns the committed
+    // final stripe) must not share an id (CWE-345).
+    // `ContentManifest::content_size()` returns the committed
     // length, falling back to the shard total for pre-V4 manifests.
     buf.extend_from_slice(&content_size.to_le_bytes());
     buf.extend_from_slice(&total_size.to_le_bytes());
@@ -1236,7 +1236,7 @@ mod tests {
         assert_eq!(m1.shard_count, m2.shard_count);
     }
 
-    /// The browser core (`crates/budscan`, `BudManifest::manifest_id`) keeps a
+    /// The browser core (`crates/budlum-explorer`, `BudManifest::manifest_id`) keeps a
     /// copy of this preimage; the vector is pinned there with the same bytes.
     /// If this changes, the browser verifies against a stale formula.
     #[test]
@@ -1248,7 +1248,7 @@ mod tests {
         );
     }
 
-    /// Same vector as the browser copy (`crates/budscan/src/fetch.rs`,
+    /// Same vector as the browser copy (`crates/budlum-explorer/src/fetch.rs`,
     /// `a_dictionary_bound_manifest_id_matches_the_chain_vector`).
     ///
     /// The single-shard vector above is dictionary-free, so it cannot see a
