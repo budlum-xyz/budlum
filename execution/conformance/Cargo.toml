@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+
+[package]
+name = "budlum-ee-conformance"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+license = "Apache-2.0"
+publish = false
+description = "Budlum UEL cross-environment conformance, gas calibration, and cross-arch root runner ()"
+
+[dependencies]
+bud-isa = { path = "../../budzero/bud-isa" }
+budlum-ee-budzero = { path = "../budzero" }
+budlum-ee-cairo = { path = "../cairo" }
+budlum-ee-evm = { path = "../evm" }
+budlum-ee-move = { path = "../move" }
+budlum-ee-move-sui = { path = "../move-sui" }
+budlum-ee-polkavm = { path = "../polkavm" }
+budlum-ee-svm = { path = "../svm" }
+budlum-ee-wasm = { path = "../wasm" }
+budlum-uel-abi = { path = "../../crates/uel-abi" }
+hex = "0.4"
+serde_json = "1.0"
+sha2 = "0.10"
+wat = "1"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[profile.release]
+panic = "unwind"
