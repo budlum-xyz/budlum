@@ -6,7 +6,10 @@
 #   b  the BLS12-381 finality peer, required together with the ML-DSA-65 QC,
 #   c  X25519 inside a hybrid KEM,
 #   d  proofs of external networks, marked in the domain profile,
-#   e  TEE attestation, which is not on a security path.
+#   e  TEE attestation, which is not on a security path,
+#   f  UEL foreign Compatibility Lane (`src/execution/coordinator/foreign/`),
+#      where a classical account is tagged `Classical`, moves only its own
+#      classical holdings (K-3), and closes under Quantum Alert Levels 2 and 3.
 #
 # The gate (xtask/gates/src/gates/classical_crypto_is_paired.rs) turns every use of
 # ed25519_dalek, schnorrkel, bls12_381, x25519 and libp2p::noise in production code
@@ -67,9 +70,39 @@ category = "d"
 
 [[entry]]
 path = "src/security/quantum_canary.rs"
-function = "(imports)"
+function = "*"
 pq_companion = "ML-DSA-87 signatures over the same canary statements (the canary's own signing path)"
 category = "a"
+
+[[entry]]
+path = "src/crypto/secp256k1_recover.rs"
+function = "*"
+pq_companion = "External Ethereum EOA recovery combinator; paired with ML-DSA-87 in Graft/Adopt or confined to QuantumClass::Classical foreign lane"
+category = "d"
+
+[[entry]]
+path = "src/execution/coordinator/foreign/ethereum.rs"
+function = "*"
+pq_companion = "QuantumClass::Classical foreign-only custody; cannot touch QuantumClass::PostQuantum holdings; Adopt requires ML-DSA-87 PQ companion"
+category = "f"
+
+[[entry]]
+path = "src/execution/coordinator/foreign/cosmos.rs"
+function = "*"
+pq_companion = "QuantumClass::Classical foreign-only custody; cannot touch QuantumClass::PostQuantum holdings; Adopt requires ML-DSA-87 PQ companion"
+category = "f"
+
+[[entry]]
+path = "src/execution/coordinator/foreign/aptos.rs"
+function = "*"
+pq_companion = "QuantumClass::Classical foreign-only custody; cannot touch QuantumClass::PostQuantum holdings; Adopt requires ML-DSA-87 PQ companion"
+category = "f"
+
+[[entry]]
+path = "src/execution/coordinator/foreign/sui.rs"
+function = "*"
+pq_companion = "QuantumClass::Classical foreign-only custody; cannot touch QuantumClass::PostQuantum holdings; Adopt requires ML-DSA-87 PQ companion"
+category = "f"
 
 [[entry]]
 path = "src/domain/producer.rs"
@@ -77,3 +110,26 @@ function = "(imports)"
 pq_companion = "ML-DSA-65 QC of the same producer (consensus/qc.rs); a block needs the QC too"
 category = "b"
 
+[[entry]]
+path = "src/execution/coordinator/foreign/mod.rs"
+function = "*"
+pq_companion = "none: UEL Compatibility Lane Adopt verification; K-3 classical-only account isolation and quantum alert closure"
+category = "f"
+
+[[entry]]
+path = "src/execution/coordinator/foreign/solana.rs"
+function = "*"
+pq_companion = "none: UEL Compatibility Lane Solana Ed25519 envelope; K-3 classical-only account isolation and quantum alert closure"
+category = "f"
+
+[[entry]]
+path = "src/execution/coordinator/foreign/aptos.rs"
+function = "*"
+pq_companion = "none: UEL Compatibility Lane Aptos Ed25519 envelope; K-3 classical-only account isolation and quantum alert closure"
+category = "f"
+
+[[entry]]
+path = "src/registry/presence.rs"
+function = "*"
+pq_companion = "ML-DSA-65 proposer block signature and validator key-set preimage binding BLS beside ML-DSA-65 (crypto/key_set_preimage.rs)"
+category = "b"
