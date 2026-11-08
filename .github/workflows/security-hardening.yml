@@ -491,13 +491,24 @@ jobs:
           fn main() {
               let mut value = 0i64;
               let ptr = std::ptr::addr_of_mut!(value) as usize;
+              let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+              let s1 = std::sync::Arc::clone(&start);
               let a = std::thread::spawn(move || {
                   let p = ptr as *mut i64;
-                  for _ in 0..10_000 { unsafe { *p += 1 } }
+                  s1.wait();
+                  for _ in 0..50_000 {
+                      unsafe { *p += 1 }
+                      std::hint::black_box(p);
+                  }
               });
+              let s2 = std::sync::Arc::clone(&start);
               let b = std::thread::spawn(move || {
                   let p = ptr as *mut i64;
-                  for _ in 0..10_000 { unsafe { *p += 1 } }
+                  s2.wait();
+                  for _ in 0..50_000 {
+                      unsafe { *p += 1 }
+                      std::hint::black_box(p);
+                  }
               });
               a.join().unwrap();
               b.join().unwrap();
@@ -561,13 +572,16 @@ jobs:
                   .expect("the canary needs a store to borrow a stack frame from");
               let mut value = 0i64;
               let ptr = std::ptr::addr_of_mut!(value) as usize;
+              let start = std::sync::Arc::new(std::sync::Barrier::new(2));
 
               // Thread A: the write happens INSIDE a closure sled invokes, so
               // `sled::tree::Tree::update_and_fetch` sits in this stack.
               let inside = {
                   let db = db.clone();
+                  let s = std::sync::Arc::clone(&start);
                   std::thread::spawn(move || {
-                      for i in 0..20_000u32 {
+                      s.wait();
+                      for i in 0..5_000u32 {
                           let _ = db.update_and_fetch(b"canary", |_old| {
                               let p = ptr as *mut i64;
                               unsafe { *p += 1 }
@@ -577,10 +591,17 @@ jobs:
                   })
               };
               // Thread B: the same address, no sled on this side at all.
-              let outside = std::thread::spawn(move || {
-                  let p = ptr as *mut i64;
-                  for _ in 0..20_000 { unsafe { *p += 1 } }
-              });
+              let outside = {
+                  let s = std::sync::Arc::clone(&start);
+                  std::thread::spawn(move || {
+                      let p = ptr as *mut i64;
+                      s.wait();
+                      for _ in 0..2_000_000 {
+                          unsafe { *p += 1 }
+                          std::hint::black_box(p);
+                      }
+                  })
+              };
               inside.join().expect("join");
               outside.join().expect("join");
               println!("{value}");
