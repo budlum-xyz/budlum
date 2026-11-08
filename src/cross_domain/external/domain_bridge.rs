@@ -51,6 +51,9 @@ pub fn encode_external_evidence(
     Ok(FinalityProof::Raw(payload))
 }
 
+/// Maximum byte budget for an encoded external-evidence carrier.
+const MAX_EXTERNAL_EVIDENCE_BYTES: usize = 2 * 1024 * 1024;
+
 /// Decodes the local carrier. It does not validate the evidence: only the
 /// bound adapter may interpret its payload or decide whether it is final.
 ///
@@ -65,8 +68,14 @@ pub fn decode_external_evidence(
             "external-domain finality requires a raw evidence envelope".to_string(),
         ));
     };
-    bincode::deserialize(payload)
-        .map_err(|error| FinalityError(format!("external evidence carrier is malformed: {error}")))
+    // The carrier is peer-supplied: bound both its bytes and every advertised
+    // collection count before a Serde visitor can reserve attacker-declared
+    // capacity. The shared decoder preserves the fixint wire encoding.
+    crate::network::bounded_bincode::decode_bounded_bincode(
+        payload,
+        MAX_EXTERNAL_EVIDENCE_BYTES,
+    )
+    .map_err(|error| FinalityError(format!("external evidence carrier is malformed: {error}")))
 }
 
 /// A consensus-facing adapter backed by one permissionless external adapter.
@@ -123,6 +132,18 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
         proof: &FinalityProof,
         observer: &mut dyn CryptoObserver,
     ) -> Result<FinalityStatus, FinalityError> {
+        if domain.id != commitment.domain_id {
+            return Ok(FinalityStatus::Rejected(format!(
+                "commitment domain {} does not match local domain {}",
+                commitment.domain_id, domain.id
+            )));
+        }
+        if !domain.is_active() {
+            return Ok(FinalityStatus::Rejected(format!(
+                "domain {} is not active",
+                domain.id
+            )));
+        }
         if domain.finality_adapter != EXTERNAL_DOMAIN_FINALITY_ADAPTER {
             return Ok(FinalityStatus::Rejected(format!(
                 "domain {} is not bound to the external-domain finality adapter",
@@ -461,5 +482,29 @@ mod tests {
             matches!(status, FinalityStatus::Rejected(_)),
             "an unslashable set passed a slashable-only policy"
         );
+    }
+
+    #[test]
+    fn inactive_or_mismatched_domain_is_rejected_at_bridge() {
+        let (adapter, mut domain, mut commitment) = fixture();
+        let proof = encode_external_evidence(&adapter.evidence).expect("encode");
+        commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
+        let bridge = ExternalDomainFinalityBridge::new(
+            Box::new(adapter),
+            VerificationPolicy::proven(100),
+        );
+
+        domain.status = DomainStatus::Frozen;
+        let frozen_status = bridge
+            .verify_finality(&domain, &commitment, &proof)
+            .unwrap();
+        assert!(matches!(frozen_status, FinalityStatus::Rejected(_)));
+
+        domain.status = DomainStatus::Active;
+        commitment.domain_id = domain.id.saturating_add(1);
+        let wrong_id = bridge
+            .verify_finality(&domain, &commitment, &proof)
+            .unwrap();
+        assert!(matches!(wrong_id, FinalityStatus::Rejected(_)));
     }
 }
