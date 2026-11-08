@@ -10,7 +10,7 @@
 //! fast path and no trusted-content exception.
 //!
 //! WIRING: `storage::emit::qr_feed_preview` calls [`verify_qr_video`] for the
-//! video it has just encoded (RPC `bud_storageQrFeedPreview`).
+//! video it has just encoded. The legacy preview RPC has been removed.
 
 use crate::core::hash::{calculate_hash_bytes, hash_fields_bytes};
 use crate::storage::content_id::ContentId;
