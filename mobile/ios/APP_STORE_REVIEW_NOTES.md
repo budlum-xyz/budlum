@@ -1,19 +1,44 @@
-# App Store Review Disclosure Notes (`WP-38` / `R-22`)
+# App Store review boundary
 
-## 1. Compliance with App Store Review Guideline 3.1.5(iii) - Zero On-Device Mining
+## Current package status
 
-* **Budlum Validator performs ZERO cryptocurrency mining or continuous proof-of-work hashing on the device.**
-* Consensus participation in this iOS application is strictly limited to the **`MobileOpportunistic`** storage custody class:
-  1. The app stores erasure-coded B.U.D. 3.0 data shares (`<= 8 GiB`, user-selected, excluded from iCloud backup via `URLResourceValues.isExcludedFromBackup = true`) inside `Application Support/bud3/`.
-  2. During iOS-scheduled `BGProcessingTask` windows (`requiresExternalPower = true`, `requiresNetworkConnectivity = true`), the app opens a short-lived QUIC/TLS 1.3 session to verify custody of already-stored local file segments (`48h` audit window) and emit a single signed presence heartbeat.
-  3. No background audio, location spoofing, silent push loops, or continuous CPU/GPU tasks are ever used. If iOS delays or skips background execution for up to 7 days (`168h`), the network automatically pauses (`Suspended`) the validator without slashing user funds.
+This package is **not submission-ready**. It contains local custody storage,
+quota enforcement, localization, and unit tests. Registration is disabled
+until the production mobile-core adapter exists. No chain registration,
+unbonding, reward claim, presence publication, or completed network audit is
+represented as a current capability.
 
-## 2. Background Modes Justification (`processing`, `fetch`)
+## Mining and background execution
 
-* **`xyz.budlum.validator.audit` (`BGProcessingTaskRequest`):** Runs only when the iPhone is connected to external power and Wi-Fi (`requiresExternalPower = true`, `requiresNetworkConnectivity = true`) to answer pending B.U.D. 3.0 custody challenges and sync newly assigned erasure-coded shares within the user's storage quota.
-* **`xyz.budlum.validator.refresh` (`BGAppRefreshTaskRequest`):** Refreshes the user's light-client header summary and validator status badge.
+The code contains no Proof-of-Work mining, continuous background connection,
+background audio, location, advertising, or analytics path. The intended
+opportunistic duty is storage custody only. `BackgroundProcessingConfig`
+requires external power and network connectivity, but there is currently no
+`BGTaskScheduler` registration and therefore no claim that iOS executes an
+audit or refresh task.
 
-## 3. Cryptography & User Privacy
+The audit task identifier is declared for the future scheduler adapter. The
+unused refresh task and Face ID usage declaration have been removed rather
+than requesting capabilities the current code does not implement.
 
-* Post-quantum signing keys (`ML-DSA-87` owner wallet, `ML-DSA-65` operator duty key) and `BLS12-381` presence keys are wrapped using an Apple Secure Enclave P-256 key and stored in the iOS Keychain (`ThisDeviceOnly`).
-* Zero third-party analytics, advertising, or tracking frameworks are linked (`PrivacyInfo` collects zero user identifiers).
+## Data and keys
+
+Canonical share files are excluded from backup and stored below the app's
+`bud3` directory. Segment IDs are validated before constructing paths.
+Unknown files are not deleted by Leave. Audit signing fails closed when no
+production signer is connected; raw share bytes are not audit proofs.
+
+The Secure Enclave wrapper requires hardware support and has no software
+fallback. It currently provides runtime ECDH/AES-GCM wrapping only. Persistent
+Keychain references, owner-wallet biometric access control, ML-DSA/BLS
+signing, QUIC transport, and presence heartbeat publication must not be listed
+as implemented in a review submission until their production code and device
+evidence exist.
+
+## Evidence required before submission
+
+- macOS/Swift build and complete test log;
+- physical-device Secure Enclave and Keychain persistence tests;
+- background-task scheduling/expiration and locked-device audit tests;
+- canonical node interop for registration, audit, presence, and unbonding;
+- privacy manifest and final capability/permission review.

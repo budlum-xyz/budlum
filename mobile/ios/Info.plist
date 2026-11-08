@@ -17,14 +17,10 @@
     <key>UIBackgroundModes</key>
     <array>
         <string>processing</string>
-        <string>fetch</string>
     </array>
     <key>BGTaskSchedulerPermittedIdentifiers</key>
     <array>
         <string>xyz.budlum.validator.audit</string>
-        <string>xyz.budlum.validator.refresh</string>
     </array>
-    <key>NSFaceIDUsageDescription</key>
-    <string>Authenticate owner ML-DSA-87 wallet transactions.</string>
 </dict>
 </plist>

@@ -1,52 +1,70 @@
 import CryptoKit
 import Foundation
 
-/// Secure Enclave P-256 + Keychain wrapper for post-quantum ML-DSA-87, ML-DSA-65,
-/// and BLS12-381 presence keys on iOS (Section 7.10,  item 3).
+public enum SecureEnclaveKeyStoreError: Error, Equatable {
+    case secureEnclaveUnavailable
+}
+
+/// Runtime ECDH/AES-GCM wrapping for device duty-key bytes.
 ///
-/// - Owner wallet key (`ML-DSA-87`) requires user presence (Face ID / Touch ID / passcode).
-/// - Operator (`ML-DSA-65`) and BLS presence keys use
-///   `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` so overnight charging
-///   `BGProcessingTask` windows can sign custody audit responses while locked.
+/// The P-256 wrapping private key must be created inside the Secure Enclave;
+/// there is no software fallback. This type is deliberately not presented as
+/// a persistent Keychain vault or an ML-DSA/BLS signer. Persistent references,
+/// owner-key access control, and canonical post-quantum signing remain mobile-
+/// core integration work.
 public final class SecureEnclaveKeyStore {
     public struct WrappedPostQuantumKey: Equatable, Sendable {
         public let label: String
         public let ephemeralPublicKeyRaw: Data
         public let sealedBoxCombined: Data
-        public let requiresBiometricForSpend: Bool
     }
 
-    private let wrappingPrivateKey: P256.KeyAgreement.PrivateKey
+    private let wrappingPrivateKey: SecureEnclave.P256.KeyAgreement.PrivateKey
 
-    public init() {
-        // Uses SecureEnclave.P256 on physical Apple Silicon hardware with software fallback on Simulator/CI.
-        self.wrappingPrivateKey = P256.KeyAgreement.PrivateKey()
+    public init() throws {
+        guard SecureEnclave.isAvailable else {
+            throw SecureEnclaveKeyStoreError.secureEnclaveUnavailable
+        }
+        self.wrappingPrivateKey = try SecureEnclave.P256.KeyAgreement.PrivateKey()
     }
 
-    public func wrapPostQuantumKey(
-        label: String,
-        secretKeyBytes: Data,
-        requiresBiometricForSpend: Bool
-    ) throws -> WrappedPostQuantumKey {
-        let ephemeral = P256.KeyAgreement.PrivateKey()
-        let sharedSecret = try ephemeral.sharedSecretFromKeyAgreement(
-            with: wrappingPrivateKey.publicKey
+    private func wrappingKey(label: String, ephemeralPublicKey: P256.KeyAgreement.PublicKey) throws
+        -> SymmetricKey
+    {
+        let sharedSecret = try wrappingPrivateKey.sharedSecretFromKeyAgreement(
+            with: ephemeralPublicKey
         )
-        let symmetricKey = sharedSecret.hkdfDerivedSymmetricKey(
+        return sharedSecret.hkdfDerivedSymmetricKey(
             using: SHA256.self,
             salt: Data("budlum/ios/se-wrap/v1".utf8),
             sharedInfo: Data(label.utf8),
             outputByteCount: 32
         )
-        let sealed = try AES.GCM.seal(secretKeyBytes, using: symmetricKey)
+    }
+
+    public func wrapPostQuantumKey(
+        label: String,
+        secretKeyBytes: Data
+    ) throws -> WrappedPostQuantumKey {
+        let ephemeral = P256.KeyAgreement.PrivateKey()
+        let key = try wrappingKey(label: label, ephemeralPublicKey: ephemeral.publicKey)
+        let sealed = try AES.GCM.seal(secretKeyBytes, using: key)
         guard let combined = sealed.combined else {
             throw CocoaError(.coderInvalidValue)
         }
         return WrappedPostQuantumKey(
             label: label,
             ephemeralPublicKeyRaw: ephemeral.publicKey.rawRepresentation,
-            sealedBoxCombined: combined,
-            requiresBiometricForSpend: requiresBiometricForSpend
+            sealedBoxCombined: combined
         )
+    }
+
+    public func unwrapPostQuantumKey(_ wrapped: WrappedPostQuantumKey) throws -> Data {
+        let ephemeralPublicKey = try P256.KeyAgreement.PublicKey(
+            rawRepresentation: wrapped.ephemeralPublicKeyRaw
+        )
+        let key = try wrappingKey(label: wrapped.label, ephemeralPublicKey: ephemeralPublicKey)
+        let box = try AES.GCM.SealedBox(combined: wrapped.sealedBoxCombined)
+        return try AES.GCM.open(box, using: key)
     }
 }

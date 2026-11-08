@@ -32,7 +32,15 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Build and run  iOS Swift test suite
+      - name: Check iOS/Rust class parity
+        working-directory: mobile/ios
+        run: python3 Scripts/check_class_parity.py --repo ../..
+
+      - name: Mutation-test the class parity check
+        working-directory: mobile/ios
+        run: python3 -m unittest discover -s Scripts -p 'test_*.py'
+
+      - name: Build and run iOS Swift test suite
         working-directory: mobile/ios
         run: |
           set -euo pipefail

@@ -8,7 +8,6 @@ public enum ValidatorRegistrationClass: String, Equatable, Sendable {
 /// Configuration for the iOS `BGProcessingTaskRequest` scheduler (Section 7.10).
 public struct BackgroundProcessingConfig: Equatable, Sendable {
     public static let auditTaskIdentifier = "xyz.budlum.validator.audit"
-    public static let refreshTaskIdentifier = "xyz.budlum.validator.refresh"
 
     public let taskIdentifier: String
     public let requiresExternalPower: Bool
@@ -25,22 +24,28 @@ public struct BackgroundProcessingConfig: Equatable, Sendable {
     }
 }
 
-/// Errors raised by `OpportunisticValidatorEngine`.
 public enum OpportunisticValidatorError: Error, Equatable {
     case invalidQuota(UInt64)
+    case quotaBelowStoredBytes(requested: UInt64, stored: UInt64)
+    case invalidSegmentId(String)
     case missingCustodyShare(String)
+    case auditSigningUnavailable
 }
 
-/// iOS `MobileOpportunistic` storage custody and background audit engine (Section 7.10).
+/// Production boundary for custody-audit signing. The mobile core must provide
+/// the canonical challenge decoder and signature transport; raw shares are not
+/// an audit proof and are never returned by the storage engine itself.
+public protocol CustodyAuditSigning: Sendable {
+    func signAudit(segmentHex: String, share: Data, nonce: Data) throws -> Data
+}
+
+/// Local custody storage for the iOS `MobileOpportunistic` class.
 ///
-/// - Registers strictly as `MobileOpportunistic` (never `Mobile` or `Standard`).
-/// - Enforces `[1 GiB, 8 GiB]` custody cap under `Application Support/bud3/`
-///   with `isExcludedFromBackup = true`.
-/// - Answers 48-hour custody audits and emits BLS presence signals inside
-///   overnight `BGProcessingTask` windows (`requiresExternalPower = true`,
-///   `requiresNetworkConnectivity = true`), with automatic suspension after 168h
-///   offline without stake slashing.
+/// This type enforces the 1...8 GiB quota and persists shares on disk. It does
+/// not register a validator, publish presence, or claim a completed audit when
+/// no production signing implementation is connected.
 public final class OpportunisticValidatorEngine {
+    public static let registrationTag: UInt64 = 2
     public static let gib: UInt64 = 1 << 30
     public static let minQuotaBytes: UInt64 = 1 * gib
     public static let defaultQuotaBytes: UInt64 = 4 * gib
@@ -52,73 +57,148 @@ public final class OpportunisticValidatorEngine {
     public let backgroundConfig = BackgroundProcessingConfig()
     public private(set) var quotaBytes: UInt64
     public let storageDirectory: URL
-
-    private var storedShares: [String: Data] = [:]
     public private(set) var answeredAuditsCount: UInt64 = 0
-    public private(set) var presenceHeartbeatsSent: UInt64 = 0
 
-    public init(baseDirectory: URL, quotaBytes: UInt64 = defaultQuotaBytes) throws {
+    private let auditSigner: (any CustodyAuditSigning)?
+
+    public init(
+        baseDirectory: URL,
+        quotaBytes: UInt64 = defaultQuotaBytes,
+        auditSigner: (any CustodyAuditSigning)? = nil
+    ) throws {
         guard quotaBytes >= Self.minQuotaBytes && quotaBytes <= Self.maxQuotaBytes else {
             throw OpportunisticValidatorError.invalidQuota(quotaBytes)
         }
         self.quotaBytes = quotaBytes
-        var bud3Dir = baseDirectory.appendingPathComponent("bud3", isDirectory: true)
-        try FileManager.default.createDirectory(at: bud3Dir, withIntermediateDirectories: true)
+        self.auditSigner = auditSigner
+        let bud3Directory = baseDirectory.appendingPathComponent("bud3", isDirectory: true)
+        try FileManager.default.createDirectory(at: bud3Directory, withIntermediateDirectories: true)
         var resourceValues = URLResourceValues()
         resourceValues.isExcludedFromBackup = true
-        try bud3Dir.setResourceValues(resourceValues)
-        self.storageDirectory = bud3Dir
+        try bud3Directory.setResourceValues(resourceValues)
+        try Self.applyFileProtection(to: bud3Directory)
+        self.storageDirectory = bud3Directory
     }
 
     public func setQuotaBytes(_ newQuotaBytes: UInt64) throws {
         guard newQuotaBytes >= Self.minQuotaBytes && newQuotaBytes <= Self.maxQuotaBytes else {
             throw OpportunisticValidatorError.invalidQuota(newQuotaBytes)
         }
+        let stored = try storedBytes()
+        guard newQuotaBytes >= stored else {
+            throw OpportunisticValidatorError.quotaBelowStoredBytes(
+                requested: newQuotaBytes,
+                stored: stored
+            )
+        }
         self.quotaBytes = newQuotaBytes
     }
 
-    public func storeCustodyShare(segmentHex: String, shareBytes: Data) throws {
-        let used = storedShares.values.reduce(UInt64(0)) { $0 + UInt64($1.count) }
-        let next = used + UInt64(shareBytes.count)
-        guard next <= quotaBytes else {
-            throw OpportunisticValidatorError.invalidQuota(next)
+    private static func normalizedSegmentId(_ segmentHex: String) throws -> String {
+        let bytes = Array(segmentHex.utf8)
+        guard bytes.count == 64, bytes.allSatisfy({ byte in
+            (48...57).contains(byte) || (65...70).contains(byte) || (97...102).contains(byte)
+        }) else {
+            throw OpportunisticValidatorError.invalidSegmentId(segmentHex)
         }
-        let target = storageDirectory.appendingPathComponent(segmentHex, isDirectory: false)
-        try shareBytes.write(to: target, options: .atomic)
-        storedShares[segmentHex] = shareBytes
+        return segmentHex.lowercased()
     }
 
-    /// Invoked by `BGTaskScheduler` during an overnight `BGProcessingTask` window.
+    private static func applyFileProtection(to url: URL) throws {
+        #if os(iOS)
+        try FileManager.default.setAttributes(
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+            ofItemAtPath: url.path
+        )
+        #endif
+    }
+
+    private func shareURL(segmentHex: String) throws -> (id: String, url: URL) {
+        let id = try Self.normalizedSegmentId(segmentHex)
+        return (id, storageDirectory.appendingPathComponent(id, isDirectory: false))
+    }
+
+    private func storedBytes(excluding excludedURL: URL? = nil) throws -> UInt64 {
+        guard FileManager.default.fileExists(atPath: storageDirectory.path) else {
+            return 0
+        }
+        let files = try FileManager.default.contentsOfDirectory(
+            at: storageDirectory,
+            includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey]
+        )
+        var total: UInt64 = 0
+        for file in files {
+            if let excludedURL, file.standardizedFileURL == excludedURL.standardizedFileURL {
+                continue
+            }
+            let values = try file.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+            guard values.isRegularFile == true else {
+                continue
+            }
+            let size = UInt64(max(values.fileSize ?? 0, 0))
+            let (next, overflow) = total.addingReportingOverflow(size)
+            guard !overflow else {
+                throw OpportunisticValidatorError.invalidQuota(UInt64.max)
+            }
+            total = next
+        }
+        return total
+    }
+
+    public func storeCustodyShare(segmentHex: String, shareBytes: Data) throws {
+        let (_, target) = try shareURL(segmentHex: segmentHex)
+        let used = try storedBytes(excluding: target)
+        let (next, overflow) = used.addingReportingOverflow(UInt64(shareBytes.count))
+        guard !overflow && next <= quotaBytes else {
+            throw OpportunisticValidatorError.invalidQuota(next)
+        }
+        try shareBytes.write(to: target, options: .atomic)
+        try Self.applyFileProtection(to: target)
+    }
+
+    /// Signs challenged shares through the connected mobile-core boundary.
+    /// Without that boundary the duty fails explicitly and no success counter
+    /// or presence claim is emitted.
     public func runBackgroundProcessingWindow(
         challengedSegments: [String],
         nonce: Data
     ) throws -> [Data] {
+        guard let auditSigner else {
+            throw OpportunisticValidatorError.auditSigningUnavailable
+        }
         var proofs: [Data] = []
-        for seg in challengedSegments {
-            guard let share = storedShares[seg] else {
-                throw OpportunisticValidatorError.missingCustodyShare(seg)
+        for segment in challengedSegments {
+            let (id, file) = try shareURL(segmentHex: segment)
+            guard FileManager.default.fileExists(atPath: file.path) else {
+                throw OpportunisticValidatorError.missingCustodyShare(id)
             }
-            var payload = Data("budlum/ios/bg-audit/v1:".utf8)
-            payload.append(Data(seg.utf8))
-            payload.append(nonce)
-            payload.append(share)
-            proofs.append(payload)
+            let share = try Data(contentsOf: file)
+            proofs.append(try auditSigner.signAudit(segmentHex: id, share: share, nonce: nonce))
             answeredAuditsCount += 1
         }
-        presenceHeartbeatsSent += 1
         return proofs
     }
 
-    /// Releases all stored shares and initiates graceful unbonding (`Leave`).
+    /// Removes only canonical share files. Unknown application data in the
+    /// directory is preserved rather than deleted by a broad cleanup.
     public func leaveAndReleaseAllShares() throws -> [String] {
-        let keys = Array(storedShares.keys).sorted()
-        for key in keys {
-            let fileURL = storageDirectory.appendingPathComponent(key, isDirectory: false)
-            if FileManager.default.fileExists(atPath: fileURL.path) {
-                try FileManager.default.removeItem(at: fileURL)
+        let files = try FileManager.default.contentsOfDirectory(
+            at: storageDirectory,
+            includingPropertiesForKeys: [.isRegularFileKey]
+        )
+        var released: [String] = []
+        for file in files {
+            let name = file.lastPathComponent
+            guard let canonical = try? Self.normalizedSegmentId(name), canonical == name else {
+                continue
             }
+            let values = try file.resourceValues(forKeys: [.isRegularFileKey])
+            guard values.isRegularFile == true else {
+                continue
+            }
+            try FileManager.default.removeItem(at: file)
+            released.append(name)
         }
-        storedShares.removeAll()
-        return keys
+        return released.sorted()
     }
 }

@@ -16,6 +16,7 @@ public struct LocalizedStrings: Sendable {
     public let custodyDisclosure: String
     public let registerAction: String
     public let leaveAction: String
+    public let coreUnavailable: String
 
     public static func resolve(_ locale: ValidatorLocale) -> LocalizedStrings {
         switch locale {
@@ -25,7 +26,8 @@ public struct LocalizedStrings: Sendable {
                 classBadge: "Class: MobileOpportunistic (Max 8 GiB, 48h Audit Window)",
                 custodyDisclosure: "Runs during overnight Wi-Fi charging via iOS Background Processing. Stores erasure-coded B.U.D. 3.0 shares excluded from iCloud backup. Zero cryptocurrency mining runs on this iPhone.",
                 registerAction: "Create 24-Word Wallet & Enable Opportunistic Custody",
-                leaveAction: "Leave & Release Custody Shares (Unbond)"
+                leaveAction: "Leave & Release Custody Shares (Unbond)",
+                coreUnavailable: "Registration unavailable: the production mobile core is not connected."
             )
         case .turkish:
             return LocalizedStrings(
@@ -33,7 +35,8 @@ public struct LocalizedStrings: Sendable {
                 classBadge: "S\u{0131}n\u{0131}f: MobileOpportunistic (En fazla 8 GiB, 48s Denetim)",
                 custodyDisclosure: "Gece Wi-Fi ve \u{015F}arj s\u{0131}ras\u{0131}nda iOS Arka Plan g\u{00F6}reviyle \u{00E7}al\u{0131}\u{015F}\u{0131}r. iCloud yede\u{011F}i d\u{0131}\u{015F}\u{0131}nda B.U.D. 3.0 paylar\u{0131} tutar; cihazda madencilik yap\u{0131}lmaz.",
                 registerAction: "24 Kelime C\u{00FC}zdan & Validator Etkinle\u{015F}tir",
-                leaveAction: "Ayr\u{0131}l & Paylar\u{0131} B\u{0131}rak (Stake \u{00C7}\u{00F6}z)"
+                leaveAction: "Ayr\u{0131}l & Paylar\u{0131} B\u{0131}rak (Stake \u{00C7}\u{00F6}z)",
+                coreUnavailable: "Kay\u{0131}t kullan\u{0131}lam\u{0131}yor: \u{00FC}retim mobil \u{00E7}ekirde\u{011F}i ba\u{011F}l\u{0131} de\u{011F}il."
             )
         }
     }
