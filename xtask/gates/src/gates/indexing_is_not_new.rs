@@ -82,14 +82,13 @@ const BASELINE: &[&str] = &[
     "src/cross_domain/evm/sync_committee.rs",
     "src/crypto/pkcs11.rs",
     "src/crypto/primitives.rs",
-    "src/developer_os.rs",
+    "src/project_manifest.rs",
     "src/domain/finality_adapter.rs",
     "src/domain/fork_choice.rs",
     "src/domain/plugin.rs",
     "src/domain/storage_deal.rs",
     "src/execution/executor.rs",
     "src/execution/zkvm.rs",
-    "src/gateway/service.rs",
     "src/light_client/mod.rs",
     "src/ai_inference/mod.rs",
     "src/main.rs",
@@ -107,12 +106,13 @@ const BASELINE: &[&str] = &[
     "src/sharding/mod.rs",
     "src/socialfi/mod.rs",
     "src/storage/assignment.rs",
+    "src/storage/content_gateway.rs",
     "src/storage/content_id.rs",
     "src/storage/dictionary.rs",
     "src/storage/erasure.rs",
     "src/storage/generated.rs",
     "src/storage/manifest.rs",
-    "src/storage/merkle_trie.rs",
+    "src/persistence/state_trie.rs",
     "src/storage/msr.rs",
     "src/storage/provider.rs",
     "src/storage/render.rs",
@@ -131,7 +131,7 @@ const BASELINE: &[&str] = &[
     "src/network/witness_protocol.rs", // "bytes.len() < 12" guard above; [..8] and [8..12] read the 12-byte header
     "src/security/quantum_canary.rs", // try-and-increment: P-192/P-224/P-256 field sizes 24/28/32 never exceed the 32-byte SHA3-256 digest
     "src/settlement/graft.rs",        // "origin.len() <= 32" guard in origin_emitter
-    "src/storage/db.rs",              // &[1u8][..] is a one-byte literal
+    "src/persistence/db.rs",              // &[1u8][..] is a one-byte literal
     "src/storage/key_package.rs", // "bytes.len() < 64" guard above; [..32] and [32..64] split the first 64
 ];
 
