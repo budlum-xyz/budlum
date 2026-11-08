@@ -63,6 +63,13 @@ pub struct BlockHeader {
     /// devnet and testnet blocks built before; mainnet requires it.
     #[serde(default)]
     pub witness_root: Option<[u8; 32]>,
+    /// The seat participation record this checkpoint block carries (section
+    /// 7.5.1): the seats whose precommits for the previous checkpoint the
+    /// proposer collected. `None` on a block that is not a checkpoint. Folded
+    /// into the block hash when present, because the next seat table is
+    /// derived from it.
+    #[serde(default)]
+    pub seat_participation: Option<crate::validators::committee::SeatParticipation>,
 }
 
 /// Stand-in bytes hashed when slashing evidence cannot be serialized.
@@ -94,6 +101,7 @@ struct BlockPreimage<'a> {
     storage_root: Option<crate::domain::types::Hash32>,
     shards_root: Option<&'a [u8; 32]>,
     witness_root: Option<&'a [u8; 32]>,
+    seat_participation: Option<&'a crate::validators::committee::SeatParticipation>,
 }
 
 fn hash_block_preimage(p: &BlockPreimage<'_>) -> [u8; 32] {
@@ -141,6 +149,18 @@ fn hash_block_preimage(p: &BlockPreimage<'_>) -> [u8; 32] {
         .map(|r| bincode::serialize(r).unwrap_or_else(|_| EVIDENCE_SERIALIZE_FAILED.to_vec()));
 
     let storage_root_bytes = presence_tagged(p.storage_root);
+    // The seat participation record is consensus data: the next seat table is
+    // derived from it, so the block hash seals it. Encoded here beside the
+    // other buffers so the borrow outlives `fields`.
+    let participation_bytes = p.seat_participation.map(|record| {
+        let seats = record.seats.as_bytes();
+        let mut bytes = Vec::with_capacity(16 + seats.len());
+        bytes.extend_from_slice(&record.checkpoint.to_le_bytes());
+        let seat_len = u64::try_from(seats.len()).unwrap_or(u64::MAX);
+        bytes.extend_from_slice(&seat_len.to_le_bytes());
+        bytes.extend_from_slice(seats);
+        bytes
+    });
     let mut fields: Vec<&[u8]> = vec![
         b"BDLM_BLOCK_V4",
         &index_bytes,
@@ -171,6 +191,12 @@ fn hash_block_preimage(p: &BlockPreimage<'_>) -> [u8; 32] {
         fields.push(b"BDLM_WITNESS_ROOT_V1");
         fields.push(witness_root.as_slice());
     }
+    // Tagged and folded only when present, so a block that carries no record
+    // hashes exactly as it did before the field existed.
+    if let Some(bytes) = &participation_bytes {
+        fields.push(b"BDLM_SEAT_PARTICIPATION_V1");
+        fields.push(bytes.as_slice());
+    }
     hash_fields_bytes(&fields)
 }
 
@@ -197,6 +223,7 @@ impl BlockHeader {
             storage_root: block.storage_root,
             shards_root: block.shards_root,
             witness_root: block.witness_root,
+            seat_participation: block.seat_participation.clone(),
         }
     }
 
@@ -224,6 +251,7 @@ impl BlockHeader {
             storage_root: self.storage_root,
             shards_root: self.shards_root.as_ref(),
             witness_root: self.witness_root.as_ref(),
+            seat_participation: self.seat_participation.as_ref(),
         })
     }
 
@@ -297,6 +325,13 @@ pub struct Block {
     /// devnet and testnet blocks built before; mainnet requires it.
     #[serde(default)]
     pub witness_root: Option<[u8; 32]>,
+    /// The seat participation record this checkpoint block carries (section
+    /// 7.5.1): the seats whose precommits for the previous checkpoint the
+    /// proposer collected. `None` on a block that is not a checkpoint. Folded
+    /// into the block hash when present, because the next seat table is
+    /// derived from it.
+    #[serde(default)]
+    pub seat_participation: Option<crate::validators::committee::SeatParticipation>,
 }
 
 impl Block {
@@ -338,6 +373,7 @@ impl Block {
             storage_root: None,
             shards_root: None,
             witness_root: None,
+            seat_participation: None,
         };
         block.tx_root = block.calculate_tx_root();
         block.hash = block.calculate_hash();
@@ -521,6 +557,7 @@ impl Block {
             storage_root: self.storage_root,
             shards_root: self.shards_root.as_ref(),
             witness_root: self.witness_root.as_ref(),
+            seat_participation: self.seat_participation.as_ref(),
         })
     }
     pub fn sign(&mut self, keypair: &KeyPair) {
