@@ -56,7 +56,6 @@ pub const SOLANA_METHOD_CLASSES: &[CompatMethodClass] = &[
 pub struct SolanaCompatGateway {
     config: SolanaCompatConfig,
     slot: u64,
-    latest_blockhash: [u8; 32],
 }
 
 impl SolanaCompatGateway {
