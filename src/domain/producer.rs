@@ -272,6 +272,7 @@ pub fn build_bft_commitment(
         agg_sig_bls: G1Affine::from(aggregate).to_compressed().to_vec(),
         bitmap,
         set_hash: snapshot.set_hash.clone(),
+        seat_table_version: 0,
     };
     let set_hash: Hash32 = hex::decode(&snapshot.set_hash)
         .ok()
@@ -462,7 +463,8 @@ mod tests {
             .map(|i| {
                 let mut seed = [0u8; 64];
                 seed[0] = i + 1;
-                let bls = crate::crypto::primitives::BlsKeypair::from_seed(&seed);
+                let bls = crate::crypto::primitives::BlsKeypair::from_seed(&seed)
+                    .expect("a non-zero test seed");
                 let pq = crate::crypto::primitives::PqKeyPair::generate();
                 let address = Address::from([i + 1; 32]);
                 let pop = crate::chain::finality::sign_bls_pop(
