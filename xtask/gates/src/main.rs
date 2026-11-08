@@ -169,6 +169,7 @@ mod gates {
     pub mod repair_fires;
     pub mod required_tests;
     pub mod rust_literals;
+    pub mod rust_syntax_is_parseable;
     pub mod scheme_is_never_inferred;
     pub mod security_parameters;
     pub mod security_scans_can_fail;
@@ -1409,6 +1410,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::no_out_of_block_consensus_writes::self_test,
+    },
+    Gate {
+        name: "rust-syntax-is-parseable",
+        replaces: None,
+        run: gates::rust_syntax_is_parseable::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::rust_syntax_is_parseable::self_test,
     },
     Gate {
         name: "release-profile-pins",
