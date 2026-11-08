@@ -105,18 +105,9 @@ pub struct RegistryParams {
     /// True, which made a passed proposal fail at execution with "governance
     /// Parameter is not whitelisted".
     pub max_invalid_votes_per_epoch: u64,
-    /// Whether the live epoch-close hook actually slashes validators for
-    /// Liveness (downtime) faults.
-    ///
-    /// DEFAULT: `false` (observe-only). Turning liveness slashing on is a
-    /// Deliberate, hard-to-reverse economic action: the underlying `slash`
-    /// Jails a validator on ANY offence, so even a light (1%) liveness penalty
-    /// Fully jails the offender. Per decision ("observe first,
-    /// Validate on live/testnet, then activate"), this stays OFF until
-    /// governance explicitly enables it - the mechanism is fully wired and
-    /// tested, but never auto-activates. Governance-settable: in
-    /// `GOVERNANCE_PARAMETER_WHITELIST`, applied by
-    /// `apply_registry_parameter_update` from the strings `true` / `false`.
+    /// Deprecated compatibility flag. Absence is suspension-only under V-4;
+    /// setting this never enables liveness slashing. It remains in the
+    /// snapshot/governance schema so historical parameter updates decode.
     pub liveness_slashing_enabled: bool,
     /// Relayer's cut of an inbound bridge transfer, in parts-per-million of the
     /// arriving amount.
@@ -344,6 +335,24 @@ impl RegistryParams {
         if self.graft_registration_fee > MAX_PARAM_AMOUNT {
             return Err("graft_registration_fee exceeds the maximum parameter amount".into());
         }
+        if self.slashing_report_fee > MAX_PARAM_AMOUNT {
+            return Err(
+                "slashing_report_fee exceeds the maximum parameter amount".into(),
+            );
+        }
+        if self.proof_submission_fee > MAX_PARAM_AMOUNT {
+            return Err(
+                "proof_submission_fee exceeds the maximum parameter amount".into(),
+            );
+        }
+        if self.prover_reward > MAX_PARAM_AMOUNT {
+            return Err("prover_reward exceeds the maximum parameter amount".into());
+        }
+        if self.liveness_max_missed_epochs == 0 || self.liveness_max_missed_epochs > 100_000 {
+            return Err(
+                "liveness_max_missed_epochs must be between 1 and 100,000".into(),
+            );
+        }
         if self.graft_default_intent_deadline_blocks == 0
             || self.graft_default_intent_deadline_blocks > 100_000
         {
@@ -378,6 +387,12 @@ impl RegistryParams {
         }
         if self.unbonding_epochs == 0 || self.unbonding_epochs > 100_000 {
             return Err("unbonding_epochs must be between 1 and 100,000".into());
+        }
+        if self.double_sign_slash_ratio_fixed == 0 {
+            return Err("double_sign_slash_ratio_fixed must be > 0".into());
+        }
+        if self.malicious_slash_ratio_fixed == 0 {
+            return Err("malicious_slash_ratio_fixed must be > 0".into());
         }
         if self.double_sign_slash_ratio_fixed > FIXED_POINT_SCALE {
             return Err("double_sign_slash_ratio_fixed cannot exceed FIXED_POINT_SCALE".into());
@@ -964,5 +979,37 @@ mod tests {
         assert!(p.validate().is_err());
         // The documented defaults still validate.
         assert!(RegistryParams::default().validate().is_ok());
+    }
+
+    #[test]
+    fn zero_malicious_slash_and_unbounded_fee_params_rejected() {
+        for bad in [
+            RegistryParams {
+                double_sign_slash_ratio_fixed: 0,
+                ..RegistryParams::default()
+            },
+            RegistryParams {
+                malicious_slash_ratio_fixed: 0,
+                ..RegistryParams::default()
+            },
+            RegistryParams {
+                slashing_report_fee: u64::MAX,
+                ..RegistryParams::default()
+            },
+            RegistryParams {
+                proof_submission_fee: u64::MAX,
+                ..RegistryParams::default()
+            },
+            RegistryParams {
+                prover_reward: u64::MAX,
+                ..RegistryParams::default()
+            },
+            RegistryParams {
+                liveness_max_missed_epochs: 0,
+                ..RegistryParams::default()
+            },
+        ] {
+            assert!(bad.validate().is_err());
+        }
     }
 }
