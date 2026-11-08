@@ -982,7 +982,7 @@ mod tests {
         assert!(BudV2File::decode(&enc[..59]).is_none());
     }
 
-    /// BLG-0586: the output ceiling is shared by all chunks, not granted to
+    ///: the output ceiling is shared by all chunks, not granted to
     /// each chunk again.
     #[test]
     fn restore_original_bounds_the_total_output() {

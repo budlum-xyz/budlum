@@ -197,7 +197,7 @@ dolayısıyla sistemin tamamı tek bir ağaç olarak derlenir, test edilir ve da
 | --- | --- |
 | [`crates/`](crates) | Bağımsız çalışma alanları: wallet-core, budscan, ai_inference, note-packing |
 | [`bud/`](bud) | B.U.D. 1.0/2.0/3.0 uygulaması (kendi çalışma alanı) |
-| [`docs/`](docs) | Başvuru belgeleri: ARCHITECTURE, SPECIFICATION, SECURITY, CONTRIBUTING, PROVENANCE_NOTES |
+| [`docs/`](docs) | Başvuru belgeleri: ARCHITECTURE, SPECIFICATION, SECURITY, CONTRIBUTING, NOTICE |
 | [`config/`](config) | Devnet / testnet / mainnet profilleri ve genesis şablonları |
 | [`xtask/gates/`](xtask/gates) | CI kapıları; her biri kendi kendini sınar ([Mühendislik standartları](#mühendislik-standartları)) |
 | [`kani/`](kani) · [`fuzz/`](fuzz) | Model denetleme koşum takımları ve fuzz hedefleri ([fuzz README](fuzz/README.md)) |
@@ -477,7 +477,6 @@ etmeyecektir.
 | [SECURITY.md](docs/SECURITY.md) | Açıklama politikası, desteklenen sürümler, bir raporda nelerin bulunması gerektiği |
 | [CONTRIBUTING.md](docs/CONTRIBUTING.md) | Geliştirme kurulumu, PR beklentileri, konsensüs ve yürütme değişiklikleri için kurallar |
 | [CODE_OF_CONDUCT.md](docs/CODE_OF_CONDUCT.md) | Topluluk beklentileri |
-| [PROVENANCE_NOTES.md](docs/PROVENANCE_NOTES.md) | Her önemsiz olmayan uygulamanın neye dayandığının modül başına kaydı |
 | [docs/VALIDATOR_ROLES.md](docs/VALIDATOR_ROLES.md) | Düğüm rolleri ve işletme gereksinimleri |
 | [docs/AI_VERIFICATION_STATUS.md](docs/AI_VERIFICATION_STATUS.md) | Yapay zeka katmanının tam olarak neyi doğrulayıp neyi doğrulamadığı |
 | [docs/BUD_STORAGE_ROADMAP.md](docs/BUD_STORAGE_ROADMAP.md) | Depolama katmanı yol haritası |

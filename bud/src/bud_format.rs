@@ -187,7 +187,7 @@ impl BudHeader {
             dictionary_hash: [0u8; 32],
             tier: 1,
             // v1 stores no erasure code: (0, 0) says so. Real repair needs
-            // bud_format_erasure and a stored layout (see BLG-0568).
+            // bud_format_erasure and a stored layout (see ).
             erasure_k: 0,
             erasure_p: 0,
             version_number: 1,
@@ -419,7 +419,7 @@ impl BudFile {
     }
 
     /// Serialise without silent truncation: a field that does not fit its
-    /// length prefix is an error (BLG-0574).
+    /// length prefix is an error.
     pub fn try_to_bytes(&self) -> Result<Vec<u8>, &'static str> {
         fn len16(n: usize) -> Result<[u8; 2], &'static str> {
             u16::try_from(n)
@@ -719,7 +719,7 @@ pub struct MultiRatioConsensus;
 
 impl MultiRatioConsensus {
     /// The ratio of a candidate, measured from its payload. A hand-written
-    /// literal is a claim, not a measurement (BLG-0573).
+    /// literal is a claim, not a measurement.
     fn measured_ratio(original_len: usize, payload_len: usize) -> f64 {
         if payload_len == 0 {
             return 1.0;

@@ -607,7 +607,7 @@ mod tests {
         assert_eq!(&blob[..8], &ENGINE_MAGIC);
     }
 
-    /// BLG-0581: a JSON array whose records list their keys in another order
+    ///: a JSON array whose records list their keys in another order
     /// restored to different bytes while the store reported success.
     #[test]
     fn json_that_does_not_roundtrip_exactly_is_stored_untransformed() {
@@ -779,7 +779,7 @@ mod tests {
         );
     }
 
-    /// BLG-0603: a cut tail or a damaged length field must not lose the
+    ///: a cut tail or a damaged length field must not lose the
     /// records that are still whole.
     #[test]
     fn shard_pack_survives_truncation_and_bad_length_field() {

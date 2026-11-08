@@ -465,7 +465,7 @@ mod tests {
         assert!(LogFieldColumnar::encode(b"").is_none());
     }
 
-    /// BLG-0606: a crafted file of newline bytes is refused by the count, and
+    ///: a crafted file of newline bytes is refused by the count, and
     /// a good first line followed by empty lines is refused at the first one.
     #[test]
     fn newline_flood_is_refused_without_a_line_table() {

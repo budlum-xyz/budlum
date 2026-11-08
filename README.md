@@ -195,7 +195,7 @@ dependencies, so the entire system builds, tests and ships as one tree.
 | --- | --- |
 | [`crates/`](crates) | Standalone workspaces: wallet-core, budscan, ai_inference, note-packing |
 | [`bud/`](bud) | B.U.D. 1.0/2.0/3.0 implementation (its own workspace) |
-| [`docs/`](docs) | Reference docs: ARCHITECTURE, SPECIFICATION, SECURITY, CONTRIBUTING, PROVENANCE_NOTES |
+| [`docs/`](docs) | Reference docs: ARCHITECTURE, SPECIFICATION, SECURITY, CONTRIBUTING, NOTICE |
 | [`config/`](config) | Devnet / testnet / mainnet profiles and genesis templates |
 | [`xtask/gates/`](xtask/gates) | CI gates, every one is self-testing (see [Engineering standards](#engineering-standards)) |
 | [`kani/`](kani) · [`fuzz/`](fuzz) | Model-checking harnesses and fuzz targets ([fuzz README](fuzz/README.md)) |
@@ -467,7 +467,6 @@ done, and this page will not imply otherwise.
 | [SECURITY.md](docs/SECURITY.md) | Disclosure policy, supported versions, what to include in a report |
 | [CONTRIBUTING.md](docs/CONTRIBUTING.md) | Development setup, PR expectations, rules for consensus and execution changes |
 | [CODE_OF_CONDUCT.md](docs/CODE_OF_CONDUCT.md) | Community expectations |
-| [PROVENANCE_NOTES.md](docs/PROVENANCE_NOTES.md) | Per-module record of what each non-trivial implementation is based on |
 | [docs/VALIDATOR_ROLES.md](docs/VALIDATOR_ROLES.md) | Node roles and their operational requirements |
 | [docs/AI_VERIFICATION_STATUS.md](docs/AI_VERIFICATION_STATUS.md) | Exactly what the AI layer does and does not verify |
 | [docs/BUD_STORAGE_ROADMAP.md](docs/BUD_STORAGE_ROADMAP.md) | Storage layer roadmap |

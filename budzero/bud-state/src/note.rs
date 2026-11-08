@@ -70,7 +70,7 @@ impl PrivacyNote {
 #[derive(Debug, Clone, Default)]
 pub struct NoteRegistry {
     /// The live (unspent) note commitments.
-    /// Live commitment -> the nullifier that spends it (P16-F18).
+    /// Live commitment -> the nullifier that spends it.
     notes: BTreeMap<Hash, Hash>,
     /// The spent nullifiers - double spend prevention.
     spent_nullifiers: BTreeSet<Hash>,
@@ -112,7 +112,7 @@ impl NoteRegistry {
         }
         match self.notes.get(&commitment) {
             None => return Err("spend: commitment not found in live note set".into()),
-            // P16-F18: the nullifier must be the one this note was created with.
+            //: the nullifier must be the one this note was created with.
             Some(bound) if *bound != nullifier => {
                 return Err("spend: nullifier does not belong to this commitment".into())
             }
@@ -220,7 +220,7 @@ mod tests {
             .is_err());
     }
 
-    /// P16-F18: a nullifier cannot spend a commitment it was not created with.
+    ///: a nullifier cannot spend a commitment it was not created with.
     #[test]
     fn spend_with_a_foreign_nullifier_rejected() {
         let mut r = NoteRegistry::new();

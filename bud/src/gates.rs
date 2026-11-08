@@ -185,7 +185,7 @@ impl GateSuite {
 mod tests {
     use super::*;
 
-    /// BLG-0671: a price error must fail the KF gate, not pass it as 0.0.
+    ///: a price error must fail the KF gate, not pass it as 0.0.
     #[test]
     fn a_price_error_fails_the_kf_gate() {
         let price = PriceModel::default();

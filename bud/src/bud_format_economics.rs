@@ -203,7 +203,7 @@ pub fn pipeline_holds_ceiling(
 }
 /// F3/F1151 TAPE ARCHIVE CLASS - cold content on tape (0 W idle):
 /// LTO-9 is about 5 USD/TB (30 years); 1 PB over 10 years costs 30K USD versus 480K USD on disk; power/cooling about 1 percent.
-/// NOT RECONCILED (P38-F05): 0.003 USD/GB/year is 3 USD/TB/year = 0.25 USD/TB/month,
+/// NOT RECONCILED: 0.003 USD/GB/year is 3 USD/TB/year = 0.25 USD/TB/month,
 /// a factor of 1000 above the constant below, and the 5 USD/TB over 30 years above
 /// gives about 0.0139 USD/TB/month. The constant is kept as measured by F3 until the
 /// owner re-derives it; do not quote the 0.016 archive target from it.

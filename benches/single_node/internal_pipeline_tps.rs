@@ -195,7 +195,7 @@ async fn main() {
     println!("INGEST TPS (Int):   {ingest_tps:.2} tx/s");
     println!("EXECUTION TPS:      {exec_tps:.2} tx/s");
     if blocks > 0 {
-        // The CI vacuity gate (BLG-1049) keys on an `Avg per` metric line:
+        // The CI vacuity gate keys on an `Avg per` metric line:
         // it is printed only when blocks were actually produced, so an
         // empty run still has no metric to hide behind.
         println!("Avg per Block:     {:?}", exec_duration / blocks as u32);

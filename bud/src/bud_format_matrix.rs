@@ -396,7 +396,7 @@ mod tests {
         assert_eq!(passing, 30);
     }
 
-    /// BLG-0608: the 30 of 30 result needs the LRC overhead. With the (4,2)
+    ///: the 30 of 30 result needs the LRC overhead. With the (4,2)
     /// code the engine really writes (1.5x) the ceiling fails for some classes.
     #[test]
     fn the_ceiling_claim_depends_on_the_lrc_overhead() {

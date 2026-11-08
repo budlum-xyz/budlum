@@ -317,7 +317,7 @@ impl HuffmanCoder {
 mod tests {
     use super::*;
 
-    /// BLG-0609: counts that follow the Fibonacci numbers give a plain
+    ///: counts that follow the Fibonacci numbers give a plain
     /// Huffman tree of depth 33; the limited tree must still round trip.
     #[test]
     fn fibonacci_counts_round_trip_within_the_code_length_limit() {

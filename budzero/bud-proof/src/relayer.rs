@@ -375,7 +375,7 @@ pub fn verify_and_report_at(
     let verified = crate::plonky3_prover::Plonky3Adapter::verify_canonical_program_with_activation(
         envelope, pi, program, activation,
     );
-    // P15-F04: the report signs `envelope.degree_bits`, so it must be the
+    //: the report signs `envelope.degree_bits`, so it must be the
     // value the verifier derived from `trace_len`, not a free field.
     let verified = verified.and_then(|()| check_degree_bits(envelope, pi));
     CanonicalRelayReport::from_outcome(envelope, pi, verified, at_unix)

@@ -180,7 +180,7 @@ jobs:
           set -euo pipefail
           cargo test --lib --verbose 2>&1 | tee /tmp/libtests.log
   budlum-bpqs:
-    # P02-F04 (BLG-0040): crates/bpqs was a package no workflow tested - the
+    # P02-F04: crates/bpqs was a package no workflow tested - the
     # fuzz target and a cargo-hack check were not a test gate. The research
     # line's KAT freeze, its quota counter and its verifier refusals all live
     # here, and a silent break in them is exactly what a gate exists for.

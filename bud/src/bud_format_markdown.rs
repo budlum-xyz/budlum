@@ -321,7 +321,7 @@ mod tests {
         );
     }
 
-    /// BLG-0611: a CRLF document lost its CR in the split and came back
+    ///: a CRLF document lost its CR in the split and came back
     /// changed. Input the split cannot restore byte for byte is refused.
     #[test]
     fn crlf_markdown_is_refused_not_changed() {
@@ -442,7 +442,7 @@ mod tests {
         );
     }
 
-    /// BLG-0610: every heading level 1 to 6 is recognised; seven marks or no
+    ///: every heading level 1 to 6 is recognised; seven marks or no
     /// space after the marks is not a heading.
     #[test]
     fn heading_levels_one_to_six_are_recognised() {
