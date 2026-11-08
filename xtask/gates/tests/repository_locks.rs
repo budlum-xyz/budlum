@@ -195,9 +195,8 @@ fn required_fee_is_classified_as_a_read() {
     );
 }
 
-/// The single denied lint that made four CI jobs red on `main`. A manual
-/// `(x + 63) / 64` is refused by clippy as `manual_div_ceil` under
-/// `-D warnings` (BLG-305).
+/// Integer ceiling division avoids a manual addition that can overflow and
+/// keeps the Bloom-filter sizing operation explicit.
 #[test]
 fn the_bloom_filter_uses_div_ceil() {
     let src = read("src/storage/bud3/dedup_index.rs");
@@ -211,8 +210,7 @@ fn the_bloom_filter_uses_div_ceil() {
     );
 }
 
-/// The two runtime indexes outside the indexing baseline were rewritten to
-/// shapes that cannot panic (BLG-308). No baseline entry was added.
+/// Checked slices and zipped iterators keep these runtime paths panic-free.
 #[test]
 fn the_two_runtime_indexes_are_panic_free() {
     let http = read("src/bin/support/http.rs");
@@ -231,10 +229,9 @@ fn the_two_runtime_indexes_are_panic_free() {
     );
 }
 
-/// The three `cargo fmt --all -- --check` hunks on `main` are applied, so the
-/// Format step has no diff left to report (BLG-306).
+/// Pin the formatter-stable shapes around these protocol vectors and calls.
 #[test]
-fn the_three_format_hunks_are_applied() {
+fn bud3_source_shapes_match_the_formatter() {
     let codec = read("crates/bud-codec/src/lib.rs");
     assert!(
         codec.contains("0x20, // single segment, one-byte content size"),
