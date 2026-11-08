@@ -8,7 +8,7 @@
 //! tests.
 //!
 //! A regenerating node holds blocks without their witnesses (a normal node
-//! prunes them,). To validate the blocks it grows back through it asks an
+//! prunes them). To validate the blocks it grows back through it asks an
 //! archive node for the witnesses of one block. A witness is not trusted
 //! because a peer sent it: the set must hash to the `witness_root` of the
 //! block, so a peer that withholds, swaps or adds a witness is caught and
