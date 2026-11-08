@@ -20,6 +20,7 @@ fn main() {
                 public_key: addr,
                 balance: 1000,
                 nonce: 0,
+                frac_attos: 0,
             },
         );
     }
