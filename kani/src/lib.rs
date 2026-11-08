@@ -460,12 +460,108 @@ pub fn stake_sum(stakes: &[u64; MAX_MIRROR_VALIDATORS], n: usize) -> u128 {
 // does not need them. They are left in place, timing out honestly, rather
 // than deleted to make the job green: deleting them would remove the only
 // statement in the tree that the truncation is monotonic.
+// ---------------------------------------------------------------------------
+// UEL fractional attoBUD arithmetic, capped committee seats, and fee split
+// ---------------------------------------------------------------------------
+
+/// One whole atom (`10^-6` BUD) holds `10^12` attoBUD (`10^-18` BUD).
+pub const ATTO_PER_ATOM: u64 = 1_000_000_000_000;
+
+/// Maximum bounded committee entities in the seat-cap model.
+pub const MAX_SEAT_ENTITIES: usize = 4;
+
+/// Checked `(balance, frac_attos) + (delta_atoms, delta_frac)` keeping
+/// `frac_attos < ATTO_PER_ATOM` without symbolic division.
+#[must_use]
+pub fn checked_add_frac_attos(
+    balance: u64,
+    frac_attos: u64,
+    delta_atoms: u64,
+    delta_frac: u64,
+) -> Option<(u64, u64)> {
+    if frac_attos >= ATTO_PER_ATOM || delta_frac >= ATTO_PER_ATOM {
+        return None;
+    }
+    let frac_sum = frac_attos + delta_frac;
+    let (carry, new_frac) = if frac_sum >= ATTO_PER_ATOM {
+        (1u64, frac_sum - ATTO_PER_ATOM)
+    } else {
+        (0u64, frac_sum)
+    };
+    let new_balance = balance.checked_add(delta_atoms)?.checked_add(carry)?;
+    Some((new_balance, new_frac))
+}
+
+/// Checked `(balance, frac_attos) - (delta_atoms, delta_frac)` keeping
+/// `frac_attos < ATTO_PER_ATOM` without symbolic division.
+#[must_use]
+pub fn checked_sub_frac_attos(
+    balance: u64,
+    frac_attos: u64,
+    delta_atoms: u64,
+    delta_frac: u64,
+) -> Option<(u64, u64)> {
+    if frac_attos >= ATTO_PER_ATOM || delta_frac >= ATTO_PER_ATOM {
+        return None;
+    }
+    let (borrow, new_frac) = if frac_attos < delta_frac {
+        (1u64, frac_attos + ATTO_PER_ATOM - delta_frac)
+    } else {
+        (0u64, frac_attos - delta_frac)
+    };
+    let new_balance = balance.checked_sub(delta_atoms)?.checked_sub(borrow)?;
+    Some((new_balance, new_frac))
+}
+
+/// Allocate up to `total_seats` across `MAX_SEAT_ENTITIES` requested quotas,
+/// enforcing `per_entity_cap` on every entity.
+#[must_use]
+pub fn allocate_capped_seats(
+    requested: &[u8; MAX_SEAT_ENTITIES],
+    total_seats: u8,
+    per_entity_cap: u8,
+) -> ([u8; MAX_SEAT_ENTITIES], u8) {
+    let mut out = [0u8; MAX_SEAT_ENTITIES];
+    let mut remaining = total_seats;
+    let mut idx = 0usize;
+    while idx < MAX_SEAT_ENTITIES {
+        let capped = if requested[idx] > per_entity_cap {
+            per_entity_cap
+        } else {
+            requested[idx]
+        };
+        let grant = if capped > remaining {
+            remaining
+        } else {
+            capped
+        };
+        out[idx] = grant;
+        remaining -= grant;
+        idx += 1;
+    }
+    (out, total_seats - remaining)
+}
+
+/// Split UEL fees into `(burned_base_fee, security_pool_base_fee, proposer_priority_fee)`.
+///
+/// Ten percent of `base_fee_paid` is burned (`base_fee_paid / 10`), the
+/// remaining ninety percent enters the Network Security Pool, and the full
+/// `priority_fee_paid` goes to the block proposer.
+#[must_use]
+pub fn split_uel_fee(base_fee_paid: u64, priority_fee_paid: u64) -> Option<(u64, u64, u64)> {
+    let _total = base_fee_paid.checked_add(priority_fee_paid)?;
+    let burn = base_fee_paid / 10;
+    let pool = base_fee_paid - burn;
+    Some((burn, pool, priority_fee_paid))
+}
+
 #[cfg(kani)]
 mod proofs {
     use super::{
-        bitmap_voted_stake, merkle_parent_layer_fold, merkle_rebuild_root_u64, merkle_root_u64,
-        merkle_sibling_index, penalty_for, raw_quotient, stake_sum, FIXED_POINT_SCALE,
-        MAX_MIRROR_LEAVES, MAX_MIRROR_VALIDATORS,
+        allocate_capped_seats, bitmap_voted_stake, checked_add_frac_attos, checked_sub_frac_attos,
+        merkle_parent_layer_fold, merkle_rebuild_root_u64, merkle_root_u64, merkle_sibling_index,
+        penalty_for, raw_quotient, split_uel_fee, stake_sum, ATTO_PER_ATOM, FIXED_POINT_SCALE,
+        MAX_MIRROR_LEAVES, MAX_MIRROR_VALIDATORS, MAX_SEAT_ENTITIES,
     };
 
     /// A slash can never take more stake than the member has.
@@ -954,5 +1050,70 @@ mod proofs {
             voted + u128::from(stakes[pick]),
             "one more signer bit must add exactly that validator's stake"
         );
+    }
+
+    /// Fractional attoBUD addition and subtraction keep `frac_attos < 10^12`
+    /// and invert each other without loss or creation of value.
+    #[kani::proof]
+    fn frac_attos_addition_and_subtraction_keep_invariant() {
+        let balance: u64 = kani::any();
+        let frac: u64 = kani::any();
+        let delta_atoms: u64 = kani::any();
+        let delta_frac: u64 = kani::any();
+        kani::assume(frac < ATTO_PER_ATOM);
+        kani::assume(delta_frac < ATTO_PER_ATOM);
+
+        if let Some((b2, f2)) = checked_add_frac_attos(balance, frac, delta_atoms, delta_frac) {
+            assert!(f2 < ATTO_PER_ATOM, "frac_attos must stay below 10^12");
+            let roundtrip = checked_sub_frac_attos(b2, f2, delta_atoms, delta_frac);
+            assert_eq!(
+                roundtrip,
+                Some((balance, frac)),
+                "subtracting an added attoBUD amount must restore exact state"
+            );
+        }
+    }
+
+    /// Committee seat allocation never exceeds the per-entity cap or total seat
+    /// budget, and assigns zero seats to zero-demand entities.
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn committee_seat_allocation_respects_cap_and_budget() {
+        let requested: [u8; MAX_SEAT_ENTITIES] = kani::any();
+        let total_seats: u8 = kani::any();
+        let cap: u8 = kani::any();
+        kani::assume(total_seats <= 32);
+
+        let (assigned, used) = allocate_capped_seats(&requested, total_seats, cap);
+        assert!(used <= total_seats, "allocated seats cannot exceed budget");
+        let mut sum = 0u16;
+        let mut idx = 0usize;
+        while idx < MAX_SEAT_ENTITIES {
+            assert!(assigned[idx] <= cap, "entity seat cap violated");
+            if requested[idx] == 0 {
+                assert_eq!(assigned[idx], 0, "zero demand must get zero seats");
+            }
+            sum += u16::from(assigned[idx]);
+            idx += 1;
+        }
+        assert_eq!(sum, u16::from(used));
+    }
+
+    /// UEL EIP-1559 fee split conserves every attoBUD across burn, security
+    /// pool and proposer priority fee.
+    #[kani::proof]
+    fn uel_fee_split_conserves_total_fee() {
+        let base_fee_paid: u64 = kani::any();
+        let priority_fee_paid: u64 = kani::any();
+        kani::assume(base_fee_paid <= (1 << 20));
+        kani::assume(priority_fee_paid <= (1 << 20));
+
+        let split = split_uel_fee(base_fee_paid, priority_fee_paid);
+        assert!(split.is_some());
+        if let Some((burn, pool, proposer)) = split {
+            assert_eq!(burn + pool, base_fee_paid);
+            assert_eq!(proposer, priority_fee_paid);
+            assert_eq!(burn + pool + proposer, base_fee_paid + priority_fee_paid);
+        }
     }
 }

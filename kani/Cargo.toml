@@ -32,3 +32,10 @@ members = ["."]
 [dependencies]
 
 [dev-dependencies]
+
+# Release hardening: a wrapping operation becomes a panic and the
+# panic becomes an exit, as in the node. Tests are unaffected: Cargo builds
+# test targets with unwinding whatever this says.
+[profile.release]
+overflow-checks = true
+panic = "abort"
