@@ -239,3 +239,7 @@ pub mod security_review;
 // (section 6.14).
 #[cfg(test)]
 pub mod bud3_replace;
+
+// Lane-D configuration, backup-drill and vote-domain regression locks.
+#[cfg(test)]
+pub mod audit_lane_d_locks;

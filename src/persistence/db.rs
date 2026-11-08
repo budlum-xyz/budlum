@@ -305,9 +305,10 @@ impl Storage {
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
     ///
-    /// The temporary file is written beside the destination and renamed only
-    /// After all bytes are durable, so a crash never presents a partial file as
-    /// A usable backup. On Unix the verified destination's parent directory is
+    /// The temporary file is written and synced beside the destination, then
+    /// published with a no-clobber hard link only after all bytes are durable.
+    /// A crash never presents a partial file as a usable backup and an existing
+    /// backup is never replaced. On Unix the verified destination's parent is
     /// also synced before success is returned.
     /// Reads every row twice and accepts the result only when both passes
     /// agree and no durable commit is in flight. sled offers no point in time
@@ -369,15 +370,23 @@ impl Storage {
             .open(&partial)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
-        std::fs::rename(&partial, path)?;
-        if let Err(error) = Self::verify_snapshot(path) {
-            let _ = std::fs::remove_file(path);
+        drop(file);
+        // Publish the complete inode without replacing an existing backup.
+        // A timestamp collision therefore keeps the earlier verified bytes.
+        if let Err(error) = std::fs::hard_link(&partial, path) {
+            let _ = std::fs::remove_file(&partial);
             return Err(error);
         }
+        if let Err(error) = Self::verify_snapshot(path) {
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(&partial);
+            return Err(error);
+        }
+        std::fs::remove_file(&partial)?;
         #[cfg(unix)]
         {
-            // The file data and the rename are separate durability steps.
-            // Persist the directory entry before the caller prunes old backups.
+            // File data and directory entries are separate durability steps.
+            // Persist the verified link and partial removal before pruning.
             let parent = path
                 .parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
@@ -2569,6 +2578,21 @@ mod tests {
             assert_eq!(std::fs::read(&target).unwrap(), b"protected target");
             assert_eq!(std::fs::read(&backup).unwrap(), b"existing backup");
         }
+    }
+
+    #[cfg(not(miri))]
+    #[test]
+    fn snapshot_never_replaces_an_existing_backup() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().join("db").to_str().unwrap()).unwrap();
+        let backup = dir.path().join("backup.bin");
+        let partial = dir.path().join("backup.bin.partial");
+        std::fs::write(&backup, b"earlier verified backup").unwrap();
+
+        let error = storage.create_snapshot(&backup).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&backup).unwrap(), b"earlier verified backup");
+        assert!(!partial.exists(), "failed publication must clean its partial");
     }
 
     #[test]

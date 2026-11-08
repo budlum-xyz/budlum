@@ -201,6 +201,15 @@ pub(crate) fn check_transaction_features(
 }
 
 impl Executor {
+    fn checked_next_nonce(nonce: u64) -> BudlumResult<u64> {
+        nonce.checked_add(1).ok_or_else(|| {
+            BudlumError::validation(
+                "nonce_exhausted",
+                "transaction sender has exhausted the nonce space",
+            )
+        })
+    }
+
     /// Apply one transaction's state effect. Admission control is NOT here:
     /// `validate_transaction` has already run over this transaction at the
     /// ingest gate, including the `tx.nonce == account.nonce` check - the
@@ -300,6 +309,9 @@ impl Executor {
                 "Burn reserve is schedule-controlled and cannot originate transactions",
             ));
         }
+        // Every arm increments the sender nonce. Refuse exhaustion before any
+        // arm can debit funds, touch a registry or escrow value.
+        Self::checked_next_nonce(state.get_nonce(&tx.from))?;
 
         match tx.tx_type {
             TransactionType::Unstake => {
@@ -365,6 +377,14 @@ impl Executor {
                         ),
                     ));
                 }
+                // Preflight the credit before the sender debit and nonce
+                // increment so direct execution cannot leave a partial transfer.
+                state.get_balance(&tx.to).checked_add(tx.amount).ok_or_else(|| {
+                    BudlumError::validation(
+                        "balance_overflow",
+                        "Receiver balance overflow: transfer would exceed u64::MAX",
+                    )
+                })?;
                 let sender = state.get_or_create(&tx.from);
                 // Checked arithmetic for critical
                 // Balance paths. Sender sub is safe (balance check above),
@@ -372,7 +392,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(total_cost).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
 
                 let receiver = state.get_or_create(&tx.to);
                 receiver.balance = receiver.balance.checked_add(tx.amount).ok_or_else(|| {
@@ -422,7 +442,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(total_cost).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
 
                 let min_stake = crate::core::chain_config::Network::from_chain_id(tx.chain_id)
                     .map_or(1, |network| network.min_stake());
@@ -486,7 +506,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "delegation fee underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::Undelegate { validator } => {
                 if tx.amount == 0 || tx.to != Address::zero() || !tx.data.is_empty() {
@@ -502,7 +522,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "delegation unbond fee underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::WithdrawDelegation { validator } => {
                 if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
@@ -524,7 +544,7 @@ impl Executor {
                         "delegation withdrawal fee underflow",
                     )
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
                 tracing::info!(delegator = %tx.from, validator = %validator, amount = withdrawn, "delegation withdrawn");
             }
             TransactionType::SetValidatorCommission { commission_ppm } => {
@@ -546,7 +566,7 @@ impl Executor {
                         "validator commission fee underflow",
                     )
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::Redelegate {
                 from_validator,
@@ -565,7 +585,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "redelegation fee underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
                 tracing::info!(delegator = %tx.from, from = %from_validator, to = %to_validator, amount = tx.amount, "delegation moved");
             }
             TransactionType::ClaimRewards { validator } => {
@@ -588,7 +608,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "reward claim fee underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
                 tracing::info!(delegator = %tx.from, validator = %validator, amount = claimed, "delegation reward claimed");
             }
             TransactionType::RegisterConsensusKeys(registration) => {
@@ -634,7 +654,7 @@ impl Executor {
                         "Consensus key registration fee underflow",
                     )
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::AiOperatorBond => {
                 let required = state.required_ai_bond(tx.chain_id);
@@ -680,7 +700,7 @@ impl Executor {
                         "AI inference layer bond fee underflow",
                     )
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::AiOperatorUnbond => {
                 if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
@@ -699,7 +719,7 @@ impl Executor {
                         "AI inference layer unbond fee underflow",
                     )
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
                 tracing::info!(
                     operator = %tx.from,
                     release_epoch,
@@ -799,7 +819,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::Vote => {
                 if tx.data.len() > 9 {
@@ -933,7 +953,7 @@ impl Executor {
                 sender_acc.balance = sender_acc.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender_acc.nonce = sender_acc.nonce.saturating_add(1);
+                sender_acc.nonce = Self::checked_next_nonce(sender_acc.nonce)?;
             }
             TransactionType::ContractCall
                 if crate::execution::coordinator::stateful_contract::is_stateful_contract_payload(
@@ -956,7 +976,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::ContractCall => {
                 // The VM runs for this transaction: its sender, nonce and the
@@ -1081,7 +1101,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::BnsRegister => {
                 let (name, duration): (String, u64) = bincode::deserialize(&tx.data)
@@ -1141,7 +1161,7 @@ impl Executor {
                             "balance underflow on cost deduction",
                         )
                     })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
                 // The registration cost is paid to no one.
                 state.record_destroyed(u128::from(cost));
             }
@@ -1195,7 +1215,7 @@ impl Executor {
                             "balance underflow on renewal payment",
                         )
                     })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
                 // The renewal cost is paid to no one.
                 state.record_destroyed(u128::from(cost));
             }
@@ -1228,7 +1248,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::BnsSetContent => {
                 let (name, cid): (String, crate::storage::content_id::ContentId) =
@@ -1246,7 +1266,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::BnsRegisterSubdomain => {
                 let (parent, label, sub_owner): (String, String, Address) =
@@ -1262,7 +1282,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::BnsSetStorage => {
                 let (name, root, dom_id): (String, [u8; 32], u32) = bincode::deserialize(&tx.data)
@@ -1279,7 +1299,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::NftMint => {
                 let (cid, author): (crate::storage::content_id::ContentId, Option<String>) =
@@ -1300,7 +1320,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::NftTransfer => {
                 let (id, to): (u64, Address) = bincode::deserialize(&tx.data)
@@ -1337,7 +1357,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::NftBurn => {
                 let id: u64 = bincode::deserialize(&tx.data)
@@ -1386,7 +1406,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::NftBoost { nft_id, amount } => {
                 let amount = *amount;
@@ -1451,7 +1471,7 @@ impl Executor {
                     .ok_or_else(|| {
                         BudlumError::validation("balance_underflow", "boost fee underflow")
                     })?;
-                booster.nonce = booster.nonce.saturating_add(1);
+                booster.nonce = Self::checked_next_nonce(booster.nonce)?;
 
                 let creator = state.get_or_create(&nft.owner);
                 // Checked add for creator share credit
@@ -1530,7 +1550,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::NftTag { nft_id, tag } => {
                 let nft = state
@@ -1555,7 +1575,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
                 state
                     .nft_registry
                     .add_tag(*nft_id, tag.clone())
@@ -1567,7 +1587,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::RelayerResult(res) => {
                 // Relayer EVM Proofs - cryptographic verification.
@@ -1847,7 +1867,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::AiOfferData { cid, price } => {
                 state
@@ -1858,7 +1878,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::AiPurchaseData { offer_id } => {
                 let offer = state.marketplace.get_offer(*offer_id).cloned().ok_or(
@@ -1889,7 +1909,7 @@ impl Executor {
                 buyer.balance = buyer.balance.checked_sub(total_cost).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                buyer.nonce = buyer.nonce.saturating_add(1);
+                buyer.nonce = Self::checked_next_nonce(buyer.nonce)?;
 
                 let seller = state.get_or_create(&offer.seller);
                 // Checked add for seller credit
@@ -1961,7 +1981,7 @@ impl Executor {
                     .ok_or_else(|| {
                         BudlumError::validation("balance_underflow", "hub register fee underflow")
                     })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::BudlumxyzAttestApp { app_id } => {
                 // Ownership proof, not audit. `attest_app_as_developer`
@@ -1979,7 +1999,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "hub attest fee underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::AiModelRegister(spec) => {
                 let mut spec = spec.clone();
@@ -2033,7 +2053,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(total).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "AI fee underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::AiInferenceRequest(req) => {
                 let mut req = req.clone();
@@ -2114,7 +2134,7 @@ impl Executor {
                     .ok_or_else(|| {
                         BudlumError::validation("balance_underflow", "AI max_fee underflow")
                     })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::AiInferenceResult(res) => {
                 // AI inference layer production authorization is permissionless but bonded:
@@ -2216,7 +2236,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::AiFeeReclaim(request_id) => {
                 // Reclaim escrowed max_fee for expired unfinalized request.
@@ -2261,7 +2281,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::AiModelDeactivate(model_id) => {
                 // Deactivate an AI model (owner-only).
@@ -2274,7 +2294,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::AiModelReactivate(model_id) => {
                 // Reactivate a previously
@@ -2288,7 +2308,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::AiRequestCancel(request_id) => {
                 // Cancel a pending AI inference request.
@@ -2311,7 +2331,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::PollenRegisterDataAsset(asset) => {
                 let mut asset = asset.clone();
@@ -2369,7 +2389,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::PollenAuthorizeSale(authorization) => {
                 let authorization = authorization.clone();
@@ -2387,7 +2407,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::PollenGrantAccess(grant) => {
                 let grant = grant.clone();
@@ -2418,7 +2438,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::PollenRevokeGrant(grant_id) => {
                 state
@@ -2429,7 +2449,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::PollenRevokeDataAsset(asset_id) => {
                 state
@@ -2440,7 +2460,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::AiDisputeSlash {
                 request_id,
@@ -2480,7 +2500,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::AiAgentPayment(payment) => {
                 // Agent-to-Agent payment in Agentic Economy.
@@ -2514,7 +2534,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(total_cost).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
                 // If not escrowed, credit recipient immediately and ARCHIVE
                 // Settlement receipt - never drop payment_id without trail.
                 if !payment.is_escrowed() {
@@ -2575,7 +2595,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::AiAgentPaymentReclaim(payment_id) => {
                 // Reclaim expired escrowed payment back to sender.
@@ -2615,7 +2635,7 @@ impl Executor {
                         )
                     })?;
                 sender.balance = new_balance;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::PrivacyNoteInsert(commitment) => {
                 if !privacy_transfers_enabled(tx.chain_id) {
@@ -2640,7 +2660,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::PrivateTransferSubmit(sub) => {
                 if !privacy_transfers_enabled(tx.chain_id) {
@@ -2745,7 +2765,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::AiAttachExecutionProof { request_id, proof } => {
                 if !state
@@ -3061,7 +3081,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::StateUpdate { domain_id, .. } => {
                 // /: the nonce writes a domain commitment carries
@@ -3111,7 +3131,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::Vault(vault_tx) => {
                 // One arm delegating to the tested body
@@ -3136,7 +3156,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::PoaOnboarding(poa_tx) => {
                 // One arm delegating to the one body
@@ -3160,7 +3180,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::Validator(validator_tx) => {
                 use crate::validators::ValidatorTx;
@@ -3246,7 +3266,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(total_cost).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::StorageV3(storage_tx) => {
                 // The storage door moves no value: the signed amount is zero
@@ -3276,7 +3296,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(total_cost).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::RoleBond { role } => {
                 // The verifier family's production
@@ -3296,7 +3316,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::RelayCrossDomainMessage(message) => {
                 // The door the registration used to reach through the public
@@ -3344,7 +3364,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::RoleUnbond { role } => {
                 // The unbonding half of the `RoleBond` door. The role id is
@@ -3370,7 +3390,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::RoleWithdraw { role } => {
                 // The refund half: the registry removes the registration and
@@ -3395,7 +3415,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::BridgeBurn(burn) => {
                 // A burn moves the transfer's units back out of the burner and
@@ -3475,7 +3495,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::CrossDomainMessage(message) => {
                 // The door that used to insert into `message_registry` from the
@@ -3509,7 +3529,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::Storage(storage_tx) => {
                 // One arm delegating to the tested body
@@ -3544,7 +3564,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::ExternalDomain(external_tx) => {
                 // /: one arm delegating to the tested body
@@ -3577,7 +3597,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::Settlement(settlement_tx) => {
                 // /: one arm delegating to the door
@@ -3608,7 +3628,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::Bridge(bridge_tx) => {
                 // /: one arm delegating to the door
@@ -3638,7 +3658,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::CanaryCommit { commitment } => {
                 // /: step one of a quantum canary claim. The book
@@ -3668,7 +3688,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::RegisterFiliz { commitment, length } => {
                 // /: schedule the chain; it activates three epoch
@@ -3703,7 +3723,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::CanaryReveal { canary, proof } => {
                 // /: step two. A valid proof applies the alarm
@@ -3748,7 +3768,7 @@ impl Executor {
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
         }
 
@@ -3762,6 +3782,22 @@ impl Executor {
     ) -> Result<(), String> {
         Self::apply_block_checked(state, transactions, block_producer)
             .map_err(|e| e.message().to_string())
+    }
+
+    /// Enforce the candidate nonce even when pruned witnesses skip admission.
+    fn check_block_transaction_nonce(
+        state: &AccountState,
+        tx: &Transaction,
+    ) -> BudlumResult<()> {
+        let expected = state.get_nonce(&tx.from);
+        if tx.nonce != expected {
+            return Err(BudlumError::validation(
+                "invalid_nonce",
+                format!("invalid nonce: expected {expected}, got {}", tx.nonce),
+            ));
+        }
+        Self::checked_next_nonce(tx.nonce)?;
+        Ok(())
     }
 
     /// Apply a whole block atomically. A rejected block leaves `state` exactly
@@ -3790,6 +3826,7 @@ impl Executor {
     ) -> BudlumResult<()> {
         Self::check_block_contract_gas(transactions)?;
         for tx in transactions {
+            Self::check_block_transaction_nonce(state, tx)?;
             Self::apply_transaction_checked(state, tx)?;
         }
         Self::finalize_block_checked(state, transactions, block_producer)
@@ -4909,4 +4946,85 @@ mod tests {
             "an equivocator must not escape the bond by waiting out a refused window"
         );
     }
+
+    #[test]
+    fn blg_113_block_nonce_failures_are_atomic() {
+        use crate::core::transaction::DEFAULT_CHAIN_ID;
+
+        let sender = Address::from([0x31; 32]);
+        let recipient = Address::from([0x32; 32]);
+        let transfer = |nonce, amount| {
+            let mut tx = Transaction::new_with_chain_id(
+                sender,
+                recipient,
+                amount,
+                1,
+                nonce,
+                vec![],
+                DEFAULT_CHAIN_ID,
+                TransactionType::Transfer,
+            );
+            tx.hash = tx.calculate_hash();
+            tx
+        };
+
+        let mut stale_state = AccountState::new();
+        stale_state.add_balance(&sender, 100);
+        let stale_root = stale_state.calculate_state_root();
+        let error = Executor::apply_block_checked(
+            &mut stale_state,
+            &[transfer(0, 10), transfer(0, 1)],
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "invalid_nonce");
+        assert_eq!(stale_state.calculate_state_root(), stale_root);
+        assert_eq!(stale_state.get_balance(&sender), 100);
+        assert_eq!(stale_state.get_nonce(&sender), 0);
+
+        let mut exhausted_state = AccountState::new();
+        exhausted_state.add_balance(&sender, 100);
+        exhausted_state.get_or_create(&sender).nonce = u64::MAX;
+        let exhausted_root = exhausted_state.calculate_state_root();
+        let error = Executor::apply_block_checked(
+            &mut exhausted_state,
+            &[transfer(u64::MAX, 1)],
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "nonce_exhausted");
+        assert_eq!(exhausted_state.calculate_state_root(), exhausted_root);
+        assert_eq!(exhausted_state.get_nonce(&sender), u64::MAX);
+    }
+
+    #[test]
+    fn blg_113_direct_execution_rejects_exhausted_nonce_before_mutation() {
+        use crate::core::transaction::DEFAULT_CHAIN_ID;
+
+        let sender = Address::from([0x35; 32]);
+        let recipient = Address::from([0x36; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&sender, 100);
+        state.get_or_create(&sender).nonce = u64::MAX;
+        let root_before = state.calculate_state_root();
+        let mut tx = Transaction::new_with_chain_id(
+            sender,
+            recipient,
+            1,
+            1,
+            u64::MAX,
+            vec![],
+            DEFAULT_CHAIN_ID,
+            TransactionType::Transfer,
+        );
+        tx.hash = tx.calculate_hash();
+
+        let error = Executor::apply_transaction_checked(&mut state, &tx).unwrap_err();
+        assert_eq!(error.code(), "nonce_exhausted");
+        assert_eq!(state.calculate_state_root(), root_before);
+        assert_eq!(state.get_balance(&sender), 100);
+        assert_eq!(state.get_balance(&recipient), 0);
+        assert_eq!(state.get_nonce(&sender), u64::MAX);
+    }
+
 }
