@@ -136,7 +136,7 @@ the prompt.
 
 Some of the designs here were reached by reading other projects. No code was
 copied and no dependency was added. Those projects are named where
-attribution belongs, in `docs/NOTICE` and `docs/PROVENANCE_NOTES.md`, with
+attribution belongs, in `docs/NOTICE`, with
 what was taken and what was not. Types and variants in the tree are named for
 what they select - an engine that pages experts off disk - because a variant
 called after another product tells a reader the tree depends on it: they
