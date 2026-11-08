@@ -185,7 +185,7 @@ use crate::consensus::pow::PoWEngine;
 use crate::core::address::Address;
 use crate::core::transaction::{Transaction, TransactionType};
 use crate::registry::role::roles;
-use crate::storage::db::Storage;
+use crate::persistence::db::Storage;
 
 /// Sled's file-lock release is not guaranteed to be synchronous with the
 /// Previous owner's `drop` under CI scheduling (os error 11 / WouldBlock
@@ -194,12 +194,12 @@ use crate::storage::db::Storage;
 /// Practice; 100 x 25ms is generous, then the final open reports the error.
 fn reopen_storage(path: &str) -> Storage {
     for _ in 0..100 {
-        if let Ok(storage) = crate::storage::db::Storage::new(path) {
+        if let Ok(storage) = crate::persistence::db::Storage::new(path) {
             return storage;
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
-    crate::storage::db::Storage::new(path).expect("storage reopen timed out after 2.5s")
+    crate::persistence::db::Storage::new(path).expect("storage reopen timed out after 2.5s")
 }
 use std::sync::Arc;
 use tempfile::tempdir;
