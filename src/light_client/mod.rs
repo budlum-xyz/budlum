@@ -10,10 +10,10 @@
 //! Two certificate kinds are verified:
 //!
 //! * [`FinalityCert`] - the BLS aggregate certificate over a stake-weighted
-//!   quorum (`LightClient::verify_checkpoint`). This is the whitepaper's
-//!   "BLS finality certificates as proofs".
+//! quorum (`LightClient::verify_checkpoint`). This is the whitepaper's
+//! "BLS finality certificates as proofs".
 //! * [`QcBlob`] - the post-quantum quorum blob (`LightClient::verify_pq_
-//!   checkpoint`), the same attestation layer full nodes import.
+//! checkpoint`), the same attestation layer full nodes import.
 //!
 //! The verification is transport-agnostic: `LightClient::sync_plan` spells
 //! out the wire requests a transport must issue (the existing `GetHeaders`
@@ -29,63 +29,46 @@ use std::fmt;
 use crate::chain::finality::{FinalityCert, ValidatorSetSnapshot};
 use crate::consensus::qc::QcBlob;
 use crate::core::block::BlockHeader;
-
-/// A 64-character lowercase hex digest.
-/// A 64-character lowercase hex digest. `const fn` so the trust-anchor check
-/// can run in constant contexts; `u8::is_ascii_hexdigit` is const since Rust
-/// 1.87, which this crate's MSRV (1.97) satisfies.
-fn is_canonical_hash(hash: &str) -> bool {
-    let bytes = hash.as_bytes();
-    if bytes.len() != 64 {
-        return false;
-    }
-    let mut i = 0;
-    while i < bytes.len() {
-        if !bytes[i].is_ascii_hexdigit() {
-            return false;
-        }
-        i += 1;
-    }
-    true
-}
+use crate::core::transaction::DEFAULT_CHAIN_ID;
+use crate::network::protocol::is_canonical_hash;
 
 /// The single trust anchor a light client is bootstrapped from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustedCheckpoint {
-    /// Block height of the anchor.
+ /// Block height of the anchor.
     pub height: u64,
-    /// Canonical block hash at `height`.
+ /// Canonical block hash at `height`.
     pub block_hash: String,
-    /// Hash of the validator set that finalized `height`.
+ /// Hash of the validator set that finalized `height`.
     pub set_hash: String,
 }
 
 /// A checkpoint that has been cryptographically verified against the anchor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedCheckpoint {
-    /// Block height of the verified checkpoint.
+ /// Block height of the verified checkpoint.
     pub height: u64,
-    /// Canonical block hash at `height`.
+ /// Canonical block hash at `height`.
     pub block_hash: String,
-    /// Hash of the validator set the certificate was verified against.
+ /// Hash of the validator set the certificate was verified against.
     pub set_hash: String,
-    /// Epoch the finality certificate belonged to.
+ /// Epoch the finality certificate belonged to.
     pub epoch: u64,
-    /// The external chain's state root at `height` (64-hex), as recorded in the
-    /// finalized header. A consensus step anchors this via
-    /// `AccountState::anchor_external_root` so the relayer gate can validate
-    /// against it (AR-GE-6 /). Carried here so the verified finality fact
-    /// survives past the verification call.
+ /// The external chain's state root at `height` (64-hex), as recorded in the
+ /// finalized header. A consensus step anchors this via
+ /// `AccountState::anchor_external_root` so the relayer gate can validate
+ /// against it (AR-GE-6 /). Carried here so the verified finality fact
+ /// survives past the verification call.
     pub state_root: String,
 }
 
 impl VerifiedCheckpoint {
-    /// The external chain's state root at [`Self::height`], as a 32-byte digest
-    /// ready to anchor via `AccountState::anchor_external_root` (AR-GE-6 /).
-    ///
-    /// Returns `None` when the recorded root is not a canonical 32-byte digest:
-    /// such a value would be refused by the anchor (zero / malformed), so
-    /// surfacing `None` keeps the caller from anchoring garbage.
+ /// The external chain's state root at [`Self::height`], as a 32-byte digest
+ /// ready to anchor via `AccountState::anchor_external_root` (AR-GE-6 /).
+ ///
+ /// Returns `None` when the recorded root is not a canonical 32-byte digest:
+ /// such a value would be refused by the anchor (zero / malformed), so
+ /// surfacing `None` keeps the caller from anchoring garbage.
     #[must_use]
     pub fn external_root(&self) -> Option<crate::domain::types::Hash32> {
         let bytes = hex::decode(&self.state_root).ok()?;
@@ -101,24 +84,24 @@ impl VerifiedCheckpoint {
 /// Why a checkpoint failed light-client verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LightClientError {
-    /// A hash string is not a canonical 64-hex digest.
+ /// A hash string is not a canonical 64-hex digest.
     MalformedHash(String),
-    /// The header fails hash self-consistency.
+ /// The header fails hash self-consistency.
     InvalidHeader(String),
-    /// The certificate does not bind to the header it claims to finalize.
+ /// The certificate does not bind to the header it claims to finalize.
     CertificateBinding(String),
-    /// The certificate or snapshot does not bind to the trusted validator set.
+ /// The certificate or snapshot does not bind to the trusted validator set.
     TrustBinding(String),
-    /// The cryptographic verification (BLS quorum or PQ quorum) failed.
+ /// The cryptographic verification (BLS quorum or PQ quorum) failed.
     VerificationFailed(String),
-    /// `advance` was asked to move backwards or stay put.
+ /// `advance` was asked to move backwards or stay put.
     NotForward { trusted: u64, candidate: u64 },
-    /// A verified checkpoint carries a different validator set than the anchor.
+ /// A verified checkpoint carries a different validator set than the anchor.
     SetChanged { trusted: String, candidate: String },
-    /// A header chain is not contiguous and parent-linked.
+ /// A header chain is not contiguous and parent-linked.
     HeaderChain(String),
-    /// A global header does not reopen the finalized state root, or does
-    /// not belong to the checkpoint it is presented for.
+ /// A global header does not reopen the finalized state root, or does
+ /// not belong to the checkpoint it is presented for.
     GlobalHeaderBinding(String),
 }
 
@@ -157,10 +140,10 @@ impl std::error::Error for LightClientError {}
 /// The wire requests a transport must issue from the current trust anchor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LightSyncPlan {
-    /// `GetHeaders { locator, limit }` starting at the trusted block hash.
+ /// `GetHeaders { locator, limit }` starting at the trusted block hash.
     pub headers_locator: Vec<String>,
-    /// The next checkpoint height the light client needs a certificate for.
-    /// `None` when the anchor already sits at or above the target.
+ /// The next checkpoint height the light client needs a certificate for.
+ /// `None` when the anchor already sits at or above the target.
     pub next_checkpoint_height: Option<u64>,
 }
 
@@ -168,25 +151,25 @@ pub struct LightSyncPlan {
 #[derive(Debug, Clone)]
 pub struct LightClient {
     trusted: TrustedCheckpoint,
-    /// Headers (height to hash) that `verify_header_chain` linked to the
-    /// trust anchor. A checkpoint is only accepted for a header in this map,
-    /// so a finalized header from an unrelated fork cannot move the anchor.
+ /// Headers (height to hash) that `verify_header_chain` linked to the
+ /// trust anchor. A checkpoint is only accepted for a header in this map,
+ /// so a finalized header from an unrelated fork cannot move the anchor.
     linked: BTreeMap<u64, String>,
-    /// Refuse a BLS-only checkpoint. Set for a mainnet client:
-    /// there, finality needs the BLS certificate and the ML-DSA-65 QC of the
-    /// same signers.
+ /// Refuse a BLS-only checkpoint. Set for a mainnet client:
+ /// there, finality needs the BLS certificate and the ML-DSA-65 QC of the
+ /// same signers.
     require_pq: bool,
-    /// The scheme statuses this client verifies post-quantum signatures under.
-    ///
-    /// Genesis statuses are the default, which is right for a client built
-    /// against a fresh chain and wrong for one following a live chain: the
-    /// Frost Alarm demotes a broken lattice family to `Disabled` in consensus
-    /// state, and every node then refuses signatures under it in the same
-    /// block. A client that kept judging by genesis statuses would verify a
-    /// checkpoint the network itself rejects and advance its trust anchor on
-    /// it. The wire carries no registry, so a client tracking a live chain pins
-    /// the chain's registry with [`Self::with_scheme_registry`], exactly as it
-    /// pins the trust anchor.
+ /// The scheme statuses this client verifies post-quantum signatures under.
+ ///
+ /// Genesis statuses are the default, which is right for a client built
+ /// against a fresh chain and wrong for one following a live chain: the
+ /// Frost Alarm demotes a broken lattice family to `Disabled` in consensus
+ /// state, and every node then refuses signatures under it in the same
+ /// block. A client that kept judging by genesis statuses would verify a
+ /// checkpoint the network itself rejects and advance its trust anchor on
+ /// it. The wire carries no registry, so a client tracking a live chain pins
+ /// the chain's registry with [`Self::with_scheme_registry`], exactly as it
+ /// pins the trust anchor.
     registry: crate::crypto::scheme::SchemeStatusRegistry,
 }
 
@@ -195,15 +178,15 @@ pub struct LightClient {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// WIRING: light-client surface - the sync doors that read it land with their wiring.
 pub enum TrustMode {
-    /// The validator majority: the trusted set's finality certificates (BLS
-    /// and ML-DSA-65 QC) and, across set changes, the handoff chain.
+ /// The validator majority: the trusted set's finality certificates (BLS
+ /// and ML-DSA-65 QC) and, across set changes, the handoff chain.
     Committee,
-    /// The Budlum anchor key ledger: the last PQ anchor and the root seal.
+ /// The Budlum anchor key ledger: the last PQ anchor and the root seal.
     Anchor,
 }
 
 impl TrustMode {
-    /// One line naming the trust a user accepts in this mode.
+ /// One line naming the trust a user accepts in this mode.
     #[must_use]
     pub const fn describe(self) -> &'static str {
         match self {
@@ -214,15 +197,15 @@ impl TrustMode {
 }
 
 impl LightClient {
-    /// Bootstrap from a single trusted checkpoint.
-    ///
-    /// Both hashes must be canonical 64-hex digests; anything else is a
-    /// bootstrap mistake that would poison every later verification.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`LightClientError::MalformedHash`] when either hash is not a
-    /// canonical 64-hex digest.
+ /// Bootstrap from a single trusted checkpoint.
+ ///
+ /// Both hashes must be canonical 64-hex digests; anything else is a
+ /// bootstrap mistake that would poison every later verification.
+ ///
+ /// # Errors
+ ///
+ /// Returns [`LightClientError::MalformedHash`] when either hash is not a
+ /// canonical 64-hex digest.
     pub fn new(trusted: TrustedCheckpoint) -> Result<Self, LightClientError> {
         if !is_canonical_hash(&trusted.block_hash) {
             return Err(LightClientError::MalformedHash(format!(
@@ -244,13 +227,13 @@ impl LightClient {
         })
     }
 
-    /// Bootstrap for the network of `chain_id`. A mainnet client refuses
-    /// BLS-only checkpoints: only [`Self::verify_hybrid_checkpoint`]
-    /// and [`Self::verify_pq_checkpoint`] advance it.
-    ///
-    /// # Errors
-    ///
-    /// See [`Self::new`].
+ /// Bootstrap for the network of `chain_id`. A mainnet client refuses
+ /// BLS-only checkpoints: only [`Self::verify_hybrid_checkpoint`]
+ /// and [`Self::verify_pq_checkpoint`] advance it.
+ ///
+ /// # Errors
+ ///
+ /// See [`Self::new`].
     pub fn for_chain(trusted: TrustedCheckpoint, chain_id: u64) -> Result<Self, LightClientError> {
         let mut client = Self::new(trusted)?;
         client.require_pq = chain_id
@@ -260,12 +243,12 @@ impl LightClient {
         Ok(client)
     }
 
-    /// Pin the chain policy this client verifies under: the scheme statuses
-    /// the chain holds in consensus state.
-    ///
-    /// The registry is not on the wire, so the caller pins it out of band like
-    /// the trust anchor. Without it the client verifies under genesis statuses,
-    /// and a family the chain has disabled keeps verifying here.
+ /// Pin the chain policy this client verifies under: the scheme statuses
+ /// the chain holds in consensus state.
+ ///
+ /// The registry is not on the wire, so the caller pins it out of band like
+ /// the trust anchor. Without it the client verifies under genesis statuses,
+ /// and a family the chain has disabled keeps verifying here.
     #[must_use]
     pub fn with_scheme_registry(
         mut self,
@@ -275,27 +258,27 @@ impl LightClient {
         self
     }
 
-    /// The trust this client's checkpoints rest on: the validator committee.
+ /// The trust this client's checkpoints rest on: the validator committee.
     #[must_use]
     pub const fn trust_mode(&self) -> TrustMode {
         TrustMode::Committee
     }
 
-    /// Whether this client refuses BLS-only checkpoints.
+ /// Whether this client refuses BLS-only checkpoints.
     #[must_use]
-    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+ /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub const fn requires_pq(&self) -> bool {
         self.require_pq
     }
 
-    /// Verify a checkpoint with both halves: the BLS certificate as
-    /// [`Self::verify_checkpoint`] checks it, and the ML-DSA-65 QC blob of
-    /// the same signers over the same checkpoint.
-    ///
-    /// # Errors
-    ///
-    /// Any refusal of the BLS half, or a QC that does not bind to the
-    /// certificate or misses a BLS signer.
+ /// Verify a checkpoint with both halves: the BLS certificate as
+ /// [`Self::verify_checkpoint`] checks it, and the ML-DSA-65 QC blob of
+ /// the same signers over the same checkpoint.
+ ///
+ /// # Errors
+ ///
+ /// Any refusal of the BLS half, or a QC that does not bind to the
+ /// certificate or misses a BLS signer.
     pub fn verify_hybrid_checkpoint(
         &self,
         header: &BlockHeader,
@@ -304,46 +287,46 @@ impl LightClient {
         snapshot: &ValidatorSetSnapshot,
     ) -> Result<VerifiedCheckpoint, LightClientError> {
         let verified = self.verify_bls_half(header, cert, snapshot)?;
-        // The client's pinned registry, not a fresh genesis one: a family the
-        // chain has demoted to `Disabled` must stop verifying here in the same
-        // block it stops verifying on every node.
+ // The client's pinned registry, not a fresh genesis one: a family the
+ // chain has demoted to `Disabled` must stop verifying here in the same
+ // block it stops verifying on every node.
         crate::domain::finality_adapter::verify_pq_quorum(&self.registry, cert, snapshot, blob)
             .map_err(LightClientError::VerificationFailed)?;
         Ok(verified)
     }
 
-    /// The current trust anchor.
+ /// The current trust anchor.
     #[must_use]
     pub const fn trusted(&self) -> &TrustedCheckpoint {
         &self.trusted
     }
 
-    /// Reject a snapshot whose metadata is not self-consistent.
-    ///
-    /// The snapshot arrives with the export, so it is untrusted input. Its
-    /// `set_hash` and `total_stake` must be recomputed from the validator
-    /// list before they are used to enforce quorum; otherwise a crafted
-    /// export could lower `total_stake` and make a minority certificate pass
-    /// the light-client quorum check.
+ /// Reject a snapshot whose metadata is not self-consistent.
+ ///
+ /// The snapshot arrives with the export, so it is untrusted input. Its
+ /// `set_hash` and `total_stake` must be recomputed from the validator
+ /// list before they are used to enforce quorum; otherwise a crafted
+ /// export could lower `total_stake` and make a minority certificate pass
+ /// the light-client quorum check.
     fn validate_snapshot_metadata(snapshot: &ValidatorSetSnapshot) -> Result<(), LightClientError> {
         snapshot
             .validate_metadata()
             .map_err(LightClientError::TrustBinding)
     }
 
-    /// Verify a BLS finality certificate checkpoint against the trusted set.
-    ///
-    /// The checks run in order, each binding the next layer to the previous
-    /// one: the header must hash to itself and be linked to the trust anchor
-    /// by an earlier `verify_header_chain` call, the certificate must name exactly
-    /// that header, the certificate and the snapshot must carry the trusted
-    /// validator-set hash, and finally the BLS aggregate signature must carry
-    /// the stake and signer quorum (`FinalityCert::verify`).
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`LightClientError`] variant for each failed binding and for
-    /// a certificate whose BLS signature fails `FinalityCert::verify`.
+ /// Verify a BLS finality certificate checkpoint against the trusted set.
+ ///
+ /// The checks run in order, each binding the next layer to the previous
+ /// one: the header must hash to itself and be linked to the trust anchor
+ /// by an earlier `verify_header_chain` call, the certificate must name exactly
+ /// that header, the certificate and the snapshot must carry the trusted
+ /// validator-set hash, and finally the BLS aggregate signature must carry
+ /// the stake and signer quorum (`FinalityCert::verify`).
+ ///
+ /// # Errors
+ ///
+ /// Returns a [`LightClientError`] variant for each failed binding and for
+ /// a certificate whose BLS signature fails `FinalityCert::verify`.
     pub fn verify_checkpoint(
         &self,
         header: &BlockHeader,
@@ -413,19 +396,21 @@ impl LightClient {
         })
     }
 
-    /// Verify a post-quantum quorum blob checkpoint against the trusted set.
-    ///
-    /// The same binding chain as [`Self::verify_checkpoint`], with the BLS
-    /// aggregate replaced by the PQ quorum: every signature verifies against
-    /// the snapshot's PQ public keys, no validator signs twice, and the
-    /// unique signers must carry the same stake and count quorum the BLS path
-    /// enforces.
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`LightClientError`] variant for each failed binding and for
-    /// a PQ blob whose signatures, stake quorum or signer count do not clear
-    /// `QcBlob::verify_against_snapshot`.
+ /// Verify a post-quantum quorum blob checkpoint against the trusted set.
+ ///
+ /// The same binding chain as [`Self::verify_checkpoint`], with the BLS
+ /// aggregate replaced by the PQ quorum: every signature verifies against
+ /// the snapshot's PQ public keys, no validator signs twice, and the
+ /// unique signers must clear the legacy stake/count threshold. This
+ /// snapshot-only fallback cannot replay Instant Seat Handover without
+ /// finalized block records. The chain's PQ-alarm path uses the seat table;
+ /// migrating this light client requires that history and remains the work package work.
+ ///
+ /// # Errors
+ ///
+ /// Returns a [`LightClientError`] variant for each failed binding and for
+ /// a PQ blob whose signatures, stake quorum or signer count do not clear
+ /// `QcBlob::verify_against_snapshot`.
     pub fn verify_pq_checkpoint(
         &self,
         header: &BlockHeader,
@@ -474,8 +459,8 @@ impl LightClient {
             .verify_against_snapshot_in(&self.registry, snapshot, None, None)
             .map_err(LightClientError::VerificationFailed)?;
 
-        // Summed exactly, like the threshold: a saturated partial sum met a
-        // saturated threshold once the stakes passed the `u64` range.
+ // Summed exactly, like the threshold: a saturated partial sum met a
+ // saturated threshold once the stakes passed the `u64` range.
         let voted_stake: u128 = verified
             .iter()
             .filter_map(|idx| snapshot.validators.get(*idx))
@@ -505,24 +490,24 @@ impl LightClient {
         })
     }
 
-    /// Verify a headers-only chain segment without any block bodies.
-    ///
-    /// Every header must hash to itself, consecutive headers must be
-    /// contiguous and parent-linked, and the first header must continue the
-    /// trust anchor: it sits exactly one height above the anchor and its
-    /// parent hash is the anchor's block hash. An unanchored first header
-    /// would let a crafted export substitute a self-consistent finalized
-    /// segment from an unrelated fork that reuses the same validator set
-    /// (CWE-345).
-    ///
-    /// A segment that passes is remembered: `verify_checkpoint` and
-    /// `verify_pq_checkpoint` accept only a header from a linked segment.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`LightClientError::HeaderChain`] for a malformed or
-    /// disconnected segment and [`LightClientError::NotForward`] for a header
-    /// at or below the anchor.
+ /// Verify a headers-only chain segment without any block bodies.
+ ///
+ /// Every header must hash to itself, consecutive headers must be
+ /// contiguous and parent-linked, and the first header must continue the
+ /// trust anchor: it sits exactly one height above the anchor and its
+ /// parent hash is the anchor's block hash. An unanchored first header
+ /// would let a crafted export substitute a self-consistent finalized
+ /// segment from an unrelated fork that reuses the same validator set
+ /// (CWE-345).
+ ///
+ /// A segment that passes is remembered: `verify_checkpoint` and
+ /// `verify_pq_checkpoint` accept only a header from a linked segment.
+ ///
+ /// # Errors
+ ///
+ /// Returns [`LightClientError::HeaderChain`] for a malformed or
+ /// disconnected segment and [`LightClientError::NotForward`] for a header
+ /// at or below the anchor.
     pub fn verify_header_chain(&mut self, headers: &[BlockHeader]) -> Result<(), LightClientError> {
         if headers.is_empty() {
             return Err(LightClientError::HeaderChain(
@@ -572,18 +557,18 @@ impl LightClient {
         Ok(())
     }
 
-    /// Move the trust anchor to a verified checkpoint.
-    ///
-    /// Strictly forward, and only within the trusted validator set: a
-    /// certificate over a different set is a different chain, and following
-    /// it without a new out-of-band anchor would hand the adversary the
-    /// light client's trust.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`LightClientError::NotForward`] for a checkpoint at or below
-    /// the anchor and [`LightClientError::SetChanged`] for a checkpoint over
-    /// a different validator set.
+ /// Move the trust anchor to a verified checkpoint.
+ ///
+ /// Strictly forward, and only within the trusted validator set: a
+ /// certificate over a different set is a different chain, and following
+ /// it without a new out-of-band anchor would hand the adversary the
+ /// light client's trust.
+ ///
+ /// # Errors
+ ///
+ /// Returns [`LightClientError::NotForward`] for a checkpoint at or below
+ /// the anchor and [`LightClientError::SetChanged`] for a checkpoint over
+ /// a different validator set.
     pub fn advance(&mut self, verified: &VerifiedCheckpoint) -> Result<(), LightClientError> {
         if verified.height <= self.trusted.height {
             return Err(LightClientError::NotForward {
@@ -606,26 +591,26 @@ impl LightClient {
         Ok(())
     }
 
-    /// Move the trusted validator set across set changes by following the
-    /// Handoff Certificate chain. `outgoing` must be the set
-    /// the client trusts; each step is a certificate and the snapshot it
-    /// hands to. Only ML-DSA-65 signatures are checked, so the move holds
-    /// without trusting BLS. The anchor height stays; the next checkpoint
-    /// verified over the new set advances it.
-    ///
-    /// # Errors
-    ///
-    /// `epoch_randomness` is the epoch randomness the caller independently
-    /// obtained for each epoch on the way; the certificate's own `randomness`
-    /// field seats the handoff committee, so a certificate cannot be allowed to
-    /// name it (see [`crate::consensus::handoff::HandoffCertificate::verify_in`]).
-    ///
-    /// # Errors
-    ///
-    /// [`LightClientError::TrustBinding`] when `outgoing` is not the trusted
-    /// set or a snapshot is not self-consistent, and
-    /// [`LightClientError::VerificationFailed`] when the chain does not verify.
-    /// WIRING: light-client surface - the sync doors that read it land with their wiring.
+ /// Move the trusted validator set across set changes by following the
+ /// Handoff Certificate chain. `outgoing` must be the set
+ /// the client trusts; each step is a certificate and the snapshot it
+ /// hands to. Only ML-DSA-65 signatures are checked, so the move holds
+ /// without trusting BLS. The anchor height stays; the next checkpoint
+ /// verified over the new set advances it.
+ ///
+ /// # Errors
+ ///
+ /// `epoch_randomness` is the epoch randomness the caller independently
+ /// obtained for each epoch on the way; the certificate's own `randomness`
+ /// field seats the handoff committee, so a certificate cannot be allowed to
+ /// name it (see [`crate::consensus::handoff::HandoffCertificate::verify_in`]).
+ ///
+ /// # Errors
+ ///
+ /// [`LightClientError::TrustBinding`] when `outgoing` is not the trusted
+ /// set or a snapshot is not self-consistent, and
+ /// [`LightClientError::VerificationFailed`] when the chain does not verify.
+ /// WIRING: light-client surface - the sync doors that read it land with their wiring.
     pub fn follow_handoffs(
         &mut self,
         registry: &crate::crypto::scheme::SchemeStatusRegistry,
@@ -670,18 +655,18 @@ impl LightClient {
         Ok(epoch)
     }
 
-    /// The next checkpoint height strictly above the anchor, given the chain's
-    /// checkpoint interval. `None` when the anchor already sits at a
-    /// checkpoint at or beyond `target_height` (i.e. nothing left to fetch).
+ /// The next checkpoint height strictly above the anchor, given the chain's
+ /// checkpoint interval. `None` when the anchor already sits at a
+ /// checkpoint at or beyond `target_height` (i.e. nothing left to fetch).
     #[must_use]
-    // Not const: the nightly jobs (udeps, determinism) reject trait calls in
-    // const fns with E0658; this fn was reverted from const in c72b911.
+ // Not const: the nightly jobs (udeps, determinism) reject trait calls in
+ // const fns with E0658; this fn was reverted from const in c72b911.
     #[allow(clippy::missing_const_for_fn)]
     pub fn next_checkpoint_height(&self, interval: u64, target_height: u64) -> Option<u64> {
         if interval == 0 || self.trusted.height >= target_height {
             return None;
         }
-        // Closed form: one division, not a walk of up to 2^64 heights.
+ // Closed form: one division, not a walk of up to 2^64 heights.
         let start = self.trusted.height.checked_add(1)?;
         let rest = start % interval;
         let next = if rest == 0 {
@@ -692,19 +677,19 @@ impl LightClient {
         (next <= target_height).then_some(next)
     }
 
-    /// Verify that `header` is the global header the finalized checkpoint
-    /// commits: it was built at the checkpoint's height, and the
-    /// checkpoint's state root reopens with `state_root_body` and the header
-    /// hash (`AccountState::root_from_opening`). The chain a light client
-    /// walks is then: trust anchor, finality certificate, block, global
-    /// header, and from there any root the header carries.
-    ///
-    /// # Errors
-    ///
-    /// [`LightClientError::GlobalHeaderBinding`] when the header belongs to
-    /// another checkpoint or the opening does not reproduce the state root;
-    /// [`LightClientError::MalformedHash`] when the checkpoint's state root
-    /// is not a 32-byte digest.
+ /// Verify that `header` is the global header the finalized checkpoint
+ /// commits: it was built at the checkpoint's height, and the
+ /// checkpoint's state root reopens with `state_root_body` and the header
+ /// hash (`AccountState::root_from_opening`). The chain a light client
+ /// walks is then: trust anchor, finality certificate, block, global
+ /// header, and from there any root the header carries.
+ ///
+ /// # Errors
+ ///
+ /// [`LightClientError::GlobalHeaderBinding`] when the header belongs to
+ /// another checkpoint or the opening does not reproduce the state root;
+ /// [`LightClientError::MalformedHash`] when the checkpoint's state root
+ /// is not a 32-byte digest.
     pub fn verify_global_header(
         checkpoint: &VerifiedCheckpoint,
         state_root_body: &crate::domain::types::Hash32,
@@ -732,9 +717,9 @@ impl LightClient {
         Ok(())
     }
 
-    /// The wire requests a transport must issue from this anchor: a
-    /// `GetHeaders` locator rooted at the trusted hash, and the next
-    /// checkpoint height a certificate is needed for.
+ /// The wire requests a transport must issue from this anchor: a
+ /// `GetHeaders` locator rooted at the trusted hash, and the next
+ /// checkpoint height a certificate is needed for.
     #[must_use]
     pub fn sync_plan(&self, interval: u64, target_height: u64) -> LightSyncPlan {
         LightSyncPlan {
@@ -759,10 +744,26 @@ mod tests {
 
     const TEST_CHAIN_ID: u64 = crate::core::transaction::DEFAULT_CHAIN_ID;
 
+ /// The trust anchor is a 64-hex digest in its one canonical spelling: an
+ /// upper-case copy names the same block to a human, and a different string
+ /// to every comparison the client makes.
+    #[test]
+    fn an_upper_case_trust_anchor_is_refused() {
+        let trusted = TrustedCheckpoint {
+            height: 7,
+            block_hash: "AA".repeat(32),
+            set_hash: "bb".repeat(32),
+        };
+        assert!(matches!(
+            LightClient::new(trusted),
+            Err(LightClientError::MalformedHash(_))
+        ));
+    }
+
     fn make_bls_key(seed: u8) -> BlsKeypair {
         let mut sk_bytes = [0u8; 64];
         sk_bytes[0] = seed + 1;
-        BlsKeypair::from_seed(&sk_bytes)
+        BlsKeypair::from_seed(&sk_bytes).expect("a non-zero test seed")
     }
 
     fn make_bls_snapshot(n: usize, stake_each: u64) -> (ValidatorSetSnapshot, Vec<Scalar>) {
@@ -793,8 +794,8 @@ mod tests {
         BlockHeader::from_block(&block)
     }
 
-    /// Produce a real BLS finality certificate for `header` signed by
-    /// `signers` of the snapshot's keys (the first `signers` validators).
+ /// Produce a real BLS finality certificate for `header` signed by
+ /// `signers` of the snapshot's keys (the first `signers` validators).
     fn make_valid_bls_cert(
         snapshot: &ValidatorSetSnapshot,
         sks: &[Scalar],
@@ -803,6 +804,7 @@ mod tests {
     ) -> FinalityCert {
         let checkpoint_hash = header.hash.clone();
         let mut agg = FinalityAggregator::new(
+            crate::core::transaction::DEFAULT_CHAIN_ID,
             snapshot.epoch,
             header.index,
             checkpoint_hash.clone(),
@@ -873,6 +875,7 @@ mod tests {
             agg_sig_bls: Vec::new(),
             bitmap: vec![1],
             set_hash: snapshot.set_hash.clone(),
+            seat_table_version: 0,
         };
         let err = client
             .verify_checkpoint(&header, &cert, &snapshot)
@@ -977,10 +980,10 @@ mod tests {
     fn rejects_a_certificate_below_the_quorum() {
         let (snapshot, sks) = make_bls_snapshot(4, 1000);
         let header = make_block_header_at(10, TEST_CHAIN_ID);
-        // Produce a valid three-of-four certificate, then shrink the bitmap
-        // to two signers: two of four validators is not a 2/3 quorum, so the
-        // certificate must be rejected at the cryptographic step, not the
-        // binding steps.
+ // Produce a valid three-of-four certificate, then shrink the bitmap
+ // to two signers: two of four validators is not a 2/3 quorum, so the
+ // certificate must be rejected at the cryptographic step, not the
+ // binding steps.
         let mut cert = make_valid_bls_cert(&snapshot, &sks, &header, 3);
         cert.bitmap = vec![0b0000_0011];
 
@@ -998,8 +1001,8 @@ mod tests {
         ));
     }
 
-    /// AR-GE-6 /: a verified checkpoint exposes the external state root
-    /// as an anchorable Hash32; non-32-byte / non-hex roots are refused.
+ /// AR-GE-6 /: a verified checkpoint exposes the external state root
+ /// as an anchorable Hash32; non-32-byte / non-hex roots are refused.
     #[test]
     fn verified_checkpoint_exposes_anchorable_external_root() {
         let cp = VerifiedCheckpoint {
@@ -1048,7 +1051,7 @@ mod tests {
             .verify_checkpoint(&header, &cert, &snapshot)
             .expect("honest checkpoint verifies");
 
-        // Same height is not forward.
+ // Same height is not forward.
         let mut other = client.clone();
         assert!(matches!(
             other.advance(&VerifiedCheckpoint {
@@ -1061,7 +1064,7 @@ mod tests {
             Err(LightClientError::NotForward { .. })
         ));
 
-        // A different set hash is a different chain.
+ // A different set hash is a different chain.
         let mut changed = client.clone();
         assert!(matches!(
             changed.advance(&VerifiedCheckpoint {
@@ -1100,14 +1103,14 @@ mod tests {
         assert_eq!(client.trusted().height, 10);
     }
 
-    /// The client verifies PQ signatures under the registry it was pinned to,
-    /// not a fresh genesis registry.
-    ///
-    /// The Frost Alarm demotes a lattice family to `Disabled` in consensus
-    /// state and every node refuses signatures under it in the same block. A
-    /// client that verified under `SchemeStatusRegistry::genesis()` kept
-    /// accepting them, printed `CHECKPOINT VERIFIED`, and advanced its trust
-    /// anchor on a checkpoint the network itself rejects.
+ /// The client verifies PQ signatures under the registry it was pinned to,
+ /// not a fresh genesis registry.
+ ///
+ /// The Frost Alarm demotes a lattice family to `Disabled` in consensus
+ /// state and every node refuses signatures under it in the same block. A
+ /// client that verified under `SchemeStatusRegistry::genesis()` kept
+ /// accepting them, printed `CHECKPOINT VERIFIED`, and advanced its trust
+ /// anchor on a checkpoint the network itself rejects.
     #[test]
     fn a_pinned_registry_decides_whether_the_pq_half_verifies() {
         use crate::crypto::scheme::{SchemeId, SchemeStatus, SchemeStatusRegistry};
@@ -1126,8 +1129,8 @@ mod tests {
             .verify_pq_checkpoint(&header, &blob, &snapshot)
             .expect("the genesis statuses accept the blob");
 
-        // The same blob, judged by a chain that has disabled the family the
-        // validators signed with.
+ // The same blob, judged by a chain that has disabled the family the
+ // validators signed with.
         let (mut schemes, suites) = SchemeStatusRegistry::genesis().entries();
         for (id, status) in &mut schemes {
             if *id == SchemeId::ML_DSA_65.0 {
@@ -1156,8 +1159,8 @@ mod tests {
         let (snapshot, keys) = make_pq_snapshot(3, 1000);
         let header = make_block_header_at(10, TEST_CHAIN_ID);
         let mut blob = make_pq_blob(&snapshot, &keys, &header);
-        // Duplicate the first signature: the same validator signing twice is
-        // one attestation, not two (canary, qcblob_quorum).
+ // Duplicate the first signature: the same validator signing twice is
+ // one attestation, not two (canary, qcblob_quorum).
         let dup = blob.pq_signatures[0].clone();
         blob.pq_signatures.push(dup);
         blob.merkle_root = QcBlob::compute_merkle_root(&blob.pq_signatures);
@@ -1192,12 +1195,12 @@ mod tests {
         h2.hash = h2.calculate_hash();
         assert!(client.verify_header_chain(&[h1.clone(), h2]).is_ok());
 
-        // A gap breaks the chain.
+ // A gap breaks the chain.
         let h3 = make_block_header_at(3, TEST_CHAIN_ID);
         let broken = [h1, h3];
         assert!(client.verify_header_chain(&broken).is_err());
 
-        // A header at or below the anchor is not forward.
+ // A header at or below the anchor is not forward.
         let anchor_header = make_block_header_at(0, TEST_CHAIN_ID);
         assert!(matches!(
             client.verify_header_chain(&[anchor_header]),
@@ -1205,8 +1208,8 @@ mod tests {
         ));
     }
 
-    /// A finalized header that `verify_header_chain` never linked to the
-    /// anchor is refused, even with a valid certificate (audit).
+ /// A finalized header that `verify_header_chain` never linked to the
+ /// anchor is refused, even with a valid certificate (audit).
     #[test]
     fn checkpoint_requires_a_header_linked_to_the_anchor() {
         let (snapshot, sks) = make_bls_snapshot(4, 1000);
@@ -1224,14 +1227,14 @@ mod tests {
         h2.previous_hash = h1.hash.clone();
         h2.hash = h2.calculate_hash();
 
-        // A self-consistent header of an unrelated fork at the same height.
+ // A self-consistent header of an unrelated fork at the same height.
         let mut fork = make_block_header_at(2, TEST_CHAIN_ID);
         fork.previous_hash = "9".repeat(64);
         fork.hash = fork.calculate_hash();
         let fork_cert = make_valid_bls_cert(&snapshot, &sks, &fork, 3);
         let cert = make_valid_bls_cert(&snapshot, &sks, &h2, 3);
 
-        // Nothing is linked yet.
+ // Nothing is linked yet.
         assert!(matches!(
             client.verify_checkpoint(&h2, &cert, &snapshot),
             Err(LightClientError::HeaderChain(_))
@@ -1247,8 +1250,8 @@ mod tests {
         ));
     }
 
-    /// The next checkpoint height is computed in closed form (audit):
-    /// a huge target must not loop height by height.
+ /// The next checkpoint height is computed in closed form (audit):
+ /// a huge target must not loop height by height.
     #[test]
     fn next_checkpoint_height_is_closed_form() {
         let client = LightClient::new(TrustedCheckpoint {
@@ -1301,7 +1304,7 @@ mod tests {
         assert_eq!(at_checkpoint.next_checkpoint_height(10, 50), Some(20));
     }
 
-    // ---- PQ helpers ----
+ // ---- PQ helpers ----
 
     fn make_pq_snapshot(n: usize, stake_each: u64) -> (ValidatorSetSnapshot, Vec<PqKeyPair>) {
         let mut keys = Vec::new();
@@ -1352,9 +1355,9 @@ mod tests {
         QcBlob::new(snapshot.epoch, header.index, header.hash.clone(), entries)
     }
 
-    /// a global header binds to a verified checkpoint through the state
-    /// root opening; a header from another checkpoint, a tampered header or
-    /// a wrong opening is refused.
+ /// a global header binds to a verified checkpoint through the state
+ /// root opening; a header from another checkpoint, a tampered header or
+ /// a wrong opening is refused.
     #[test]
     fn a_global_header_binds_to_its_checkpoint_through_the_state_root() {
         use crate::core::account::AccountState;
