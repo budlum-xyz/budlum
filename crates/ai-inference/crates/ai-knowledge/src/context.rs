@@ -49,8 +49,31 @@ pub struct CompactContext {
     pub notes: Vec<String>,
 }
 
+fn is_secret_label(label: &str) -> bool {
+    let lower = label.trim().to_ascii_lowercase().replace('-', "_");
+    matches!(
+        lower.as_str(),
+        "password"
+            | "passwd"
+            | "secret"
+            | "api_key"
+            | "apikey"
+            | "token"
+            | "access_token"
+            | "private_key"
+            | "mnemonic"
+            | "seed"
+    )
+}
+
 fn escape_cell(value: &str, max_chars: usize) -> String {
-    let mut text = value.replace('|', r"\|").replace('\n', " ");
+    let mask = crate::redact::redact_text(value);
+    let redacted = if mask.report().total() > 0 {
+        mask.into_text()
+    } else {
+        value.to_string()
+    };
+    let mut text = redacted.replace('|', r"\|").replace('\n', " ");
     text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if max_chars > 0 && text.chars().count() > max_chars {
         let truncated: String = text.chars().take(max_chars - 1).collect();
@@ -116,10 +139,15 @@ pub fn render(ctx: &CompactContext, max_chars: Option<usize>) -> String {
         let rows: Vec<Vec<String>> = facts
             .iter()
             .map(|f| {
+                let obj = if is_secret_label(&f.subject) || is_secret_label(&f.predicate) {
+                    String::from("<SECRET:MASKED>")
+                } else {
+                    f.object.clone()
+                };
                 vec![
                     f.subject.clone(),
                     f.predicate.clone(),
-                    f.object.clone(),
+                    obj,
                     format_evidence(&f.evidence),
                     f.confidence.clone(),
                 ]
@@ -243,5 +271,23 @@ mod tests {
     fn token_estimate_nonzero() {
         assert!(estimate_tokens("one two three four") > 0);
         assert_eq!(estimate_tokens(""), 0);
+    }
+
+    #[test]
+    fn compact_context_render_masks_secrets() {
+        let mut ctx = sample();
+        let leaked = format!("ghp_{}{}", "0123456789abcdefghij", "0123456789");
+        ctx.notes.push(format!("token: {leaked}"));
+        ctx.facts.push(FactRow {
+            subject: "operator".to_string(),
+            predicate: "api_key".to_string(),
+            object: "raw-credential-value".to_string(),
+            confidence: "high".to_string(),
+            evidence: None,
+        });
+        let out = render(&ctx, None);
+        assert!(!out.contains(&leaked));
+        assert!(!out.contains("raw-credential-value"));
+        assert!(out.contains(crate::redact::REDACTION_TOKEN));
     }
 }

@@ -43,7 +43,8 @@ const BENIGN_KEYS: &[&str] = &["author", "authors", "max_tokens", "tokenizer", "
 /// Does a key name carry one of the secret keywords?
 fn is_secret_key(key: &str) -> bool {
     let key_norm = key.to_lowercase().replace('-', "_");
-    let bare = key_norm.trim_matches(|c: char| c.is_whitespace() || c == '"' || c == '\'');
+    let bare = key_norm
+        .trim_matches(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '\\');
     if BENIGN_KEYS.contains(&bare) {
         return false;
     }
@@ -266,8 +267,18 @@ fn redact_key_value(line: &str, report: &mut RedactionReport) -> String {
     while let Some(rel) = find_separator(&line[start..]) {
         let pos = start + rel;
         let head = &line[start..pos];
-        // The key is the text after the last pair delimiter in front of the separator.
-        let key = head.rfind([',', '{', '[']).map_or(head, |i| &head[i + 1..]);
+        // The key is the identifier immediately before the separator.
+        let key_seg = head
+            .rfind([',', ';', '{', '['])
+            .map_or(head, |i| &head[i + 1..])
+            .trim();
+        let key = if key_seg.ends_with('"') || key_seg.ends_with('\'') {
+            key_seg
+        } else {
+            key_seg
+                .rsplit_once([' ', '\t'])
+                .map_or(key_seg, |(_, k)| k)
+        };
         out.push_str(head);
         out.push_str(&line[pos..=pos]);
         start = pos + 1;
@@ -298,26 +309,24 @@ fn redact_key_value(line: &str, report: &mut RedactionReport) -> String {
             continue;
         }
 
-        // Otherwise the value runs to the end of the line. Split off the
-        // punctuation at the end of the value (comma, semicolon, closing bracket).
+        // Otherwise the value runs until the next unquoted field delimiter
+        // (comma, semicolon, closing bracket, or whitespace), and scanning
+        // continues across the rest of the line.
         let value_end = body
             .char_indices()
-            .rev()
-            .find(|(_, c)| !matches!(c, ',' | ';' | ')' | '}' | ']' | ' ' | '\t'))
-            .map_or(0, |(i, c)| i + c.len_utf8());
-        let tail = &body[value_end..];
+            .find(|(_, c)| matches!(c, ',' | ';' | ')' | '}' | ']' | ' ' | '\t'))
+            .map_or(body.len(), |(i, _)| i);
         let value = &body[..value_end];
-        if value.is_empty() || value.starts_with(REDACTION_TOKEN) {
-            out.push_str(&line[start..]);
-            return out;
-        }
-        report.add("key_value");
         out.push_str(lead_ws);
         out.push_str(&q);
-        out.push_str(REDACTION_TOKEN);
+        if value.is_empty() || value.starts_with(REDACTION_TOKEN) {
+            out.push_str(value);
+        } else {
+            report.add("key_value");
+            out.push_str(REDACTION_TOKEN);
+        }
         out.push_str(&q);
-        out.push_str(tail);
-        return out;
+        start += lead_ws.len() + q.len() + value_end;
     }
     out.push_str(&line[start..]);
     out
@@ -875,5 +884,20 @@ mod tests {
         assert!(!r.text().contains(&seed));
         let r = redact_text(&format!("wallet_key={seed}"));
         assert!(!r.text().contains(&seed));
+    }
+
+    #[test]
+    fn multi_field_unquoted_and_escaped_json_keys_are_masked() {
+        let r1 = redact_text("api_key=alpha_secret, password=bravo_secret");
+        assert!(!r1.text().contains("alpha_secret"), "{}", r1.text());
+        assert!(!r1.text().contains("bravo_secret"), "{}", r1.text());
+
+        // An empty first secret field must not abort redaction of later fields.
+        let r2 = redact_text("api_key=, password=charlie_secret");
+        assert!(!r2.text().contains("charlie_secret"), "{}", r2.text());
+
+        let r3 = redact_text("export TOKEN=delta_secret SECRET=echo_secret");
+        assert!(!r3.text().contains("delta_secret"), "{}", r3.text());
+        assert!(!r3.text().contains("echo_secret"), "{}", r3.text());
     }
 }

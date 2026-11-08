@@ -1,11 +1,11 @@
 //! The closed-circuit source check.
 //!
-//! The principle: the source kinds AI inference layer can read form a closed set (a Pollen
-//! grant, a B.U.D. StorageDeal, or SocialFi). The permission **rules** are
+//! The principle: the source kinds AI inference layer can read form a closed set (a DataMarket
+//! grant, a B.U.D. `StorageDeal`, or `SocialFi`). The permission **rules** are
 //! queried from the chain and are not copied here (the decision; the "the
 //! second copy is the worst copy" principle from budlum).
 
-use ai_core::dataset::{SourceKind, SourceRef};
+use ai_core::dataset::{SourceError, SourceKind, SourceRef};
 
 /// Data layer errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +18,8 @@ pub enum DataError {
         expected: SourceKind,
         got: SourceKind,
     },
+    /// Closed-circuit source identity or grant fields are invalid.
+    InvalidSource(SourceError),
     /// The SHA-256 verification failed - no data flows.
     HashMismatch { detail: String },
 }
@@ -26,10 +28,12 @@ pub enum DataError {
 ///
 /// # Errors
 ///
-/// `NotClosedLoop` when the source kind is not one of the three channels.
+/// `InvalidSource` when `content_id` is zero or a data-market grant has zero
+/// remaining epochs.
 pub fn assert_closed_loop(source: &SourceRef) -> Result<(), DataError> {
+    source.validate().map_err(DataError::InvalidSource)?;
     match source.kind {
-        SourceKind::PollenGrant | SourceKind::StorageDeal | SourceKind::SocialRef => Ok(()),
+        SourceKind::DataMarketGrant | SourceKind::StorageDeal | SourceKind::SocialRef => Ok(()),
     }
 }
 
@@ -40,7 +44,7 @@ pub fn assert_closed_loop(source: &SourceRef) -> Result<(), DataError> {
 /// `NotClosedLoop` when `raw_kind` is outside 0..=2.
 pub fn reject_unknown_source(raw_kind: u8) -> Result<SourceKind, DataError> {
     match raw_kind {
-        0 => Ok(SourceKind::PollenGrant),
+        0 => Ok(SourceKind::DataMarketGrant),
         1 => Ok(SourceKind::StorageDeal),
         2 => Ok(SourceKind::SocialRef),
         other => Err(DataError::NotClosedLoop { found: other }),
@@ -71,14 +75,14 @@ mod tests {
 
     #[test]
     fn all_three_closed_loop_kinds_pass() {
-        assert!(assert_closed_loop(&SourceRef::pollen_grant([1; 32], 2)).is_ok());
+        assert!(assert_closed_loop(&SourceRef::data_market_grant([8; 32], [9; 32], [1; 32], 2)).is_ok());
         assert!(assert_closed_loop(&SourceRef::storage_deal([1; 32])).is_ok());
         assert!(assert_closed_loop(&SourceRef::social([1; 32])).is_ok());
     }
 
     #[test]
     fn unknown_raw_source_is_rejected() {
-        assert_eq!(reject_unknown_source(0), Ok(SourceKind::PollenGrant));
+        assert_eq!(reject_unknown_source(0), Ok(SourceKind::DataMarketGrant));
         assert_eq!(
             reject_unknown_source(3),
             Err(DataError::NotClosedLoop { found: 3 })
@@ -91,14 +95,34 @@ mod tests {
 
     #[test]
     fn require_source_enforces_exact_kind() {
-        let grant = SourceRef::pollen_grant([1; 32], 1);
-        assert!(require_source(&grant, SourceKind::PollenGrant).is_ok());
+        let mut grant = SourceRef::data_market_grant([8; 32], [9; 32], [1; 32], 1);
+        assert!(require_source(&grant, SourceKind::DataMarketGrant).is_ok());
         assert_eq!(
             require_source(&grant, SourceKind::StorageDeal),
             Err(DataError::UnexpectedSource {
                 expected: SourceKind::StorageDeal,
-                got: SourceKind::PollenGrant
+                got: SourceKind::DataMarketGrant
             })
+        );
+        grant.grant_epochs_remaining = Some(0);
+        assert_eq!(
+            assert_closed_loop(&grant),
+            Err(DataError::InvalidSource(SourceError::ExpiredOrMissingGrant))
+        );
+
+        grant.grant_epochs_remaining = Some(1);
+        grant.grant_id = None;
+        assert_eq!(
+            assert_closed_loop(&grant),
+            Err(DataError::InvalidSource(SourceError::MissingGrantId))
+        );
+    }
+
+    #[test]
+    fn assert_closed_loop_refuses_zero_content_id() {
+        assert_eq!(
+            assert_closed_loop(&SourceRef::storage_deal([0u8; 32])),
+            Err(DataError::InvalidSource(SourceError::ZeroContentId))
         );
     }
 }
