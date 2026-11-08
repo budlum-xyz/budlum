@@ -27,3 +27,4 @@ THE_BUDLUM_DIREKTIF.md
 # Also pin the explicit root form: the repository lock test requires this
 # anchored rule, while the rule above retains the broader accidental-upload guard.
 /THE_BUDLUM_DIREKTIF.md
+/arena_claude.py
