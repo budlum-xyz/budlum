@@ -428,7 +428,7 @@ fn configured_commit_base() -> Option<String> {
     None
 }
 
-/// Select commits introduced by this run: after the PR base or push's before
+/// Select commits introduced by this run: after the change base or push's before
 /// SHA. Local runs use `origin/main`, falling back to the last commit there.
 fn commit_subject_range(root: &Path, base_ref: Option<&str>) -> Result<String, String> {
     if let Some(base_ref) = base_ref {
@@ -832,9 +832,11 @@ mod tests {
 
     #[test]
     fn generated_merge_subjects_are_distinguished_from_authored_subjects() {
-        assert!(is_generated_merge_subject(
-            "Merge pull request #6 from lubothebook/arena/ff47a4d3-budlum"
-        ));
+        let generated = format!(
+            "Merge pull request #123 from lubothebook/{}/feature-branch",
+            review_identity().to_lowercase()
+        );
+        assert!(is_generated_merge_subject(&generated));
         assert!(!is_generated_merge_subject(
             "Merge pull request #x from lubothebook/arena/branch"
         ));
@@ -867,15 +869,17 @@ mod tests {
         run_git(&root, &["init", "-q"]);
         run_git(&root, &["config", "user.name", "Audit Guard Test"]);
         run_git(&root, &["config", "user.email", "audit-guard@example.invalid"]);
-        run_git(&root, &["commit", "--allow-empty", "-m", "Add arena_claude.py"]);
+        let inherited = format!("Add {}_launcher.py", review_identity().to_lowercase());
+        run_git(&root, &["commit", "--allow-empty", "-m", &inherited]);
         run_git(&root, &["branch", "base"]);
         run_git(&root, &["commit", "--allow-empty", "-m", "fix: ordinary change"]);
 
         let mut errors = Vec::new();
         commit_subject_audit(&root, Some("base"), &mut errors).expect("commit audit");
-        assert!(errors.is_empty(), "base history is outside the PR range: {errors:?}");
+        assert!(errors.is_empty(), "base history is outside the change range: {errors:?}");
 
-        run_git(&root, &["commit", "--allow-empty", "-m", "fix: Arena is forbidden"]);
+        let introduced = format!("fix: {} is forbidden", review_identity());
+        run_git(&root, &["commit", "--allow-empty", "-m", &introduced]);
         commit_subject_audit(&root, Some("base"), &mut errors).expect("commit audit");
         assert_eq!(errors.len(), 1, "new violating subject must be found");
         let _ = std::fs::remove_dir_all(&root);
