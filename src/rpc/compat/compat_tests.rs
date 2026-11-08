@@ -366,3 +366,54 @@ fn eth_filters_are_peer_isolated_and_bud_execution_proof_verifies() {
         &state.execution_state.execution_root(),
     ));
 }
+
+
+#[test]
+fn solana_unimplemented_methods_never_return_invented_success() {
+    let state = AccountState::default();
+    let mut gateway = SolanaCompatGateway::new(SolanaCompatConfig::default(), 50, [0x99; 32]);
+    for method in [
+        "getGenesisHash",
+        "getEpochInfo",
+        "getLatestBlockhash",
+        "isBlockhashValid",
+        "getBalance",
+        "getAccountInfo",
+        "getMultipleAccounts",
+        "getProgramAccounts",
+        "getTokenAccountsByOwner",
+        "getTokenAccountBalance",
+        "getTokenSupply",
+        "getMinimumBalanceForRentExemption",
+        "getFeeForMessage",
+        "getRecentPrioritizationFees",
+        "sendTransaction",
+        "simulateTransaction",
+        "getSignatureStatuses",
+        "getSignaturesForAddress",
+        "getTransaction",
+        "getBlock",
+        "accountSubscribe",
+        "signatureSubscribe",
+        "slotSubscribe",
+        "logsSubscribe",
+        "programSubscribe",
+        "accountUnsubscribe",
+        "signatureUnsubscribe",
+        "slotUnsubscribe",
+        "logsUnsubscribe",
+        "programUnsubscribe",
+    ] {
+        let response = gateway.handle_request(&rpc_req(method, serde_json::json!([])), &state);
+        assert!(response.result.is_none(), "{method} returned an invented result");
+        let error = response.error.expect("unimplemented method must fail");
+        assert_eq!(error.code, -32004, "{method}");
+        assert!(error.message.contains(method), "{method}: {}", error.message);
+    }
+
+    for method in ["getHealth", "getVersion", "getSlot", "getBlockHeight"] {
+        let response = gateway.handle_request(&rpc_req(method, serde_json::json!([])), &state);
+        assert!(response.error.is_none(), "{method} must remain served");
+        assert!(response.result.is_some(), "{method} lost its chain answer");
+    }
+}
