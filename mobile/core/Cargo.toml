@@ -1,0 +1,61 @@
+[package]
+name = "budlum-mobile-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+description = "Budlum mobile validator core: custody duties, presence, quota, relay switch and share handover"
+publish = false
+
+[lib]
+name = "budlum_mobile_core"
+path = "src/lib.rs"
+
+[dependencies]
+# The class, the presence message and the presence signal: one definition the
+# node binds too (K-4), so the phone signs the bytes the node verifies.
+budlum-types = { path = "../../crates/budlum-types" }
+sha2 = "=0.11.1"
+# The operator key (section 7.9.6) signs through the node's own signature
+# code, mounted in src/crypto.rs (K-4). These are the lines
+# crates/wallet-core compiles the same three files with.
+ml-dsa = { version = "=0.1.1", features = ["alloc", "zeroize", "rand_core"] }
+libcrux-ml-dsa = { version = "=0.0.11", default-features = false, features = ["std", "mldsa65", "mldsa87"] }
+slh-dsa = { version = "=0.2.0-rc.5", features = ["zeroize"] }
+# scheme.rs hashes with it; the shared presence vector test uses it as an
+# implementation independent of budlum-types' sha3 0.12.
+sha3 = "0.10"
+zeroize = { version = "=1.9.1", features = ["derive"] }
+
+[dev-dependencies]
+# The NIST ACVP and Wycheproof vectors the mounted pq tests parse.
+serde_json = "=1.0.154"
+
+[package.metadata.cargo-machete]
+# src/crypto.rs mounts the node's crypto sources by path, outside this crate
+# directory; cargo-machete scans the crate directory only and cannot see the
+# `use` statements that read these.
+ignored = ["ml-dsa", "libcrux-ml-dsa", "slh-dsa"]
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unused_import_braces = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[profile.release]
+overflow-checks = true
+panic = "abort"
+
+# The mounted pq tests replay SLH-DSA vectors, a few million SHAKE calls
+# each; only the hashing crates are optimized, as in the root manifest.
+[profile.dev.package.keccak]
+opt-level = 3
+[profile.dev.package.sha3]
+opt-level = 3
+[profile.dev.package.slh-dsa]
+opt-level = 3
