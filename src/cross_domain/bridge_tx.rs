@@ -655,12 +655,6 @@ pub fn submit_relay_proof(
         if !domain.bridge_enabled {
             return Err(format!("Bridge relay disabled for domain {source_domain}"));
         }
-        if source_height > domain.last_committed_height {
-            return Err(format!(
-                "Bridge source commitment at height {source_height} is not on the applied domain chain (tip {})",
-                domain.last_committed_height
-            ));
-        }
         let commitment = state
             .settlement
             .commitments
@@ -670,6 +664,12 @@ pub fn submit_relay_proof(
                     "No committed event root for domain {source_domain} at height {source_height}"
                 )
             })?;
+        if source_height > domain.last_committed_height {
+            return Err(format!(
+                "Bridge source commitment at height {source_height} is not on the applied domain chain (tip {})",
+                domain.last_committed_height
+            ));
+        }
         // The root is the root of trust only when the commitment's finality
         // proof binds it. A PoS or BFT certificate signs the checkpoint hash
         // and nothing else, so under one of those the event root is the
