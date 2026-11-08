@@ -1016,7 +1016,7 @@ impl ConsensusEngine for PoSEngine {
                         // rounds 1..=16 at once (CWE-807).
                         let affordable = affordable_leader_round(
                             prev.timestamp,
-                            self.round_prices.seen_at(&prev.hash),
+                            self.round_prices.chain_seen_at(chain),
                             now_millis(),
                         );
                         if round > affordable {

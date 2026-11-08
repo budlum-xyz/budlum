@@ -7,7 +7,7 @@ on:
     # Run on the normal protected bases and on stacked continuation bases.
     # `arena/**` covers this repository's generated continuation branches;
     # `consensus-of-consensuses` keeps upstream stack covered.
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, 'arena/**']
+    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, 'arena/**']
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -2556,6 +2556,10 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- ci-workflow-guards --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- ci-workflow-guards
+      - name: security-quality-tools-are-wired (SARIF, coverage, dependency graph, Wolfi, PR gates) + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- security-quality-tools-are-wired --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- security-quality-tools-are-wired
       # A test name is the claim a reader trusts when counting coverage.
       # `pow_empty_block_rejected_by_validation` asserted is_some();
       # `pos_double_producer_address_rejected` asserted both blocks succeed;
