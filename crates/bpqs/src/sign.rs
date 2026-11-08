@@ -130,6 +130,7 @@ impl<P: BpqsParams, H: BpqsHash> BpqsSigner<P, H> {
     /// through [`BpqsSigner::resume`] (or declares a never-minted device with
     /// [`BpqsSigner::fresh_device`]).
     pub fn ceremonial_keygen(root_seed: [u8; 32], window: EpochWindow) -> Result<Self, BpqsError> {
+        crate::params::ensure_valid_params::<P>()?;
         let mut vks = Vec::with_capacity(1usize << P::T_LOG2);
         for epoch in 0..(1u32 << P::T_LOG2) {
             let seed = prf_epoch_seed::<H>(&root_seed, epoch);
@@ -359,6 +360,7 @@ pub fn verify_at_height<H: BpqsHash, P: BpqsParams>(
     msg: &[u8],
     sig: &BpqsSignature<P>,
 ) -> Result<(), BpqsError> {
+    crate::params::ensure_valid_params::<P>()?;
     if public.params_name != P::NAME {
         return Err(BpqsError::Malformed(
             "keybook entry and signature are from different parameter rows",
@@ -378,6 +380,70 @@ pub fn verify_at_height<H: BpqsHash, P: BpqsParams>(
     let bound = H::digest32(domains::MESSAGE_BIND_V1, &[&sig.randomizer, msg]);
     let rebuilt = wots::verify_chains::<H, P>(&sig.chains, &bound);
     merkle::verify_path::<H, P>(&rebuilt, sig.epoch as usize, &sig.path, &public.root)
+}
+
+/// Stateful verifier-side ceremony log enforcing one-time epoch consumption
+/// (`Q_MAX = 1`) and refusing non-production parameter rows unless
+/// explicitly constructed for tests.
+///
+/// WIRING: anchor family verifier log for research line F2.
+#[derive(Clone, Debug, Default)]
+pub struct BpqsVerifierLog {
+    seen_epochs: alloc::collections::BTreeSet<([u8; 32], u32)>,
+    allow_test_params: bool,
+}
+
+impl BpqsVerifierLog {
+    /// Create a production verifier log that refuses non-production parameter
+    /// rows (`ParamsTestFast`, benchmark rows) and records spent epochs.
+    ///
+    /// WIRING: cold-committee anchor verification state.
+    #[must_use]
+    pub const fn new_production() -> Self {
+        Self {
+            seen_epochs: alloc::collections::BTreeSet::new(),
+            allow_test_params: false,
+        }
+    }
+
+    /// Create a test-capable verifier log that still enforces one-time epoch
+    /// consumption while permitting small-tree test parameter rows.
+    ///
+    /// WIRING: exposed for small-tree unit and integration batteries.
+    #[must_use]
+    pub const fn new_allow_test_params() -> Self {
+        Self {
+            seen_epochs: alloc::collections::BTreeSet::new(),
+            allow_test_params: true,
+        }
+    }
+
+    /// Verify `sig` at `height` and atomically record `(public.root, sig.epoch)`
+    /// as spent so any second signature under the same key and epoch is refused.
+    ///
+    /// WIRING: stateful verifier entry point pairing `verify_at_height` with
+    /// one-time epoch tracking.
+    pub fn accept_at_height<H: BpqsHash, P: BpqsParams>(
+        &mut self,
+        public: &BpqsPublicKey<P>,
+        height: u64,
+        msg: &[u8],
+        sig: &BpqsSignature<P>,
+    ) -> Result<(), BpqsError> {
+        if !self.allow_test_params && !P::IS_PRODUCTION {
+            return Err(BpqsError::Malformed(
+                "non-production BPQS parameter row refused by production verifier",
+            ));
+        }
+        verify_at_height::<H, P>(public, height, msg, sig)?;
+        if !self.seen_epochs.insert((public.root, sig.epoch)) {
+            return Err(BpqsError::QuotaExceeded {
+                epoch: sig.epoch,
+                attempted: 2,
+            });
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

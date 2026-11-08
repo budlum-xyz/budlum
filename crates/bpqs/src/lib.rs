@@ -28,7 +28,7 @@
 //!   families); frozen KAT vector file under `kat/`; differential bench
 //!   example vs the in-tree `ml-dsa` and the `slh-dsa` crate; BPQS fuzz
 //!   harness in the repo fuzz workspace.
-//! - (): the canonical backend for long-lived
+//! -: the canonical backend for long-lived
 //!   use is SHAKE-256 ([`CanonicalHash`]). Poseidon2 stays only as a
 //!   research backend for in-VM verification experiments: an algebraic hash
 //!   is never the long-lived signature or commitment hash. The
@@ -97,7 +97,7 @@ pub use shake256::Shake256Hash;
 /// Keccak permutation alone. The Poseidon2 backend is research-only and is
 /// never the hash of a long-lived signature or commitment.
 pub type CanonicalHash = Shake256Hash;
-pub use sign::{keygen_root, verify_at_height, BpqsSignature};
+pub use sign::{keygen_root, verify_at_height, BpqsSignature, BpqsVerifierLog};
 
 #[cfg(test)]
 mod tests;
