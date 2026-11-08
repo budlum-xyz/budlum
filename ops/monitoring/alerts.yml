@@ -8,16 +8,16 @@
 groups:
   - name: budlum-consensus
     rules:
-      - alert: BudlumFinalityStalled
-        # The finalized height has not moved for 10 minutes: no checkpoint
-        # gathered a two-thirds quorum.
-        expr: changes(budlum_finalized_height[10m]) == 0
-        for: 5m
+      - alert: BudlumFinalityRecoveryThreshold
+        # Section 7.7: eight checkpoint intervals without finality is the
+        # recovery threshold. The node uses the chain-specific interval.
+        expr: budlum_finality_stalled > 0
+        for: 1m
         labels:
           severity: critical
         annotations:
-          summary: "Finality stalled on {{ $labels.node }}"
-          description: "budlum_finalized_height has not changed for 10 minutes."
+          summary: "Finality recovery threshold reached on {{ $labels.node }}"
+          description: "No checkpoint has finalized for eight checkpoint intervals."
 
       - alert: BudlumFinalityLagHigh
         # The tip runs far ahead of the last finalized block.
@@ -94,3 +94,145 @@ groups:
           severity: critical
         annotations:
           summary: "Less than 10% disk left on {{ $labels.instance }}"
+
+  # Public-service alerts use metrics registered by the node or faucet. Add
+  # each alert with its exporter; the metric-reference test reads every
+  # expression and refuses a name missing from both source inventories.
+  - name: budlum-public-services
+    rules:
+      - alert: BudlumRpcRateLimitedSpike
+        expr: increase(budlum_rpc_rate_limited_total[5m]) > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RPC rate limiter refused {{ $value }} requests in 5 minutes"
+
+      - alert: BudlumRpcRefusalRateHigh
+        expr: rate(budlum_rpc_rate_limited_total[5m]) / clamp_min(rate(budlum_rpc_requests_total[5m]), 1) > 0.10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 10% of RPC requests are being rate limited"
+
+      - alert: BudlumFaucetGrantSpike
+        # Exported by the faucet's own GET /metrics after acknowledged submissions.
+        expr: increase(budlum_faucet_grants_total[1h]) > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} faucet grants acknowledged in one hour"
+
+  # Readiness alerts backed by production-written metric series.
+  #
+  # Each expression reads a `budlum_*` series that `src/core/metrics.rs`
+  # registers and the node writes on its production paths, so none of these is
+  # a rule that can never fire. `alert_rules_reference_existing_metrics`
+  # (src/tests/alert_rules_reference_existing_metrics.rs) checks that against
+  # the metric inventory before a change can land.
+  - name: budlum-readiness
+    rules:
+      - alert: BudlumFinalityLagCheckpoints
+        # Halfway to the recovery trigger: 4 checkpoints behind on any network.
+        # Written against the checkpoint gauge, not the block gauge, so the
+        # threshold means the same thing on testnet and mainnet.
+        expr: budlum_finality_lag_checkpoints >= 4
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Finality is {{ $value }} checkpoints behind on {{ $labels.node }}"
+
+      - alert: BudlumStateRootMismatch
+        # The same blocks produced a different root on this node than on
+        # the node that committed them. Any increase is a determinism split and
+        # the forked node stops agreeing with the network, so this fires on the
+        # first one instead of waiting for a rate.
+        expr: increase(budlum_state_root_mismatch_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "State-root mismatch on {{ $labels.node }}"
+          description: "This node refused a committed state root; isolate it until the determinism divergence is diagnosed."
+
+  - name: budlum-bud3
+    rules:
+      - alert: BudlumBud3SegmentsAtRisk
+        # A segment with a
+        # lost share is still decodable - that is what the tolerance is for -
+        # so this is a warning that the margin is shrinking, not an outage.
+        expr: budlum_bud3_segments_at_risk > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} B.U.D. 3.0 segments have a lost share on {{ $labels.node }}"
+
+      - alert: BudlumBud3RepairBacklog
+        # The work half of the same reading: these segments are past the lazy
+        # threshold and wait for a Full repairer to take them.
+        expr: budlum_bud3_repair_backlog > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} B.U.D. 3.0 repairs are waiting on {{ $labels.node }}"
+
+      - alert: BudlumBud3AuditLatencyHigh
+        # An audit that stays open is a holder
+        # that is not answering; the Full window is 2 epochs (about 100 s at
+        # testnet's slot) and the Mobile window 24 epochs, so a p90 above ten
+        # minutes means holders are drifting out of their window long before
+        # the window closes and the miss is recorded.
+        expr: histogram_quantile(0.9, sum by (le, node) (rate(budlum_bud3_audit_latency_seconds_bucket[15m]))) > 600
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "B.U.D. 3.0 custody audits wait {{ $value }}s at p90 on {{ $labels.node }}"
+          description: "An open audit is approaching or past its window; missed windows can lead to repair."
+
+      - alert: BudlumBud3MobileCustodyMissing
+        # The mobile floor is a promise about where the network's custody sits.
+        # The rooted placement has live objects but requires no mobile custody;
+        # every node reports this same network-level reading.
+        expr: budlum_bud3_objects > 0 and budlum_bud3_custody_bytes{class="mobile"} == 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No mobile custody required by live B.U.D. 3.0 placement"
+
+  - name: budlum-relayer
+    rules:
+      - alert: BudlumRelayReservationsStuck
+        # A reservation is a result that was submitted and has not reached a
+        # finalized block. A handful is normal; a table that only grows means
+        # results keep being dropped before finality.
+        #
+        # `increase()` is deliberately NOT used: it is defined for counters, and
+        # `budlum_relay_reservations` is a gauge - the depth of the pending
+        # table, which falls again when a result finalizes. A Prometheus
+        # counter reset inside the window makes `increase()` report a negative
+        # number, and a comparison against it would either never fire or fire
+        # on the reset. This compares the current depth and, with `for:`, the
+        # part of it that is not merely a burst being worked through.
+        expr: budlum_relay_reservations > 50
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} relayer reservations are pending on {{ $labels.node }}"
+
+      - alert: BudlumRelayReservationNeedsOperator
+        # The external action was in flight when a run stopped. Only a person
+        # can resolve it (look the external transaction up by nonce and clear
+        # or complete the entry), so it pages rather than warns.
+        expr: budlum_relay_inflight_reservations > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $value }} relayer reservations need an operator on {{ $labels.node }}"
