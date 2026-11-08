@@ -211,3 +211,76 @@ fn a_refused_recovery_changes_nothing_through_the_arm() {
     assert_eq!(state.get_nonce(&subject), 1, "only the register moved it");
     assert_eq!(state.get_balance(&subject), 999, "only the register paid");
 }
+
+#[cfg(feature = "wallet-ml-dsa")]
+#[test]
+fn a_signed_recovery_cannot_bypass_the_domain_gate_through_the_executor() {
+    use crate::crypto::primitives::WalletKeyPair;
+    use crate::registry::recovery_digest;
+
+    let subject = addr(1);
+    let guardian_one = WalletKeyPair::from_seed(&[21; 32]);
+    let guardian_two = WalletKeyPair::from_seed(&[22; 32]);
+    let mut state = poa_state(&subject);
+    let record = IdentityRecord::new(
+        subject,
+        vec![VerificationMethod::new([7u8; 32], MethodKind::MlDsa87)],
+        vec![guardian_one.address(), guardian_two.address()],
+        2,
+    )
+    .expect("two guardians, threshold two");
+    Executor::apply_transaction_checked(
+        &mut state,
+        &identity_tx(subject, IdentityTx::Register { record }, 0),
+    )
+    .expect("the PoA domain can establish the recovery record");
+    let original_record = state
+        .identity
+        .record(&subject)
+        .expect("registration stored the identity")
+        .clone();
+
+    let new_key = [9u8; 32];
+    let digest = recovery_digest(&subject, &new_key, state.epoch_index, DEFAULT_CHAIN_ID);
+    let approvals = vec![
+        GuardianApproval {
+            public_key: guardian_one.public_key_bytes().to_vec(),
+            signature: guardian_one
+                .sign(crate::crypto::ctx::IDENTITY_V2, &digest)
+                .to_vec(),
+        },
+        GuardianApproval {
+            public_key: guardian_two.public_key_bytes().to_vec(),
+            signature: guardian_two
+                .sign(crate::crypto::ctx::IDENTITY_V2, &digest)
+                .to_vec(),
+        },
+    ];
+
+    // The transaction arm reads the active domain from AccountState, exactly
+    // as it does during block execution. Even a valid guardian quorum cannot
+    // rotate a PoA-owned registry from a PoS execution context.
+    state.execution_domain = ConsensusKind::PoS;
+    let err = Executor::apply_transaction_checked(
+        &mut state,
+        &identity_tx(
+            subject,
+            IdentityTx::Recover {
+                subject,
+                new_key,
+                approvals,
+            },
+            1,
+        ),
+    )
+    .expect_err("signed recovery remains restricted to the PoA domain");
+    assert_eq!(err.code(), "identity_tx_failed");
+    assert!(err.message().contains("PoA-domain authority"), "{err:?}");
+    assert_eq!(
+        state.identity.record(&subject),
+        Some(&original_record),
+        "the valid approvals must not mutate the registry under PoS"
+    );
+    assert_eq!(state.get_nonce(&subject), 1, "the refusal spends no nonce");
+    assert_eq!(state.get_balance(&subject), 999, "the refusal spends no fee");
+}
