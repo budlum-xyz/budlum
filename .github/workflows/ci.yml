@@ -1882,6 +1882,9 @@ jobs:
     # Tools are version+sha256 pinned (nextest verified byte for byte against the official .sha256 asset).
     name: Coverage (nextest + llvm-cov, ratchet)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      code-quality: write
     # 45 minutes used to be enough and stopped being enough without the suite
     # getting slower: it got longer. The run on `7535554` was still walking the
     # suite at 44 minutes (2383 of 4355 tests at 17 minutes, plus the instrumented
@@ -1928,6 +1931,13 @@ jobs:
           mkdir -p coverage
           cargo llvm-cov nextest --lib --json --output-path coverage/cov.json
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- coverage coverage/cov.json
+          cargo llvm-cov report --cobertura --output-path coverage/cobertura.xml
+      - name: Upload Cobertura coverage (GitHub Code Quality)
+        uses: actions/upload-code-coverage@2b21a77928be8d5168c2b9581a67f2adbebacc52 # v1.4.4
+        with:
+          file: coverage/cobertura.xml
+          language: Rust
+          label: code-coverage/llvm-cov
       - name: Module analysis canary (not vacuous)
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- module-coverage --self-test
       - name: Module coverage report - budlum (baselines in step 2, NO vacuous gate)
