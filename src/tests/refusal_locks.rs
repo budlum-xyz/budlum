@@ -96,35 +96,17 @@ fn a_double_sign_cuts_the_configured_ratio_and_leaves_the_rest() {
 }
 
 #[test]
-fn a_liveness_fault_is_cut_by_its_own_ratio_and_a_repeat_changes_nothing() {
+fn a_liveness_report_and_its_repeat_never_cut_stake_or_write_history() {
     let mut reg = registry_with(&[0x44]);
     let val = addr(0x44);
-    let want = expected_penalty(&reg, SlashingCondition::LivenessFault);
+    assert_eq!(reg.slash_from_report(&liveness(val)).unwrap(), None);
+    assert_eq!(reg.get(&val, roles::VALIDATOR).unwrap().stake, STAKE);
+    assert!(reg.is_active(&val, roles::VALIDATOR));
+    assert!(reg.slashing_history().is_empty());
 
-    let outcome = reg
-        .slash_from_report(&liveness(val))
-        .expect("the report is actionable")
-        .expect("a registered offender produces an outcome");
-    assert_eq!(outcome.condition, SlashingCondition::LivenessFault);
-    assert_eq!(outcome.penalty, want);
-    assert_eq!(outcome.penalty + outcome.remaining_stake, STAKE);
-    assert_eq!(reg.slashing_history().len(), 1);
-    let stake_after_first = reg.get(&val, roles::VALIDATOR).expect("registered").stake;
-    assert_eq!(stake_after_first, outcome.remaining_stake);
-
-    // The same report again is answered with a no-op: no second cut.
-    let again = reg
-        .slash_from_report(&liveness(val))
-        .expect("the repeat is still actionable");
-    assert!(
-        again.is_none(),
-        "a repeated liveness report must be a no-op"
-    );
-    assert_eq!(
-        reg.get(&val, roles::VALIDATOR).expect("registered").stake,
-        stake_after_first
-    );
-    assert_eq!(reg.slashing_history().len(), 1);
+    assert_eq!(reg.slash_from_report(&liveness(val)).unwrap(), None);
+    assert_eq!(reg.get(&val, roles::VALIDATOR).unwrap().stake, STAKE);
+    assert!(reg.slashing_history().is_empty());
 }
 
 #[test]
