@@ -2267,22 +2267,10 @@ impl AccountState {
         validator.active = false;
         validator.jailed = true;
 
-        // Stake destroyed here left the supply denominator, and a burn only
-        // counts against the fixed cap if it is recorded. Left out of
-        // `burned_total`, every slashed bond reopened its own amount as
-        // minting headroom - the same hole the external-bond and storage-bond
-        // slashes had.
-        //
-        // It is recorded ONCE, by `slash_validator`, which measures the drop
-        // in committed supply across the whole call (`record_destroyed_since`).
-        // That measurement already covers every part this body cuts - the
-        // bond, the queue, the delegation positions, the delegation exits and
-        // the cross-role sweep - so adding `penalty` here as well booked the
-        // slash twice: a 1 200 penalty left `burned_total` at 2 400 and closed
-        // twice as much minting headroom as the slash destroyed
-        // (`a_validator_slash_records_what_it_destroyed` measured exactly
-        // that, 2400 against 1200). Recording in the wrapper and not here
-        // keeps the one measurement that cannot miss a part.
+        // Destroyed stake is recorded once by `slash_validator` via
+        // `record_destroyed_since`, which covers the validator bond, the
+        // unbonding queue, delegation positions/exits, and any cross-role bonds
+        // swept below.
 
         let jail_epochs = 7;
         validator.jail_until = self.epoch_index.saturating_add(jail_epochs);
@@ -3424,19 +3412,19 @@ impl AccountState {
     }
 
     /// Records the drop in committed supply since `committed_before` as
-    /// destroyed. For paths that mint nothing, so any drop is a destruction.
+    /// destroyed. For paths that mint nothing, any drop is a destruction.
     fn record_destroyed_since(&mut self, committed_before: u128) {
         let destroyed = committed_before.saturating_sub(self.total_bud_committed());
         self.record_destroyed(destroyed);
     }
 
-    /// Slash one application role bond and record the penalty as destroyed
-    ///. Every non-validator role bond counts toward committed supply,
-    /// so the penalty is exactly what leaves it.
+    /// Slash one application role bond and record the penalty as destroyed.
+    /// Every non-validator role bond counts toward committed supply, so the
+    /// penalty is exactly what leaves it.
     ///
     /// # Errors
     ///
-    /// The registry's refusal: an unregistered or already slashed role.
+    /// Returns the registry's refusal for an unregistered or already slashed role.
     pub fn slash_role_destroying(
         &mut self,
         account: Address,
@@ -5833,6 +5821,120 @@ mod c3_validator_readiness_tests {
                 .is_err(),
             "the reward can never exceed the slash"
         );
+    }
+
+    #[test]
+    fn report_slash_records_validator_and_unbonding_cuts_in_burned_total() {
+        let mut state = AccountState::new();
+        let who = Address::from([0x31; 32]);
+        state.add_validator(who, 4_000);
+        state.unbonding_queue.push(UnbondingEntry {
+            address: who,
+            amount: 2_000,
+            release_epoch: 10,
+        });
+        let headroom_before = state.supply_capacity_remaining();
+        let committed_before = state.total_bud_committed();
+        let report = crate::registry::evidence::SlashingReport::consensus_double_sign(
+            who,
+            crate::registry::evidence::SlashingProof::DoubleSign {
+                height: 7,
+                kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+                epoch: None,
+                block_hash_1: "aa".into(),
+                block_hash_2: "bb".into(),
+                signature_1: vec![1],
+                signature_2: vec![2],
+            },
+            None,
+        );
+        let outcome = state
+            .slash_from_report(&report)
+            .expect("valid report")
+            .expect("validator slashed");
+        assert!(outcome.penalty > 0);
+        let destroyed = committed_before - state.total_bud_committed();
+        assert!(destroyed > u128::from(outcome.penalty));
+        assert_eq!(u128::from(state.burned_total), destroyed);
+        assert_eq!(
+            state.supply_capacity_remaining(),
+            headroom_before,
+            "slash_from_report must not reopen supply mint headroom"
+        );
+    }
+
+    #[test]
+    fn report_slash_and_role_slash_conserve_non_validator_role_headroom() {
+        let mut state = AccountState::new();
+        let relayer = Address::from([0x32; 32]);
+        let relayer_min = state.registry.params().min_stake;
+        state
+            .registry
+            .register_relayer(relayer, relayer_min, 0)
+            .expect("register relayer");
+
+        let operator = Address::from([0x33; 32]);
+        let ai_bond = state.required_ai_bond(crate::core::transaction::DEFAULT_CHAIN_ID);
+        state.add_balance(&operator, ai_bond * 2);
+        state
+            .bond_ai_operator(
+                &operator,
+                ai_bond,
+                crate::core::transaction::DEFAULT_CHAIN_ID,
+            )
+            .expect("bond AI operator");
+
+        let headroom_before = state.supply_capacity_remaining();
+        let relayer_report =
+            crate::registry::evidence::SlashingReport::consensus_invalid_relay_proof(
+                relayer,
+                "invalid relay proof".into(),
+                None,
+            );
+        let relayer_outcome = state
+            .slash_from_report(&relayer_report)
+            .expect("valid relayer report")
+            .expect("relayer slashed");
+        assert_eq!(relayer_outcome.penalty, relayer_min);
+        assert_eq!(state.supply_capacity_remaining(), headroom_before);
+
+        let ai_outcome = state
+            .slash_role_destroying(
+                operator,
+                crate::registry::role::roles::AI_OPERATOR,
+                crate::registry::permissionless::SlashingCondition::MaliciousBehaviour,
+                crate::core::chain_config::FIXED_POINT_SCALE,
+            )
+            .expect("slash AI operator");
+        assert_eq!(ai_outcome.penalty, ai_bond);
+        assert_eq!(state.burned_total, relayer_min + ai_bond);
+        assert_eq!(state.supply_capacity_remaining(), headroom_before);
+    }
+
+    #[test]
+    fn slash_validator_counts_cross_role_sweep_in_burned_total() {
+        let mut state = AccountState::new();
+        let who = Address::from([0x34; 32]);
+        state.add_validator(who, 10_000);
+        let relayer_min = state.registry.params().min_stake;
+        state
+            .registry
+            .register_relayer(who, relayer_min, 0)
+            .expect("register relayer on same address");
+
+        let headroom_before = state.supply_capacity_remaining();
+        let committed_before = state.total_bud_committed();
+        let penalty = state
+            .slash_validator(&who, 500_000, "double sign")
+            .expect("validator slashed");
+        assert!(penalty > 0);
+        let destroyed = committed_before - state.total_bud_committed();
+        assert!(
+            destroyed > u128::from(penalty),
+            "cross-role sweep must also cut the relayer bond"
+        );
+        assert_eq!(u128::from(state.burned_total), destroyed);
+        assert_eq!(state.supply_capacity_remaining(), headroom_before);
     }
 }
 
