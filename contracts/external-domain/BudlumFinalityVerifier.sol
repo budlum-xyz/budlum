@@ -358,6 +358,9 @@ contract BudlumFinalityVerifier {
         if (a.chainId != budlumChainId) {
             revert WrongChainId(budlumChainId, a.chainId);
         }
+        if (a.stateRoot == bytes32(0)) {
+            revert SignatureInvalid("zero state root cannot be attested");
+        }
         digest = attestationDigest(a);
         if (accepted[digest]) {
             revert AlreadyAccepted(digest);
@@ -521,6 +524,13 @@ contract BudlumFinalityVerifier {
         }
         // Reject settlement if another root already finalized this height or
         // if this challenge is no longer the pending claim for its height.
+        if (heightFinal[c.height]) {
+            bytes32 existing = rootAtHeight[c.height];
+            if (existing != c.stateRoot) {
+                revert ConflictingRoot(c.height, existing, c.stateRoot);
+            }
+            revert AlreadyAccepted(digest);
+        }
         bytes32 held = rootAtHeight[c.height];
         if (held != bytes32(0) && held != c.stateRoot) {
             revert ConflictingRoot(c.height, held, c.stateRoot);
@@ -589,7 +599,7 @@ contract BudlumFinalityVerifier {
             g1NegSignature, g2Generator
         );
         (bool ok, bytes memory out) = PRECOMPILE_BLS_PAIRING.staticcall{gas: 400_000}(input);
-        if (!ok || out.length < 32) {
+        if (!ok || out.length != 32) {
             return false;
         }
         uint256 result;
@@ -667,6 +677,11 @@ contract BudlumFinalityVerifier {
         bytes calldata signature,
         bool ethVariant
     ) internal view returns (bool) {
+        bool valid65 = pubkey.length == 1952 && signature.length == 3309;
+        bool valid87 = pubkey.length == 2592 && signature.length == 4627;
+        if (!valid65 && !valid87) {
+            revert BadSignatureLength("ML-DSA key/signature must match level-65 or level-87");
+        }
         address target = ethVariant ? PRECOMPILE_MLDSA_ETH : PRECOMPILE_MLDSA;
         if (!_probeRejectsMalformed(target)) {
             return false;
@@ -675,7 +690,7 @@ contract BudlumFinalityVerifier {
         // EIP-8051 prices the call at 4500; the stipend here is headroom, not a
         // guess at the cost.
         (bool ok, bytes memory out) = target.staticcall{gas: 60_000}(input);
-        if (!ok || out.length < 32) {
+        if (!ok || out.length != 32) {
             return false;
         }
         uint256 result;
