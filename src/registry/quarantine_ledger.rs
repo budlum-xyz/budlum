@@ -38,6 +38,20 @@ pub struct QuarantineEntry {
     pub height: u64,
 }
 
+fn deserialize_severity<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = u8::deserialize(deserializer)?;
+    if (1..=4).contains(&raw) {
+        Ok(raw)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "invalid alarm severity {raw}: expected 1..=4"
+        )))
+    }
+}
+
 /// A persistent security alarm entry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AlarmEntry {
@@ -46,6 +60,7 @@ pub struct AlarmEntry {
     pub message: String,
     pub height: u64,
     /// 1=Info, 2=Warn, 3=Critical, 4=Fatal.
+    #[serde(deserialize_with = "deserialize_severity")]
     pub severity: u8,
 }
 
@@ -76,17 +91,17 @@ impl QuarantineLedger {
         hasher.finalize().into()
     }
 
-    /// Record a quarantine decision. Idempotent per `(target, reason, height)`;
-    /// a later record for the same target overwrites the earlier one.
+    /// Record a quarantine decision. The first recorded proof for a target is
+    /// preserved until [`QuarantineLedger::release_entity`] so a later event
+    /// cannot overwrite the original equivocation or slash evidence.
     pub fn quarantine_entity(&mut self, target_id: Hash32, reason: QuarantineReason, height: u64) {
-        self.quarantined_entities.insert(
-            target_id,
-            QuarantineEntry {
+        self.quarantined_entities
+            .entry(target_id)
+            .or_insert(QuarantineEntry {
                 target_id,
                 reason,
                 height,
-            },
-        );
+            });
     }
 
     /// Drops alarms older than `retention_blocks`: the
@@ -109,7 +124,10 @@ impl QuarantineLedger {
     }
 
     /// Record a security alarm and return its deterministic id.
+    ///
+    /// Out-of-range severities outside `1..=4` are clamped into `1..=4`.
     pub fn record_alarm(&mut self, code: &str, message: &str, height: u64, severity: u8) -> Hash32 {
+        let severity = severity.clamp(1, 4);
         let mut hasher = Sha3_256::new();
         hasher.update(b"BDLM_BUDZERO_ALARMLOG_V1");
         hasher.update((code.len() as u64).to_le_bytes());
@@ -194,5 +212,46 @@ mod tests {
         );
         ledger.release_entity(&old);
         assert!(!ledger.quarantined_entities.contains_key(&old));
+    }
+
+    #[test]
+    fn quarantine_preserves_first_proof_and_validates_severity() {
+        let mut ledger = QuarantineLedger::new();
+        let target = QuarantineLedger::domain_target(9);
+        ledger.quarantine_entity(
+            target,
+            QuarantineReason::Equivocation("first-proof".into()),
+            42,
+        );
+        ledger.quarantine_entity(
+            target,
+            QuarantineReason::OperatorSlash("later-overwrite".into()),
+            999,
+        );
+        assert_eq!(ledger.quarantined_entities[&target].height, 42);
+        assert_eq!(
+            ledger.quarantined_entities[&target].reason,
+            QuarantineReason::Equivocation("first-proof".into())
+        );
+
+        let id_low = ledger.record_alarm("LOW", "msg", 1, 0);
+        let id_high = ledger.record_alarm("HIGH", "msg", 1, 250);
+        assert_eq!(ledger.alarms[&id_low].severity, 1);
+        assert_eq!(ledger.alarms[&id_high].severity, 4);
+
+        let key_hex = "01".repeat(32);
+        let bad_json = serde_json::json!({
+            "quarantined_entities": {},
+            "alarms": {
+                (key_hex): {
+                    "alarm_id": [1u8; 32],
+                    "code": "BAD",
+                    "message": "bad",
+                    "height": 1,
+                    "severity": 0
+                }
+            }
+        });
+        assert!(serde_json::from_value::<QuarantineLedger>(bad_json).is_err());
     }
 }
