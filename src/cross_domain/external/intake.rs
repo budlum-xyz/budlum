@@ -131,6 +131,10 @@ impl BlsVerifier for PairingBls {
         }
         Ok(())
     }
+
+    fn sync_committee_closed(&self) -> bool {
+        true
+    }
 }
 
 /// The adapter families this binary can construct. Data, so it can be
@@ -385,6 +389,11 @@ impl IntakeState {
         if matches!(spec, AdapterSpec::EthereumSync { .. }) && bls.is_none() {
             return Err(IntakeError::MissingBlsVerifier);
         }
+        if matches!(spec, AdapterSpec::EthereumSync { .. })
+            && bls.as_ref().is_some_and(|v| v.sync_committee_closed())
+        {
+            return Err(IntakeError::CommitteeNotPinned);
+        }
         // EthereumSync admission is
         // closed until a sync committee is pinned - the old shape let the
         // submitter name their own aggregate key.
@@ -475,6 +484,11 @@ impl IntakeState {
         };
         if matches!(entry.spec, AdapterSpec::EthereumSync { .. }) && bls.is_none() {
             return Err(IntakeError::MissingBlsVerifier);
+        }
+        if matches!(entry.spec, AdapterSpec::EthereumSync { .. })
+            && bls.as_ref().is_some_and(|v| v.sync_committee_closed())
+        {
+            return Err(IntakeError::CommitteeNotPinned);
         }
         let adapter = entry.spec.build(bls, None);
         // `now` is the live clock, not the
@@ -1674,5 +1688,43 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, IntakeError::CommitteeNotPinned), "got: {err}");
+    }
+
+    #[test]
+    fn ethereum_sync_committee_is_closed_on_testnet() {
+        use crate::core::account::AccountState;
+        use crate::core::chain_config::Network;
+        use crate::cross_domain::external::external_tx::{
+            execute_external_domain_tx, ExternalDomainTx, ExternalDomainTxContext,
+        };
+
+        let mut state = AccountState::new();
+        let poster = addr(9);
+        let bond = u64::try_from(economics_bond()).unwrap();
+        state.add_balance(&poster, bond.saturating_mul(4));
+
+        let spec = eth_spec();
+        let req = RegistrationRequest {
+            golden: golden_for(&spec),
+            versions: versions_for(&spec),
+            economics: IntakeState::conservative_economics(1_000_000),
+            policy: VerificationPolicy::strict(1_000),
+            bond_atoms: economics_bond(),
+            poster,
+            spec,
+        };
+        let ctx = ExternalDomainTxContext {
+            sender: poster,
+            chain_id: Network::Testnet.chain_id().value(),
+            fee: 10,
+            bls: IntakeState::production_bls,
+        };
+        let tx = ExternalDomainTx::Register(Box::new(req));
+        let res = execute_external_domain_tx(&mut state, &ctx, &tx);
+        assert!(
+            res.is_err(),
+            "Ethereum sync-committee registration must be refused on testnet"
+        );
+        assert!(state.settlement.external_intake.entries.is_empty());
     }
 }
