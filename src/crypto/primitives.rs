@@ -1166,7 +1166,7 @@ fn keypair_generate_does_not_leak_public_key_via_println() {
             // Test-only re-exec of this test binary via argv[0] to capture its
             // stdout; no security decision depends on the path and avoiding
             // `current_exe()` keeps Semgrep's SARIF free of suppressed alerts.
-            let exe = std::env::args_os().next().expect("test binary argv[0]");
+            let exe = std::env::args().next().expect("test binary argv[0]");
             // `--exact` matches the full test path, which includes the module
             // (without the crate name). A bare function name matches nothing,
             // and a probe that runs nothing prints nothing - the red-green
