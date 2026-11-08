@@ -841,6 +841,10 @@ fn apply_pending_commitments(
             break;
         };
         if last_hash != [0u8; 32] && com.parent_domain_block_hash != last_hash {
+            state
+                .settlement
+                .commitments
+                .remove(domain_id, next_height, com.sequence);
             if CommitmentAttestation::for_kind(&com.consensus_kind).parent {
                 return Ok(freeze_domain(
                     state,
@@ -853,10 +857,6 @@ fn apply_pending_commitments(
             // a parent the submitter chose. Dropping it (rather than freezing)
             // leaves the domain free to advance on the honest commitment at
             // this height.
-            state
-                .settlement
-                .commitments
-                .remove(domain_id, next_height, com.sequence);
             break;
         }
         validate_commitment_state_updates(state, &com)?;
@@ -1266,6 +1266,21 @@ pub fn execute_settlement_tx(
         SettlementTx::RegisterDomain(domain) => {
             if domain.operator != Some(ctx.sender) {
                 return Err(SettlementTxError::OperatorIsNotSender);
+            }
+            // Canonical external-chain anchors (`state.external_roots[1..=4]`)
+            // belong exclusively to genesis bootstrap domains (`register_domain`).
+            // On a network whose genesis seeds no bootstrap domains, ids 1..=4
+            // are unoccupied; refusing a permissionless claim of an
+            // anchor-recognized chain's canonical `(id, domain_chain_id)` pair
+            // prevents the first registrant from capturing that chain's anchor.
+            if let Some(chain) = anchor_recognized_chain(domain.id) {
+                if domain.domain_chain_id == chain.canonical_chain_id() {
+                    return Err(SettlementTxError::Refused(format!(
+                        "domain {} cannot permissionlessly claim canonical external chain {:?}; \
+                         anchor-recognized external chains are seeded by genesis only",
+                        domain.id, chain
+                    )));
+                }
             }
             let balance = state.get_balance(&ctx.sender);
             let needed = domain.operator_bond.saturating_add(ctx.fee);
@@ -2126,18 +2141,24 @@ mod tests {
             "a domain that is not Ethereum's must not write Ethereum's anchor"
         );
 
-        // The same id, declared as the domain of chain 1, does anchor.
+        // A permissionless registrant cannot claim canonical chain 1 on an
+        // unseeded network; only genesis bootstrap (`register_domain`) may
+        // install an anchor-recognized external chain.
         let mut ethereum = pow(1);
         ethereum.domain_chain_id = 1;
         ethereum.validator_set_hash = [0u8; 32];
         let mut state = AccountState::new();
         state.add_balance(&operator(&ethereum), MIN_DOMAIN_OPERATOR_BOND + FEE);
-        execute_settlement_tx(
-            &mut state,
-            &ctx(operator(&ethereum)),
-            &SettlementTx::RegisterDomain(Box::new(ethereum.clone())),
-        )
-        .unwrap();
+        assert!(
+            execute_settlement_tx(
+                &mut state,
+                &ctx(operator(&ethereum)),
+                &SettlementTx::RegisterDomain(Box::new(ethereum.clone())),
+            )
+            .is_err(),
+            "permissionless registration must not claim an anchor-recognized external chain"
+        );
+        register_domain(&mut state, ethereum.clone()).expect("genesis bootstrap domain registers");
         accept_verified_commitment(&mut state, commitment(&ethereum, &block_one, 0))
             .expect("accepted");
         let mut expected = [0u8; 32];

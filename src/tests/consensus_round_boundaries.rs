@@ -502,22 +502,28 @@ mod poa_round_pricing_tests {
             (parent, block)
         };
 
-        // Ten minutes behind the schedule is past round 6 on the shared clock,
-        // so the pricing gate lets the claim through - and it prices the same
-        // on the node that committed the parent and on one that synced it a
-        // minute later, which is the whole point of anchoring at the stamp.
-        let (parent, block) = fixture(now_ms.saturating_sub(600_000));
-        let engine = PoAEngine::new(PoAConfig::default(), None);
-        if let Err(error) = engine.validate_block(&block, std::slice::from_ref(&parent), &state) {
-            assert!(
-                !error.0.contains("claimed before it elapsed"),
-                "a genuinely stalled slot must walk the ladder, got: {error:?}"
-            );
+        // Within ROUND_LADDER_SPAN_MS (49 s) and past round 6 (19 s): mesh
+        // sightings seconds apart agree on the shared parent stamp.
+        let (parent, block) = fixture(now_ms.saturating_sub(30_000));
+        for seen in [Some(parent.timestamp), Some(now_ms), None] {
+            let engine = PoAEngine::new(PoAConfig::default(), None);
+            if let Some(at) = seen {
+                engine.note_block_seen(&parent.hash, at);
+            }
+            if let Err(error) = engine.validate_block(&block, std::slice::from_ref(&parent), &state)
+            {
+                assert!(
+                    !error.0.contains("claimed before it elapsed"),
+                    "within the active ladder window the stamp is the shared anchor; \
+                     sighting {seen:?} must not change the price, got: {error:?}"
+                );
+            }
         }
 
         // A parent stamped an hour ahead prices at round 0 here and at every
         // other node: the stamp anchors the price on every node alike, so the
         // claim buys nothing until the moment it names has passed.
+        let engine = PoAEngine::new(PoAConfig::default(), None);
         let (parent, block) = fixture(now_ms.saturating_add(3_600_000));
         let error = engine
             .validate_block(&block, std::slice::from_ref(&parent), &state)
@@ -525,6 +531,92 @@ mod poa_round_pricing_tests {
         assert!(
             error.0.contains("claimed before it elapsed"),
             "the refusal must be the wall-clock price of the round, got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn poa_refuses_round_16_on_newly_adopted_stale_parent() {
+        let (state, address) = single_authority_state();
+        let now_ms = crate::consensus::now_millis();
+        let round = crate::consensus::MAX_LEADER_ROUNDS;
+
+        let mut stale_parent = Block::genesis();
+        stale_parent.timestamp = now_ms.saturating_sub(120_000);
+        stale_parent.hash = stale_parent.calculate_hash();
+
+        let mut block = Block::new(1, stale_parent.hash.clone(), vec![]);
+        block.timestamp = stale_parent
+            .timestamp
+            .saturating_add(MIN_BLOCK_INTERVAL_MS)
+            .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
+        block.producer = Some(address);
+        block.nonce = round;
+
+        let engine = PoAEngine::new(PoAConfig::default(), None);
+        engine.note_block_seen(&stale_parent.hash, now_ms);
+        let error = engine
+            .validate_block(&block, &[stale_parent], &state)
+            .expect_err("a newly adopted stale parent must not unlock round 16 in PoA");
+        assert!(
+            error.0.contains("claimed before it elapsed"),
+            "expected round-pricing refusal on newly adopted stale parent, got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn pos_refuses_round_16_on_newly_adopted_stale_parent() {
+        use crate::consensus::pos::{PoSConfig, PoSEngine};
+        use crate::crypto::primitives::ValidatorKeys;
+
+        let keys = ValidatorKeys::generate().unwrap();
+        let address = Address::from(keys.sig_key.public_key_bytes());
+        let mut state = AccountState::new();
+        state.add_validator(address, 2_000);
+        let bls = keys.bls_key.as_ref().expect("fixture has BLS keys");
+        let pop = bls.generate_pop(crate::core::transaction::DEFAULT_CHAIN_ID, &address);
+        if let Some(validator) = state.get_validator_mut(&address) {
+            validator.vrf_public_key = keys.vrf_key.public.to_bytes().to_vec();
+            validator.bls_public_key = bls.public_key.clone();
+            validator.pop_signature = pop;
+            validator.pq_public_key = keys
+                .pq_key
+                .as_ref()
+                .expect("fixture has PQ keys")
+                .public_key_bytes()
+                .to_vec();
+            validator.active = true;
+        }
+
+        let now_ms = crate::consensus::now_millis();
+        let round = crate::consensus::MAX_LEADER_ROUNDS;
+
+        let mut stale_parent = Block::genesis();
+        stale_parent.timestamp = now_ms.saturating_sub(120_000);
+        stale_parent.hash = stale_parent.calculate_hash();
+
+        let mut block = Block::new(1, stale_parent.hash.clone(), vec![]);
+        block.slot = block.index;
+        block.timestamp = stale_parent
+            .timestamp
+            .saturating_add(MIN_BLOCK_INTERVAL_MS)
+            .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
+        block.producer = Some(address);
+        block.nonce = round;
+        block.validator_set_hash = state
+            .consensus_validator_set_hash(block.chain_id)
+            .expect("fixture keys are consensus-ready");
+        block.vrf_output = vec![0u8; 32];
+        block.vrf_proof = vec![0u8; 64];
+        block.sign(&keys.sig_key);
+
+        let engine = PoSEngine::new(PoSConfig::default(), None);
+        engine.note_block_seen(&stale_parent.hash, now_ms);
+        let error = engine
+            .validate_block(&block, &[stale_parent], &state)
+            .expect_err("a newly adopted stale parent must not unlock round 16 in PoS");
+        assert!(
+            error.0.contains("claimed before it elapsed"),
+            "expected PoS round-pricing refusal on newly adopted stale parent, got: {error:?}"
         );
     }
 

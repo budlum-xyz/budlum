@@ -645,6 +645,21 @@ pub fn submit_relay_proof(
             .pending_relay(&message_id)
             .ok_or_else(|| format!("no pending relay for message {}", hex::encode(message_id)))?;
         let source_height = pending.source_event.domain_height;
+        let domain = state
+            .settlement
+            .domains
+            .get(source_domain)
+            .ok_or_else(|| format!("Unknown bridge source domain {source_domain}"))?;
+        if matches!(domain.kind, crate::domain::types::ConsensusKind::PoW)
+            && domain.finality_adapter != POW_HEADER_CHAIN_ADAPTER
+        {
+            return Err(
+                "Bridge relay from PoW domains requires pow-header-chain-v1 finality".into(),
+            );
+        }
+        if !domain.bridge_enabled {
+            return Err(format!("Bridge relay disabled for domain {source_domain}"));
+        }
         let commitment = state
             .settlement
             .commitments
@@ -654,6 +669,12 @@ pub fn submit_relay_proof(
                     "No committed event root for domain {source_domain} at height {source_height}"
                 )
             })?;
+        if source_height > domain.last_committed_height {
+            return Err(format!(
+                "Bridge source commitment at height {source_height} is not on the applied domain chain (tip {})",
+                domain.last_committed_height
+            ));
+        }
         // The root is the root of trust only when the commitment's finality
         // proof binds it. A PoS or BFT certificate signs the checkpoint hash
         // and nothing else, so under one of those the event root is the

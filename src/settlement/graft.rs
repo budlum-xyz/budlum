@@ -1,12 +1,12 @@
 //! WIRING: unwired - verify_graft_payment has no in-tree caller by design: bud_getGraftPayment returns the proof to the caller, who verifies it against their own trust anchor (documented in rpc/api.rs).
 //! WIRING: wired - registration, ownership claims, payments, solver intents,
 //! bids, fulfilment and refunds run in block through `SettlementTx::Graft`;
-//! the Ethereum-side `GraftExecutor` contract is.
+//! the Ethereum-side `GraftExecutor` contract is ().
 //!
-//! Remote app binding: an application that lives on another network is used from
+//! Graft: an application that lives on another network is used from
 //! Budlum and paid for in BUD, without moving there.
 //!
-//! An app-binding row binds an application on an origin domain to one deterministic,
+//! A Graft row binds an application on an origin domain to one deterministic,
 //! keyless Budlum mirror account. Nothing leaves the mirror except by a rule
 //! of this module; there is no administrator key.
 //!
@@ -695,9 +695,6 @@ pub fn execute_graft_tx(
     ctx: &SettlementTxContext,
     tx: &GraftTx,
 ) -> Result<(), SettlementTxError> {
-    if !crate::core::chain_config::app_binding_enabled_for_chain_id(ctx.chain_id) {
-        return Err(refused("remote app binding is not enabled on this network"));
-    }
     let block = state.current_block_height;
     match tx {
         GraftTx::Register {
@@ -707,6 +704,13 @@ pub fn execute_graft_tx(
         } => {
             if state.settlement.domains.get(*domain_key).is_none() {
                 return Err(refused("Graft domain_key is not a registered domain"));
+            }
+            if let Some(executor) = state.settlement.graft.executors.get(domain_key) {
+                if executor.len() != origin_app.len() {
+                    return Err(refused(
+                        "the Graft application's identifier width does not match its domain's executor",
+                    ));
+                }
             }
             let registration_fee = state.registry.params().graft_registration_fee;
             let funded = state
@@ -913,13 +917,20 @@ pub fn execute_graft_tx(
             if app.status != GraftStatus::Active {
                 return Err(refused("Graft application is not active"));
             }
-            if !state
+            let executor = state
                 .settlement
                 .graft
                 .executors
-                .contains_key(&app.domain_key)
-            {
-                return Err(refused("the Graft application's domain has no executor"));
+                .get(&app.domain_key)
+                .cloned()
+                .ok_or_else(|| refused("the Graft application's domain has no executor"))?;
+            // The executor emits the application's identifier in the
+            // fulfilment preimage, so an application whose identifier is a
+            // different width than the executor's own can never be fulfilled.
+            if executor.len() != app.origin_app.len() {
+                return Err(refused(
+                    "the Graft application's identifier width does not match its domain's executor",
+                ));
             }
             if *call_hash == [0u8; 32] {
                 return Err(refused("Graft call_hash cannot be zero"));
@@ -1747,26 +1758,56 @@ mod tests {
     }
 
     #[test]
-    fn app_binding_is_closed_on_testnet() {
-        let operator = Address::from([0x11; 32]);
+    fn non_matching_origin_app_width_is_refused_before_escrow() {
+        let operator = Address::from([0x01; 32]);
+        let user = Address::from([0x03; 32]);
         let mut state = state_with_domain(operator);
-        let registrant = Address::from([0x22; 32]);
-        state.add_balance(&registrant, 1_000_000);
-        let testnet_ctx = SettlementTxContext {
-            sender: registrant,
-            chain_id: crate::core::chain_config::Network::Testnet
-                .chain_id()
-                .value(),
-            fee: FEE,
-            bls: crate::cross_domain::external::IntakeState::production_bls,
+        state.add_balance(&user, 10_000);
+        // Register a 32-byte app before an executor exists, then set a 20-byte executor.
+        let wide_app = vec![0xAA; 32];
+        execute_graft_tx(
+            &mut state,
+            &ctx(user),
+            &GraftTx::Register {
+                domain_key: DOMAIN,
+                origin_app: wide_app.clone(),
+                manifest_hash: [0x11; 32],
+            },
+        )
+        .unwrap();
+        execute_graft_tx(
+            &mut state,
+            &ctx(operator),
+            &GraftTx::SetExecutor {
+                domain_key: DOMAIN,
+                executor: vec![0x77; 20],
+            },
+        )
+        .unwrap();
+        let open = GraftTx::OpenIntent {
+            graft_id: graft_id(DOMAIN, &wide_app),
+            call_hash: [0x22; 32],
+            value: 0,
+            max_payment: 1_000,
+            solver_fee_cap: 100,
+            service_price: 200,
+            origin_beneficiary: vec![0x33; 20],
+            deadline_block: 0,
         };
-        let tx = GraftTx::Register {
-            domain_key: DOMAIN,
-            origin_app: vec![0xAA; 20],
-            manifest_hash: [0xBB; 32],
-        };
-        let err = execute_graft_tx(&mut state, &testnet_ctx, &tx)
-            .expect_err("remote app binding must be closed on testnet");
-        assert!(err.to_string().contains("closed on testnet"));
+        assert!(
+            execute_graft_tx(&mut state, &ctx(user), &open).is_err(),
+            "an intent whose app identifier width differs from the executor's must be refused"
+        );
+        // Registering a new mismatched-width app after the executor is set is refused too.
+        assert!(execute_graft_tx(
+            &mut state,
+            &ctx(user),
+            &GraftTx::Register {
+                domain_key: DOMAIN,
+                origin_app: vec![0xBB; 32],
+                manifest_hash: [0x11; 32],
+            },
+        )
+        .is_err());
     }
 }

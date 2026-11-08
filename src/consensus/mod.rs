@@ -47,6 +47,16 @@ pub const MAX_LEADER_ROUNDS: u64 = 16;
 /// the parent" steering channel: a later round can no longer be
 /// claimed on the minimum step.
 pub const ROUND_TIMEOUT_MS: u128 = 3 * 1000;
+/// Full wall-clock span of the leader-round retry ladder (`0..=MAX_LEADER_ROUNDS`).
+///
+/// Once a parent's header stamp lags wall time by more than this span, pricing
+/// from the stamp alone would make every round `0..=MAX_LEADER_ROUNDS`
+/// affordable at once on every node (CWE-807).
+const ROUND_LADDER_SPAN_MS: u128 =
+    MIN_BLOCK_INTERVAL_MS + ROUND_TIMEOUT_MS * (MAX_LEADER_ROUNDS as u128);
+/// Small producer-side propagation cushion applied before claiming a retry
+/// round (`round >= 1`) when node-local adoption time is the active anchor.
+const PRODUCER_ROUND_CUSHION_MS: u128 = 500;
 
 /// Wall clock, milliseconds since the Unix epoch.
 ///
@@ -60,6 +70,123 @@ pub fn now_millis() -> u128 {
         .as_millis()
 }
 
+/// When this node first adopted a block it committed, keyed by hash.
+///
+/// The round price is "how long ago did the parent land", and a header cannot
+/// answer that: production stamps blocks from the slot schedule
+/// (`genesis_time + index * slot_ms`), so a chain that has fallen behind its
+/// schedule carries parent stamps that are minutes older than the moment the
+/// parent actually landed. Pricing straight off the stamp let the gate
+/// saturate - at 49 s of lag every round up to [`MAX_LEADER_ROUNDS`] was
+/// affordable at once (CWE-807) - while capping the stamp instead froze the
+/// retry ladder for genuinely stalled slots.
+///
+/// A node does know when it adopted a block, and that fact cannot be inflated:
+/// a peer can delay delivery, which only makes this node stricter (and
+/// self-heals, because `now` keeps moving while the adoption time does not),
+/// but it can never backdate it.
+///
+/// The book holds the blocks this node committed, up to
+/// `ROUND_PRICE_WINDOW`, and only chain commit writes it, never validation:
+///
+/// - Writing from validation would price a parent and its child milliseconds
+///   apart whenever a single pass walks several blocks (fork recovery through
+///   a peer's candidate chain, replay), so a legitimately produced retry block
+///   inside that chain would be refused and a node stuck on a minority fork
+///   could never adopt the better one.
+/// - The window covers every parent a reorg candidate can legally name: a
+///   candidate forks at most [`MAX_REORG_DEPTH`] below the tip, so the fork
+///   block is always one this node committed.
+/// - The first sighting wins, so re-committing a block (a reorg back onto it,
+///   a restore of the same tip) cannot backdate its price, and a reorg inside
+///   the window cannot evict the sighting of a block still on the live chain.
+pub struct RoundPriceBook {
+    seen: std::sync::Mutex<std::collections::VecDeque<(String, u128)>>,
+}
+
+/// How many committed blocks the round price book remembers.
+///
+/// One more than [`MAX_REORG_DEPTH`]: the deepest block a reorg candidate may
+/// fork at is `MAX_REORG_DEPTH` below the tip, and the window has to hold the
+/// tip itself as well.
+const ROUND_PRICE_WINDOW: usize = MAX_REORG_DEPTH + 1;
+
+impl Default for RoundPriceBook {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RoundPriceBook {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            seen: std::sync::Mutex::new(std::collections::VecDeque::new()),
+        }
+    }
+
+    /// Record that `block_hash` was committed at `now_ms`.
+    ///
+    /// Called from the chain commit path, and from a restore for the tip a
+    /// node loads from disk. A poisoned lock is treated as "no adoption
+    /// recorded" rather than as a panicking consensus path.
+    pub fn note_tip_block(&self, block_hash: &str, now_ms: u128) {
+        let Ok(mut seen) = self.seen.lock() else {
+            return;
+        };
+        if seen.iter().any(|(hash, _)| hash == block_hash) {
+            // First sighting wins: a re-commit cannot backdate the price.
+            return;
+        }
+        seen.push_back((block_hash.to_string(), now_ms));
+        while seen.len() > ROUND_PRICE_WINDOW {
+            seen.pop_front();
+        }
+    }
+
+    /// When this node first committed `block_hash`, while it is still inside
+    /// the window.
+    #[must_use]
+    pub fn seen_at(&self, block_hash: &str) -> Option<u128> {
+        let Ok(seen) = self.seen.lock() else {
+            return None;
+        };
+        seen.iter()
+            .find(|(hash, _)| hash == block_hash)
+            .map(|(_, at)| *at)
+    }
+
+    /// The highest round this node may *claim*, from the producer's side.
+    ///
+    /// Uses the same [`affordable_leader_round`] rule validation enforces.
+    /// When the parent's header stamp has fallen behind wall time by more than
+    /// `ROUND_LADDER_SPAN_MS` so that node-local adoption time is the active
+    /// anchor, retry rounds (`round >= 1`) wait an additional
+    /// `PRODUCER_ROUND_CUSHION_MS` before being claimed so normal gossip
+    /// stagger does not place peers on opposite sides of a timeout boundary.
+    #[must_use]
+    pub fn claimable_round_for(
+        &self,
+        parent_hash: &str,
+        parent_timestamp_ms: u128,
+        now_ms: u128,
+    ) -> u64 {
+        let seen = self.seen_at(parent_hash);
+        let raw = affordable_leader_round(parent_timestamp_ms, seen, now_ms);
+        if raw == 0 || seen.is_none() {
+            return raw;
+        }
+        if parent_timestamp_ms.saturating_add(ROUND_LADDER_SPAN_MS) < now_ms {
+            affordable_leader_round(
+                parent_timestamp_ms,
+                seen,
+                now_ms.saturating_sub(PRODUCER_ROUND_CUSHION_MS),
+            )
+        } else {
+            raw
+        }
+    }
+}
 /// The highest leader round a slot can have reached by `now_ms`.
 ///
 /// Round `r` is affordable once `MIN_BLOCK_INTERVAL_MS + r * ROUND_TIMEOUT_MS`
@@ -84,27 +211,45 @@ pub fn now_millis() -> u128 {
 ///
 /// # The anchor
 ///
-/// Both sides price a claim with this function, so the anchor has to be a
-/// value every node holding the parent can read: the parent's own stamp. A
-/// sighting is node-local - a boot time for genesis, the load instant for a
-/// tip restored from disk, a peer's delivery delay for everything else - so
-/// pricing from it puts the same claim on opposite sides of the boundary at
-/// two honest nodes. A claim the producer finds affordable and the verifier
-/// does not is not a warning: the block is refused there for good, the slot
-/// runs again on the other side of the boundary, and the mesh keeps two
-/// chains that both look valid at home.
+/// While a parent's header stamp is within `ROUND_LADDER_SPAN_MS` of wall
+/// time, `parent_seen_ms` only *lowers* the anchor (`seen.min(stamp)`): in
+/// normal cadence every node holding the parent agrees on the shared stamp, and
+/// a future-dated header still cannot buy the rounds between its stamp and the
+/// moment this node saw it.
 ///
-/// A parent stamped ahead of this node's clock therefore pins the ladder at
-/// round 0 until its stamp passes, on every node alike, which costs that slot
-/// the delay and nothing else: the stamp is fixed, so the moment it passes is
-/// the same for every node, and the ladder walks again from there. Returning
-/// 0 outright would let one future-stamped block kill the retry term for that
-/// height; `saturating_sub` does not, because `now` keeps moving.
+/// Once `parent_timestamp_ms + ROUND_LADDER_SPAN_MS < now_ms` and this node has
+/// an adoption record (`Some(seen)`), pricing from the stale stamp would
+/// saturate all `0..=MAX_LEADER_ROUNDS` rounds immediately on arrival - both on
+/// a schedule-lagged chain and when an elected producer withholds a backdated
+/// parent (CWE-807). In that stale regime the anchor switches to
+/// `anchor_ms.max(seen)`, so round 0 alone opens at adoption and retry rounds
+/// unlock one [`ROUND_TIMEOUT_MS`] at a time as real wall time elapses. Parents
+/// with no local sighting (`None` during historical sync or replay outside
+/// `ROUND_PRICE_WINDOW`) continue to price from `parent_timestamp_ms`.
 #[must_use]
-pub fn affordable_leader_round(parent_timestamp_ms: u128, now_ms: u128) -> u64 {
-    // The stamp alone. Nothing a node observes locally may enter the price.
+pub fn affordable_leader_round(
+    parent_timestamp_ms: u128,
+    parent_seen_ms: Option<u128>,
+    now_ms: u128,
+) -> u64 {
+    let anchor_ms =
+        parent_seen_ms.map_or(parent_timestamp_ms, |seen| seen.min(parent_timestamp_ms));
+    // A stamp that lags the wall clock by more than the whole ladder is not a
+    // price: one withheld block stamped at the minimum interval (or a schedule
+    // running behind wall time) would make every round affordable at once on
+    // every node, and a slot could then carry up to 17 competing valid blocks.
+    // When the stamp is that stale, price from the moment this node adopted the
+    // parent instead - a value no producer can write, which stays fixed while
+    // `now_ms` advances.
+    let anchor_ms = if parent_seen_ms
+        .is_some_and(|_| parent_timestamp_ms.saturating_add(ROUND_LADDER_SPAN_MS) < now_ms)
+    {
+        parent_seen_ms.map_or(anchor_ms, |seen| anchor_ms.max(seen))
+    } else {
+        anchor_ms
+    };
     let spaced = now_ms
-        .saturating_sub(parent_timestamp_ms)
+        .saturating_sub(anchor_ms)
         .saturating_sub(MIN_BLOCK_INTERVAL_MS);
     u64::try_from(spaced / ROUND_TIMEOUT_MS)
         .unwrap_or(u64::MAX)
@@ -222,6 +367,11 @@ pub trait ConsensusEngine: Send + Sync {
         _storage: Option<&crate::persistence::db::Storage>,
     ) {
     }
+
+    /// Record when this node adopted `block_hash` as the chain tip, so leader
+    /// rounds on a schedule-lagged parent are priced from local commit time
+    /// rather than from a stale schedule-derived header stamp (CWE-807).
+    fn note_block_seen(&self, _block_hash: &str, _at_ms: u128) {}
 
     /// The chain reports the height finalised by quorum certificates.
     ///
@@ -451,23 +601,121 @@ mod tests {
     #[test]
     fn a_claim_is_priced_by_the_shared_stamp_and_the_ladder_walks_in_real_time() {
         let now = 1_700_000_000_000u128;
+        let fresh_stamp = now - 20_000; // within ROUND_LADDER_SPAN_MS (49 s)
         let stale_stamp = now - 600_000; // ten minutes behind the schedule
 
-        // A parent that is far behind its schedule has walked the whole
-        // ladder, and every node reads that off the same stamp.
-        assert_eq!(affordable_leader_round(stale_stamp, now), MAX_LEADER_ROUNDS);
+        // Within the active ladder window, sightings seconds apart agree on the
+        // shared parent stamp so mesh nodes do not split on propagation jitter.
+        assert_eq!(
+            affordable_leader_round(fresh_stamp, Some(fresh_stamp), now),
+            6
+        );
+        assert_eq!(
+            affordable_leader_round(fresh_stamp, Some(now - 2_000), now),
+            6
+        );
+        assert_eq!(affordable_leader_round(fresh_stamp, None, now), 6);
+
+        // Once the parent stamp lags wall time by more than the whole ladder,
+        // a newly adopted parent opens round 0 only instead of saturating all
+        // 17 rounds at once; real elapsed time since adoption still walks up to
+        // MAX_LEADER_ROUNDS, and unsighted historical replay keeps the stamp.
+        assert_eq!(
+            affordable_leader_round(stale_stamp, Some(now - 500), now),
+            0
+        );
+        assert_eq!(
+            affordable_leader_round(stale_stamp, Some(now - 10_000), now),
+            3
+        );
+        assert_eq!(
+            affordable_leader_round(stale_stamp, Some(stale_stamp), now),
+            MAX_LEADER_ROUNDS
+        );
+        assert_eq!(
+            affordable_leader_round(stale_stamp, None, now),
+            MAX_LEADER_ROUNDS
+        );
 
         // One round per `ROUND_TIMEOUT_MS`, as the constant says.
-        assert_eq!(affordable_leader_round(stale_stamp, stale_stamp + 7_500), 2);
+        assert_eq!(
+            affordable_leader_round(stale_stamp, None, stale_stamp + 7_500),
+            2
+        );
 
         // A parent stamped into the future prices at round 0 here and at every
         // other node, and recovers by itself once the moment it names has
         // passed - the stamp does not move, so the boundary does not either.
-        assert_eq!(affordable_leader_round(now + 60_000, now), 0);
+        assert_eq!(affordable_leader_round(now + 60_000, Some(now), now), 0);
         assert_eq!(
-            affordable_leader_round(now + 60_000, now + 109_000),
+            affordable_leader_round(now + 60_000, None, now + 109_000),
             MAX_LEADER_ROUNDS
         );
+    }
+
+    #[test]
+    fn stale_parent_seen_just_now_does_not_saturate_the_round_ladder() {
+        let now = 1_700_000_000_000u128;
+        let stale_parent = now - ROUND_LADDER_SPAN_MS - 1_000;
+        let book = RoundPriceBook::new();
+        book.note_tip_block("stale-tip", now);
+
+        assert_eq!(
+            affordable_leader_round(stale_parent, book.seen_at("stale-tip"), now),
+            0,
+            "a parent stamped beyond the ladder span must not unlock rounds 1..=16 at adoption"
+        );
+        assert_eq!(
+            book.claimable_round_for("stale-tip", stale_parent, now),
+            0,
+            "producer cap must also hold at round 0 when a stale parent just landed"
+        );
+        // After MIN_BLOCK_INTERVAL_MS + ROUND_TIMEOUT_MS + cushion, round 1 unlocks.
+        let after_one_timeout =
+            now + MIN_BLOCK_INTERVAL_MS + ROUND_TIMEOUT_MS + PRODUCER_ROUND_CUSHION_MS;
+        assert_eq!(
+            book.claimable_round_for("stale-tip", stale_parent, after_one_timeout),
+            1
+        );
+    }
+
+    /// The book holds the blocks this node committed, inside the reorg
+    /// window, and nothing a peer can move.
+    ///
+    /// Written only by commit: a candidate chain replayed through validation
+    /// cannot write an entry, the first sighting of a block wins so a re-commit
+    /// cannot backdate it, and every block a reorg candidate may fork at keeps
+    /// its sighting because the window is as deep as `MAX_REORG_DEPTH`.
+    #[test]
+    fn the_round_price_book_holds_the_committed_reorg_window() {
+        let book = RoundPriceBook::new();
+        assert_eq!(book.seen_at("aa"), None);
+
+        book.note_tip_block("aa", 1_000);
+        assert_eq!(book.seen_at("aa"), Some(1_000));
+        assert_eq!(book.seen_at("bb"), None, "an unseen block has no sighting");
+
+        // A committed ancestor keeps its sighting when the tip moves past it:
+        // that is the fork block of every reorg candidate.
+        book.note_tip_block("bb", 5_000);
+        assert_eq!(book.seen_at("aa"), Some(1_000));
+        assert_eq!(book.seen_at("bb"), Some(5_000));
+
+        // Re-committing a block does not backdate its first sighting.
+        book.note_tip_block("aa", 9_000);
+        assert_eq!(book.seen_at("aa"), Some(1_000));
+
+        // The window is bounded: only the last `ROUND_PRICE_WINDOW` blocks are
+        // remembered, so the book cannot be grown without limit.
+        for height in 0..(ROUND_PRICE_WINDOW as u64 + 5) {
+            book.note_tip_block(&format!("h{height}"), 10_000 + u128::from(height));
+        }
+        assert_eq!(book.seen_at("aa"), None, "evicted from the window");
+        assert_eq!(
+            book.seen_at(&format!("h{}", ROUND_PRICE_WINDOW as u64 + 4)),
+            Some(10_000 + u128::from(ROUND_PRICE_WINDOW as u64) + 4)
+        );
+        assert_eq!(ROUND_PRICE_WINDOW, MAX_REORG_DEPTH + 1);
     }
 
     #[test]

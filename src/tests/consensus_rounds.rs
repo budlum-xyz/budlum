@@ -581,13 +581,44 @@ mod poa_round_pricing_tests {
             (parent, block)
         };
 
-        // Ten minutes behind the schedule is past round 6 on the shared clock,
-        // so the pricing gate lets the claim through - and it prices the same
-        // on the node that committed the parent and on one that synced it a
-        // minute later, which is the whole point of anchoring at the stamp.
-        let (parent, block) = fixture(now_ms.saturating_sub(600_000));
-        let engine = PoAEngine::new(PoAConfig::default(), None);
-        if let Err(error) = engine.validate_block(&block, std::slice::from_ref(&parent), &state) {
+        // Within ROUND_LADDER_SPAN_MS (49 s) and past round 6 (19 s): mesh
+        // sightings seconds apart agree on the shared parent stamp.
+        let (parent, block) = fixture(now_ms.saturating_sub(30_000));
+        for seen in [Some(parent.timestamp), Some(now_ms), None] {
+            let engine = PoAEngine::new(PoAConfig::default(), None);
+            if let Some(at) = seen {
+                engine.note_block_seen(&parent.hash, at);
+            }
+            if let Err(error) = engine.validate_block(&block, std::slice::from_ref(&parent), &state)
+            {
+                assert!(
+                    !round_not_elapsed(&error.0),
+                    "within the active ladder window the stamp is the shared anchor; \
+                     sighting {seen:?} must not change the price, got: {error:?}"
+                );
+            }
+        }
+
+        // Once a parent lags wall time beyond ROUND_LADDER_SPAN_MS (49 s), a
+        // newly adopted parent opens round 0 only rather than saturating at
+        // MAX_LEADER_ROUNDS, while a genuinely stalled slot whose adoption was
+        // ten minutes ago still walks the ladder.
+        let (stale_parent, stale_block) = fixture(now_ms.saturating_sub(600_000));
+        let fresh_adoption_engine = PoAEngine::new(PoAConfig::default(), None);
+        fresh_adoption_engine.note_block_seen(&stale_parent.hash, now_ms);
+        let stale_err = fresh_adoption_engine
+            .validate_block(&stale_block, std::slice::from_ref(&stale_parent), &state)
+            .expect_err("a freshly adopted schedule-lagged parent must not buy round 6");
+        assert!(
+            round_not_elapsed(&stale_err.0),
+            "expected wall-clock round refusal on freshly adopted stale parent, got: {stale_err:?}"
+        );
+
+        let stalled_engine = PoAEngine::new(PoAConfig::default(), None);
+        stalled_engine.note_block_seen(&stale_parent.hash, stale_parent.timestamp);
+        if let Err(error) =
+            stalled_engine.validate_block(&stale_block, std::slice::from_ref(&stale_parent), &state)
+        {
             assert!(
                 !round_not_elapsed(&error.0),
                 "a genuinely stalled slot must walk the ladder, got: {error:?}"
@@ -597,6 +628,7 @@ mod poa_round_pricing_tests {
         // A parent stamped an hour ahead prices at round 0 here and at every
         // other node: a stamp can only ever be behind the shared clock, so the
         // claim buys nothing until the moment it names has passed.
+        let engine = PoAEngine::new(PoAConfig::default(), None);
         let (parent, block) = fixture(now_ms.saturating_add(3_600_000));
         let error = engine
             .validate_block(&block, std::slice::from_ref(&parent), &state)
