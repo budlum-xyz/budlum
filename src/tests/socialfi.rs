@@ -26,7 +26,7 @@ use crate::crypto::primitives::KeyPair;
 use crate::domain::storage_deal::{StorageEconomicsParams, FEE_RATE_SCALE};
 use crate::domain::storage_params::StorageDomainParams;
 use crate::storage::content_id::ContentId;
-use crate::storage::db::Storage;
+use crate::persistence::db::Storage;
 use crate::storage::manifest::ContentManifest;
 use std::sync::Arc;
 use tempfile::tempdir;
