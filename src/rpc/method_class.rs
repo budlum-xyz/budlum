@@ -311,6 +311,43 @@ const METHOD_CLASSES: &[MethodClass] = &[
     // Section 8.10.6: the Budlum state root is not an MPT root, so the MPT
     // proof method answers `-32601` for good at the opening layer.
     row("eth_getProof", Public, Refused),
+    // Solana compatibility: four chain reads, one bounded slot feed, generated
+    // unsubscribe doors, and explicit refusals for every unwired state mapping.
+    row("getHealth", Public, Read),
+    row("getVersion", Public, Read),
+    row("getGenesisHash", Public, Refused),
+    row("getSlot", Public, Read),
+    row("getBlockHeight", Public, Read),
+    row("getEpochInfo", Public, Refused),
+    row("getLatestBlockhash", Public, Refused),
+    row("isBlockhashValid", Public, Refused),
+    row("getBalance", Public, Refused),
+    row("getAccountInfo", Public, Refused),
+    row("getMultipleAccounts", Public, Refused),
+    row("getProgramAccounts", Public, Refused),
+    row("getTokenAccountsByOwner", Public, Refused),
+    row("getTokenAccountBalance", Public, Refused),
+    row("getTokenSupply", Public, Refused),
+    row("getMinimumBalanceForRentExemption", Public, Refused),
+    row("getFeeForMessage", Public, Refused),
+    row("getRecentPrioritizationFees", Public, Refused),
+    row("sendTransaction", Public, Refused),
+    row("simulateTransaction", Public, Refused),
+    row("getSignatureStatuses", Public, Refused),
+    row("getSignaturesForAddress", Public, Refused),
+    row("getTransaction", Public, Refused),
+    row("getBlock", Public, Refused),
+    row("requestAirdrop", Public, Refused),
+    row("accountSubscribe", Public, Refused),
+    row("accountUnsubscribe", Public, Read),
+    row("signatureSubscribe", Public, Refused),
+    row("signatureUnsubscribe", Public, Read),
+    row("slotSubscribe", Public, Read),
+    row("slotUnsubscribe", Public, Read),
+    row("logsSubscribe", Public, Refused),
+    row("logsUnsubscribe", Public, Read),
+    row("programSubscribe", Public, Refused),
+    row("programUnsubscribe", Public, Read),
 ];
 
 /// Check that the methods a server registers are exactly the classified
@@ -340,6 +377,9 @@ pub fn check_served_methods<'a>(
     // a method the gateway marks pending must not be served at all
     // (`src/rpc/compat/ethereum/opening.rs`).
     if let Err(problem) = crate::rpc::compat::ethereum::opening::check_served(registered.iter().copied()) {
+        problems.push(problem);
+    }
+    if let Err(problem) = crate::rpc::compat::solana::check_served(registered.iter().copied()) {
         problems.push(problem);
     }
     if problems.is_empty() {

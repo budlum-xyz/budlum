@@ -416,4 +416,10 @@ fn solana_unimplemented_methods_never_return_invented_success() {
         assert!(response.error.is_none(), "{method} must remain served");
         assert!(response.result.is_some(), "{method} lost its chain answer");
     }
+    let configured = gateway.handle_request(
+        &rpc_req("getSlot", serde_json::json!([{"commitment": "finalized"}])),
+        &state,
+    );
+    assert!(configured.result.is_none());
+    assert_eq!(configured.error.expect("unsupported commitment").code, -32602);
 }

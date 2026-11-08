@@ -2601,4 +2601,100 @@ mod rpc_tests {
         assert!(accepted.ends_with("aptos-node:ok"), "{accepted}");
     }
 
+
+    #[tokio::test]
+    async fn solana_handlers_honor_commitment_and_refuse_submission() {
+        let (server, _chain) = setup().await;
+        let processed = crate::rpc::compat::solana::subscriptions::SlotConfig {
+            commitment: Some(crate::rpc::compat::solana::subscriptions::Commitment::Processed),
+        };
+        let finalized = crate::rpc::compat::solana::subscriptions::SlotConfig {
+            commitment: Some(crate::rpc::compat::solana::subscriptions::Commitment::Finalized),
+        };
+        assert_eq!(
+            server
+                .solana_get_slot(Some(processed))
+                .await
+                .expect("processed slot"),
+            0,
+        );
+        let expected_finalized = _chain.get_finalized_height().await;
+        assert_eq!(
+            server
+                .solana_get_block_height(Some(finalized))
+                .await
+                .expect("finalized height"),
+            expected_finalized,
+        );
+        let refusal = server
+            .solana_send_transaction(String::from("AA=="), None)
+            .await
+            .expect_err("an unwired submission cannot return a signature");
+        assert_eq!(refusal.code(), -32004);
+        assert!(refusal.message().contains("bud_sendRawTransaction"));
+    }
+
+    #[tokio::test]
+    async fn solana_dedicated_listener_enforces_admission_and_method_filter() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn rpc(
+            addr: std::net::SocketAddr,
+            method: &str,
+            api_key: Option<&str>,
+        ) -> String {
+            let body = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"{method}","params":[]}}"#);
+            let key = api_key.map(|key| format!("x-api-key: {key}\r\n")).unwrap_or_default();
+            let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect Solana RPC");
+            let request = format!(
+                "POST / HTTP/1.1\r\nHost: {addr}\r\n{key}content-type: application/json\r\ncontent-length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            );
+            stream.write_all(request.as_bytes()).await.expect("write RPC");
+            let mut response = Vec::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                stream.read_to_end(&mut response),
+            )
+            .await
+            .expect("RPC response timeout")
+            .expect("read RPC");
+            String::from_utf8(response).expect("UTF-8 RPC response")
+        }
+
+        let consensus = Arc::new(PoWEngine::new(0));
+        let blockchain = Blockchain::new(consensus, None, 45268, None);
+        let (chain_actor, chain) = ChainActor::new(blockchain);
+        tokio::spawn(async move { chain_actor.run().await; });
+        let node = Node::new(chain.clone()).expect("node");
+        let security = RpcSecurityConfig {
+            auth_required: true,
+            api_key: Some(String::from("solana-test-key")),
+            ..RpcSecurityConfig::default()
+        };
+        let server = RpcServer::with_security_and_mode(
+            chain,
+            node.get_client(),
+            security,
+            RpcMode::Public,
+        );
+        let primary = free_loopback().await;
+        let solana = free_loopback().await;
+        server
+            .with_solana_listener(solana.to_string())
+            .run(primary.to_string())
+            .await
+            .expect("primary and Solana listeners bind");
+
+        let refused = rpc(solana, "getHealth", None).await;
+        assert!(refused.starts_with("HTTP/1.1 401"), "{refused}");
+        let health = rpc(solana, "getHealth", Some("solana-test-key")).await;
+        assert!(health.starts_with("HTTP/1.1 200"), "{health}");
+        assert!(health.contains(r#""result":"ok""#), "{health}");
+        let filtered = rpc(solana, "bud_chainId", Some("solana-test-key")).await;
+        assert!(filtered.starts_with("HTTP/1.1 200"), "{filtered}");
+        assert!(filtered.contains("-32601"), "{filtered}");
+        assert!(!filtered.contains(r#""result":"#), "{filtered}");
+    }
+
 }

@@ -1771,7 +1771,8 @@ async fn main() {
             RpcMode::Public,
         )
         .with_metrics(metrics.clone())
-        .with_aptos_listener("127.0.0.1:18549".to_string());
+        .with_aptos_listener("127.0.0.1:18549".to_string())
+        .with_solana_listener("127.0.0.1:18548".to_string());
         let pub_server = match std::env::var("BUDLUM_APTOS_UPSTREAM_URL") {
             Ok(upstream) => pub_server.with_aptos_upstream(upstream),
             Err(std::env::VarError::NotPresent) => pub_server,

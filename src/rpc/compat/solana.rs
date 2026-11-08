@@ -3,10 +3,119 @@
 use crate::core::account::AccountState;
 use crate::rpc::compat::{
     CompatEffect, CompatListener, CompatMethodClass, JsonRpcRequest, JsonRpcResponse,
-    SolanaCompatConfig, JSONRPC_METHOD_NOT_FOUND, JSONRPC_TX_REJECTED,
+    SolanaCompatConfig, JSONRPC_INVALID_PARAMS, JSONRPC_METHOD_NOT_FOUND, JSONRPC_TX_REJECTED,
 };
 
-const SOLANA_UNAVAILABLE: i32 = -32004;
+pub mod subscriptions;
+#[cfg(test)]
+mod tests;
+
+pub const SOLANA_UNAVAILABLE: i32 = -32004;
+
+/// Native read or submission door named by a Solana refusal.
+#[must_use]
+pub fn native_door(method: &str) -> Option<&'static str> {
+    Some(match method {
+        "getGenesisHash" | "getLatestBlockhash" | "isBlockhashValid" | "getBlock" => "bud_getBlockByNumber",
+        "getEpochInfo" | "getTokenSupply" | "getMinimumBalanceForRentExemption" => "bud_getStatus",
+        "getBalance" | "getTokenAccountBalance" => "bud_getBalance",
+        "getAccountInfo" | "getMultipleAccounts" | "getProgramAccounts"
+        | "getTokenAccountsByOwner" | "accountSubscribe" | "programSubscribe" => "bud_getAccountProof",
+        "getFeeForMessage" | "getRecentPrioritizationFees" => "bud_gasPrice",
+        "sendTransaction" | "requestAirdrop" => "bud_sendRawTransaction",
+        "simulateTransaction" => "bud_txPrecheck",
+        "getSignatureStatuses" | "signatureSubscribe" | "logsSubscribe" => "bud_getTransactionReceipt",
+        "getSignaturesForAddress" | "getTransaction" => "bud_getTransactionByHash",
+        _ => return None,
+    })
+}
+
+#[must_use]
+pub fn owns_method(name: &str) -> bool {
+    SOLANA_METHOD_CLASSES.iter().any(|row| row.name == name) || name.starts_with("solana_")
+}
+
+#[must_use]
+pub fn is_unsubscribe(name: &str) -> bool {
+    matches!(
+        name,
+        "accountUnsubscribe"
+            | "signatureUnsubscribe"
+            | "slotUnsubscribe"
+            | "logsUnsubscribe"
+            | "programUnsubscribe"
+    )
+}
+
+/// Copy only Solana callbacks onto the dedicated compatibility listener.
+pub fn dedicated_methods(
+    all: &jsonrpsee::core::server::Methods,
+) -> Result<jsonrpsee::core::server::Methods, String> {
+    let mut out = jsonrpsee::core::server::Methods::new();
+    for name in all.method_names() {
+        if !owns_method(name) {
+            continue;
+        }
+        let callback = all
+            .method(name)
+            .ok_or_else(|| format!("Solana method {name} disappeared while filtering"))?
+            .clone();
+        out.verify_and_insert(name, callback)
+            .map_err(|error| format!("register dedicated Solana method {name}: {error}"))?;
+    }
+    check_served(out.method_names())?;
+    Ok(out)
+}
+
+/// Reject a Solana-prefixed method that has no classification row.
+pub fn check_served<'a>(registered: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
+    let problems: Vec<String> = registered
+        .into_iter()
+        .filter(|name| owns_method(name))
+        .filter(|name| !SOLANA_METHOD_CLASSES.iter().any(|row| row.name == *name))
+        .map(|name| format!("{name} has no Solana gateway row"))
+        .collect();
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("; "))
+    }
+}
+
+#[must_use]
+pub fn ee_unavailable(
+    method: &str,
+    door: &'static str,
+) -> jsonrpsee::types::error::ErrorObjectOwned {
+    jsonrpsee::types::error::ErrorObjectOwned::owned(
+        SOLANA_UNAVAILABLE,
+        format!("{method}: production Solana state mapping is unavailable; use {door}"),
+        Some(serde_json::json!({ "door": door })),
+    )
+}
+
+#[must_use]
+pub fn not_exposed(
+    method: &str,
+    door: &'static str,
+) -> jsonrpsee::types::error::ErrorObjectOwned {
+    jsonrpsee::types::error::ErrorObjectOwned::owned(
+        SOLANA_UNAVAILABLE,
+        format!("{method}: this chain fact is not exposed in Solana form; use {door}"),
+        Some(serde_json::json!({ "door": door })),
+    )
+}
+
+#[must_use]
+pub fn faucet_unavailable(
+    method: &str,
+) -> jsonrpsee::types::error::ErrorObjectOwned {
+    jsonrpsee::types::error::ErrorObjectOwned::owned(
+        SOLANA_UNAVAILABLE,
+        format!("{method}: no grant was queued; use the testnet faucet"),
+        Some(serde_json::json!({ "door": "bud_sendRawTransaction" })),
+    )
+}
 
 const fn row(name: &'static str, effect: CompatEffect) -> CompatMethodClass {
     CompatMethodClass::new(name, CompatListener::Public, effect)
@@ -40,15 +149,15 @@ pub const SOLANA_METHOD_CLASSES: &[CompatMethodClass] = &[
     row("getBlock", CompatEffect::Refused),
     row("requestAirdrop", CompatEffect::Refused),
     row("accountSubscribe", CompatEffect::Refused),
+    row("accountUnsubscribe", CompatEffect::Read),
     row("signatureSubscribe", CompatEffect::Refused),
-    row("slotSubscribe", CompatEffect::Refused),
+    row("signatureUnsubscribe", CompatEffect::Read),
+    row("slotSubscribe", CompatEffect::Read),
+    row("slotUnsubscribe", CompatEffect::Read),
     row("logsSubscribe", CompatEffect::Refused),
+    row("logsUnsubscribe", CompatEffect::Read),
     row("programSubscribe", CompatEffect::Refused),
-    row("accountUnsubscribe", CompatEffect::Refused),
-    row("signatureUnsubscribe", CompatEffect::Refused),
-    row("slotUnsubscribe", CompatEffect::Refused),
-    row("logsUnsubscribe", CompatEffect::Refused),
-    row("programUnsubscribe", CompatEffect::Refused),
+    row("programUnsubscribe", CompatEffect::Read),
 ];
 
 /// Solana JSON-RPC gateway adapter (`state` is read-only).
@@ -75,10 +184,19 @@ impl SolanaCompatGateway {
         }
         match req.method.as_str() {
             "getHealth" => JsonRpcResponse::ok(id, serde_json::json!("ok")),
-            "getVersion" => {
-                JsonRpcResponse::ok(id, serde_json::json!({ "solana-core": "2.0.0-budlum" }))
+            "getVersion" => JsonRpcResponse::ok(id, serde_json::json!({ "solana-core": format!("budlum-core/{}", env!("CARGO_PKG_VERSION")) })),
+            "getSlot" | "getBlockHeight" => {
+                let no_config = req.params.is_null()
+                    || req.params.as_array().is_some_and(|params| {
+                        params.is_empty()
+                            || (params.len() == 1
+                                && params[0].as_object().is_some_and(serde_json::Map::is_empty))
+                    });
+                if !no_config {
+                    return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "the standalone adapter cannot honor a slot commitment config");
+                }
+                JsonRpcResponse::ok(id, serde_json::json!(self.slot))
             }
-            "getSlot" | "getBlockHeight" => JsonRpcResponse::ok(id, serde_json::json!(self.slot)),
             "requestAirdrop" => {
                 if !self.config.testnet_faucet_enabled {
                     return JsonRpcResponse::err(
@@ -97,7 +215,8 @@ impl SolanaCompatGateway {
                 id,
                 SOLANA_UNAVAILABLE,
                 format!(
-                    "{method}: no production Solana implementation; no data was invented and no request was submitted"
+                    "{method}: no production Solana implementation; no data was invented and no request was submitted; use {}",
+                    native_door(method).unwrap_or("bud_getStatus")
                 ),
             ),
         }
