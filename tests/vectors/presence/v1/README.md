@@ -28,3 +28,9 @@ That difference is the presence finding recorded in PR #77 as BLG-288 and must
 be reconciled before the node and phone can interoperate. This fixture does not
 change a node wire format or claim the finding closed. Both implementations
 must eventually use the shared types definition rather than duplicate it.
+
+The integrated #91 follow-up uses `budlum_types::presence` in both the node
+registry and `mobile/core`. The registry regression reads `digest.bin` too, and
+the Android WorkManager regression pins the same hexadecimal digest. Kotlin
+still has an adapter rather than the generated Rust binding (BLG-357), so this
+is a shared wire vector, not evidence that every mobile duty uses the Rust core.

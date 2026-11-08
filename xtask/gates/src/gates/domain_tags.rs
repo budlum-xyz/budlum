@@ -31,6 +31,13 @@
 //!    `budzero/bud-node/src/store.rs`. A tag shared across trees is the
 //!    collision case the inventory exists to review, and it sat outside the
 //!    review surface. The scan is `src` + `budzero` + `crates` + `bud` now.
+//! 4. **The `mobile/` blind spot.** The mobile core (WP-11) is a standalone
+//!    crate under `mobile/core`, outside all four roots. Measured when it
+//!    landed: it carried four tags, `BDLM_PRESENCE_V1` and
+//!    `BDLM_PRESENCE_HINT_V1` among them, and neither presence tag was in the
+//!    inventory, so a phone could sign under a domain no reviewer had seen.
+//!    A phone's signature is verified by the node, so its domains are the
+//!    node's domains. The scan reads `mobile` too.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -49,7 +56,7 @@ const INVENTORY: &str = "src/crypto/domain_tags.rs";
 /// that cannot look is not a clean scan.
 fn tags_under(root: &Path, exclude: Option<&str>) -> Result<BTreeSet<String>, String> {
     let mut tags = BTreeSet::new();
-    for dir in ["src", "budzero", "crates", "bud"] {
+    for dir in ["src", "budzero", "crates", "bud", "mobile"] {
         let base = root.join(dir);
         if !base.is_dir() {
             return Err(format!(
@@ -185,7 +192,13 @@ pub fn run(root: &Path) -> Result<String, String> {
 /// passes, an unlisted used tag is caught, a listed-but-unused tag is caught.
 pub fn self_test() -> Result<String, String> {
     let tmp = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-dtags")?;
-    for d in ["src/crypto", "budzero", "crates/wallet-core/src", "bud/src"] {
+    for d in [
+        "src/crypto",
+        "budzero",
+        "crates/wallet-core/src",
+        "bud/src",
+        "mobile/core/src",
+    ] {
         fs::create_dir_all(tmp.join(d)).map_err(|e| format!("cannot create fixture dir: {e}"))?;
     }
     fs::write(
@@ -260,6 +273,22 @@ pub fn self_test() -> Result<String, String> {
     }
 
     fs::remove_file(tmp.join("bud/src/lib.rs")).map_err(|e| e.to_string())?;
+
+    // A tag under `mobile/` must be seen: the phone signs under it and the
+    // node verifies it, so it is a node domain like any other.
+    fs::write(
+        tmp.join("mobile/core/src/lib.rs"),
+        "const E: &[u8] = b\"BDLM_MOBILE_UNLISTED_V1\";\n",
+    )
+    .map_err(|e| e.to_string())?;
+    if run(&tmp).is_ok() {
+        let _ = fs::remove_dir_all(&tmp);
+        return Err(String::from(
+            "self-test: tag under mobile/ was not seen (mobile blind spot)",
+        ));
+    }
+
+    fs::remove_file(tmp.join("mobile/core/src/lib.rs")).map_err(|e| e.to_string())?;
     fs::write(
         tmp.join("src/crypto/domain_tags.rs"),
         "pub const DOMAIN_TAGS: &[&str] = &[\"BDLM_LISTED_V1\", \"BDLM_GONE_V1\"];\n",

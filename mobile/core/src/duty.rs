@@ -138,12 +138,20 @@ impl MobileCore {
     ///
     /// # Errors
     ///
-    /// [`CoreError`] when the quota is out of range.
+    /// [`CoreError`] when the quota is out of range, or above the class cap
+    /// (8 GiB for an opportunistic validator, section 7.2).
     pub fn set_policy(&mut self, policy: Policy) -> Result<(), CoreError> {
         if !policy.thermal_pause {
             return Err(CoreError::new(
                 "mobile_thermal_pause_locked",
                 "the thermal pause cannot be disabled",
+            ));
+        }
+        let cap = self.class.max_custody_quota_bytes();
+        if cap.is_some_and(|cap| policy.quota_bytes > cap) {
+            return Err(CoreError::new(
+                "mobile_quota_above_class_cap",
+                "an opportunistic validator's quota is at most 8 GiB",
             ));
         }
         let mut next = Policy::default();
@@ -232,7 +240,7 @@ impl MobileCore {
         F: FnOnce(&[u8; 32]) -> Vec<u8>,
     {
         let signal = PresenceSignal::sign(
-            self.owner,
+            self.owner.into(),
             self.chain_id,
             window,
             self.class,

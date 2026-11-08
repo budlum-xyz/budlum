@@ -232,7 +232,7 @@ fn mobile_distinct_symbols_of_one_segment_remain_usable() -> Result<(), Box<dyn 
 
 #[test]
 fn presence_preimage_matches_shared_golden_vector() {
-    use budlum_mobile_core::presence::presence_preimage;
+    use budlum_mobile_core::presence::{presence_message, presence_preimage};
     use sha3::{Digest, Sha3_256};
 
     const EXPECTED: &[u8; 32] = include_bytes!("../../../tests/vectors/presence/v1/digest.bin");
@@ -240,15 +240,44 @@ fn presence_preimage_matches_shared_golden_vector() {
     assert_eq!(Sha3_256::digest(PREIMAGE).as_slice(), EXPECTED);
     assert_eq!(
         presence_preimage(45_261, 11, ValidatorClass::Mobile),
+        *PREIMAGE
+    );
+    assert_eq!(
+        presence_message(45_261, 11, ValidatorClass::Mobile),
         *EXPECTED
     );
     assert_ne!(
-        presence_preimage(45_261, 11, ValidatorClass::Full),
+        presence_message(45_261, 11, ValidatorClass::Full),
         *EXPECTED
     );
     assert_ne!(
-        presence_preimage(45_261, 12, ValidatorClass::Mobile),
+        presence_message(45_261, 12, ValidatorClass::Mobile),
         *EXPECTED
     );
-    assert_ne!(presence_preimage(1, 11, ValidatorClass::Mobile), *EXPECTED);
+    assert_ne!(presence_message(1, 11, ValidatorClass::Mobile), *EXPECTED);
+}
+
+/// Section 7.2: an opportunistic (iOS) validator holds at most 8 GiB. The
+/// chain refuses a larger registration (`MOBILE_OPPORTUNISTIC_MAX_QUOTA_BYTES`),
+/// so a phone that accepted one would advertise custody it cannot register.
+#[test]
+fn mobile_opportunistic_quota_is_capped_at_8_gib() -> Result<(), Box<dyn std::error::Error>> {
+    use budlum_mobile_core::quota::GIB;
+
+    let mut ios = MobileCore::new(
+        [9; 32],
+        ValidatorClass::MobileOpportunistic,
+        Vec::new(),
+        64 * GIB,
+    );
+    let refused = refusal(ios.set_policy(Policy::with_quota(8 * GIB + 1)?));
+    assert_eq!(refused.code, "mobile_quota_above_class_cap");
+    assert_eq!(ios.policy(), Policy::default());
+    ios.set_policy(Policy::with_quota(8 * GIB)?)?;
+    assert_eq!(ios.policy().quota_bytes, 8 * GIB);
+
+    let mut android = core(64 * GIB);
+    android.set_policy(Policy::with_quota(64 * GIB)?)?;
+    assert_eq!(android.policy().quota_bytes, 64 * GIB);
+    Ok(())
 }

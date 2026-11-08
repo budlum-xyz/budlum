@@ -20,14 +20,28 @@
 //!
 //! # Scope
 //!
-//! This first slice carries the address only. The transaction, signature,
-//! handoff-certificate, checkpoint-certificate and B.U.D. 3.0 symbol/share/proof
-//! types follow in later slices of the same package; each move has to keep the
-//! wire shape byte-identical, so they move one at a time rather than together.
+//! The first slice carried the address. The second carries what the mobile
+//! core needs to sign its first message: the validator class with its per-class
+//! windows ([`class`]) and the presence preimage, message, signal and network
+//! hint ([`presence`], section 7.8).
+//! The transaction, signature, handoff-certificate, checkpoint-certificate and
+//! B.U.D. 3.0 symbol/share/proof types follow in later slices of the same
+//! package; each move has to keep the wire shape byte-identical, so they move
+//! one at a time rather than together.
 //!
 //! Every dependency here is one the phone inherits, so the list stays short.
+//! `sha3` is the presence digest's hash, at the major the root manifest already
+//! links, so the node's lockfile gains no new package.
 
 #![forbid(unsafe_code)]
+
+pub mod class;
+pub mod presence;
+
+pub use class::{
+    hours_to_epochs, AuditWindow, ClassParameterError, ValidatorClass,
+    MOBILE_OPPORTUNISTIC_MAX_QUOTA_BYTES,
+};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;

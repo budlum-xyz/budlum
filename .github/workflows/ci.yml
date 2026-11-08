@@ -1359,10 +1359,105 @@ jobs:
         run: cargo fmt --manifest-path mobile/core/Cargo.toml --all -- --check
       - name: Clippy
         if: always() && steps.rust.outcome == 'success'
-        run: cargo clippy --manifest-path mobile/core/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --manifest-path mobile/core/Cargo.toml --locked --all-targets -- -D warnings
       - name: Tests
         if: always() && steps.rust.outcome == 'success'
-        run: cargo test --manifest-path mobile/core/Cargo.toml
+        run: cargo test --manifest-path mobile/core/Cargo.toml --locked
+
+  mobile-core-targets:
+    # WP-11 job 2 names five phone targets and the card's test
+    # `mobile_core_builds_for_all_targets` is this job. A host-only build hides
+    # a target break (a pointer-width assumption on armv7, a dependency with no
+    # Android or iOS support) until somebody tries a phone build. The library
+    # is built as an rlib, so no NDK or Xcode linker is involved; linking is
+    # the bindings' job. armv7 is a compile check only, as the card says.
+    name: mobile_core_builds_for_all_targets (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-linux-android
+          - armv7-linux-androideabi
+          - x86_64-linux-android
+          - aarch64-apple-ios
+          - aarch64-apple-ios-sim
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: mobile-core-${{ matrix.target }}
+          workspaces: mobile/core
+      - name: Build the library for the target
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --manifest-path mobile/core/Cargo.toml --locked --lib --target "$TARGET"
+
+  mobile-ffi:
+    # WP-11 job 2: the Kotlin and Swift bindings of the mobile core come from
+    # mobile/ffi. Besides format, clippy and tests, the job builds the shared
+    # library and generates both bindings from it with the pinned generator,
+    # so a type UniFFI cannot express fails here and not in the app builds.
+    # The phone targets are type-checked only: linking the cdylib needs the
+    # NDK and Xcode, which belong to the app jobs (WP-36, WP-38).
+    name: Mobile FFI bindings (WP-11)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+          components: clippy, rustfmt
+          targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android, aarch64-apple-ios, aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: mobile-ffi
+          workspaces: mobile/ffi
+      - name: Format
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path mobile/ffi/Cargo.toml --all -- --check
+      - name: Clippy
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo clippy --manifest-path mobile/ffi/Cargo.toml --locked --all-targets --all-features -- -D warnings
+      - name: Tests
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo test --manifest-path mobile/ffi/Cargo.toml --locked
+      - name: Generate the Kotlin and Swift bindings
+        if: always() && steps.rust.outcome == 'success'
+        working-directory: mobile/ffi
+        run: |
+          set -euo pipefail
+          cargo build --locked --lib
+          lib=target/debug/libbudlum_mobile_ffi.so
+          for language in kotlin swift; do
+            cargo run --locked --features cli --bin uniffi-bindgen -- \
+              generate --library "$lib" --language "$language" \
+              --out-dir "target/bindings/$language"
+          done
+          grep -rq "class MobileNode" target/bindings/kotlin
+          grep -rq "class MobileNode" target/bindings/swift
+      - name: Type-check the phone targets
+        if: always() && steps.rust.outcome == 'success'
+        run: |
+          set -euo pipefail
+          for target in aarch64-linux-android armv7-linux-androideabi x86_64-linux-android \
+            aarch64-apple-ios aarch64-apple-ios-sim; do
+            cargo check --manifest-path mobile/ffi/Cargo.toml --locked --lib --target "$target"
+          done
 
   # ============================ Budlum Explorer (web3 tarayici cekirdegi) ============================
   budlum-explorer:
@@ -1693,6 +1788,9 @@ jobs:
           - { name: wallet-core, manifest: "crates/wallet-core/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: xtask-gates, manifest: "xtask/gates/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: xtask-tools, manifest: "xtask/tools/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: budlum-types, manifest: "crates/budlum-types/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: mobile-core, manifest: "mobile/core/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: mobile-ffi, manifest: "mobile/ffi/Cargo.toml", config: "--config .quality/deny.toml" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1732,6 +1830,9 @@ jobs:
           - { name: wallet-core, manifest: "crates/wallet-core/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: xtask-gates, manifest: "xtask/gates/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: xtask-tools, manifest: "xtask/tools/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: budlum-types, manifest: "crates/budlum-types/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: mobile-core, manifest: "mobile/core/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: mobile-ffi, manifest: "mobile/ffi/Cargo.toml", config: "--config .quality/deny.toml" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2910,10 +3011,10 @@ jobs:
         run: cargo fmt --manifest-path crates/budlum-types/Cargo.toml --all -- --check
       - name: Clippy
         if: always() && steps.rust.outcome == 'success'
-        run: cargo clippy --manifest-path crates/budlum-types/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --manifest-path crates/budlum-types/Cargo.toml --locked --all-targets -- -D warnings
       - name: Tests
         if: always() && steps.rust.outcome == 'success'
-        run: cargo test --manifest-path crates/budlum-types/Cargo.toml
+        run: cargo test --manifest-path crates/budlum-types/Cargo.toml --locked
 
 # WP-04 / WP-42 continuation: the integrated tree is checked without a Rust
   # toolchain. Several open pull requests are merged into one branch here, and

@@ -2,6 +2,8 @@ package network.budlum.validator.core
 
 import java.io.File
 import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
 import java.nio.file.LinkOption
@@ -29,6 +31,27 @@ object MobileConstants {
     const val FAUCET_DRIP_BUD: Long = 100L
     const val WORKMANAGER_PERIOD_MINUTES: Long = 15L
     const val THERMAL_STATUS_MODERATE: Int = 2
+}
+
+private fun littleEndianU64(value: Long): ByteArray =
+    ByteBuffer.allocate(Long.SIZE_BYTES).order(ByteOrder.LITTLE_ENDIAN).putLong(value).array()
+
+/** SHA3-256 over the four length-prefixed fields in presence/v1 (G-5). */
+private fun presenceSigningDigest(chainId: Long, window: Long, classTag: Byte): ByteArray {
+    require(chainId >= 0L) { "chain id must be an unsigned 64-bit value" }
+    require(window >= 0L) { "presence window must be non-negative" }
+    val digest = MessageDigest.getInstance("SHA3-256")
+    val fields = listOf(
+        "BDLM_PRESENCE_V1".toByteArray(Charsets.UTF_8),
+        littleEndianU64(chainId),
+        littleEndianU64(window),
+        byteArrayOf(classTag),
+    )
+    for (field in fields) {
+        digest.update(littleEndianU64(field.size.toLong()))
+        digest.update(field)
+    }
+    return digest.digest()
 }
 
 enum class ValidatorClass(val tag: Byte) {
@@ -446,6 +469,7 @@ class MobileValidatorEngine(
         mobileUsedMbToday: Long? = null,
         incomingShares: List<AssignedShare>,
     ): List<DutyTx> {
+        require(window >= 0L) { "presence window must be non-negative" }
         if (!registered || unbonding || pausedForThermal) {
             return emptyList()
         }
@@ -469,12 +493,13 @@ class MobileValidatorEngine(
         for (audit in pendingAudits) {
             produced.add(answerAudit(audit))
         }
-        val md = MessageDigest.getInstance("SHA-256")
-        md.update("BDLM_PRESENCE_V1".toByteArray(Charsets.UTF_8))
-        md.update(MobileConstants.TESTNET_CHAIN_ID.toString().toByteArray(Charsets.UTF_8))
-        md.update(window.toString().toByteArray(Charsets.UTF_8))
-        md.update(byteArrayOf(ValidatorClass.Mobile.tag))
-        val preimageHex = md.digest().joinToString("") { "%02x".format(it) }
+        // No SHA-256 or decimal-concatenation fallback: a provider failure
+        // refuses the duty rather than emitting a signature on another wire.
+        val preimageHex = presenceSigningDigest(
+            MobileConstants.TESTNET_CHAIN_ID,
+            window,
+            ValidatorClass.Mobile.tag,
+        ).joinToString("") { "%02x".format(it) }
         val presence = DutyTx.Presence(window, ValidatorClass.Mobile, preimageHex)
         outbox.add(presence)
         produced.add(presence)

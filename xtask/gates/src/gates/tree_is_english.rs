@@ -998,6 +998,34 @@ fn exemption_canaries(clean: &Path, tmp: &Path) -> Result<usize, String> {
         ));
     }
 
+    // Android's shipped Turkish strings have the same narrow exemption.
+    if !counted_accepts_with(
+        &mut ran,
+        clean,
+        tmp,
+        "androidl10n",
+        "mobile/android/app/src/main/res/values-tr/strings.xml",
+        "<string name=\"validator\">Doğrulayıcı çalışıyor</string>\n",
+    )? {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "canary: the Android Turkish localisation was rejected",
+        ));
+    }
+    if counted_accepts_with(
+        &mut ran,
+        clean,
+        tmp,
+        "androidl10nspill",
+        "mobile/android/app/src/main/res/values/strings.xml",
+        "<string name=\"validator\">Doğrulayıcı çalışıyor</string>\n",
+    )? {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "canary: the Android localisation exemption leaked into the default locale",
+        ));
+    }
+
     // The exemption must not spill over: the same text one directory up, or in
     // another locale, is still a finding.
     if counted_accepts_with(

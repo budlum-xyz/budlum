@@ -383,6 +383,41 @@ object MobileValidatorUnitTest {
         check(logLine.contains("on_timeout=false"), "field harness formats TSV soak line")
     }
 
+    fun android_presence_matches_the_shared_sha3_vector() {
+        val engine = MobileValidatorEngine(
+            ownerAddressHex = "05".repeat(32),
+            keyVault = KeystoreKeyVault(JvmMemoryWrappingKeyProvider()),
+            custodyDir = newTestCustody(),
+            relays = listOf(RelayOffer("/ip4/203.0.113.9/udp/4001/quic-v1", 10_000L)),
+            initialAvailableBytes = 12L * MobileConstants.GIB_BYTES,
+        )
+        engine.requestTestnetFaucet(1L)
+        engine.registerValidator("BIOMETRIC_VERIFIED_SESSION", "99".repeat(32))
+        engine.stopForeground()
+        val presence = engine.runWorkManagerPeriodicTick(
+            window = 11L,
+            isUnmeteredWifi = true,
+            pendingAudits = emptyList(),
+            incomingShares = emptyList(),
+        ).filterIsInstance<DutyTx.Presence>().single()
+        check(
+            presence.preimageHex ==
+                "26a5bec8b11098debd4eeffbe797638d295a08aa570cb3c176d9c5e41bfbb2a3",
+            "Android signs the same length-prefixed SHA3-256 message as node and Rust core",
+        )
+        check(
+            runCatching {
+                engine.runWorkManagerPeriodicTick(
+                    window = -1L,
+                    isUnmeteredWifi = true,
+                    pendingAudits = emptyList(),
+                    incomingShares = emptyList(),
+                )
+            }.isFailure,
+            "negative presence windows are refused",
+        )
+    }
+
     fun android_reproducible_build_matches() {
         val gradle = File("mobile/android/app/build.gradle.kts").readText()
         check(gradle.contains("includeInApk = false"), " Play dependency block must be excluded from APK")
@@ -435,6 +470,7 @@ object MobileValidatorUnitTest {
         android_low_space_releases_shares()
         android_onboarding_reaches_registered_state()
         android_workmanager_answers_audit_when_service_stopped()
+        android_presence_matches_the_shared_sha3_vector()
         android_reproducible_build_matches()
         println("ALL ANDROID VALIDATOR TESTS PASSED")
     }

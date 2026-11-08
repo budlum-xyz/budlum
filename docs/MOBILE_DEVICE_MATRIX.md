@@ -14,8 +14,10 @@ rules, and JSONL telemetry format validated by `budlum::registry::rehearsal::ana
 ## 2. Mandatory Operating Invariants
 
 1. **Non-slashing offline policy (`V-4`):** Going offline, losing Wi-Fi, or pausing on low
-   battery transitions the Mobile validator to `Suspended` after `2` missed presence epochs
-   with **zero** stake slash.
+   battery transitions the validator to `Suspended` after the class-specific absence
+   threshold: 24 hours for Full, 72 hours for Mobile, or 168 hours for
+   MobileOpportunistic, converted to epochs with checked integer arithmetic.
+   Suspension carries **zero** stake slash.
 2. **Wi-Fi-only custody serving by default:** When `allow_cellular_opt_in == false`,
    `metered_bytes_served` MUST equal `0` (`SymbolProtocolError::CellularServingDisabled`).
 3. **Key protection:** Signing keys reside in Android Keystore / StrongBox; the custody store

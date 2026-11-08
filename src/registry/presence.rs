@@ -8,7 +8,6 @@
 
 use bls12_381::{G1Affine, G1Projective, G2Affine, G2Projective, Scalar};
 use serde::{Deserialize, Serialize};
-use sha3::{Digest, Sha3_256};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::chain::finality::{sign_bls, verify_bls_sig};
@@ -41,42 +40,9 @@ pub const DUPLICATE_SIGNAL_PEER_PENALTY: i32 = -25;
 /// Epochs after `ResumeValidator` before a suspended validator becomes active again.
 pub const RESUME_ACTIVATION_DELAY_EPOCHS: u64 = 1;
 
-/// Presence class tag carried in `PresenceSignal` and signed under `BDLM_PRESENCE_V1`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[repr(u8)]
-pub enum PresenceClass {
-    /// Dedicated Full validator (1-epoch window, 24h suspension threshold).
-    Full = 0x00,
-    /// Android Mobile validator (4-epoch window, 72h suspension threshold).
-    Mobile = 0x01,
-    /// iOS opportunistic Mobile validator (4-epoch window, 168h suspension threshold).
-    IosOpportunistic = 0x02,
-}
-
-impl PresenceClass {
-    #[must_use]
-    pub const fn to_byte(self) -> u8 {
-        self as u8
-    }
-
-    /// Convenience: exposed for mobile and full task engines querying window cadence.
-    #[must_use]
-    pub const fn window_epochs(self) -> u64 {
-        match self {
-            Self::Full => FULL_PRESENCE_WINDOW_EPOCHS,
-            Self::Mobile | Self::IosOpportunistic => MOBILE_PRESENCE_WINDOW_EPOCHS,
-        }
-    }
-
-    #[must_use]
-    pub const fn suspension_hours(self) -> u64 {
-        match self {
-            Self::Full => FULL_SUSPENSION_HOURS,
-            Self::Mobile => MOBILE_SUSPENSION_HOURS,
-            Self::IosOpportunistic => IOS_OPPORTUNISTIC_SUSPENSION_HOURS,
-        }
-    }
-}
+/// The one validator-class definition shared by the node and phone (K-4).
+/// The alias keeps existing node call sites source-compatible.
+pub use budlum_types::ValidatorClass as PresenceClass;
 
 /// Convert an offline duration in hours to a ceiling epoch count (Section 6.21.3):
 /// `ceil(hours * 3600 / (slot_secs * epoch_len_blocks))`.
@@ -95,59 +61,41 @@ pub fn hours_to_epochs(hours: u64, slot_secs: u64, epoch_len_blocks: u64) -> Res
     u64::try_from(ceil_epochs).map_err(|_| PresenceError::EpochOverflow)
 }
 
-/// Canonical 32-byte signing digest for a presence window (Section 7.8 item 2):
-/// `SHA3-256("BDLM_PRESENCE_V1" || chain_id_le8 || window_le8 || class_u8)`.
+/// Canonical 32-byte signing digest for a presence window (Section 7.8 item 2).
+/// All four fields, including the domain tag, are length-prefixed under G-5.
+/// The shared definition is the same function the mobile core signs.
 #[must_use]
 pub fn presence_signing_digest(chain_id: u64, window: u64, class: PresenceClass) -> [u8; 32] {
-    let mut h = Sha3_256::new();
-    h.update(b"BDLM_PRESENCE_V1");
-    h.update(chain_id.to_le_bytes());
-    h.update(window.to_le_bytes());
-    h.update([class.to_byte()]);
-    h.finalize().into()
+    budlum_types::presence::presence_message(chain_id, window, class)
 }
 
-/// Individual gossip presence message on `/budlum/presence/1` (Section 7.8 item 1).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PresenceSignal {
-    pub validator: Address,
-    pub window: u64,
-    pub class: PresenceClass,
-    /// Hash of the validator's IPv4 /24 or IPv6 /48 prefix.
-    pub network_hint: [u8; 32],
-    /// 48-byte compressed BLS12-381 G1 signature over [`presence_signing_digest`].
-    pub sig_bls: Vec<u8>,
+pub use budlum_types::presence::PresenceSignal;
+
+/// Sign the shared presence message with the node's BLS implementation.
+/// The signal layout and digest remain defined by `budlum-types`; only the
+/// chain-specific BLS primitive stays here.
+#[must_use]
+pub fn sign_presence_signal(
+    validator: Address,
+    chain_id: u64,
+    window: u64,
+    class: PresenceClass,
+    network_hint: [u8; 32],
+    secret_key: &Scalar,
+) -> PresenceSignal {
+    PresenceSignal::sign(validator, chain_id, window, class, network_hint, |digest| {
+        sign_bls(secret_key, digest)
+    })
 }
 
-impl PresenceSignal {
-    /// Sign a presence signal for `(chain_id, window, class)` using `secret_key`.
-    /// Convenience: exposed for full and mobile validator presence signers.
-    #[must_use]
-    pub fn sign(
-        validator: Address,
-        chain_id: u64,
-        window: u64,
-        class: PresenceClass,
-        network_hint: [u8; 32],
-        secret_key: &Scalar,
-    ) -> Self {
-        let digest = presence_signing_digest(chain_id, window, class);
-        let sig_bls = sign_bls(secret_key, &digest);
-        Self {
-            validator,
-            window,
-            class,
-            network_hint,
-            sig_bls,
-        }
-    }
-
-    /// Verify this presence signal against the validator's 96-byte BLS public key.
-    pub fn verify(&self, bls_public_key: &[u8], chain_id: u64) -> Result<(), PresenceError> {
-        let digest = presence_signing_digest(chain_id, self.window, self.class);
-        verify_bls_sig(bls_public_key, &digest, &self.sig_bls)
-            .map_err(PresenceError::InvalidSignature)
-    }
+fn verify_presence_signal(
+    signal: &PresenceSignal,
+    bls_public_key: &[u8],
+    chain_id: u64,
+) -> Result<(), PresenceError> {
+    let digest = presence_signing_digest(chain_id, signal.window, signal.class);
+    verify_bls_sig(bls_public_key, &digest, &signal.sig_bls)
+        .map_err(PresenceError::InvalidSignature)
 }
 
 /// Provable equivocation when a validator signs two different [`PresenceClass`] values
@@ -183,7 +131,7 @@ impl PresenceGossipInbox {
         bls_public_key: &[u8],
         chain_id: u64,
     ) -> Result<GossipIngestOutcome, PresenceError> {
-        signal.verify(bls_public_key, chain_id)?;
+        verify_presence_signal(&signal, bls_public_key, chain_id)?;
         let key = (signal.validator, signal.window);
         if let Some(existing) = self.seen.get(&key) {
             if existing.class != signal.class {
@@ -254,7 +202,7 @@ impl PresenceAggregate {
             let Some(sig) = by_addr.get(addr) else {
                 continue;
             };
-            sig.verify(pk, chain_id)?;
+            verify_presence_signal(sig, pk, chain_id)?;
             let g1 = decode_g1(&sig.sig_bls)?;
             sum_sig += G1Projective::from(g1);
             let byte_idx = idx / 8;
@@ -515,8 +463,8 @@ impl PresenceTracker {
         {
             return Err(PresenceError::InvalidDoubleSignEvidence);
         }
-        evidence.first.verify(bls_public_key, chain_id)?;
-        evidence.second.verify(bls_public_key, chain_id)?;
+        verify_presence_signal(&evidence.first, bls_public_key, chain_id)?;
+        verify_presence_signal(&evidence.second, bls_public_key, chain_id)?;
 
         let st = self
             .validators
@@ -626,6 +574,19 @@ mod tests {
     }
 
     #[test]
+    fn node_presence_digest_matches_the_shared_mobile_vector() {
+        let digest = include_bytes!("../../tests/vectors/presence/v1/digest.bin");
+        assert_eq!(
+            &presence_signing_digest(45_261, 11, PresenceClass::Mobile),
+            digest
+        );
+        assert_ne!(
+            presence_signing_digest(45_261, 11, PresenceClass::Mobile),
+            presence_signing_digest(45_261, 11, PresenceClass::Full)
+        );
+    }
+
+    #[test]
     fn presence_window_hours_convert_to_epochs() {
         // Testnet: 3-second slots, 50-block epochs => 150 seconds (2.5 min) per epoch.
         // 1 day (24h) = 86,400s => 576 epochs.
@@ -648,7 +609,7 @@ mod tests {
             let (addr, sk, pk) = keypair_for(i as u64);
             roster.push((addr, pk));
             if i % 2 == 0 {
-                signals.push(PresenceSignal::sign(
+                signals.push(sign_presence_signal(
                     addr,
                     CHAIN_ID,
                     9,
@@ -717,9 +678,30 @@ mod tests {
         tracker.register_validator(val, PresenceClass::Mobile, 100_000, 0);
 
         let mut inbox = PresenceGossipInbox::default();
-        let sig_mobile = PresenceSignal::sign(val, CHAIN_ID, 42, PresenceClass::Mobile, [1; 32], &sk);
-        let sig_dup = PresenceSignal::sign(val, CHAIN_ID, 42, PresenceClass::Mobile, [2; 32], &sk);
-        let sig_full = PresenceSignal::sign(val, CHAIN_ID, 42, PresenceClass::Full, [1; 32], &sk);
+        let sig_mobile = sign_presence_signal(
+            val,
+            CHAIN_ID,
+            42,
+            PresenceClass::Mobile,
+            [1; 32],
+            &sk,
+        );
+        let sig_dup = sign_presence_signal(
+            val,
+            CHAIN_ID,
+            42,
+            PresenceClass::Mobile,
+            [2; 32],
+            &sk,
+        );
+        let sig_full = sign_presence_signal(
+            val,
+            CHAIN_ID,
+            42,
+            PresenceClass::Full,
+            [1; 32],
+            &sk,
+        );
 
         assert_eq!(
             inbox.ingest(sig_mobile, &pk, CHAIN_ID).unwrap(),

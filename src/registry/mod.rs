@@ -58,7 +58,8 @@ pub use identity_fill::{
 pub use invalid_vote::InvalidVoteTracker;
 pub use liveness::{LivenessTracker, SuspensionNotice};
 pub use presence::{
-    hours_to_epochs, presence_signing_digest, GossipIngestOutcome, PresenceAggregate,
+    hours_to_epochs, presence_signing_digest, sign_presence_signal, GossipIngestOutcome,
+    PresenceAggregate,
     PresenceClass, PresenceDoubleSignEvidence, PresenceError, PresenceGossipInbox, PresenceSignal,
     PresenceTracker, ValidatorPresenceState, DUPLICATE_SIGNAL_PEER_PENALTY,
     FULL_PRESENCE_WINDOW_EPOCHS, FULL_SUSPENSION_HOURS, IOS_OPPORTUNISTIC_SUSPENSION_HOURS,
