@@ -78,7 +78,7 @@ impl Default for RpcSecurityConfig {
             api_key: None,
             allowed_ips: vec!["127.0.0.1".into(), "::1".into()],
             cors_origins: Vec::new(),
-            // Secure default (P21-F01): a limiter that is off by default
+            // Secure default: a limiter that is off by default
             // leaves API-key guessing unthrottled on the public listener.
             rate_limit_per_minute: Some(120),
             trusted_proxies: Vec::new(),
@@ -1683,8 +1683,8 @@ impl BudlumApiServer for RpcServer {
         &self,
         registration: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Operator-only: only the operator may declare the terms. BLG-0155
-        // (P07-F10): the bond itself is no longer a declared number - the
+        // Operator-only: only the operator may declare the terms.
+        //: the bond itself is no longer a declared number - the
         // registration debits the poster's balance into escrow before the
         // registry sees it (Blockchain::register_external_domain).
         self.require_operator("bud_registerExternalDomain")?;
@@ -3044,7 +3044,7 @@ impl BudlumApiServer for RpcServer {
         // Operator-only: `submission.message.sender` is an unsigned field and
         // the proof fee is burned from that address when verification fails,
         // so a public caller could burn the fee balance of any address
-        // (P18-F02). Until submissions carry a sender signature, the endpoint
+        //. Until submissions carry a sender signature, the endpoint
         // is restricted like its sibling domain-registration methods.
         self.require_operator("bud_submitZkProof")?;
         match self.chain.submit_zk_proof(submission).await {
@@ -3129,7 +3129,7 @@ impl BudlumApiServer for RpcServer {
         // Submitter cannot self-certify a report as ConsensusVerified to force a
         // Slash - the RPC path is always Unverified. Only the node's own
         // Consensus layer emits ConsensusVerified reports internally; a
-        // caller's claim is demoted first (BLG-0102/P04-F24).
+        // caller's claim is demoted first.
         report.demote_to_unverified();
         // A reporter is required so the anti-spam fee can be charged.
         if report.reporter.is_none() {
@@ -6417,7 +6417,7 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn ai_agent_ranking(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // BLG-0201 (P10-F11): the score crosses the actor and the wire as a
+        //: the score crosses the actor and the wire as a
         // fixed-point permyriad integer (10_000 = full trust), never as an
         // f64 - Z8. The unit is stated in the response so a client never has
         // to guess whether 9000 is 9000.0 or 0.9.

@@ -457,7 +457,7 @@ pub trait BudlumApi {
 
     /// (security audit §4) submit a QC fault proof.
     ///
-    /// Fail-closed (P01-F22): every reachable proof shape is refused with a
+    /// Fail-closed: every reachable proof shape is refused with a
     /// named reason. A proof naming a signature that verifies targets a
     /// valid attestation; one naming a signature that does not verify is not
     /// evidence against the named validator - garbage bytes naming anyone

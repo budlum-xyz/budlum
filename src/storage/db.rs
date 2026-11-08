@@ -116,7 +116,7 @@ fn decode<T: DeserializeOwned>(value: &[u8]) -> std::io::Result<T> {
 #[derive(Debug)]
 pub struct Storage {
     db: Db,
-    /// BLG-0190 (P09-F11): a test-only knob that makes the storage-economics
+    ///: a test-only knob that makes the storage-economics
     /// persist fail for real, so the accounting paths' `?` propagation can
     /// be EXERCISED instead of grepped. Never set outside `cfg(test)`; no
     /// production behaviour reads it.
@@ -275,7 +275,7 @@ impl Storage {
     /// Reads every row twice and accepts the result only when both passes
     /// agree and no durable commit is in flight. sled offers no point in time
     /// iterator, so a commit landing mid-scan would otherwise be copied
-    /// half way (P26-F13).
+    /// half way.
     fn read_consistent_entries(&self) -> std::io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let read = || -> std::io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
             let mut rows = Vec::new();
@@ -1307,7 +1307,7 @@ impl Storage {
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
-    /// BLG-0190 (P09-F11): arm/disarm the test-only persist failure.
+    ///: arm/disarm the test-only persist failure.
     #[cfg(test)]
     pub(crate) fn set_fail_economics_writes(&self, on: bool) {
         self.fail_economics_writes
@@ -1324,7 +1324,7 @@ impl Storage {
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             return Err(std::io::Error::other(
-                "injected storage-economics persist failure (BLG-0190)",
+                "injected storage-economics persist failure ",
             ));
         }
         let val = encode(snapshot)?;
@@ -2480,7 +2480,7 @@ mod tests {
         assert!(storage.db.get(b"MEMPOOL:corrupt").unwrap().is_none());
     }
 
-    /// BLG-0023: one bad SEEN record failed the whole load, so the node ran
+    ///: one bad SEEN record failed the whole load, so the node ran
     /// with no checkpoints and no double-sign memory.
     #[test]
     fn load_all_seen_blocks_skips_corrupt_records() {
@@ -2614,7 +2614,7 @@ mod tests {
         (blocks, tx_hash)
     }
 
-    /// P26-F07: a commit over a height that already holds a block writes no
+    ///: a commit over a height that already holds a block writes no
     /// recovery marker, so recovery can never delete the committed block.
     #[test]
     fn a_recommit_of_a_committed_height_needs_no_progress_marker() {
@@ -2641,7 +2641,7 @@ mod tests {
         assert!(storage.get_block_by_height(1).unwrap().is_some());
     }
 
-    /// P26-F06: a `previous_hash` cycle ends the walk with an error instead of
+    ///: a `previous_hash` cycle ends the walk with an error instead of
     /// looping on the boot path.
     #[test]
     fn a_previous_hash_cycle_is_an_error_not_a_loop() {
@@ -2656,7 +2656,7 @@ mod tests {
         assert!(storage.repair_index().is_err());
     }
 
-    /// P26-F06: a record stored under a key other than its own hash is refused.
+    ///: a record stored under a key other than its own hash is refused.
     #[test]
     fn a_record_under_the_wrong_hash_is_refused() {
         let dir = tempdir().unwrap();
@@ -2672,7 +2672,7 @@ mod tests {
         assert!(storage.load_chain().is_err());
     }
 
-    /// P26-F02: `delete_block` left the `TX_IDX` row pointing at a deleted block.
+    ///: `delete_block` left the `TX_IDX` row pointing at a deleted block.
     #[test]
     fn delete_block_removes_its_tx_index_rows() {
         let dir = tempdir().unwrap();
@@ -2684,7 +2684,7 @@ mod tests {
         assert_eq!(storage.get_tx_block_height(&tx_hash).unwrap(), None);
     }
 
-    /// P26-F02: a pruned prefix is not reported as damage by the audit.
+    ///: a pruned prefix is not reported as damage by the audit.
     #[test]
     fn check_integrity_accepts_a_pruned_prefix_but_not_a_gap() {
         let dir = tempdir().unwrap();
@@ -2698,7 +2698,7 @@ mod tests {
         assert!(!storage.check_integrity().unwrap().is_empty());
     }
 
-    /// P26-F02: a dangling height index is an error, not a short chain.
+    ///: a dangling height index is an error, not a short chain.
     #[test]
     fn load_chain_reports_a_missing_indexed_parent() {
         let dir = tempdir().unwrap();
@@ -2780,7 +2780,7 @@ mod storage_decode_locks {
         assert!(super::decode::<Stored>(b"\xff\xff\xff").is_err());
     }
 
-    /// P26-F05: a database written by a newer schema is refused, not opened.
+    ///: a database written by a newer schema is refused, not opened.
     #[test]
     fn a_newer_schema_version_refuses_to_open() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -89,7 +89,7 @@ impl QuarantineLedger {
         );
     }
 
-    /// Drops alarms older than `retention_blocks` (BLG-0105/P04-F23): the
+    /// Drops alarms older than `retention_blocks`: the
     /// alarm log is history, and history that is never trimmed is a disk
     /// bill paid forever. Quarantine entries are live state - a frozen
     /// entity stays frozen until [`QuarantineLedger::release_entity`] - so
@@ -176,7 +176,7 @@ mod tests {
         assert_eq!(ledger, back);
     }
 
-    /// BLG-0105 (P04-F23): alarms are trimmed by age; live quarantine
+    ///: alarms are trimmed by age; live quarantine
     /// entries are not (a frozen entity stays frozen until released).
     #[test]
     fn alarms_trim_by_age_and_quarantine_survives_until_released() {

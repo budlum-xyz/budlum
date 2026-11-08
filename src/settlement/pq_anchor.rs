@@ -127,7 +127,7 @@ pub struct AnchorKeyEntry {
     pub algorithm: AnchorSignatureAlgorithm,
     /// The raw public key bytes.
     pub public_key: Vec<u8>,
-    /// BLG-0070 (P03-F13): the key epoch this entry is authorized for.
+    ///: the key epoch this entry is authorized for.
     /// After a rotation, entries from older epochs must stop verifying
     /// without anyone having to edit the book by hand.
     #[serde(default)]
@@ -173,14 +173,14 @@ pub enum AnchorError {
     InvalidSignature,
     /// The signer's (algorithm, key) pair is not in the keybook.
     SignerNotInKeybook,
-    /// BLG-0070: the anchor carries a rotated-out key epoch.
+    ///: the anchor carries a rotated-out key epoch.
     StaleAnchorEpoch {
         anchor_epoch: u32,
         current_epoch: u32,
     },
-    /// BLG-0075: the signature list is over its bound.
+    ///: the signature list is over its bound.
     TooManySignatures { max: usize, presented: usize },
-    /// BLG-0075: the same (algorithm, key) signed twice in one list.
+    ///: the same (algorithm, key) signed twice in one list.
     DuplicateSignature,
     /// Full verification requires at least every supported algorithm to be
     /// represented; a required family is missing.
@@ -418,7 +418,7 @@ impl AnchorSigner for HsmSignerStub {
 ///
 /// [`AnchorError::ProductionBlocked`] when `mode` is
 /// [`AnchorMode::ProductionApproved`].
-/// Node-side anchor emission (BLG-0076 / P03-F19): where a sealed anchor is
+/// Node-side anchor emission (/ ): where a sealed anchor is
 /// written, under which mode, at which key epoch, and with which key.
 ///
 /// The production trace runs on every global-header seal; the default is the
@@ -627,7 +627,7 @@ pub fn rotate_anchor_key_with_committee(
     let identities = state.trusted_devices.clone();
     let mut payload = Vec::with_capacity(26 + 8 + 8 + 8 + 32);
     payload.extend_from_slice(b"BDLM_PQ_ANCHOR_ROTATION_V2");
-    // BLG-0069 (P03-F12): the chain id is part of the signed payload. With
+    //: the chain id is part of the signed payload. With
     // the same committee devices on two networks, a V1 rotation certificate
     // could replay across them and force an epoch bump on the other chain.
     payload.extend_from_slice(&state.policy.chain_id.to_le_bytes());
@@ -1029,7 +1029,7 @@ mod tests {
             )
         );
     }
-    // ---- BLG-0075 (P03-F18) ----
+    // ---- ----
 
     #[test]
     fn a_repeated_signature_in_one_anchor_is_refused() {

@@ -68,7 +68,7 @@ mod rpc_tests {
             MethodKind, SlotDisclosure, VerificationMethod,
         };
         let poa = crate::domain::ConsensusKind::PoA;
-        // The receipt is signed by the subject's account key (BLG-0097), and
+        // The receipt is signed by the subject's account key, and
         // the V4 address IS that key, so the subject is derived from it.
         let subject_keys = crate::crypto::primitives::KeyPair::generate().expect("keypair");
         let subject = Address::from(subject_keys.public_key_bytes());
@@ -788,7 +788,7 @@ mod rpc_tests {
         // The relayed submit path requires the sender to be an active relayer.
         // Fund and register a relayer (staking == registration), then use it as
         // The message sender.
-        // The message envelope is signed (BLG-0113): the V4 address IS the
+        // The message envelope is signed: the V4 address IS the
         // Ed25519 public key, so the relayer is derived from the key that
         // signs.
         let relayer_keys = crate::crypto::primitives::KeyPair::generate().unwrap();

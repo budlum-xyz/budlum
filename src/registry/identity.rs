@@ -179,7 +179,7 @@ pub struct IdentityRecord {
     /// the first credential is issued - there is no "empty root" state a
     /// reader could mistake for "issued, then revoked".
     pub credential_root: Option<[u8; 32]>,
-    /// BLG-0095 (P04-F13): every credential root ever asserted here. The
+    ///: every credential root ever asserted here. The
     /// single `credential_root` above is the LATEST; validity accepts any
     /// root still on record, so issuing a second credential no longer
     /// silently invalidates the first.
@@ -592,7 +592,7 @@ impl IdentityRegistry {
                     did: did_of(&subject),
                 });
             }
-            // BLG-0095 (P04-F13): the issuer must be a REGISTERED DID - or
+            //: the issuer must be a REGISTERED DID - or
             // the subject themself (self-issuance). The old check also let
             // "any key_id on the SUBJECT's record" vouch for the issuer,
             // which an unregistered issuer could pass.
@@ -611,7 +611,7 @@ impl IdentityRegistry {
         self.credentials.insert(hex32(&id), credential);
         if let Some(record) = self.records.get_mut(&subject) {
             record.credential_root = Some(root);
-            // BLG-0095 (P04-F13): the root joins the record's live set
+            //: the root joins the record's live set
             // instead of replacing it - issuing a second credential no
             // longer silently invalidates the first.
             record.credential_roots.insert(root);
@@ -744,7 +744,7 @@ impl IdentityRegistry {
                 &guardians,
             ]);
         }
-        // BLG-0096 (P04-F14): the id folds root, issuer and issued_at only,
+        //: the id folds root, issuer and issued_at only,
         // yet validity reads the subject, the schema and the expiry. The
         // fold below commits every field the validity check decides on, so
         // the root and the decision can no longer disagree.
@@ -794,7 +794,7 @@ impl IdentityRegistry {
                 .ok_or_else(|| IdentityError::UnknownSubject {
                     did: did_of(&credential.subject),
                 })?;
-        // BLG-0095 (P04-F13): any root still on record is valid - the
+        //: any root still on record is valid - the
         // latest-only comparison invalidated every earlier credential the
         // moment a second one landed.
         if record.credential_root != Some(credential.root())
@@ -895,7 +895,7 @@ pub enum IdentityTx {
     Register { record: IdentityRecord },
     /// Issue a credential commitment to a registered subject.
     ///
-    /// BLG-0095 (P04-F13): unless the subject IS the issuer, the subject
+    ///: unless the subject IS the issuer, the subject
     /// must consent - a signature by one of the subject's live methods over
     /// the issue-consent digest. Issuing to somebody else used to need only
     /// "sender == issuer", so any registered DID could plant credentials in
@@ -923,7 +923,7 @@ pub struct GuardianApproval {
     pub signature: Vec<u8>,
 }
 
-/// The subject's word on an issuance aimed at them (BLG-0095), at the
+/// The subject's word on an issuance aimed at them, at the
 /// transaction door: the full method key and its signature over
 /// [`issue_consent_digest`]. The key's wallet address must be a live
 /// verification method of the subject record - a consent from a key the
@@ -1003,7 +1003,7 @@ pub fn authorize_recovery(
     registry.guardian_recovery(subject, new_key, &guardians, epoch)
 }
 
-/// BLG-0095 (P04-F13): verify the subject's consent at the crypto door -
+///: verify the subject's consent at the crypto door -
 /// the same rules as [`authorize_recovery`]: the consenting key's wallet
 /// address must be a LIVE verification method of the subject, and the
 /// signature must speak the issue-consent digest of THIS credential on
@@ -1095,7 +1095,7 @@ pub fn execute_identity_tx(
                     did_of(&credential.issuer)
                 )));
             }
-            // BLG-0095 (P04-F13): the subject consents unless the subject IS
+            //: the subject consents unless the subject IS
             // the issuer (self-issuance - the sender already proves both).
             if credential.subject != credential.issuer {
                 let consent = consent.ok_or_else(|| {
@@ -1723,7 +1723,7 @@ mod tests {
                 100,
             )
             .unwrap();
-        // BLG-0099 (P04-F17): the result is the point - the edited
+        //: the result is the point - the edited
         // credential's id is unknown, and the refusal says so.
         assert!(matches!(
             registry.is_credential_valid(&original_id, 500),
@@ -2014,7 +2014,7 @@ mod tests {
                 100,
             )
             .unwrap();
-        // BLG-0095 (P04-F13): the issuer to a THIRD-PARTY subject needs the
+        //: the issuer to a THIRD-PARTY subject needs the
         // subject's consent - refused at the door without one. The Op layer
         // below sets up the Revoke flow as the direct write it has always
         // been (consent is a door rule, like the sender rule above).
@@ -2118,7 +2118,7 @@ mod tests {
         assert!(matches!(empty.validate(), Err(IdentityError::NoFields)));
     }
 
-    /// BLG-0095 (P04-F13): a third-party issuance needs the subject's
+    ///: a third-party issuance needs the subject's
     /// consent, signed by a live method key over the exact credential and
     /// this chain. Without one - or with a junk one - the door refuses and
     /// no credential lands. A self-issue needs no consent: the subject is
@@ -2200,7 +2200,7 @@ mod tests {
         .unwrap();
     }
 
-    /// BLG-0096 (P04-F14): a second issue must not orphan the first. The
+    ///: a second issue must not orphan the first. The
     /// record keeps every root it ever accepted and validity consults all
     /// of them, while the record root still answers to each issuance.
     #[test]
@@ -2267,7 +2267,7 @@ mod tests {
         assert!(registry.is_credential_valid(&second_id, 200).is_ok());
     }
 
-    /// BLG-0099 (P04-F17): the happy paths that need a real wallet signature
+    ///: the happy paths that need a real wallet signature
     ///   a consented third-party Issue and a guardian-quorum Recover. They
     ///   live behind `wallet-ml-dsa`: the build that carries the wallet is the
     ///   build that can sign. The refusal paths run unguarded everywhere.

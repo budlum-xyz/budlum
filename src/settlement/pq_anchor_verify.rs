@@ -27,7 +27,7 @@ pub(crate) fn verify_one(
 }
 
 /// Ensures a signer's (algorithm, key) pair is authorized by the keybook
-/// **for the anchor's key epoch** (BLG-0070): a rotated-out entry cannot
+/// **for the anchor's key epoch**: a rotated-out entry cannot
 /// authorize anything, however it got into the book.
 fn in_keybook(
     keybook: &[AnchorKeyEntry],
@@ -40,11 +40,11 @@ fn in_keybook(
         .any(|e| e.algorithm == algorithm && e.public_key == public_key && e.key_epoch == key_epoch)
 }
 
-/// BLG-0075 (P03-F18): how many signatures one anchor may carry. Each one
+///: how many signatures one anchor may carry. Each one
 /// costs an ML-DSA-87 verification; an unbounded list is a DoS multiplier.
 pub const MAX_ANCHOR_SIGNATURES: usize = 8;
 
-/// BLG-0075: refuse oversized or self-duplicate signature lists before any
+///: refuse oversized or self-duplicate signature lists before any
 /// expensive verification runs.
 pub(crate) fn check_signature_list(signatures: &[AnchorSignature]) -> Result<(), AnchorError> {
     if signatures.is_empty() {
@@ -82,7 +82,7 @@ pub fn verify_anchor_full(
     current_key_epoch: u32,
 ) -> Result<(), AnchorError> {
     check_signature_list(&anchor.signatures)?;
-    // BLG-0070 (P03-F13): an anchor from a rotated-out epoch is dead on
+    //: an anchor from a rotated-out epoch is dead on
     // arrival. Without this comparison an old key kept verifying until the
     // keybook was edited by hand.
     if anchor.key_epoch != current_key_epoch {
@@ -132,9 +132,9 @@ pub fn verify_anchor_light(
     keybook: &[AnchorKeyEntry],
     current_key_epoch: u32,
 ) -> Result<(), AnchorError> {
-    // BLG-0075: the same list bound applies to the light path.
+    //: the same list bound applies to the light path.
     check_signature_list(&anchor.signatures)?;
-    // BLG-0070: light verification applies the same epoch rule.
+    //: light verification applies the same epoch rule.
     if anchor.key_epoch != current_key_epoch {
         return Err(AnchorError::StaleAnchorEpoch {
             anchor_epoch: anchor.key_epoch,

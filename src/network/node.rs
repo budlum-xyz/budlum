@@ -455,7 +455,7 @@ pub struct Node {
     /// Target peer for each in-flight Bitswap request so `ConnectionClosed`
     /// retires only requests sent to the peer whose connection actually closed.
     bitswap_request_peers: HashMap<request_response::OutboundRequestId, PeerId>,
-    /// BLG-0212 (P11-F11): outstanding Bitswap answers per content id. A
+    ///: outstanding Bitswap answers per content id. A
     /// waiters list used to be removed only when a response delivered data;
     /// every `not_found`, every malformed response and every disconnected
     /// peer left the entry - and the callers in it - in the map forever.
@@ -1653,7 +1653,7 @@ impl Node {
 
     /// Record the vote high-water marks.
     ///
-    /// BLG-0210 (P11-F09): written BEFORE the vote is published, never
+    ///: written BEFORE the vote is published, never
     /// batched, and atomically. Persist-then-publish can at worst lose a
     /// round (mark ahead of the wire); the old publish-then-persist order lost
     /// the record of a vote everyone else saw.
@@ -1673,7 +1673,7 @@ impl Node {
             "last_prevote_height": self.last_prevote_height,
             "last_precommit_height": self.last_precommit_height,
         });
-        // BLG-0210 (P11-F09): tmp + fsync + rename. A plain `fs::write` left
+        //: tmp + fsync + rename. A plain `fs::write` left
         // a truncated file behind when a crash landed mid-write; the loader
         // parsed nothing, reset BOTH high-water marks to zero, and the vote
         // that triggered the write was already on the wire - the exact
@@ -1942,7 +1942,7 @@ impl Node {
                                     sig_bls: precommit.sig_bls,
                                     auth_sig: precommit.auth_sig,
                                 };
-                                // BLG-0210: the mark is durable before the
+                                //: the mark is durable before the
                                 // bytes leave on the wire.
                                 self.last_precommit_height = agg_state.checkpoint_height;
                                 self.save_vote_history();
@@ -1967,7 +1967,7 @@ impl Node {
                             // mismatch" on every network where the two
                             // divisors differ, so the prevote quorum
                             // was never reached and native BLS
-                            // finality never advanced (P10-F01).
+                            // finality never advanced.
                             let epoch = checkpoint_height
                                 / crate::core::chain_config::epoch_len_for_chain_id(
                                     chain_id,
@@ -1988,7 +1988,7 @@ impl Node {
                                         sig_bls: prevote.sig_bls,
                                         auth_sig: prevote.auth_sig,
                                     };
-                                    // BLG-0210: persist-before-publish, as
+                                    //: persist-before-publish, as
                                     // for the precommit above.
                                     self.last_prevote_height = checkpoint_height;
                                     self.save_vote_history();
@@ -2236,7 +2236,7 @@ impl Node {
                                             }
                                             entry.push(response);
                                             let want_cid = bud_node::store::ContentId(cid);
-                                            // BLG-0212: one attempt per peer asked;
+                                            //: one attempt per peer asked;
                                             // the counter is what lets a failing route
                                             // (not_found, bad response, disconnect)
                                             // retire the waiters instead of parking them.
@@ -3478,7 +3478,7 @@ impl Node {
                                             &header.calculate_hash()[..16]
                                         );
                                         // Nothing about the header is validated here, so it
-                                        // earns neither a forward verdict nor score credit (P11-F03).
+                                        // earns neither a forward verdict nor score credit.
                                         self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                         continue;
                                     }
@@ -3866,7 +3866,7 @@ impl Node {
                                                     }
                                                 }
                                             }
-                                            // BLG-0212: recompute remaining live asks from
+                                            //: recompute remaining live asks from
                                             // `bitswap_requests` using `requested_cid` (never
                                             // `response_cid`, which is peer-chosen!).
                                             if attempt_failed {
@@ -4150,7 +4150,7 @@ mod sync_handler_order_tests {
             .unwrap_or("")
     }
 
-    /// BLG-0202: a multi byte character on the cut must not panic.
+    ///: a multi byte character on the cut must not panic.
     #[test]
     fn log_prefix_survives_multibyte_input() {
         let hostile = format!("{}{}", "a".repeat(15), "\u{20ac}\u{20ac}");
@@ -4158,7 +4158,7 @@ mod sync_handler_order_tests {
         assert_eq!(super::log_prefix("abc", 16), "abc");
     }
 
-    /// BLG-0202: no byte slice of a peer string is left in the production path.
+    ///: no byte slice of a peer string is left in the production path.
     #[test]
     fn no_byte_slice_of_checkpoint_hash_in_logs() {
         let needle = format!("{}[..16", "checkpoint_hash");
@@ -4167,7 +4167,7 @@ mod sync_handler_order_tests {
         assert!(!code.contains(&needle) && !code.contains(&needle2));
     }
 
-    /// BLG-0203 / CWE-693: gossipsub holds messages until per-arm validation
+    /// / CWE-693: gossipsub holds messages until per-arm validation
     /// succeeds; neither `Accept` nor `record_valid` may precede `match msg`.
     #[test]
     fn gossipsub_forwarding_waits_for_the_application_verdict() {
@@ -4192,7 +4192,7 @@ mod sync_handler_order_tests {
         );
     }
 
-    /// BLG-0204: gossip batches get the cheap checks and earn credit only
+    ///: gossip batches get the cheap checks and earn credit only
     /// when the chain moved.
     #[test]
     fn gossip_block_batches_are_prechecked_and_not_credited_blindly() {
@@ -4202,7 +4202,7 @@ mod sync_handler_order_tests {
         }
         assert!(code.contains("> height_before"));
         assert!(code.contains("> snap_height_before"));
-        // P11-F03: an unvalidated GlobalHeader earns no credit.
+        //: an unvalidated GlobalHeader earns no credit.
         let arm = code
             .split_once("NetworkMessage::GlobalHeader(header) => {")
             .and_then(|(_, rest)| rest.split_once("Computed invalid message"))
@@ -4211,7 +4211,7 @@ mod sync_handler_order_tests {
         assert!(!arm.contains("report_good_behavior"));
     }
 
-    /// BLG-0205: the guard compares the height that is signed.
+    ///: the guard compares the height that is signed.
     #[test]
     fn precommit_guard_blocks_equal_and_lower_aggregator_heights() {
         assert!(!super::precommit_height_is_new(100, 100));
@@ -4225,7 +4225,7 @@ mod sync_handler_order_tests {
         );
     }
 
-    /// BLG-0209: the cid a Bitswap response is checked against comes from the
+    ///: the cid a Bitswap response is checked against comes from the
     /// request we sent.
     #[test]
     fn bitswap_response_is_checked_against_the_requested_cid() {
@@ -4240,7 +4240,7 @@ mod sync_handler_order_tests {
         assert!(code.contains("self.bitswap_requests.remove(request_id)"));
     }
 
-    /// BLG-0550: ban and rate limit run before the protobuf decode.
+    ///: ban and rate limit run before the protobuf decode.
     #[test]
     fn sync_request_checks_ban_and_rate_before_decode() {
         let code = production();
@@ -4255,7 +4255,7 @@ mod sync_handler_order_tests {
         assert!(rate < parse, "the decode must come after the rate limit");
     }
 
-    /// BLG-0551: the stream cap is set on the request/response config.
+    ///: the stream cap is set on the request/response config.
     #[test]
     fn request_response_config_caps_concurrent_streams() {
         let code = production();

@@ -19,7 +19,7 @@ pub enum ProofVerificationError {
     EventHeightMismatch,
     EventIndexMismatch,
     EventLeafMismatch,
-    /// BLG-0081: the message body does not hash to its claimed id.
+    ///: the message body does not hash to its claimed id.
     EventMessageIdMismatch,
     InvalidMerkleProof,
     CommitmentBlockHashMismatch,
@@ -86,7 +86,7 @@ impl SettlementProofVerifier {
         if event.leaf_hash() != proof.leaf {
             return Err(ProofVerificationError::EventLeafMismatch);
         }
-        // BLG-0081 (P03-F24): a carried cross-domain message must be
+        //: a carried cross-domain message must be
         // self-consistent - its id has to match its body. The bridge checks
         // this on mint (bridge.rs); the verifier accepted any body under any
         // id, and only the id is bound into the leaf.
@@ -122,7 +122,7 @@ impl SettlementProofVerifier {
             },
         )?;
 
-        // BLG-0081: the block hash check is not optional. It used to be a
+        //: the block hash check is not optional. It used to be a
         // `None`-skippable Option; every caller knew the hash, and the skip
         // path was pure bypass surface.
         if commitment.domain_block_hash != expected_block_hash {
