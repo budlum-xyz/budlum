@@ -10,7 +10,7 @@
 //! WIRING: unwired - the v3 wallet surface belongs to the custody path; in-tree readers land with it (the crate binary and SDK callers are not wired yet).
 
 use crate::crypto::key_derivation::{RootSecret, UserAccount, ENTROPY_LEN};
-use crate::{entropy_to_mnemonic, mnemonic_to_entropy, WalletError};
+use crate::{entropy_to_mnemonic, mnemonic_to_entropy, normalize_mnemonic_nfkd, WalletError};
 use zeroize::{Zeroize, Zeroizing};
 
 /// The word count of a V3 wallet.
@@ -72,11 +72,12 @@ impl WalletV3 {
     /// refused), [`WalletError::InvalidMnemonic`] for a bad checksum.
 /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
     pub fn from_mnemonic(mnemonic: &str, password: &str) -> Result<Self, WalletError> {
-        let words = mnemonic.split_whitespace().count();
+        let normalized = normalize_mnemonic_nfkd(mnemonic);
+        let words = normalized.split_whitespace().count();
         if words != WORD_COUNT {
             return Err(WalletError::InvalidWordCount(words));
         }
-        let mut entropy = mnemonic_to_entropy(mnemonic)?;
+        let mut entropy = mnemonic_to_entropy(&normalized)?;
         let wallet = Self::from_entropy(&entropy, password);
         entropy.zeroize();
         wallet
