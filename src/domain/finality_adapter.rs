@@ -1525,12 +1525,6 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
                         "Storage attestation PoS validator set is empty".into(),
                     ));
                 }
-                if cert.chain_id != domain.domain_chain_id {
-                    return Ok(FinalityStatus::Rejected(format!(
-                        "Storage attestation PoS cert chain id {} does not match domain {} chain id {}",
-                        cert.chain_id, domain.id, domain.domain_chain_id
-                    )));
-                }
                 if cert.checkpoint_height != commitment.domain_height {
                     return Ok(FinalityStatus::Rejected(
                         "Storage attestation PoS cert height mismatch".into(),
@@ -1611,12 +1605,6 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
                     return Ok(FinalityStatus::Rejected(
                         "Storage attestation BFT commit hash does not match commitment".into(),
                     ));
-                }
-                if cert.chain_id != domain.domain_chain_id {
-                    return Ok(FinalityStatus::Rejected(format!(
-                        "Storage attestation BFT cert chain id {} does not match domain {} chain id {}",
-                        cert.chain_id, domain.id, domain.domain_chain_id
-                    )));
                 }
                 if cert.checkpoint_height != commitment.domain_height {
                     return Ok(FinalityStatus::Rejected(

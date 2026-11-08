@@ -212,38 +212,6 @@ impl MapKey for (ContentId, ContentId) {
     }
 }
 
-impl MapKey for (Address, ContentId) {
-    fn to_key_string(&self) -> String {
-        format!("{}:{}", self.0.to_hex(), hex::encode(self.1 .0))
-    }
-    fn from_key_string(s: &str) -> Result<Self, String> {
-        let [address, content] = parts::<2>(s)?;
-        Ok((
-            Address(parse_hex32(address)?),
-            ContentId(parse_hex32(content)?),
-        ))
-    }
-}
-
-impl MapKey for (ContentId, ContentId, Address) {
-    fn to_key_string(&self) -> String {
-        format!(
-            "{}:{}:{}",
-            hex::encode(self.0 .0),
-            hex::encode(self.1 .0),
-            self.2.to_hex()
-        )
-    }
-    fn from_key_string(s: &str) -> Result<Self, String> {
-        let [manifest, shard, address] = parts::<3>(s)?;
-        Ok((
-            ContentId(parse_hex32(manifest)?),
-            ContentId(parse_hex32(shard)?),
-            Address(parse_hex32(address)?),
-        ))
-    }
-}
-
 /// `#[serde(with)]` half: string keys for JSON, the derived layout for
 /// binary formats.
 pub fn serialize<S, Key, Value>(

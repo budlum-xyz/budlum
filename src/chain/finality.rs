@@ -771,12 +771,6 @@ impl FinalityAggregator {
             &vote.sig_bls,
         )
         .map_err(|e| format!("Invalid precommit signature: {e}"))?;
-        // A registered PQ signer cannot downgrade its vote to BLS-only. Reject
-        // before deduplication or equivocation bookkeeping so a stripped copy
-        // cannot occupy the authentic precommit's slot (PR110-C4510256171).
-        if !entry.pq_public_key.is_empty() && vote.pq_sig.is_empty() {
-            return Err("Missing PQ attestation in precommit".into());
-        }
 
         // Equivocation detection .
         self.detect_precommit_equivocation(&vote);

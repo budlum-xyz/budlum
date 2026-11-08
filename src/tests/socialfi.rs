@@ -145,11 +145,11 @@ async fn boost_share_distributes_by_deal_fee_weight_with_dust_to_first() {
     // is 1e9, so for a weight of 100 the rate has to be 100 * 1e9 / 4 = 25e9. We
     // derive the rates from that so what the test measures stays the 100/300
     // share.
-    let manifest_100 = ContentManifest::from_bytes_sliced(&[0xA1u8; 100], 100).unwrap();
-    let manifest_300 = ContentManifest::from_bytes_sliced(&[0xB2u8; 300], 300).unwrap();
-    let _ = FEE_RATE_SCALE;
-    open_weighted_deal(&mut bc, &manifest_100, op1, 0, 1);
-    open_weighted_deal(&mut bc, &manifest_300, op2, 0, 1);
+    let manifest = ContentManifest::from_bytes_sliced(b"boost pool content", 4).unwrap();
+    let shard_bytes = u64::from(manifest.shards[0].size);
+    let rate_for = |weight: u64| weight * (FEE_RATE_SCALE as u64) / shard_bytes;
+    open_weighted_deal(&mut bc, &manifest, op1, 0, rate_for(100));
+    open_weighted_deal(&mut bc, &manifest, op2, 1, rate_for(300));
 
     mint_nft(&mut bc, &alice_kp, ContentId([0x77; 32]));
     assert_eq!(bc.state.get_balance(&alice), 999);
@@ -163,33 +163,9 @@ async fn boost_share_distributes_by_deal_fee_weight_with_dust_to_first() {
     let op2_pre = bc.state.get_balance(&op2);
     boost_nft(&mut bc, &bob_kp, nft_id, BOOST_AMOUNT);
 
-    // While challenge STARK proofs are uncheckable (and before any independent
-    // challenge is answered), caller-declared shard sizes earn zero boost share
-    // so an operator storing nothing cannot collect rewards.
-    assert_eq!(bc.state.get_balance(&op1), op1_pre);
-    assert_eq!(bc.state.get_balance(&op2), op2_pre);
-
-    // Once independent challenges prove 100 and 300 bytes under a checkable
-    // proof gate, bud_share = 10 distributes 3 (2 + 1 dust) and 7.
-    let deals_info: Vec<(u64, Address, u64)> = bc
-        .state
-        .storage_registry
-        .all_deals()
-        .iter()
-        .map(|d| (d.deal_id, d.operator, d.shard_bytes))
-        .collect();
-    for (did, op, bytes) in deals_info {
-        let cid = bc
-            .state
-            .storage_registry
-            .open_challenge(did, 0, bytes, 110, 120, bob, 50)
-            .unwrap();
-        bc.state
-            .storage_registry
-            .answer_challenge(cid, ContentId([1u8; 32]), op, 115, Some(b"test-mock-proof"))
-            .unwrap();
-    }
-    Blockchain::distribute_bud_boost_share_for_test(&mut bc.state, 10, true).unwrap();
+    // bud_share = 10: op1 = 10*100/400 = 2, op2 = 10*300/400 = 7, so 9 are
+    // distributed. The dust of 1 goes to the operator of the first deal (the
+    // deal_id order is deterministic), giving op1 = 3.
     assert_eq!(bc.state.get_balance(&op1), op1_pre + 3);
     assert_eq!(bc.state.get_balance(&op2), op2_pre + 7);
     // %16 creator

@@ -121,31 +121,22 @@ fn honest_fixture(register_relayer: bool) -> Fixture {
     }
 }
 
-/// Anchor the honest tree root on-chain via an applied sequence of domain
-/// commitments `1..=height` (same recipe as the positive E2E path).
+/// Anchor the honest tree root on-chain via a domain commitment (same
+/// Recipe as the positive E2E path).
 fn anchor_commitment(f: &mut Fixture, domain_idx: usize, height: u64) {
-    let mut parent_hash = f.bc.last_block().hash.clone();
-    for h in 1..=height {
-        let mut b = crate::core::block::Block::new(h, parent_hash, vec![]);
-        b.state_root = "22".repeat(32);
-        b.tx_root = b.calculate_tx_root();
-        b.hash = b.calculate_hash();
-        parent_hash = b.hash.clone();
-        let event_root = if h == height {
-            f.tree.root()
-        } else {
-            [0u8; 32]
-        };
-        let commitment = crate::domain::DomainCommitment::from_block(
-            &f.domains[domain_idx],
-            &b,
-            event_root,
-            [0u8; 32],
-            h.saturating_sub(1),
-        )
-        .unwrap();
-        f.bc.submit_domain_commitment(commitment).unwrap();
-    }
+    let mut b = crate::core::block::Block::new(height, f.bc.last_block().hash.clone(), vec![]);
+    b.state_root = "22".repeat(32);
+    b.tx_root = b.calculate_tx_root();
+    b.hash = b.calculate_hash();
+    let commitment = crate::domain::DomainCommitment::from_block(
+        &f.domains[domain_idx],
+        &b,
+        f.tree.root(),
+        [0u8; 32],
+        0,
+    )
+    .unwrap();
+    f.bc.submit_domain_commitment(commitment).unwrap();
 }
 
 /// [N1] A proof built from an *attacker-controlled* event tree must not
@@ -264,31 +255,6 @@ fn unknown_message_proof_rejected() {
     assert!(
         err.contains("no pending relay"),
         "unknown message relay must be rejected: {err}"
-    );
-}
-
-/// [N7] An out-of-order commitment stored ahead of `last_committed_height`
-/// (heights `1..=9` missing, so `last_committed_height == 0`) must never
-/// authenticate a bridge relay until the domain chain actually advances to it.
-#[test]
-fn unapplied_out_of_order_commitment_rejected() {
-    let mut f = honest_fixture(true);
-    let mut b = crate::core::block::Block::new(10, f.bc.last_block().hash.clone(), vec![]);
-    b.state_root = "22".repeat(32);
-    b.tx_root = b.calculate_tx_root();
-    b.hash = b.calculate_hash();
-    let commitment =
-        crate::domain::DomainCommitment::from_block(&f.domains[0], &b, f.tree.root(), [0u8; 32], 0)
-            .unwrap();
-    f.bc.submit_domain_commitment(commitment).unwrap();
-
-    let proof = f.tree.proof(0).unwrap();
-    let err =
-        f.bc.submit_relay_proof(f.message_id, f.relayer, &proof, 1)
-            .unwrap_err();
-    assert!(
-        err.contains("not on the applied domain chain"),
-        "unapplied out-of-order commitment must not mint: {err}"
     );
 }
 

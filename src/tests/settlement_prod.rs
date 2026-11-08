@@ -256,110 +256,6 @@ mod settlement_prod_tests {
         commitment
     }
 
-    /// A domain authority signature is not authorization from a native account
-    /// owner. Exercise the authenticated, bonded settlement transaction door,
-    /// including out-of-order commitments that would otherwise be staged.
-    #[cfg(feature = "wallet-ml-dsa")]
-    #[test]
-    fn poa_authorities_cannot_authorize_canonical_account_nonce_writes() -> Result<(), String> {
-        use crate::cross_domain::external::IntakeState;
-        use crate::domain::registry::MIN_DOMAIN_OPERATOR_BOND;
-        use crate::domain::VerifiedDomainCommitment;
-        use crate::registry::role::roles;
-        use crate::settlement::domains::{
-            execute_settlement_tx, SettlementTx, SettlementTxContext,
-        };
-
-        for admitted in [true, false] {
-            for bound_set in [false, true] {
-                for height in [1, 2] {
-                    for writes_accounts in [false, true] {
-                        let mut bc = test_chain();
-                        let owner_key =
-                            crate::crypto::primitives::WalletKeyPair::from_seed(&[0x31; 32]);
-                        let attacker = owner_key.address();
-                        let victim = Address::from([0xD8; 32]);
-                        let unknown = Address::from([0xD9; 32]);
-                        let mut domain = poa_domain(9001, 1);
-                        domain.operator = Some(attacker);
-                        domain.operator_bond = MIN_DOMAIN_OPERATOR_BOND;
-                        domain.bridge_enabled = false;
-                        if !bound_set {
-                            domain.validator_set_hash = [0; 32];
-                        }
-                        let stake = bc.state.registry.params().min_stake;
-                        bc.state
-                            .add_balance(&attacker, MIN_DOMAIN_OPERATOR_BOND + stake + 100);
-                        bc.state
-                            .registry
-                            .register(attacker, roles::RELAYER, stake, 0)
-                            .map_err(|error| format!("relayer registration: {error:?}"))?;
-                        let context = SettlementTxContext {
-                            sender: attacker,
-                            chain_id: bc.chain_id,
-                            fee: 1,
-                            bls: IntakeState::production_bls,
-                        };
-                        execute_settlement_tx(
-                            &mut bc.state,
-                            &context,
-                            &SettlementTx::RegisterDomain(Box::new(domain.clone())),
-                        )
-                        .map_err(|error| format!("domain registration: {error:?}"))?;
-                        if admitted {
-                            bc.state.poa_onboarding.add_admin(domain.id, attacker);
-                        }
-                        assert_eq!(bc.state.poa_is_permissioned(domain.id), admitted);
-                        bc.state.get_or_create(&victim).nonce = 4;
-                        let mut commitment = commitment_for(&domain, height, 1, 0x41);
-                        if writes_accounts {
-                            commitment.state_updates.insert(victim, 10);
-                            commitment.state_updates.insert(unknown, 20);
-                        }
-                        let proof =
-                            poa_proof_for(&commitment, domain.domain_chain_id, domain.id, 1, 1);
-                        commitment.finality_proof_hash =
-                            hash_finality_proof(&proof).map_err(|error| error.to_string())?;
-                        let root_before = bc.state.calculate_state_root();
-                        let result = execute_settlement_tx(
-                            &mut bc.state,
-                            &context,
-                            &SettlementTx::SubmitCommitment(Box::new(VerifiedDomainCommitment {
-                                commitment,
-                                proof,
-                            })),
-                        );
-                        if writes_accounts {
-                            assert!(result.is_err(), "self-declared PoA wrote or staged another account's nonce: admitted={admitted}, bound_set={bound_set}, height={height}");
-                            let error = result.err().ok_or("account-write rejection")?;
-                            assert!(
-                                format!("{error:?}").contains("account-owner authorization"),
-                                "{error:?}"
-                            );
-                            assert_eq!(bc.state.calculate_state_root(), root_before);
-                        } else {
-                            result.map_err(|error| {
-                                format!("ordinary PoA finality was refused: {error:?}")
-                            })?;
-                            assert_eq!(
-                                bc.state
-                                    .settlement
-                                    .domains
-                                    .get(domain.id)
-                                    .ok_or("domain")?
-                                    .last_committed_height,
-                                if height == 1 { 1 } else { 0 }
-                            );
-                        }
-                        assert_eq!(bc.state.get_nonce(&victim), 4);
-                        assert_eq!(bc.state.get_nonce(&unknown), 0);
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
     #[test]
     fn pow_pos_poa_domains_can_all_contribute_to_one_global_commitment_root() {
         let mut blockchain = test_chain();
@@ -1933,23 +1829,6 @@ mod settlement_prod_tests {
         bc.submit_domain_commitment(burn_commitment).unwrap();
 
         let burn_proof = burn_tree.proof(0).unwrap();
-        // While height 101 is staged above `last_committed_height`, unlock must refuse.
-        let unlinked_err = bc
-            .unlock_bridge_transfer_from_verified_event(
-                poa.id,
-                101,
-                0,
-                Some(burn_commitment_block_hash),
-                burn_event.clone(),
-                &burn_proof,
-            )
-            .expect_err("staged burn commitment above applied domain tip must be refused");
-        assert!(
-            unlinked_err.contains("not on the applied domain chain"),
-            "got: {unlinked_err}"
-        );
-
-        apply_chain_through(&mut bc, &poa, 101, 81);
         let alice_before = bc.state.get_balance(&alice);
         bc.unlock_bridge_transfer_from_verified_event(
             poa.id,

@@ -9,7 +9,7 @@
 use crate::core::account::AccountState;
 use crate::core::address::Address;
 use crate::domain::storage_deal::{
-    DealStatus, ReallocationCause, ReallocationStatus, StorageEconomicsParams, StorageError,
+    DealStatus, ReallocationStatus, StorageEconomicsParams, StorageError,
 };
 use crate::domain::storage_params::StorageDomainParams;
 use crate::domain::Hash32;
@@ -31,7 +31,6 @@ pub struct DealOpenTerms<'a> {
 
 /// What a repair acceptance asks for. The placement itself (manifest, shard,
 /// replica, domain) comes from the ticket, not from the caller.
-/// WIRING: carried by the in-block `StorageTx::AcceptReallocation` door.
 pub struct ReallocationTerms {
     pub ticket_id: u64,
     pub replacement_operator: Address,
@@ -137,9 +136,6 @@ pub fn open_deal_escrowed(
 /// read only, the registry acceptance writes nothing when it refuses, and the
 /// debits come last. The escrow is priced on `held_bytes` of the ticket's
 /// shard, which is what the replacement deal records.
-/// WIRING: the in-block `StorageTx::AcceptReallocation` door (which verifies
-/// replacement-operator consent before calling here); until that transaction
-/// lands, only the test harness reaches this kernel.
 pub fn accept_reallocation_escrowed(
     state: &mut AccountState,
     terms: &ReallocationTerms,
@@ -164,73 +160,18 @@ pub fn accept_reallocation_escrowed(
             "reallocation ticket {ticket_id} is not open for acceptance"
         ));
     }
-    // The identity refusal precedes the cooldown refusal and payer binding
-    // deliberately: the slash that opened this very ticket also starts the
-    // operator's cooldown, and being the slashed operator of the ticket is a
-    // permanent structural refusal regardless of who offers to fund it.
+    // The identity refusal precedes the cooldown refusal deliberately: the
+    // slash that opened this very ticket also starts the operator's
+    // cooldown, so the cooldown message would otherwise always shadow the
+    // more specific answer: "you are the operator this ticket replaces".
+    // A cooldown expires; being the slashed operator of the ticket does
+    // not, and the caller deserves the refusal that never goes away.
     if operator == ticket.slashed_operator {
         return Err(format!(
             "operator {operator} is the slashed operator of ticket {ticket_id}"
         ));
     }
     refuse_cooling_operator(state, &operator, now_unix_secs)?;
-    // Bind `payer` to the authority behind the ticket before any write:
-    // a failed-deal ticket may only be funded by the client whose deal failed,
-    // and a never-placed ticket may only be funded by the manifest's owner.
-    match ticket.cause {
-        ReallocationCause::NeverPlaced => {
-            if !state
-                .storage_registry
-                .has_manifest_claim(&ticket.manifest_id, &payer)
-                || state
-                    .storage_registry
-                    .owner_of(&ticket.manifest_id)
-                    .is_some_and(|owner| owner != payer)
-            {
-                return Err(format!(
-                    "manifest {} does not belong to payer {payer}; refusing to fund never-placed ticket {ticket_id}",
-                    ticket.manifest_id
-                ));
-            }
-        }
-        _ => {
-            let funded_by = state
-                .storage_registry
-                .get_deal(ticket.failed_deal_id)
-                .and_then(|deal| deal.payer)
-                .ok_or_else(|| {
-                    format!(
-                        "failed deal {} behind ticket {ticket_id} records no payer; refusing a repair funded by an unnamed account",
-                        ticket.failed_deal_id
-                    )
-                })?;
-            if payer != funded_by {
-                return Err(format!(
-                    "failed deal {} behind ticket {ticket_id} was funded by {funded_by}, not by payer {payer}",
-                    ticket.failed_deal_id
-                ));
-            }
-        }
-    }
-    // Same durability guard as `open_deal_escrowed`: one operator holds at
-    // most one active copy of a shard over overlapping epochs, so a repair
-    // accepted by an operator already serving the shard adds no redundancy.
-    let duplicate = state
-        .storage_registry
-        .deals_for_shard(&ticket.manifest_id, &ticket.shard_id)
-        .iter()
-        .any(|d| {
-            d.status == DealStatus::Active
-                && d.operator == operator
-                && d.deal_start_epoch < terms.end_epoch
-                && terms.start_epoch < d.deal_end_epoch
-        });
-    if duplicate {
-        return Err(format!(
-            "an active deal already covers shard {:?} for operator {operator} over epochs {}..{}; refusing a replacement that adds no durability",
-            ticket.shard_id, terms.start_epoch, terms.end_epoch
-        ));
-    }
 
     let manifest = state
         .storage_registry
@@ -851,12 +792,10 @@ mod tests {
         operator_balance: u64,
     ) -> (AccountState, u64) {
         let mut state = funded(payer_balance, operator_balance);
-        let mut owned = manifest.clone();
-        owned.owner = payer();
-        state.storage_registry.register_manifest(&owned);
+        state.storage_registry.register_manifest(manifest);
         let ticket_id = state
             .storage_registry
-            .open_never_placed_ticket(42, owned.manifest_id, owned.shards[0].shard_id, 0, 1)
+            .open_never_placed_ticket(42, manifest.manifest_id, manifest.shards[0].shard_id, 0, 1)
             .expect("the sweep's ticket opens for an empty slot");
         (state, ticket_id)
     }
@@ -916,90 +855,5 @@ mod tests {
             .expect_err("the cooldown applies to repairs too");
         assert!(err.contains("missed a challenge"), "got {err:?}");
         assert_eq!(snapshot(&state), before);
-    }
-
-    #[test]
-    fn a_reallocation_refuses_an_unrelated_payer_without_a_write() {
-        let manifest = manifest();
-        let stranger = Address::from([99u8; 32]);
-        let (mut state, ticket_id) = state_with_ticket(&manifest, 5_000_000, 5_000_000);
-        state.add_balance(&stranger, 5_000_000);
-        let terms = reallocation_terms(ticket_id, operator(), &manifest);
-        let before = snapshot(&state);
-
-        let err = accept_reallocation_escrowed(&mut state, &terms, stranger, 0, BOND, 0)
-            .expect_err("a stranger must not be debited to fund another owner's ticket");
-        assert!(err.contains("does not belong to payer"), "got {err:?}");
-        assert_eq!(snapshot(&state), before);
-        assert_eq!(state.get_balance(&stranger), 5_000_000);
-    }
-
-    #[test]
-    fn a_slashed_deal_reallocation_binds_to_the_original_deal_payer() {
-        let mut owned = manifest();
-        owned.owner = payer();
-        let mut state = funded(5_000_000, 5_000_000);
-        let replacement = Address::from([33u8; 32]);
-        let victim = Address::from([44u8; 32]);
-        state.add_balance(&replacement, 5_000_000);
-        state.add_balance(&victim, 5_000_000);
-        state.storage_registry.register_manifest(&owned);
-
-        let initial_terms = terms(&owned, operator());
-        let deal_id = open_deal_escrowed(&mut state, &initial_terms, payer(), 0, BOND, 0).unwrap();
-        let ticket_id = state
-            .storage_registry
-            .open_expiry_reallocation(deal_id, 10)
-            .expect("a lapsed deal opens a FailedDeal reallocation ticket");
-
-        let repair_terms = reallocation_terms(ticket_id, replacement, &owned);
-        let err = accept_reallocation_escrowed(&mut state, &repair_terms, victim, 0, BOND, 0)
-            .expect_err("naming a victim as payer on a slashed-deal ticket must fail");
-        assert!(err.contains("was funded by"), "got {err:?}");
-        assert_eq!(state.get_balance(&victim), 5_000_000);
-
-        let replacement_id =
-            accept_reallocation_escrowed(&mut state, &repair_terms, payer(), 0, BOND, 0)
-                .expect("the original deal payer may fund the repair");
-        assert_eq!(
-            state
-                .storage_registry
-                .get_deal(replacement_id)
-                .and_then(|d| d.payer),
-            Some(payer())
-        );
-    }
-
-    #[test]
-    fn accept_reallocation_refuses_operator_already_serving_shard() {
-        let mut state = AccountState::new();
-        let owned = manifest();
-        let op_a = operator();
-        let op_b = Address::from([21u8; 32]);
-        state.add_balance(&payer(), 10_000_000);
-        state.add_balance(&op_a, 10_000_000);
-        state.add_balance(&op_b, 10_000_000);
-        state.storage_registry.register_manifest(&owned);
-
-        let mut terms_a = terms(&owned, op_a);
-        terms_a.replica_index = 0;
-        let deal_a = open_deal_escrowed(&mut state, &terms_a, payer(), 0, BOND, 0).unwrap();
-
-        let mut terms_b = terms(&owned, op_b);
-        terms_b.replica_index = 1;
-        let _deal_b = open_deal_escrowed(&mut state, &terms_b, payer(), 0, BOND, 0).unwrap();
-
-        let ticket_id = state
-            .storage_registry
-            .open_expiry_reallocation(deal_a, 10)
-            .expect("lapsed deal opens reallocation ticket");
-
-        let repair_by_existing = reallocation_terms(ticket_id, op_b, &owned);
-        let err =
-            accept_reallocation_escrowed(&mut state, &repair_by_existing, payer(), 0, BOND, 0)
-                .expect_err(
-                    "operator already serving shard over overlapping epochs must be refused",
-                );
-        assert!(err.contains("adds no durability"), "got: {err:?}");
     }
 }

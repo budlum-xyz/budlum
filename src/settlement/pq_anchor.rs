@@ -1255,7 +1255,6 @@ mod tests {
                 max_value_per_settlement_atoms: 1000,
                 max_value_per_epoch_atoms: 3000,
                 min_height_advance: 1,
-                epoch_length_blocks: 100,
                 required_quorum: 3,
                 device_count: 6,
                 refusal_history_capacity: 8,

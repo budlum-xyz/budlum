@@ -914,7 +914,7 @@ pub fn wallet_address_from_ml_dsa_87_public_key(
 /// This form reads the statuses of a fresh genesis: every path that decides on
 /// behalf of a chain calls [`verify_ml_dsa_87_signature_in`] with the
 /// chain-state registry.
-fn verify_ml_dsa_87_signature(
+pub fn verify_ml_dsa_87_signature(
     ctx: &[u8],
     message: &[u8],
     signature: &[u8],
@@ -930,7 +930,7 @@ fn verify_ml_dsa_87_signature(
 }
 
 #[cfg(feature = "wallet-ml-dsa")]
-/// `verify_ml_dsa_87_signature` under the scheme statuses of a chain
+/// [`verify_ml_dsa_87_signature`] under the scheme statuses of a chain
 ///. A family the registry marks
 /// `Disabled` or not yet `Active` is refused before any key is decoded.
 pub fn verify_ml_dsa_87_signature_in(
@@ -982,7 +982,7 @@ pub fn verify_ml_dsa_87_signature_in(
 }
 
 #[cfg(not(feature = "wallet-ml-dsa"))]
-fn verify_ml_dsa_87_signature(
+pub fn verify_ml_dsa_87_signature(
     _ctx: &[u8],
     _message: &[u8],
     _signature: &[u8],
@@ -1163,10 +1163,14 @@ fn keypair_generate_does_not_leak_public_key_via_println() {
             println!("{canary}");
         }
         _ => {
-            // Test-only re-exec of this test binary via argv[0] to capture its
-            // stdout; no security decision depends on the path and avoiding
-            // `current_exe()` keeps Semgrep's SARIF free of suppressed alerts.
-            let exe = std::env::args().next().expect("test binary argv[0]");
+            // Test-only re-exec of this test binary to capture its stdout; no
+            // security decision depends on the path. The suppression carries
+            // the rule id alone: a trailing " - reason" after the id is not
+            // part of the recognised form in every semgrep version, and the
+            // alert this line exists to silence came back on the PR when it
+            // had one.
+            // nosemgrep: rust.lang.security.current-exe.current-exe
+            let exe = std::env::current_exe().expect("test binary path");
             // `--exact` matches the full test path, which includes the module
             // (without the crate name). A bare function name matches nothing,
             // and a probe that runs nothing prints nothing - the red-green

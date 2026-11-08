@@ -71,11 +71,6 @@ const BODY_TIMEOUT: Duration = Duration::from_secs(10);
 /// Most rows each cooldown table keeps. Rows older than the cooldown are
 /// dropped first; at the ceiling new requests are refused rather than
 /// letting the table grow without bound.
-/// One caller may make this many requests per window whether or not they are
-/// granted: the address and IP cooldowns alone let a client with fresh
-/// addresses and a source range spend the whole daily allowance in one burst.
-const CLIENT_REQUESTS_PER_WINDOW: u32 = 10;
-const REQUEST_WINDOW_SECS: u64 = 60;
 const MAX_TRACKED_KEYS: usize = 200_000;
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 
@@ -284,12 +279,6 @@ fn rpc_u64(value: &serde_json::Value, field: &str) -> Result<u64, String> {
 struct Node {
     url: String,
     http: reqwest::Client,
-    /// The operator key, when the node this faucet funds from runs with the RPC
-    /// gate on - which is its default. Read once from the file named by
-    /// `BUDLUM_RPC_API_KEY_FILE`; the environment carries a path, never the
-    /// secret (RT-002: without this header every call to an `auth_required`
-    /// node answered `401 Unauthorized`).
-    api_key: Option<String>,
 }
 
 impl Node {
@@ -300,24 +289,13 @@ impl Node {
     ) -> Result<serde_json::Value, String> {
         let body =
             serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
-        let mut request = self.http.post(&self.url).json(&body);
-        if let Some(key) = self.api_key.as_deref() {
-            request = request.header("x-api-key", key);
-        }
-        let response = request
+        let response = self
+            .http
+            .post(&self.url)
+            .json(&body)
             .send()
             .await
             .map_err(|e| format!("{method}: node unreachable: {e}"))?;
-        // An unauthorised answer carries no JSON-RPC error object, so name the
-        // cause here instead of reporting "answer is not JSON".
-        let status = response.status();
-        if matches!(status.as_u16(), 401 | 403) {
-            return Err(format!(
-                "{method}: node refused the call with HTTP {status}: it requires the operator \
-                 key; point {} at a 0600 file holding it",
-                budlum_core::rpc::client_auth::API_KEY_FILE_ENV
-            ));
-        }
         let value: serde_json::Value = response
             .json()
             .await
@@ -341,9 +319,6 @@ struct Faucet {
     identity: http_support::ClientIdentity,
     /// Do not queue an unbounded number of grants behind the nonce lock.
     grant_slots: Arc<Semaphore>,
-    /// Per-client request arrivals, charged before a request may queue for a
-    /// grant so one caller cannot hold the permit or spend the daily cap.
-    request_window: Mutex<BTreeMap<IpAddr, (u64, u32)>>,
     /// The ledger and the next nonce to use, under one lock so two requests
     /// cannot pass the same cooldown or sign with the same nonce.
     state: Mutex<(Ledger, u64)>,
@@ -502,32 +477,6 @@ async fn handle(
         Ok(to) => to,
         Err(e) => return Ok(error_response(StatusCode::BAD_REQUEST, &e)),
     };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    {
-        let mut window = faucet.request_window.lock().await;
-        if window.len() >= MAX_TRACKED_KEYS {
-            window.retain(|_, (start, _)| now.saturating_sub(*start) < REQUEST_WINDOW_SECS);
-        }
-        if window.len() >= MAX_TRACKED_KEYS && !window.contains_key(&ip) {
-            return Ok(error_response(
-                StatusCode::TOO_MANY_REQUESTS,
-                "faucet rate-limit table full; retry in a minute",
-            ));
-        }
-        let entry = window.entry(ip).or_insert((now, 0));
-        if now.saturating_sub(entry.0) >= REQUEST_WINDOW_SECS {
-            *entry = (now, 0);
-        }
-        if entry.1 >= CLIENT_REQUESTS_PER_WINDOW {
-            return Ok(error_response(
-                StatusCode::TOO_MANY_REQUESTS,
-                "too many faucet requests from this client; retry in a minute",
-            ));
-        }
-        entry.1 += 1;
-    }
     let Ok(permit) = faucet.grant_slots.clone().try_acquire_owned() else {
         return Ok(error_response(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -593,13 +542,7 @@ async fn serve(
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| format!("HTTP client: {e}"))?;
-    let api_key = budlum_core::rpc::client_auth::api_key_from_env()
-        .map_err(|e| format!("RPC operator key: {e}"))?;
-    let node = Node {
-        url: rpc_url,
-        http,
-        api_key,
-    };
+    let node = Node { url: rpc_url, http };
     let chain_id = node
         .call("bud_chainId", serde_json::json!([]))
         .await
@@ -619,7 +562,6 @@ async fn serve(
         policy,
         identity,
         grant_slots: Arc::new(Semaphore::new(1)),
-        request_window: Mutex::new(BTreeMap::new()),
         state: Mutex::new((Ledger::default(), 0)),
     });
     let listener = tokio::net::TcpListener::bind(listen)

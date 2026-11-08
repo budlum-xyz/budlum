@@ -17,7 +17,7 @@ name: Typos
 
 on:
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet]
+    branches: [main, fix/architecture-tip-adlari]
   push:
     branches: [main]
   workflow_dispatch:
@@ -42,7 +42,7 @@ jobs:
       - name: Install typos v1.48.0 (version + sha256 pinned)
         run: |
           set -euo pipefail
-          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/typos.tar.gz \
+          curl -sSfL -o /tmp/typos.tar.gz \
             https://github.com/crate-ci/typos/releases/download/v1.48.0/typos-v1.48.0-x86_64-unknown-linux-musl.tar.gz
           echo "72a930c9a94fc3914aa56835c5b859c892a797d40c1c42638b98d93f16ff519c  /tmp/typos.tar.gz" | sha256sum -c -
           mkdir -p /tmp/typos-bin
@@ -139,7 +139,7 @@ jobs:
       - name: Install trufflehog (version + sha256 pinned)
         run: |
           set -euo pipefail
-          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/th.tar.gz \
+          curl -sSfL -o /tmp/th.tar.gz \
             https://github.com/trufflesecurity/trufflehog/releases/download/v3.90.10/trufflehog_3.90.10_linux_amd64.tar.gz
           echo "32d349aea9b5b6644bb9a8ab8cb44314ce5912d730a16b1466511fc6c69a7ffc  /tmp/th.tar.gz" \
             | sha256sum -c - || {

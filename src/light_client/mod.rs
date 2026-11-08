@@ -650,29 +650,10 @@ impl LightClient {
             return Ok(outgoing.epoch);
         };
         let mut member_steps = Vec::with_capacity(steps.len());
-        for (idx, (cert, snapshot)) in steps.iter().enumerate() {
+        for (cert, snapshot) in steps {
             snapshot
                 .validate_metadata()
                 .map_err(LightClientError::TrustBinding)?;
-            let expected_next_epoch = outgoing
-                .epoch
-                .checked_add((idx as u64).saturating_add(1))
-                .ok_or_else(|| LightClientError::TrustBinding("handoff epoch overflow".into()))?;
-            if snapshot.epoch != expected_next_epoch {
-                return Err(LightClientError::TrustBinding(format!(
-                    "handoff snapshot epoch {} does not match expected {}",
-                    snapshot.epoch, expected_next_epoch
-                )));
-            }
-            for entry in &snapshot.validators {
-                if !entry.bls_public_key.is_empty()
-                    && !crate::chain::finality::verify_pop(entry, chain_id)
-                {
-                    return Err(LightClientError::TrustBinding(
-                        "incoming validator failed BLS proof-of-possession".into(),
-                    ));
-                }
-            }
             member_steps.push((cert.clone(), HandoffMember::from_snapshot(snapshot)));
         }
         let trusted_members = HandoffMember::from_snapshot(outgoing);
@@ -686,7 +667,6 @@ impl LightClient {
         )
         .map_err(|e| LightClientError::VerificationFailed(e.to_string()))?;
         self.trusted.set_hash = last.set_hash.clone();
-        self.require_pq = true;
         Ok(epoch)
     }
 

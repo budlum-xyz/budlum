@@ -872,21 +872,9 @@ pub struct StorageRegistry {
     /// slash and burn totals, and the recent economics events. It used to
     /// live on `Blockchain`, written after the block outside the state
     /// root and restored from a side store.
+    /// Last field: bincode is positional.
     #[serde(default)]
     pub economics: StorageEconomicsLedger,
-    /// Per-(owner, content_id) confidential body commits so a squatter naming
-    /// another party's content id cannot block or hijack the real owner's
-    /// confidential commit, grant or social-delete surface.
-    #[serde(default)]
-    #[serde(with = "crate::core::map_keys")]
-    scoped_confidential_commits:
-        BTreeMap<(Address, ContentId), crate::storage::ConfidentialBodyCommit>,
-    /// Per-(manifest_id, content_id, owner) self-host policies so a squatter's
-    /// policy applies only to its own deals and cannot block another owner.
-    #[serde(default)]
-    #[serde(with = "crate::core::map_keys")]
-    scoped_self_host_policies:
-        BTreeMap<(ContentId, ContentId, Address), crate::storage::MobileSelfContentPolicy>,
 }
 
 use std::collections::BTreeMap;
@@ -1387,8 +1375,6 @@ impl StorageRegistry {
             && self.confidential_commits.is_empty()
             && self.confidential_owners.is_empty()
             && self.manifest_claims.is_empty()
-            && self.scoped_confidential_commits.is_empty()
-            && self.scoped_self_host_policies.is_empty()
     }
 
     pub fn root(&self) -> [u8; 32] {
@@ -1554,27 +1540,6 @@ impl StorageRegistry {
         if !self.economics.is_empty() {
             hasher.update(self.economics.root());
         }
-        if !self.scoped_confidential_commits.is_empty() {
-            hasher.update(b"BDLM_STORAGE_SCOPED_COMMITS_V1");
-            hasher.update((self.scoped_confidential_commits.len() as u64).to_le_bytes());
-            for ((owner, content_id), commit) in &self.scoped_confidential_commits {
-                hasher.update(owner.as_bytes());
-                hasher.update(content_id.0);
-                hasher.update(commit.commitment());
-            }
-        }
-        if !self.scoped_self_host_policies.is_empty() {
-            hasher.update(b"BDLM_STORAGE_SCOPED_SELF_HOST_V1");
-            hasher.update((self.scoped_self_host_policies.len() as u64).to_le_bytes());
-            for ((manifest_id, content_id, owner), policy) in &self.scoped_self_host_policies {
-                hasher.update(manifest_id.0);
-                hasher.update(content_id.0);
-                hasher.update(owner.as_bytes());
-                hasher.update(
-                    bincode::serialize(policy).unwrap_or_else(|_| SERIALIZE_FAILED.to_vec()),
-                );
-            }
-        }
         hasher.finalize().into()
     }
 
@@ -1606,61 +1571,8 @@ impl StorageRegistry {
                 reason,
             }
         })?;
-        let owner = policy.owner;
-        if owner != Address::zero() {
-            self.scoped_self_host_policies
-                .insert((manifest_id, policy.content_id, owner), policy.clone());
-        }
-        if !self
-            .self_host_policies
-            .contains_key(&(manifest_id, policy.content_id))
-            || self.owner_of(&manifest_id) == Some(owner)
-        {
-            self.self_host_policies
-                .insert((manifest_id, policy.content_id), policy);
-        }
-        Ok(())
-    }
-
-    /// Owner-scoped check for mobile self-hosting so a squatter's policy on a
-    /// shared `manifest_id` governs only its own deals, never another owner's.
-    pub fn check_self_host_allowed_for_owner(
-        &self,
-        manifest_id: &ContentId,
-        content_id: &ContentId,
-        owner: &Address,
-    ) -> Result<(), StorageError> {
-        if *owner == Address::zero() {
-            return self.check_self_host_allowed(manifest_id, content_id);
-        }
-        let policy = self
-            .scoped_self_host_policies
-            .get(&(*manifest_id, *content_id, *owner))
-            .or_else(|| {
-                self.self_host_policies
-                    .get(&(*manifest_id, *content_id))
-                    .filter(|p| p.owner == *owner || p.owner == Address::zero())
-            });
-        let Some(policy) = policy else {
-            return Ok(());
-        };
-        if !policy.self_host_allowed {
-            return Err(StorageError::SelfHostRefusedByPolicy {
-                content_id: *content_id,
-                reason: "the owner turned self-hosting off for this content".into(),
-            });
-        }
-        let paid = self.active_replica_count(manifest_id, content_id);
-        let required = usize::from(policy.required_paid_replicas);
-        if paid < required {
-            return Err(StorageError::SelfHostRefusedByPolicy {
-                content_id: *content_id,
-                reason: format!(
-                    "the owner asked for {required} paid replica(s) before \
-                     self-hosting and {paid} are open"
-                ),
-            });
-        }
+        self.self_host_policies
+            .insert((manifest_id, policy.content_id), policy);
         Ok(())
     }
 
@@ -1771,12 +1683,11 @@ impl StorageRegistry {
 
     pub fn register_manifest(&mut self, manifest: &ContentManifest) {
         let id = manifest.manifest_id;
+        if self.manifests.contains_key(&id) || self.confidential_commits.contains_key(&id) {
+            return;
+        }
         let claim_owner = manifest.owner;
-        self.manifests.entry(id).or_insert_with(|| manifest.clone());
-        // `manifest_id` is content-addressed and excludes `owner`, so recording
-        // only the first writer's owner let a mempool front-runner or public
-        // content squatter seize the id permanently. Each registrant records
-        // its own `(id, owner)` claim without locking out later registrants.
+        self.manifests.insert(id, manifest.clone());
         if claim_owner != Address::zero() {
             self.manifest_claims.insert((id, claim_owner));
         }
@@ -1786,23 +1697,6 @@ impl StorageRegistry {
     pub fn is_registered(&self, content_id: &ContentId) -> bool {
         self.manifests.contains_key(content_id)
             || self.confidential_commits.contains_key(content_id)
-            || self
-                .scoped_confidential_commits
-                .keys()
-                .any(|(_, cid)| cid == content_id)
-    }
-
-    /// True when `claimant` has already registered a manifest claim on `content_id`.
-    #[must_use]
-    pub fn has_manifest_claim(&self, content_id: &ContentId, claimant: &Address) -> bool {
-        *claimant != Address::zero() && self.manifest_claims.contains(&(*content_id, *claimant))
-    }
-
-    fn has_any_manifest_claim(&self, content_id: &ContentId) -> bool {
-        self.manifest_claims
-            .range((*content_id, Address::zero())..=(*content_id, Address::from([u8::MAX; 32])))
-            .next()
-            .is_some()
     }
 
     #[must_use]
@@ -1810,29 +1704,7 @@ impl StorageRegistry {
         if *claimant == Address::zero() {
             return false;
         }
-        if self.manifest_claims.contains(&(*content_id, *claimant))
-            || self
-                .scoped_confidential_commits
-                .contains_key(&(*claimant, *content_id))
-        {
-            return true;
-        }
-        !self.has_any_manifest_claim(content_id)
-            && self.confidential_owners.get(content_id) == Some(claimant)
-    }
-
-    /// True when an active deal on `manifest_id` is funded by a payer other than `caller`.
-    #[must_use]
-    pub fn has_active_deal_for_other_payer(
-        &self,
-        manifest_id: &ContentId,
-        caller: &Address,
-    ) -> bool {
-        self.deals.values().any(|d| {
-            d.manifest_id == *manifest_id
-                && matches!(d.status, DealStatus::Active)
-                && d.payer != Some(*caller)
-        })
+        self.owner_of(content_id) == Some(*claimant)
     }
 
     /// Scoped retraction of `caller`'s own un-paid `Plaintext` manifest when
@@ -1846,10 +1718,11 @@ impl StorageRegistry {
         let Some(existing) = self.manifests.get(manifest_id) else {
             return false;
         };
-        if !matches!(
-            existing.encryption,
-            crate::storage::ContentEncryption::Plaintext
-        ) || self.owner_of(manifest_id) != Some(*caller)
+        if existing.owner != *caller
+            || !matches!(
+                existing.encryption,
+                crate::storage::ContentEncryption::Plaintext
+            )
         {
             return false;
         }
@@ -1860,10 +1733,8 @@ impl StorageRegistry {
         if has_active_deal {
             return false;
         }
+        self.manifests.remove(manifest_id);
         self.manifest_claims.remove(&(*manifest_id, *caller));
-        if !self.has_any_manifest_claim(manifest_id) {
-            self.manifests.remove(manifest_id);
-        }
         true
     }
 
@@ -2337,28 +2208,33 @@ impl StorageRegistry {
         owner: Address,
         commit: crate::storage::ConfidentialBodyCommit,
     ) -> Result<[u8; 32], String> {
-        if owner == Address::zero() {
-            return Err(String::from(
-                "confidential body commit refused: zero address cannot hold a commit",
-            ));
-        }
         if let Some(m) = self.manifests.get(&commit.content_id) {
             if !m.edition.admits_body() {
                 return Err(String::from(
                     "confidential body commit refused: registered manifest is Three (recipe-only); bodies are Classic/2.0",
                 ));
             }
+            // Defence in depth for the authority order in `owner_of`: a commit
+            // registered against somebody else's manifest would leave two
+            // records disagreeing about who speaks for the content. Refusing it
+            // here means the disagreement never exists to be resolved.
+            if let Some(manifest_owner) = self.owner_of(&commit.content_id) {
+                if manifest_owner != owner {
+                    return Err(format!(
+                        "confidential body commit refused: 0x{:?} is registered to {manifest_owner:?}",
+                        commit.content_id
+                    ));
+                }
+            }
         }
         let commitment = commit.commitment();
         let content_id = commit.content_id;
-        // Scope commits per `(owner, content_id)` and never promote an
-        // un-manifested commit into `confidential_owners` (`owner_of`), so:
-        // 1. an account committing an un-manifested content id never becomes
-        //    the global `owner_of` of that id;
-        // 2. a squatter's manifest claim or distinct commit cannot block the
-        //    real owner's `(owner, content_id)` commit, grant or social delete;
-        // 3. replaying the exact same commitment bytes under another sender is refused.
-        if let Some(prev) = self.scoped_confidential_commits.get(&(owner, content_id)) {
+        // Registering a commit for an object somebody else already spoke for
+        // would move the view authority of a live object to the newcomer, and a
+        // grant issued under the old owner would silently start meaning the new
+        // one. Overwriting an already-open commitment is refused outright:
+        // whoever holds an object holds it until the object is closed.
+        if let Some(prev) = self.confidential_commits.get(&content_id) {
             return Err(if prev.commitment() == commitment {
                 format!("confidential body commit already registered for 0x{content_id:?}")
             } else {
@@ -2367,36 +2243,15 @@ impl StorageRegistry {
                 )
             });
         }
-        let is_canonical_owner = self.owner_of(&content_id) == Some(owner);
-        if !is_canonical_owner
-            && (self
-                .scoped_confidential_commits
-                .iter()
-                .any(|((other, cid), prev)| {
-                    *cid == content_id && *other != owner && prev.commitment() == commitment
-                })
-                || self
-                    .confidential_commits
-                    .get(&content_id)
-                    .is_some_and(|prev| {
-                        prev.commitment() == commitment
-                            && self.confidential_owners.get(&content_id) != Some(&owner)
-                    }))
-        {
-            return Err(format!(
-                "confidential body commit refused: commitment for 0x{content_id:?} is already bound to another principal"
-            ));
+        if let Some(prev_owner) = self.confidential_owners.get(&content_id) {
+            if *prev_owner != owner {
+                return Err(format!(
+                    "confidential body commit refused: 0x{content_id:?} is spoken for by {prev_owner:?}"
+                ));
+            }
         }
-        self.scoped_confidential_commits
-            .insert((owner, content_id), commit.clone());
-        if is_canonical_owner {
-            self.confidential_commits.insert(content_id, commit);
-            self.confidential_owners.insert(content_id, owner);
-        } else {
-            self.confidential_commits
-                .entry(content_id)
-                .or_insert(commit);
-        }
+        self.confidential_commits.insert(content_id, commit);
+        self.confidential_owners.insert(content_id, owner);
         Ok(commitment)
     }
 
@@ -2405,57 +2260,37 @@ impl StorageRegistry {
         &self,
         content_id: &ContentId,
     ) -> Option<&crate::storage::ConfidentialBodyCommit> {
-        if let Some(owner) = self.owner_of(content_id) {
-            if let Some(commit) = self.scoped_confidential_commits.get(&(owner, *content_id)) {
-                return Some(commit);
-            }
-        }
-        self.confidential_commits.get(content_id).or_else(|| {
-            self.scoped_confidential_commits
-                .iter()
-                .find_map(|((_, cid), commit)| (cid == content_id).then_some(commit))
-        })
+        self.confidential_commits.get(content_id)
     }
 
-    /// Who may speak for this content when a single canonical owner is queried
-    /// (RPC read queries, marketplace asset binding, and whole-object prunes).
+    /// Who may speak for this content: the manifest owner, or the address that
+    /// registered a Classic confidential commit when there is no manifest. One
+    /// authority per object, and it is looked up rather than believed.
     ///
-    /// Because `manifest_id` is content-addressed and excludes `owner`, a bare
-    /// first-writer claim does not earn exclusive ownership over another
-    /// registrant: claimants backed by an active third-party operator-consented
-    /// `StorageDeal` (`payer == Some(claimant)` and `payer != Some(operator)`)
-    /// outrank unearned/self-dealt claims, and two competing claims at the same
-    /// tier stay ambiguous (`None`) rather than resolving by arrival order.
+    /// The read path for wallets and auditors: before signing a grant, a holder
+    /// has to be able to ask who the chain believes owns an object. The refusals
+    /// of `issue_view_grant` are the write-side half; this is the same authority
+    /// made visible, so the two cannot disagree.
     #[must_use]
     pub fn owner_of(&self, content_id: &ContentId) -> Option<crate::core::address::Address> {
-        let claimants: Vec<Address> = self
+        // A manifest claim is the primary authority, exactly as the rule above
+        // states. The confidential-commit owner answers only when the object
+        // has no manifest. The order used to be the other way round, which let
+        // any account become the authority for somebody else's registered
+        // content id just by registering a confidential commit for it - every
+        // grant, self-host declaration, read gate and prune decision resolves
+        // through this function.
+        let mut iter = self
             .manifest_claims
             .range((*content_id, Address::zero())..=(*content_id, Address::from([u8::MAX; 32])))
-            .map(|(_, claimant)| *claimant)
-            .collect();
-        if !claimants.is_empty() {
-            let earned: Vec<Address> = claimants
-                .iter()
-                .copied()
-                .filter(|claimant| {
-                    self.deals.values().any(|deal| {
-                        deal.manifest_id == *content_id
-                            && matches!(deal.status, DealStatus::Active)
-                            && deal.payer == Some(*claimant)
-                            && deal.payer != Some(deal.operator)
-                    })
-                })
-                .collect();
-            if earned.len() == 1 {
-                return Some(earned[0]);
-            }
-            if earned.len() > 1 {
-                return None;
-            }
-            return if claimants.len() == 1 {
-                Some(claimants[0])
-            } else {
+            .map(|(_, claimant)| *claimant);
+        if let Some(first) = iter.next() {
+            // Two claims are ambiguous, and an ambiguous owner stays unusable
+            // rather than resolving to one of the two names.
+            return if iter.next().is_some() {
                 None
+            } else {
+                Some(first)
             };
         }
         self.confidential_owners.get(content_id).copied()
@@ -2562,11 +2397,7 @@ impl StorageRegistry {
         // The policy reaches the chain through `StorageTx::DeclareSelfHostPolicy`,
         // so this check reads what owners declared in block.
         if self.operator_class(&operator) == OperatorClass::Mobile {
-            self.check_self_host_allowed_for_owner(
-                &manifest.manifest_id,
-                &shard_id,
-                &manifest.owner,
-            )?;
+            self.check_self_host_allowed(&manifest.manifest_id, &shard_id)?;
         }
         // A deal-open carries its own copy of the manifest, and
         // `register_manifest` is first-writer-wins, so this path can seed the
@@ -2680,16 +2511,16 @@ impl StorageRegistry {
         auth: &crate::storage::GrantAuthorization,
         at_epoch: u64,
     ) -> Result<crate::storage::DeleteOutcome, crate::storage::ViewGrantError> {
-        if !self.is_registered(&content_id) {
-            return Err(crate::storage::ViewGrantError::UnknownContent);
-        }
+        let owner = self
+            .owner_of(&content_id)
+            .ok_or(crate::storage::ViewGrantError::UnknownContent)?;
         let caller = auth
             .derived_owner()
             .map_err(crate::storage::ViewGrantError::Authorization)?;
-        if !self.has_claim(&content_id, &caller) {
+        if caller != owner {
             return Err(crate::storage::ViewGrantError::NotOwner {
                 issuer: caller,
-                owner: self.owner_of(&content_id).unwrap_or_default(),
+                owner,
             });
         }
         let digest = crate::storage::social_delete_digest(
@@ -2699,7 +2530,7 @@ impl StorageRegistry {
             &caller,
             at_epoch,
         );
-        auth.verify(&digest, &caller)
+        auth.verify(&digest, &owner)
             .map_err(crate::storage::ViewGrantError::Authorization)?;
         self.social_delete_as(caller, content_id, at_epoch)
     }
@@ -2710,27 +2541,27 @@ impl StorageRegistry {
     /// # Errors
     ///
     /// [`crate::storage::ViewGrantError`] for unknown content or a caller who
-    /// holds no claim on the content.
+    /// is not the owner.
     pub fn social_delete_as(
         &mut self,
         caller: Address,
         content_id: ContentId,
         at_epoch: u64,
     ) -> Result<crate::storage::DeleteOutcome, crate::storage::ViewGrantError> {
-        if !self.is_registered(&content_id) {
-            return Err(crate::storage::ViewGrantError::UnknownContent);
-        }
-        if !self.has_claim(&content_id, &caller) {
+        let owner = self
+            .owner_of(&content_id)
+            .ok_or(crate::storage::ViewGrantError::UnknownContent)?;
+        if caller != owner {
             return Err(crate::storage::ViewGrantError::NotOwner {
                 issuer: caller,
-                owner: self.owner_of(&content_id).unwrap_or_default(),
+                owner,
             });
         }
         let mut hook = crate::storage::three_hooks::NopThreeHook;
         Ok(crate::storage::process_social_delete(
             &mut self.view_grants,
             content_id,
-            caller,
+            owner,
             at_epoch,
             &mut hook,
         ))
@@ -4674,52 +4505,6 @@ impl StorageRegistry {
         self.deals.values()
     }
 
-    /// Union byte count of non-self retrieval challenges on `deal_id` that
-    /// resolved `ChallengeOutcome::Answered`, gated by `proofs_checkable`.
-    #[must_use]
-    pub(crate) fn verified_challenge_bytes_with_gate(
-        &self,
-        deal_id: u64,
-        operator: Address,
-        proofs_checkable: bool,
-    ) -> u64 {
-        if !proofs_checkable {
-            return 0;
-        }
-        let mut ranges: Vec<(u64, u64)> = self
-            .challenges
-            .values()
-            .filter(|c| {
-                c.deal_id == deal_id
-                    && c.opener != operator
-                    && c.byte_end > c.byte_start
-                    && self
-                        .results
-                        .get(&c.challenge_id)
-                        .is_some_and(|r| r.outcome == ChallengeOutcome::Answered)
-            })
-            .map(|c| (c.byte_start, c.byte_end))
-            .collect();
-        ranges.sort_unstable();
-        let mut iter = ranges.into_iter();
-        let Some((mut cur_start, mut cur_end)) = iter.next() else {
-            return 0;
-        };
-        let mut total = 0u64;
-        for (start, end) in iter {
-            if start <= cur_end {
-                if end > cur_end {
-                    cur_end = end;
-                }
-            } else {
-                total = total.saturating_add(cur_end - cur_start);
-                cur_start = start;
-                cur_end = end;
-            }
-        }
-        total.saturating_add(cur_end - cur_start)
-    }
-
     pub fn all_deals(&self) -> Vec<&StorageDeal> {
         self.deals.values().collect()
     }
@@ -4986,12 +4771,8 @@ impl StorageRegistry {
         self.access_events.remove(manifest_id);
         self.confidential_commits.remove(manifest_id);
         self.confidential_owners.remove(manifest_id);
-        self.scoped_confidential_commits
-            .retain(|(_, cid), _| cid != manifest_id);
         self.self_host_policies
             .retain(|(policy_manifest, _), _| policy_manifest != manifest_id);
-        self.scoped_self_host_policies
-            .retain(|(policy_manifest, _, _), _| policy_manifest != manifest_id);
         // The ownership claim is part of the record, so it goes with it. Left
         // behind it made `owner_of`/`has_claim` report an owner for content
         // that is no longer registered, and registration is first-writer-wins
@@ -5210,49 +4991,6 @@ mod tests {
             res.is_err(),
             "a commit under an address whose key signed nothing was accepted"
         );
-    }
-
-    #[test]
-    fn confidential_commit_as_refuses_unmanifested_or_foreign_content_id() {
-        use crate::storage::{
-            ConfidentialBodyCommit, ConfidentialProofKind, ContentCipher, ContentEncryption,
-        };
-        let mut reg = StorageRegistry::new();
-        let attacker = Address::from([0xEE; 32]);
-        let victim = Address::from([0x11; 32]);
-        let mut m = ContentManifest::from_bytes_sliced(b"classic private body bytes!!", 8).unwrap();
-        m.owner = victim;
-        let attacker_commit = ConfidentialBodyCommit::new(
-            m.manifest_id,
-            ContentEncryption::ClientSide(ContentCipher::Aes256Gcm),
-            [6u8; 32],
-            ConfidentialProofKind::HybridZkTee,
-        )
-        .unwrap();
-        let victim_commit = ConfidentialBodyCommit::new(
-            m.manifest_id,
-            ContentEncryption::ClientSide(ContentCipher::Aes256Gcm),
-            [7u8; 32],
-            ConfidentialProofKind::HybridZkTee,
-        )
-        .unwrap();
-        // Un-manifested id: scoped to attacker only; global `owner_of` stays None.
-        assert!(reg
-            .register_confidential_commit_as(attacker, attacker_commit)
-            .is_ok());
-        assert_eq!(reg.owner_of(&m.manifest_id), None);
-
-        // Manifest registered to victim: victim owns `m.manifest_id`, victim's
-        // own commit succeeds despite attacker's prior scoped commit, and
-        // replaying victim's exact commitment under attacker is refused.
-        reg.register_manifest(&m);
-        assert_eq!(reg.owner_of(&m.manifest_id), Some(victim));
-        assert!(reg
-            .register_confidential_commit_as(victim, victim_commit.clone())
-            .is_ok());
-        assert!(reg
-            .register_confidential_commit_as(attacker, victim_commit)
-            .is_err());
     }
 
     /// A manifest claim outranks a confidential body commit.
@@ -6251,13 +5989,10 @@ mod tests {
             )
         };
 
-        let kp1 = WalletKeyPair::generate();
-        let mut m1 = m.clone();
-        m1.owner = kp1.address();
         let mut reg = StorageRegistry::new();
-        reg.register_manifest(&m1);
+        reg.register_manifest(&m);
         let before = reg.root();
-        let (commit, auth) = signed_commit(&kp1);
+        let (commit, auth) = signed_commit(&WalletKeyPair::generate());
         reg.register_confidential_commit(commit, &auth).unwrap();
         let after = reg.root();
         assert_ne!(before, after, "the body commit must reach the root");
@@ -6265,12 +6000,9 @@ mod tests {
         // The owner alone moves the root too: same commitment, different
         // speaker. A fold over the commitments only would let a node swap who
         // owns an object without any state-root change.
-        let kp2 = WalletKeyPair::generate();
-        let mut m2 = m.clone();
-        m2.owner = kp2.address();
         let mut other_registry = StorageRegistry::new();
-        other_registry.register_manifest(&m2);
-        let (commit2, auth2) = signed_commit(&kp2);
+        other_registry.register_manifest(&m);
+        let (commit2, auth2) = signed_commit(&WalletKeyPair::generate());
         other_registry
             .register_confidential_commit(commit2, &auth2)
             .unwrap();
@@ -9593,10 +9325,7 @@ mod demand_driven_replication_tests {
             ConfidentialBodyCommit, ConfidentialProofKind, ContentCipher, ContentEncryption,
         };
 
-        let kp = WalletKeyPair::generate();
-        let owner = kp.address();
-        let mut m = ContentManifest::from_bytes_sliced(b"classic private body bytes!!", 8).unwrap();
-        m.owner = owner;
+        let m = ContentManifest::from_bytes_sliced(b"classic private body bytes!!", 8).unwrap();
         let mut reg = StorageRegistry::new();
         reg.register_manifest(&m);
         let commit = ConfidentialBodyCommit::new(
@@ -9606,6 +9335,8 @@ mod demand_driven_replication_tests {
             ConfidentialProofKind::HybridZkTee,
         )
         .unwrap();
+        let kp = WalletKeyPair::generate();
+        let owner = kp.address();
         let digest = crate::storage::confidential_commit_digest(&commit, &owner);
         let auth = crate::storage::GrantAuthorization {
             owner_key: kp.public_key_bytes(),
@@ -9623,44 +9354,6 @@ mod demand_driven_replication_tests {
             reg.confidential_owners.get(&m.manifest_id).copied(),
             Some(owner),
             "the commit must be recorded under the address that signed it"
-        );
-    }
-
-    #[test]
-    fn canonical_manifest_owner_overrides_front_run_confidential_commit_without_leaking_manifest_claim(
-    ) {
-        use crate::storage::{
-            ConfidentialBodyCommit, ConfidentialProofKind, ContentCipher, ContentEncryption,
-        };
-
-        let owner = Address::from([0x11; 32]);
-        let squatter = Address::from([0x22; 32]);
-        let mut m = ContentManifest::from_bytes_sliced(b"front-run private body bytes", 8).unwrap();
-        m.owner = owner;
-        let commit = ConfidentialBodyCommit::new(
-            m.manifest_id,
-            ContentEncryption::ClientSide(ContentCipher::Aes256Gcm),
-            [7u8; 32],
-            ConfidentialProofKind::HybridZkTee,
-        )
-        .unwrap();
-
-        let mut reg = StorageRegistry::new();
-        // Squatter replays the confidential commit before the manifest lands:
-        // neither `owner_of` nor `has_manifest_claim` may grant manifest authority.
-        reg.register_confidential_commit_as(squatter, commit.clone())
-            .unwrap();
-        assert_eq!(reg.owner_of(&m.manifest_id), None);
-        assert!(!reg.has_manifest_claim(&m.manifest_id, &squatter));
-
-        // Canonical manifest owner registers the manifest and commits the body:
-        // the squatter's front-run collision cannot block the canonical owner.
-        reg.register_manifest(&m);
-        assert_eq!(reg.owner_of(&m.manifest_id), Some(owner));
-        reg.register_confidential_commit_as(owner, commit).unwrap();
-        assert_eq!(
-            reg.confidential_owners.get(&m.manifest_id).copied(),
-            Some(owner)
         );
     }
 

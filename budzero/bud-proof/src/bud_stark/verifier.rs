@@ -7,7 +7,7 @@
 use p3_air::symbolic::{get_symbolic_constraints, SymbolicAirBuilder};
 use p3_air::{Air, RowWindow};
 use p3_challenger::{CanObserve, FieldChallenger};
-use p3_commit::{CommitmentOpening, Pcs, PolynomialSpace, UnivariateStarkPcs};
+use p3_commit::{Pcs, PolynomialSpace};
 use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing};
 use p3_matrix::dense::RowMajorMatrixView;
 use p3_matrix::stack::VerticalPair;
@@ -631,20 +631,8 @@ where
         coms_to_verify.push((commit, vec![(trace_domain, pre_points)]));
     }
 
-    let preprocessed_idx = if preprocessed_width > 0 {
-        Some(coms_to_verify.len() - 1)
-    } else {
-        None
-    };
-    let coms_to_verify: Vec<CommitmentOpening<_, _, _>> =
-        coms_to_verify.into_iter().map(Into::into).collect();
-    pcs.verify_with_preprocessing(
-        coms_to_verify,
-        opening_proof,
-        &mut challenger,
-        preprocessed_idx,
-    )
-    .map_err(VerificationError::InvalidOpeningArgument)?;
+    pcs.verify(coms_to_verify, opening_proof, &mut challenger)
+        .map_err(VerificationError::InvalidOpeningArgument)?;
 
     let quotient = recompose_quotient_from_chunks::<SC>(
         &quotient_chunks_domains,

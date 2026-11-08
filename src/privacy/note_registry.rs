@@ -1,9 +1,8 @@
 //! On-chain note registry: live commitments + spent nullifiers.
 
-use crate::core::address::Address;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 /// 32-byte commitment or nullifier hash.
 ///
@@ -58,12 +57,6 @@ pub struct L1NoteRegistry {
     /// itself is what dies.
     #[serde(default)]
     spent_commitments: BTreeSet<NoteHash>,
-    /// Owner bound to each live note commitment (hex-keyed for JSON-safe
-    /// serialization). Spending through `apply_transfer_for_owner` requires
-    /// every input note to be bound to `spender` or derived from `spender` and
-    /// its secret `proof` (`derive_commitment`).
-    #[serde(default)]
-    note_owners: BTreeMap<String, Address>,
 }
 
 impl L1NoteRegistry {
@@ -107,8 +100,8 @@ impl L1NoteRegistry {
         self.spent_commitments.contains(c)
     }
 
-    /// Genesis / faucet helper: insert a note without spending (internal + unit tests).
-    fn insert_note(&mut self, commitment: NoteHash) -> Result<(), String> {
+    /// Genesis / faucet helper: insert a note without spending (tests + mint path).
+    pub fn insert_note(&mut self, commitment: NoteHash) -> Result<(), String> {
         if self.live_commitments.contains(&commitment) {
             return Err("note commitment already live".into());
         }
@@ -134,74 +127,10 @@ impl L1NoteRegistry {
         Ok(())
     }
 
-    /// Insert a live note commitment bound to `owner`, so only `owner` may
-    /// authorize spending it via `PrivateTransferSubmit`.
-    pub fn insert_note_for_owner(
-        &mut self,
-        commitment: NoteHash,
-        owner: Address,
-    ) -> Result<(), String> {
-        self.insert_note(commitment)?;
-        self.note_owners.insert(hex::encode(commitment), owner);
-        Ok(())
-    }
-
-    /// Apply a confidential transfer authorized by `spender`, enforcing both
-    /// per-input note ownership and 1-for-1 note count conservation (preventing
-    /// unbacked note creation while value-carrying confidential pools remain
-    /// closed outside devnet).
-    pub fn apply_transfer_for_owner(
-        &mut self,
-        spender: &Address,
-        spent_commitments: &[NoteHash],
-        nullifiers: &[NoteHash],
-        output_commitments: &[NoteHash],
-        nullifier_proofs: &[NoteHash],
-    ) -> Result<(), String> {
-        if spent_commitments.len() != nullifier_proofs.len() {
-            return Err("nullifier_proofs length mismatch (proofs are mandatory)".into());
-        }
-        if output_commitments.len() != spent_commitments.len() {
-            return Err(format!(
-                "value conservation failed: {} output note(s) != {} input note(s)",
-                output_commitments.len(),
-                spent_commitments.len()
-            ));
-        }
-        for (i, (commitment, proof)) in spent_commitments
-            .iter()
-            .zip(nullifier_proofs.iter())
-            .enumerate()
-        {
-            let recorded_owner = self.note_owners.get(&hex::encode(commitment));
-            let owns_note = match recorded_owner {
-                Some(owner) => owner == spender,
-                None => *commitment == Self::derive_commitment(spender, proof),
-            };
-            if !owns_note {
-                return Err(format!(
-                    "spend ownership invalid for input {i}: spender does not own note"
-                ));
-            }
-        }
-        self.apply_transfer_with_proofs(
-            spent_commitments,
-            nullifiers,
-            output_commitments,
-            nullifier_proofs,
-        )?;
-        for commitment in spent_commitments {
-            self.note_owners.remove(&hex::encode(commitment));
-        }
-        for out in output_commitments {
-            self.note_owners.insert(hex::encode(out), *spender);
-        }
-        Ok(())
-    }
-
     /// Apply transfer with nullifier derivation proofs.
     /// Each `proof[i]` must satisfy: `nullifier[i] == derive_nullifier(commitment[i], proof[i])`, a domain-separated SHA-256.
-    fn apply_transfer_with_proofs(
+    /// If proofs is empty, falls back to legacy behavior (no binding check).
+    pub fn apply_transfer_with_proofs(
         &mut self,
         spent_commitments: &[NoteHash],
         nullifiers: &[NoteHash],
@@ -348,31 +277,7 @@ impl L1NoteRegistry {
         for c in &self.spent_commitments {
             h.update(c);
         }
-        h.update((self.note_owners.len() as u64).to_le_bytes());
-        for (commitment_hex, owner) in &self.note_owners {
-            let kb = commitment_hex.as_bytes();
-            h.update((kb.len() as u64).to_le_bytes());
-            h.update(kb);
-            let ob = owner.as_bytes();
-            h.update((ob.len() as u64).to_le_bytes());
-            h.update(ob);
-        }
         h.finalize().into()
-    }
-
-    /// Derive a note commitment binding `owner` and `spend_secret`.
-    /// Convenience: exposed for wallet builders and confidential-transfer ownership tests.
-    #[must_use]
-    pub fn derive_commitment(owner: &Address, spend_secret: &NoteHash) -> NoteHash {
-        let mut h = Sha256::new();
-        h.update(b"BDLM_NOTE_COMMIT_V2");
-        h.update(owner.as_bytes());
-        h.update(spend_secret);
-        let digest: [u8; 32] = h.finalize().into();
-        let mut low = [0u8; 8];
-        low.copy_from_slice(&digest[..8]);
-        let fe = u64::from_le_bytes(low) % budlum_note_packing::GOLDILOCKS_P;
-        budlum_note_packing::hash_from_field(fe)
     }
 
     /// Derive nullifier from commitment and proof.

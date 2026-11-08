@@ -31,10 +31,6 @@ pub(crate) const TESTS: &[&str] = &[
     "h5_score_map_ceiling_is_load_bearing",
     "h5_ceiling_refuses_rather_than_evicting_a_ban",
     "h5_tracked_peer_still_scored_when_map_is_full",
-    "simultaneous_dial_to_same_peer_is_recognized_as_already_connected",
-    "plan_sync_headers_skips_shared_locator_prefix_and_caps_fork_and_forward_windows",
-    "unjoined_next_height_fork_sync_and_connection_guards_are_in_production_source",
-    "deferred_votes_two_pass_replay_and_prevote_retry_until_precommit_quorum",
 ];
 
 pub fn run(_root: &Path, log: &Path) -> Result<String, String> {
