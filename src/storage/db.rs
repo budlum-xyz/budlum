@@ -770,7 +770,7 @@ impl Storage {
     /// # Errors
     ///
     /// Propagates `std::io::Error` from the read.
-    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    /// WIRING: called from `Blockchain::validate_candidate_chain` so locally witness-pruned blocks are not rejected during fork-choice replay.
     pub fn is_witness_pruned(&self, height: u64) -> std::io::Result<bool> {
         Ok(self
             .db

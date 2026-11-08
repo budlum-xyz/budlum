@@ -42,6 +42,11 @@ const RPC_BODY_LIMIT_CEILING: u32 = 64 * 1024 * 1024;
 /// Upper bound accepted for `max_connections`, for the same reason.
 const RPC_CONNECTION_LIMIT_CEILING: u32 = 100_000;
 
+/// Deadline for the in-process TLS handshake. Without it a peer that opens a
+/// socket and never sends a ClientHello holds the connection task and its file
+/// descriptor for the lifetime of the process.
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Transport limits applied when a caller builds a config from process
 /// Configuration without stating its own. These match
 /// [`RpcSecurityConfig::default`] so that every constructor in this file
@@ -306,6 +311,7 @@ async fn serve_tls_connection<S, B>(
     remote_addr: SocketAddr,
     service: S,
     stopped: impl std::future::Future<Output = ()>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
 ) where
     S: tower::Service<HttpRequest<hyper::body::Incoming>, Response = hyper::Response<B>>
         + Clone
@@ -317,12 +323,16 @@ async fn serve_tls_connection<S, B>(
     B: hyper::body::Body<Data = hyper::body::Bytes> + Send + 'static,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-    match acceptor.accept(socket).await {
-        Ok(stream) => {
+    let handshake = tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(socket));
+    match handshake.await {
+        Ok(Ok(stream)) => {
             let _ = jsonrpsee::server::serve_with_graceful_shutdown(stream, service, stopped).await;
         }
-        Err(error) => {
+        Ok(Err(error)) => {
             tracing::debug!("RPC TLS handshake from {remote_addr} failed: {error}");
+        }
+        Err(_) => {
+            tracing::debug!("RPC TLS handshake from {remote_addr} timed out");
         }
     }
 }
@@ -444,6 +454,10 @@ impl RpcServer {
             RpcMode::Operator => "operator",
         };
         validate_operator_bind_address(&self.mode, &addr)?;
+        let connection_cap = self
+            .security
+            .max_connections
+            .unwrap_or(RPC_DEFAULT_CONNECTION_LIMIT) as usize;
         // Every served method must be classified (`src/rpc/method_class.rs`).
         let methods: Methods = self.into_rpc().into();
         crate::rpc::method_class::check_served_methods(methods.method_names()).map_err(|e| {
@@ -452,6 +466,7 @@ impl RpcServer {
                 format!("RPC method classification refused this listener: {e}"),
             )
         })?;
+        let tls_permits = Arc::new(tokio::sync::Semaphore::new(connection_cap));
         let svc_builder = builder.to_service_builder();
         let listener = tokio::net::TcpListener::bind(addr.clone()).await?;
         let (stop_handle, server_handle) = stop_channel();
@@ -490,12 +505,19 @@ impl RpcServer {
                 let shutdown = stop_handle.clone().shutdown();
                 match tls.clone() {
                     Some(acceptor) => {
+                        let Ok(permit) = tls_permits.clone().try_acquire_owned() else {
+                            tracing::debug!(
+                                "RPC TLS connection from {remote_addr} dropped: max_connections reached"
+                            );
+                            continue;
+                        };
                         tokio::spawn(serve_tls_connection(
                             acceptor,
                             socket,
                             remote_addr,
                             svc,
                             shutdown,
+                            permit,
                         ));
                     }
                     None => {

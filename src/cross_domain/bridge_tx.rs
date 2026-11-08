@@ -640,6 +640,27 @@ pub fn submit_relay_proof(
             .pending_relay(&message_id)
             .ok_or_else(|| format!("no pending relay for message {}", hex::encode(message_id)))?;
         let source_height = pending.source_event.domain_height;
+        let domain = state
+            .settlement
+            .domains
+            .get(source_domain)
+            .ok_or_else(|| format!("Unknown bridge source domain {source_domain}"))?;
+        if matches!(domain.kind, crate::domain::types::ConsensusKind::PoW)
+            && domain.finality_adapter != POW_HEADER_CHAIN_ADAPTER
+        {
+            return Err(
+                "Bridge relay from PoW domains requires pow-header-chain-v1 finality".into(),
+            );
+        }
+        if !domain.bridge_enabled {
+            return Err(format!("Bridge relay disabled for domain {source_domain}"));
+        }
+        if source_height > domain.last_committed_height {
+            return Err(format!(
+                "Bridge source commitment at height {source_height} is not on the applied domain chain (tip {})",
+                domain.last_committed_height
+            ));
+        }
         let commitment = state
             .settlement
             .commitments
