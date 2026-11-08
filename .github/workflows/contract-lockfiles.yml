@@ -1,0 +1,40 @@
+name: Contract lockfile maintenance
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/contract-lockfiles.yml
+      - contracts/object-layer/cosmwasm/Cargo.toml
+      - contracts/object-layer/svm/Cargo.toml
+
+permissions:
+  contents: read
+
+jobs:
+  generate-lockfiles:
+    name: Generate standalone contract lockfiles
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - name: Resolve CosmWasm dependencies
+        working-directory: contracts/object-layer/cosmwasm
+        run: cargo generate-lockfile
+      - name: Resolve SVM dependencies
+        working-directory: contracts/object-layer/svm
+        run: cargo generate-lockfile
+      - name: Publish lockfiles for review
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: standalone-contract-lockfiles
+          path: |
+            contracts/object-layer/cosmwasm/Cargo.lock
+            contracts/object-layer/svm/Cargo.lock
+          retention-days: 1
