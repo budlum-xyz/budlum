@@ -3,16 +3,16 @@
 //! The ideas3.0 thesis: "the disk sleeps, the CPU wakes, the guardian roves, and
 //! the tariff is bound to wakefulness." This module is the code counterpart of
 //! the Y ideas in the bud skeleton:
-//! - Y1  Roving guardian: every epoch the guardian picks one of N contents,
-//!   reproduces the PACT and verifies it against the commitment (a production
-//!   challenge instead of PoR).
+//! - Y1 Roving guardian: every epoch the guardian picks one of N contents,
+//! reproduces the PACT and verifies it against the commitment (a production
+//! challenge instead of PoR).
 //! - Y12 Guardian selection: commit-reveal plus a deterministic PRF (the same
-//!   history gives the same selection).
+//! history gives the same selection).
 //! - Y14 Guardian sub-role: an opt-in flag (without opening a new RoleId).
-//! - Y9  Regenerative device network: the mini-guardian record (shard audit plus
-//!   a fault counter).
-//!   The numbers are program output; none is written by hand (the 2.0 rule). The
-//!   N=26 table comes from DV.
+//! - Y9 Regenerative device network: the mini-guardian record (shard audit plus
+//! a fault counter).
+//! The numbers are program output; none is written by hand (the 2.0 rule). The
+//! N=26 table comes from DV.
 
 #![forbid(unsafe_code)]
 
@@ -81,7 +81,7 @@ pub fn select_guardian(seeds: &[[u8; 32]], epoch: u64, pact_id: &[u8; 32]) -> Op
     w8.copy_from_slice(&d[..8]);
     let v = u64::from_le_bytes(w8);
     let idx = (v % seeds.len() as u64) as usize;
-    // round count: as N grows the wakefulness share drops -> a round frequency of 1/N (DV)
+ // round count: as N grows the wakefulness share drops -> a round frequency of 1/N (DV)
     let tour = DV_N.max(1);
     Some((idx, tour))
 }
@@ -128,8 +128,8 @@ pub struct MiniGuardianAudit {
 
 /// A lying device proof (the Y9 risk): an unsigned or corrupt proof raises the fault counter.
 pub fn audit_mini(device: &mut Guardian, audit: &MiniGuardianAudit) -> bool {
-    // An audit written for another device counts neither for nor against
-    // this one.
+ // An audit written for another device counts neither for nor against
+ // this one.
     if audit.device_id != device.id {
         return false;
     }
@@ -196,7 +196,7 @@ mod tests {
             "the same history gives the same selection"
         );
         assert_eq!(t1, DV_N);
-        // a different epoch gives a different selection (sampling; not guaranteed but likely)
+ // a different epoch gives a different selection (sampling; not guaranteed but likely)
         let (i3, _) = select_guardian(&seeds, 8, &pact).unwrap();
         assert!(i1 < seeds.len() && i3 < seeds.len());
     }
@@ -279,11 +279,11 @@ mod tests {
 
     #[test]
     fn y1_cost_ratio_measurement() {
-        // producing 0.5s, PoR 120s -> 0.42 percent -> accepted (the I2 criterion)
+ // producing 0.5s, PoR 120s -> 0.42 percent -> accepted (the I2 criterion)
         let r = production_vs_por_ratio(0.5, 120.0);
         assert!(r < 0.01, "oran: {r}");
         assert!(production_cheaper_than_por(0.5, 120.0));
-        // producing 2s, PoR 10s -> 20 percent -> REFUSED
+ // producing 2s, PoR 10s -> 20 percent -> REFUSED
         assert!(!production_cheaper_than_por(2.0, 10.0));
         assert_eq!(production_vs_por_ratio(1.0, 0.0), f64::INFINITY);
     }
