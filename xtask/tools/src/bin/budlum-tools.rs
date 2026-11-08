@@ -35,8 +35,8 @@
 
 use budlum_tools::{
     ai_test_verifier, audit_deps, backup_drill, checked_repo_root, contracts, devnet, docker_smoke,
-    multinode_smoke, prepush, propagation, resource_sample, sbom, seed_corpus, smoke_rpc,
-    testnet_genesis, testnet_rehearsal,
+    multinode_smoke, placement_table, prepush, propagation, resource_sample, sbom, seed_corpus,
+    smoke_rpc, testnet_genesis, testnet_rehearsal,
 };
 use budlum_tools::{
     audit_guard, clippy_extra_report, fsf_fit, pq_measure, stark_soundness, step_reachability,
@@ -89,6 +89,7 @@ fn run_self_tests() {
         ("propagation-sim", propagation::self_test()),
         ("resource-sample", resource_sample::self_test()),
         ("ai-test-verifier", ai_test_verifier::self_test()),
+        ("placement-table", placement_table::self_test()),
     ] {
         match result {
             Ok(msg) => println!("{msg}"),
@@ -168,6 +169,7 @@ fn main() {
                 "propagation-sim",
                 "resource-sample",
                 "ai-test-verifier",
+                "placement-table",
             ] {
                 println!("{name}");
             }
@@ -207,6 +209,9 @@ fn main() {
         Some(&"propagation-sim") => propagation::run(&root, refs.get(1..).unwrap_or_default()),
         Some(&"testnet-rehearsal") => {
             testnet_rehearsal::run(&root, refs.get(1..).unwrap_or_default())
+        }
+        Some(&"placement-table") => {
+            placement_table::run(&root, refs.get(1..).unwrap_or_default())
         }
         Some(name) => {
             eprintln!("FAIL: there is no tool named `{name}`.\n");
