@@ -152,6 +152,8 @@ PN = "PN"           # typos splits the acronym PNG and offers ON for the PN half
 Ponit = "Ponit"
 
 # -- Deliberate test data and a filter name ----------------------------------
+# abd   : mutated opaque payload in src/storage/bud3/bof1.rs, not English prose.
+abd = "abd"
 # tru   : json.rs negative test input, a deliberately truncated "true" literal.
 # paeth : the PNG Paeth predictor (src/storage/qr_video.rs), named after its author.
 tru = "tru"
