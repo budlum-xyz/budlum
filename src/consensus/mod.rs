@@ -193,7 +193,7 @@ pub trait ConsensusEngine: Send + Sync {
     fn record_block(
         &self,
         _block: &Block,
-        _storage: Option<&crate::storage::db::Storage>,
+        _storage: Option<&crate::persistence::db::Storage>,
     ) -> Result<(), ConsensusError> {
         Ok(())
     }
@@ -219,7 +219,7 @@ pub trait ConsensusEngine: Send + Sync {
         &self,
         _block: &Block,
         _chain: &[Block],
-        _storage: Option<&crate::storage::db::Storage>,
+        _storage: Option<&crate::persistence::db::Storage>,
     ) {
     }
 
@@ -234,10 +234,10 @@ pub trait ConsensusEngine: Send + Sync {
         &self,
         _height: u64,
         _chain: &[Block],
-        _storage: Option<&crate::storage::db::Storage>,
+        _storage: Option<&crate::persistence::db::Storage>,
     ) {
     }
-    fn load_state(&self, _storage: &crate::storage::db::Storage) -> Result<(), ConsensusError> {
+    fn load_state(&self, _storage: &crate::persistence::db::Storage) -> Result<(), ConsensusError> {
         Ok(())
     }
     fn drain_slashing_evidence(
