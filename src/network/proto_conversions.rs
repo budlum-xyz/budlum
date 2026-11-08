@@ -1613,18 +1613,69 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
             hash: proto.hash,
             signature,
             signer_public_key: proto.signer_public_key,
-            authorization: proto.authorization.map(|auth| {
-                crate::core::transaction::MultisigAuthorizationV6 {
-                    scheme_id: auth.scheme_id,
-                    owners: auth.owners,
-                    threshold: auth.threshold,
-                    signatures: auth
-                        .signatures
-                        .into_iter()
-                        .map(|s| (s.public_key, s.signature))
-                        .collect(),
+            authorization: match proto.authorization {
+                Some(auth) => {
+                    use crate::core::transaction::{
+                        MAX_V6_AUTHORIZATION_OWNERS, MAX_V6_AUTHORIZATION_SIGNATURES,
+                        MAX_V6_OWNER_KEY_BYTES, MAX_V6_SCHEME_ID_BYTES, MAX_V6_SIGNATURE_BYTES,
+                    };
+                    if auth.scheme_id.len() > MAX_V6_SCHEME_ID_BYTES {
+                        return Err(format!(
+                            "authorization scheme_id length {} exceeds max {}",
+                            auth.scheme_id.len(),
+                            MAX_V6_SCHEME_ID_BYTES
+                        ));
+                    }
+                    if auth.owners.len() > MAX_V6_AUTHORIZATION_OWNERS {
+                        return Err(format!(
+                            "authorization owners count {} exceeds max {}",
+                            auth.owners.len(),
+                            MAX_V6_AUTHORIZATION_OWNERS
+                        ));
+                    }
+                    for owner in &auth.owners {
+                        if owner.len() > MAX_V6_OWNER_KEY_BYTES {
+                            return Err(format!(
+                                "authorization owner key length {} exceeds max {}",
+                                owner.len(),
+                                MAX_V6_OWNER_KEY_BYTES
+                            ));
+                        }
+                    }
+                    if auth.signatures.len() > MAX_V6_AUTHORIZATION_SIGNATURES {
+                        return Err(format!(
+                            "authorization signatures count {} exceeds max {}",
+                            auth.signatures.len(),
+                            MAX_V6_AUTHORIZATION_SIGNATURES
+                        ));
+                    }
+                    let mut signatures = Vec::with_capacity(auth.signatures.len());
+                    for s in auth.signatures {
+                        if s.public_key.len() > MAX_V6_OWNER_KEY_BYTES {
+                            return Err(format!(
+                                "authorization signer key length {} exceeds max {}",
+                                s.public_key.len(),
+                                MAX_V6_OWNER_KEY_BYTES
+                            ));
+                        }
+                        if s.signature.len() > MAX_V6_SIGNATURE_BYTES {
+                            return Err(format!(
+                                "authorization signature length {} exceeds max {}",
+                                s.signature.len(),
+                                MAX_V6_SIGNATURE_BYTES
+                            ));
+                        }
+                        signatures.push((s.public_key, s.signature));
+                    }
+                    Some(crate::core::transaction::MultisigAuthorizationV6 {
+                        scheme_id: auth.scheme_id,
+                        owners: auth.owners,
+                        threshold: auth.threshold,
+                        signatures,
+                    })
                 }
-            }),
+                None => None,
+            },
             chain_id: proto.chain_id,
             signature_version: proto.signature_version,
             tx_type,
