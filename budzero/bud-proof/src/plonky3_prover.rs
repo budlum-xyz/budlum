@@ -118,7 +118,8 @@ where
     crate::bud_stark::verify(&config, air, proof, public_values).map_err(|e| format!("{e:?}"))
 }
 
-fn build_config() -> MyConfig {
+/// Build the canonical Goldilocks/Keccak STARK configuration.
+pub fn build_config() -> ChipStarkConfig {
     let hash = MyHasher::new(Keccak256Hash {});
     let compress = MyCompress::new(Keccak256Hash {});
     let val_mmcs = MyMmcs::new(hash, compress, 0);
@@ -2106,6 +2107,30 @@ mod tests {
     use bud_isa::{Instruction, Opcode};
     use bud_vm::Vm;
     use p3_field::PrimeField64;
+
+    /// `setup_preprocessed` is `pub` and takes `degree_bits` as given, so a
+    /// shift past the word width, a height that disagrees with the trace, or a degree
+    /// above the cap must be a refusal (`None`), never a panic that aborts a node.
+    #[test]
+    fn setup_preprocessed_refuses_bad_degrees_instead_of_panicking() {
+        let config = build_config();
+        let air = BudAir {
+            num_steps: 2,
+            program: vec![
+                inst(Opcode::Load, 1, 0, 0, 7),
+                inst(Opcode::Halt, 0, 0, 0, 0),
+            ],
+        };
+        // Past the word width: `1 << 200` panics in a debug build.
+        assert!(setup_preprocessed(&config, &air, 200).is_none());
+        // Above the cap, below the word width.
+        assert!(setup_preprocessed(&config, &air, 40).is_none());
+        // A height that is not the trace degree (the old `assert_eq!`).
+        assert!(setup_preprocessed(&config, &air, 3).is_none());
+        // Control: the degree the verifier derives for this program is accepted.
+        let honest = log2_strict_usize((3usize * 2 + 1).next_power_of_two().max(16));
+        assert!(setup_preprocessed(&config, &air, honest).is_some());
+    }
 
     /// A mutation that corrupts a single field of a proof.
     ///
@@ -5296,7 +5321,7 @@ mod tests {
                 }),
             ),
             (
-                "aux trace commitment and openings stripped together (P15-F01)",
+                "aux trace commitment and openings stripped together",
                 Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
                     p.commitments.aux_trace = None;
                     p.opened_values.aux_trace_local = None;
