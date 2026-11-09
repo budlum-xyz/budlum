@@ -7044,6 +7044,23 @@ impl Blockchain {
             Some(agg) => agg.checkpoint_height != vote.checkpoint_height,
         };
         if off_round {
+            if !self
+                .state
+                .validators
+                .get(&vote.voter_id)
+                .is_some_and(|v| !v.bls_public_key.is_empty())
+            {
+                return Err(
+                    "Rejecting early prevote: voter is not a registered validator with a BLS key"
+                        .into(),
+                );
+            }
+            let max_early_height = (self.chain.len() as u64).saturating_add(
+                crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL.saturating_mul(8),
+            );
+            if vote.checkpoint_height > max_early_height {
+                return Err("Rejecting early prevote beyond finality horizon".into());
+            }
             self.keep_early_prevote(vote);
             return Err("No active finality aggregator".into());
         }
@@ -7186,6 +7203,23 @@ impl Blockchain {
                 .as_ref()
                 .is_some_and(|agg| !agg.prevote_quorum_reached)
         {
+            if !self
+                .state
+                .validators
+                .get(&vote.voter_id)
+                .is_some_and(|v| !v.bls_public_key.is_empty())
+            {
+                return Err(
+                    "Rejecting early precommit: voter is not a registered validator with a BLS key"
+                        .into(),
+                );
+            }
+            let max_early_height = (self.chain.len() as u64).saturating_add(
+                crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL.saturating_mul(8),
+            );
+            if vote.checkpoint_height > max_early_height {
+                return Err("Rejecting early precommit beyond finality horizon".into());
+            }
             // Kept, not dropped: the sender voted at the same checkpoint as
             // this node, it simply reached the quorum first, and the vote is
             // published once. `handle_prevote` replays these the moment the
@@ -10342,10 +10376,54 @@ mod tests {
     /// a peer votes the moment it holds the checkpoint, the round here starts
     /// from the committed block a moment after, and the dropped vote left
     /// every node one short of the quorum forever.
+    fn register_signed_early_voter(
+        bc: &mut Blockchain,
+        voter_id: Address,
+    ) -> crate::crypto::primitives::BlsKeypair {
+        let bls = crate::crypto::primitives::BlsKeypair::generate().expect("bls key");
+        bc.state.add_validator(voter_id, 2_000);
+        if let Some(v) = bc.state.get_validator_mut(&voter_id) {
+            v.bls_public_key = bls.public_key.clone();
+            v.pop_signature =
+                bls.generate_pop(crate::core::transaction::DEFAULT_CHAIN_ID, &voter_id);
+            v.active = true;
+        }
+        bls
+    }
+
+    fn sign_early_prevote(
+        bls: &crate::crypto::primitives::BlsKeypair,
+        mut vote: Prevote,
+    ) -> Prevote {
+        let sig_msg = vote.signing_message();
+        vote.sig_bls = crate::chain::finality::sign_bls(&bls.secret_key, &sig_msg);
+        let auth_msg = vote.auth_signing_message();
+        vote.auth_sig = crate::chain::finality::sign_bls(&bls.secret_key, &auth_msg);
+        vote
+    }
+
+    fn sign_early_precommit(
+        bls: &crate::crypto::primitives::BlsKeypair,
+        mut vote: Precommit,
+    ) -> Precommit {
+        let sig_msg = crate::chain::finality::checkpoint_signing_message(
+            vote.chain_id,
+            vote.epoch,
+            vote.checkpoint_height,
+            &vote.checkpoint_hash,
+        );
+        vote.sig_bls = crate::chain::finality::sign_bls(&bls.secret_key, &sig_msg);
+        let auth_msg = vote.auth_signing_message();
+        vote.auth_sig = crate::chain::finality::sign_bls(&bls.secret_key, &auth_msg);
+        vote
+    }
+
     #[test]
     fn a_prevote_that_arrives_before_its_round_is_counted_when_the_round_starts() {
         let consensus = Arc::new(PoWEngine::new(0));
         let mut bc = Blockchain::new(consensus, None, 45262, None);
+        let voter_id = Address::from([1u8; 32]);
+        let bls = register_signed_early_voter(&mut bc, voter_id);
         let checkpoint_hash = "a".repeat(64);
         let checkpoint_height = 10;
         // The round's epoch is derived from the height, and a vote for another
@@ -10354,15 +10432,18 @@ mod tests {
             / crate::core::chain_config::epoch_len_for_chain_id(
                 crate::core::transaction::DEFAULT_CHAIN_ID,
             );
-        let vote = Prevote {
-            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
-            epoch,
-            checkpoint_height,
-            checkpoint_hash: checkpoint_hash.clone(),
-            voter_id: Address::from([1u8; 32]),
-            sig_bls: vec![],
-            auth_sig: Vec::new(),
-        };
+        let vote = sign_early_prevote(
+            &bls,
+            Prevote {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+                epoch,
+                checkpoint_height,
+                checkpoint_hash: checkpoint_hash.clone(),
+                voter_id,
+                sig_bls: vec![],
+                auth_sig: Vec::new(),
+            },
+        );
         assert!(bc.handle_prevote(vote.clone()).is_err());
         assert_eq!(
             bc.early_finality_votes.prevotes.len(),
@@ -10388,15 +10469,20 @@ mod tests {
     fn a_kept_vote_for_another_round_survives_the_round_that_starts() {
         let consensus = Arc::new(PoWEngine::new(0));
         let mut bc = Blockchain::new(consensus, None, 45262, None);
-        let vote = Prevote {
-            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
-            epoch: 0,
-            checkpoint_height: 10,
-            checkpoint_hash: "a".repeat(64),
-            voter_id: Address::from([2u8; 32]),
-            sig_bls: vec![],
-            auth_sig: Vec::new(),
-        };
+        let voter_id = Address::from([2u8; 32]);
+        let bls = register_signed_early_voter(&mut bc, voter_id);
+        let vote = sign_early_prevote(
+            &bls,
+            Prevote {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+                epoch: 0,
+                checkpoint_height: 10,
+                checkpoint_hash: "a".repeat(64),
+                voter_id,
+                sig_bls: vec![],
+                auth_sig: Vec::new(),
+            },
+        );
         assert!(bc.handle_prevote(vote).is_err());
         bc.start_prevote_task(12, "c".repeat(64));
         assert_eq!(
@@ -10414,20 +10500,25 @@ mod tests {
     fn a_precommit_that_arrives_before_the_quorum_is_replayed_after_it() {
         let consensus = Arc::new(PoWEngine::new(0));
         let mut bc = Blockchain::new(consensus, None, 45262, None);
+        let voter_id = Address::from([3u8; 32]);
+        let bls = register_signed_early_voter(&mut bc, voter_id);
         let checkpoint_hash = "a".repeat(64);
         let checkpoint_height = 10;
         bc.start_prevote_task(checkpoint_height, checkpoint_hash.clone());
         let epoch = bc.finality_aggregator.as_ref().expect("round").epoch;
-        let vote = Precommit {
-            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
-            epoch,
-            checkpoint_height,
-            checkpoint_hash: checkpoint_hash.clone(),
-            voter_id: Address::from([3u8; 32]),
-            sig_bls: vec![],
-            auth_sig: Vec::new(),
-            pq_sig: Vec::new(),
-        };
+        let vote = sign_early_precommit(
+            &bls,
+            Precommit {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+                epoch,
+                checkpoint_height,
+                checkpoint_hash: checkpoint_hash.clone(),
+                voter_id,
+                sig_bls: vec![],
+                auth_sig: Vec::new(),
+                pq_sig: Vec::new(),
+            },
+        );
         let err = bc
             .handle_precommit(vote)
             .expect_err("no prevote quorum yet");
@@ -10450,6 +10541,44 @@ mod tests {
             bc.early_finality_votes.precommits.is_empty(),
             "the kept precommit was replayed into its own round"
         );
+    }
+
+    #[test]
+    fn unauthenticated_unknown_voter_rejected_from_early_vote_store() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
+        let honest_id = Address::from([4u8; 32]);
+        let honest_bls = register_signed_early_voter(&mut bc, honest_id);
+        let honest_vote = sign_early_prevote(
+            &honest_bls,
+            Prevote {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+                epoch: 0,
+                checkpoint_height: 10,
+                checkpoint_hash: "a".repeat(64),
+                voter_id: honest_id,
+                sig_bls: vec![],
+                auth_sig: Vec::new(),
+            },
+        );
+        assert!(bc.handle_prevote(honest_vote).is_err());
+        assert_eq!(bc.early_finality_votes.prevotes.len(), 1);
+
+        let unauth = Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+            epoch: 0,
+            checkpoint_height: 10,
+            checkpoint_hash: "b".repeat(64),
+            voter_id: Address::from([0xFE; 32]),
+            sig_bls: vec![],
+            auth_sig: Vec::new(),
+        };
+        let err = bc
+            .handle_prevote(unauth)
+            .expect_err("unknown voter must be rejected");
+        assert!(err.contains("not a registered validator"), "got: {err}");
+        assert_eq!(bc.early_finality_votes.prevotes.len(), 1);
+        assert_eq!(bc.early_finality_votes.prevotes[0].voter_id, honest_id);
     }
 
     #[test]

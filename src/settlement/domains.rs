@@ -188,6 +188,24 @@ fn deliver_message(
             message.source_quantum_class
         )));
     }
+    // A finalized commitment may arrive out of order and sit staged in the
+    // commitment registry until its parent chain links up; delivering its
+    // message may not consume it before `last_committed_height` reaches
+    // `delivery.domain_height`.
+    let committed_tip = state
+        .settlement
+        .domains
+        .get(delivery.domain_id)
+        .map(|domain| domain.last_committed_height)
+        .ok_or_else(|| {
+            SettlementTxError::Refused(format!("unknown domain {}", delivery.domain_id))
+        })?;
+    if delivery.domain_height > committed_tip {
+        return Err(SettlementTxError::Refused(format!(
+            "domain {} commitment at height {} is not on the applied domain chain (tip {committed_tip})",
+            delivery.domain_id, delivery.domain_height
+        )));
+    }
     crate::cross_domain::bridge_tx::verify_domain_event_proof(
         state,
         delivery.domain_id,
@@ -318,6 +336,26 @@ pub fn register_domain(state: &mut AccountState, domain: ConsensusDomain) -> Res
              admission authority and the recorded consensus kind must agree",
             domain.id, domain.kind
         ));
+    }
+    if domain.finality_adapter == crate::cross_domain::external::EXTERNAL_DOMAIN_FINALITY_ADAPTER {
+        if domain.config_hash == [0u8; 32] {
+            return Err(format!(
+                "External finality domain {} must bind its registered DomainKey in config_hash",
+                domain.id
+            ));
+        }
+        if state.settlement.domains.domains().iter().any(|existing| {
+            existing.id != domain.id
+                && existing.status != DomainStatus::Retired
+                && existing.finality_adapter
+                    == crate::cross_domain::external::EXTERNAL_DOMAIN_FINALITY_ADAPTER
+                && existing.config_hash == domain.config_hash
+        }) {
+            return Err(format!(
+                "External finality DomainKey {} is already claimed by another consensus domain",
+                hex::encode(domain.config_hash)
+            ));
+        }
     }
     state.settlement.domains.register(domain)
 }
@@ -484,6 +522,14 @@ pub fn verify_commitment_finality_observed(
                 &evidence.adapter,
                 &evidence.network,
             );
+            if domain.config_hash == [0u8; 32] || key.as_bytes() != &domain.config_hash {
+                return Err(format!(
+                    "Domain {} is bound to external DomainKey {}, but evidence names {}",
+                    commitment.domain_id,
+                    hex::encode(domain.config_hash),
+                    hex::encode(key.0)
+                ));
+            }
             let Some(entry) = state.settlement.external_intake.entries.get(&key) else {
                 return Err(format!(
                     "Domain {} names an external adapter that is not registered",
@@ -525,7 +571,9 @@ pub fn verify_commitment_finality_observed(
                 .total_stake(crate::registry::role::roles::ATTESTER)
                 > 0
             {
-                if let FinalityProof::PoA { authorities, .. } = proof {
+                if let FinalityProof::PoA { authorities, .. }
+                | FinalityProof::PoAPq { authorities, .. } = proof
+                {
                     for auth in authorities {
                         if !state.registry.is_active_attester(auth) {
                             return Err(format!(
@@ -540,34 +588,59 @@ pub fn verify_commitment_finality_observed(
         ConsensusKind::AiInference => {
             let adapter = crate::domain::AiInferenceFinalityAdapter;
             ensure_adapter_name(domain, adapter.adapter_name())?;
-            adapter.verify_finality(domain, commitment, proof)
+            let status = adapter.verify_finality(domain, commitment, proof);
+            // Attester gate: mirror StorageAttestation once any ATTESTER stake exists.
+            if state
+                .registry
+                .total_stake(crate::registry::role::roles::ATTESTER)
+                > 0
+            {
+                if let FinalityProof::PoA { authorities, .. }
+                | FinalityProof::PoAPq { authorities, .. } = proof
+                {
+                    for auth in authorities {
+                        if !state.registry.is_active_attester(auth) {
+                            return Err(format!(
+                                "AI inference authority {auth} is not an active attester (D4 unified registry)"
+                            ));
+                        }
+                    }
+                }
+            }
+            status
         }
     }
     .map_err(|e| e.to_string())?;
 
     match status {
         FinalityStatus::Finalized => {
-            // Only a PoA proof attests the commitment's nonce writes: both PoA
-            // adapters put `state_updates` into the message the authorities
-            // sign (`poa_commit_signing_message`), while the PoS, BFT, PoW and
-            // ZK adapters attest the block hash and the roots. A non-empty map
-            // under any other proof is therefore submitter-chosen data, and it
-            // is refused at the seam - before `apply_pending_commitments` can
-            // write another account's nonce - because the RELAYER role that
-            // submits a commitment is permissionless.
-            if !commitment.state_updates.is_empty()
-                && !matches!(
+            // Only a governance-admitted PoA domain may write canonical account
+            // nonces: permissionless `RegisterDomain` lets any funded registrant
+            // supply its own `validator_set_hash`, so a PoA signature without
+            // governance admission only proves the registrant signed for itself.
+            if !commitment.state_updates.is_empty() {
+                if !matches!(
                     proof,
                     FinalityProof::PoA { .. } | FinalityProof::PoAPq { .. }
-                )
-            {
-                return Err(format!(
-                    "Domain {} height {}: commitment claims {} state updates that no finality \
-                     proof attests",
-                    commitment.domain_id,
-                    commitment.domain_height,
-                    commitment.state_updates.len()
-                ));
+                ) {
+                    return Err(format!(
+                        "Domain {} height {}: commitment claims {} state updates that no finality \
+                         proof attests",
+                        commitment.domain_id,
+                        commitment.domain_height,
+                        commitment.state_updates.len()
+                    ));
+                }
+                if !state.poa_is_permissioned(commitment.domain_id) {
+                    return Err(format!(
+                        "Domain {} height {}: commitment claims {} state updates, but the domain \
+                         holds no governance admission and its authority set is therefore \
+                         self-declared",
+                        commitment.domain_id,
+                        commitment.domain_height,
+                        commitment.state_updates.len()
+                    ));
+                }
             }
             // The same seam, applied to the roots' consumers rather than to
             // the commitment itself: a root no proof binds is never anchored
@@ -845,6 +918,14 @@ fn apply_pending_commitments(
             break;
         }
         validate_commitment_state_updates(state, &com)?;
+        if !com.state_updates.is_empty() {
+            tracing::info!(
+                domain_id = com.domain_id,
+                domain_height = com.domain_height,
+                updates = com.state_updates.len(),
+                "applying permissioned domain commitment nonce updates"
+            );
+        }
         for (addr, new_nonce) in &com.state_updates {
             let account = state.get_or_create(addr);
             account.nonce = *new_nonce;
@@ -3019,5 +3100,56 @@ mod tests {
         };
         assert_eq!(run(&second), run(&second));
         assert_ne!(run(&second), run(&other));
+    }
+
+    #[test]
+    fn self_declared_poa_domain_cannot_submit_state_updates_without_governance_admission() {
+        let mut state = AccountState::new();
+        let authority_kp = crate::crypto::primitives::KeyPair::generate();
+        let authority = Address::from(authority_kp.public_key_bytes());
+        let victim = Address::from([0xCC; 32]);
+
+        let mut domain = crate::domain::default_domain(
+            99,
+            ConsensusKind::PoA,
+            99_001,
+            "poa-authority-quorum",
+            1,
+        );
+        domain.validator_set_hash = [0u8; 32];
+        register_domain(&mut state, domain.clone()).unwrap();
+
+        let blk = block(1, &"00".repeat(32), 1);
+        let mut com = commitment(&domain, &blk, 1);
+        com.state_updates.insert(victim, 42);
+        let signing_msg = crate::domain::poa_commit_signing_message(
+            com.domain_id,
+            domain.domain_chain_id,
+            com.domain_height,
+            &com.domain_block_hash,
+            &com.parent_domain_block_hash,
+            com.sequence,
+            com.timestamp_ms,
+            None,
+            &com.state_root,
+            &com.tx_root,
+            &com.event_root,
+            &com.state_updates,
+        );
+        let sig = authority_kp.sign(&signing_msg).to_vec();
+        let proof = FinalityProof::PoA {
+            authorities: vec![authority],
+            signatures: vec![sig],
+        };
+        com.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
+
+        let err = verify_commitment_finality(
+            &state,
+            &com,
+            &proof,
+            crate::cross_domain::external::IntakeState::production_bls,
+        )
+        .expect_err("self-declared PoA authority set must not license nonce writes");
+        assert!(err.contains("no governance admission"), "got: {err}");
     }
 }

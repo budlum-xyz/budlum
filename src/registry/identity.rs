@@ -69,6 +69,11 @@ pub const DID_METHOD_NAME: &str = "did:bud";
 pub const MAX_IDENTITY_CREDENTIALS: usize = 1_000_000;
 /// Maximum live credential roots recorded on a single DID record.
 pub const MAX_CREDENTIAL_ROOTS_PER_DID: usize = 10_000;
+/// Maximum verification methods a single DID record may carry, live or
+/// revoked: `IdentityRegistry::root` folds every one of them on every block.
+pub const MAX_IDENTITY_METHODS_PER_DID: usize = 256;
+/// Maximum guardians a single DID record may name.
+pub const MAX_IDENTITY_GUARDIANS_PER_DID: usize = 64;
 
 /// Formats the DID for an address. Lowercase hex over the 32 address bytes,
 /// so a DID survives case-folding in any wallet that stores it as text.
@@ -229,6 +234,18 @@ impl IdentityRecord {
             return Err(IdentityError::NoMethods {
                 did: did_of(&self.subject),
             });
+        }
+        if self.methods.len() > MAX_IDENTITY_METHODS_PER_DID {
+            return Err(IdentityError::BadApproval(format!(
+                "validate: {} exceeds method cap ({MAX_IDENTITY_METHODS_PER_DID})",
+                did_of(&self.subject)
+            )));
+        }
+        if self.guardians.len() > MAX_IDENTITY_GUARDIANS_PER_DID {
+            return Err(IdentityError::BadApproval(format!(
+                "validate: {} exceeds guardian cap ({MAX_IDENTITY_GUARDIANS_PER_DID})",
+                did_of(&self.subject)
+            )));
         }
         for (i, method) in self.methods.iter().enumerate() {
             if self
@@ -711,6 +728,11 @@ impl IdentityRegistry {
             .any(|m| m.key_id == new_key && m.is_live_at(now))
         {
             return Err(IdentityError::DuplicateKeyId { did });
+        }
+        if record.methods.len() >= MAX_IDENTITY_METHODS_PER_DID {
+            return Err(IdentityError::BadApproval(format!(
+                "recover: {did} is at its method cap ({MAX_IDENTITY_METHODS_PER_DID})"
+            )));
         }
         for method in &mut record.methods {
             if method.revoked_at.is_none() {
@@ -2537,6 +2559,58 @@ mod tests {
         assert!(
             record.live_method(&new_key, 200).is_some(),
             "the quorum must have rotated the DID to the new key"
+        );
+    }
+
+    #[test]
+    fn identity_method_and_guardian_caps_are_enforced_at_registration_and_recovery() {
+        let oversized_methods: Vec<VerificationMethod> = (0..=MAX_IDENTITY_METHODS_PER_DID)
+            .map(|i| {
+                let mut key = [0u8; 32];
+                key[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                VerificationMethod::new(key, MethodKind::MlDsa87)
+            })
+            .collect();
+        let err = IdentityRecord::new(addr(1), oversized_methods, Vec::new(), 0)
+            .expect_err("methods above MAX_IDENTITY_METHODS_PER_DID must be refused");
+        assert!(format!("{err:?}").contains("method cap"), "got: {err:?}");
+
+        let oversized_guardians: Vec<Address> = (0..=MAX_IDENTITY_GUARDIANS_PER_DID)
+            .map(|i| {
+                let mut g = [0xAAu8; 32];
+                g[..8].copy_from_slice(&((i + 2) as u64).to_le_bytes());
+                Address(g)
+            })
+            .collect();
+        let err = IdentityRecord::new(
+            addr(1),
+            vec![VerificationMethod::new([1u8; 32], MethodKind::MlDsa87)],
+            oversized_guardians,
+            1,
+        )
+        .expect_err("guardians above MAX_IDENTITY_GUARDIANS_PER_DID must be refused");
+        assert!(format!("{err:?}").contains("guardian cap"), "got: {err:?}");
+
+        let at_cap_methods: Vec<VerificationMethod> = (0..MAX_IDENTITY_METHODS_PER_DID)
+            .map(|i| {
+                let mut key = [0u8; 32];
+                key[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                VerificationMethod::new(key, MethodKind::MlDsa87)
+            })
+            .collect();
+        let guardian = addr(9);
+        let record = IdentityRecord::new(addr(1), at_cap_methods, vec![guardian], 1).unwrap();
+        let mut registry = IdentityRegistry::new();
+        registry
+            .apply(&ConsensusKind::PoA, IdentityOp::Register { record }, 1)
+            .unwrap();
+        let err = registry
+            .guardian_recovery(addr(1), [0xFF; 32], &[guardian], 2)
+            .expect_err("rotation at method cap must be refused without growing the record");
+        assert!(format!("{err:?}").contains("method cap"), "got: {err:?}");
+        assert_eq!(
+            registry.record(&addr(1)).unwrap().methods.len(),
+            MAX_IDENTITY_METHODS_PER_DID
         );
     }
 }

@@ -235,6 +235,7 @@ impl Mempool {
         let registry_commitment = self.scheme_registry.commitment();
         let authorization = bincode::serialize(&tx.authorization).unwrap_or_default();
         let digest = crate::mempool::authority_cache::authorization_digest(&[
+            tx.hash.as_bytes(),
             &tx.signing_hash(),
             tx.signature.as_deref().unwrap_or_default(),
             &tx.signer_public_key,
@@ -1577,5 +1578,30 @@ mod tests {
                 "only one equal-fee entry should be evicted"
             );
         }
+    }
+
+    #[test]
+    fn authorization_cache_rejects_mutated_tx_hash_after_valid_cache_entry() {
+        let kp = KeyPair::generate();
+        let from = Address::from(kp.public_key_bytes());
+        let to = Address::from([0x77; 32]);
+        let mut pool = Mempool::new(MempoolConfig {
+            min_fee: 0,
+            ..MempoolConfig::default()
+        });
+
+        let mut tx = Transaction::new(from, to, 10, 1, 0, Vec::new());
+        tx.sign(&kp);
+        let mut tampered = tx.clone();
+        tampered.hash = "ff".repeat(32);
+
+        pool.add_transaction(tx).expect("valid tx admitted");
+        let err = pool
+            .add_transaction(tampered)
+            .expect_err("non-canonical tx.hash must not hit authorization cache");
+        assert!(
+            matches!(err, MempoolError::InvalidTransaction(_)),
+            "got: {err:?}"
+        );
     }
 }

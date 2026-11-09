@@ -107,8 +107,8 @@ impl L1NoteRegistry {
         self.spent_commitments.contains(c)
     }
 
-    /// Genesis / faucet helper: insert a note without spending (tests + mint path).
-    pub fn insert_note(&mut self, commitment: NoteHash) -> Result<(), String> {
+    /// Genesis / faucet helper: insert a note without spending (internal + unit tests).
+    fn insert_note(&mut self, commitment: NoteHash) -> Result<(), String> {
         if self.live_commitments.contains(&commitment) {
             return Err("note commitment already live".into());
         }
@@ -201,8 +201,7 @@ impl L1NoteRegistry {
 
     /// Apply transfer with nullifier derivation proofs.
     /// Each `proof[i]` must satisfy: `nullifier[i] == derive_nullifier(commitment[i], proof[i])`, a domain-separated SHA-256.
-    /// If proofs is empty, falls back to legacy behavior (no binding check).
-    pub fn apply_transfer_with_proofs(
+    fn apply_transfer_with_proofs(
         &mut self,
         spent_commitments: &[NoteHash],
         nullifiers: &[NoteHash],
