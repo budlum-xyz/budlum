@@ -3445,28 +3445,15 @@ impl Node {
                                         continue;
                                     }
                                     NetworkMessage::CrossDomainMessage(msg_obj) => {
-                                        info!("Received CrossDomainMessage from {peer_id} for bridge");
-                                        let msg_clone = msg_obj.clone();
-                                        let chain = self.chain.clone();
-                                        let swarm_cmd_tx = self.command_tx.clone();
-                                        let pm_arc = self.peer_manager.clone();
-                                        tokio::spawn(async move {
-                                            match chain.submit_relayed_cross_domain_message(msg_clone.clone()).await {
-                                                Ok(_) => {
-                                                    if let Ok(mut pm) = pm_arc.lock() {
-                                                        pm.report_good_behavior(&peer_id);
-                                                    }
-                                                    let msg = NetworkMessage::CrossDomainMessage(msg_clone);
-                                                    let _ = swarm_cmd_tx.send(NodeCommand::Broadcast("blocks".into(), msg)).await;
-                                                }
-                                                Err(e) => {
-                                                    warn!("Failed to process CrossDomainMessage from {peer_id}: {e}");
-                                                    if let Ok(mut pm) = pm_arc.lock() {
-                                                        pm.report_invalid_tx(&peer_id);
-                                                    }
-                                                }
-                                            }
-                                        });
+                                        // Unauthenticated gossip frames must never drive the local
+                                        // validator/relayer key to sign, fund, or sequence an
+                                        // on-chain relay transaction: relayed messages enter via
+                                        // signed `TransactionType::CrossDomainMessage` transactions
+                                        // (or the operator-authenticated RPC door).
+                                        info!(
+                                            "Ignoring unauthenticated gossip CrossDomainMessage {:?} from {peer_id}",
+                                            msg_obj.message_id
+                                        );
                                         self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                         continue;
                                     }
@@ -4366,6 +4353,26 @@ mod sync_handler_order_tests {
         assert!(
             !code.contains("reorg_blocks"),
             "the unsolicited gossip batch must not be handed to a reconstruction"
+        );
+    }
+
+    #[test]
+    fn gossip_cross_domain_message_does_not_sign_or_fund_local_relay_tx() {
+        let code = production();
+        assert!(
+            !code.contains("submit_relayed_cross_domain_message"),
+            "gossip must never make the local node sign or fund a relayed cross-domain tx"
+        );
+        let at = code
+            .find("NetworkMessage::CrossDomainMessage(msg_obj) =>")
+            .expect("the CrossDomainMessage gossip arm exists");
+        let arm = code[at..]
+            .split("NetworkMessage::GlobalHeader(")
+            .next()
+            .expect("the arm ends before GlobalHeader");
+        assert!(
+            arm.contains("MessageAcceptance::Ignore"),
+            "unauthenticated CrossDomainMessage gossip must be ignored without forwarding"
         );
     }
 }

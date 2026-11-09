@@ -1722,7 +1722,9 @@ impl AccountState {
                 .validators
                 .get(&report.offender)
                 .is_some_and(|validator| validator.slashed);
-        let outcome = self.registry.slash_from_report(report)?;
+        let outcome = self
+            .registry
+            .slash_from_report_at_epoch(report, self.epoch_index)?;
         if report.role == roles::VALIDATOR && !already_slashed {
             let ratio = self.registry.params().slash_ratio(report.condition());
             let mut cut_total = 0u64;
@@ -2003,68 +2005,94 @@ impl AccountState {
                 address,
                 evidence_hash,
             } => {
-                // Governance slash now requires evidence, and the committed
-                // evidence_hash must match a real slashing record in the
-                // registry. Before this check the hash was discarded and any
-                // historical slashing record for the address was enough, so a
-                // proposal could claim one evidence hash while zeroing stake
-                // on unrelated past evidence (security audit, MEDIUM,
-                // CWE-345). The hash is the bincode serialization of
-                // the report that was actually slashed, so a passed proposal
-                // names the exact evidence it relies on.
+                // Maximum age (in epochs) of a slashing report that governance
+                // may escalate into a full validator slash.
+                const MAX_GOVERNANCE_SLASH_EVIDENCE_AGE_EPOCHS: u64 = 1_000;
+                let slash_digest = *evidence_hash;
+                let registered_epoch = self
+                    .registry
+                    .get(address, crate::registry::role::roles::VALIDATOR)
+                    .map_or(0, |reg| reg.registered_epoch);
+                let mut matched_remaining_stake: u64 = 0;
+
+                // Governance slash requires unconsumed, fresh, equivocation/fault
+                // VALIDATOR evidence from the validator's current registration era
+                // (never a timed LivenessFault jail), and caps active-bond
+                // confiscation to the remaining stake at the time of the offence.
                 let evidence_matches =
                     self.registry
                         .slashing_history_for(address)
                         .iter()
                         .any(|record| {
-                            // The evidence must be a VALIDATOR slashing record.
-                            // A slash record for another role on the same
-                            // address (e.g. a VERIFIER) proves nothing about
-                            // the validator role this proposal is slashing
-                            // (security audit, HIGH).
                             if record.report.role != crate::registry::role::roles::VALIDATOR {
                                 return false;
                             }
+                            if record.report.condition()
+                                == crate::registry::SlashingCondition::LivenessFault
+                            {
+                                return false;
+                            }
+                            if self
+                                .governance
+                                .consumed_slash_evidence
+                                .contains(&slash_digest)
+                            {
+                                return false;
+                            }
+                            if record.slashed_epoch < registered_epoch {
+                                return false;
+                            }
+                            if self.epoch_index.saturating_sub(record.slashed_epoch)
+                                > MAX_GOVERNANCE_SLASH_EVIDENCE_AGE_EPOCHS
+                            {
+                                return false;
+                            }
+                            matched_remaining_stake = record.remaining_stake;
                             let bytes = bincode::serialize(&record.report)
                                 .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec());
                             sha2::Sha256::digest(&bytes).as_slice() == evidence_hash
                         });
                 if !evidence_matches {
                     tracing::warn!(
-                        "Rejecting SlashValidator {address}: no slashing record matching the committed evidence_hash in registry history"
+                        "Rejecting SlashValidator {address}: no eligible unconsumed validator slashing record matching the committed evidence_hash"
                     );
-                } else if let Some(v) = self.validators.get_mut(address) {
-                    v.slashed = true;
-                    v.active = false;
-                    v.jailed = true;
-                    v.jail_until = self.epoch_index.saturating_add(7);
-                    let mut destroyed = u128::from(std::mem::take(&mut v.stake));
-                    // A full governance slash also takes the stake that is
-                    // still waiting to unbond. Otherwise unstake before the
-                    // vote would keep it whole.
-                    destroyed += self
-                        .unbonding_queue
-                        .iter()
-                        .filter(|entry| entry.address == *address)
-                        .map(|entry| u128::from(entry.amount))
-                        .sum::<u128>();
-                    self.unbonding_queue
-                        .retain(|entry| entry.address != *address);
-                    // The destroyed stake was issued once. Counting it as
-                    // burned keeps it from reopening mint headroom.
-                    self.record_destroyed(destroyed);
-                    // Same tally rule as the report path: the stake this arm
-                    // just removed from the eligible set has to leave the
-                    // numerator too, or a vote cast before the slash keeps
-                    // weighing against a denominator it is no longer part of.
-                    for proposal in self.governance.proposals.iter_mut() {
-                        if proposal.status == crate::core::governance::ProposalStatus::Active {
-                            proposal.reduce_vote_weight(address, u64::MAX);
+                } else {
+                    self.governance.consumed_slash_evidence.insert(slash_digest);
+                    if let Some(v) = self.validators.get_mut(address) {
+                        v.slashed = true;
+                        v.active = false;
+                        v.jailed = true;
+                        v.jail_until = self.epoch_index.saturating_add(7);
+                        let slashed_active = v.stake.min(matched_remaining_stake);
+                        v.stake = v.stake.saturating_sub(slashed_active);
+                        let mut destroyed = u128::from(slashed_active);
+                        // A full governance slash also takes the stake that is
+                        // still waiting to unbond. Otherwise unstake before the
+                        // vote would keep it whole.
+                        destroyed += self
+                            .unbonding_queue
+                            .iter()
+                            .filter(|entry| entry.address == *address)
+                            .map(|entry| u128::from(entry.amount))
+                            .sum::<u128>();
+                        self.unbonding_queue
+                            .retain(|entry| entry.address != *address);
+                        // The destroyed stake was issued once. Counting it as
+                        // burned keeps it from reopening mint headroom.
+                        self.record_destroyed(destroyed);
+                        // Same tally rule as the report path: the stake this arm
+                        // just removed from the eligible set has to leave the
+                        // numerator too, or a vote cast before the slash keeps
+                        // weighing against a denominator it is no longer part of.
+                        for proposal in self.governance.proposals.iter_mut() {
+                            if proposal.status == crate::core::governance::ProposalStatus::Active {
+                                proposal.reduce_vote_weight(address, u64::MAX);
+                            }
                         }
+                        tracing::info!(
+                            "Executing Governance: Slashed validator {address} (evidence-verified)"
+                        );
                     }
-                    tracing::info!(
-                        "Executing Governance: Slashed validator {address} (evidence-verified)"
-                    );
                 }
             }
             ProposalType::PoaAddAdmin { domain_id, admin } => {
@@ -4276,6 +4304,108 @@ mod tests {
         assert_eq!(state.unbonding_queue.len(), 1);
         assert_eq!(state.unbonding_queue[0].address, other);
         assert_eq!(state.unbonding_queue[0].amount, 300);
+    }
+
+    #[test]
+    fn governance_slash_rejects_consumed_liveness_stale_and_post_offence_stake() {
+        use crate::core::governance::{Proposal, ProposalType};
+        let who = test_addr_from_byte(7u8);
+        let proposer = test_addr_from_byte(8u8);
+        let mut state = AccountState::new();
+        state.add_validator(who, 1_000);
+
+        // 1. A LivenessFault report is a timed jail, never valid SlashValidator evidence.
+        let liveness_report = crate::registry::evidence::SlashingReport::consensus_liveness(
+            who,
+            crate::registry::role::roles::VALIDATOR,
+            crate::registry::evidence::SlashingProof::Liveness {
+                window_start_epoch: 0,
+                window_end_epoch: 10,
+                missed: 10,
+                expected: 10,
+            },
+            None,
+        );
+        assert!(state.slash_from_report(&liveness_report).unwrap().is_some());
+        let liveness_bytes = bincode::serialize(&liveness_report).unwrap();
+        let liveness_hash: [u8; 32] = sha2::Sha256::digest(&liveness_bytes).into();
+        let stake_after_liveness = state.get_validator(&who).unwrap().stake;
+        state.execute_proposal(&Proposal::new(
+            1,
+            proposer,
+            ProposalType::SlashValidator {
+                address: who,
+                evidence_hash: liveness_hash,
+            },
+            0,
+            10,
+        ));
+        assert_eq!(
+            state.get_validator(&who).unwrap().stake,
+            stake_after_liveness,
+            "LivenessFault report must never trigger full governance stake confiscation"
+        );
+
+        // 2. Real double-sign report: simulate post-offence stake added above
+        // `remaining_stake` and verify only offence-time remaining stake is confiscated,
+        // and replaying the same `evidence_hash` a second time is rejected.
+        let eq_report = crate::registry::evidence::SlashingReport::consensus_double_sign(
+            who,
+            crate::registry::evidence::SlashingProof::DoubleSign {
+                height: 9,
+                kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+                epoch: None,
+                block_hash_1: "11".into(),
+                block_hash_2: "22".into(),
+                signature_1: vec![3],
+                signature_2: vec![4],
+            },
+            None,
+        );
+        assert!(state.slash_from_report(&eq_report).unwrap().is_some());
+        let offence_remaining = state
+            .registry
+            .slashing_history()
+            .last()
+            .unwrap()
+            .remaining_stake;
+        state.get_validator_mut(&who).unwrap().stake = offence_remaining + 2_500;
+
+        let eq_bytes = bincode::serialize(&eq_report).unwrap();
+        let eq_hash: [u8; 32] = sha2::Sha256::digest(&eq_bytes).into();
+        state.execute_proposal(&Proposal::new(
+            2,
+            proposer,
+            ProposalType::SlashValidator {
+                address: who,
+                evidence_hash: eq_hash,
+            },
+            0,
+            10,
+        ));
+        assert_eq!(
+            state.get_validator(&who).unwrap().stake,
+            2_500,
+            "stake bonded after the offence must not be confiscated"
+        );
+        assert!(state.governance.consumed_slash_evidence.contains(&eq_hash));
+
+        // Second execution with the same consumed evidence_hash must leave remaining stake intact.
+        state.execute_proposal(&Proposal::new(
+            3,
+            proposer,
+            ProposalType::SlashValidator {
+                address: who,
+                evidence_hash: eq_hash,
+            },
+            0,
+            10,
+        ));
+        assert_eq!(
+            state.get_validator(&who).unwrap().stake,
+            2_500,
+            "replayed SlashValidator evidence must be refused"
+        );
     }
 
     #[test]
