@@ -8224,6 +8224,11 @@ impl Blockchain {
     /// shard it cannot prove. Until this path existed, a repair ticket
     /// opened by the maintenance sweep could never be filled on-chain:
     /// the trigger ran, and the acceptance was test-only.
+    /// Test harness only, for the same reason as operator-consent storage
+    /// doors: the helper debits `replacement_operator`'s bond with no consent
+    /// signature of its own. Production reallocations must enter via the
+    /// signed in-block storage door.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn accept_storage_reallocation_with_escrow(
         &mut self,
