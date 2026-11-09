@@ -1582,7 +1582,7 @@ mod tests {
 
     #[test]
     fn authorization_cache_rejects_mutated_tx_hash_after_valid_cache_entry() {
-        let kp = KeyPair::generate();
+        let kp = crate::crypto::primitives::KeyPair::generate().unwrap();
         let from = Address::from(kp.public_key_bytes());
         let to = Address::from([0x77; 32]);
         let mut pool = Mempool::new(MempoolConfig {
@@ -1590,7 +1590,8 @@ mod tests {
             ..MempoolConfig::default()
         });
 
-        let mut tx = Transaction::new(from, to, 10, 1, 0, Vec::new());
+        let mut tx = Transaction::new(from, to, 10, Vec::new());
+        tx.fee = 1;
         tx.sign(&kp);
         let mut tampered = tx.clone();
         tampered.hash = "ff".repeat(32);

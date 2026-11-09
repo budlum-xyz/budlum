@@ -276,7 +276,11 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
     if domain.id == 0 {
         return Err("Consensus domain id 0 is reserved".into());
     }
-    if domain.domain_chain_id == 0 {
+    // Bitcoin uses numeric chain id 0; no other canonical or custom slot may
+    // register with zero. Keep this consistent with the chain bootstrap gate.
+    if domain.domain_chain_id == 0
+        && domain.id != crate::core::transaction::ExternalChain::Bitcoin.domain_id()
+    {
         return Err(format!("Domain {} has invalid chain id 0", domain.id));
     }
 
@@ -390,6 +394,39 @@ fn ensure_adapter_name(domain: &ConsensusDomain, expected: &'static str) -> Resu
             "Domain {} finality adapter mismatch: expected {}, got {}",
             domain.id, expected, domain.finality_adapter
         ));
+    }
+    Ok(())
+}
+
+/// Both classical and composite PoA proofs name Ed25519 authority addresses;
+/// the latter wraps the address alongside its composite public key. Do not
+/// accidentally skip the stake-registry gate for composite authorities.
+fn ensure_attester_authorities(
+    state: &AccountState,
+    proof: &FinalityProof,
+    kind: &str,
+) -> Result<(), String> {
+    let check = |auth: &Address| {
+        if state.registry.is_active_attester(auth) {
+            Ok(())
+        } else {
+            Err(format!(
+                "{kind} authority {auth} is not an active attester (D4 unified registry)"
+            ))
+        }
+    };
+    match proof {
+        FinalityProof::PoA { authorities, .. } => {
+            for auth in authorities {
+                check(auth)?;
+            }
+        }
+        FinalityProof::PoAPq { authorities, .. } => {
+            for auth in authorities {
+                check(&auth.authority)?;
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -571,17 +608,7 @@ pub fn verify_commitment_finality_observed(
                 .total_stake(crate::registry::role::roles::ATTESTER)
                 > 0
             {
-                if let FinalityProof::PoA { authorities, .. }
-                | FinalityProof::PoAPq { authorities, .. } = proof
-                {
-                    for auth in authorities {
-                        if !state.registry.is_active_attester(auth) {
-                            return Err(format!(
-                                "Storage attestation authority {auth} is not an active attester (D4 unified registry)"
-                            ));
-                        }
-                    }
-                }
+                ensure_attester_authorities(state, proof, "Storage attestation")?;
             }
             status
         }
@@ -595,17 +622,7 @@ pub fn verify_commitment_finality_observed(
                 .total_stake(crate::registry::role::roles::ATTESTER)
                 > 0
             {
-                if let FinalityProof::PoA { authorities, .. }
-                | FinalityProof::PoAPq { authorities, .. } = proof
-                {
-                    for auth in authorities {
-                        if !state.registry.is_active_attester(auth) {
-                            return Err(format!(
-                                "AI inference authority {auth} is not an active attester (D4 unified registry)"
-                            ));
-                        }
-                    }
-                }
+                ensure_attester_authorities(state, proof, "AI inference")?;
             }
             status
         }
@@ -2186,6 +2203,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn bitcoin_anchor_requires_chain_id_zero_and_genesis_admission() {
+        use crate::core::transaction::ExternalChain;
+        let slot = ExternalChain::Bitcoin.domain_id();
+        let mut state = AccountState::new();
+        let mut impostor = pow(slot);
+        impostor.domain_chain_id = 45262;
+        register_domain(&mut state, impostor.clone()).unwrap();
+        let first = block(1, &"00".repeat(32), 0x83);
+        accept_verified_commitment(&mut state, commitment(&impostor, &first, 0)).unwrap();
+        assert!(
+            !state.external_roots.contains_key(&slot),
+            "a different network cannot anchor under Bitcoin's slot"
+        );
+
+        let bitcoin = default_domain(slot, ConsensusKind::PoW, 0, POW_HEADER_CHAIN_ADAPTER, 1);
+        let mut state = AccountState::new();
+        state.add_balance(&operator(&bitcoin), MIN_DOMAIN_OPERATOR_BOND + FEE);
+        assert!(
+            execute_settlement_tx(
+                &mut state,
+                &ctx(operator(&bitcoin)),
+                &SettlementTx::RegisterDomain(Box::new(bitcoin.clone())),
+            )
+            .is_err(),
+            "permissionless registration cannot capture Bitcoin's canonical anchor"
+        );
+        register_domain(&mut state, bitcoin.clone()).unwrap();
+        accept_verified_commitment(&mut state, commitment(&bitcoin, &first, 0)).unwrap();
+        assert!(state.external_roots.contains_key(&slot));
+    }
+
     /// Registration is permissionless, so an id the wire contract reserves for
     /// a named external chain but no genesis seeds is open to anyone: Polygon
     /// 5, Arbitrum 6, Optimism 7. Taking one of those ids used to be enough to
@@ -3105,7 +3154,7 @@ mod tests {
     #[test]
     fn self_declared_poa_domain_cannot_submit_state_updates_without_governance_admission() {
         let mut state = AccountState::new();
-        let authority_kp = crate::crypto::primitives::KeyPair::generate();
+        let authority_kp = crate::crypto::primitives::KeyPair::generate().unwrap();
         let authority = Address::from(authority_kp.public_key_bytes());
         let victim = Address::from([0xCC; 32]);
 
@@ -3122,24 +3171,18 @@ mod tests {
         let blk = block(1, &"00".repeat(32), 1);
         let mut com = commitment(&domain, &blk, 1);
         com.state_updates.insert(victim, 42);
-        let signing_msg = crate::domain::poa_commit_signing_message(
-            com.domain_id,
+        let signing_msg = crate::domain::finality_adapter::poa_commit_signing_message(
             domain.domain_chain_id,
-            com.domain_height,
-            &com.domain_block_hash,
-            &com.parent_domain_block_hash,
-            com.sequence,
-            com.timestamp_ms,
-            None,
-            &com.state_root,
-            &com.tx_root,
-            &com.event_root,
-            &com.state_updates,
+            domain.id,
+            &com,
         );
         let sig = authority_kp.sign(&signing_msg).to_vec();
         let proof = FinalityProof::PoA {
             authorities: vec![authority],
-            signatures: vec![sig],
+            signatures: vec![crate::domain::finality_adapter::PoAAuthoritySignature {
+                authority,
+                signature: sig,
+            }],
         };
         com.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
 
