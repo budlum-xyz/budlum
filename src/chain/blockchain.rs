@@ -195,6 +195,9 @@ pub struct Blockchain {
     pub cold_wallet: Option<ColdWalletState>,
     /// Append-only in-memory event log consumed by RPC/gossip/reporting layers.
     pub storage_economics_events: Vec<StorageEconomicsEvent>,
+    /// Rolling post-maintenance state checkpoints so candidate-chain validation
+    /// replays from the nearest ancestor anchor rather than genesis (CWE-400).
+    reorg_anchors: Vec<(usize, String, AccountState)>,
 }
 
 impl Blockchain {
@@ -716,6 +719,17 @@ impl Blockchain {
             }
         }
 
+        let mut init_reorg_anchors: Vec<(usize, String, AccountState)> = Vec::new();
+        if start_index > 1 {
+            let snap_idx = start_index - 1;
+            if let Some(snap_block) = chain_vec.get(snap_idx) {
+                if state.calculate_state_root() == snap_block.state_root {
+                    let mut snap_state = state.clone();
+                    Self::apply_ai_registry_maintenance(&mut snap_state, snap_block.index);
+                    init_reorg_anchors.push((snap_idx, snap_block.hash.clone(), snap_state));
+                }
+            }
+        }
         for block in chain_vec.iter().skip(start_index) {
             let preceding = &chain_vec[..block.index as usize];
             state = match Self::apply_block_effects(&state, block, preceding) {
@@ -744,7 +758,14 @@ impl Blockchain {
             // each block; the replay must do the same, or the restarted node
             // carries rows its peers already pruned and its state root
             // diverges from the network's at the next block (P10-F02).
+            let matches_root = state.calculate_state_root() == block.state_root;
             Self::apply_ai_registry_maintenance(&mut state, block.index);
+            if matches_root && block.index > 0 && block.index.is_multiple_of(50) {
+                if init_reorg_anchors.len() >= 6 {
+                    init_reorg_anchors.remove(0);
+                }
+                init_reorg_anchors.push((block.index as usize, block.hash.clone(), state.clone()));
+            }
         }
 
         let mempool_config = Network::from_chain_id(chain_id)
@@ -1025,6 +1046,7 @@ impl Blockchain {
             anchor_emission: AnchorEmission::default(),
             cold_wallet: None,
             storage_economics_events: Vec::new(),
+            reorg_anchors: init_reorg_anchors,
         };
 
         if let Some(store) = bc.storage.as_ref() {
@@ -5996,6 +6018,7 @@ impl Blockchain {
         // Made the producer's `liveness` root unreproducible by replay.
 
         self.chain.push(block.clone());
+        self.maybe_record_reorg_anchor(block.index as usize, &block.hash, &block.state_root);
         // The block is the tip now, and the leader rounds of its children are
         // priced from this moment rather than from a header stamp that a
         // lagging slot schedule may have put minutes in the past.
@@ -6341,8 +6364,14 @@ impl Blockchain {
         let applied_tx_count = block.transactions.len() as u64;
         let committed_index = block.index;
         let committed_hash = block.hash.clone();
+        let committed_state_root = block.state_root.clone();
         self.emit_applied_tx_metrics(&block.transactions, ai_outcomes_before);
         self.chain.push(block);
+        self.maybe_record_reorg_anchor(
+            committed_index as usize,
+            &committed_hash,
+            &committed_state_root,
+        );
         // Same rule as the other commit path: adoption is what prices the
         // next slot's leader rounds.
         self.consensus
@@ -6438,6 +6467,28 @@ impl Blockchain {
         self.validate_candidate_chain(chain).is_ok()
     }
 
+    fn maybe_record_reorg_anchor(
+        &mut self,
+        index: usize,
+        block_hash: &str,
+        committed_state_root: &str,
+    ) {
+        if index == 0 || !index.is_multiple_of(50) {
+            return;
+        }
+        if self.state.calculate_state_root() != committed_state_root {
+            return;
+        }
+        let mut anchor_state = self.state.clone();
+        Self::apply_ai_registry_maintenance(&mut anchor_state, index as u64);
+        self.reorg_anchors.retain(|(idx, _, _)| *idx < index);
+        if self.reorg_anchors.len() >= 6 {
+            self.reorg_anchors.remove(0);
+        }
+        self.reorg_anchors
+            .push((index, block_hash.to_string(), anchor_state));
+    }
+
     fn validate_candidate_chain(&self, chain: &[Block]) -> Result<AccountState, String> {
         let genesis = chain
             .first()
@@ -6447,9 +6498,31 @@ impl Blockchain {
             return Err("Candidate genesis does not match configured genesis".into());
         }
 
-        let mut state = self.genesis_config.build_state();
-        state.execution_domain = self.consensus.domain_kind();
-        for (index, block) in chain.iter().enumerate().skip(1) {
+        let anchor = self.reorg_anchors.iter().rev().find(|(idx, hash, _)| {
+            *idx < chain.len()
+                && *idx < self.chain.len()
+                && chain
+                    .iter()
+                    .take(*idx + 1)
+                    .zip(self.chain.iter().take(*idx + 1))
+                    .all(|(cand, local)| cand.hash == local.hash && cand.index == local.index)
+                && chain.get(*idx).is_some_and(|b| &b.hash == hash)
+        });
+
+        let (mut state, replay_from) = match anchor {
+            Some((idx, _, anchored_state)) => {
+                let mut cloned = anchored_state.clone();
+                cloned.execution_domain = self.consensus.domain_kind();
+                (cloned, idx + 1)
+            }
+            None => {
+                let mut fresh = self.genesis_config.build_state();
+                fresh.execution_domain = self.consensus.domain_kind();
+                (fresh, 1usize)
+            }
+        };
+
+        for (index, block) in chain.iter().enumerate().skip(replay_from) {
             let expected_height = index as u64;
             let parent = &chain[index - 1];
             if block.index != expected_height || block.previous_hash != parent.hash {
@@ -6619,6 +6692,31 @@ impl Blockchain {
                 suffix.len()
             ));
         }
+        // Pre-validate the peer-supplied suffix structurally before copying any
+        // prefix or entering candidate-chain replay (CWE-400).
+        let mut expected_index = start;
+        let mut expected_previous = first.previous_hash.clone();
+        for block in &suffix {
+            if block.index != expected_index
+                || block.previous_hash != expected_previous
+                || block.chain_id != self.chain_id
+                || block.tx_root != block.calculate_tx_root()
+                || block.hash != block.calculate_hash()
+            {
+                return Err(format!(
+                    "reorg suffix is not a structurally valid chain at height {}",
+                    block.index
+                ));
+            }
+            Self::check_block_slashing_evidence(block).map_err(|e| {
+                format!(
+                    "reorg suffix block {} failed slashing evidence check: {e}",
+                    block.index
+                )
+            })?;
+            expected_index = expected_index.saturating_add(1);
+            expected_previous = block.hash.clone();
+        }
         let mut candidate = Vec::with_capacity(candidate_len);
         candidate.extend_from_slice(&self.chain[..start_index]);
         candidate.extend(suffix);
@@ -6703,8 +6801,12 @@ impl Blockchain {
             }
         }
 
+        self.reorg_anchors.retain(|(idx, _, _)| *idx < fork_point);
         self.chain = new_chain;
         self.state = new_state;
+        if let Some(tip) = self.chain.last().cloned() {
+            self.maybe_record_reorg_anchor(tip.index as usize, &tip.hash, &tip.state_root);
+        }
         // The adopted tip is a different block from the one the round price
         // book was stamped with, so the book has to move with it: left naming
         // the orphaned tip, the new tip's leader rounds fall back to a
@@ -9136,6 +9238,7 @@ impl Clone for Blockchain {
             anchor_emission: self.anchor_emission.clone(),
             cold_wallet: self.cold_wallet.clone(),
             storage_economics_events: self.storage_economics_events.clone(),
+            reorg_anchors: Vec::new(),
         }
     }
 }
@@ -12268,5 +12371,57 @@ mod reorg_suffix_tests {
             .expect("post-restart reorg across historical retry-round block 1 must succeed");
         assert!(reorged);
         assert_eq!(restarted.chain.len(), 5);
+    }
+
+    #[test]
+    fn reorg_suffix_rejects_malformed_hash_before_replay_and_uses_rolling_anchor() {
+        let mut bc = Blockchain::new(
+            Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+            None,
+            45262,
+            None,
+        );
+        let miner = Address::from([0x33; 32]);
+        let mut alt = Blockchain::new(
+            Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+            None,
+            45262,
+            None,
+        );
+        for h in 0..60 {
+            let (blk, _) = bc.produce_block(miner).expect("produce block");
+            if h < 55 {
+                alt.validate_and_add_block(blk).expect("sync shared prefix");
+            }
+        }
+        let alt_miner = Address::from([0x44; 32]);
+        let mut good_suffix = Vec::new();
+        for _ in 55..62 {
+            let (blk, _) = alt.produce_block(alt_miner).expect("produce alt block");
+            good_suffix.push(blk);
+        }
+        assert!(
+            !bc.reorg_anchors.is_empty(),
+            "committed chain across stride 50 must record a rolling reorg anchor"
+        );
+
+        let mut bad_suffix = fork_blocks(&bc, 58, 4);
+        bad_suffix[1].chain_id = bc.chain_id;
+        for b in &mut bad_suffix {
+            b.chain_id = bc.chain_id;
+            b.tx_root = b.calculate_tx_root();
+            b.hash = b.calculate_hash();
+        }
+        for i in 1..bad_suffix.len() {
+            bad_suffix[i].previous_hash = bad_suffix[i - 1].hash.clone();
+            bad_suffix[i].hash = bad_suffix[i].calculate_hash();
+        }
+        bad_suffix[2].hash = "00".repeat(32);
+        let err = bc
+            .try_reorg_suffix(bad_suffix)
+            .expect_err("corrupted suffix block hash must fail before genesis replay");
+        assert!(err.contains("not a structurally valid chain"), "got: {err}");
+        assert_eq!(bc.try_reorg_suffix(good_suffix), Ok(true));
+        assert_eq!(bc.chain.len(), 63);
     }
 }

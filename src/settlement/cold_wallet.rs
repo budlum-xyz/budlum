@@ -243,6 +243,10 @@ pub enum ColdRefusal {
         expected: u64,
         requested: u64,
     },
+    BudgetEpochNotAdvanced {
+        active_epoch: u64,
+        requested: u64,
+    },
     NonceZero,
     HeightAdvanceTooSmall {
         required: u64,
@@ -269,6 +273,7 @@ impl ColdRefusal {
             Self::QuorumExceedsDeviceCount { .. } => "quorum-exceeds-device-count",
             Self::EpochRolledBack { .. } => "epoch-rolled-back",
             Self::EpochMismatch { .. } => "epoch-mismatch",
+            Self::BudgetEpochNotAdvanced { .. } => "budget-epoch-not-advanced",
             Self::NonceZero => "nonce-zero",
             Self::HeightAdvanceTooSmall { .. } => "height-advance-too-small",
         }
@@ -450,18 +455,20 @@ impl ColdWalletState {
         if self.signed_count == 0
             && (self.last_signed_height != 0
                 || self.last_signed_nonce != 0
-                || self.epoch_spent_atoms != 0
-                || self.budget_epoch != 0)
+                || self.epoch_spent_atoms != 0)
         {
             return Err("counters-without-a-signed-settlement");
         }
         if self.epoch_spent_atoms > self.policy.max_value_per_epoch_atoms {
             return Err("epoch-spent-above-budget");
         }
-        if self.signed_count > 0
-            && self.budget_epoch != self.policy.epoch_for_height(self.last_signed_height)
-        {
-            return Err("budget-epoch-height-mismatch");
+        if self.signed_count > 0 {
+            let last_epoch = self.policy.epoch_for_height(self.last_signed_height);
+            if self.budget_epoch < last_epoch
+                || (self.budget_epoch > last_epoch && self.epoch_spent_atoms != 0)
+            {
+                return Err("budget-epoch-height-mismatch");
+            }
         }
         let mut previous = 0u32;
         for rotation in &self.rotations {
@@ -547,7 +554,7 @@ impl ColdWalletState {
                 // important for a restored or hand-edited state: a late
                 // arithmetic refusal must not partially advance the epoch.
                 let height_epoch = self.policy.epoch_for_height(request.height);
-                let next_spent = if self.signed_count == 0 || height_epoch != self.budget_epoch {
+                let next_spent = if self.signed_count == 0 {
                     request.value_atoms
                 } else {
                     match self.epoch_spent_atoms.checked_add(request.value_atoms) {
@@ -675,6 +682,12 @@ impl ColdWalletState {
                 height: request.height,
                 expected: height_epoch,
                 requested: request.epoch,
+            });
+        }
+        if (self.signed_count > 0 || self.budget_epoch > 0) && height_epoch > self.budget_epoch {
+            return Err(ColdRefusal::BudgetEpochNotAdvanced {
+                active_epoch: self.budget_epoch,
+                requested: height_epoch,
             });
         }
         if request.nonce == 0 {
@@ -866,6 +879,26 @@ impl ColdWalletState {
             0
         };
         self.policy.max_value_per_epoch_atoms.saturating_sub(spent)
+    }
+
+    /// WIRING: operator-side cold ceremony door called after verifying an
+    /// out-of-band finalized header at or above `next_epoch`.
+    /// Convenience: kept for the CLI
+    pub fn advance_budget_epoch(&mut self, next_epoch: u64) -> Result<u64, ColdRefusal> {
+        if let Err(rule) = self.validate() {
+            return Err(ColdRefusal::InvalidState {
+                rule: rule.to_string(),
+            });
+        }
+        if next_epoch <= self.budget_epoch {
+            return Err(ColdRefusal::EpochRolledBack {
+                last_signed: self.budget_epoch,
+                requested: next_epoch,
+            });
+        }
+        self.budget_epoch = next_epoch;
+        self.epoch_spent_atoms = 0;
+        Ok(self.budget_epoch)
     }
 }
 
@@ -1116,8 +1149,18 @@ mod tests {
             "a new epoch has a fresh budget"
         );
         let next = request(100, 4, 1000);
+        assert_eq!(
+            cold.sign(&next, 1, 2).unwrap_err(),
+            ColdRefusal::BudgetEpochNotAdvanced {
+                active_epoch: 0,
+                requested: 1,
+            },
+            "online host height jump alone must not reset the cold budget"
+        );
+        cold.advance_budget_epoch(1)
+            .expect("cold operator advances epoch after verifying finalized header");
         cold.sign(&next, 1, 2)
-            .expect("epoch 1 has its own budget once height crosses epoch_length_blocks");
+            .expect("epoch 1 has its own budget after operator advances budget_epoch");
         assert_eq!(cold.budget_epoch, 1);
         assert_eq!(cold.epoch_spent_atoms, 1000);
     }
