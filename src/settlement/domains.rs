@@ -2,9 +2,10 @@
 //!
 //! Budlum settles the finality of the consensus domains it hosts: each
 //! domain registers once, then its commitments arrive with finality proofs,
-//! each one advancing the domain's committed height, anchoring its state
-//! root and applying the account nonce writes it carries. ZK domains advance
-//! by proof claims instead. Every one of those writes used to happen outside
+//! each one advancing the domain's committed height and anchoring its state
+//! root. Domain finality does not authorize native account nonce writes:
+//! those require account-owner authorization, absent from this commitment
+//! format. ZK domains advance by proof claims instead. Every one of those writes used to happen outside
 //! a block: operator RPCs (`bud_registerConsensusDomain`,
 //! `bud_submitVerifiedDomainCommitment`, `bud_registerSovereignTemplate`,
 //! `bud_submitZkProof`), a gossip side channel that applied commitments as
@@ -394,6 +395,38 @@ fn ensure_adapter_name(domain: &ConsensusDomain, expected: &'static str) -> Resu
     Ok(())
 }
 
+/// Apply the same registry policy to classical addresses and composite-key
+/// records. A PoAPq authority record is not itself an Address.
+fn require_active_attester_authorities(
+    state: &AccountState,
+    proof: &FinalityProof,
+    purpose: &str,
+) -> Result<(), String> {
+    if state
+        .registry
+        .total_stake(crate::registry::role::roles::ATTESTER)
+        == 0
+    {
+        return Ok(());
+    }
+    let check = |authority: &Address| {
+        if state.registry.is_active_attester(authority) {
+            Ok(())
+        } else {
+            Err(format!(
+                "{purpose} authority {authority} is not an active attester (D4 unified registry)"
+            ))
+        }
+    };
+    match proof {
+        FinalityProof::PoA { authorities, .. } => authorities.iter().try_for_each(check),
+        FinalityProof::PoAPq { authorities, .. } => authorities
+            .iter()
+            .try_for_each(|entry| check(&entry.authority)),
+        _ => Ok(()),
+    }
+}
+
 /// Verify that `proof` finalizes `commitment` under the domain's own
 /// finality adapter. Reads the account state only, so every node that holds
 /// the same state reaches the same verdict.
@@ -434,6 +467,18 @@ pub fn verify_commitment_finality_observed(
     observer: &mut dyn crate::crypto::facts::CryptoObserver,
 ) -> Result<(), String> {
     let domain = validate_commitment_metadata(state, commitment)?;
+    // Domain authorities may attest their own domain, not authorize writes to
+    // another native account. Permissionless registration makes that distinction
+    // essential: even a correctly signed PoA/PoAPq commitment can be entirely
+    // controlled by its registrant. No current proof variant carries per-account
+    // owner authorization, so refuse these writes before verification or staging.
+    // Governance admission must not grant authority over the permissionless core.
+    if !commitment.state_updates.is_empty() {
+        return Err(format!(
+            "Domain {} height {}: canonical account nonce writes require account-owner authorization; domain finality is not account-owner authorization",
+            commitment.domain_id, commitment.domain_height
+        ));
+    }
     let expected_proof_hash = hash_finality_proof(proof).map_err(|e| e.to_string())?;
     if commitment.finality_proof_hash != expected_proof_hash {
         return Err(format!(
@@ -565,48 +610,14 @@ pub fn verify_commitment_finality_observed(
             let adapter = crate::domain::StorageAttestationFinalityAdapter;
             ensure_adapter_name(domain, adapter.adapter_name())?;
             let status = adapter.verify_finality(domain, commitment, proof);
-            // Attester gate: enforced once any ATTESTER stake exists.
-            if state
-                .registry
-                .total_stake(crate::registry::role::roles::ATTESTER)
-                > 0
-            {
-                if let FinalityProof::PoA { authorities, .. }
-                | FinalityProof::PoAPq { authorities, .. } = proof
-                {
-                    for auth in authorities {
-                        if !state.registry.is_active_attester(auth) {
-                            return Err(format!(
-                                "Storage attestation authority {auth} is not an active attester (D4 unified registry)"
-                            ));
-                        }
-                    }
-                }
-            }
+            require_active_attester_authorities(state, proof, "Storage attestation")?;
             status
         }
         ConsensusKind::AiInference => {
             let adapter = crate::domain::AiInferenceFinalityAdapter;
             ensure_adapter_name(domain, adapter.adapter_name())?;
             let status = adapter.verify_finality(domain, commitment, proof);
-            // Attester gate: mirror StorageAttestation once any ATTESTER stake exists.
-            if state
-                .registry
-                .total_stake(crate::registry::role::roles::ATTESTER)
-                > 0
-            {
-                if let FinalityProof::PoA { authorities, .. }
-                | FinalityProof::PoAPq { authorities, .. } = proof
-                {
-                    for auth in authorities {
-                        if !state.registry.is_active_attester(auth) {
-                            return Err(format!(
-                                "AI inference authority {auth} is not an active attester (D4 unified registry)"
-                            ));
-                        }
-                    }
-                }
-            }
+            require_active_attester_authorities(state, proof, "AI inference")?;
             status
         }
     }
@@ -614,34 +625,9 @@ pub fn verify_commitment_finality_observed(
 
     match status {
         FinalityStatus::Finalized => {
-            // Only a governance-admitted PoA domain may write canonical account
-            // nonces: permissionless `RegisterDomain` lets any funded registrant
-            // supply its own `validator_set_hash`, so a PoA signature without
-            // governance admission only proves the registrant signed for itself.
-            if !commitment.state_updates.is_empty() {
-                if !matches!(
-                    proof,
-                    FinalityProof::PoA { .. } | FinalityProof::PoAPq { .. }
-                ) {
-                    return Err(format!(
-                        "Domain {} height {}: commitment claims {} state updates that no finality \
-                         proof attests",
-                        commitment.domain_id,
-                        commitment.domain_height,
-                        commitment.state_updates.len()
-                    ));
-                }
-                if !state.poa_is_permissioned(commitment.domain_id) {
-                    return Err(format!(
-                        "Domain {} height {}: commitment claims {} state updates, but the domain \
-                         holds no governance admission and its authority set is therefore \
-                         self-declared",
-                        commitment.domain_id,
-                        commitment.domain_height,
-                        commitment.state_updates.len()
-                    ));
-                }
-            }
+            // Account writes were refused before the proof was checked. A
+            // finality verdict cannot upgrade a domain authority into an account
+            // owner, even when the domain is governance-admitted.
             // The same seam, applied to the roots' consumers rather than to
             // the commitment itself: a root no proof binds is never anchored
             // (`accept_verified_commitment`) and never trusted as an event
@@ -923,7 +909,7 @@ fn apply_pending_commitments(
                 domain_id = com.domain_id,
                 domain_height = com.domain_height,
                 updates = com.state_updates.len(),
-                "applying permissioned domain commitment nonce updates"
+                "applying domain commitment nonce updates"
             );
         }
         for (addr, new_nonce) in &com.state_updates {
@@ -3103,43 +3089,31 @@ mod tests {
     }
 
     #[test]
-    fn self_declared_poa_domain_cannot_submit_state_updates_without_governance_admission() {
+    fn poa_authorities_require_account_owner_authorization() {
         let mut state = AccountState::new();
-        let authority_kp = crate::crypto::primitives::KeyPair::generate();
+        let authority_kp = crate::crypto::primitives::KeyPair::generate().expect("authority key");
         let authority = Address::from(authority_kp.public_key_bytes());
         let victim = Address::from([0xCC; 32]);
 
-        let mut domain = crate::domain::default_domain(
-            99,
-            ConsensusKind::PoA,
-            99_001,
-            "poa-authority-quorum",
-            1,
-        );
+        let mut domain = default_domain(99, ConsensusKind::PoA, 99_001, "poa-authority-quorum", 1);
         domain.validator_set_hash = [0u8; 32];
         register_domain(&mut state, domain.clone()).unwrap();
 
         let blk = block(1, &"00".repeat(32), 1);
         let mut com = commitment(&domain, &blk, 1);
         com.state_updates.insert(victim, 42);
-        let signing_msg = crate::domain::poa_commit_signing_message(
-            com.domain_id,
+        let signing_msg = crate::domain::finality_adapter::poa_commit_signing_message(
             domain.domain_chain_id,
-            com.domain_height,
-            &com.domain_block_hash,
-            &com.parent_domain_block_hash,
-            com.sequence,
-            com.timestamp_ms,
-            None,
-            &com.state_root,
-            &com.tx_root,
-            &com.event_root,
-            &com.state_updates,
+            com.domain_id,
+            &com,
         );
         let sig = authority_kp.sign(&signing_msg).to_vec();
         let proof = FinalityProof::PoA {
             authorities: vec![authority],
-            signatures: vec![sig],
+            signatures: vec![crate::domain::finality_adapter::PoAAuthoritySignature {
+                authority,
+                signature: sig,
+            }],
         };
         com.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
 
@@ -3150,6 +3124,17 @@ mod tests {
             crate::cross_domain::external::IntakeState::production_bls,
         )
         .expect_err("self-declared PoA authority set must not license nonce writes");
-        assert!(err.contains("no governance admission"), "got: {err}");
+        assert!(err.contains("account-owner authorization"), "got: {err}");
+
+        state.poa_onboarding.add_admin(domain.id, authority);
+        assert!(state.poa_is_permissioned(domain.id));
+        let err = verify_commitment_finality(
+            &state,
+            &com,
+            &proof,
+            crate::cross_domain::external::IntakeState::production_bls,
+        )
+        .expect_err("governance admission cannot authorize a native account's nonce");
+        assert!(err.contains("account-owner authorization"), "got: {err}");
     }
 }
