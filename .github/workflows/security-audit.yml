@@ -275,7 +275,7 @@ jobs:
       - name: Install cargo-hack (version + sha256 pinned)
         run: |
           set -euo pipefail
-          curl -sSfL -o /tmp/cargo-hack.tar.gz \
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/cargo-hack.tar.gz \
             https://github.com/taiki-e/cargo-hack/releases/download/v0.6.45/cargo-hack-x86_64-unknown-linux-musl.tar.gz
           echo "b242dffcfd43317ac484dd2dbc3b9fc5f8a7eb3ba252af31b531503f0bad33d1  /tmp/cargo-hack.tar.gz" | sha256sum -c -
           tar -xzf /tmp/cargo-hack.tar.gz -C /tmp

@@ -53,7 +53,7 @@ jobs:
       - name: Install osv-scanner v2.4.0 (version + sha256 pinned)
         run: |
           set -euo pipefail
-          curl -sSfL -o /tmp/osv-scanner \
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/osv-scanner \
             https://github.com/google/osv-scanner/releases/download/v2.4.0/osv-scanner_linux_amd64
           echo "15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0  /tmp/osv-scanner" | sha256sum -c -
           sudo install -m 0755 /tmp/osv-scanner /usr/local/bin/osv-scanner
