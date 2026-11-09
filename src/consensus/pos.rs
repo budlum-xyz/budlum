@@ -608,8 +608,13 @@ impl PoSEngine {
                         // `ROUND_TIMEOUT_MS` - and validation re-prices the
                         // claim against the block timestamp floor
                         // `parent + MIN_BLOCK_INTERVAL_MS + round * ROUND_TIMEOUT_MS`.
-                        // The same pricing function validation enforces, so
-                        // propose and verify cannot drift apart.
+                        // Validation prices a claim from the parent stamp
+                        // alone; this cap is the producer's own, stricter
+                        // schedule (it also counts how long ago *this* node
+                        // adopted the parent), so a block this node proposes is
+                        // always one it would itself accept, and a schedule it
+                        // runs later than validation still cannot reject a
+                        // peer's block.
                         let round_cap = chain.last().map_or(MAX_LEADER_ROUNDS, |prev| {
                             self.round_prices.claimable_round_for(
                                 &prev.hash,
@@ -1000,26 +1005,25 @@ impl ConsensusEngine for PoSEngine {
                                 block.timestamp, floor
                             )));
                         }
-                        // The floor compares two values the producer writes
-                        // (`block.timestamp` against `parent.timestamp`), so it
-                        // does not price the round: a timestamp up to
-                        // `MAX_FUTURE_BLOCK_TIME_MS` ahead makes rounds 0..=5
-                        // affordable at once, and every validator elected in
-                        // one of those rounds could publish a valid competing
-                        // block for the slot (CWE-807). Price the claim against
-                        // this node's clock, with the function the producer
-                        // clamps itself with.
-                        // Priced from the shared parent stamp while within the
-                        // active ladder span, switching to local commit time
-                        // once a parent lags wall time beyond
-                        // `ROUND_LADDER_SPAN_MS` so schedule lag cannot unlock
-                        // rounds 1..=16 at once (CWE-807).
+                        // The floor compares two values the producer writes,
+                        // so it does not price the round on its own: a
+                        // timestamp up to `MAX_FUTURE_BLOCK_TIME_MS` ahead makes
+                        // rounds 0..=5 affordable at once, and every validator
+                        // elected in one of those rounds could publish a valid
+                        // competing block for the slot (CWE-807).
+                        //
+                        // The price is therefore the shared parent stamp against
+                        // this node's clock, and *only* those two: a claim priced
+                        // from when this node adopted the parent split an
+                        // eight-validator network permanently (RT-001), because
+                        // the same block cleared the gate on the node that
+                        // committed the parent and was refused on the next one.
+                        // `affordable_leader_round` has no local input at all;
+                        // see its documentation for how the ladder is still
+                        // priced, and how the future bound keeps one producer
+                        // from running the ladder open.
                         let now_ms = now_millis();
-                        let affordable = affordable_leader_round(
-                            prev.timestamp,
-                            self.round_prices.chain_seen_at(chain, now_ms),
-                            now_ms,
-                        );
+                        let affordable = affordable_leader_round(prev.timestamp, now_ms);
                         if round > affordable {
                             return Err(ConsensusError(format!(
                                 "PoS leader round {round} claimed before it elapsed: only \
