@@ -4272,31 +4272,20 @@ impl ChainActor {
                     ));
                 }
                 ChainCommand::AcceptStorageReallocation {
-                    ticket_id,
-                    replacement_operator,
-                    payer,
-                    start_epoch,
-                    end_epoch,
-                    economics,
-                    domain_params,
-                    merkle_proof,
-                    storage_root,
+                    ticket_id: _,
+                    replacement_operator: _,
+                    payer: _,
+                    start_epoch: _,
+                    end_epoch: _,
+                    economics: _,
+                    domain_params: _,
+                    merkle_proof: _,
+                    storage_root: _,
                     response,
                 } => {
-                    if self.storage_economics_disabled_on_mainnet() {
-                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
-                        continue;
-                    }
-                    let _ = response.send(self.blockchain.accept_storage_reallocation_with_escrow(
-                        ticket_id,
-                        replacement_operator,
-                        payer,
-                        start_epoch,
-                        end_epoch,
-                        economics,
-                        &domain_params,
-                        merkle_proof,
-                        storage_root,
+                    let _ = response.send(Err(
+                        "storage reallocation acceptance must run in-block via a signed StorageTx carrying operator consent"
+                            .to_string(),
                     ));
                 }
                 ChainCommand::RegisterStorageManifest { manifest, response } => {

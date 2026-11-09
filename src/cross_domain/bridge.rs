@@ -158,6 +158,13 @@ pub struct BridgeTransfer {
     /// and read by the only refund path there is.
     #[serde(default)]
     pub delivered_height: Option<u64>,
+    /// Height at which an off-chain release claim for this burn was built
+    /// by the Bud-to-Ethereum claim builder. A burn whose payout executes on
+    /// an external domain is delivered by that claim rather than `unlock`, so
+    /// the expiry sweep must never treat `delivered_height == None` as "never
+    /// delivered" once a claim has been issued.
+    #[serde(default)]
+    pub claim_issued_height: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -459,6 +466,7 @@ impl BridgeState {
             recipient_eth: None,
             burned_amount: 0,
             delivered_height: None,
+            claim_issued_height: None,
         };
 
         self.asset_locations.insert(
@@ -810,6 +818,10 @@ impl BridgeState {
                 // delivered and a node that did not must not agree on the
                 // bridge root while disagreeing about who is owed the money.
                 &transfer.delivered_height.unwrap_or(u64::MAX).to_le_bytes(),
+                &transfer
+                    .claim_issued_height
+                    .unwrap_or(u64::MAX)
+                    .to_le_bytes(),
             ]));
         }
         // The settled queue decides when a transfer leaf above disappears,
@@ -853,6 +865,32 @@ impl BridgeState {
 
     pub fn transfer(&self, message_id: &MessageId) -> Option<&BridgeTransfer> {
         self.transfers.get(message_id)
+    }
+
+    /// Record positive evidence that an off-chain release claim was built for
+    /// a burned transfer, refusing claims past the burn's expiry height so
+    /// off-chain release and local expiry refund are mutually exclusive.
+    pub fn record_claim_issued(
+        &mut self,
+        message_id: &MessageId,
+        finalized_height: u64,
+    ) -> Result<(), BridgeError> {
+        let transfer = self
+            .transfers
+            .get_mut(message_id)
+            .ok_or_else(|| BridgeError("Unknown bridge transfer".into()))?;
+        if !matches!(transfer.status, BridgeStatus::Burned { .. }) {
+            return Err(BridgeError("Transfer is not in Burned status".into()));
+        }
+        if transfer.expiry_height > 0 && finalized_height >= transfer.expiry_height {
+            return Err(BridgeError(
+                "Burn expired before external claim issuance".into(),
+            ));
+        }
+        if transfer.claim_issued_height.is_none() {
+            transfer.claim_issued_height = Some(finalized_height);
+        }
+        Ok(())
     }
 
     /// (security audit §3) sweep all `Locked` transfers whose
@@ -975,7 +1013,8 @@ impl BridgeState {
                             BridgeStatus::Burned { domain }
                                 if t.expiry_height > 0
                                     && t.expiry_height <= h
-                                    && t.delivered_height.is_none() =>
+                                    && t.delivered_height.is_none()
+                                    && t.claim_issued_height.is_none() =>
                             {
                                 let _ = (fee_ppm, min_fee);
                                 let returned = Bud::new(t.burned_amount);
