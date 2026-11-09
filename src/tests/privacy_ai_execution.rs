@@ -197,7 +197,8 @@ fn ai_mlp_guest_program_hash_stable() {
 fn l1_note_registry_root_changes() {
     let mut r = L1NoteRegistry::new();
     let a = r.state_root();
-    r.insert_note([1u8; 32]).unwrap();
+    r.insert_note_for_owner([1u8; 32], crate::core::address::Address::zero())
+        .unwrap();
     assert_ne!(a, r.state_root());
 }
 
