@@ -1366,6 +1366,28 @@ impl Blockchain {
                 domain.id, domain.kind
             ));
         }
+        if domain.finality_adapter
+            == crate::cross_domain::external::EXTERNAL_DOMAIN_FINALITY_ADAPTER
+        {
+            if domain.config_hash == [0u8; 32] {
+                return Err(format!(
+                    "External finality domain {} must bind its registered DomainKey in config_hash",
+                    domain.id
+                ));
+            }
+            if self.domain_registry.domains().iter().any(|existing| {
+                existing.id != domain.id
+                    && existing.status != DomainStatus::Retired
+                    && existing.finality_adapter
+                        == crate::cross_domain::external::EXTERNAL_DOMAIN_FINALITY_ADAPTER
+                    && existing.config_hash == domain.config_hash
+            }) {
+                return Err(format!(
+                    "External finality DomainKey {} is already claimed by another consensus domain",
+                    hex::encode(domain.config_hash)
+                ));
+            }
+        }
         self.domain_registry.register(domain.clone())?;
         if let Some(store) = &self.storage {
             store
@@ -1918,12 +1940,41 @@ impl Blockchain {
         // A future commitment can be stored without advancing the applied
         // tip. Conversely, filling a gap can advance past the submitted
         // height. Only the actual applied tip is safe to anchor.
-        let applied_height = self
+        let applied_domain = self
             .domain_registry
             .get(domain_id)
-            .ok_or_else(|| format!("Unknown consensus domain {domain_id}"))?
-            .last_committed_height;
+            .ok_or_else(|| format!("Unknown consensus domain {domain_id}"))?;
+        let applied_height = applied_domain.last_committed_height;
         if applied_height <= height_before {
+            return Ok(());
+        }
+        let binds_state_root = match applied_domain.kind {
+            ConsensusKind::PoW | ConsensusKind::PoA | ConsensusKind::Zk => true,
+            ConsensusKind::Custom(_) => {
+                applied_domain.finality_adapter
+                    == crate::cross_domain::external::EXTERNAL_DOMAIN_FINALITY_ADAPTER
+                    && applied_domain.config_hash != [0u8; 32]
+            }
+            ConsensusKind::PoS
+            | ConsensusKind::Bft
+            | ConsensusKind::StorageAttestation(_)
+            | ConsensusKind::AiInference => false,
+        };
+        let may_anchor = binds_state_root
+            && match crate::core::transaction::ExternalChain::from_domain_id(domain_id) {
+                Some(chain) => {
+                    matches!(
+                        chain,
+                        crate::core::transaction::ExternalChain::Ethereum
+                            | crate::core::transaction::ExternalChain::Solana
+                            | crate::core::transaction::ExternalChain::Bitcoin
+                            | crate::core::transaction::ExternalChain::Avalanche
+                    ) && (chain == crate::core::transaction::ExternalChain::Bitcoin
+                        || applied_domain.domain_chain_id == chain.canonical_chain_id())
+                }
+                None => true,
+            };
+        if !may_anchor {
             return Ok(());
         }
         let state_root = self
@@ -2127,6 +2178,14 @@ impl Blockchain {
                         &evidence.adapter,
                         &evidence.network,
                     );
+                    if domain.config_hash == [0u8; 32] || key.as_bytes() != &domain.config_hash {
+                        return Err(format!(
+                            "Domain {} is bound to external DomainKey {}, but evidence names {}",
+                            commitment.domain_id,
+                            hex::encode(domain.config_hash),
+                            hex::encode(key.0)
+                        ));
+                    }
                     let Some(entry) = self.external_intake.entries.get(&key) else {
                         return Err(format!(
                             "Domain {} names an external adapter that is not registered",
@@ -9389,6 +9448,33 @@ mod tests {
         // The idempotent branch returns Ok, and the anchor must stay at root2.
         bc.accept_verified_domain_commitment(c1).unwrap();
         assert_eq!(bc.state.external_roots.get(&1), Some(&root2));
+    }
+
+    #[test]
+    fn non_canonical_domain_on_canonical_slot_does_not_anchor_external_root() {
+        let mut bc = Blockchain::new(
+            Arc::new(crate::consensus::pow::PoWEngine::new(1)),
+            None,
+            45262,
+            None,
+        );
+        // Domain claims slot 1 (Ethereum) with a non-Ethereum chain id (9999).
+        let domain =
+            crate::domain::default_domain(1, ConsensusKind::PoW, 9999, "pow-header-chain-v1", 1);
+        bc.register_consensus_domain(domain.clone()).unwrap();
+        let mut block1 = Block::new(1, "00".repeat(32), vec![]);
+        block1.state_root = "33".repeat(32);
+        block1.tx_root = block1.calculate_tx_root();
+        block1.hash = block1.calculate_hash();
+        let c1 =
+            crate::domain::DomainCommitment::from_block(&domain, &block1, [0u8; 32], [0u8; 32], 0)
+                .unwrap();
+        bc.accept_verified_domain_commitment(c1).unwrap();
+        assert_eq!(
+            bc.state.external_roots.get(&1),
+            None,
+            "a domain with non-canonical chain id must not forge Ethereum's anchor"
+        );
     }
 
     /// BLG-0168: a snapshot that is ahead of the stored chain must not stay
