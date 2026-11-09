@@ -130,7 +130,6 @@ fn signed_precommit(sk: &Scalar, epoch: u64, height: u64, hash: &str, voter: Add
         voter_id: voter,
         sig_bls: sign_bls(sk, &msg),
         auth_sig: Vec::new(),
-        pq_sig: Vec::new(),
     }
 }
 
@@ -174,7 +173,6 @@ fn signed_precommit_with_chain(
         voter_id: voter,
         sig_bls: sign_bls(sk, &msg),
         auth_sig: Vec::new(),
-        pq_sig: Vec::new(),
     }
 }
 
@@ -307,7 +305,6 @@ fn finality_recovers_honest_subset_after_invalid_signature() {
         voter_id: snap.validators[3].address,
         sig_bls: sign_bls(&sks[3], &wrong_msg),
         auth_sig: Vec::new(),
-        pq_sig: Vec::new(),
     };
     // REFUSED at ingest, never enters the aggregate.
     let err = agg
@@ -490,7 +487,6 @@ fn finality_honest_quorum_survives_byzantine_noise() {
                 ),
             ),
             auth_sig: Vec::new(),
-            pq_sig: Vec::new(),
         };
         assert!(
             agg.add_precommit(noise).is_err(),
@@ -788,7 +784,7 @@ fn repeated_invalid_signatures_trigger_slash() {
     bc.start_prevote_task(block.index, block.hash.clone());
     let epoch = bc.finality_aggregator.as_ref().unwrap().epoch;
 
-    // Threshold-1 invalid signatures: no slash yet.: the
+    // Threshold-1 invalid signatures: no slash yet. BLG-0083 (P04-F01): the
     // spam is self-authenticated under the spammer's key - only distinct votes
     // the validator's own key vouches for can count against the validator.
     for i in 0..(threshold - 1) {
@@ -813,7 +809,7 @@ fn repeated_invalid_signatures_trigger_slash() {
     );
     assert_eq!(mid.stake, 10_000);
 
-    // An invalid signature past the threshold -> slash (the spam
+    // An invalid signature past the threshold -> slash (BLG-0083: the spam
     // authenticates itself under the spammer's key).
     let mut final_bad_sig = vec![0u8; 48];
     final_bad_sig[0] = threshold as u8;
@@ -915,7 +911,7 @@ fn invalid_signatures_below_threshold_do_not_slash() {
             sig_bls: bad_sig,
             auth_sig: Vec::new(),
         };
-        // Authenticated, so the vote may incriminate its own sender:
+        // Authenticated, so the vote may incriminate its own sender (BLG-0083):
         // the vote signature is the invalid part.
         bad.auth_sig = sign_bls(&spammer_bls, &bad.auth_signing_message());
         let _ = bc.handle_prevote(bad);
@@ -962,7 +958,7 @@ fn blockchain_rejects_invalid_vote_signature_at_ingest() {
     bc.start_prevote_task(block.index, block.hash.clone());
     let epoch = bc.finality_aggregator.as_ref().unwrap().epoch;
 
-    // A garbage vote WITHOUT authentication is dropped
+    // BLG-0083 (P04-F01): a garbage vote WITHOUT authentication is dropped
     // without attributing anything to the named validator - anybody can put
     // any name in a message, so the tick is only reachable through the
     // voter's own authenticated signature (self-incrimination).
@@ -1333,7 +1329,6 @@ fn oversized_checkpoint_hash_is_refused_and_oversized_pending_report_is_dropped(
             voter_id: voter,
             sig_bls: vec![0; 48],
             auth_sig: vec![0; 48],
-            pq_sig: Vec::new(),
         })
         .expect_err("oversized precommit checkpoint_hash must be refused");
     assert!(
@@ -1520,18 +1515,18 @@ fn a_finality_cert_from_another_chain_is_refused() {
 
 #[test]
 fn stale_epoch_cert_and_qc_blob_are_refused_for_later_checkpoint() {
-    let voter = Address::from([0x77u8; 32]);
-    let consensus = Arc::new(PoAEngine::new(vec![voter]));
+    let voter = test_addr_from_byte(0x77);
+    let consensus = Arc::new(PoWEngine::new(0));
     let mut bc = Blockchain::new(consensus, None, 45262, None);
     bc.state.add_balance(&voter, 10_000);
     bc.state.add_validator(voter, 10_000);
 
-    // Devnet epoch_len = 10 and checkpoint_interval = 2: height 10 sits in epoch 1.
-    for _ in 1..=10 {
-        let _ = bc.produce_block(voter).unwrap();
-    }
-    let block = bc.chain.get(10).expect("height 10").clone();
-    assert_eq!(block.epoch, 1);
+    let block = loop {
+        let (b, _) = bc.produce_block(voter).unwrap();
+        if b.epoch >= 1 && crate::chain::finality::is_checkpoint_height_for_chain(b.index, 45262) {
+            break b;
+        }
+    };
 
     let stale_cert = crate::chain::finality::FinalityCert {
         epoch: 0,
@@ -1546,7 +1541,7 @@ fn stale_epoch_cert_and_qc_blob_are_refused_for_later_checkpoint() {
         .handle_finality_cert(stale_cert)
         .expect_err("stale-epoch finality certificate must be refused");
     assert!(
-        cert_err.contains("epoch 0 does not match epoch 1"),
+        cert_err.contains(&format!("epoch 0 does not match epoch {}", block.epoch)),
         "unexpected error: {cert_err}"
     );
     assert_eq!(bc.finalized_height, 0);
@@ -1556,8 +1551,11 @@ fn stale_epoch_cert_and_qc_blob_are_refused_for_later_checkpoint() {
         .import_qc_blob(stale_blob)
         .expect_err("stale-epoch QC blob must be refused");
     assert!(
-        blob_err.contains("QcBlob epoch 0 does not match epoch 1"),
+        blob_err.contains(&format!(
+            "QcBlob epoch 0 does not match epoch {}",
+            block.epoch
+        )),
         "unexpected error: {blob_err}"
     );
-    assert!(bc.get_qc_blob(10).is_none());
+    assert!(bc.get_qc_blob(block.index).is_none());
 }
