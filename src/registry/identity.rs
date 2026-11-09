@@ -65,6 +65,10 @@ use std::collections::{BTreeMap, BTreeSet};
 /// before a PoA-only write is refused: the gate matches on the constant, not
 /// on a string an operator can mistype into an open door.
 pub const DID_METHOD_NAME: &str = "did:bud";
+/// Maximum total credential commitments held by [`IdentityRegistry`].
+pub const MAX_IDENTITY_CREDENTIALS: usize = 1_000_000;
+/// Maximum live credential roots recorded on a single DID record.
+pub const MAX_CREDENTIAL_ROOTS_PER_DID: usize = 10_000;
 
 /// Formats the DID for an address. Lowercase hex over the 32 address bytes,
 /// so a DID survives case-folding in any wallet that stores it as text.
@@ -621,6 +625,21 @@ impl IdentityRegistry {
                 return Err(IdentityError::AlreadyIssued {
                     did: did_of(&subject),
                 });
+            }
+            if self.credentials.len() >= MAX_IDENTITY_CREDENTIALS {
+                return Err(IdentityError::BadApproval(format!(
+                    "issue: registry at its credential cap ({MAX_IDENTITY_CREDENTIALS})"
+                )));
+            }
+            let roots_on_record = self
+                .records
+                .get(&subject)
+                .map_or(0, |record| record.credential_roots.len());
+            if roots_on_record >= MAX_CREDENTIAL_ROOTS_PER_DID {
+                return Err(IdentityError::BadApproval(format!(
+                    "issue: {} is at its credential-root cap ({MAX_CREDENTIAL_ROOTS_PER_DID})",
+                    did_of(&subject)
+                )));
             }
         }
         self.credentials.insert(hex32(&id), credential);

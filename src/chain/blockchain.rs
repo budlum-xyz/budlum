@@ -7132,13 +7132,22 @@ impl Blockchain {
                 }
             }
         }
-        // The post-quantum half of the vote. A precommit that carries one is
-        // checked here, against the epoch's snapshot, before the aggregator
-        // can put it in a QC blob; a bad attestation is a bad vote. A
-        // precommit without one still counts for the BLS half, but its signer
-        // is missing from the checkpoint's blob, so no certificate can be
-        // applied on it - the signing path only leaves it out when the node
-        // holds no PQ key at all.
+        // A vote whose signer has a registered PQ key MUST carry its
+        // attestation. Without this gate a third party can strip `pq_sig`
+        // from a captured precommit and re-gossip it: neither `sig_bls` nor
+        // `auth_sig` covers the attestation, the stripped copy would win the
+        // duplicate race, and the signer's entry would be lost from this
+        // round's QC blob.
+        if vote.pq_sig.is_empty() {
+            if let Some(snapshot) = self.validator_snapshot_for_epoch(vote.epoch) {
+                if snapshot
+                    .find_validator(&vote.voter_id)
+                    .is_some_and(|entry| !entry.pq_public_key.is_empty())
+                {
+                    return Err("Precommit is missing its PQ attestation".into());
+                }
+            }
+        }
         if !vote.pq_sig.is_empty() {
             if let Some(snapshot) = self.validator_snapshot_for_epoch(vote.epoch) {
                 if let (Some(index), Some(entry)) = (
@@ -7213,10 +7222,22 @@ impl Blockchain {
             return Ok(None);
         }
         // Both halves of the round, taken while the aggregator is still the
-        // one that produced them.
+        // one that produced them. When the epoch's validator set carries PQ
+        // keys, a certificate without a quorum QC blob cannot be applied by
+        // `handle_finality_cert`, so keep the round open until the blob also
+        // reaches quorum.
         let produced = self.finality_aggregator.as_ref().and_then(|agg| {
             let cert = agg.try_produce_cert()?;
-            let blob = agg.try_produce_qc_blob();
+            let pq_set_active = agg
+                .validator_snapshot
+                .validators
+                .iter()
+                .any(|v| !v.pq_public_key.is_empty());
+            let blob = if pq_set_active {
+                Some(agg.try_produce_qc_blob()?)
+            } else {
+                agg.try_produce_qc_blob()
+            };
             Some((cert, blob))
         });
         let Some((cert, blob)) = produced else {

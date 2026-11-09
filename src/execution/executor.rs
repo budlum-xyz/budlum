@@ -83,10 +83,6 @@ fn privacy_transfers_enabled(chain_id: u64) -> bool {
         == crate::core::chain_config::Network::Devnet
             .chain_id()
             .value()
-        || chain_id
-            == crate::core::chain_config::Network::Testnet
-                .chain_id()
-                .value()
 }
 
 impl Executor {
@@ -2464,7 +2460,7 @@ impl Executor {
                 }
                 state
                     .note_registry
-                    .insert_note(*commitment)
+                    .insert_note_for_owner(*commitment, tx.from)
                     .map_err(|e| BudlumError::validation("privacy_note_insert", e))?;
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
@@ -2564,7 +2560,8 @@ impl Executor {
                 }
                 state
                     .note_registry
-                    .apply_transfer_with_proofs(
+                    .apply_transfer_for_owner(
+                        &tx.from,
                         &sub.spent_commitments,
                         &sub.nullifiers,
                         &sub.output_commitments,
@@ -3992,7 +3989,7 @@ mod tests {
 
         assert!(!privacy_transfers_enabled(mainnet), "mainnet must stay off");
         assert!(privacy_transfers_enabled(devnet), "devnet must stay on");
-        assert!(privacy_transfers_enabled(testnet), "testnet must stay on");
+        assert!(!privacy_transfers_enabled(testnet), "testnet must stay off");
 
         for unclaimed in [1u64, 42, 1337, 45263, u64::MAX] {
             assert!(

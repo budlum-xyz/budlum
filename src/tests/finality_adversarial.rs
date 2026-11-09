@@ -1520,21 +1520,26 @@ fn a_finality_cert_from_another_chain_is_refused() {
 
 #[test]
 fn stale_epoch_cert_and_qc_blob_are_refused_for_later_checkpoint() {
+    use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
+
     let voter = test_addr_from_byte(0x77);
     let consensus = Arc::new(PoWEngine::new(0));
     let mut bc = Blockchain::new(consensus, None, 45262, None);
     bc.state.add_balance(&voter, 10_000);
     bc.state.add_validator(voter, 10_000);
 
-    let block = loop {
-        let (b, _) = bc.produce_block(voter).unwrap();
-        if b.epoch >= 1 && crate::chain::finality::is_checkpoint_height_for_chain(b.index, 45262) {
-            break b;
-        }
-    };
+    let cp = FINALITY_CHECKPOINT_INTERVAL;
+    for _ in 1..cp {
+        let _ = bc.produce_block(voter).unwrap();
+    }
+    let (mut block, _) = bc.produce_block(voter).unwrap();
+    block.epoch = 2;
+    if let Some(slot) = bc.chain.get_mut(cp as usize) {
+        slot.epoch = 2;
+    }
 
     let stale_cert = crate::chain::finality::FinalityCert {
-        epoch: 0,
+        epoch: 1,
         checkpoint_height: block.index,
         checkpoint_hash: block.hash.clone(),
         chain_id: 45262,
@@ -1546,18 +1551,18 @@ fn stale_epoch_cert_and_qc_blob_are_refused_for_later_checkpoint() {
         .handle_finality_cert(stale_cert)
         .expect_err("stale-epoch finality certificate must be refused");
     assert!(
-        cert_err.contains(&format!("epoch 0 does not match epoch {}", block.epoch)),
+        cert_err.contains(&format!("epoch 1 does not match epoch {}", block.epoch)),
         "unexpected error: {cert_err}"
     );
     assert_eq!(bc.finalized_height, 0);
 
-    let stale_blob = crate::consensus::qc::QcBlob::new(0, block.index, block.hash, Vec::new());
+    let stale_blob = crate::consensus::qc::QcBlob::new(1, block.index, block.hash, Vec::new());
     let blob_err = bc
         .import_qc_blob(stale_blob)
         .expect_err("stale-epoch QC blob must be refused");
     assert!(
         blob_err.contains(&format!(
-            "QcBlob epoch 0 does not match epoch {}",
+            "QcBlob epoch 1 does not match epoch {}",
             block.epoch
         )),
         "unexpected error: {blob_err}"

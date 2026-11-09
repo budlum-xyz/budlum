@@ -429,18 +429,16 @@ fn observe(
     registry.used_messages.insert(message_id);
     // The registrar keeps one `validator` slot per operator, so an operator's
     // live allocation names one validator at a time: a newer report from that
-    // operator for another validator means it moved and the validator it was
-    // bound to before is no longer backed. Retire the old row, or the same
-    // allocation counts twice in `apply_restaked_weights`.
-    if allocation.allocated_units > 0 {
-        for row in registry.validators.values_mut() {
-            if row.budlum_validator != allocation.budlum_validator
-                && row.source == source
-                && row.eth_operator == allocation.eth_operator
-                && row.status == RestakeStatus::Active
-            {
-                row.status = RestakeStatus::Exited;
-            }
+    // operator for another validator (even with zero allocated units on exit)
+    // means it moved and the validator it was bound to before is no longer
+    // backed. Retire the old row unconditionally.
+    for row in registry.validators.values_mut() {
+        if row.budlum_validator != allocation.budlum_validator
+            && row.source == source
+            && row.eth_operator == allocation.eth_operator
+            && row.status == RestakeStatus::Active
+        {
+            row.status = RestakeStatus::Exited;
         }
     }
     registry.validators.insert(
@@ -786,6 +784,21 @@ mod tests {
         apply_restaked_weights(&mut state, &params);
         assert_eq!(state.validators[&left].restaked_weight, 0);
         assert!(state.validators[&moved_to].restaked_weight > 0);
+
+        // Moving again with zero allocated units (operator rebind + unstake in
+        // one Ethereum epoch) must also retire `moved_to`.
+        let zero_dest = Address::from([6u8; 32]);
+        let tx = observe_tx(&mut state, &claim(zero_dest, 0, 7), 2);
+        execute_shared_security_tx(&mut state, &ctx(carrier, devnet()), &tx)
+            .expect("zero-unit move records");
+        assert!(state.settlement.shared_security.active(&moved_to).is_none());
+        assert!(state
+            .settlement
+            .shared_security
+            .active(&zero_dest)
+            .is_none());
+        apply_restaked_weights(&mut state, &params);
+        assert_eq!(state.validators[&moved_to].restaked_weight, 0);
     }
 
     #[test]

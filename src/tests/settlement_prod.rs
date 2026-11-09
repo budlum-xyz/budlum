@@ -1829,6 +1829,23 @@ mod settlement_prod_tests {
         bc.submit_domain_commitment(burn_commitment).unwrap();
 
         let burn_proof = burn_tree.proof(0).unwrap();
+        // While height 101 is staged above `last_committed_height`, unlock must refuse.
+        let unlinked_err = bc
+            .unlock_bridge_transfer_from_verified_event(
+                poa.id,
+                101,
+                0,
+                Some(burn_commitment_block_hash),
+                burn_event.clone(),
+                &burn_proof,
+            )
+            .expect_err("staged burn commitment above applied domain tip must be refused");
+        assert!(
+            unlinked_err.contains("not on the applied domain chain"),
+            "got: {unlinked_err}"
+        );
+
+        apply_chain_through(&mut bc, &poa, 101, 81);
         let alice_before = bc.state.get_balance(&alice);
         bc.unlock_bridge_transfer_from_verified_event(
             poa.id,
