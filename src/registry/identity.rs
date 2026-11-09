@@ -251,6 +251,30 @@ impl IdentityRecord {
                 did_of(&self.subject)
             )));
         }
+        if self.credential_roots.len() > MAX_CREDENTIAL_ROOTS_PER_DID {
+            return Err(IdentityError::BadApproval(format!(
+                "validate: {} exceeds credential-root cap ({MAX_CREDENTIAL_ROOTS_PER_DID})",
+                did_of(&self.subject)
+            )));
+        }
+        match self.credential_root {
+            Some(latest) => {
+                if !self.credential_roots.contains(&latest) {
+                    return Err(IdentityError::BadApproval(format!(
+                        "validate: {} latest credential_root is absent from credential_roots",
+                        did_of(&self.subject)
+                    )));
+                }
+            }
+            None => {
+                if !self.credential_roots.is_empty() {
+                    return Err(IdentityError::BadApproval(format!(
+                        "validate: {} carries credential_roots with no active credential_root",
+                        did_of(&self.subject)
+                    )));
+                }
+            }
+        }
         for (i, method) in self.methods.iter().enumerate() {
             if self
                 .methods
@@ -589,6 +613,12 @@ impl IdentityRegistry {
 
     fn register(&mut self, record: IdentityRecord) -> Result<(), IdentityError> {
         record.validate()?;
+        if record.credential_root.is_some() || !record.credential_roots.is_empty() {
+            return Err(IdentityError::BadApproval(format!(
+                "register: {} cannot pre-populate credential roots without issuing a credential",
+                did_of(&record.subject)
+            )));
+        }
         let subject = record.subject;
         if self.records.contains_key(&subject) {
             return Err(IdentityError::AlreadyExists {
@@ -2508,5 +2538,46 @@ mod tests {
         let err = authorize_recovery(&mut registry, addr(1), [2u8; 32], &flood, 1, 1)
             .expect_err("oversized recovery approval list must be refused before verification");
         assert!(format!("{err:?}").contains("guardian cap"), "got: {err:?}");
+    }
+
+    #[test]
+    fn register_and_validate_refuse_unbacked_or_excess_credential_roots() {
+        let mut record = IdentityRecord::new(
+            addr(9),
+            vec![VerificationMethod::new([1u8; 32], MethodKind::MlDsa87)],
+            vec![],
+            0,
+        )
+        .unwrap();
+        record.credential_roots.insert([7u8; 32]);
+        assert!(
+            record.validate().is_err(),
+            "credential_roots without active credential_root must fail validate()"
+        );
+
+        record.credential_root = Some([7u8; 32]);
+        let mut registry = IdentityRegistry::new();
+        assert!(
+            registry
+                .apply(
+                    &ConsensusKind::PoA,
+                    IdentityOp::Register {
+                        record: record.clone()
+                    },
+                    1
+                )
+                .is_err(),
+            "register() must refuse pre-populated credential roots"
+        );
+
+        for i in 0..=MAX_CREDENTIAL_ROOTS_PER_DID {
+            let mut r = [0u8; 32];
+            r[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            record.credential_roots.insert(r);
+        }
+        assert!(
+            record.validate().is_err(),
+            "validate() must enforce MAX_CREDENTIAL_ROOTS_PER_DID"
+        );
     }
 }

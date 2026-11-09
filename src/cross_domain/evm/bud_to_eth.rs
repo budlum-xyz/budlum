@@ -152,6 +152,7 @@ pub fn build_bud_to_eth_claim(
         // not a free parameter the caller picks here.
         let recipient_eth = transfer
             .recipient_eth
+            .filter(|eth| *eth != [0u8; 20])
             .ok_or(BudToEthError::InvalidRecipient)?;
         (amount, asset_id, recipient_eth)
     };
