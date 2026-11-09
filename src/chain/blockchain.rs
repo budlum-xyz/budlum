@@ -7149,48 +7149,52 @@ impl Blockchain {
                 }
             }
         }
-        // A vote whose signer has a registered PQ key MUST carry its
-        // attestation. Without this gate a third party can strip `pq_sig`
-        // from a captured precommit and re-gossip it: neither `sig_bls` nor
-        // `auth_sig` covers the attestation, the stripped copy would win the
-        // duplicate race, and the signer's entry would be lost from this
-        // round's QC blob.
-        if vote.pq_sig.is_empty() {
-            if let Some(snapshot) = self.validator_snapshot_for_epoch(vote.epoch) {
-                if snapshot
-                    .find_validator(&vote.voter_id)
-                    .is_some_and(|entry| !entry.pq_public_key.is_empty())
-                {
-                    return Err("Precommit is missing its PQ attestation".into());
-                }
-            }
+        // Enforce the registered signer's PQ obligation before either the
+        // early-vote queue or the aggregator can deduplicate by voter. The BLS
+        // vote authentication does not cover pq_sig, so accepting an empty
+        // replacement lets a peer race the authentic vote (PR110-C4510256171).
+        // Prefer the active round's immutable membership/index snapshot. The
+        // chain's epoch snapshot may not yet be retained when an early round
+        // already exists, and silently skipping PQ verification is unsafe.
+        let snapshot = self
+            .finality_aggregator
+            .as_ref()
+            .filter(|round| {
+                round.epoch == vote.epoch && round.checkpoint_height == vote.checkpoint_height
+            })
+            .map(|round| round.validator_snapshot.clone())
+            .or_else(|| self.validator_snapshot_for_epoch(vote.epoch));
+        let entry = snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.find_validator(&vote.voter_id));
+        if entry.is_some_and(|entry| !entry.pq_public_key.is_empty()) && vote.pq_sig.is_empty() {
+            return Err("Missing PQ attestation in precommit".into());
         }
         if !vote.pq_sig.is_empty() {
-            if let Some(snapshot) = self.validator_snapshot_for_epoch(vote.epoch) {
-                if let (Some(index), Some(entry)) = (
-                    snapshot.validator_index(&vote.voter_id),
-                    snapshot.find_validator(&vote.voter_id),
-                ) {
-                    let index: u32 = index.try_into().map_err(|_| {
-                        "Precommit attests a validator index that does not fit its wire field"
-                            .to_string()
-                    })?;
-                    let message = crate::consensus::qc::pq_signing_message(
-                        vote.epoch,
-                        vote.checkpoint_height,
-                        &vote.checkpoint_hash,
-                        index,
-                    );
-                    crate::crypto::primitives::PqKeyPair::verify_in(
-                        &self.state.scheme_registry,
-                        &entry.pq_public_key,
-                        crate::crypto::ctx::QC_V2,
-                        &message,
-                        &vote.pq_sig,
-                    )
-                    .map_err(|e| format!("Invalid PQ attestation in precommit: {e}"))?;
-                }
-            }
+            let snapshot = snapshot
+                .as_ref()
+                .ok_or("No validator snapshot for PQ attestation")?;
+            let entry = entry.ok_or("PQ attestation signer is not in the validator snapshot")?;
+            let index = snapshot
+                .validator_index(&vote.voter_id)
+                .ok_or("PQ attestation signer has no snapshot index")?;
+            let index: u32 = index.try_into().map_err(|_| {
+                "Precommit attests a validator index that does not fit its wire field".to_string()
+            })?;
+            let message = crate::consensus::qc::pq_signing_message(
+                vote.epoch,
+                vote.checkpoint_height,
+                &vote.checkpoint_hash,
+                index,
+            );
+            crate::crypto::primitives::PqKeyPair::verify_in(
+                &self.state.scheme_registry,
+                &entry.pq_public_key,
+                crate::crypto::ctx::QC_V2,
+                &message,
+                &vote.pq_sig,
+            )
+            .map_err(|e| format!("Invalid PQ attestation in precommit: {e}"))?;
         }
         let off_round = match self.finality_aggregator.as_ref() {
             None => true,
@@ -7256,54 +7260,30 @@ impl Blockchain {
             return Ok(None);
         }
         // Both halves of the round, taken while the aggregator is still the
-        // one that produced them. When the epoch's validator set carries PQ
-        // keys, a certificate without a quorum QC blob cannot be applied by
-        // `handle_finality_cert`, so keep the round open until the blob also
-        // reaches quorum.
+        // one that produced them.
         let produced = self.finality_aggregator.as_ref().and_then(|agg| {
             let cert = agg.try_produce_cert()?;
-            let pq_set_active = agg
-                .validator_snapshot
-                .validators
-                .iter()
-                .any(|v| !v.pq_public_key.is_empty());
-            let blob = if pq_set_active {
-                Some(agg.try_produce_qc_blob()?)
-            } else {
-                agg.try_produce_qc_blob()
-            };
+            let blob = agg.try_produce_qc_blob()?;
             Some((cert, blob))
         });
         let Some((cert, blob)) = produced else {
+            // Retain the round until both signature quorums exist. Emitting a
+            // BLS-only certificate would consume the round without finalizing.
             return Ok(None);
         };
+        // Verify the assembled PQ half through the normal import path before
+        // consuming the round or returning a certificate for gossip. Missing
+        // context or an invalid blob must leave the round available for retry.
+        self.import_qc_blob(blob)?;
         info!(
             "FinalityCert produced: epoch={}, height={}",
             cert.epoch, cert.checkpoint_height
         );
         self.finality_aggregator = None;
 
-        // The QC blob this round's own precommits attested, imported through
-        // the same verified door a blob from a peer takes, and then the
-        // certificate applied here: a node does not gossip to itself, so
-        // without this the only node that never finalized was the one that
-        // assembled the certificate. The failures below are logged, not
-        // returned: the certificate is still worth gossiping (a peer may hold
-        // the blob), and a round that cannot be applied locally must not take
-        // the vote-ingest path down with it.
-        if let Some(blob) = blob {
-            if let Err(e) = self.import_qc_blob(blob) {
-                warn!(
-                    height = cert.checkpoint_height,
-                    "The round's own QC blob was refused locally: {e}"
-                );
-            }
-        } else {
-            warn!(
-                height = cert.checkpoint_height,
-                "No QC blob could be assembled for this checkpoint: fewer than a quorum of its precommits carried a PQ attestation"
-            );
-        }
+        // A node does not gossip to itself, so also apply its own certificate.
+        // The verified PQ blob is already present even if local application
+        // fails; peers can still consume the returned certificate and blob.
         if let Err(e) = self.handle_finality_cert(cert.clone()) {
             warn!(
                 height = cert.checkpoint_height,
@@ -10307,6 +10287,7 @@ mod tests {
     fn test_handle_prevote_rejects_when_no_aggregator() {
         let consensus = Arc::new(PoWEngine::new(0));
         let mut bc = Blockchain::new(consensus, None, 45262, None);
+        let bls = register_signed_early_voter(&mut bc, Address::from([1u8; 32]));
 
         let vote = Prevote {
             chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
@@ -10317,7 +10298,7 @@ mod tests {
             sig_bls: vec![],
             auth_sig: Vec::new(),
         };
-        let result = bc.handle_prevote(vote);
+        let result = bc.handle_prevote(sign_early_prevote(&bls, vote));
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -10353,6 +10334,7 @@ mod tests {
     fn test_handle_precommit_rejects_when_no_aggregator() {
         let consensus = Arc::new(PoWEngine::new(0));
         let mut bc = Blockchain::new(consensus, None, 45262, None);
+        let bls = register_signed_early_voter(&mut bc, Address::from([1u8; 32]));
 
         let vote = Precommit {
             chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
@@ -10364,7 +10346,7 @@ mod tests {
             auth_sig: Vec::new(),
             pq_sig: Vec::new(),
         };
-        let result = bc.handle_precommit(vote);
+        let result = bc.handle_precommit(sign_early_precommit(&bls, vote));
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
