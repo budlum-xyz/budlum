@@ -350,9 +350,11 @@ impl PoAEngine {
         // same floor validation applies. A slot whose round-0 leader is
         // offline therefore advances one round per timeout instead of
         // stalling forever.
-        // One pricing rule for both sides: `affordable_leader_round` is what
-        // validation enforces, so a producer can never claim a round this node
-        // would not itself accept.
+        // Validation prices a claim from the shared parent stamp alone; this
+        // cap is the producer's own, stricter schedule (it also counts how long
+        // ago *this* node adopted the parent), so an authority never claims a
+        // round it would refuse from a peer - while a peer that paces itself
+        // differently is still judged on the shared stamp (RT-001).
         let round_cap = parent_timestamp.map_or(MAX_LEADER_ROUNDS, |prev_ts| {
             self.round_prices
                 .claimable_round_for(&block.previous_hash, prev_ts, now_millis())
@@ -590,19 +592,12 @@ impl ConsensusEngine for PoAEngine {
                     // may sit up to `MAX_FUTURE_BLOCK_TIME_MS` ahead of this
                     // node, which makes rounds 0..=5 affordable the moment the
                     // parent lands (CWE-807). Price the claim against this
-                    // node's clock with the same function the producer clamps
-                    // itself with, so an authority cannot publish a valid block
-                    // for a round another authority leads.
-                    // Priced from the shared parent stamp while within the
-                    // active ladder span, switching to local commit time once
-                    // a parent lags wall time beyond `ROUND_LADDER_SPAN_MS` so
-                    // schedule lag cannot unlock rounds 1..=16 at once (CWE-807).
+                    // node's clock, from the shared parent stamp and from
+                    // nothing else: an authority's own view of when the parent
+                    // landed cannot decide another authority's block (RT-001,
+                    // where exactly that input forked a PoS network for good).
                     let now_ms = now_millis();
-                    let affordable = affordable_leader_round(
-                        prev.timestamp,
-                        self.round_prices.chain_seen_at(chain, now_ms),
-                        now_ms,
-                    );
+                    let affordable = affordable_leader_round(prev.timestamp, now_ms);
                     if round > affordable {
                         return Err(ConsensusError(format!(
                             "PoA leader round {round} claimed before it elapsed: only round \

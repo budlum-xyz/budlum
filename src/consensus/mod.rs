@@ -162,51 +162,21 @@ impl RoundPriceBook {
             .map(|(_, at)| *at)
     }
 
-    /// Effective local adoption time for `chain.last()`, either directly from
-    /// this book or anchored at `now_ms` when `chain.last()` is an uncommitted
-    /// candidate suffix built on a committed ancestor within
-    /// `ROUND_PRICE_WINDOW`.
-    ///
-    /// During multi-block candidate validation (`try_reorg`), intermediate fork
-    /// blocks are not yet committed to [`RoundPriceBook`]. Returning `None` for
-    /// those uncommitted parents would fall back to stale schedule timestamps,
-    /// while returning an ancestor's older sighting would price rounds from
-    /// before the candidate parent existed. Anchoring uncommitted suffix
-    /// parents at `now_ms` lets [`affordable_leader_round`] lower the anchor to
-    /// `parent.timestamp` in normal cadence while refusing both backdated and
-    /// withheld-fork round saturation.
-    #[must_use]
-    pub fn chain_seen_at(&self, chain: &[Block], now_ms: u128) -> Option<u128> {
-        let last = chain.last()?;
-        if let Some(at) = self.seen_at(&last.hash) {
-            return Some(at);
-        }
-        let Ok(seen) = self.seen.lock() else {
-            return None;
-        };
-        let search_floor = chain.len().saturating_sub(ROUND_PRICE_WINDOW);
-        for pair in chain.get(search_floor..)?.windows(2).rev() {
-            let [ancestor, child] = pair else {
-                return None;
-            };
-            if child.previous_hash != ancestor.hash {
-                return None;
-            }
-            if seen.iter().any(|(hash, _)| hash == &ancestor.hash) {
-                return Some(now_ms);
-            }
-        }
-        None
-    }
-
     /// The highest round this node may *claim*, from the producer's side.
     ///
-    /// Uses the same [`affordable_leader_round`] rule validation enforces.
-    /// When the parent's header stamp has fallen behind wall time by more than
-    /// `ROUND_LADDER_SPAN_MS` so that node-local adoption time is the active
-    /// anchor, retry rounds (`round >= 1`) wait an additional
-    /// `PRODUCER_ROUND_CUSHION_MS` before being claimed so normal gossip
-    /// stagger does not place peers on opposite sides of a timeout boundary.
+    /// Validation prices a claim from the parent stamp alone
+    /// ([`affordable_leader_round`]); this is the producer's own, deliberately
+    /// stricter schedule. It also counts the time since *this* node adopted the
+    /// parent, which is safe here for the reason it is not safe in validation:
+    /// it can only delay this node's own proposal, never refuse a peer's block.
+    ///
+    /// A parent adopted a moment ago is priced from its adoption rather than
+    /// from a stamp that may sit far behind wall time, so a node that joins a
+    /// schedule-lagged chain does not fire a wide round in its first second.
+    /// Once wall time since adoption has walked the ladder, retry rounds
+    /// (`round >= 1`) wait an additional [`PRODUCER_ROUND_CUSHION_MS`] so normal
+    /// gossip stagger does not place peers on opposite sides of a timeout
+    /// boundary.
     #[must_use]
     pub fn claimable_round_for(
         &self,
@@ -214,83 +184,70 @@ impl RoundPriceBook {
         parent_timestamp_ms: u128,
         now_ms: u128,
     ) -> u64 {
-        let seen = self.seen_at(parent_hash);
-        let raw = affordable_leader_round(parent_timestamp_ms, seen, now_ms);
-        if raw == 0 || seen.is_none() {
+        let Some(seen) = self.seen_at(parent_hash) else {
+            return affordable_leader_round(parent_timestamp_ms, now_ms);
+        };
+        // Never let a sighting raise the anchor above the shared stamp unless
+        // the stamp itself has gone stale: a future-dated header must not buy
+        // rounds even for the block's own producer.
+        let mut anchor_ms = seen.min(parent_timestamp_ms);
+        let stale_stamp = parent_timestamp_ms.saturating_add(ROUND_LADDER_SPAN_MS) < now_ms;
+        if stale_stamp {
+            anchor_ms = anchor_ms.max(seen);
+        }
+        let raw = round_affordable_from_anchor(anchor_ms, now_ms);
+        if raw == 0 || !stale_stamp {
             return raw;
         }
-        if parent_timestamp_ms.saturating_add(ROUND_LADDER_SPAN_MS) < now_ms {
-            affordable_leader_round(
-                parent_timestamp_ms,
-                seen,
-                now_ms.saturating_sub(PRODUCER_ROUND_CUSHION_MS),
-            )
-        } else {
-            raw
-        }
+        round_affordable_from_anchor(anchor_ms, now_ms.saturating_sub(PRODUCER_ROUND_CUSHION_MS))
     }
 }
-/// The highest leader round a slot can have reached by `now_ms`.
+/// The highest leader round a slot can have reached by `now_ms`, priced from
+/// the parent's header stamp.
 ///
 /// Round `r` is affordable once `MIN_BLOCK_INTERVAL_MS + r * ROUND_TIMEOUT_MS`
 /// has elapsed since the parent block was published; the result is capped at
 /// [`MAX_LEADER_ROUNDS`].
 ///
-/// This is the *pricing* half of the round rule, and it is deliberately
-/// clock-based. The other half - the floor "`block.timestamp` must be at least
-/// `parent + MIN_BLOCK_INTERVAL_MS + r * ROUND_TIMEOUT_MS`" - compares two
-/// values the producer writes, so on its own it prices nothing: the timestamp
-/// may sit up to [`MAX_FUTURE_BLOCK_TIME_MS`] ahead of the verifier, which makes
-/// rounds `0..=MAX_FUTURE_BLOCK_TIME_MS / ROUND_TIMEOUT_MS` affordable the
-/// instant the parent lands. Every authority or validator elected in one of
-/// those rounds could then publish a valid block for a slot it does not lead,
-/// and a slot would routinely have several valid competing blocks.
+/// # One claim, one price, every node
 ///
-/// Both sides use this function: the producer clamps the round it claims, the
-/// verifier refuses a claim above it. A verifier whose clock trails a producer
-/// by more than one [`ROUND_TIMEOUT_MS`] refuses that producer's retry-round
-/// block; round 0 - the ordinary case - is unaffected, so a skewed node still
-/// follows the chain, and the next round's leader can produce instead.
+/// The inputs are the parent stamp - a field of a block every node holding the
+/// parent reads byte for byte - and the verifying node's clock. Nothing local
+/// enters: in particular not *when this node adopted the parent*. That value
+/// differs between honest nodes by a restart, a sync or a second of scheduling,
+/// and any consensus verdict computed from it puts one block on both sides of
+/// the boundary. RT-001: eight validators on the `915819c` build forked
+/// permanently and could not reorg onto each other, because the branch whose
+/// parent this node had just committed was refused with `PoS leader round 1
+/// claimed before it elapsed: only round 0 has been reached since the parent`
+/// while the sibling branch, whose parent had been adopted earlier, was
+/// accepted. The same split is pinned by
+/// `round_determinism_tests::pos_round_verdict_does_not_depend_on_when_this_node_saw_the_parent`.
 ///
-/// # The anchor
+/// # The ladder
 ///
-/// While a parent's header stamp is within `ROUND_LADDER_SPAN_MS` of wall
-/// time, `parent_seen_ms` only *lowers* the anchor (`seen.min(stamp)`): in
-/// normal cadence every node holding the parent agrees on the shared stamp, and
-/// a future-dated header still cannot buy the rounds between its stamp and the
-/// moment this node saw it.
+/// A stalled slot has to be able to retry, so the price is not a fixed round 0:
+/// a parent stamped `MIN_BLOCK_INTERVAL_MS + r * ROUND_TIMEOUT_MS` in the past
+/// has reached round `r`. Escalating a claim therefore costs header time - each
+/// claim raises its own stamp to the floor, which becomes the next block's
+/// anchor - and the ±`MAX_FUTURE_BLOCK_TIME_MS` bound in
+/// `validate_timestamp` caps how far one producer can run
+/// ahead of the wall clock. Fork choice, not a local clock, decides between the
+/// candidates a wide ladder can name (CWE-807).
 ///
-/// Once `parent_timestamp_ms + ROUND_LADDER_SPAN_MS < now_ms` and this node has
-/// an adoption record (`Some(seen)`), pricing from the stale stamp would
-/// saturate all `0..=MAX_LEADER_ROUNDS` rounds immediately on arrival - both on
-/// a schedule-lagged chain and when an elected producer withholds a backdated
-/// parent (CWE-807). In that stale regime the anchor switches to
-/// `anchor_ms.max(seen)`, so round 0 alone opens at adoption and retry rounds
-/// unlock one [`ROUND_TIMEOUT_MS`] at a time as real wall time elapses. Parents
-/// with no local sighting (`None` during historical sync or replay outside
-/// `ROUND_PRICE_WINDOW`) continue to price from `parent_timestamp_ms`.
+/// A producer may always be *stricter* about itself: [`RoundPriceBook`] holds
+/// this node's own adoption times and [`RoundPriceBook::claimable_round_for`]
+/// lets the proposal path pace itself without ever rejecting a peer's block on
+/// a value only this node has.
 #[must_use]
-pub fn affordable_leader_round(
-    parent_timestamp_ms: u128,
-    parent_seen_ms: Option<u128>,
-    now_ms: u128,
-) -> u64 {
-    let anchor_ms =
-        parent_seen_ms.map_or(parent_timestamp_ms, |seen| seen.min(parent_timestamp_ms));
-    // A stamp that lags the wall clock by more than the whole ladder is not a
-    // price: one withheld block stamped at the minimum interval (or a schedule
-    // running behind wall time) would make every round affordable at once on
-    // every node, and a slot could then carry up to 17 competing valid blocks.
-    // When the stamp is that stale, price from the moment this node adopted the
-    // parent instead - a value no producer can write, which stays fixed while
-    // `now_ms` advances.
-    let anchor_ms = if parent_seen_ms
-        .is_some_and(|_| parent_timestamp_ms.saturating_add(ROUND_LADDER_SPAN_MS) < now_ms)
-    {
-        parent_seen_ms.map_or(anchor_ms, |seen| anchor_ms.max(seen))
-    } else {
-        anchor_ms
-    };
+pub fn affordable_leader_round(parent_timestamp_ms: u128, now_ms: u128) -> u64 {
+    round_affordable_from_anchor(parent_timestamp_ms, now_ms)
+}
+
+/// The ladder walk itself: how many [`ROUND_TIMEOUT_MS`] fit between `anchor_ms`
+/// and `now_ms` after the mandatory [`MIN_BLOCK_INTERVAL_MS`], capped at
+/// [`MAX_LEADER_ROUNDS`].
+fn round_affordable_from_anchor(anchor_ms: u128, now_ms: u128) -> u64 {
     let spaced = now_ms
         .saturating_sub(anchor_ms)
         .saturating_sub(MIN_BLOCK_INTERVAL_MS);
@@ -631,7 +588,6 @@ mod tests {
     /// same way, and the ladder still walks in real time.
     ///
     /// One claim, one price, whatever any node observed on its own clock.
-    ///
     /// Pricing from when this node happened to commit the parent put the same
     /// claim on different sides of the boundary at different nodes - a boot
     /// time, a restart or a sync of a few seconds is already more than a
@@ -639,81 +595,68 @@ mod tests {
     /// the block is refused for good and the slot runs again on the other
     /// side. The devnet mesh split into two chains at height 1 exactly so, on
     /// the first block, where the parent is genesis and every node had booted
-    /// a few seconds apart. The stamp is the only value every node holding the
-    /// parent reads identically, so it is the only anchor.
+    /// a few seconds apart. RT-001 repeated it on a real eight-validator
+    /// network: the price must not carry a local input, not even in the
+    /// schedule-lagged regime the earlier rule reserved for adoption times.
     #[test]
     fn a_claim_is_priced_by_the_shared_stamp_and_the_ladder_walks_in_real_time() {
         let now = 1_700_000_000_000u128;
-        let fresh_stamp = now - 20_000; // within ROUND_LADDER_SPAN_MS (49 s)
+        let fresh_stamp = now - 20_000; // twenty seconds behind the clock
         let stale_stamp = now - 600_000; // ten minutes behind the schedule
 
-        // Within the active ladder window, sightings seconds apart agree on the
-        // shared parent stamp so mesh nodes do not split on propagation jitter.
-        assert_eq!(
-            affordable_leader_round(fresh_stamp, Some(fresh_stamp), now),
-            6
-        );
-        assert_eq!(
-            affordable_leader_round(fresh_stamp, Some(now - 2_000), now),
-            6
-        );
-        assert_eq!(affordable_leader_round(fresh_stamp, None, now), 6);
+        // One round per `ROUND_TIMEOUT_MS`, minus the mandatory interval.
+        assert_eq!(affordable_leader_round(fresh_stamp, now), 6);
+        assert_eq!(affordable_leader_round(stale_stamp, now), MAX_LEADER_ROUNDS);
 
-        // Once the parent stamp lags wall time by more than the whole ladder,
-        // a newly adopted parent opens round 0 only instead of saturating all
-        // 17 rounds at once; real elapsed time since adoption still walks up to
-        // MAX_LEADER_ROUNDS, and unsighted historical replay keeps the stamp.
+        // The walk really walks: the same stamp opens one more round per
+        // timeout, and nothing opens before the interval has passed.
+        assert_eq!(affordable_leader_round(stale_stamp, stale_stamp), 0);
         assert_eq!(
-            affordable_leader_round(stale_stamp, Some(now - 500), now),
+            affordable_leader_round(stale_stamp, stale_stamp + MIN_BLOCK_INTERVAL_MS),
             0
         );
-        assert_eq!(
-            affordable_leader_round(stale_stamp, Some(now - 10_000), now),
-            3
-        );
-        assert_eq!(
-            affordable_leader_round(stale_stamp, Some(stale_stamp), now),
-            MAX_LEADER_ROUNDS
-        );
-        assert_eq!(
-            affordable_leader_round(stale_stamp, None, now),
-            MAX_LEADER_ROUNDS
-        );
-
-        // One round per `ROUND_TIMEOUT_MS`, as the constant says.
-        assert_eq!(
-            affordable_leader_round(stale_stamp, None, stale_stamp + 7_500),
-            2
-        );
+        assert_eq!(affordable_leader_round(stale_stamp, stale_stamp + 7_500), 2);
+        assert_eq!(affordable_leader_round(stale_stamp, stale_stamp + 4_000), 1);
 
         // A parent stamped into the future prices at round 0 here and at every
         // other node, and recovers by itself once the moment it names has
         // passed - the stamp does not move, so the boundary does not either.
-        assert_eq!(affordable_leader_round(now + 60_000, Some(now), now), 0);
+        assert_eq!(affordable_leader_round(now + 60_000, now), 0);
         assert_eq!(
-            affordable_leader_round(now + 60_000, None, now + 109_000),
+            affordable_leader_round(now + 60_000, now + 109_000),
             MAX_LEADER_ROUNDS
         );
     }
 
+    /// The producer's own pacing may read its local adoption time; consensus
+    /// pricing may not.
+    ///
+    /// This is the whole separation: a value only one node has can delay that
+    /// node's proposal (safe - someone else proposes instead), and cannot be
+    /// allowed to decide whether a peer's block is valid (fatal - the network
+    /// keeps two chains).
     #[test]
-    fn stale_parent_seen_just_now_does_not_saturate_the_round_ladder() {
+    fn producer_pacing_uses_adoption_time_and_validation_does_not() {
         let now = 1_700_000_000_000u128;
         let stale_parent = now - ROUND_LADDER_SPAN_MS - 1_000;
         let book = RoundPriceBook::new();
         book.note_tip_block("stale-tip", now);
 
+        // The shared-stamp price of that parent is the whole ladder: every
+        // node validates a wide claim on it, so the network agrees.
         assert_eq!(
-            affordable_leader_round(stale_parent, book.seen_at("stale-tip"), now),
-            0,
-            "a parent stamped beyond the ladder span must not unlock rounds 1..=16 at adoption"
+            affordable_leader_round(stale_parent, now),
+            MAX_LEADER_ROUNDS,
+            "validation prices a schedule-lagged parent from its stamp alone"
         );
+
+        // The producer that adopted it a moment ago still starts at round 0
+        // and walks up one timeout at a time.
         assert_eq!(
             book.claimable_round_for("stale-tip", stale_parent, now),
             0,
-            "producer cap must also hold at round 0 when a stale parent just landed"
+            "producer cap must hold at round 0 when a stale parent just landed"
         );
-        // After MIN_BLOCK_INTERVAL_MS + ROUND_TIMEOUT_MS + cushion, round 1 unlocks.
         let after_one_timeout =
             now + MIN_BLOCK_INTERVAL_MS + ROUND_TIMEOUT_MS + PRODUCER_ROUND_CUSHION_MS;
         assert_eq!(
@@ -759,47 +702,6 @@ mod tests {
             Some(10_000 + u128::from(ROUND_PRICE_WINDOW as u64) + 4)
         );
         assert_eq!(ROUND_PRICE_WINDOW, MAX_REORG_DEPTH + 1);
-    }
-
-    #[test]
-    fn chain_seen_at_propagates_committed_ancestor_adoption_across_candidate_suffix() {
-        let now = 1_700_000_000_000u128;
-        let stale_base = now - 600_000;
-        let book = RoundPriceBook::new();
-
-        let mut ancestor = Block::new_with_chain_id(10, "prev-9".to_string(), vec![], 1);
-        ancestor.timestamp = stale_base;
-        ancestor.hash = ancestor.calculate_hash();
-        book.note_tip_block(&ancestor.hash, now);
-
-        // Uncommitted round-0 fork child F1 built on the just-adopted stale ancestor.
-        let mut fork_1 = Block::new_with_chain_id(11, ancestor.hash.clone(), vec![], 1);
-        fork_1.timestamp = ancestor.timestamp + MIN_BLOCK_INTERVAL_MS;
-        fork_1.nonce = 0;
-        fork_1.hash = fork_1.calculate_hash();
-
-        let prefix = vec![ancestor.clone(), fork_1.clone()];
-        let effective_seen = book.chain_seen_at(&prefix, now);
-        assert_eq!(
-            effective_seen,
-            Some(now),
-            "uncommitted candidate parent must anchor at wall time rather than header or older ancestor"
-        );
-        assert_eq!(
-            affordable_leader_round(fork_1.timestamp, effective_seen, now),
-            0,
-            "a 2-block candidate fork must not unlock higher rounds on F2 immediately"
-        );
-
-        let old_book = RoundPriceBook::new();
-        old_book.note_tip_block(&ancestor.hash, now - 50_000);
-        let old_effective_seen = old_book.chain_seen_at(&prefix, now);
-        assert_eq!(old_effective_seen, Some(now));
-        assert_eq!(
-            affordable_leader_round(fork_1.timestamp, old_effective_seen, now),
-            0,
-            "an old ancestor sighting must not unlock rounds for an uncommitted parent"
-        );
     }
 
     #[test]
