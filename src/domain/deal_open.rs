@@ -164,6 +164,16 @@ pub fn accept_reallocation_escrowed(
             "reallocation ticket {ticket_id} is not open for acceptance"
         ));
     }
+    // The identity refusal precedes the cooldown refusal and payer binding
+    // deliberately: the slash that opened this very ticket also starts the
+    // operator's cooldown, and being the slashed operator of the ticket is a
+    // permanent structural refusal regardless of who offers to fund it.
+    if operator == ticket.slashed_operator {
+        return Err(format!(
+            "operator {operator} is the slashed operator of ticket {ticket_id}"
+        ));
+    }
+    refuse_cooling_operator(state, &operator, now_unix_secs)?;
     // Bind `payer` to the authority behind the ticket before any write:
     // a failed-deal ticket may only be funded by the client whose deal failed,
     // and a never-placed ticket may only be funded by the manifest's owner.
@@ -198,18 +208,25 @@ pub fn accept_reallocation_escrowed(
             }
         }
     }
-    // The identity refusal precedes the cooldown refusal deliberately: the
-    // slash that opened this very ticket also starts the operator's
-    // cooldown, so the cooldown message would otherwise always shadow the
-    // more specific answer: "you are the operator this ticket replaces".
-    // A cooldown expires; being the slashed operator of the ticket does
-    // not, and the caller deserves the refusal that never goes away.
-    if operator == ticket.slashed_operator {
+    // Same durability guard as `open_deal_escrowed`: one operator holds at
+    // most one active copy of a shard over overlapping epochs, so a repair
+    // accepted by an operator already serving the shard adds no redundancy.
+    let duplicate = state
+        .storage_registry
+        .deals_for_shard(&ticket.manifest_id, &ticket.shard_id)
+        .iter()
+        .any(|d| {
+            d.status == DealStatus::Active
+                && d.operator == operator
+                && d.deal_start_epoch < terms.end_epoch
+                && terms.start_epoch < d.deal_end_epoch
+        });
+    if duplicate {
         return Err(format!(
-            "operator {operator} is the slashed operator of ticket {ticket_id}"
+            "an active deal already covers shard {:?} for operator {operator} over epochs {}..{}; refusing a replacement that adds no durability",
+            ticket.shard_id, terms.start_epoch, terms.end_epoch
         ));
     }
-    refuse_cooling_operator(state, &operator, now_unix_secs)?;
 
     let manifest = state
         .storage_registry
@@ -947,5 +964,38 @@ mod tests {
                 .and_then(|d| d.payer),
             Some(payer())
         );
+    }
+
+    #[test]
+    fn accept_reallocation_refuses_operator_already_serving_shard() {
+        let mut state = AccountState::new();
+        let owned = manifest();
+        let op_a = operator();
+        let op_b = Address::from([21u8; 32]);
+        state.add_balance(&payer(), 10_000_000);
+        state.add_balance(&op_a, 10_000_000);
+        state.add_balance(&op_b, 10_000_000);
+        state.storage_registry.register_manifest(&owned);
+
+        let mut terms_a = terms(&owned, op_a);
+        terms_a.replica_index = 0;
+        let deal_a = open_deal_escrowed(&mut state, &terms_a, payer(), 0, BOND, 0).unwrap();
+
+        let mut terms_b = terms(&owned, op_b);
+        terms_b.replica_index = 1;
+        let _deal_b = open_deal_escrowed(&mut state, &terms_b, payer(), 0, BOND, 0).unwrap();
+
+        let ticket_id = state
+            .storage_registry
+            .open_expiry_reallocation(deal_a, 10)
+            .expect("lapsed deal opens reallocation ticket");
+
+        let repair_by_existing = reallocation_terms(ticket_id, op_b, &owned);
+        let err =
+            accept_reallocation_escrowed(&mut state, &repair_by_existing, payer(), 0, BOND, 0)
+                .expect_err(
+                    "operator already serving shard over overlapping epochs must be refused",
+                );
+        assert!(err.contains("adds no durability"), "got: {err:?}");
     }
 }
