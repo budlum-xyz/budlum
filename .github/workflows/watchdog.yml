@@ -90,7 +90,7 @@ jobs:
       - name: Install actionlint v1.7.12 (sha256 pinned)
         run: |
           set -euo pipefail
-          curl -sSfL -o /tmp/actionlint.tar.gz \
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/actionlint.tar.gz \
             https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
           echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  /tmp/actionlint.tar.gz" | sha256sum -c -
           sudo tar -xzf /tmp/actionlint.tar.gz -C /usr/local/bin actionlint
