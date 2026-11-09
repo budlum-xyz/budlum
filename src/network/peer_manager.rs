@@ -349,11 +349,11 @@ impl PeerManager {
     }
 
     /// Make room for a connected peer by dropping the least recently seen
-    /// unbanned, unconnected penalty record. A running ban is never dropped.
-    /// Connected peers are bounded by the connection limits, so this cannot
-    /// be driven faster than connections are admitted. Without it a table
-    /// full of fresh penalty records refuses to track a live peer, which
-    /// then can never complete its handshake.
+    /// unbanned, unconnected penalty record first; if every unconnected slot
+    /// holds a running ban, fall back to the unconnected ban closest to expiry
+    /// so attacker-minted bans cannot lock out new handshakes for the entire
+    /// ban window. Connected peers are bounded by the connection limits, so
+    /// this cannot be driven faster than connections are admitted.
     fn evict_stalest_penalty(&mut self) -> bool {
         let connected = &self.connected_peers;
         let victim = self
@@ -361,7 +361,14 @@ impl PeerManager {
             .iter()
             .filter(|(id, s)| !s.is_banned() && !connected.contains(*id))
             .min_by_key(|(_, s)| s.last_seen)
-            .map(|(id, _)| *id);
+            .map(|(id, _)| *id)
+            .or_else(|| {
+                self.peers
+                    .iter()
+                    .filter(|(id, _)| !connected.contains(*id))
+                    .min_by_key(|(_, s)| s.ban_expires_unix.unwrap_or(u64::MAX))
+                    .map(|(id, _)| *id)
+            });
         match victim {
             Some(id) => self.peers.remove(&id).is_some(),
             None => false,
@@ -1563,5 +1570,54 @@ mod tests {
         manager.reload_banned_peers(&bans);
         assert!(manager.peers.len() <= 4);
         assert!(manager.get_banned_peers().len() <= 4);
+    }
+
+    #[test]
+    fn connected_peer_handshakes_when_table_is_saturated_with_running_bans() {
+        let mut manager = PeerManager::new();
+        manager.max_tracked_peers = 4;
+        let now = unix_now_secs();
+        let soonest_peer = test_peer_id();
+        let mut others = Vec::new();
+        for _ in 0..3 {
+            let p = test_peer_id();
+            others.push(p);
+        }
+        let bans = vec![
+            PersistedBan {
+                peer_id: soonest_peer.to_base58(),
+                expires_unix: now + 60,
+            },
+            PersistedBan {
+                peer_id: others[0].to_base58(),
+                expires_unix: now + 300,
+            },
+            PersistedBan {
+                peer_id: others[1].to_base58(),
+                expires_unix: now + 600,
+            },
+            PersistedBan {
+                peer_id: others[2].to_base58(),
+                expires_unix: now + 900,
+            },
+        ];
+        manager.reload_banned_peers(&bans);
+        assert_eq!(manager.tracked_peer_count(), 4);
+
+        let honest = test_peer_id();
+        assert!(manager.note_connected(honest, None));
+        assert!(
+            manager.check_rate_limit(&honest),
+            "connected peer must still be admitted when every unconnected slot holds a ban"
+        );
+        manager.set_handshaked(&honest, true);
+        assert!(manager.is_handshaked(&honest));
+        assert!(
+            !manager.is_banned(&soonest_peer),
+            "the ban closest to expiry should be evicted first"
+        );
+        for kept in &others {
+            assert!(manager.is_banned(kept), "longer-lived bans remain enforced");
+        }
     }
 }
