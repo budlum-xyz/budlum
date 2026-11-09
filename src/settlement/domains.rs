@@ -277,7 +277,11 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
     if domain.id == 0 {
         return Err("Consensus domain id 0 is reserved".into());
     }
-    if domain.domain_chain_id == 0 {
+    // Bitcoin uses numeric chain id 0; no other canonical or custom slot may
+    // register with zero. Keep this consistent with the chain bootstrap gate.
+    if domain.domain_chain_id == 0
+        && domain.id != crate::core::transaction::ExternalChain::Bitcoin.domain_id()
+    {
         return Err(format!("Domain {} has invalid chain id 0", domain.id));
     }
 
@@ -2170,6 +2174,38 @@ mod tests {
             Some(expected),
             "the domain of chain 1 anchors under id 1"
         );
+    }
+
+    #[test]
+    fn bitcoin_anchor_requires_chain_id_zero_and_genesis_admission() {
+        use crate::core::transaction::ExternalChain;
+        let slot = ExternalChain::Bitcoin.domain_id();
+        let mut state = AccountState::new();
+        let mut impostor = pow(slot);
+        impostor.domain_chain_id = 45262;
+        register_domain(&mut state, impostor.clone()).unwrap();
+        let first = block(1, &"00".repeat(32), 0x83);
+        accept_verified_commitment(&mut state, commitment(&impostor, &first, 0)).unwrap();
+        assert!(
+            !state.external_roots.contains_key(&slot),
+            "a different network cannot anchor under Bitcoin's slot"
+        );
+
+        let bitcoin = default_domain(slot, ConsensusKind::PoW, 0, POW_HEADER_CHAIN_ADAPTER, 1);
+        let mut state = AccountState::new();
+        state.add_balance(&operator(&bitcoin), MIN_DOMAIN_OPERATOR_BOND + FEE);
+        assert!(
+            execute_settlement_tx(
+                &mut state,
+                &ctx(operator(&bitcoin)),
+                &SettlementTx::RegisterDomain(Box::new(bitcoin.clone())),
+            )
+            .is_err(),
+            "permissionless registration cannot capture Bitcoin's canonical anchor"
+        );
+        register_domain(&mut state, bitcoin.clone()).unwrap();
+        accept_verified_commitment(&mut state, commitment(&bitcoin, &first, 0)).unwrap();
+        assert!(state.external_roots.contains_key(&slot));
     }
 
     /// Registration is permissionless, so an id the wire contract reserves for
