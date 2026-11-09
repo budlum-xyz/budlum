@@ -4626,6 +4626,17 @@ impl Blockchain {
             ));
         }
 
+        // Bind the QC blob's declared epoch to the canonical block at that
+        // checkpoint height (`block.epoch` is validated on block admission), so
+        // a rotated-out validator set cannot store a stale-epoch blob for a
+        // later checkpoint.
+        if blob.epoch != block.epoch {
+            return Err(format!(
+                "QcBlob epoch {} does not match epoch {} of checkpoint height {}",
+                blob.epoch, block.epoch, blob.checkpoint_height
+            ));
+        }
+
         let snapshot = self.require_validator_snapshot(blob.epoch)?;
         // (security audit §4, §2) enforce the BLS
         // Finality quorum (2/3 of `snapshot.validators`) against the
@@ -7325,6 +7336,16 @@ impl Blockchain {
                 return Err(format!(
                     "Certificate hash {} mismatch with our block hash {} at height {}",
                     cert.checkpoint_hash, block.hash, cert.checkpoint_height
+                ));
+            }
+            // The certificate's epoch must match the canonical block's epoch at
+            // `checkpoint_height` (`block.epoch` is enforced at block admission),
+            // refusing a certificate signed by a rotated-out validator set for a
+            // later checkpoint.
+            if cert.epoch != block.epoch {
+                return Err(format!(
+                    "Certificate epoch {} does not match epoch {} of checkpoint height {}",
+                    cert.epoch, block.epoch, cert.checkpoint_height
                 ));
             }
         } else {
