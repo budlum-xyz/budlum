@@ -65,6 +65,8 @@ use std::collections::{BTreeMap, BTreeSet};
 /// before a PoA-only write is refused: the gate matches on the constant, not
 /// on a string an operator can mistype into an open door.
 pub const DID_METHOD_NAME: &str = "did:bud";
+/// Maximum total DID records held by [`IdentityRegistry`].
+pub const MAX_IDENTITY_RECORDS: usize = 65_536;
 /// Maximum total credential commitments held by [`IdentityRegistry`].
 pub const MAX_IDENTITY_CREDENTIALS: usize = 1_000_000;
 /// Maximum live credential roots recorded on a single DID record.
@@ -74,6 +76,8 @@ pub const MAX_CREDENTIAL_ROOTS_PER_DID: usize = 10_000;
 pub const MAX_IDENTITY_METHODS_PER_DID: usize = 256;
 /// Maximum guardians a single DID record may name.
 pub const MAX_IDENTITY_GUARDIANS_PER_DID: usize = 64;
+/// Maximum field commitments a single [`CredentialCommitment`] may carry.
+pub const MAX_CREDENTIAL_FIELDS: usize = 64;
 
 /// Formats the DID for an address. Lowercase hex over the 32 address bytes,
 /// so a DID survives case-folding in any wallet that stores it as text.
@@ -372,6 +376,14 @@ impl CredentialCommitment {
                 schema: self.schema.clone(),
             });
         }
+        if self.fields.len() > MAX_CREDENTIAL_FIELDS {
+            return Err(IdentityError::BadSchema {
+                schema: format!(
+                    "credential has {} fields (cap {MAX_CREDENTIAL_FIELDS})",
+                    self.fields.len()
+                ),
+            });
+        }
         for (i, field) in self.fields.iter().enumerate() {
             if field.name.is_empty() || field.name.len() > 64 {
                 return Err(IdentityError::BadSchema {
@@ -583,6 +595,11 @@ impl IdentityRegistry {
                 did: did_of(&subject),
             });
         }
+        if self.records.len() >= MAX_IDENTITY_RECORDS {
+            return Err(IdentityError::BadApproval(format!(
+                "register: registry at its record cap ({MAX_IDENTITY_RECORDS})"
+            )));
+        }
         self.records.insert(subject, record);
         Ok(())
     }
@@ -693,6 +710,12 @@ impl IdentityRegistry {
             .ok_or_else(|| IdentityError::UnknownSubject { did: did.clone() })?;
         if record.guardians.is_empty() {
             return Err(IdentityError::NoGuardians { did });
+        }
+        if approvals.len() > MAX_IDENTITY_GUARDIANS_PER_DID {
+            return Err(IdentityError::BadApproval(format!(
+                "recover: {} approvals exceeds guardian cap ({MAX_IDENTITY_GUARDIANS_PER_DID})",
+                approvals.len()
+            )));
         }
         let mut counted: Vec<Address> = Vec::new();
         for approval in approvals {
@@ -1026,6 +1049,12 @@ pub fn authorize_recovery(
     epoch: u64,
     chain_id: u64,
 ) -> Result<(), IdentityError> {
+    if approvals.len() > MAX_IDENTITY_GUARDIANS_PER_DID {
+        return Err(IdentityError::BadApproval(format!(
+            "recover: {} approvals exceeds guardian cap ({MAX_IDENTITY_GUARDIANS_PER_DID})",
+            approvals.len()
+        )));
+    }
     let digest = recovery_digest(&subject, &new_key, epoch, chain_id);
     let mut guardians = Vec::with_capacity(approvals.len());
     for approval in approvals {
@@ -2446,5 +2475,38 @@ mod tests {
             registry.record(&addr(1)).unwrap().methods.len(),
             MAX_IDENTITY_METHODS_PER_DID
         );
+    }
+
+    #[test]
+    fn identity_credential_fields_and_recovery_approvals_are_bounded() {
+        let too_many_fields: Vec<FieldCommitment> = (0..=MAX_CREDENTIAL_FIELDS)
+            .map(|i| FieldCommitment {
+                name: format!("f_{i}"),
+                commitment: [i as u8; 32],
+            })
+            .collect();
+        let cred = CredentialCommitment {
+            issuer: addr(1),
+            subject: addr(2),
+            schema: "kyc.v1".to_string(),
+            fields: too_many_fields,
+            issued_at: 1,
+            expires_at: None,
+        };
+        let err = cred
+            .validate()
+            .expect_err("credential exceeding MAX_CREDENTIAL_FIELDS must be refused");
+        assert!(format!("{err:?}").contains("cap"), "got: {err:?}");
+
+        let mut registry = IdentityRegistry::new();
+        let flood: Vec<GuardianApproval> = (0..=MAX_IDENTITY_GUARDIANS_PER_DID)
+            .map(|_| GuardianApproval {
+                public_key: vec![0u8; 32],
+                signature: vec![0u8; 64],
+            })
+            .collect();
+        let err = authorize_recovery(&mut registry, addr(1), [2u8; 32], &flood, 1, 1)
+            .expect_err("oversized recovery approval list must be refused before verification");
+        assert!(format!("{err:?}").contains("guardian cap"), "got: {err:?}");
     }
 }

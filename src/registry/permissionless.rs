@@ -300,6 +300,8 @@ pub struct SlashingRecord {
     pub report: SlashingReport,
     pub penalty: u64,
     pub remaining_stake: u64,
+    #[serde(default)]
+    pub slashed_epoch: u64,
 }
 
 mod registrations_as_seq {
@@ -773,6 +775,15 @@ impl PermissionlessRegistry {
         report: &SlashingReport,
     ) -> Result<Option<SlashOutcome>, EvidenceError> {
         report.is_actionable()?;
+        self.slash_from_report_at_epoch(report, 0)
+    }
+
+    pub fn slash_from_report_at_epoch(
+        &mut self,
+        report: &SlashingReport,
+        current_epoch: u64,
+    ) -> Result<Option<SlashOutcome>, EvidenceError> {
+        report.is_actionable()?;
         let condition = report.condition();
         // BLG-0087 (P04-F05, decision B): a liveness fault no longer lands in
         // `Slashed`, so the `AlreadySlashed` replay guard does not cover it.
@@ -818,6 +829,7 @@ impl PermissionlessRegistry {
                     report: report.clone(),
                     penalty: outcome.penalty,
                     remaining_stake: outcome.remaining_stake,
+                    slashed_epoch: current_epoch,
                 });
                 Ok(Some(outcome))
             }
@@ -1714,6 +1726,7 @@ mod tests {
             ),
             penalty: n,
             remaining_stake: 0,
+            slashed_epoch: 0,
         }
     }
 

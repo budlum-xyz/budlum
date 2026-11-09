@@ -469,7 +469,9 @@ mod tests {
         blockchain.state.add_balance(&operator, 5_000_000);
         blockchain.state.add_balance(&payer, 5_000_000);
 
-        let manifest = ContentManifest::from_bytes_sliced(b"repair acceptance payload", 8).unwrap();
+        let mut manifest =
+            ContentManifest::from_bytes_sliced(b"repair acceptance payload", 8).unwrap();
+        manifest.owner = payer;
         // open_never_placed_ticket refuses an unknown manifest on purpose; the
         // helper built one locally without registering it, so the sweep could never
         // open the ticket the four acceptance tests are about.
