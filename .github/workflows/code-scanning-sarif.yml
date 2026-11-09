@@ -52,7 +52,7 @@ jobs:
       - name: Install hadolint v2.14.0 (sha256 pinned)
         run: |
           set -euo pipefail
-          curl -sSfL -o /tmp/hadolint \
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/hadolint \
             https://github.com/hadolint/hadolint/releases/download/v2.14.0/hadolint-Linux-x86_64
           echo "6bf226944684f56c84dd014e8b979d27425c0148f61b3bd99bcc6f39e9dc5a47  /tmp/hadolint" | sha256sum -c -
           sudo install -m 0755 /tmp/hadolint /usr/local/bin/hadolint
@@ -60,7 +60,7 @@ jobs:
       - name: Install actionlint v1.7.12 (sha256 pinned)
         run: |
           set -euo pipefail
-          curl -sSfL -o /tmp/actionlint.tar.gz \
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/actionlint.tar.gz \
             https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
           echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  /tmp/actionlint.tar.gz" | sha256sum -c -
           sudo tar -xzf /tmp/actionlint.tar.gz -C /usr/local/bin actionlint
@@ -220,13 +220,13 @@ jobs:
       - name: Install Foundry v1.3.5 and solc 0.8.26 (sha256 pinned)
         run: |
           set -euo pipefail
-          curl -sSfL -o /tmp/foundry.tgz \
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/foundry.tgz \
             https://github.com/foundry-rs/foundry/releases/download/v1.3.5/foundry_v1.3.5_linux_amd64.tar.gz
           echo "9746c51f76c57ee2b099aa67d8b6fb8a93c82175671b654b1b8fd8ddba8e3b42  /tmp/foundry.tgz" | sha256sum -c -
           mkdir -p "$HOME/.foundry/bin"
           tar xzf /tmp/foundry.tgz -C "$HOME/.foundry/bin"
           echo "$HOME/.foundry/bin" >> "$GITHUB_PATH"
-          curl -sSfL -o /tmp/solc \
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/solc \
             https://github.com/ethereum/solidity/releases/download/v0.8.26/solc-static-linux
           echo "d5f23436f443edb85d8e76906d12f0a86ce0490e7663a9e608efeb7a93f149ef  /tmp/solc" | sha256sum -c -
           mkdir -p "$HOME/.svm/0.8.26"
@@ -234,7 +234,7 @@ jobs:
       - name: Install Aderyn v0.6.8 (sha256 pinned)
         run: |
           set -euo pipefail
-          curl -sSfL -o /tmp/aderyn.tar.xz \
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/aderyn.tar.xz \
             https://github.com/Cyfrin/aderyn/releases/download/aderyn-v0.6.8/aderyn-x86_64-unknown-linux-gnu.tar.xz
           echo "ffd6ca658962e211a3ac821c646f69c8e14bf1b1001cbfe091bcd4535a691e46  /tmp/aderyn.tar.xz" | sha256sum -c -
           mkdir -p /tmp/aderyn-bin

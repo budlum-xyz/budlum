@@ -429,7 +429,7 @@ jobs:
       - name: Install actionlint v1.7.12 (sha256 pinned)
         run: |
           set -euo pipefail
-          curl -sSfL -o /tmp/actionlint.tar.gz \
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/actionlint.tar.gz \
             https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
           echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  /tmp/actionlint.tar.gz" | sha256sum -c -
           sudo tar -xzf /tmp/actionlint.tar.gz -C /usr/local/bin actionlint
@@ -441,7 +441,7 @@ jobs:
       - name: Install typos v1.48.0 (sha256 pinned)
         run: |
           set -euo pipefail
-          curl -sSfL -o /tmp/typos.tar.gz \
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/typos.tar.gz \
             https://github.com/crate-ci/typos/releases/download/v1.48.0/typos-v1.48.0-x86_64-unknown-linux-musl.tar.gz
           echo "72a930c9a94fc3914aa56835c5b859c892a797d40c1c42638b98d93f16ff519c  /tmp/typos.tar.gz" | sha256sum -c -
           mkdir -p /tmp/typos-bin
@@ -1677,7 +1677,7 @@ jobs:
       - name: Install gitleaks v8.30.1 (version + sha256 pinned)
         run: |
           set -euo pipefail
-          curl -sSfL -o /tmp/gitleaks.tar.gz \
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/gitleaks.tar.gz \
             https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
           echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tar.gz" | sha256sum -c -
           sudo tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
@@ -1778,7 +1778,7 @@ jobs:
       - name: Install hadolint v2.14.0 (version + sha256 pinned)
         run: |
           set -euo pipefail
-          curl -sSfL -o /tmp/hadolint \
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/hadolint \
             https://github.com/hadolint/hadolint/releases/download/v2.14.0/hadolint-Linux-x86_64
           echo "6bf226944684f56c84dd014e8b979d27425c0148f61b3bd99bcc6f39e9dc5a47  /tmp/hadolint" | sha256sum -c -
           sudo install -m 0755 /tmp/hadolint /usr/local/bin/hadolint
@@ -1853,7 +1853,7 @@ jobs:
       - name: cargo-llvm-cov v0.8.7 + nextest 0.9.140 kur (sha256 pinli)
         run: |
           set -euo pipefail
-          curl -sSfL -o /tmp/clcov.tar.gz \
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/clcov.tar.gz \
             https://github.com/taiki-e/cargo-llvm-cov/releases/download/v0.8.7/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz
           echo "9a75fe29538d3800b3da57f6f6efb64cba5c720a257bf0cb8b51f39d495a9168  /tmp/clcov.tar.gz" | sha256sum -c -
           # The hash is fixed HERE. Previously the neighbouring `.sha256` file was downloaded from the same
@@ -1861,7 +1861,7 @@ jobs:
           # also changes the hash file next to it, so the check was validating
           # itself. The step name said "sha256 pinned" and it was not a pin.
           # This value was downloaded and computed independently (2026-07-31).
-          curl -sSfL -o /tmp/nextest.tar.gz \
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/nextest.tar.gz \
             https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.140/cargo-nextest-0.9.140-x86_64-unknown-linux-gnu.tar.gz
           echo "4ee9aaa0d0171a985a5d0eb735b87355894c1c455972e9674fb9fdbd1387c9a3  /tmp/nextest.tar.gz" | sha256sum -c -
           mkdir -p ~/.cargo/bin
@@ -1923,7 +1923,7 @@ jobs:
       - name: actionlint v1.7.12 kur (sha256 pinli)
         run: |
           set -euo pipefail
-          curl -sSfL -o /tmp/actionlint.tar.gz \
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/actionlint.tar.gz \
             https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
           echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  /tmp/actionlint.tar.gz" | sha256sum -c -
           sudo tar -xzf /tmp/actionlint.tar.gz -C /usr/local/bin actionlint
@@ -1935,7 +1935,7 @@ jobs:
       - name: Install typos v1.48.0 (sha256 pinned)
         run: |
           set -euo pipefail
-          curl -sSfL -o /tmp/typos.tar.gz \
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/typos.tar.gz \
             https://github.com/crate-ci/typos/releases/download/v1.48.0/typos-v1.48.0-x86_64-unknown-linux-musl.tar.gz
           echo "72a930c9a94fc3914aa56835c5b859c892a797d40c1c42638b98d93f16ff519c  /tmp/typos.tar.gz" | sha256sum -c -
           mkdir -p /tmp/typos-bin
@@ -2465,7 +2465,7 @@ jobs:
       - name: buf v1.71.0 kur (sha256 pinli)
         run: |
           set -euo pipefail
-          curl -sSfL -o /tmp/buf \
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/buf \
             https://github.com/bufbuild/buf/releases/download/v1.71.0/buf-Linux-x86_64
           echo "d3de2838c68a5759ca276884254bc70df4e4ad185d6ed5f65f327b6ce6363eab  /tmp/buf" | sha256sum -c -
           sudo install -m 0755 /tmp/buf /usr/local/bin/buf
