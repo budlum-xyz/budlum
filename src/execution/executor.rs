@@ -1451,6 +1451,17 @@ impl Executor {
                 // Root to be present in the consensus-owned, finalized
                 // External-root registry. A relayer cannot create that
                 // Anchor by submitting this transaction.
+                if let crate::core::transaction::ExternalChain::Custom(custom_id) = res.chain {
+                    if custom_id == 0
+                        || crate::core::transaction::ExternalChain::from_domain_id(custom_id)
+                            .is_some()
+                    {
+                        return Err(BudlumError::validation(
+                            "relayer_reserved_custom_chain",
+                            "custom external chain id collides with a reserved canonical chain slot",
+                        ));
+                    }
+                }
                 let domain_id = res.chain.domain_id();
                 match state.external_roots.get(&domain_id) {
                     Some(finalized_root) if finalized_root == &res.external_state_root => {}
