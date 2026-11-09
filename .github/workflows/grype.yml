@@ -56,7 +56,7 @@ jobs:
       - name: Install grype v0.116.0 (version + sha256 pinned)
         run: |
           set -euo pipefail
-          curl -sSfL -o /tmp/grype.tar.gz \
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/grype.tar.gz \
             https://github.com/anchore/grype/releases/download/v0.116.0/grype_0.116.0_linux_amd64.tar.gz
           echo "40aff724297312f91ea390d003bed8d8651c74cc7f5b26732db80b3a408d2fc5  /tmp/grype.tar.gz" | sha256sum -c -
           mkdir -p /tmp/grype-bin

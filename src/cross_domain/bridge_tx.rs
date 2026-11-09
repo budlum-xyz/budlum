@@ -526,6 +526,27 @@ pub fn unlock_from_verified_event(
     proven: &ProvenBridgeEvent,
     height: u64,
 ) -> Result<(), String> {
+    let domain = state
+        .settlement
+        .domains
+        .get(proven.domain)
+        .ok_or_else(|| format!("Bridge target domain {} is not registered", proven.domain))?;
+    if !domain.bridge_enabled {
+        return Err(format!(
+            "Bridge unlock disabled for domain {}",
+            proven.domain
+        ));
+    }
+    // A finalized commitment may arrive out of order and sit staged in the
+    // commitment registry until its parent chain links up; bridge unlock may
+    // not consume it before `last_committed_height` reaches `proven.height`.
+    if proven.height > domain.last_committed_height {
+        return Err(format!(
+            "Bridge target commitment at height {} is not on the applied domain chain (tip {})",
+            proven.height, domain.last_committed_height
+        ));
+    }
+
     let verified = verify_domain_event_proof(
         state,
         proven.domain,
