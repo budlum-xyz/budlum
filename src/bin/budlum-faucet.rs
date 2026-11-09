@@ -284,6 +284,12 @@ fn rpc_u64(value: &serde_json::Value, field: &str) -> Result<u64, String> {
 struct Node {
     url: String,
     http: reqwest::Client,
+    /// The operator key, when the node this faucet funds from runs with the RPC
+    /// gate on - which is its default. Read once from the file named by
+    /// `BUDLUM_RPC_API_KEY_FILE`; the environment carries a path, never the
+    /// secret (RT-002: without this header every call to an `auth_required`
+    /// node answered `401 Unauthorized`).
+    api_key: Option<String>,
 }
 
 impl Node {
@@ -294,13 +300,24 @@ impl Node {
     ) -> Result<serde_json::Value, String> {
         let body =
             serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
-        let response = self
-            .http
-            .post(&self.url)
-            .json(&body)
+        let mut request = self.http.post(&self.url).json(&body);
+        if let Some(key) = self.api_key.as_deref() {
+            request = request.header("x-api-key", key);
+        }
+        let response = request
             .send()
             .await
             .map_err(|e| format!("{method}: node unreachable: {e}"))?;
+        // An unauthorised answer carries no JSON-RPC error object, so name the
+        // cause here instead of reporting "answer is not JSON".
+        let status = response.status();
+        if matches!(status.as_u16(), 401 | 403) {
+            return Err(format!(
+                "{method}: node refused the call with HTTP {status}: it requires the operator \
+                 key; point {} at a 0600 file holding it",
+                budlum_core::rpc::client_auth::API_KEY_FILE_ENV
+            ));
+        }
         let value: serde_json::Value = response
             .json()
             .await
@@ -576,7 +593,13 @@ async fn serve(
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| format!("HTTP client: {e}"))?;
-    let node = Node { url: rpc_url, http };
+    let api_key = budlum_core::rpc::client_auth::api_key_from_env()
+        .map_err(|e| format!("RPC operator key: {e}"))?;
+    let node = Node {
+        url: rpc_url,
+        http,
+        api_key,
+    };
     let chain_id = node
         .call("bud_chainId", serde_json::json!([]))
         .await
