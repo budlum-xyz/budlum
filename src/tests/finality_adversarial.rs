@@ -1512,3 +1512,47 @@ fn a_finality_cert_from_another_chain_is_refused() {
         "a foreign certificate must not advance finality"
     );
 }
+
+#[test]
+fn stale_epoch_cert_and_qc_blob_are_refused_for_later_checkpoint() {
+    let voter = Address::from([0x77u8; 32]);
+    let consensus = Arc::new(PoAEngine::new(vec![voter]));
+    let mut bc = Blockchain::new(consensus, None, 45262, None);
+    bc.state.add_balance(&voter, 10_000);
+    bc.state.add_validator(voter, 10_000);
+
+    // Devnet epoch_len = 10 and checkpoint_interval = 2: height 10 sits in epoch 1.
+    for _ in 1..=10 {
+        let _ = bc.produce_block(voter).unwrap();
+    }
+    let block = bc.chain.get(10).expect("height 10").clone();
+    assert_eq!(block.epoch, 1);
+
+    let stale_cert = crate::chain::finality::FinalityCert {
+        epoch: 0,
+        checkpoint_height: block.index,
+        checkpoint_hash: block.hash.clone(),
+        chain_id: 45262,
+        agg_sig_bls: vec![0u8; 48],
+        bitmap: vec![1],
+        set_hash: String::new(),
+    };
+    let cert_err = bc
+        .handle_finality_cert(stale_cert)
+        .expect_err("stale-epoch finality certificate must be refused");
+    assert!(
+        cert_err.contains("Certificate epoch 0 does not match epoch 1"),
+        "unexpected error: {cert_err}"
+    );
+    assert_eq!(bc.finalized_height, 0);
+
+    let stale_blob = crate::consensus::qc::QcBlob::new(0, block.index, block.hash, Vec::new());
+    let blob_err = bc
+        .import_qc_blob(stale_blob)
+        .expect_err("stale-epoch QC blob must be refused");
+    assert!(
+        blob_err.contains("QcBlob epoch 0 does not match epoch 1"),
+        "unexpected error: {blob_err}"
+    );
+    assert!(bc.get_qc_blob(10).is_none());
+}
