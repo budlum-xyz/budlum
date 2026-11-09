@@ -1479,7 +1479,11 @@ impl Blockchain {
         if domain.id == 0 {
             return Err("Consensus domain id 0 is reserved".into());
         }
-        if domain.domain_chain_id == 0 {
+        // Bitcoin uses zero as its canonical numeric chain id (its network
+        // identity is its genesis hash). Zero is invalid on every other slot.
+        if domain.domain_chain_id == 0
+            && domain.id != crate::core::transaction::ExternalChain::Bitcoin.domain_id()
+        {
             return Err(format!("Domain {} has invalid chain id 0", domain.id));
         }
 
@@ -1969,8 +1973,7 @@ impl Blockchain {
                             | crate::core::transaction::ExternalChain::Solana
                             | crate::core::transaction::ExternalChain::Bitcoin
                             | crate::core::transaction::ExternalChain::Avalanche
-                    ) && (chain == crate::core::transaction::ExternalChain::Bitcoin
-                        || applied_domain.domain_chain_id == chain.canonical_chain_id())
+                    ) && applied_domain.domain_chain_id == chain.canonical_chain_id()
                 }
                 None => true,
             };
@@ -9475,6 +9478,41 @@ mod tests {
             None,
             "a domain with non-canonical chain id must not forge Ethereum's anchor"
         );
+    }
+
+    #[test]
+    fn bitcoin_slot_requires_bitcoin_chain_id_before_anchoring_root() {
+        for (network_id, anchors) in [(1, false), (0, true)] {
+            let mut bc = Blockchain::new(
+                Arc::new(crate::consensus::pow::PoWEngine::new(1)),
+                None,
+                45262,
+                None,
+            );
+            let domain = crate::domain::default_domain(
+                3,
+                ConsensusKind::PoW,
+                network_id,
+                "pow-header-chain-v1",
+                1,
+            );
+            bc.register_consensus_domain(domain.clone()).unwrap();
+            let mut block = Block::new(1, "00".repeat(32), vec![]);
+            block.state_root = "33".repeat(32);
+            block.tx_root = block.calculate_tx_root();
+            block.hash = block.calculate_hash();
+            let commitment = crate::domain::DomainCommitment::from_block(
+                &domain, &block, [0u8; 32], [0u8; 32], 0,
+            )
+            .unwrap();
+            let root = commitment.state_root;
+            bc.accept_verified_domain_commitment(commitment).unwrap();
+            assert_eq!(
+                bc.state.external_roots.get(&3).copied(),
+                anchors.then_some(root),
+                "Bitcoin's canonical slot must only anchor chain id 0"
+            );
+        }
     }
 
     /// BLG-0168: a snapshot that is ahead of the stored chain must not stay
