@@ -18,6 +18,21 @@ use tracing::{info, warn};
 #[cfg(feature = "p2p-mdns")]
 use libp2p::{mdns, swarm::behaviour::toggle::Toggle};
 
+/// Whether a gossipsub publish refusal means the bytes are already in the mesh.
+///
+/// `PublishError::Duplicate` is gossipsub's answer to a message id it already
+/// holds: the same bytes were published by this node one beat earlier (the
+/// finality retry signs the same `(epoch, height, hash)` again, so the signature
+/// and therefore the message id do not change), or they arrived from a peer.
+/// Treating that as a delivery failure had two costs (RT-003, measured on a
+/// four-validator lab mesh): the retry re-published identical bytes for the life
+/// of the round - about 2.6 warnings per second per validator - and, on the
+/// prevote path, kept the vote out of `prevote_published`, so the node never
+/// recorded that it had already voted at that height.
+fn publish_reached_the_mesh(error: &gossipsub::PublishError) -> bool {
+    matches!(error, gossipsub::PublishError::Duplicate)
+}
+
 /// Maximum seconds a sync cycle may remain in
 /// "syncing" state (sync_state == 1) before it is considered orphaned
 /// And automatically reset. Prevents nodes from reporting stale
@@ -2875,12 +2890,23 @@ impl Node {
                                     pq_sig: precommit.pq_sig,
                                 };
                                 let topic = gossipsub::IdentTopic::new("blocks");
-                                if let Err(e) = self
+                                match self
                                     .swarm
                                     .behaviour_mut()
                                     .gossipsub
                                     .publish(topic, vote_msg.to_bytes())
                                 {
+                                    Ok(_) => {}
+                                    // The same bytes are already in the mesh:
+                                    // the earlier publish of this round landed,
+                                    // so this is not a failure and must not be
+                                    // retried as one.
+                                    Err(e) if publish_reached_the_mesh(&e) => {
+                                        tracing::debug!(
+                                            "precommit for height {} is already in the mesh: {e}",
+                                            agg_state.checkpoint_height
+                                        );
+                                    }
                                     // A vote that never reaches the mesh is
                                     // indistinguishable from a vote that was
                                     // never cast, and finality simply stops.
@@ -2888,10 +2914,12 @@ impl Node {
                                     // retry beat re-publishes these bytes; the
                                     // height is already marked, so no second
                                     // vote can be signed at it.
-                                    warn!(
-                                        "Failed to gossip a finality vote: {e}; the vote for height {} stands and its bytes are re-published on the next beat",
-                                        agg_state.checkpoint_height
-                                    );
+                                    Err(e) => {
+                                        warn!(
+                                            "Failed to gossip a finality vote: {e}; the vote for height {} stands and its bytes are re-published on the next beat",
+                                            agg_state.checkpoint_height
+                                        );
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -2971,19 +2999,28 @@ impl Node {
                                     auth_sig: prevote.auth_sig,
                                 };
                                 let topic = gossipsub::IdentTopic::new("blocks");
-                                if let Err(e) = self
+                                let publish = self
                                     .swarm
                                     .behaviour_mut()
                                     .gossipsub
-                                    .publish(topic, vote_msg.to_bytes())
-                                {
-                                    // Same rule as the precommit above: a vote
-                                    // that did not leave the node is not
-                                    // recorded as cast, so the next beat
-                                    // retries the same bytes.
-                                    warn!(
-                                        "Failed to gossip a finality vote: {e}; height {checkpoint_height} stays unvoted and is retried on the next beat"
-                                    );
+                                    .publish(topic, vote_msg.to_bytes());
+                                // `Duplicate` means the bytes are already in the
+                                // mesh (see `publish_reached_the_mesh`), which is
+                                // a delivery, not a failure: recording it is what
+                                // stops the node re-signing and re-publishing the
+                                // same vote every beat while the round waits for
+                                // its quorum.
+                                let delivered = publish.as_ref().err().is_none_or(publish_reached_the_mesh);
+                                if !delivered {
+                                    if let Err(e) = &publish {
+                                        // Same rule as the precommit above: a vote
+                                        // that did not leave the node is not
+                                        // recorded as cast, so the next beat
+                                        // retries the same bytes.
+                                        warn!(
+                                            "Failed to gossip a finality vote: {e}; height {checkpoint_height} stays unvoted and is retried on the next beat"
+                                        );
+                                    }
                                 } else {
                                     let advanced = checkpoint_height > self.last_prevote_height;
                                     if advanced {
@@ -6037,5 +6074,37 @@ mod gossip_author_tests {
         assert!(handshake_origin_matches_peer(relay, Some(relay)));
         assert!(!handshake_origin_matches_peer(relay, Some(author)));
         assert!(!handshake_origin_matches_peer(relay, None));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod finality_publish_tests {
+    use super::publish_reached_the_mesh;
+    use libp2p::gossipsub::PublishError;
+
+    /// RT-003: a re-published vote is not a failed vote.
+    ///
+    /// The finality retry signs the same `(epoch, height, hash)` again, so the
+    /// byte string - and with it the gossipsub message id - is unchanged.
+    /// gossipsub answers the second publish with `Duplicate`, which the node
+    /// treated as "the vote did not leave", re-published on the next beat, and
+    /// so produced ~2.6 warnings per second per validator for the whole round
+    /// while the round still had no quorum. Every other refusal is a real
+    /// failure and must stay one.
+    #[test]
+    fn a_duplicate_publish_counts_as_delivered_and_nothing_else_does() {
+        assert!(
+            publish_reached_the_mesh(&PublishError::Duplicate),
+            "duplicate bytes are already in the mesh"
+        );
+        assert!(!publish_reached_the_mesh(
+            &PublishError::NoPeersSubscribedToTopic
+        ));
+        assert!(!publish_reached_the_mesh(&PublishError::MessageTooLarge));
+        assert!(!publish_reached_the_mesh(&PublishError::AllQueuesFull(3)));
+        assert!(!publish_reached_the_mesh(&PublishError::TransformFailed(
+            std::io::Error::other("compression")
+        )));
     }
 }
