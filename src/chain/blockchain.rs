@@ -1068,6 +1068,11 @@ impl Blockchain {
             if let Err(e) = bc.consensus.load_state(store) {
                 tracing::error!(error = %e, "Failed to load consensus state from store during startup");
             }
+            if let Ok(sightings) = store.load_round_price_sightings() {
+                for (hash, seen_ms) in sightings {
+                    bc.consensus.note_block_seen(&hash, seen_ms);
+                }
+            }
         }
         // The restored tip is a block this node never watched land. Give the
         // leader-round price an observation time for it: the moment it was
@@ -1105,6 +1110,15 @@ impl Blockchain {
     /// onward (the tip on startup/snapshot restore, or `fork_point..` on a
     /// reorg) are anchored at `now`. Existing sightings in [`RoundPriceBook`]
     /// are preserved ("first sighting wins").
+    fn persist_round_price_sightings(&self) {
+        if let Some(store) = self.storage.as_ref() {
+            let sightings = self.consensus.round_price_sightings();
+            if !sightings.is_empty() {
+                let _ = store.save_round_price_sightings(&sightings);
+            }
+        }
+    }
+
     fn seed_round_price_window_from(&self, adopted_from: usize) {
         let now = crate::consensus::now_millis();
         let start = self
@@ -1114,7 +1128,15 @@ impl Blockchain {
         if let Some(slice) = self.chain.get(start..) {
             for (offset, block) in slice.iter().enumerate() {
                 let index = start.saturating_add(offset);
-                let seen_ms = if index >= adopted_from {
+                let stale = block
+                    .timestamp
+                    .saturating_add(crate::consensus::MIN_BLOCK_INTERVAL_MS)
+                    .saturating_add(
+                        crate::consensus::ROUND_TIMEOUT_MS
+                            .saturating_mul(u128::from(crate::consensus::MAX_LEADER_ROUNDS)),
+                    )
+                    < now;
+                let seen_ms = if index >= adopted_from || stale {
                     now
                 } else {
                     block.timestamp.min(now)
@@ -1122,6 +1144,7 @@ impl Blockchain {
                 self.consensus.note_block_seen(&block.hash, seen_ms);
             }
         }
+        self.persist_round_price_sightings();
     }
 
     fn seed_round_price_window(&self) {
@@ -6024,6 +6047,7 @@ impl Blockchain {
         // lagging slot schedule may have put minutes in the past.
         self.consensus
             .note_block_seen(&block.hash, crate::consensus::now_millis());
+        self.persist_round_price_sightings();
         // The external-domain registry's clock is the local chain height, and
         // block commit is the only place that may advance it: a clock driven
         // from anywhere else would let sunset windows drift between replay
@@ -6376,6 +6400,7 @@ impl Blockchain {
         // next slot's leader rounds.
         self.consensus
             .note_block_seen(&committed_hash, crate::consensus::now_millis());
+        self.persist_round_price_sightings();
         // Same clock rule as the other commit path: block commit drives the
         // external-domain registry height, nothing else does.
         self.external_intake.on_block_committed(committed_index);
@@ -12423,5 +12448,60 @@ mod reorg_suffix_tests {
         assert!(err.contains("not a structurally valid chain"), "got: {err}");
         assert_eq!(bc.try_reorg_suffix(good_suffix), Ok(true));
         assert_eq!(bc.chain.len(), 63);
+    }
+
+    #[test]
+    fn restored_round_price_sightings_reload_from_storage_and_clamp_stale_ancestors() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().to_str().unwrap().to_string();
+        let now = crate::consensus::now_millis();
+        let stale_ts = now.saturating_sub(120_000);
+
+        let pos1 = std::sync::Arc::new(crate::consensus::PoSEngine::new(
+            crate::consensus::pos::PoSConfig::default(),
+            None,
+        ));
+        let mut bc_mem = Blockchain::new(pos1.clone(), None, 45262, None);
+        let mut anc = Block::new(1, bc_mem.chain.first().unwrap().hash.clone(), Vec::new());
+        anc.timestamp = stale_ts;
+        anc.hash = anc.calculate_hash();
+        let anc_hash = anc.hash.clone();
+        let mut tip = Block::new(2, anc_hash.clone(), Vec::new());
+        tip.timestamp = now;
+        tip.hash = tip.calculate_hash();
+        bc_mem.chain.push(anc);
+        bc_mem.chain.push(tip);
+        bc_mem.seed_round_price_window();
+
+        let sightings = pos1.round_price_sightings();
+        let anc_seen = sightings
+            .iter()
+            .find(|(h, _)| h == &anc_hash)
+            .map(|(_, at)| *at)
+            .expect("ancestor sighting recorded");
+        assert!(
+            anc_seen >= now,
+            "stale ancestor must anchor at restore time rather than producer stamp"
+        );
+
+        {
+            let store = crate::storage::db::Storage::new(&db_path).unwrap();
+            store
+                .save_round_price_sightings(&[(anc_hash.clone(), now.saturating_sub(7_000))])
+                .unwrap();
+        }
+        let store2 = crate::storage::db::Storage::new(&db_path).unwrap();
+        let pos2 = std::sync::Arc::new(crate::consensus::PoSEngine::new(
+            crate::consensus::pos::PoSConfig::default(),
+            None,
+        ));
+        let _bc_restarted = Blockchain::new(pos2.clone(), Some(store2), 45262, None);
+        let reloaded = pos2.round_price_sightings();
+        let reloaded_at = reloaded
+            .iter()
+            .find(|(h, _)| h == &anc_hash)
+            .map(|(_, at)| *at)
+            .expect("persisted sighting reloaded on startup");
+        assert_eq!(reloaded_at, now.saturating_sub(7_000));
     }
 }
