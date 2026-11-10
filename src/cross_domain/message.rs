@@ -393,11 +393,16 @@ pub fn register_relayed_cross_domain_on_state(
             message.source_domain
         ));
     }
-    let derived = state
-        .settlement
-        .domains
-        .observed(message.source_domain)
-        .quantum_class();
+    let derived = Some(
+        state
+            .settlement
+            .domains
+            .observed(message.source_domain)
+            .quantum_class()
+            .unwrap_or_else(|| {
+                crate::settlement::pq_anchor::domain_quantum_class(&source_domain.kind)
+            }),
+    );
     if message.source_quantum_class != derived {
         return Err(format!(
             "relayed message carries source quantum class {:?}, the chain derives {:?} for source domain {}",

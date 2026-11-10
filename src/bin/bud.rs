@@ -418,6 +418,12 @@ enum GraftAction {
         /// A 32-byte memo hash (hex); zero when absent.
         #[arg(long)]
         memo_hash: Option<String>,
+        /// Redeeming origin chain id committed in the payment leaf.
+        #[arg(long, default_value_t = 0)]
+        target_chain_id: u64,
+        /// Redeeming receiver contract/account identifier (hex) committed in the leaf.
+        #[arg(long)]
+        target_receiver: Option<String>,
     },
     /// Ask a solver to make a call on the origin network; escrows
     /// `--max-payment`.
@@ -1656,6 +1662,8 @@ fn run_graft(rpc_url: &str, action: &GraftAction) -> Result<(), String> {
             amount,
             origin_recipient,
             memo_hash,
+            target_chain_id,
+            target_receiver,
         } => (
             signer,
             GraftTx::Pay {
@@ -1665,6 +1673,10 @@ fn run_graft(rpc_url: &str, action: &GraftAction) -> Result<(), String> {
                     .as_deref()
                     .map_or(Ok([0u8; 32]), |memo| hex32(memo, "--memo-hash"))?,
                 origin_recipient: hex_bytes(origin_recipient, "--origin-recipient")?,
+                target_chain_id: *target_chain_id,
+                target_receiver: target_receiver
+                    .as_deref()
+                    .map_or(Ok(Vec::new()), |recv| hex_bytes(recv, "--target-receiver"))?,
             },
         ),
         GraftAction::Intent {

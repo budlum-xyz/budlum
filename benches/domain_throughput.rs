@@ -376,15 +376,12 @@ fn bench_registry(c: &mut Criterion) {
 
     // Register
     group.bench_function("register_validator", |b| {
-        b.iter_with_setup(
-            || PermissionlessRegistry::new(),
-            |mut reg| {
-                for i in 0..100u8 {
-                    let _ = reg.register_validator(addr(i), MIN_REGISTRATION_STAKE, 0);
-                }
-                black_box(reg.len());
-            },
-        )
+        b.iter_with_setup(PermissionlessRegistry::new, |mut reg| {
+            for i in 0..100u8 {
+                let _ = reg.register_validator(addr(i), MIN_REGISTRATION_STAKE, 0);
+            }
+            black_box(reg.len());
+        })
     });
 
     // Is_active query
