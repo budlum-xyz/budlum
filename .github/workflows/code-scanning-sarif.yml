@@ -69,7 +69,7 @@ jobs:
         run: hadolint --no-fail --format sarif ops/Dockerfile > hadolint.sarif
       - name: Upload Hadolint SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         with:
           sarif_file: hadolint.sarif
           category: hadolint
@@ -88,7 +88,7 @@ jobs:
             sarif actionlint /tmp/actionlint.json actionlint.sarif
       - name: Upload actionlint SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         with:
           sarif_file: actionlint.sarif
           category: actionlint
@@ -103,7 +103,7 @@ jobs:
           exit-code: "0"
       - name: Upload Trivy Config SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         with:
           sarif_file: trivy-config.sarif
           category: trivy-config
@@ -160,7 +160,7 @@ jobs:
           echo "$clippy_status" > /tmp/clippy.status
       - name: Upload Clippy SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         with:
           sarif_file: clippy.sarif
           category: clippy
@@ -179,7 +179,7 @@ jobs:
             sarif cargo-audit /tmp/cargo-audit.json cargo-audit.sarif Cargo.lock
       - name: Upload cargo-audit SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         with:
           sarif_file: cargo-audit.sarif
           category: cargo-audit
@@ -195,7 +195,7 @@ jobs:
           echo "$deny_status" > /tmp/cargo-deny.status
       - name: Upload cargo-deny SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         with:
           sarif_file: cargo-deny.sarif
           category: cargo-deny
@@ -245,7 +245,7 @@ jobs:
         run: aderyn contracts --output aderyn.sarif
       - name: Upload Aderyn SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         with:
           sarif_file: aderyn.sarif
           category: aderyn
