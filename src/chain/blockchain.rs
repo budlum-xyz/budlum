@@ -11830,25 +11830,25 @@ mod bond_and_reorg_tests {
             None,
         ));
         let mut bc_mem = Blockchain::new(pos1.clone(), None, 45262, None);
-        let mut anc = Block::new(1, bc_mem.chain.first().unwrap().hash.clone(), Vec::new());
-        anc.timestamp = stale_ts;
-        anc.hash = anc.calculate_hash();
-        let anc_hash = anc.hash.clone();
-        let mut tip = Block::new(2, anc_hash.clone(), Vec::new());
+        let mut ancestor = Block::new(1, bc_mem.chain.first().unwrap().hash.clone(), Vec::new());
+        ancestor.timestamp = stale_ts;
+        ancestor.hash = ancestor.calculate_hash();
+        let ancestor_hash = ancestor.hash.clone();
+        let mut tip = Block::new(2, ancestor_hash.clone(), Vec::new());
         tip.timestamp = now;
         tip.hash = tip.calculate_hash();
-        bc_mem.chain.push(anc);
+        bc_mem.chain.push(ancestor);
         bc_mem.chain.push(tip);
         bc_mem.seed_round_price_window();
 
         let sightings = pos1.round_price_sightings();
-        let anc_seen = sightings
+        let ancestor_seen = sightings
             .iter()
-            .find(|(h, _)| h == &anc_hash)
+            .find(|(h, _)| h == &ancestor_hash)
             .map(|(_, at)| *at)
             .expect("ancestor sighting recorded");
         assert!(
-            anc_seen >= now,
+            ancestor_seen >= now,
             "stale ancestor must anchor at restore time rather than producer stamp"
         );
 
@@ -11856,7 +11856,7 @@ mod bond_and_reorg_tests {
         {
             let store = std::sync::Arc::new(crate::storage::db::Storage::new(&db_path).unwrap());
             store
-                .save_round_price_sightings(&[(anc_hash.clone(), now.saturating_sub(7_000))])
+                .save_round_price_sightings(&[(ancestor_hash.clone(), now.saturating_sub(7_000))])
                 .unwrap();
         }
         let store2 = crate::storage::db::Storage::new(&db_path).unwrap();
@@ -11868,7 +11868,7 @@ mod bond_and_reorg_tests {
         let reloaded = pos2.round_price_sightings();
         let reloaded_at = reloaded
             .iter()
-            .find(|(h, _)| h == &anc_hash)
+            .find(|(h, _)| h == &ancestor_hash)
             .map(|(_, at)| *at)
             .expect("persisted sighting reloaded on startup");
         assert_eq!(reloaded_at, now.saturating_sub(7_000));
