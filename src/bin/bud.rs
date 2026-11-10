@@ -2639,7 +2639,6 @@ mod tests {
 /// request path against a socket that records exactly what the CLI writes, so
 /// "the key is sent" and "a 401 is reported as what it is" are both pinned.
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod rpc_auth_tests {
     use super::*;
     use std::io::Write;
