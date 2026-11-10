@@ -34,6 +34,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet, 'arena/**']
   schedule:
     # Once a week: two full builds are expensive, and backdoor classes do not
     # change on every commit.
