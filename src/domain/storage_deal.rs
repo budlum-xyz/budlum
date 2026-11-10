@@ -1630,17 +1630,17 @@ impl StorageRegistry {
         content_id: &ContentId,
         owner: &Address,
     ) -> Result<(), StorageError> {
-        let policy = if *owner != Address::zero() {
-            self.scoped_self_host_policies
-                .get(&(*manifest_id, *content_id, *owner))
-                .or_else(|| {
-                    self.self_host_policies
-                        .get(&(*manifest_id, *content_id))
-                        .filter(|p| p.owner == *owner || p.owner == Address::zero())
-                })
-        } else {
-            self.self_host_policies.get(&(*manifest_id, *content_id))
-        };
+        if *owner == Address::zero() {
+            return self.check_self_host_allowed(manifest_id, content_id);
+        }
+        let policy = self
+            .scoped_self_host_policies
+            .get(&(*manifest_id, *content_id, *owner))
+            .or_else(|| {
+                self.self_host_policies
+                    .get(&(*manifest_id, *content_id))
+                    .filter(|p| p.owner == *owner || p.owner == Address::zero())
+            });
         let Some(policy) = policy else {
             return Ok(());
         };
