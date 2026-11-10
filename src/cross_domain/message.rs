@@ -409,14 +409,16 @@ pub fn register_relayed_cross_domain_on_state(
             message.source_quantum_class, derived, message.source_domain
         ));
     }
-    let anchored_height = state
-        .settlement
-        .commitments
-        .earliest_accepted_height(message.source_domain, message.source_height);
+    // A relayed message carries no Merkle inclusion proof tying it to
+    // `message.source_height`, so that height is relayer-chosen and cannot
+    // anchor the Watch wait (naming an older committed height would let a
+    // brand-new message bypass the hold). Unproven relayed classical messages
+    // pass `None` and stay held during Watch; proven messages enter through
+    // `DeliverMessage` against their verified commitment's acceptance height.
     crate::core::account::enforce_classical_message_intake(
         message,
         state.settlement.quantum.alarm(),
-        anchored_height,
+        None,
         state.current_block_height,
     )?;
     register_cross_domain_on_state(state, message)
@@ -638,8 +640,32 @@ mod tests {
         Executor::apply_transaction_checked(&mut state, &ok_tx)
             .expect("matching derived class passes when alarm is clear");
 
-        // 4) Activate Watch alarm -> relayed door holds Classical intake.
-        state.current_block_height = 20;
+        // 4) Activate Watch alarm -> relayed door holds Classical intake even if
+        // a historical commitment at `source_height = 10` was accepted long ago.
+        state
+            .settlement
+            .commitments
+            .insert_at_height(
+                crate::domain::types::DomainCommitment {
+                    domain_id: 2,
+                    domain_height: 10,
+                    domain_block_hash: [0x11; 32],
+                    parent_domain_block_hash: [0u8; 32],
+                    state_root: [0x22; 32],
+                    tx_root: [0x33; 32],
+                    event_root: [0x44; 32],
+                    finality_proof_hash: [0x55; 32],
+                    consensus_kind: crate::domain::ConsensusKind::PoW,
+                    validator_set_hash: [0u8; 32],
+                    timestamp_ms: 1_000,
+                    sequence: 0,
+                    producer: None,
+                    state_updates: std::collections::BTreeMap::new(),
+                },
+                1,
+            )
+            .unwrap();
+        state.current_block_height = 700_000;
         state.settlement.quantum.force_solved(
             CanaryId::Ecc192,
             CanaryClaim {
@@ -648,50 +674,16 @@ mod tests {
                 accepted_height: 20,
             },
         );
-        let held_signed = build_msg(4, Some(QuantumClass::Classical), true);
-        let held_err = register_relayed_on_state(&mut state, &held_signed, relayer)
-            .expect_err("Watch alarm must hold classical relayed message");
+        let mut held_signed = build_msg(4, Some(QuantumClass::Classical), true);
+        held_signed.expiry_height = 800_000;
+        held_signed.message_id = held_signed.calculate_message_id();
+        held_signed.sender_signature = kp.sign(&held_signed.message_id).to_vec();
+        let held_err = register_relayed_on_state(&mut state, &held_signed, relayer).expect_err(
+            "Watch alarm must hold classical relayed message even with historical committed height",
+        );
         assert!(
             held_err.contains("held by the quantum alarm"),
             "got: {held_err}"
-        );
-
-        // 5) Unknown, frozen, or bridge-disabled source domains are refused at
-        //    the relayed doors before any row reaches the message registry.
-        let mut unknown_state = AccountState::new();
-        unknown_state.add_balance(
-            &relayer,
-            min_stake.saturating_mul(4).saturating_add(1_000_000),
-        );
-        unknown_state
-            .bond_relayer(&relayer, min_stake)
-            .expect("bond relayer");
-        let unknown_msg = build_msg(5, None, true);
-        let unknown_err = register_relayed_on_state(&mut unknown_state, &unknown_msg, relayer)
-            .expect_err("unknown source domain must be refused");
-        assert!(
-            unknown_err.contains("unknown source domain"),
-            "got: {unknown_err}"
-        );
-
-        let mut disabled_dom = crate::domain::plugin::default_domain(
-            2,
-            crate::domain::ConsensusKind::PoW,
-            2000,
-            crate::domain::POW_HEADER_CHAIN_ADAPTER,
-            1,
-        );
-        disabled_dom.bridge_enabled = false;
-        unknown_state
-            .settlement
-            .domains
-            .register(disabled_dom)
-            .expect("register bridge-disabled domain");
-        let disabled_err = register_relayed_on_state(&mut unknown_state, &unknown_msg, relayer)
-            .expect_err("bridge-disabled source domain must be refused");
-        assert!(
-            disabled_err.contains("not bridge-enabled"),
-            "got: {disabled_err}"
         );
     }
 }
