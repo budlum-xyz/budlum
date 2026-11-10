@@ -87,7 +87,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
     uint64 public override latestFinalHeight;
     mapping(bytes32 => Challenge) public challenges;
     mapping(bytes32 => bool) public fraudulent;
-    mapping(uint64 => mapping(bytes32 => bool)) public fraudulentRoot;
+    mapping(bytes32 => uint256) public pendingEnvelopeCount;
 
     bool public immutable hasBlsPrecompile;
     bool public immutable hasMlDsaPrecompile;
@@ -197,9 +197,6 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         if (fraudulent[digest]) {
             revert AlreadyFraudulent(digest);
         }
-        if (fraudulentRoot[a.height][a.stateRoot]) {
-            revert AlreadyFraudulent(digest);
-        }
         if (challenges[digest].openedAt != 0) {
             revert AlreadyChallenged(digest);
         }
@@ -258,6 +255,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
             if (pendingDigest == identity) {
                 pendingAttestationAtHeight[a.height] = bytes32(0);
                 pendingRootAtHeight[a.height] = bytes32(0);
+                pendingEnvelopeCount[identity] = 0;
             }
             emit AttestationVerified(digest, a.height, a.stateRoot);
             return digest;
@@ -283,6 +281,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         });
         pendingRootAtHeight[a.height] = a.stateRoot;
         pendingAttestationAtHeight[a.height] = identity;
+        pendingEnvelopeCount[identity] += 1;
         emit AttestationOptimistic(digest, a.height, reason);
     }
 
@@ -299,17 +298,25 @@ contract BudlumFinalityVerifier is IBudlumFinality {
             revert ChallengeWindowClosed(digest);
         }
         uint64 challengeHeight = c.height;
-        bytes32 challengeRoot = c.stateRoot;
-        bytes32 challengeIdentity = pendingIdentity(challengeHeight, challengeRoot);
+        bytes32 challengeIdentity = pendingIdentity(challengeHeight, c.stateRoot);
         c.challenger = msg.sender;
         c.resolved = true;
+        // The fraud proof speaks only to this envelope (`digest`), not to the
+        // `(height, stateRoot)` substance: on the optimistic BLS path the ML-DSA
+        // blob is outside the BLS signing root and unverified at submission, so
+        // a verdict on a mutated envelope must neither condemn `(height, stateRoot)`
+        // nor drop another live envelope's pending claim.
         fraudulent[digest] = true;
-        fraudulentRoot[challengeHeight][challengeRoot] = true;
         accepted[digest] = false;
-        accepted[challengeIdentity] = false;
-        if (pendingAttestationAtHeight[challengeHeight] == challengeIdentity) {
-            pendingAttestationAtHeight[challengeHeight] = bytes32(0);
-            pendingRootAtHeight[challengeHeight] = bytes32(0);
+        if (pendingEnvelopeCount[challengeIdentity] > 0) {
+            pendingEnvelopeCount[challengeIdentity] -= 1;
+            if (pendingEnvelopeCount[challengeIdentity] == 0
+                && !heightFinal[challengeHeight]
+                && pendingAttestationAtHeight[challengeHeight] == challengeIdentity)
+            {
+                pendingAttestationAtHeight[challengeHeight] = bytes32(0);
+                pendingRootAtHeight[challengeHeight] = bytes32(0);
+            }
         }
         bool fraud;
         try IExternalFraudProofVerifier(fraudProofVerifier).verifyFraud(digest, fraudProof) returns (bool proven) {
@@ -332,7 +339,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         if (c.resolved) {
             revert ChallengeResolved(digest);
         }
-        if (fraudulent[digest] || fraudulentRoot[c.height][c.stateRoot]) {
+        if (fraudulent[digest]) {
             revert AlreadyFraudulent(digest);
         }
         uint256 elapsed = block.number - uint256(c.openedAt);
@@ -350,6 +357,9 @@ contract BudlumFinalityVerifier is IBudlumFinality {
                 || pendingRootAtHeight[c.height] != c.stateRoot))
         {
             revert PendingAttestation(c.height, pendingAttestationAtHeight[c.height]);
+        }
+        if (pendingEnvelopeCount[identity] > 0) {
+            pendingEnvelopeCount[identity] -= 1;
         }
         if (!sameFinalized) {
             pendingAttestationAtHeight[c.height] = bytes32(0);
