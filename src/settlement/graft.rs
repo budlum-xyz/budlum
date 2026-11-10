@@ -106,6 +106,10 @@ pub struct GraftPayment {
     pub origin_recipient: Vec<u8>,
     pub memo_hash: [u8; 32],
     pub paid_at_block: u64,
+    #[serde(default)]
+    pub target_chain_id: u64,
+    #[serde(default)]
+    pub target_receiver: Vec<u8>,
 }
 
 impl GraftPayment {
@@ -125,6 +129,11 @@ impl GraftPayment {
             &self.origin_recipient,
             &self.memo_hash,
             &self.paid_at_block.to_le_bytes(),
+            &self.target_chain_id.to_le_bytes(),
+            &u64::try_from(self.target_receiver.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+            &self.target_receiver,
         ])
     }
 }
@@ -183,6 +192,10 @@ pub enum GraftTx {
         amount: u64,
         memo_hash: [u8; 32],
         origin_recipient: Vec<u8>,
+        #[serde(default)]
+        target_chain_id: u64,
+        #[serde(default)]
+        target_receiver: Vec<u8>,
     },
     /// Pause, resume or retire the application (owner only; retiring is
     /// final).
@@ -346,6 +359,8 @@ pub enum GraftProofError {
     Opening,
     #[error("the proof carries no state root opening for its checkpoint")]
     NoStateRootBody,
+    #[error("the checkpoint lies outside the active payment window")]
+    Window,
     #[error("the header is not the one the finalized checkpoint commits: {0}")]
     Header(String),
 }
@@ -370,6 +385,12 @@ pub fn verify_graft_payment(
     }
     if proof.header.graft_root != Some(proof.opening.root()) {
         return Err(GraftProofError::Opening);
+    }
+    if proof.header.checkpoint_height < proof.payment.paid_at_block
+        || proof.header.checkpoint_height - proof.payment.paid_at_block
+            > GRAFT_PAYMENT_WINDOW as u64
+    {
+        return Err(GraftProofError::Window);
     }
     let body = proof
         .state_root_body
@@ -821,12 +842,21 @@ pub fn execute_graft_tx(
             amount,
             memo_hash,
             origin_recipient,
+            target_chain_id,
+            target_receiver,
         } => {
             if *amount == 0 {
                 return Err(refused("Graft payment amount must be non-zero"));
             }
             if !identifier_ok(origin_recipient) {
                 return Err(refused("Graft origin_recipient length is invalid"));
+            }
+            if target_receiver.len() > MAX_GRAFT_IDENTIFIER_BYTES
+                || (*target_chain_id != 0) != (!target_receiver.is_empty())
+            {
+                return Err(refused(
+                    "Graft target_chain_id and target_receiver must be set together",
+                ));
             }
             let app = state
                 .settlement
@@ -852,6 +882,8 @@ pub fn execute_graft_tx(
                 origin_recipient: origin_recipient.clone(),
                 memo_hash: *memo_hash,
                 paid_at_block: block,
+                target_chain_id: *target_chain_id,
+                target_receiver: target_receiver.clone(),
             });
             Ok(())
         }
@@ -1312,6 +1344,8 @@ mod tests {
             amount: 300,
             memo_hash: [0u8; 32],
             origin_recipient: vec![0x01],
+            target_chain_id: 1,
+            target_receiver: vec![0x22; 20],
         };
         execute_graft_tx(&mut state, &ctx(user), &pay).unwrap();
         assert_eq!(state.get_balance(&mirror_account(id)), 300);
@@ -1655,6 +1689,8 @@ mod tests {
                         amount: 1,
                         memo_hash: [0u8; 32],
                         origin_recipient: vec![1],
+                        target_chain_id: 0,
+                        target_receiver: Vec::new(),
                     })),
                 ),
             )
