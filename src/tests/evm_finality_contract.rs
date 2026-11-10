@@ -72,10 +72,11 @@ fn f02_missing_verifiers_remain_pending_not_accepted() {
 #[test]
 fn f03_pairing_probe_and_verification_have_a_realistic_gas_floor() {
     let source = contract_source();
-    assert!(source.contains("GAS_BLS_PAIRING_PROBE = 150_000"));
+    assert!(source.contains("GAS_BLS_PAIRING_PROBE = 15e4"));
+    assert!(source.contains("GAS_BLS_PAIRING_VERIFY = 4e5"));
     assert!(source.contains("staticcall{gas: GAS_BLS_PAIRING_PROBE}"));
-    assert!(source.contains("PRECOMPILE_BLS_PAIRING.staticcall{gas: 400_000}"));
-    assert!(source.contains("out.length == 32"));
+    assert!(source.contains("PRECOMPILE_BLS_PAIRING.staticcall{gas: GAS_BLS_PAIRING_VERIFY}"));
+    assert!(source.contains("out.length == WORD_LEN"));
 }
 
 #[test]

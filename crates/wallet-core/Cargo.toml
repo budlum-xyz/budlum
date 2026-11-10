@@ -15,7 +15,7 @@ crate-type = ["cdylib", "rlib"]
 # signature scheme. The node already links the same family via the
 # `pq-ml-dsa` validator feature; the wallet pins Category 5 (256-bit
 # quantum security) rather than inheriting Category 3.
-ml-dsa = { version = "=0.1.1", features = ["alloc", "zeroize", "rand_core"] }
+ml-dsa = { version = "=0.1.2", features = ["alloc", "zeroize", "rand_core"] }
 # The shared cryptographic core (`src/crypto.rs` mounts the node own files by
 # path): ML-DSA is verified by a second library, SLH-DSA backs the recovery key
 # and the emergency suite, Ed25519 is the composite signature classical half.
