@@ -5,6 +5,17 @@ pragma solidity ^0.8.24;
 /// @notice Verifies Budlum's hybrid finality proof (BLS12-381 aggregate +
 ///         post-quantum ML-DSA) on an EVM chain.
 ///
+/// @dev BLG-1074 (P60-F07, decision C now / A at deploy): NOT DEPLOYED AND
+///      NOT TRUSTED. CI compiles this file (solidity.yml is a syntax and
+///      codegen gate only); nothing deploys it and no Rust path encodes its
+///      digests. The F01-F06 defects (no trusted key fixed in the contract,
+///      the challenge-window fallback, the pairing probe gas floor, the
+///      signingRoot layout, the missing Rust encoder, the one-root-per-height
+///      gap) are open on purpose here - the contract is quarantined, not
+///      shipped. The A part (deployment) requires the F01-F06 fixes plus
+///      negative tests for each of them in CI. Until then the deployment
+///      path is closed.
+///
 /// @dev THE GAS QUESTION, ANSWERED WITH NUMBERS
 ///
 ///      This contract exists because the reverse direction has a cost problem,
@@ -90,21 +101,19 @@ struct Attestation {
     uint64 chainId;
     // --- BLS12-381, in the UNCOMPRESSED form EIP-2537 requires ---
     //
-    // Four points, not two. A BLS verification is the pairing equation
-    //     e(H(m), agg_pubkey) * e(-sig, g1) == 1
-    // and the precompile wants each side of each pairing as a separate
-    // uncompressed point. The negation of the signature is done by the caller
-    // for the same reason the decompression is: neither is something the
-    // precompile does, and doing them in Solidity is the expensive part.
-    /// H(signing root) mapped to G1, uncompressed (128 bytes).
-    bytes g1HashedMessage;
+    // Budlum signs with public keys in G2 and signatures in G1. The
+    // verification is the pairing equation
+    //     e(H(root), agg_pubkey) * e(-sig, g2) == 1
+    // H(root) is derived inside the contract, never supplied. The aggregate
+    // public key and the G2 generator are carried here but must match the
+    // hashes pinned at construction. The signature is negated by the caller
+    // because the precompile does not negate points.
     /// The aggregate public key, uncompressed G2 (256 bytes).
     bytes g2AggregatePubkey;
-    /// The G1 generator, uncompressed (128 bytes). Carried rather than hardcoded
-    /// so a chain with a different encoding is served by the same contract.
-    bytes g1Generator;
-    /// The negated aggregate signature, uncompressed G2 (256 bytes).
-    bytes g2NegSignature;
+    /// The G2 generator, uncompressed (256 bytes).
+    bytes g2Generator;
+    /// The negated aggregate signature, uncompressed G1 (128 bytes).
+    bytes g1NegSignature;
     /// ML-DSA signature over the same signing root.
     bytes mlDsaSignature;
     /// ML-DSA public key.
@@ -119,6 +128,8 @@ struct Challenge {
     address challenger;
     uint64 openedAt;
     bool resolved;
+    uint64 height;
+    bytes32 stateRoot;
 }
 
 /// @notice A deployment-specific fraud-proof verifier. The optimistic path
@@ -140,20 +151,21 @@ contract BudlumFinalityVerifier {
     /// BLS12_G2MSM, and calling it as if it were the pairing check returns a
     /// successful result that means nothing.
     address internal constant PRECOMPILE_BLS_G1ADD = address(0x0b);
-    address internal constant PRECOMPILE_BLS_G1MSM = address(0x0c);
-    address internal constant PRECOMPILE_BLS_G2ADD = address(0x0d);
-    address internal constant PRECOMPILE_BLS_G2MSM = address(0x0e);
     address internal constant PRECOMPILE_BLS_PAIRING = address(0x0f);
     address internal constant PRECOMPILE_BLS_MAP_FP_TO_G1 = address(0x10);
-    address internal constant PRECOMPILE_BLS_MAP_FP2_TO_G2 = address(0x11);
+    /// EIP-198 modexp, present on every EVM chain. Used to reduce the
+    /// hash-to-field bytes modulo the BLS12-381 base field prime.
+    address internal constant PRECOMPILE_MODEXP = address(0x05);
+    /// BLS12-381 base field prime p, 48 bytes big-endian.
+    bytes internal constant BLS_FIELD_MODULUS =
+        hex"1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f6241eabfffeb153ffffb9feffffffffaaab";
+    /// Budlum BLS signature DST. Must equal `BLS_SIGNATURE_DST` in
+    /// src/chain/finality.rs.
+    bytes internal constant BLS_DST = "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_";
     /// EIP-8051 VERIFY_MLDSA (FIPS-204).
     address internal constant PRECOMPILE_MLDSA = address(0x12);
     /// EIP-8051 VERIFY_MLDSA_ETH (Keccak PRNG, NTT-domain t1).
     address internal constant PRECOMPILE_MLDSA_ETH = address(0x13);
-    /// RIP-7212 / EIP-7212 secp256r1, present on most L2s. Not used for the
-    /// hybrid proof itself; probed so the deployment report can say what the
-    /// chain supports.
-    address internal constant PRECOMPILE_P256 = address(0x100);
 
     // ---------------------------------------------------------------------
     // Gas accounting, as constants so the numbers are in one place.
@@ -163,9 +175,10 @@ contract BudlumFinalityVerifier {
     // floor a chain with the precompiles will hit.
     // ---------------------------------------------------------------------
 
-    uint256 internal constant GAS_MLDSA_VERIFY = 4500;      // EIP-8051
-    uint256 internal constant GAS_P256_VERIFY = 3450;       // RIP-7212
-    uint256 internal GAS_P256_SOLIDITY = 300_000;           // pure Solidity
+    /// EIP-2537 pairing check costs 32600 * k + 37700 gas, so 70300 for the
+    /// one-pair probe. The stipend leaves headroom. A smaller stipend makes
+    /// the probe fail on a real chain.
+    uint256 internal constant GAS_BLS_PAIRING_PROBE = 100_000;
 
     /// Challenge window for the optimistic fallback, in blocks. Long enough
     /// that a prover cannot finalise a lie and spend the proceeds before
@@ -181,8 +194,23 @@ contract BudlumFinalityVerifier {
     /// The Budlum chain id this deployment serves.
     uint64 public immutable budlumChainId;
 
+    /// Trusted keys, pinned at construction as hashes of the exact bytes an
+    /// attestation must carry. An attestation whose key bytes do not hash to
+    /// these values is refused, so a caller cannot bring its own key.
+    bytes32 public immutable committeePubkeyHash;
+    bytes32 public immutable g2GeneratorHash;
+    bytes32 public immutable mlDsaPubkeyHash;
+
     /// Attestations accepted, by digest.
     mapping(bytes32 => bool) public accepted;
+
+    /// The one state root allowed per Budlum height. Set by the first digest
+    /// that is accepted or opens a window. A different root for the same
+    /// height is refused until a fraud proof clears the claim.
+    mapping(uint64 => bytes32) public rootAtHeight;
+
+    /// Heights with an accepted digest. Their claim is never cleared.
+    mapping(uint64 => bool) public heightFinal;
 
     /// Open challenges, by attestation digest.
     mapping(bytes32 => Challenge) public challenges;
@@ -192,6 +220,12 @@ contract BudlumFinalityVerifier {
     /// after the fact. A per-challenge record is ephemeral (the struct is
     /// rewritten when a window opens); the fraud verdict must outlive it.
     mapping(bytes32 => bool) public fraudulent;
+
+    /// Claims a fraud proof has disproved, keyed by `(height, stateRoot)`.
+    /// Keying fraud by digest alone lets a submitter re-present the exact
+    /// same disproved `(height, stateRoot)` under a fresh `epoch` or signature
+    /// blob and settle it in a second window (CWE-294).
+    mapping(uint64 => mapping(bytes32 => bool)) public fraudulentRoot;
 
     /// Which regime this deployment detected at construction. Stored so a
     /// reader can tell whether the verifier is cryptographic or optimistic
@@ -207,20 +241,28 @@ contract BudlumFinalityVerifier {
     error WrongChainId(uint64 expected, uint64 got);
     error AlreadyAccepted(bytes32 digest);
     error BadSignatureLength(string what);
+    error UntrustedKey(string what);
     error PrecompileRefused(string what);
     error NoVerificationPath();
     error ChallengeWindowOpen(bytes32 digest, uint256 blocksLeft);
+    error ChallengeWindowClosed(bytes32 digest);
+    error AlreadyChallenged(bytes32 digest);
     error NoSuchChallenge(bytes32 digest);
     error ChallengeResolved(bytes32 digest);
     error AlreadyFraudulent(bytes32 digest);
     error NoFraudProofVerifier();
     error FraudProofRejected(bytes32 digest);
     error NoChallengeWindow();
+    error SignatureInvalid(string what);
+    error ConflictingRoot(uint64 height, bytes32 held, bytes32 got);
 
     constructor(
         uint64 budlumChainId_,
         uint256 challengeWindow_,
-        address fraudProofVerifier_
+        address fraudProofVerifier_,
+        bytes32 committeePubkeyHash_,
+        bytes32 g2GeneratorHash_,
+        bytes32 mlDsaPubkeyHash_
     ) {
         if (fraudProofVerifier_ == address(0)) {
             revert NoFraudProofVerifier();
@@ -231,6 +273,9 @@ contract BudlumFinalityVerifier {
         budlumChainId = budlumChainId_;
         challengeWindow = challengeWindow_;
         fraudProofVerifier = fraudProofVerifier_;
+        committeePubkeyHash = committeePubkeyHash_;
+        g2GeneratorHash = g2GeneratorHash_;
+        mlDsaPubkeyHash = mlDsaPubkeyHash_;
         // Pairing's ABI is 384 bytes per pair. A malformed one-pair probe
         // distinguishes the final pairing precompile from an early-draft
         // address that hosts a different BLS operation.
@@ -250,10 +295,9 @@ contract BudlumFinalityVerifier {
                 a.stateRoot,
                 a.epoch,
                 a.chainId,
-                keccak256(a.g1HashedMessage),
                 keccak256(a.g2AggregatePubkey),
-                keccak256(a.g1Generator),
-                keccak256(a.g2NegSignature),
+                keccak256(a.g2Generator),
+                keccak256(a.g1NegSignature),
                 keccak256(a.mlDsaSignature),
                 keccak256(a.mlDsaPubkey),
                 a.mlDsaEthVariant
@@ -272,17 +316,7 @@ contract BudlumFinalityVerifier {
                 a.height,
                 a.stateRoot,
                 a.epoch,
-                a.chainId,
-                // The signature must bind the exact decompressed points that
-                // the pairing call will consume. This does not replace
-                // hash-to-curve; the deployment still requires the circuit
-                // binding recorded by the Rust planner. It does prevent a
-                // valid signature over one point encoding from being paired
-                // with another after signing.
-                keccak256(a.g1HashedMessage),
-                keccak256(a.g2AggregatePubkey),
-                keccak256(a.g1Generator),
-                keccak256(a.g2NegSignature)
+                a.chainId
             )
         );
     }
@@ -295,6 +329,8 @@ contract BudlumFinalityVerifier {
     ///        a challenge window for the post-quantum half. This is a weaker
     ///        guarantee and the event says so;
     ///      - neither: optimistic, window open, event says so.
+    ///      A window opens only for a half whose precompile is missing. If a
+    ///      precompile is present and its check fails, `verify` reverts.
     ///
     ///      There is no path in which a missing precompile causes the
     ///      verification to be skipped and the attestation recorded as if it
@@ -310,12 +346,34 @@ contract BudlumFinalityVerifier {
         if (fraudulent[digest]) {
             revert AlreadyFraudulent(digest);
         }
+        if (fraudulentRoot[a.height][a.stateRoot]) {
+            revert AlreadyFraudulent(digest);
+        }
         if (challenges[digest].openedAt != 0) {
             // A digest gets one window: re-verifying would overwrite the
             // challenge record, reset `openedAt`, and postpone `settle`
             // indefinitely (and before the `fraudulent` guard, would revive
             // a fraud-proven attestation).
-            revert ChallengeWindowOpen(digest, 0);
+            revert AlreadyChallenged(digest);
+        }
+
+        if (keccak256(a.g2AggregatePubkey) != committeePubkeyHash) {
+            revert UntrustedKey("aggregate pubkey is not the pinned committee key");
+        }
+        if (keccak256(a.g2Generator) != g2GeneratorHash) {
+            revert UntrustedKey("G2 generator is not the pinned generator");
+        }
+        if (keccak256(a.mlDsaPubkey) != mlDsaPubkeyHash) {
+            revert UntrustedKey("ML-DSA pubkey is not the pinned key");
+        }
+
+        // Only a conflicting FINALIZED root bars new attestations at `a.height`.
+        // Allowing an unverified optimistic claim to lock `rootAtHeight` let
+        // any first caller squat every height and permanently censor honest
+        // attestations with `ConflictingRoot` (CWE-284).
+        bytes32 held = rootAtHeight[a.height];
+        if (held != bytes32(0) && held != a.stateRoot && heightFinal[a.height]) {
+            revert ConflictingRoot(a.height, held, a.stateRoot);
         }
 
         bytes32 root = signingRoot(a);
@@ -324,25 +382,32 @@ contract BudlumFinalityVerifier {
         bool pqOk = false;
 
         if (hasBlsPrecompile) {
-            blsOk = _verifyBls(
-                root,
-                a.g1HashedMessage,
-                a.g2AggregatePubkey,
-                a.g1Generator,
-                a.g2NegSignature
-            );
+            blsOk = _verifyBls(root, a.g2AggregatePubkey, a.g2Generator, a.g1NegSignature);
         }
         if (hasMlDsaPrecompile) {
             pqOk = _verifyMlDsa(root, a.mlDsaPubkey, a.mlDsaSignature, a.mlDsaEthVariant);
         }
 
+        // A half whose precompile is present must verify. A failed check is a
+        // refusal, never a reason to open a window: only a MISSING precompile
+        // may fall back to the optimistic path.
+        if (hasBlsPrecompile && !blsOk) {
+            revert SignatureInvalid("BLS signature does not verify");
+        }
+        if (hasMlDsaPrecompile && !pqOk) {
+            revert SignatureInvalid("ML-DSA signature does not verify");
+        }
+
         if (blsOk && pqOk) {
             accepted[digest] = true;
+            rootAtHeight[a.height] = a.stateRoot;
+            heightFinal[a.height] = true;
             emit AttestationVerified(digest, a.height, a.stateRoot);
             return digest;
         }
 
-        // Optimistic path. The attestation is NOT marked accepted here; it is
+        // Optimistic path, reached only when a precompile is missing. The
+        // attestation is NOT marked accepted here; it is
         // marked accepted only when the window closes, via `settle`. A caller
         // that treats an open window as accepted is reading the wrong function.
         string memory reason = !hasBlsPrecompile && !hasMlDsaPrecompile
@@ -352,8 +417,13 @@ contract BudlumFinalityVerifier {
             attestationDigest: digest,
             challenger: address(0),
             openedAt: uint64(block.number),
-            resolved: false
+            resolved: false,
+            height: a.height,
+            stateRoot: a.stateRoot
         });
+        // Do NOT claim `rootAtHeight[a.height]` on an unverified optimistic
+        // submission: only `verify` (when both cryptographic halves pass) or
+        // `settle` (once the challenge window closes unrefuted) claims it.
         emit AttestationOptimistic(digest, a.height, reason);
     }
 
@@ -372,7 +442,7 @@ contract BudlumFinalityVerifier {
         }
         uint256 elapsed = block.number - uint256(c.openedAt);
         if (elapsed >= challengeWindow) {
-            revert ChallengeWindowOpen(digest, 0);
+            revert ChallengeWindowClosed(digest);
         }
         bool fraud;
         try IExternalFraudProofVerifier(fraudProofVerifier).verifyFraud(digest, fraudProof) returns (bool proven) {
@@ -386,7 +456,11 @@ contract BudlumFinalityVerifier {
         c.challenger = msg.sender;
         c.resolved = true;
         fraudulent[digest] = true;
+        fraudulentRoot[c.height][c.stateRoot] = true;
         accepted[digest] = false;
+        if (!heightFinal[c.height] && rootAtHeight[c.height] == c.stateRoot) {
+            rootAtHeight[c.height] = bytes32(0);
+        }
         emit ChallengeOpened(digest, msg.sender);
         emit ChallengeProven(digest, msg.sender, true);
     }
@@ -402,12 +476,22 @@ contract BudlumFinalityVerifier {
         if (c.resolved) {
             revert ChallengeResolved(digest);
         }
+        if (fraudulent[digest] || fraudulentRoot[c.height][c.stateRoot]) {
+            revert AlreadyFraudulent(digest);
+        }
         uint256 elapsed = block.number - uint256(c.openedAt);
         if (elapsed < challengeWindow) {
             revert ChallengeWindowOpen(digest, challengeWindow - elapsed);
         }
+        // Reject settlement if another root already finalized this height.
+        bytes32 held = rootAtHeight[c.height];
+        if (held != bytes32(0) && held != c.stateRoot) {
+            revert ConflictingRoot(c.height, held, c.stateRoot);
+        }
         c.resolved = true;
         accepted[digest] = true;
+        rootAtHeight[c.height] = c.stateRoot;
+        heightFinal[c.height] = true;
         emit ChallengeProven(digest, c.challenger, false);
     }
 
@@ -425,40 +509,33 @@ contract BudlumFinalityVerifier {
     ///      The pairing check takes 384 bytes per pair - 128 bytes of G1
     ///      followed by 256 bytes of G2 - and returns 32 bytes whose last byte
     ///      is 0x01 when the pairing product is the identity, 0x00 otherwise.
-    ///      BLS verification is two pairs:
-    ///            e(H(m), agg_pubkey) * e(-signature, g1_generator) == 1
-    ///
-    ///      Both points arrive UNCOMPRESSED and the caller is responsible for
-    ///      having decompressed them; see the header note on why that step is
-    ///      the expensive one and is not done here.
+    ///      Budlum BLS is public key in G2, signature in G1, with two pairs:
+    ///            e(H(root), agg_pubkey) * e(-signature, g2_generator) == 1
+    ///      H(root) is `_hashToG1(root)`, so the signature is bound to the
+    ///      signing root. The key and generator were checked against the
+    ///      pinned hashes by the caller.
     ///
     ///      A precompile that returns anything other than a 32-byte word is
     ///      treated as a refusal, never as an unknown - an unknown answer from
     ///      a cryptographic check is a refusal.
-    function _verifyBls(bytes32 root, bytes calldata g1HashedMessage, bytes calldata g2Pubkey, bytes calldata g1Generator, bytes calldata g2NegSignature)
+    function _verifyBls(bytes32 root, bytes calldata g2Pubkey, bytes calldata g2Generator, bytes calldata g1NegSignature)
         internal
         view
         returns (bool)
     {
-        // Pair layout: G1 (128) then G2 (256), twice.
-        if (g1HashedMessage.length != 128) {
-            revert BadSignatureLength("hashed message must be an uncompressed G1 point (128 bytes)");
-        }
         if (g2Pubkey.length != 256) {
             revert BadSignatureLength("aggregate pubkey must be an uncompressed G2 point (256 bytes)");
         }
-        if (g1Generator.length != 128) {
-            revert BadSignatureLength("generator must be an uncompressed G1 point (128 bytes)");
+        if (g2Generator.length != 256) {
+            revert BadSignatureLength("generator must be an uncompressed G2 point (256 bytes)");
         }
-        if (g2NegSignature.length != 256) {
-            revert BadSignatureLength("negated signature must be an uncompressed G2 point (256 bytes)");
+        if (g1NegSignature.length != 128) {
+            revert BadSignatureLength("negated signature must be an uncompressed G1 point (128 bytes)");
         }
-        // `root` is carried in the G1 point the caller hashed to; it is not
-        // concatenated into the input, because the pairing ABI has no place
-        // for a bare scalar and inventing one would be inventing an ABI.
+        // Pair layout: G1 (128) then G2 (256), twice.
         bytes memory input = abi.encodePacked(
-            g1HashedMessage, g2Pubkey,
-            g1Generator, g2NegSignature
+            _hashToG1(root), g2Pubkey,
+            g1NegSignature, g2Generator
         );
         (bool ok, bytes memory out) = PRECOMPILE_BLS_PAIRING.staticcall{gas: 400_000}(input);
         if (!ok || out.length < 32) {
@@ -469,6 +546,46 @@ contract BudlumFinalityVerifier {
             result := mload(add(out, 32))
         }
         return result == 1;
+    }
+
+    /// @dev RFC 9380 hash_to_curve for BLS12381G1_XMD:SHA-256_SSWU_RO_ with
+    ///      the Budlum signature DST (same as `BLS_SIGNATURE_DST` in
+    ///      src/chain/finality.rs). Two field elements come from
+    ///      expand_message_xmd (128 bytes, four SHA-256 blocks). Each goes
+    ///      through the EIP-2537 map precompile, which also clears the
+    ///      cofactor, and the two points are added.
+    function _hashToG1(bytes32 root) internal view returns (bytes memory) {
+        bytes memory dstPrime = abi.encodePacked(BLS_DST, uint8(BLS_DST.length));
+        bytes32 b0 = sha256(abi.encodePacked(new bytes(64), root, uint16(128), uint8(0), dstPrime));
+        bytes32 b1 = sha256(abi.encodePacked(b0, uint8(1), dstPrime));
+        bytes32 b2 = sha256(abi.encodePacked(b0 ^ b1, uint8(2), dstPrime));
+        bytes32 b3 = sha256(abi.encodePacked(b0 ^ b2, uint8(3), dstPrime));
+        bytes32 b4 = sha256(abi.encodePacked(b0 ^ b3, uint8(4), dstPrime));
+        bytes memory p0 = _mapToG1(abi.encodePacked(b1, b2));
+        bytes memory p1 = _mapToG1(abi.encodePacked(b3, b4));
+        (bool ok, bytes memory out) = PRECOMPILE_BLS_G1ADD.staticcall(abi.encodePacked(p0, p1));
+        if (!ok || out.length != 128) {
+            revert PrecompileRefused("G1 add");
+        }
+        return out;
+    }
+
+    /// @dev Reduces 64 big-endian bytes modulo the BLS12-381 base field prime
+    ///      with the modexp precompile (x^1 mod p), pads the 48-byte result to
+    ///      the 64-byte EIP-2537 field element, and maps it to G1.
+    function _mapToG1(bytes memory element64) internal view returns (bytes memory) {
+        (bool ok, bytes memory reduced) = PRECOMPILE_MODEXP.staticcall(
+            abi.encodePacked(uint256(64), uint256(1), uint256(48), element64, uint8(1), BLS_FIELD_MODULUS)
+        );
+        if (!ok || reduced.length != 48) {
+            revert PrecompileRefused("modexp");
+        }
+        bytes memory out;
+        (ok, out) = PRECOMPILE_BLS_MAP_FP_TO_G1.staticcall(abi.encodePacked(bytes16(0), reduced));
+        if (!ok || out.length != 128) {
+            revert PrecompileRefused("map to G1");
+        }
+        return out;
     }
 
     /// @dev Calls the EIP-8051 ML-DSA precompile.
@@ -510,7 +627,7 @@ contract BudlumFinalityVerifier {
         if (PRECOMPILE_BLS_PAIRING.code.length > 0) {
             return false;
         }
-        (bool ok, bytes memory out) = PRECOMPILE_BLS_PAIRING.staticcall{gas: 5_000}(probe);
+        (bool ok, bytes memory out) = PRECOMPILE_BLS_PAIRING.staticcall{gas: GAS_BLS_PAIRING_PROBE}(probe);
         return ok && out.length == 32;
     }
 

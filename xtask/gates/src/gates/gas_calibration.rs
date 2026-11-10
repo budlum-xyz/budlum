@@ -60,27 +60,42 @@ fn opcode_names(lhs: &str) -> Vec<String> {
     out
 }
 
+/// The integer literal that starts the arm value, or 0.
+///
+/// Only the first token counts. A named constant (`DIV_GAS`) is not resolved
+/// and reads as 0, which the checks below refuse as too cheap, so the gate
+/// fails closed instead of reading a number from the next arm.
 fn first_integer(s: &str) -> u64 {
     let digits: String = s
+        .trim_start()
         .chars()
-        .skip_while(|c| !c.is_ascii_digit())
-        .take_while(char::is_ascii_digit)
+        .take_while(|c| c.is_ascii_digit() || *c == '_')
+        .filter(char::is_ascii_digit)
         .collect();
     digits.parse().unwrap_or(0)
+}
+
+/// Drop `//` comments, so an opcode name or a number in a comment is not read.
+fn without_comments(body: &str) -> String {
+    body.lines()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Extract `(opcode -> gas)` and the `_` default from a `Vm::gas_cost` body.
 fn parse_gas_map(body: &str) -> (HashMap<String, u64>, u64) {
     let mut map = HashMap::new();
     let mut default = 0u64;
-    let mut rest = body;
+    let cleaned = without_comments(body);
+    let mut rest = cleaned.as_str();
     let mut pending: Vec<String> = Vec::new();
     while let Some(eq) = rest.find("=>") {
         let lhs = &rest[..eq];
         pending.extend(opcode_names(lhs));
         let after = &rest[eq + 2..];
         let value = first_integer(after);
-        if pending.is_empty() && lhs.contains('_') {
+        if pending.is_empty() && lhs.rsplit(',').next().unwrap_or("").trim() == "_" {
             default = value;
         } else {
             for name in pending.drain(..) {
@@ -287,5 +302,14 @@ mod tests {
     fn cheap_div_is_refused() {
         let (map, default) = parse_gas_map(&synth_body(1));
         assert!(verify(&map, default, "unit").is_err());
+    }
+
+    #[test]
+    fn comments_constants_and_guard_arms_do_not_mislead() {
+        let body = "match o {\n Opcode::Div => DIV_GAS, // 64 rows\n Opcode::SWrite => 12,\n op if op.is_alu() => 2,\n _ => 1,\n}";
+        let (map, default) = parse_gas_map(body);
+        assert_eq!(map.get("Div"), Some(&0));
+        assert_eq!(map.get("SWrite"), Some(&12));
+        assert_eq!(default, 1);
     }
 }

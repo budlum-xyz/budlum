@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 //! # Verifier Registry - Generic RoleId-based Staking + Slashing Primitive
 //!
-//! A standalone, domain-agnostic registry for Budlum's multi-domain L1.
+//! A standalone, domain-agnostic registry for Budlum's multi-domain chain.
 //! Any role - Master Verifier, Relayer, Attester, Storage Operator, AI Verifier,
 //! Or a future caller-defined role - shares **one** registry, **one** staking
 //! Mechanism, and **one** slashing pipeline. There is no per-role bespoke code.

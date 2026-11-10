@@ -31,6 +31,7 @@ pub struct ThreeRecipePublic {
 /// Holders without the opening cannot re-emit drops; validators still see
 /// sizes needed for refuse-absurd checks.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "ThreeRecipeSealedWire")]
 pub struct ThreeRecipeSealed {
     /// `three_recipe_digest` of the full [`ThreeRecipePublic`].
     pub recipe_commitment: [u8; 32],
@@ -40,6 +41,40 @@ pub struct ThreeRecipeSealed {
     pub k: u16,
     /// Block length.
     pub block_len: u16,
+}
+
+/// The wire shape of [`ThreeRecipeSealed`]. A decoded recipe passes through
+/// [`TryFrom`], so the refuse-absurd rule holds for every recipe that is read
+/// back, not only for the ones `seal` built.
+#[derive(serde::Deserialize)]
+struct ThreeRecipeSealedWire {
+    recipe_commitment: [u8; 32],
+    total_len: u32,
+    k: u16,
+    block_len: u16,
+}
+
+impl TryFrom<ThreeRecipeSealedWire> for ThreeRecipeSealed {
+    type Error = &'static str;
+
+    fn try_from(wire: ThreeRecipeSealedWire) -> Result<Self, Self::Error> {
+        use crate::storage::qr_carousel::{MAX_BLOCK_LEN, MAX_K};
+        if wire.total_len == 0 || wire.block_len == 0 || wire.block_len > MAX_BLOCK_LEN {
+            return Err("sealed three recipe has an empty or oversized size field");
+        }
+        if wire.k == 0 || wire.k > MAX_K {
+            return Err("sealed three recipe k is outside 1..=MAX_K");
+        }
+        if u64::from(wire.total_len).div_ceil(u64::from(wire.block_len)) != u64::from(wire.k) {
+            return Err("sealed three recipe k does not fit total_len and block_len");
+        }
+        Ok(Self {
+            recipe_commitment: wire.recipe_commitment,
+            total_len: wire.total_len,
+            k: wire.k,
+            block_len: wire.block_len,
+        })
+    }
 }
 
 /// Either visibility mode.
@@ -171,6 +206,46 @@ mod tests {
     use crate::storage::qr_carousel::{CarouselEncoder, DEFAULT_BLOCK_LEN};
     use crate::storage::qr_frame::{fold_frame_digests, frame_digest, pack_frame};
     use crate::storage::qr_payload::{pack_payload, payload_commitment, PayloadKind};
+
+    #[test]
+    fn a_sealed_recipe_with_absurd_metering_fields_is_refused_on_decode() {
+        let packed = pack_payload(PayloadKind::ContentBytes, b"sealed-decode-probe").unwrap();
+        let commit = payload_commitment(&packed);
+        let enc = CarouselEncoder::new(&packed, DEFAULT_BLOCK_LEN).unwrap();
+        let stream = enc.params().stream_commitment(&commit);
+        let sealed = ThreeRecipePublic::new(commit, enc.params(), stream).seal();
+        let ok = bincode::serialize(&sealed).unwrap();
+        assert_eq!(
+            bincode::deserialize::<ThreeRecipeSealed>(&ok).unwrap(),
+            sealed
+        );
+
+        for bad in [
+            ThreeRecipeSealed {
+                k: 0,
+                ..sealed.clone()
+            },
+            ThreeRecipeSealed {
+                total_len: 0,
+                ..sealed.clone()
+            },
+            ThreeRecipeSealed {
+                block_len: 0,
+                ..sealed.clone()
+            },
+            ThreeRecipeSealed {
+                k: sealed.k + 1,
+                ..sealed.clone()
+            },
+            ThreeRecipeSealed {
+                k: u16::MAX,
+                ..sealed.clone()
+            },
+        ] {
+            let bytes = bincode::serialize(&bad).unwrap();
+            assert!(bincode::deserialize::<ThreeRecipeSealed>(&bytes).is_err());
+        }
+    }
 
     /// The fee schedule prices content by recipe bytes. This measures what a
     /// recipe actually costs on the wire and pins it.

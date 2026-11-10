@@ -31,7 +31,8 @@ impl QuadRing {
     /// its tail, and the function returned the wrong bytes as the recovered
     /// block with no way for the caller to tell.
     pub fn repair_one_missing(blocks: &[Vec<u8>], parity: &[u8]) -> Option<Vec<u8>> {
-        if blocks.iter().any(|b| b.len() != parity.len()) {
+        // With no survivor the "repair" would hand back the parity itself.
+        if blocks.is_empty() || blocks.iter().any(|b| b.len() != parity.len()) {
             return None;
         }
         let mut out = parity.to_vec();
@@ -126,10 +127,12 @@ impl ChurnFixture {
 
     pub fn run(&self) -> ChurnResult {
         // Skeleton simulation - real disk IO in production
+        // A fixture with no disks repairs no disks; it must not underflow.
+        let others = self.n.saturating_sub(1);
         match self.kind {
             FixtureKind::SingleChurn => ChurnResult {
                 survived: true,
-                repair_disks: self.n - 1,
+                repair_disks: others,
                 traffic_mb: 256.0,
             },
             FixtureKind::DoubleChurn => {
@@ -143,7 +146,7 @@ impl ChurnFixture {
                 } else {
                     ChurnResult {
                         survived: true,
-                        repair_disks: self.n - 1,
+                        repair_disks: others,
                         traffic_mb: 512.0,
                     }
                 }
@@ -213,8 +216,23 @@ mod tests {
             vec![7, 7, 7, 7],
         ];
         assert!(QuadRing::repair_one_missing(&long, &parity).is_none());
+        assert!(
+            QuadRing::repair_one_missing(&[], &parity).is_none(),
+            "no survivors: the parity is not a lost block"
+        );
     }
 
+    #[test]
+    fn a_fixture_with_no_disks_does_not_underflow() {
+        for kind in [FixtureKind::SingleChurn, FixtureKind::DoubleChurn] {
+            let f = ChurnFixture {
+                kind,
+                n: 0,
+                description: "",
+            };
+            assert_eq!(f.run().repair_disks, 0);
+        }
+    }
     #[test]
     fn all_fixtures_count_10() {
         assert_eq!(ChurnFixture::all().len(), 10);

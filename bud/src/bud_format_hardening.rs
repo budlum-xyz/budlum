@@ -49,7 +49,8 @@ pub fn spam_check(quota: &RecipeQuota, recipes_last_sec: u64, fee_usd: f64) -> b
     if recipes_last_sec > quota.max_recipes_per_sec {
         return true; // rate quota exceeded -> REFUSE
     }
-    fee_usd < quota.min_creation_fee_usd
+    // A NaN fee compares false against everything, so it is refused by name.
+    fee_usd.is_nan() || fee_usd < quota.min_creation_fee_usd
 }
 
 /// Minimum revenue guarantee: even in the recipe class the network must earn at
@@ -141,6 +142,13 @@ pub fn sert_digest() -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_nan_fee_is_refused() {
+        let quota = RecipeQuota::default();
+        assert!(spam_check(&quota, 1, f64::NAN));
+        assert!(!spam_check(&quota, 1, 0.01));
+    }
 
     #[test]
     fn spam_quota_refuses() {

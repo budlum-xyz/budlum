@@ -5,6 +5,7 @@
 
 use crate::bud_format::BudFile;
 use crate::bud_format_economics::BudEconomics;
+use crate::bud_format_erasure::CauchyMds;
 
 #[derive(Debug, Clone)]
 pub struct BudStorageAssignment {
@@ -59,21 +60,21 @@ impl BudLivingThreshold {
             2
         }
     }
+    /// Holders needed per tier: 3 replicas when hot, 21 shard holders for the
+    /// cold 18+3 layout, and the device plus one copy when frozen.
     pub fn required_replicas(&self) -> usize {
         match self.tier() {
             0 => 3,
-            1 => 9,
+            1 => 21,
             _ => 2,
         }
     }
     pub fn decide(&self) -> &'static str {
-        // From living_threshold.rs decide()
-        if self.access_count_last_epoch > 100 {
-            "hot 3 replica"
-        } else if self.access_count_last_epoch > 10 {
-            "cold (18+3)"
-        } else {
-            "ice device+1"
+        // From living_threshold.rs decide(); the text follows `tier()`.
+        match self.tier() {
+            0 => "hot 3 replica",
+            1 => "cold (18+3)",
+            _ => "ice device+1",
         }
     }
 }
@@ -107,19 +108,13 @@ impl BudErasure {
         if len == 0 || data_shards.iter().any(|s| s.len() != len) {
             return Err("K-BUD-ERASURE-REAL: shards must be non-empty and equal in length");
         }
-        // Cauchy MDS stub: parity = XOR of data shards with different patterns
-        let mut parity = Vec::with_capacity(self.p);
-        for i in 0..self.p {
-            let mut p = vec![0u8; len];
-            for (j, shard) in data_shards.iter().enumerate() {
-                let pattern = ((i + j) % 256) as u8;
-                for (o, s) in p.iter_mut().zip(shard.iter()) {
-                    *o ^= s ^ pattern;
-                }
-            }
-            parity.push(p);
-        }
-        Ok(parity)
+        // Real Cauchy MDS parity: any k of the k + p shards rebuild the data.
+        let mds = CauchyMds::new(self.k, self.p)
+            .ok_or("K-BUD-ERASURE-REAL: k + p exceeds the field size")?;
+        let mut all = mds
+            .encode(data_shards)
+            .ok_or("K-BUD-ERASURE-REAL: encode refused the shards")?;
+        Ok(all.split_off(self.k))
     }
 }
 
@@ -139,9 +134,11 @@ impl IntegrationGates {
         Ok(())
     }
     pub fn k_bud_living_threshold(lt: &BudLivingThreshold) -> Result<(), &'static str> {
-        let tier = lt.tier();
-        if tier > 2 {
-            return Err("K-BUD-LIVING: invalid tier");
+        if lt.size_bytes == 0 {
+            return Err("K-BUD-LIVING: empty content");
+        }
+        if lt.required_replicas() < 2 {
+            return Err("K-BUD-LIVING: fewer than two holders");
         }
         Ok(())
     }
@@ -152,6 +149,9 @@ impl IntegrationGates {
         Ok(())
     }
     pub fn k_bud_erasure(erasure: &BudErasure, data_shards: usize) -> Result<(), &'static str> {
+        if CauchyMds::new(erasure.k, erasure.p).is_none() {
+            return Err("K-BUD-ERASURE-REAL: k and p outside the code");
+        }
         if data_shards < erasure.k {
             return Err("K-BUD-ERASURE-REAL: not enough data shards");
         }
@@ -181,6 +181,49 @@ mod tests {
         assert_eq!(lt.decide(), "hot 3 replica");
         assert_eq!(lt.required_replicas(), 3);
     }
+    /// BLG-0605: parity must rebuild lost data shards, not only have a length.
+    #[test]
+    fn erasure_parity_rebuilds_lost_shards() {
+        let erasure = BudErasure::new(4, 3);
+        let data: Vec<Vec<u8>> = (0..4u8)
+            .map(|j| (0..16u8).map(|b| b.wrapping_mul(j + 3) ^ j).collect())
+            .collect();
+        let parity = erasure.encode(&data).expect("encode");
+        assert_eq!(parity.len(), 3);
+        assert_ne!(parity[0], parity[1]);
+        let mds = CauchyMds::new(4, 3).expect("code");
+        // Three data shards lost: only one data shard and three parity left.
+        let survivors = vec![
+            (3, data[3].clone()),
+            (4, parity[0].clone()),
+            (5, parity[1].clone()),
+            (6, parity[2].clone()),
+        ];
+        assert_eq!(mds.decode(&survivors).expect("decode"), data);
+    }
+
+    #[test]
+    fn living_threshold_text_follows_tier() {
+        for (count, replicas, text) in [
+            (150u64, 3usize, "hot 3 replica"),
+            (50, 21, "cold (18+3)"),
+            (1, 2, "ice device+1"),
+        ] {
+            let lt = BudLivingThreshold {
+                access_count_last_epoch: count,
+                size_bytes: 1,
+            };
+            assert_eq!(lt.required_replicas(), replicas);
+            assert_eq!(lt.decide(), text);
+            assert!(IntegrationGates::k_bud_living_threshold(&lt).is_ok());
+        }
+        let empty = BudLivingThreshold {
+            access_count_last_epoch: 1,
+            size_bytes: 0,
+        };
+        assert!(IntegrationGates::k_bud_living_threshold(&empty).is_err());
+    }
+
     #[test]
     fn erasure_real() {
         let erasure = BudErasure::new(18, 3);

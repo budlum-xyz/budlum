@@ -395,6 +395,10 @@ fn m_internal(state: &mut [u64; WIDTH]) {
 ///
 /// Initial external layer, 4+(4) full rounds around 22 partial rounds;
 /// matches Plonky3 `default_goldilocks_poseidon2_16` step for step.
+///
+/// Convenience: pub so differential tests and downstream users can
+/// drive the raw permutation against reference vectors directly,
+/// not only through the hash backend built on it here.
 pub fn permute16(state: &mut [u64; WIDTH]) {
     m_external(state);
     for rc in RC_EXT_INIT.iter() {
@@ -441,6 +445,10 @@ fn sponge_digest(frame: &[u8]) -> [u8; 32] {
 /// The canonical backend of the research line: Poseidon2-Goldilocks-16
 /// behind the [`super::hash::BpqsHash`] seam. The 2026-09-19 decision made
 /// this the primary; SHA3-256 and SHAKE-256 stay as the audit cross-checks.
+///
+/// WIRING: exposed for whoever instantiates the scheme with the
+/// canonical backend; in-tree the KAT corpus and the seam's users in
+/// this crate are what pin it.
 pub struct Poseidon2GoldilocksHash;
 
 impl super::hash::BpqsHash for Poseidon2GoldilocksHash {

@@ -133,15 +133,16 @@ pub struct LogFieldColumnar {
 impl LogFieldColumnar {
     /// Split log text into field-aware columns (the lines must share one format).
     pub fn encode(data: &[u8]) -> Option<Self> {
-        let mut lines: Vec<Vec<u8>> = Vec::new();
-        for line in data.split_inclusive(|&b| b == b'\n') {
-            lines.push(line.to_vec());
-        }
-        if lines.is_empty() || lines.len() > MAX_LINES {
+        // Count the lines first and check the cap BEFORE any per line
+        // allocation: a file of newline bytes made one heap block per byte.
+        let newlines = data.iter().filter(|&&b| b == b'\n').count();
+        let line_count = newlines + usize::from(data.last().is_some_and(|&b| b != b'\n'));
+        if line_count == 0 || line_count > MAX_LINES {
             return None;
         }
         // extract the template from the first line (the fixed pieces)
-        let first = parse_nginx_line(&lines[0])?;
+        let first_line = data.split_inclusive(|&b| b == b'\n').next()?;
+        let first = parse_nginx_line(first_line)?;
         let fixed_template = first.0.concat();
         // `vec![Vec::with_capacity(n); 7]` builds only the FIRST vector with a
         // capacity of n; the remaining six are clones of it, and a clone does
@@ -149,9 +150,11 @@ impl LogFieldColumnar {
         // the intent to preallocate silently vanished for 6 of the 7 columns.
         // Building each column one by one makes the intent real
         // (clippy::repeat_vec_with_capacity).
-        let mut columns: Vec<Vec<Vec<u8>>> =
-            (0..7).map(|_| Vec::with_capacity(lines.len())).collect();
-        for line in &lines {
+        // The preallocation is bounded: a crafted file must not reserve
+        // memory for ten million lines before the first bad line is seen.
+        let reserve = line_count.min(4096);
+        let mut columns: Vec<Vec<Vec<u8>>> = (0..7).map(|_| Vec::with_capacity(reserve)).collect();
+        for line in data.split_inclusive(|&b| b == b'\n') {
             let (_, values) = parse_nginx_line(line)?;
             for (ci, v) in values.iter().enumerate() {
                 columns[ci].push(v.clone());
@@ -172,7 +175,7 @@ impl LogFieldColumnar {
             }
         }
         Some(LogFieldColumnar {
-            lines: lines.len(),
+            lines: line_count,
             fixed_template,
             columns: out_cols,
         })
@@ -460,6 +463,17 @@ mod tests {
         assert!(parse_nginx_line(b"broken line").is_none());
         assert!(LogFieldColumnar::encode(b"broken line\nsecond line\n").is_none());
         assert!(LogFieldColumnar::encode(b"").is_none());
+    }
+
+    /// BLG-0606: a crafted file of newline bytes is refused by the count, and
+    /// a good first line followed by empty lines is refused at the first one.
+    #[test]
+    fn newline_flood_is_refused_without_a_line_table() {
+        let flood = vec![b'\n'; MAX_LINES + 1];
+        assert!(LogFieldColumnar::encode(&flood).is_none());
+        let mut crafted = sample_log(1);
+        crafted.resize(crafted.len() + 1_000_000, b'\n');
+        assert!(LogFieldColumnar::encode(&crafted).is_none());
     }
 
     /// Lines the old parser accepted and the writer rebuilt differently.

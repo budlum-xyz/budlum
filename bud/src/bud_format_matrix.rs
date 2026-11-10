@@ -3,11 +3,17 @@
 //! Scope: every content format type is scanned, and the scan does not stop
 //! until each one is seen to reach 0.016 $.
 //!
-//! Result: 30 of the 32 classes are compressible; with the BUD pipeline
-//! (transform x codec x measured dedup/culling) 30/30 land on the 0.016
-//! $/TB/month ceiling. Two canaries: (a) an already-compressed single video
-//! (no lossless gain was measured), (b) random/encrypted data
-//! (K25: >100:1 REFUSED - not stored).
+//! Result: 30 of the 32 classes are compressible. IF the erasure overhead is
+//! the 1.031x of a local reconstruction code (LRC_ERASURE) and the dedup and
+//! culling multipliers below hold, 30/30 land on the 0.016 $/TB/month
+//! ceiling. That is a MODEL result, not a measurement of the shipped
+//! pipeline: the `bud_format_lrc` module has no encoder or decoder, and the
+//! only erasure the engine writes is (4,2), a 1.5x overhead; at 1.5x fewer
+//! than 30 classes hold the ceiling (see the test
+//! `the_ceiling_claim_depends_on_the_lrc_overhead`). Do not repeat "30 of 30"
+//! in public text for the shipped pipeline. Two canaries: (a) an already
+//! compressed single video (no lossless gain was measured), (b)
+//! random/encrypted data (K25: >100:1 REFUSED - not stored).
 //!
 //! HONESTY: the `single_ratio` values are the real measurement of this corpus;
 //! the multipliers stay INSIDE the measured upper bounds (corpus dedup 9.67x,
@@ -26,7 +32,7 @@ pub const MATRIX_VERSION: u8 = 1;
 pub const CORPUS_DEDUP_MEASURED: f64 = 9.67; // corpus wide, 16KB SHA256
 pub const FLEET_DEDUP_MEASURED: f64 = 25.43; // 25 identical ELFs (in-file chunking)
 pub const CULLING_MULT_MEASURED: f64 = 2.52; // 1/(1-0.603), access pattern measurement
-pub const LRC_ERASURE: f64 = 1.031; // measured LRC
+pub const LRC_ERASURE: f64 = 1.031; // model value of a local reconstruction code, no codec ships
 pub const PHYSICAL_USD_PER_TB_MONTH: f64 = 0.23342;
 pub const CEILING_USD_TB_MONTH: f64 = 0.016;
 
@@ -388,6 +394,22 @@ mod tests {
         assert_eq!(total, 32);
         assert_eq!(refused, 2);
         assert_eq!(passing, 30);
+    }
+
+    /// BLG-0608: the 30 of 30 result needs the LRC overhead. With the (4,2)
+    /// code the engine really writes (1.5x) the ceiling fails for some classes.
+    #[test]
+    fn the_ceiling_claim_depends_on_the_lrc_overhead() {
+        let engine_erasure = 1.5;
+        let held = MATRIX
+            .iter()
+            .filter(|e| {
+                e.multiplier_kind != "RED"
+                    && PHYSICAL_USD_PER_TB_MONTH * engine_erasure / e.pipeline_ratio()
+                        <= CEILING_USD_TB_MONTH
+            })
+            .count();
+        assert!(held < 30, "the claim does not hold for the shipped erasure");
     }
 
     #[test]

@@ -2,6 +2,10 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(kani)]
+#[path = "../kani/kani_bud_format.rs"]
+mod kani_bud_format;
+
 pub mod bud_fixed_point;
 pub mod bud_format;
 pub mod bud_format_autozstd;

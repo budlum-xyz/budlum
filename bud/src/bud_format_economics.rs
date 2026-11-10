@@ -36,8 +36,14 @@ impl BudEconomics {
     }
 
     pub fn holds_price(&self, ceiling: f64) -> bool {
-        self.cost_per_tb_month() <= ceiling + 1e-12
+        within_ceiling(self.cost_per_tb_month(), ceiling)
     }
+}
+
+/// A cost holds a ceiling only if both are finite numbers. An invalid input
+/// gives a cost of +inf, and that must not pass an infinite ceiling.
+fn within_ceiling(cost: f64, ceiling: f64) -> bool {
+    cost.is_finite() && ceiling.is_finite() && cost <= ceiling + 1e-12
 }
 
 /// The K60 zero-egress model (research: an R2-like zero-egress CDN, p.190):
@@ -65,7 +71,7 @@ pub fn egress_cost(zone: EgressZone, tb: f64, rate_usd_per_tb: f64) -> f64 {
 
 /// Gate: does egress hold the budget? InNetwork always holds (zero egress).
 pub fn holds_egress(zone: EgressZone, tb: f64, rate_usd_per_tb: f64, budget: f64) -> bool {
-    egress_cost(zone, tb, rate_usd_per_tb) <= budget + 1e-12
+    within_ceiling(egress_cost(zone, tb, rate_usd_per_tb), budget)
 }
 
 /// I6 RESIDUAL CLASS ECONOMICS (I6 of the ideas document; replacing pay-as-you-go):
@@ -83,7 +89,7 @@ pub fn residual_price(
         || !erasure_multiplier.is_finite()
         || erasure_multiplier < 1.0
         || !coldness.is_finite()
-        || coldness < 0.0
+        || !(0.0..=1.0).contains(&coldness)
         || !physical_usd_per_tb_month.is_finite()
         || physical_usd_per_tb_month < 0.0
     {
@@ -104,7 +110,10 @@ pub fn residual_holds_price(
     physical: f64,
     ceiling: f64,
 ) -> bool {
-    residual_price(residual_tb, erasure_multiplier, coldness, physical) <= ceiling + 1e-12
+    within_ceiling(
+        residual_price(residual_tb, erasure_multiplier, coldness, physical),
+        ceiling,
+    )
 }
 
 /// Economic decision: A SINGLE PRICE.
@@ -132,7 +141,7 @@ pub fn flat_price(
 
 /// The SINGLE PRICE gate: does it hold the ceiling? (K19 - with the measured ratio)
 pub fn flat_holds_ceiling(physical: f64, erasure: f64, ratio: f64, ceiling: f64) -> bool {
-    flat_price(physical, erasure, ratio) <= ceiling + 1e-12
+    within_ceiling(flat_price(physical, erasure, ratio), ceiling)
 }
 
 // ===========================================================================
@@ -194,7 +203,11 @@ pub fn pipeline_holds_ceiling(
 }
 /// F3/F1151 TAPE ARCHIVE CLASS - cold content on tape (0 W idle):
 /// LTO-9 is about 5 USD/TB (30 years); 1 PB over 10 years costs 30K USD versus 480K USD on disk; power/cooling about 1 percent.
-/// 0.003 USD/GB/year = 0.00025 USD/TB/month. Access latency is accepted (tape takes minutes).
+/// NOT RECONCILED (P38-F05): 0.003 USD/GB/year is 3 USD/TB/year = 0.25 USD/TB/month,
+/// a factor of 1000 above the constant below, and the 5 USD/TB over 30 years above
+/// gives about 0.0139 USD/TB/month. The constant is kept as measured by F3 until the
+/// owner re-derives it; do not quote the 0.016 archive target from it.
+/// Access latency is accepted (tape takes minutes).
 pub const TAPE_USD_PER_TB_MONTH: f64 = 0.00025; // the F3 measurement
 
 /// Archive class cost: cold content on tape (per TB).
@@ -290,13 +303,17 @@ impl MerkleTrie {
 
     pub fn insert(&mut self, key: [u8; 32], value: Vec<u8>) {
         self.entries.insert(key, value);
-        // root = hash of all keys sorted
-        let mut hashes: Vec<_> = self.entries.keys().cloned().collect();
-        hashes.sort();
+        // root = hash of all (key, value) pairs, sorted by key. The value is
+        // length-prefixed, so two tries with different values cannot share
+        // a root.
+        let mut pairs: Vec<(&[u8; 32], &Vec<u8>)> = self.entries.iter().collect();
+        pairs.sort();
         let mut h = Sha3_256::new();
-        h.update(b"BDLM_BUD_TRIE_V1");
-        for hk in hashes {
-            h.update(hk);
+        h.update(b"BDLM_BUD_TRIE_V2");
+        for (k, v) in pairs {
+            h.update(k);
+            h.update((v.len() as u64).to_le_bytes());
+            h.update(v);
         }
         self.root = h.finalize().into();
     }
@@ -338,6 +355,41 @@ impl EconomicsGates {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn invalid_inputs_do_not_pass_an_infinite_ceiling() {
+        let bad = BudEconomics {
+            physical_usd: 0.23342,
+            expansion: 1.1667,
+            ratio: 0.0,
+            device_only: false,
+        };
+        assert!(!bad.holds_price(f64::INFINITY));
+        assert!(!bad.holds_price(f64::NAN));
+        assert!(!holds_egress(
+            EgressZone::Internet,
+            1.0,
+            -1.0,
+            f64::INFINITY
+        ));
+        assert!(!flat_holds_ceiling(0.2, 1.1, 0.0, f64::INFINITY));
+        // coldness above 1 would make the price negative
+        assert_eq!(residual_price(1.0, 1.143, 3.0, 0.23342), f64::INFINITY);
+        assert!(!residual_holds_price(1.0, 1.143, 3.0, 0.23342, 0.016));
+    }
+
+    #[test]
+    fn trie_root_commits_to_values() {
+        let mut a = MerkleTrie::new();
+        let mut b = MerkleTrie::new();
+        a.insert([1u8; 32], b"one".to_vec());
+        b.insert([1u8; 32], b"two".to_vec());
+        assert_ne!(a.root, b.root);
+        // An overwrite changes the root too.
+        let before = a.root;
+        a.insert([1u8; 32], b"three".to_vec());
+        assert_ne!(a.root, before);
+    }
+
     #[test]
     fn economics_holds() {
         // JSON 17.19x with plain 7+1 (e=1.143) holds 0.016: 0.23342*1.143/17.19 = 0.01552 <= 0.016

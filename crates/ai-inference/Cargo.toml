@@ -33,4 +33,5 @@ rust-version = "1.75"
 license = "LicenseRef-PolyForm-Shield-1.0.0"
 
 [profile.release]
+overflow-checks = true
 lto = true

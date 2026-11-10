@@ -456,6 +456,14 @@ fn has_rebinding(before: &str, binding: &str) -> bool {
     false
 }
 
+/// A line that draws a challenge, whatever the sampling call is named.
+fn is_challenge_draw(line: &str) -> bool {
+    line.contains("sample_algebra_element")
+        || line.contains(".sample(")
+        || line.contains(".sample_bits(")
+        || line.contains(".sample_array(")
+}
+
 /// Check that one side absorbs `security_parameters()` before its first
 /// challenge.
 fn check_absorption(src: &str, name: &str, problems: &mut Vec<String>, checked: &mut usize) {
@@ -465,7 +473,7 @@ fn check_absorption(src: &str, name: &str, problems: &mut Vec<String>, checked: 
     let stops: Vec<usize> = lines
         .iter()
         .enumerate()
-        .filter(|(_, l)| l.contains("sample_algebra_element()"))
+        .filter(|(_, l)| is_challenge_draw(l))
         .map(|(i, _)| i)
         .collect();
     let Some(&stop) = stops.first() else {
@@ -520,12 +528,6 @@ fn check_absorption(src: &str, name: &str, problems: &mut Vec<String>, checked: 
                  outside the transcript."
             ));
         }
-        problems.push(format!(
-            "{name}.rs reads `security_parameters()` but never observes the \
-             value (or its binding) into the challenger before the first \
-             challenge. An unrelated observe call leaves the FRI parameters \
-             outside the transcript."
-        ));
     }
 }
 
@@ -739,6 +741,9 @@ fn passes_security(config_tail: &str) -> bool {
 }
 
 fn check_build_config(build_src: &str, problems: &mut Vec<String>, checked: &mut usize) {
+    // Text in a comment or a string cannot satisfy the structure checks.
+    let build_src = strip_comments(build_src);
+    let build_src = build_src.as_str();
     // The absorbed vector must be derived from the FriParameters binding.
     *checked += 1;
     let Some(fri_body) = fri_params_body(build_src) else {
@@ -844,7 +849,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     // 1. The trait must declare it.
     checked += 1;
-    if !has_trait_decl(&cfg_src) {
+    if !has_trait_decl(&strip_comments(&cfg_src)) {
         problems.push(String::from(
             "config.rs does not declare `security_parameters`, so the FRI \
              parameters are outside the Fiat-Shamir transcript. num_queries and \
@@ -1052,4 +1057,18 @@ pub fn self_test() -> Result<String, String> {
          comment lookalikes and a nested comment next to the real call are \
          handled correctly; the derived tree passes.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn any_sampling_call_before_the_absorption_is_a_problem() {
+        let src = "fn f() {\n    let bits = challenger.sample_bits(4);\n    let sec = security_parameters();\n    challenger.observe(sec);\n    let x = challenger.sample_algebra_element();\n}\n";
+        let mut problems = Vec::new();
+        let mut checked = 0usize;
+        check_absorption(src, "prover", &mut problems, &mut checked);
+        assert!(!problems.is_empty());
+    }
 }

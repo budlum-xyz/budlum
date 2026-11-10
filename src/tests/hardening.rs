@@ -131,8 +131,10 @@ mod hardening_tests {
         let db_path = dir.path().join("test_repair.db");
         let storage = Storage::new(db_path.to_str().unwrap()).unwrap();
 
-        // Create a block and commit it
-        let mut block = Block::new(1, "prev_hash".to_string(), vec![]);
+        // Create a linked chain: the repair walk reaches genesis.
+        let genesis = Block::genesis();
+        storage.commit_block(&genesis, "state_root_0").unwrap();
+        let mut block = Block::new(1, genesis.hash.clone(), vec![]);
         block.hash = block.calculate_hash();
         storage.commit_block(&block, "state_root_1").unwrap();
 
@@ -347,10 +349,15 @@ mod hardening_tests {
         use crate::rpc::RpcSecurityConfig;
         let from_default = RpcSecurityConfig::default();
         let from_op = RpcSecurityConfig::operator_default();
-        let from_env_no_auth = RpcSecurityConfig {
-            auth_required: false,
-            ..Default::default()
-        };
+        std::env::remove_var("BUDLUM_TUR6_RPC_TEST_KEY_OFF");
+        let from_env_no_auth = RpcSecurityConfig::from_env(
+            false,
+            Some("BUDLUM_TUR6_RPC_TEST_KEY_OFF"),
+            vec![],
+            vec![],
+            None,
+        )
+        .expect("auth_required=false must not need an api key");
         // `from_default` is now `true`, so there is no warning.
         assert!(from_default.auth_required);
         // `operator_default` is deliberately `false`, so the warning fires.

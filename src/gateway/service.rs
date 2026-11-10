@@ -18,6 +18,35 @@ fn checked_gateway_content(source: &str, data: Vec<u8>) -> Result<Vec<u8>, Strin
     Ok(data)
 }
 
+fn verified_gateway_content(
+    source: &str,
+    cid: &ContentId,
+    data: Vec<u8>,
+) -> Result<Vec<u8>, String> {
+    let data = checked_gateway_content(source, data)?;
+    if ContentId::of(&data) != *cid {
+        return Err(format!(
+            "gateway content from {source} does not match ContentId {}",
+            hex::encode(&cid.0[..8])
+        ));
+    }
+    Ok(data)
+}
+
+/// Local sled lookup. `Ok(None)` means "not stored here" and leaves the caller
+/// to the next source. `Err` means bytes were found but are not trusted.
+fn read_local_storage(storage: &Storage, cid: &ContentId) -> Result<Option<Vec<u8>>, String> {
+    match storage.get_content(cid) {
+        Ok(chunk) => verified_gateway_content("local sled storage", cid, chunk).map(Some),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Err(format!(
+            "gateway content from local sled storage does not match ContentId {}",
+            hex::encode(&cid.0[..8])
+        )),
+        Err(e) => Err(format!("local sled storage read failed: {e}")),
+    }
+}
+
 /// Turn a recipe-based manifest into bytes, or `None` if it is not one.
 ///
 /// `Ok(None)` means "this manifest is not a recipe" and leaves the caller to
@@ -91,6 +120,12 @@ fn render_from_recipe(
 /// is less code than counting bytes and gives the same guarantee.
 pub const MAX_GENERATION_CACHE_ENTRIES: usize = 64;
 
+/// The most bytes the generation cache holds in total.
+///
+/// Convenience: pub so the gateway's callers can budget against
+/// the same byte cap the generation cache enforces here.
+pub const MAX_GENERATION_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
 /// A bounded cache so the recipe is not run over and over.
 ///
 /// # What it changes and what it does not
@@ -119,25 +154,39 @@ pub const MAX_GENERATION_CACHE_ENTRIES: usize = 64;
 #[derive(Default)]
 struct GenerationCache {
     /// The entries held in insertion order.
-    entries: std::collections::VecDeque<(ContentId, Vec<u8>)>,
+    entries: std::collections::VecDeque<(ContentId, std::sync::Arc<Vec<u8>>)>,
 }
 
 impl GenerationCache {
-    fn get(&self, id: &ContentId) -> Option<Vec<u8>> {
+    fn get_shared(&self, id: &ContentId) -> Option<std::sync::Arc<Vec<u8>>> {
         self.entries
             .iter()
             .find(|(key, _)| key == id)
-            .map(|(_, bytes)| bytes.clone())
+            .map(|(_, bytes)| std::sync::Arc::clone(bytes))
+    }
+
+    #[cfg(test)]
+    fn get(&self, id: &ContentId) -> Option<Vec<u8>> {
+        self.get_shared(id).map(|bytes| bytes.as_ref().clone())
     }
 
     fn insert(&mut self, id: ContentId, bytes: Vec<u8>) {
         if self.entries.iter().any(|(key, _)| key == &id) {
             return;
         }
-        while self.entries.len() >= MAX_GENERATION_CACHE_ENTRIES {
-            self.entries.pop_front();
+        if bytes.len() > MAX_GENERATION_CACHE_BYTES {
+            return;
         }
-        self.entries.push_back((id, bytes));
+        let mut held: usize = self.entries.iter().map(|(_, b)| b.len()).sum();
+        while self.entries.len() >= MAX_GENERATION_CACHE_ENTRIES
+            || held.saturating_add(bytes.len()) > MAX_GENERATION_CACHE_BYTES
+        {
+            match self.entries.pop_front() {
+                Some((_, old)) => held = held.saturating_sub(old.len()),
+                None => break,
+            }
+        }
+        self.entries.push_back((id, std::sync::Arc::new(bytes)));
     }
 }
 
@@ -164,6 +213,20 @@ impl BudGateway {
         }
     }
 
+    /// Refuse a name when Pollen protects any content id it points at,
+    /// including the id the gateway is about to serve.
+    async fn refuse_if_pollen_protected(
+        &self,
+        resolved: &crate::bns::types::BnsResolved,
+    ) -> Result<(), String> {
+        for cid in pollen_guard_ids(resolved) {
+            if self.chain.pollen_asset_for_content(cid).await.is_some() {
+                return Err("Content is Pollen-protected; an AccessGrant is required".to_string());
+            }
+        }
+        Ok(())
+    }
+
     /// Primary entry point for D-Web resolution.
     /// Name: "ayaz.bud" → Returns raw bytes (HTML/Media).
     pub async fn fetch_name_content(&self, name: &str) -> Result<Vec<u8>, String> {
@@ -177,6 +240,8 @@ impl BudGateway {
         if resolved.is_expired {
             return Err(format!("BNS name '{name}' expired"));
         }
+
+        self.refuse_if_pollen_protected(&resolved).await?;
 
         // 2. Derive ContentId from storage_root
         let storage_root = resolved
@@ -203,10 +268,15 @@ impl BudGateway {
         // the request is refused.
         // Cache first: rerunning the same recipe for the same bytes buys
         // nothing. The lock is held only for the lookup.
-        if let Ok(cache) = self.generation_cache.lock() {
-            if let Some(bytes) = cache.get(&cid) {
-                return checked_gateway_content("generation cache", bytes);
-            }
+        // Only the shared handle is taken under the lock; the bytes are
+        // copied after it is released.
+        let hit = self
+            .generation_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get_shared(&cid));
+        if let Some(bytes) = hit {
+            return checked_gateway_content("generation cache", bytes.as_ref().clone());
         }
 
         if let Some(manifest) = self.chain.get_storage_manifest(cid).await {
@@ -227,8 +297,8 @@ impl BudGateway {
         //    Currently a stub (scope: no blob store yet), so this branch
         //    naturally misses and the NotFound return falls through to a P2P error.
         if let Some(ref storage) = self.storage {
-            if let Ok(chunk) = storage.get_content(&cid) {
-                return checked_gateway_content("local sled storage", chunk);
+            if let Some(chunk) = read_local_storage(storage, &cid)? {
+                return Ok(chunk);
             }
         }
 
@@ -238,7 +308,7 @@ impl BudGateway {
         // RPC server is co-located with storage.
         if let Some(ref network) = self.network {
             if let Ok(chunk) = network.fetch_local_content(cid.0).await {
-                return checked_gateway_content("node-local B.U.D. store", chunk);
+                return verified_gateway_content("node-local B.U.D. store", &cid, chunk);
             }
         }
 
@@ -246,7 +316,7 @@ impl BudGateway {
         // We query connected remote peers over the network.
         if let Some(ref network) = self.network {
             if let Ok(chunk) = network.fetch_remote_content(cid.0).await {
-                return checked_gateway_content("remote P2P peer", chunk);
+                return verified_gateway_content("remote P2P peer", &cid, chunk);
             }
         }
 
@@ -293,6 +363,7 @@ impl BudGateway {
         if resolved.is_expired {
             return Err(format!("BNS name '{name}' expired"));
         }
+        self.refuse_if_pollen_protected(&resolved).await?;
         let storage_root = resolved
             .storage_root
             .ok_or_else(|| format!("BNS name '{name}' has no storage binding"))?;
@@ -323,11 +394,127 @@ impl BudGateway {
     }
 }
 
+/// Every content identity a name record points at. The Pollen guard in the
+/// RPC handlers must check all of them: the gateway serves `storage_root`
+/// while `content_id` is the other identity, and a record may hold two
+/// different values. Checking only one lets the owner pick the unprotected one.
+pub fn pollen_guard_ids(resolved: &crate::bns::types::BnsResolved) -> Vec<ContentId> {
+    let mut ids = Vec::with_capacity(2);
+    if let Some(root) = resolved.storage_root {
+        ids.push(ContentId(root));
+    }
+    if let Some(cid) = resolved.content_id {
+        if !ids.contains(&cid) {
+            ids.push(cid);
+        }
+    }
+    ids
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::generated::{ContentSource, GeneratedSpec, GeneratorId};
     use crate::storage::ContentManifest;
+
+    fn resolved_with(
+        root: Option<[u8; 32]>,
+        content_id: Option<ContentId>,
+    ) -> crate::bns::types::BnsResolved {
+        crate::bns::types::BnsResolved {
+            name: "a.bud".to_string(),
+            owner: crate::core::address::Address::from([1u8; 32]),
+            address: None,
+            storage_root: root,
+            storage_domain_id: None,
+            content_id,
+            is_expired: false,
+        }
+    }
+
+    #[test]
+    fn pollen_guard_covers_the_served_storage_root() {
+        // BLG-0713: storage_root is what the gateway serves; the guard must see it
+        // even when content_id points elsewhere.
+        let protected = [7u8; 32];
+        let other = ContentId::of(b"unprotected");
+        let ids = pollen_guard_ids(&resolved_with(Some(protected), Some(other)));
+        assert!(ids.contains(&ContentId(protected)));
+        assert!(ids.contains(&other));
+        assert_eq!(ids.len(), 2);
+        let same = pollen_guard_ids(&resolved_with(Some(protected), Some(ContentId(protected))));
+        assert_eq!(same, vec![ContentId(protected)]);
+        assert!(pollen_guard_ids(&resolved_with(None, None)).is_empty());
+    }
+
+    fn corrupt_store(good: &[u8], bad: &[u8]) -> (tempfile::TempDir, Storage, ContentId) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_str().expect("utf8 path").to_string();
+        let cid = ContentId::of(good);
+        {
+            let raw = sled::open(&path).expect("raw sled");
+            raw.insert(format!("CONTENT:{}", hex::encode(cid.0)).as_bytes(), bad)
+                .expect("insert");
+            raw.flush().expect("flush");
+        }
+        let storage = Storage::new(&path).expect("storage");
+        (dir, storage, cid)
+    }
+
+    #[test]
+    fn corrupted_local_bytes_are_refused() {
+        let (_dir, storage, cid) = corrupt_store(b"honest bytes", b"tampered bytes");
+        let err = read_local_storage(&storage, &cid).expect_err("tampered bytes must be refused");
+        assert!(err.contains("ContentId"), "{err}");
+    }
+
+    #[test]
+    fn honest_local_bytes_are_returned() {
+        let (_dir, storage, cid) = corrupt_store(b"honest bytes", b"honest bytes");
+        assert_eq!(
+            read_local_storage(&storage, &cid).expect("honest read"),
+            Some(b"honest bytes".to_vec())
+        );
+    }
+
+    #[test]
+    fn empty_content_is_verified_too() {
+        let (_dir, storage, cid) = corrupt_store(b"", b"");
+        assert_eq!(
+            read_local_storage(&storage, &cid).expect("empty read"),
+            Some(Vec::new())
+        );
+        let (_dir2, storage2, cid2) = corrupt_store(b"", b"x");
+        assert!(read_local_storage(&storage2, &cid2).is_err());
+    }
+
+    #[test]
+    fn the_generation_cache_is_bounded_in_bytes() {
+        let mut cache = GenerationCache::default();
+        let big = MAX_GENERATION_CACHE_BYTES / 2 + 1;
+        for n in 0u8..3 {
+            cache.insert(ContentId([n; 32]), vec![0u8; big]);
+        }
+        let held: usize = cache.entries.iter().map(|(_, b)| b.len()).sum();
+        assert!(held <= MAX_GENERATION_CACHE_BYTES);
+        assert!(cache.get(&ContentId([2u8; 32])).is_some());
+        assert!(cache.get(&ContentId([0u8; 32])).is_none());
+    }
+
+    #[test]
+    fn missing_local_bytes_fall_through() {
+        let (_dir, storage, _) = corrupt_store(b"a", b"a");
+        let other = ContentId::of(b"never stored");
+        assert_eq!(read_local_storage(&storage, &other).expect("miss"), None);
+    }
+
+    #[test]
+    fn network_bytes_are_checked_against_the_id() {
+        let cid = ContentId::of(b"real");
+        assert!(verified_gateway_content("test", &cid, b"real".to_vec()).is_ok());
+        assert!(verified_gateway_content("test", &cid, b"fake".to_vec()).is_err());
+        assert!(verified_gateway_content("test", &cid, Vec::new()).is_err());
+    }
 
     fn spec() -> GeneratedSpec {
         GeneratedSpec {
@@ -431,6 +618,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_cache_hit_hands_out_a_shared_handle_not_a_copy() {
+        let mut cache = GenerationCache::default();
+        let id = ContentId([7u8; 32]);
+        cache.insert(id, vec![1, 2, 3]);
+        let a = cache.get_shared(&id).expect("held");
+        let b = cache.get_shared(&id).expect("held");
+        assert!(std::sync::Arc::ptr_eq(&a, &b));
+    }
+
     /// The generation cache does not exceed its bound and returns the right bytes.
     ///
     /// An unbounded cache is an unbounded queue: an attacker requesting distinct names
@@ -491,5 +688,27 @@ mod tests {
         // No answer for an identity that is not cached - returning an old entry
         // under the wrong identity would make everything the gateway serves suspect.
         assert_eq!(cache.get(&ContentId([255u8; 32])), None);
+    }
+
+    #[test]
+    fn pollen_guard_ids_cover_both_storage_root_and_content_id() {
+        let resolved = crate::bns::types::BnsResolved {
+            name: "n".to_string(),
+            owner: crate::core::address::Address::zero(),
+            address: None,
+            storage_root: Some([1u8; 32]),
+            storage_domain_id: None,
+            content_id: Some(ContentId([2u8; 32])),
+            is_expired: false,
+        };
+        let ids = pollen_guard_ids(&resolved);
+        assert!(ids.contains(&ContentId([1u8; 32])));
+        assert!(ids.contains(&ContentId([2u8; 32])));
+
+        let only_root = crate::bns::types::BnsResolved {
+            content_id: None,
+            ..resolved.clone()
+        };
+        assert_eq!(pollen_guard_ids(&only_root), vec![ContentId([1u8; 32])]);
     }
 }

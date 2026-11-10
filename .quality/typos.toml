@@ -145,3 +145,14 @@ PN = "PN"           # typos splits the acronym PNG and offers ON for the PN half
 # error deliberately uses a misspelled type name in the source.
 # Fixing it would remove the very thing the test measures.
 Ponit = "Ponit"
+
+# -- Deliberate test data and a filter name ----------------------------------
+# tru   : json.rs negative test input, a deliberately truncated "true" literal.
+# paeth : the PNG Paeth predictor (src/storage/qr_video.rs), named after its author.
+tru = "tru"
+paeth = "paeth"
+# flate : typos splits the crate name `flate2` (zlib backend of the QR PNG code)
+#         and offers "flat". The crate name cannot change.
+flate = "flate"
+# loca  : the TrueType glyph location table tag in the font parser test data.
+loca = "loca"

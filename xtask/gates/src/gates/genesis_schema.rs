@@ -96,6 +96,51 @@ fn check_int_table(table: &Value, table_name: &str, keys: &[&str], errs: &mut Ve
     }
 }
 
+/// The id of one list entry: a validator is a hex string, an allocation is
+/// `[address_hex, amount]`.
+fn entry_id(entry: &Value) -> Option<&str> {
+    match entry {
+        Value::String(s) => Some(s.as_str()),
+        Value::Array(a) => a.first().and_then(Value::as_str),
+        Value::Object(o) => o.get("address").and_then(Value::as_str),
+        _ => None,
+    }
+}
+
+/// Entries are well formed hex ids and not repeated. Once the ceremony is no
+/// longer a template, both lists have to hold entries.
+fn check_entries(map: &serde_json::Map<String, Value>, errs: &mut Vec<String>) {
+    for key in ["allocations", "validators"] {
+        let Some(list) = map.get(key).and_then(Value::as_array) else {
+            continue;
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        for (i, entry) in list.iter().enumerate() {
+            let Some(id) = entry_id(entry) else {
+                errs.push(format!("{key}[{i}]: has no address or key"));
+                continue;
+            };
+            if id.is_empty() || id.len() % 2 != 0 || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+                errs.push(format!(
+                    "{key}[{i}]: `{id}` is not an even-length hex string"
+                ));
+            }
+            if !seen.insert(id.to_ascii_lowercase()) {
+                errs.push(format!("{key}[{i}]: `{id}` appears twice"));
+            }
+        }
+        let template = map
+            .get("ceremony_status")
+            .and_then(Value::as_str)
+            .is_none_or(|s| s == "template_ready");
+        if list.is_empty() && !template {
+            errs.push(format!(
+                "{key}: is empty but ceremony_status says the ceremony is no longer a template"
+            ));
+        }
+    }
+}
+
 /// Every problem with the genesis document; empty when it is well formed.
 fn validate(g: &Value) -> Vec<String> {
     let mut errs = Vec::new();
@@ -123,6 +168,7 @@ fn validate(g: &Value) -> Vec<String> {
             errs.push(format!("{key}: must be a list"));
         }
     }
+    check_entries(map, &mut errs);
     check_int_table(&map["gas_schedule"], "gas_schedule", GAS_KEYS, &mut errs);
     check_int_table(
         &map["bud_tokenomics"],
@@ -212,4 +258,43 @@ pub fn self_test() -> Result<String, String> {
         "genesis schema canary OK: {} broken variants refused, the current genesis passes",
         variants.len()
     ))
+}
+
+#[cfg(test)]
+mod entry_tests {
+    use super::*;
+
+    fn doc(extra: &Value) -> serde_json::Map<String, Value> {
+        let mut m = serde_json::Map::new();
+        for (k, v) in extra.as_object().cloned().unwrap_or_default() {
+            m.insert(k, v);
+        }
+        m
+    }
+
+    #[test]
+    fn duplicate_bad_hex_and_empty_after_ceremony_are_refused() {
+        let mut errs = Vec::new();
+        check_entries(
+            &doc(&serde_json::json!({"allocations": [["aa", 1], ["AA", 2]], "validators": ["zz"]})),
+            &mut errs,
+        );
+        assert_eq!(errs.len(), 2, "{errs:?}");
+        let mut errs = Vec::new();
+        check_entries(
+            &doc(
+                &serde_json::json!({"allocations": [], "validators": [], "ceremony_status": "done"}),
+            ),
+            &mut errs,
+        );
+        assert_eq!(errs.len(), 2, "{errs:?}");
+        let mut errs = Vec::new();
+        check_entries(
+            &doc(
+                &serde_json::json!({"allocations": [], "validators": [], "ceremony_status": "template_ready"}),
+            ),
+            &mut errs,
+        );
+        assert!(errs.is_empty());
+    }
 }

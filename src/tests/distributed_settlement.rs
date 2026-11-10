@@ -22,6 +22,16 @@ mod distributed_settlement_tests {
     use tempfile::TempDir;
     use tokio::time::sleep;
 
+    /// Asks the OS for an unused TCP port so parallel runs and leftover
+    /// sockets never collide on a fixed number.
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind an ephemeral port")
+            .local_addr()
+            .expect("local address")
+            .port()
+    }
+
     struct NodeHarness {
         node_client: NodeClient,
         chain_handle: ChainHandle,
@@ -86,11 +96,11 @@ mod distributed_settlement_tests {
 
     #[tokio::test]
     async fn test_distributed_gossip_convergence() {
-        let n1 = NodeHarness::new(5101, vec![], None).await;
-        let n2 = NodeHarness::new(5102, vec![n1.multiaddr()], None).await;
-        let n3 = NodeHarness::new(5103, vec![n1.multiaddr()], None).await;
-        let n4 = NodeHarness::new(5104, vec![n2.multiaddr()], None).await;
-        let n5 = NodeHarness::new(5105, vec![n3.multiaddr()], None).await;
+        let n1 = NodeHarness::new(free_port(), vec![], None).await;
+        let n2 = NodeHarness::new(free_port(), vec![n1.multiaddr()], None).await;
+        let n3 = NodeHarness::new(free_port(), vec![n1.multiaddr()], None).await;
+        let n4 = NodeHarness::new(free_port(), vec![n2.multiaddr()], None).await;
+        let n5 = NodeHarness::new(free_port(), vec![n3.multiaddr()], None).await;
 
         sleep(Duration::from_secs(5)).await;
 
@@ -120,7 +130,20 @@ mod distributed_settlement_tests {
             sleep(Duration::from_millis(100)).await;
         }
 
-        sleep(Duration::from_secs(10)).await;
+        // Poll until every node reports the same root, bounded by a deadline.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let mut roots = Vec::new();
+            for client in clients {
+                let header = client.chain_handle.build_global_header(None).await.unwrap();
+                roots.push(header.domain_commitment_root);
+            }
+            let converged = roots.iter().all(|r| *r == roots[0]) && roots[0] != [0u8; 32];
+            if converged || std::time::Instant::now() >= deadline {
+                break;
+            }
+            sleep(Duration::from_millis(250)).await;
+        }
 
         let h1 = n1.chain_handle.build_global_header(None).await.unwrap();
         let h2 = n2.chain_handle.build_global_header(None).await.unwrap();
@@ -149,7 +172,8 @@ mod distributed_settlement_tests {
         let temp = TempDir::new().unwrap();
         let path = temp.path().to_path_buf();
 
-        let n1 = NodeHarness::new(6101, vec![], Some(path.clone())).await;
+        let port = free_port();
+        let n1 = NodeHarness::new(port, vec![], Some(path.clone())).await;
 
         // Height 1 arrives second, so it is built first here to give height 2
         // a real parent. The buffered commitment has to chain onto the one it
@@ -189,7 +213,7 @@ mod distributed_settlement_tests {
 
         n1.stop().await;
 
-        let n2 = NodeHarness::new(6101, vec![], Some(path.clone())).await;
+        let n2 = NodeHarness::new(port, vec![], Some(path.clone())).await;
         let com1 = DomainCommitment::from_block(
             &default_domain(1, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0),
             &b1,
@@ -219,7 +243,8 @@ mod distributed_settlement_tests {
         let temp = TempDir::new().unwrap();
         let path = temp.path().to_path_buf();
 
-        let n1 = NodeHarness::new(7101, vec![], Some(path.clone())).await;
+        let port = free_port();
+        let n1 = NodeHarness::new(port, vec![], Some(path.clone())).await;
         let b1 = Block::new(1, "h1".into(), vec![]);
         let b1_alt = Block::new(1, "h1_alt".into(), vec![]);
         let com1 = DomainCommitment::from_block(
@@ -249,7 +274,7 @@ mod distributed_settlement_tests {
 
         n1.stop().await;
 
-        let n2 = NodeHarness::new(7101, vec![], Some(path.clone())).await;
+        let n2 = NodeHarness::new(port, vec![], Some(path.clone())).await;
         let b2 = Block::new(2, "h2".into(), vec![]);
         let com2 = DomainCommitment::from_block(
             &default_domain(1, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0),
@@ -273,7 +298,8 @@ mod distributed_settlement_tests {
         let path = temp.path().to_path_buf();
         let alice = test_addr_from_byte(1u8);
 
-        let n1 = NodeHarness::new(8101, vec![], Some(path.clone())).await;
+        let port = free_port();
+        let n1 = NodeHarness::new(port, vec![], Some(path.clone())).await;
         let mut b1 = Block::new(1, "h1".into(), vec![]);
         b1.hash = "h1".repeat(32);
         let mut com_pow = DomainCommitment::from_block(
@@ -308,18 +334,29 @@ mod distributed_settlement_tests {
             .await
             .unwrap();
 
+        let root_before = n1
+            .chain_handle
+            .build_global_header(None)
+            .await
+            .unwrap()
+            .domain_commitment_root;
+        assert_ne!(root_before, [0u8; 32]);
+
         n1.stop().await;
 
-        let n2 = NodeHarness::new(8101, vec![], Some(path.clone())).await;
+        let n2 = NodeHarness::new(port, vec![], Some(path.clone())).await;
         let header = n2.chain_handle.build_global_header(None).await.unwrap();
-        assert_ne!(header.domain_commitment_root, [0u8; 32]);
+        assert_eq!(
+            header.domain_commitment_root, root_before,
+            "the commitment root must survive a restart unchanged"
+        );
 
         n2.stop().await;
     }
 
     #[tokio::test]
     async fn test_adversarial_finality_proofs() {
-        let n = NodeHarness::new(9101, vec![], None).await;
+        let n = NodeHarness::new(free_port(), vec![], None).await;
         let alice = test_addr_from_byte(1u8);
         let mut b = Block::new(1, "h".into(), vec![]);
         b.hash = "h".repeat(32);

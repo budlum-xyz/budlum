@@ -331,21 +331,25 @@ mod relayer_escrow_silent_failure_regression {
         registry: &mut AiRegistry,
         request_id: AiRequestId,
         verifier: Address,
-        output_commitment: [u8; 32],
+        output_ref: &[u8],
         result_nonce: u64,
         current_block: u64,
     ) {
         if registry.verifier_stake(&verifier) < crate::ai::registry::MIN_VERIFIER_STAKE {
-            let _ =
-                registry.lock_verifier_stake(&verifier, crate::ai::registry::MIN_VERIFIER_STAKE);
+            registry
+                .lock_verifier_stake(&verifier, crate::ai::registry::MIN_VERIFIER_STAKE)
+                .expect("verifier stake locks");
         }
+        let output_ref = BoundedBytes::try_new(output_ref.to_vec()).unwrap();
         registry
             .submit_result(
                 AiInferenceResult {
                     request_id,
                     verifier,
-                    output_commitment,
-                    output_ref: BoundedBytes::try_new(b"response".to_vec()).unwrap(),
+                    output_commitment: crate::ai::types::canonical_output_commitment(
+                        output_ref.as_slice(),
+                    ),
+                    output_ref,
                     result_nonce,
                     signature: vec![1],
                     submitted_at_block: current_block,
@@ -391,7 +395,7 @@ mod relayer_escrow_silent_failure_regression {
             &mut registry,
             request_id,
             verifier,
-            [0x11u8; 32],
+            b"response",
             1,
             current_block + 10,
         );
@@ -399,7 +403,7 @@ mod relayer_escrow_silent_failure_regression {
             &mut registry,
             request_id,
             verifier2,
-            [0x11u8; 32],
+            b"response",
             2,
             current_block + 11,
         );
@@ -532,8 +536,10 @@ mod relayer_escrow_silent_failure_regression {
         // If release is attempted -> it must error (no escrow)
         let result = registry.release_agent_payment(&[0xFCu8; 32], 110);
         assert!(
-            result.is_err(),
-            "REGRESYON: non-escrowed payment release edilmemeli! \
+            result
+                .as_ref()
+                .is_err_and(|e| e.contains("non-escrowed payment")),
+            "REGRESSION: a non-escrowed payment must not be released: {result:?}. \
              This payment must be credited immediately in the executor and must not enter the release path. \
              Release erroring out preserves the fact that the executor's non-escrowed path works \
              correctly (the recipient is credited immediately)."
@@ -628,8 +634,8 @@ mod relayer_escrow_silent_failure_regression {
         // Release attempted after expiry -> must be refused
         let result = registry.release_agent_payment(&[0xFAu8; 32], current_block + 51);
         assert!(
-            result.is_err(),
-            "REGRESYON: expired payment release edilmemeli! \
+            result.as_ref().is_err_and(|e| e.contains("has expired")),
+            "REGRESSION: an expired payment must not be released: {result:?}. \
              An expired payment can only be recovered through reclaim. \
              Accepting release would send the funds to the recipient and \
              leave the sender unable to recover them."
@@ -671,7 +677,7 @@ mod relayer_escrow_silent_failure_regression {
             &mut registry,
             request_id,
             verifier,
-            [0x11u8; 32],
+            b"response",
             1,
             current_block + 10,
         );
@@ -679,7 +685,7 @@ mod relayer_escrow_silent_failure_regression {
             &mut registry,
             request_id,
             verifier2,
-            [0x11u8; 32],
+            b"response",
             2,
             current_block + 11,
         );

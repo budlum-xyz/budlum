@@ -168,9 +168,17 @@ pub struct RoutingHeat {
     pub counts: std::collections::BTreeMap<[u8; 32], u64>,
 }
 
+/// The most distinct shards a heat map tracks. A router cannot select more
+/// shards than a model has, so a larger map only comes from unknown ids.
+const MAX_HEAT_ENTRIES: usize = 65_536;
+
 impl RoutingHeat {
-    /// Record one router selection of a shard.
+    /// Record one router selection of a shard. A shard not yet tracked is
+    /// ignored once the map holds [`MAX_HEAT_ENTRIES`] shards.
     pub fn record(&mut self, content_id: [u8; 32]) {
+        if self.counts.len() >= MAX_HEAT_ENTRIES && !self.counts.contains_key(&content_id) {
+            return;
+        }
         let current = self.counts.get(&content_id).copied().unwrap_or(0);
         self.counts.insert(content_id, current.saturating_add(1));
     }
@@ -250,7 +258,8 @@ impl ResidencyPlan {
     /// The rule, in order:
     ///
     /// 1. Every [`Demand::EveryToken`] shard is placed in fast memory,
-    ///    accelerator first. If they do not all fit, the whole plan fails;
+    ///    accelerator first, largest shard first with ties broken by content
+    ///    id (so the plan does not depend on input order). If they do not all fit, the whole plan fails;
     ///    there is no partial answer here, because a dense part half on disk
     ///    pays the disk cost on every token anyway.
     /// 2. [`Demand::WhenRouted`] shards fill whatever fast memory is left,
@@ -312,9 +321,8 @@ impl ResidencyPlan {
     ///
     /// # Errors
     ///
-    /// [`PlanError`] from the re-run. For a plan produced under the same
-    /// budget this cannot fail, but the signature stays honest instead of
-    /// panicking.
+    /// [`PlanError`] from the re-run, and [`PlanError::DiskPartDoesNotFit`]
+    /// when the heat order would read more bytes from disk than this plan.
     pub fn rebalance(&self, heat: &RoutingHeat, budget: DeviceBudget) -> Result<Self, PlanError> {
         let shards: Vec<WeightShard> = self
             .placements
@@ -325,7 +333,19 @@ impl ResidencyPlan {
                 demand: p.demand,
             })
             .collect();
-        Self::plan_with_heat(&shards, budget, self.semantics, heat)
+        let rebalanced = Self::plan_with_heat(&shards, budget, self.semantics, heat)?;
+        // The current plan already passed its disk bound. A heat order can
+        // leave more bytes on disk than the size order did, so the new plan
+        // may not read more from disk than the plan it replaces.
+        let allowed = self.bytes_in(Tier::Disk);
+        let needed = rebalanced.bytes_in(Tier::Disk);
+        if needed > allowed {
+            return Err(PlanError::DiskPartDoesNotFit {
+                needed,
+                available: allowed,
+            });
+        }
+        Ok(rebalanced)
     }
 
     fn place_internal(
@@ -355,8 +375,19 @@ impl ResidencyPlan {
         let mut free_system = budget.system_bytes;
         let mut placements = Vec::with_capacity(shards.len());
 
-        // Rule 1: the dense part, fastest tier first.
-        for shard in shards.iter().filter(|s| s.demand == Demand::EveryToken) {
+        // Rule 1: the dense part, fastest tier first. Largest shard first
+        // (first-fit decreasing), ties by content id, so the verdict and the
+        // placement order do not depend on the order the shards were listed.
+        let mut dense: Vec<&WeightShard> = shards
+            .iter()
+            .filter(|s| s.demand == Demand::EveryToken)
+            .collect();
+        dense.sort_by(|a, b| {
+            b.bytes
+                .cmp(&a.bytes)
+                .then_with(|| a.content_id.cmp(&b.content_id))
+        });
+        for shard in dense {
             let tier = if shard.bytes <= free_accelerator {
                 free_accelerator -= shard.bytes;
                 Tier::Accelerator
@@ -791,6 +822,30 @@ mod tests {
         }
     }
 
+    /// Two dense shards that only fit in one order of a naive first-fit.
+    #[test]
+    fn the_dense_plan_does_not_depend_on_shard_order() {
+        let budget = DeviceBudget {
+            accelerator_bytes: 700,
+            system_bytes: 400,
+        };
+        let a = WeightShard {
+            content_id: id(1),
+            bytes: 300,
+            demand: Demand::EveryToken,
+        };
+        let b = WeightShard {
+            content_id: id(2),
+            bytes: 700,
+            demand: Demand::EveryToken,
+        };
+        let forward = ResidencyPlan::plan(&[a.clone(), b.clone()], budget, profile())
+            .expect("1000 B of dense weights fit in 1100 B");
+        let backward = ResidencyPlan::plan(&[b, a], budget, profile())
+            .expect("the same device must give the same verdict");
+        assert_eq!(forward, backward, "placements must not follow input order");
+    }
+
     /// Every shard appears exactly once.
     #[test]
     fn every_shard_is_placed_exactly_once() {
@@ -931,6 +986,56 @@ mod heat_tests {
 
         assert_eq!(tier_of(&rebalanced, 4), Tier::System);
         assert_eq!(tier_of(&rebalanced, 1), Tier::Disk);
+    }
+
+    #[test]
+    fn heat_tracks_a_bounded_number_of_shards() {
+        let mut heat = RoutingHeat::default();
+        for n in 0..=MAX_HEAT_ENTRIES {
+            let mut key = [0u8; 32];
+            key[..8].copy_from_slice(&(n as u64).to_le_bytes());
+            heat.record(key);
+        }
+        assert_eq!(heat.counts.len(), MAX_HEAT_ENTRIES);
+        heat.record([0u8; 32]);
+        assert_eq!(heat.count(&[0u8; 32]), 2);
+    }
+
+    #[test]
+    fn rebalance_refuses_a_plan_that_reads_more_from_disk() {
+        let shards = vec![
+            WeightShard {
+                content_id: id(0),
+                bytes: 1000,
+                demand: Demand::EveryToken,
+            },
+            WeightShard {
+                content_id: id(1),
+                bytes: 800,
+                demand: Demand::WhenRouted,
+            },
+            WeightShard {
+                content_id: id(2),
+                bytes: 100,
+                demand: Demand::WhenRouted,
+            },
+        ];
+        let budget = DeviceBudget {
+            accelerator_bytes: 0,
+            system_bytes: 1850,
+        };
+        let plan = ResidencyPlan::plan(&shards, budget, profile()).unwrap();
+        assert_eq!(plan.bytes_in(Tier::Disk), 100);
+
+        let mut heat = RoutingHeat::default();
+        heat.record(id(2));
+        assert_eq!(
+            plan.rebalance(&heat, budget),
+            Err(PlanError::DiskPartDoesNotFit {
+                needed: 800,
+                available: 100,
+            })
+        );
     }
 
     #[test]

@@ -294,6 +294,10 @@ fn zlib_stored(data: &[u8]) -> Vec<u8> {
 /// [`RenderError::MissingParam`] when the format needs a parameter the
 /// recipe did not carry (a non-square buffer, or an oversized PNG request).
 pub fn render(spec: &GeneratedSpec, format: &RenderFormat) -> Result<Vec<u8>, RenderError> {
+    // BLG-0418: refuse SVG expansion before generating the source raster.
+    if matches!(format, RenderFormat::Svg) {
+        svg_capacity(spec.output_len as usize)?;
+    }
     let pixels = generate_content(spec)?;
     match format {
         RenderFormat::Svg => render_svg(spec, &pixels),
@@ -336,14 +340,29 @@ fn square_side(output_len: u32) -> Result<u16, RenderError> {
     u16::try_from(side).map_err(|_| RenderError::MissingParam("square side"))
 }
 
+// At most 128 bytes per rect (u16 side, coordinates scaled by eight),
+// plus 256 bytes for the document wrapper. This bounds allocation and CPU
+// before writing any rect, rather than rejecting a 270 MB result at the gateway.
+fn svg_capacity(pixel_count: usize) -> Result<usize, RenderError> {
+    let bound = pixel_count
+        .checked_mul(128)
+        .and_then(|bytes| bytes.checked_add(256))
+        .ok_or(RenderError::MissingParam("svg output size"))?;
+    if bound > MAX_GENERATED_BYTES as usize {
+        return Err(RenderError::MissingParam("svg output size"));
+    }
+    Ok(bound)
+}
+
 fn render_svg(spec: &GeneratedSpec, pixels: &[u8]) -> Result<Vec<u8>, RenderError> {
+    let capacity = svg_capacity(pixels.len())?;
     let side = square_side(spec.output_len)?;
     // One pixel = one rect. For a 32x32 avatar that is 1024 rects, which is
     // small; larger buffers should use a path-based renderer (a separate
     // versioned step). The scale keeps coordinates in a readable range.
     let scale = 8u64;
     let view = u64::from(side) * scale;
-    let mut svg = String::with_capacity(pixels.len() * 12 + 128);
+    let mut svg = String::with_capacity(capacity);
     let _ = write!(
         svg,
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{view}\" height=\"{view}\" viewBox=\"0 0 {view} {view}\">"
@@ -373,8 +392,10 @@ fn render_png(spec: &GeneratedSpec, pixels: &[u8], size: u16) -> Result<Vec<u8>,
     // must sit under the same cap, so the square side is bounded by
     // sqrt(MAX_GENERATED_BYTES / 3) ~= 1182. Refuse anything larger rather
     // than let a hostile caller exhaust memory or CPU (CWE-400).
-    let max_side = ((u64::from(MAX_GENERATED_BYTES) / 3) as f64).sqrt() as u64;
-    if u64::from(size) > max_side {
+    // BLG-0419: compare squared dimensions directly. u16 dimensions fit
+    // comfortably in u64 even after multiplying by the three RGB channels.
+    let raster_bytes = u64::from(size) * u64::from(size) * 3;
+    if raster_bytes > u64::from(MAX_GENERATED_BYTES) {
         return Err(RenderError::MissingParam("png size"));
     }
     // Scale the pixel buffer to the requested size with a deterministic
@@ -422,7 +443,7 @@ fn render_frame(_spec: &GeneratedSpec, pixels: &[u8], frame: u16) -> Result<Vec<
 const QR_FRAME_HEADER_LEN: usize = 16;
 
 /// Domain tag for a recipe-addressed stream id.
-const QR_STREAM_ID_TAG: &[u8] = b"BDLM_QR_STREAM_ID_V1";
+const QR_STREAM_ID_TAG: &[u8] = b"BDLM_QR_STREAM_ID_V2";
 
 /// The path that produces a transport frame.
 ///
@@ -556,29 +577,15 @@ pub fn qr_stream_content_id(
     if frame_count == 0 {
         return Err(RenderError::MissingParam("qr stream frame_count"));
     }
-    // The scheme is deliberately narrow. The frame digest already binds the recipe, the
-    // position and the slice bytes; binding them **again** in the fold says nothing new.
-    //
-    // The first version carried three more fields - recipe digest, frame count,
-    // slice length - and all three turned out redundant. Measured by mutation: removing
-    // each one from the scheme broke no test, because what all three distinguished was
-    // already inside the frame digests. A different slice
-    // length produces different frames; a different frame count produces a fold of a
-    // different length; a different recipe gives a different frame digest.
-    //
-    // What defends a field in a scheme is that removing it breaks something.
-    // If it breaks nothing it is not there, it is merely sitting there - and a field
-    // that merely sits tells a reader "this is bound too", producing a false assurance.
-    let mut acc = hash_fields_bytes(&[QR_STREAM_ID_TAG]);
+    // BLG-0421: V1 folded only the four-byte transport checksum. That
+    // checksum detects optical corruption; it is not a content commitment.
+    // V2 binds the full recipe digest and every frame byte at hash strength.
+    // No V1 fallback: this helper has no production callers or stored ids.
+    let recipe = generated_spec_digest(spec);
+    let mut acc = hash_fields_bytes(&[QR_STREAM_ID_TAG, &recipe]);
     for seq in 0..frame_count {
         let frame = render_qr_stream_frame(spec, payload, seq, payload_len)?;
-        // A frame's own digest sits at header range 12..16. Instead of hashing the
-        // frame afresh that value is used: the id builds on what the receiver already
-        // verifies per frame, not on a separate digest scheme.
-        let frame_digest = frame
-            .get(12..QR_FRAME_HEADER_LEN)
-            .ok_or(RenderError::MissingParam("qr frame digest"))?;
-        acc = hash_fields_bytes(&[QR_STREAM_ID_TAG, &acc, frame_digest]);
+        acc = hash_fields_bytes(&[QR_STREAM_ID_TAG, &acc, &frame]);
     }
     Ok(acc)
 }
@@ -628,6 +635,70 @@ pub fn render_and_verify(
 mod tests {
     use super::*;
     use crate::storage::generated::GeneratorId;
+
+    #[test]
+    fn stream_v2_commits_full_frame_bytes_not_the_transport_checksum() {
+        let spec = avatar_spec();
+        let payload = [0xabu8; 64];
+        let recipe = generated_spec_digest(&spec);
+        let initial = hash_fields_bytes(&[super::QR_STREAM_ID_TAG, &recipe]);
+        let frame = super::render_qr_stream_frame(&spec, &payload, 0, 64).unwrap();
+        let expected = hash_fields_bytes(&[super::QR_STREAM_ID_TAG, &initial, &frame]);
+        assert_eq!(super::QR_STREAM_ID_TAG, b"BDLM_QR_STREAM_ID_V2");
+        assert_eq!(
+            super::qr_stream_content_id(&spec, &payload, 64, 1).unwrap(),
+            expected
+        );
+        let mut substituted = frame.clone();
+        substituted[super::QR_FRAME_HEADER_LEN] ^= 1;
+        assert_eq!(&frame[12..16], &substituted[12..16], "same short checksum");
+        assert_ne!(
+            expected,
+            hash_fields_bytes(&[super::QR_STREAM_ID_TAG, &initial, &substituted]),
+            "even a short-checksum collision cannot substitute a frame"
+        );
+        let old_tag = b"BDLM_QR_STREAM_ID_V1";
+        let old_initial = hash_fields_bytes(&[old_tag]);
+        let old_id = hash_fields_bytes(&[old_tag, &old_initial, &frame[12..16]]);
+        assert_ne!(expected, old_id, "V1 and V2 are explicitly separated");
+    }
+
+    #[test]
+    fn png_size_limit_is_exact_integer_arithmetic() {
+        let spec = avatar_spec();
+        let pixels = vec![0; spec.output_len as usize];
+        assert!(super::render_png(&spec, &pixels, 1182).is_ok());
+        for size in [0, 1183, u16::MAX] {
+            assert_eq!(
+                super::render_png(&spec, &pixels, size),
+                Err(RenderError::MissingParam("png size"))
+            );
+        }
+    }
+
+    #[test]
+    fn svg_expansion_is_bounded_before_rendering() {
+        let max_pixels = (MAX_GENERATED_BYTES as usize - 256) / 128;
+        assert!(super::svg_capacity(max_pixels).is_ok());
+        assert_eq!(
+            super::svg_capacity(max_pixels + 1),
+            Err(RenderError::MissingParam("svg output size"))
+        );
+        assert!(super::svg_capacity(usize::MAX).is_err());
+        let mut spec = avatar_spec();
+        spec.output_len = MAX_GENERATED_BYTES;
+        // Even a bad generation budget must not run ahead of the size gate.
+        spec.step_budget = 0;
+        assert_eq!(
+            render(&spec, &RenderFormat::Svg),
+            Err(RenderError::MissingParam("svg output size"))
+        );
+        let ordinary = avatar_spec();
+        let bytes = render(&ordinary, &RenderFormat::Svg).expect("small SVG still renders");
+        assert!(bytes.len() <= super::svg_capacity(ordinary.output_len as usize).unwrap());
+        assert!(bytes.starts_with(b"<svg "));
+        assert!(bytes.ends_with(b"</svg>"));
+    }
 
     fn avatar_spec() -> GeneratedSpec {
         GeneratedSpec {

@@ -27,6 +27,12 @@ pub struct LlmCache {
     items: BTreeMap<String, serde_json::Value>,
 }
 
+/// Escapes the key separator so two different part lists cannot join to the
+/// same key.
+fn escape_key_part(part: &str) -> String {
+    part.replace('%', "%25").replace('|', "%7C")
+}
+
 impl LlmCache {
     /// Opens the cache.
     ///
@@ -72,7 +78,12 @@ impl LlmCache {
                 acc
             },
         );
-        format!("{SCHEMA_VERSION}|{provider}|{model}|{task}|{h}")
+        format!(
+            "{SCHEMA_VERSION}|{}|{}|{}|{h}",
+            escape_key_part(provider),
+            escape_key_part(model),
+            escape_key_part(task)
+        )
     }
 
     #[must_use]
@@ -116,7 +127,15 @@ impl LlmCache {
             text.push_str(&json);
             text.push('\n');
         }
-        std::fs::write(&self.path, text).map_err(|e| format!("the cache could not be written: {e}"))
+        // Write beside the cache and rename over it, so a crash mid-write
+        // cannot leave a truncated cache file.
+        let mut tmp_name = self.path.as_os_str().to_owned();
+        tmp_name.push(".tmp");
+        let tmp_path = std::path::PathBuf::from(tmp_name);
+        std::fs::write(&tmp_path, text)
+            .map_err(|e| format!("the cache could not be written: {e}"))?;
+        std::fs::rename(&tmp_path, &self.path)
+            .map_err(|e| format!("the cache could not be written: {e}"))
     }
 
     #[must_use]
@@ -136,6 +155,15 @@ mod tests {
 
     fn tmp_path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("ai_inference-cache-{name}"))
+    }
+
+    #[test]
+    fn key_parts_containing_the_separator_do_not_collide() {
+        let h = [7u8; 32];
+        assert_ne!(
+            LlmCache::key("a|b", "c", "t", &h),
+            LlmCache::key("a", "b|c", "t", &h)
+        );
     }
 
     #[test]

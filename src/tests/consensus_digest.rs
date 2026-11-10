@@ -16,8 +16,8 @@
 //! divergence and FAILs (no false green: `if-no-files-found: error`).
 //!
 //! The boundaries of the determinism, deliberately:
-//!   * `genesis_time` sabitlenir (`Blockchain::new` aksi halde duvar saatini
-//!     Okur; `produce_block` timestamp'i `genesis_time + slot*SLOT_MS`'tir).
+//!   * `genesis_time` is fixed (`Blockchain::new` would otherwise read the wall
+//!     clock; the `produce_block` timestamp is `genesis_time + slot*SLOT_MS`).
 //!   * The transactions are signed with Ed25519 (RFC 8032 - a deterministic signature).
 //!   * The scenario contains an equal-fee tie pair (bob and carol at fee=9):
 //!     because the mempool tie-break is canonical under the

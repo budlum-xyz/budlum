@@ -41,6 +41,8 @@ pub enum HeaderError {
     InvalidHeader,
     /// The chain is broken (parent_hash -> child.hash / number+1 mismatch).
     ChainBroken,
+    /// The chain never touches the trusted checkpoint (BLG-0111).
+    CheckpointNotReached,
     /// The N-confirmation threshold was not met (too few confirmation
     /// headers).
     InsufficientConfirmations,
@@ -55,6 +57,9 @@ impl std::fmt::Display for HeaderError {
             HeaderError::Rlp(e) => write!(f, "header rlp error: {e}"),
             HeaderError::InvalidHeader => write!(f, "header: invalid structure"),
             HeaderError::ChainBroken => write!(f, "header: chain broken"),
+            HeaderError::CheckpointNotReached => {
+                write!(f, "header: chain does not reach the trusted checkpoint")
+            }
             HeaderError::InsufficientConfirmations => {
                 write!(f, "header: insufficient confirmations")
             }
@@ -133,6 +138,7 @@ pub fn verify_chain(
     target: &EthHeader,
     confirmations: &[EthHeader],
     required: u32,
+    checkpoint: Option<&(u64, [u8; 32])>,
 ) -> Result<(), HeaderError> {
     if required == 0 {
         return Err(HeaderError::ZeroConfirmations);
@@ -142,6 +148,12 @@ pub fn verify_chain(
     }
     let mut prev_hash = target.hash;
     let mut prev_number = target.number;
+    let mut anchored = checkpoint.is_none();
+    if let Some((cp_number, cp_hash)) = checkpoint {
+        if target.number == *cp_number && target.hash == *cp_hash {
+            anchored = true;
+        }
+    }
     for hdr in confirmations {
         if hdr.parent_hash != prev_hash {
             return Err(HeaderError::ChainBroken);
@@ -151,8 +163,19 @@ pub fn verify_chain(
         if Some(hdr.number) != prev_number.checked_add(1) {
             return Err(HeaderError::ChainBroken);
         }
+        if let Some((cp_number, cp_hash)) = checkpoint {
+            if hdr.number == *cp_number && hdr.hash == *cp_hash {
+                anchored = true;
+            }
+        }
         prev_hash = hdr.hash;
         prev_number = hdr.number;
+    }
+    // BLG-0111 (P05-F04, karar B with A interim): the chain must touch the
+    // trusted checkpoint it claims to descend from. Links alone prove only
+    // self-consistency - a relayer can build a perfectly linked fantasy.
+    if !anchored {
+        return Err(HeaderError::CheckpointNotReached);
     }
     Ok(())
 }
@@ -233,7 +256,7 @@ mod tests {
             prev_num = h.number;
             confs.push(h);
         }
-        assert!(verify_chain(&target, &confs, 3).is_ok());
+        assert!(verify_chain(&target, &confs, 3, None).is_ok());
     }
 
     #[test]
@@ -241,7 +264,7 @@ mod tests {
         let target = decode_header(&header_bytes([1u8; 32], 10, [0u8; 32])).unwrap();
         let bad = decode_header(&header_bytes([99u8; 32], 11, [0u8; 32])).unwrap(); // wrong parent
         assert_eq!(
-            verify_chain(&target, &[bad], 1).unwrap_err(),
+            verify_chain(&target, &[bad], 1, None).unwrap_err(),
             HeaderError::ChainBroken
         );
     }
@@ -251,7 +274,7 @@ mod tests {
         let target = decode_header(&header_bytes([1u8; 32], 10, [0u8; 32])).unwrap();
         let gap = decode_header(&header_bytes(target.hash, 15, [0u8; 32])).unwrap(); // number jump
         assert_eq!(
-            verify_chain(&target, &[gap], 1).unwrap_err(),
+            verify_chain(&target, &[gap], 1, None).unwrap_err(),
             HeaderError::ChainBroken
         );
     }
@@ -261,27 +284,27 @@ mod tests {
         let target = decode_header(&header_bytes([1u8; 32], 10, [0u8; 32])).unwrap();
         let one = decode_header(&header_bytes(target.hash, 11, [0u8; 32])).unwrap();
         assert_eq!(
-            verify_chain(&target, &[one], 64).unwrap_err(),
+            verify_chain(&target, &[one], 64, None).unwrap_err(),
             HeaderError::InsufficientConfirmations
         );
     }
 
     /// A zero demand is refused before any header is looked at. With the
-    /// old code `verify_chain(&target, &[], 0)` returned `Ok`, so a proof
+    /// old code `verify_chain(&target, &[], 0, None)` returned `Ok`, so a proof
     /// that named zero confirmations finalised its own target.
     #[test]
     fn verify_chain_refuses_a_zero_demand() {
         let target = decode_header(&header_bytes([1u8; 32], 10, [0u8; 32])).unwrap();
         let one = decode_header(&header_bytes(target.hash, 11, [0u8; 32])).unwrap();
         assert_eq!(
-            verify_chain(&target, &[], 0).unwrap_err(),
+            verify_chain(&target, &[], 0, None).unwrap_err(),
             HeaderError::ZeroConfirmations
         );
         assert_eq!(
-            verify_chain(&target, std::slice::from_ref(&one), 0).unwrap_err(),
+            verify_chain(&target, std::slice::from_ref(&one), 0, None).unwrap_err(),
             HeaderError::ZeroConfirmations
         );
-        assert!(verify_chain(&target, &[one], 1).is_ok());
+        assert!(verify_chain(&target, &[one], 1, None).is_ok());
     }
 
     /// A target at `u64::MAX` cannot have a child by number. The old
@@ -291,7 +314,7 @@ mod tests {
         let target = decode_header(&header_bytes([1u8; 32], u64::MAX, [0u8; 32])).unwrap();
         let child = decode_header(&header_bytes(target.hash, 0, [0u8; 32])).unwrap();
         assert_eq!(
-            verify_chain(&target, &[child], 1).unwrap_err(),
+            verify_chain(&target, &[child], 1, None).unwrap_err(),
             HeaderError::ChainBroken
         );
     }
@@ -309,6 +332,22 @@ mod tests {
         assert_eq!(
             decode_header(&encode(&item)).unwrap_err(),
             HeaderError::InvalidHeader
+        );
+    }
+
+    /// BLG-0111 (P05-F04): a perfectly linked fantasy is refused - the
+    /// chain must touch the trusted checkpoint, and a relayer cannot build
+    /// one that does not.
+    #[test]
+    fn verify_chain_never_accepts_a_fantasy_without_the_checkpoint() {
+        let target = decode_header(&header_bytes([1u8; 32], 10, [0u8; 32])).unwrap();
+        let one = decode_header(&header_bytes(target.hash, 11, [0u8; 32])).unwrap();
+        let cp = (one.number, one.hash);
+        assert!(verify_chain(&target, std::slice::from_ref(&one), 1, Some(&cp)).is_ok());
+        let wrong: (u64, [u8; 32]) = (one.number, [0xAA; 32]);
+        assert_eq!(
+            verify_chain(&target, std::slice::from_ref(&one), 1, Some(&wrong)).unwrap_err(),
+            HeaderError::CheckpointNotReached
         );
     }
 }

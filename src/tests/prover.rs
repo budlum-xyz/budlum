@@ -298,12 +298,14 @@ fn conflicting_claim_same_domain_height_rejected() {
         r[0] ^= 0xFF; // guaranteed different
         r
     };
-    bc.proof_claims.record(AcceptedProofClaim {
-        key,
-        final_state_root: conflicting_root,
-        prover: addr(0x08),
-        rewarded: false,
-    });
+    bc.proof_claims
+        .record(AcceptedProofClaim {
+            key,
+            final_state_root: conflicting_root,
+            prover: addr(0x08),
+            rewarded: false,
+        })
+        .expect("seed claim fits the registry");
     assert_eq!(bc.proof_claims.len(), 1);
 
     // A genuinely valid proof asserting a different root for the same
@@ -519,7 +521,7 @@ fn a_domain_with_an_empty_allowlist_accepts_no_proof() {
     let err = bc
         .submit_zk_proof(submission(sender, 2, 10, &proof, &pi, &program))
         .unwrap_err();
-    assert!(err.contains("not on the zk allowlist"), "gelen: {err}");
+    assert!(err.contains("not on the zk allowlist"), "got: {err}");
 }
 
 /// An unregistered domain: the proof is refused without being evaluated.
@@ -534,7 +536,7 @@ fn a_proof_for_an_unknown_domain_is_refused() {
     let err = bc
         .submit_zk_proof(submission(sender, 77, 10, &proof, &pi, &program))
         .unwrap_err();
-    assert!(err.contains("unknown domain 77"), "gelen: {err}");
+    assert!(err.contains("unknown domain 77"), "got: {err}");
 }
 
 /// 1d (freshness): if a public input claims a height that is too old the proof is refused
@@ -699,11 +701,32 @@ fn spending_exactly_the_declared_limit_is_allowed() {
 
     // The budget check must let this proof through. Proof verification may fail for other
     // reasons; what is measured is that the budget gate does not refuse wrongly.
+    // The altered public inputs may fail the later proof check. That is the only
+    // refusal allowed here, and it comes after the fee is taken, so it shows the
+    // budget gate and the shape gates were all passed.
+    let before = bc.state.get_balance(&sender);
     let outcome = bc.submit_zk_proof(submission(sender, 1, 10, &proof, &exact, &program));
     if let Err(e) = &outcome {
         assert!(
-            !e.contains("declared limit"),
-            "spending exactly at the ceiling must not trip the budget gate: {e}"
+            e.starts_with("invalid proof"),
+            "at the ceiling only the proof check may refuse: {e}"
+        );
+        assert_eq!(
+            bc.state.get_balance(&sender),
+            before - fee,
+            "the proof check runs after the fee is charged"
         );
     }
+
+    // One unit over the ceiling trips the same gate, so the boundary is `>`.
+    let mut over = pi.clone();
+    over.gas_limit = 5_000;
+    over.gas_used = 5_001;
+    let err = bc
+        .submit_zk_proof(submission(sender, 1, 10, &proof, &over, &program))
+        .expect_err("spending above the declared limit must be refused");
+    assert!(
+        err.contains("declared limit"),
+        "the budget gate must name the declared limit: {err}"
+    );
 }

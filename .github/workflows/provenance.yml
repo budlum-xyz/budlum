@@ -49,7 +49,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
 
@@ -57,30 +57,16 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
 
       - name: SBOM uret (CycloneDX)
-        run: bash ./ops/scripts/generate-sbom.sh
+        run: cargo run --release --manifest-path xtask/tools/Cargo.toml -- generate-sbom
 
-      # Canary: is the file to be signed really an SBOM. Signing an empty or broken
-# file makes the signature itself meaningless; a signature says not that the
-# content is correct but that it came out of this job.
-      - name: SBOM canary (is the thing to be signed an SBOM)
-        run: |
-          set -euo pipefail
-          test -s sbom.cdx.json || { echo "the SBOM is empty or missing" >&2; exit 1; }
-          python3 - <<'PY'
-          import json, sys
-          d = json.load(open("sbom.cdx.json"))
-          fmt = d.get("bomFormat")
-          comps = d.get("components") or []
-          if fmt != "CycloneDX":
-              print(f"bomFormat is not 'CycloneDX': {fmt!r}", file=sys.stderr)
-              sys.exit(1)
-          # The repository carries hundreds of dependencies. A handful of
-          # components indicates production was cut short and signing would be wrong.
-          if len(comps) < 50:
-              print(f"only {len(comps)} components; production is incomplete", file=sys.stderr)
-              sys.exit(1)
-          print(f"canary OK: CycloneDX, {len(comps)} components.")
-          PY
+      # Canary: is the file to be signed really an SBOM. Signing an empty or
+      # broken file makes the signature itself meaningless; a signature says
+      # not that the content is correct but that it came out of this job.
+      # `generate-sbom` refuses to finish unless the file is CycloneDX with at
+      # least 50 components (xtask/tools, sbom.rs), so the step above is the
+      # canary; this step only proves the file is where the signer expects it.
+      - name: SBOM present
+        run: test -s sbom.cdx.json || { echo "the SBOM is empty or missing" >&2; exit 1; }
 
       - name: Sign the SBOM (an attestation through Sigstore)
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -88,7 +74,7 @@ jobs:
           subject-path: sbom.cdx.json
 
       - name: SBOM artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sbom-attested-${{ github.sha }}
           path: sbom.cdx.json

@@ -27,7 +27,7 @@ pub const MAX_SAMPLE_BYTES: usize = 1024 * 1024; // the ceiling for one sample
 pub struct TenantDictionary {
     pub bytes: Vec<u8>,   // the zstd dictionary body, raw, not wrapped in a BDLM magic
     pub digest: [u8; 32], // SHA3("BDLM_BUD_DICT_V1" || bytes), the determinism anchor
-    pub dict_id: u32,     // the zstd dictID, the first 4 bytes, little-endian
+    pub dict_id: u32,     // the zstd dictID, bytes 4 to 8 (after the magic), little-endian
     pub sample_count: usize,
 }
 
@@ -49,7 +49,9 @@ impl TenantDictionary {
         if bytes.is_empty() || bytes.len() > MAX_DICT_SIZE {
             return None;
         }
-        Some(Self::from_bytes(bytes))
+        let mut dict = Self::from_bytes(bytes);
+        dict.sample_count = samples.len();
+        Some(dict)
     }
 
     /// Build from ready dictionary bytes, with the deterministic digest
@@ -60,8 +62,9 @@ impl TenantDictionary {
         h.update((bytes.len() as u64).to_le_bytes());
         h.update(&bytes);
         let digest: [u8; 32] = h.finalize().into();
-        let dict_id = if bytes.len() >= 4 {
-            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+        // A zstd dictionary starts with a 4-byte magic; the dictID follows it.
+        let dict_id = if bytes.len() >= 8 {
+            u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]])
         } else {
             0
         };
@@ -218,10 +221,24 @@ mod tests {
     }
 
     #[test]
+    fn training_records_the_sample_count_and_a_real_dict_id() {
+        let samples = gen_records(500);
+        let dict = TenantDictionary::train(&samples, 4096).expect("dictionary");
+        assert_eq!(dict.sample_count, 500);
+        assert_ne!(dict.dict_id, 0xEC30_A437, "the id is not the magic");
+    }
+
+    #[test]
     fn dict_blob_format_never_panics() {
         // Compress and decompress stay panic-free on corrupt dictionary bytes.
-        let dict = TenantDictionary::from_bytes(vec![0x28, 0xB5, 0x2F, 0xFD, 0x00]);
-        assert_eq!(dict.dict_id, 0xFD2FB528);
+        let dict =
+            TenantDictionary::from_bytes(vec![0x37, 0xA4, 0x30, 0xEC, 0x01, 0x02, 0x03, 0x04]);
+        assert_eq!(dict.dict_id, 0x0403_0201);
+        // Too short for a dictID.
+        assert_eq!(
+            TenantDictionary::from_bytes(vec![0x37, 0xA4, 0x30]).dict_id,
+            0
+        );
         let _ = dict.compress_with(b"test", 19, 100);
         let _ = dict.decompress_with(b"abc", 100);
     }

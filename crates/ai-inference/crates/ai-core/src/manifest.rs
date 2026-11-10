@@ -31,6 +31,17 @@ pub struct LoRaManifest {
     pub trained_at: String,
 }
 
+/// A length as 8 little-endian bytes.
+fn len_prefix(len: usize) -> [u8; 8] {
+    u64::try_from(len).unwrap_or(u64::MAX).to_le_bytes()
+}
+
+/// Appends a length-prefixed field.
+fn push_field(buf: &mut Vec<u8>, bytes: &[u8]) {
+    buf.extend_from_slice(&len_prefix(bytes.len()));
+    buf.extend_from_slice(bytes);
+}
+
 impl LoRaManifest {
     #[must_use]
     pub fn new(base_model: ModelId, rank: u16, alpha: u16) -> Self {
@@ -47,15 +58,32 @@ impl LoRaManifest {
     }
 
     /// The manifest digest (a placeholder; in production a SHA-256 goes here).
+    ///
+    /// Every field is bound. Each variable-length field carries a length
+    /// prefix, so two different manifests cannot give the same input bytes.
     #[must_use]
     pub fn digest(&self) -> Hash32 {
         let mut buf = Vec::new();
         buf.extend_from_slice(&self.base_model.0);
+        match &self.adapter_sha256 {
+            Some(h) => {
+                buf.push(1);
+                push_field(&mut buf, h.as_bytes());
+            }
+            None => buf.push(0),
+        }
         buf.extend_from_slice(&self.rank.to_le_bytes());
         buf.extend_from_slice(&self.alpha.to_le_bytes());
+        buf.push(match self.dtype {
+            AdapterDtype::Bf16 => 1,
+            AdapterDtype::Fp16 => 2,
+        });
+        buf.extend_from_slice(&len_prefix(self.dataset_refs.len()));
         for r in &self.dataset_refs {
             buf.extend_from_slice(r);
         }
+        push_field(&mut buf, self.framework.as_bytes());
+        push_field(&mut buf, self.trained_at.as_bytes());
         placeholder_digest(&buf)
     }
 
@@ -79,6 +107,41 @@ mod tests {
         let mut m2 = m.clone();
         m2.dataset_refs.push([3; 32]);
         assert_ne!(d1, m2.digest());
+    }
+
+    /// The digest binds the adapter hash, the dtype, the framework and the date.
+    #[test]
+    fn digest_binds_every_field() {
+        let m = LoRaManifest::new(ModelId([2; 32]), 16, 32);
+        let base = m.digest();
+
+        let mut a = m.clone();
+        a.adapter_sha256 = Some("ab".repeat(32));
+        assert_ne!(base, a.digest());
+        let mut a2 = a.clone();
+        a2.adapter_sha256 = Some("cd".repeat(32));
+        assert_ne!(a.digest(), a2.digest());
+
+        let mut d = m.clone();
+        d.dtype = AdapterDtype::Fp16;
+        assert_ne!(base, d.digest());
+
+        let mut f = m.clone();
+        f.framework = "trainer".to_string();
+        assert_ne!(base, f.digest());
+
+        let mut t = m.clone();
+        t.trained_at = "2026-01-01".to_string();
+        assert_ne!(base, t.digest());
+    }
+
+    /// An all-zero dataset ref is not the same as no ref.
+    #[test]
+    fn zero_dataset_ref_differs_from_none() {
+        let m = LoRaManifest::new(ModelId([2; 32]), 16, 32);
+        let mut z = m.clone();
+        z.dataset_refs.push([0; 32]);
+        assert_ne!(m.digest(), z.digest());
     }
 
     #[test]

@@ -16,7 +16,7 @@
 #      place. Grype closes that gap.
 #
 # Gate policy: high and above = FAIL (NO `continue-on-error`). Exceptions live in
-# .quality/grype.yaml and are identical to the justifications in .quality/osv-scanner.toml -
+# .quality/grype.yaml and are identical to the justifications in osv-scanner.toml -
 # two scanners contradicting each other on the same finding erodes gate trust.
 #
 # The tool is version + sha256 pinned (the gitleaks/hadolint/actionlint/typos pattern).
@@ -25,7 +25,7 @@ name: Grype
 
 on:
   pull_request:
-    branches: [main, fix/architecture-tip-adlari]
+    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet]
   push:
     branches: [main]
   schedule:
@@ -56,7 +56,7 @@ jobs:
       - name: Install grype v0.116.0 (version + sha256 pinned)
         run: |
           set -euo pipefail
-          curl -sSfL -o /tmp/grype.tar.gz \
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/grype.tar.gz \
             https://github.com/anchore/grype/releases/download/v0.116.0/grype_0.116.0_linux_amd64.tar.gz
           echo "40aff724297312f91ea390d003bed8d8651c74cc7f5b26732db80b3a408d2fc5  /tmp/grype.tar.gz" | sha256sum -c -
           mkdir -p /tmp/grype-bin
@@ -89,8 +89,15 @@ jobs:
           version = "0.12.1"
           source = "registry+https://github.com/rust-lang/crates.io-index"
           CANARY
-          if grype dir:/tmp/grype-canary --fail-on high --config /tmp/grype-canary/empty.yaml -o table; then
+          if grype dir:/tmp/grype-canary --fail-on high --config /tmp/grype-canary/empty.yaml -o table > /tmp/grype-canary/out.txt 2>&1; then
             echo "ERROR: Grype failed to catch the canary (yamux 0.12.1 / GHSA-vxx9-2994-q338) -> the scan is untrustworthy (vacuous gate)!"
+            exit 1
+          fi
+          # A scanner failure (network, database) also exits non-zero. Only a
+          # report that names the known advisory counts as a catch.
+          if ! grep -q "GHSA-vxx9-2994-q338" /tmp/grype-canary/out.txt; then
+            echo "ERROR: Grype failed for a reason other than the canary finding."
+            tail -30 /tmp/grype-canary/out.txt
             exit 1
           fi
           echo "Canary caught -> the Grype alarm works."
@@ -100,7 +107,7 @@ jobs:
 
       - name: Upload SARIF (Security tab)
         if: always()
-        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: grype.sarif
           category: grype

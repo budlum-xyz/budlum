@@ -198,6 +198,26 @@ fn contains_word(haystack_lower: &str, needle: &str) -> bool {
     false
 }
 
+/// Does the line use the name inside a CamelCase identifier, such as
+/// `ColibriEngine`? The name must start a word and the next character must start
+/// a new capitalised word, so `jcodex` and `Jcodes` stay clear.
+fn contains_camel(line: &str, needle: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    let bytes = line.as_bytes();
+    let mut from = 0usize;
+    while let Some(offset) = lower[from..].find(needle) {
+        let at = from + offset;
+        let end = at + needle.len();
+        let starts_word = at == 0 || !bytes[at - 1].is_ascii_alphanumeric();
+        let next_is_upper = bytes.get(end).is_some_and(u8::is_ascii_uppercase);
+        if starts_word && next_is_upper {
+            return true;
+        }
+        from = at + needle.len();
+    }
+    false
+}
+
 /// Scan one file's text. Returns `(name, line number, trimmed line)` per hit.
 fn findings_in(rel: &str, text: &str) -> Vec<(&'static str, usize, String)> {
     let mut out = Vec::new();
@@ -207,9 +227,10 @@ fn findings_in(rel: &str, text: &str) -> Vec<(&'static str, usize, String)> {
     for (line_no, line) in text.lines().enumerate() {
         let lower = line.to_lowercase();
         for (name, _) in FORBIDDEN {
-            if contains_word(&lower, name) {
-                let mut shown = line.trim().to_string();
-                shown.truncate(120);
+            if contains_word(&lower, name) || contains_camel(line, name) {
+                // Characters, not bytes: `String::truncate(120)` panics inside
+                // a multi-byte character.
+                let shown: String = line.trim().chars().take(120).collect();
                 out.push((*name, line_no + 1, shown));
             }
         }
@@ -366,4 +387,18 @@ pub fn self_test() -> Result<String, String> {
     }
 
     Ok(String::from("no-upstream-brands: 10 canaries"))
+}
+
+#[cfg(test)]
+mod camel_tests {
+    use super::*;
+
+    #[test]
+    fn camel_case_use_is_found_and_a_wide_line_does_not_panic() {
+        assert!(!findings_in("src/x.rs", "struct ColibriEngine;").is_empty());
+        assert!(!findings_in("src/x.rs", "let m = JcodeMemory::new();").is_empty());
+        assert!(findings_in("src/x.rs", "let decoded = jcodex_value; let y = Jcodes;").is_empty());
+        let wide = format!("a{} colibri", "\u{00f6}".repeat(70));
+        assert_eq!(findings_in("src/x.rs", &wide).len(), 1);
+    }
 }

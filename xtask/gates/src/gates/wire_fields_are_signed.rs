@@ -23,6 +23,14 @@
 //! calls) mentions each one, or that the field carries
 //! `SIGNING: excluded - <reason>` in its own doc comment.
 //!
+//! A variant that carries an *enum* (the identity variant carries
+//! `IdentityTx`) is walked into rather than skipped: the preimage writes the
+//! enum's variant tag and payload, so the types those variants carry are
+//! carried by the transaction too. Skipping the hop is how
+//! `IdentityRecord.credential_roots` - a field that decides whether a
+//! credential is accepted - rode inside a signed transaction without reaching
+//! the preimage while this gate stayed green.
+//!
 //! # Known limits
 //!
 //! Coverage is by name: a preimage that mentions `spec.foo` counts `foo` as
@@ -36,7 +44,7 @@ use std::path::{Path, PathBuf};
 const TX: &str = "src/core/transaction.rs";
 
 /// Roots holding shipped library code, for resolving carried structs.
-const SCAN_ROOTS: &[&str] = &["src", "wallet-core"];
+const SCAN_ROOTS: &[&str] = &["src", "crates/wallet-core"];
 
 fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
@@ -176,6 +184,85 @@ fn struct_fields(body: &str) -> Vec<(String, String)> {
     fields
 }
 
+/// `(variant, field, doc)` for each named field declared inline in an enum
+/// variant (`Variant { a: u64, b: String }`) of the enum body.
+fn inline_fields(enum_body: &str) -> Vec<(String, String, String)> {
+    let bytes = enum_body.as_bytes();
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' if depth == 1 => {
+                let mut k = i;
+                while k > 0 && bytes[k - 1].is_ascii_whitespace() {
+                    k -= 1;
+                }
+                let end = k;
+                while k > 0 && is_ident_byte(bytes[k - 1]) {
+                    k -= 1;
+                }
+                let variant = enum_body[k..end].to_string();
+                let body = balanced(enum_body, i);
+                let mut doc: Vec<String> = Vec::new();
+                let mut level = 0usize;
+                for line in body.split('\n') {
+                    let stripped = line.trim();
+                    if level == 1 && stripped.starts_with("//") {
+                        doc.push(stripped.to_string());
+                        continue;
+                    }
+                    if level == 1 && !stripped.starts_with('#') {
+                        let rest = stripped.strip_prefix("pub ").unwrap_or(stripped);
+                        let name_end = rest
+                            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                            .unwrap_or(rest.len());
+                        if name_end > 0 && rest[name_end..].trim_start().starts_with(':') {
+                            out.push((
+                                variant.clone(),
+                                rest[..name_end].to_string(),
+                                doc.join("\n"),
+                            ));
+                        }
+                        doc.clear();
+                    }
+                    for c in line.bytes() {
+                        match c {
+                            b'{' | b'(' | b'[' | b'<' => level += 1,
+                            b'}' | b')' | b']' | b'>' => level = level.saturating_sub(1),
+                            _ => {}
+                        }
+                    }
+                }
+                i += body.len();
+                continue;
+            }
+            b'{' => depth += 1,
+            b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Is the bare identifier present with word boundaries in the text?
+fn word_in(text: &str, word: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut from = 0usize;
+    while let Some(at) = text[from..].find(word) {
+        let start = from + at;
+        let end = start + word.len();
+        let before_ok = start == 0 || !is_ident_byte(bytes[start - 1]);
+        let after_ok = end >= bytes.len() || !is_ident_byte(bytes[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = end;
+    }
+    false
+}
+
 /// A path under a test directory, or a file that is itself a test module.
 fn is_test_path(p: &Path) -> bool {
     let s = p.to_string_lossy();
@@ -187,7 +274,9 @@ fn collect_rs(root: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
-    for entry in entries.flatten() {
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
         let Ok(p_kind) = entry.file_type() else {
             continue;
         };
@@ -255,6 +344,25 @@ fn helpers_called(text: &str, all_helpers: &BTreeSet<String>) -> BTreeSet<String
     out
 }
 
+/// The body with `//` comments removed.
+///
+/// `carried_types` reads capitalised words, and a doc comment that *mentions*
+/// a type ("replaces `ProposalType::VerifyHubApp`") is not the enum carrying
+/// it. Without this, the walk into carried enums followed a name that appears
+/// only in prose and reported a payload that never rides the wire.
+fn without_comments(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    for line in body.split('\n') {
+        let code = match line.find("//") {
+            Some(at) => &line[..at],
+            None => line,
+        };
+        out.push_str(code);
+        out.push('\n');
+    }
+    out
+}
+
 /// Every capitalised word in the enum body: the carried struct types.
 fn carried_types(enum_body: &str) -> BTreeSet<String> {
     let bytes = enum_body.as_bytes();
@@ -274,6 +382,51 @@ fn carried_types(enum_body: &str) -> BTreeSet<String> {
         i += 1;
     }
     out
+}
+
+/// A carried struct: its relative path and its `(field, doc)` pairs.
+type StructIndex = BTreeMap<String, (String, Vec<(String, String)>)>;
+/// A carried enum: its relative path and its body.
+type EnumIndex = BTreeMap<String, (String, String)>;
+
+/// Every `pub enum` in the tree, resolved to its relative path and body.
+///
+/// An enum carried by a `TransactionType` variant is a payload, not an
+/// opaque name: its variants write a tag and their own fields into the
+/// preimage, and the types those variants carry ride along with them.
+fn collect_enums(root: &Path) -> EnumIndex {
+    let mut enums: EnumIndex = BTreeMap::new();
+    let mut files = Vec::new();
+    for r in SCAN_ROOTS {
+        collect_rs(&root.join(r), &mut files);
+    }
+    for path in &files {
+        let raw = std::fs::read(path).unwrap_or_default();
+        let src = String::from_utf8_lossy(&raw).into_owned();
+        let mut cursor = 0usize;
+        while let Some(rel) = src[cursor..].find("pub enum ") {
+            let start = cursor + rel;
+            let after = start + "pub enum ".len();
+            let mut j = after;
+            while j < src.len() && is_ident_byte(src.as_bytes()[j]) {
+                j += 1;
+            }
+            let name = src[after..j].to_string();
+            j = ws_skip(&src, j);
+            if src[j..].starts_with('{') {
+                enums.entry(name.clone()).or_insert_with(|| {
+                    let rel = path
+                        .strip_prefix(root)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .into_owned();
+                    (rel, balanced(&src, j))
+                });
+            }
+            cursor = j;
+        }
+    }
+    enums
 }
 
 struct Outcome {
@@ -327,8 +480,8 @@ fn build_committed(tx_src: &str) -> Result<String, String> {
 }
 
 /// Every struct in the tree, resolved to its relative path and fields.
-fn collect_structs(root: &Path) -> BTreeMap<String, (String, Vec<(String, String)>)> {
-    let mut structs: BTreeMap<String, (String, Vec<(String, String)>)> = BTreeMap::new();
+fn collect_structs(root: &Path) -> StructIndex {
+    let mut structs: StructIndex = BTreeMap::new();
     let mut files = Vec::new();
     for r in SCAN_ROOTS {
         collect_rs(&root.join(r), &mut files);
@@ -362,6 +515,110 @@ fn collect_structs(root: &Path) -> BTreeMap<String, (String, Vec<(String, String
     structs
 }
 
+/// Report every inline field of an enum that the preimage does not commit.
+fn check_inline_fields(
+    label: &str,
+    inline: &[(String, String, String)],
+    committed: &str,
+    out: &mut Outcome,
+) {
+    for (variant, field, doc) in inline {
+        out.fields += 1;
+        if word_in(committed, field) || signing_excluded(doc).is_some() {
+            continue;
+        }
+        out.problems.push(format!(
+            "{label}: inline field {variant}.{field} rides inside a signed transaction \
+             and is not in the signing preimage. A relaying node can rewrite it and \
+             the signature still verifies. Append it in \
+             `encode_transaction_type_payload` (or the `encode_*` helper for this \
+             type), or write `SIGNING: excluded - <reason>` in the field's doc."
+        ));
+    }
+}
+
+/// Report every field of a carried struct the preimage does not commit, and
+/// every stale `SIGNING: excluded` marker on a field it does.
+fn check_struct_fields(
+    type_name: &str,
+    rel: &str,
+    fields: &[(String, String)],
+    committed: &str,
+    out: &mut Outcome,
+) {
+    out.structs += 1;
+    for (field, doc) in fields {
+        out.fields += 1;
+        let bound = bound_in(committed, field);
+        let declared = signing_excluded(doc);
+        if !bound && declared.is_none() {
+            out.problems.push(format!(
+                "{rel}: {type_name}.{field} rides inside a signed transaction and is \
+                 not in the signing preimage. A relaying node can rewrite it and the \
+                 signature still verifies. Append it in \
+                 `encode_transaction_type_payload` (or the `encode_*` helper for this \
+                 type), or write `SIGNING: excluded - <reason>` in the field's doc."
+            ));
+        } else if bound {
+            if let Some(reason) = declared {
+                out.problems.push(format!(
+                    "{rel}: {type_name}.{field} is marked `SIGNING: excluded` \
+                     ({reason}) and the preimage does commit it. The marker is \
+                     stale and now describes a hole that is closed.",
+                    reason = if reason.is_empty() {
+                        "no reason given".to_string()
+                    } else {
+                        reason
+                    }
+                ));
+            }
+        }
+    }
+}
+
+/// Walk the types a transaction carries, one enum hop deep.
+///
+/// A variant that carries an enum hands that enum's own variants to the walk:
+/// their fields are written into the preimage and the structs they carry ride
+/// along with them. A struct reached through an enum is checked but not
+/// followed further, because at that depth a preimage that serializes the
+/// struct whole (bincode, or a helper with its own framing) no longer names
+/// individual fields, and following it would report confident false positives
+/// instead of a hole. `seen` keeps a self-referential type from looping and
+/// keeps each type reported once.
+fn walk_carried(
+    carried: &BTreeSet<String>,
+    structs: &StructIndex,
+    enums: &EnumIndex,
+    committed: &str,
+    out: &mut Outcome,
+) {
+    let mut queue: Vec<String> = carried.iter().cloned().collect();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    while let Some(type_name) = queue.pop() {
+        if !seen.insert(type_name.clone()) {
+            continue;
+        }
+        if let Some((rel, enum_body)) = enums.get(&type_name) {
+            let inline = inline_fields(enum_body);
+            check_inline_fields(rel, &inline, committed, out);
+            for next in carried_types(&without_comments(enum_body)) {
+                if !seen.contains(&next) && structs.contains_key(&next) {
+                    queue.push(next);
+                }
+            }
+            continue;
+        }
+        let Some((rel, fields)) = structs.get(&type_name) else {
+            continue;
+        };
+        if fields.is_empty() {
+            continue;
+        }
+        check_struct_fields(&type_name, rel, fields, committed, out);
+    }
+}
+
 fn measure(root: &Path) -> Result<Outcome, String> {
     let tx = root.join(TX);
     if !tx.is_file() {
@@ -385,56 +642,36 @@ fn measure(root: &Path) -> Result<Outcome, String> {
 
     let committed = build_committed(&tx_src)?;
     // Every struct in the tree, so a variant carrying `AiModelSpec` can be
-    // resolved.
+    // resolved. Enums too: a variant may carry an enum, whose own variants
+    // carry the structs that actually reach the wire.
     let structs = collect_structs(root);
-
-    let carried = carried_types(&enum_body);
-    if carried.is_empty() {
-        return Err(String::from(
-            "TransactionType carries no named types - wrong parse?",
-        ));
-    }
+    let enums = collect_enums(root);
 
     let mut out = Outcome {
         structs: 0,
         fields: 0,
         problems: Vec::new(),
     };
+    let carried = carried_types(&without_comments(&enum_body));
+    if carried.is_empty() {
+        return Err(String::from(
+            "TransactionType carries no named types - wrong parse?",
+        ));
+    }
+    walk_carried(&carried, &structs, &enums, &committed, &mut out);
 
-    for type_name in carried {
-        let Some((rel, fields)) = structs.get(&type_name) else {
-            continue;
-        };
-        if fields.is_empty() {
-            continue;
-        }
-        out.structs += 1;
-        for (field, doc) in fields {
-            out.fields += 1;
-            let bound = bound_in(&committed, field);
-            let declared = signing_excluded(doc);
-            if !bound && declared.is_none() {
-                out.problems.push(format!(
-                    "{rel}: {type_name}.{field} rides inside a signed transaction and is \
-                     not in the signing preimage. A relaying node can rewrite it and the \
-                     signature still verifies. Append it in \
-                     `encode_transaction_type_payload` (or the `encode_*` helper for this \
-                     type), or write `SIGNING: excluded - <reason>` in the field's doc."
-                ));
-            } else if bound {
-                if let Some(reason) = declared {
-                    out.problems.push(format!(
-                        "{rel}: {type_name}.{field} is marked `SIGNING: excluded` \
-                         ({reason}) and the preimage does commit it. The marker is \
-                         stale and now describes a hole that is closed.",
-                        reason = if reason.is_empty() {
-                            "no reason given".to_string()
-                        } else {
-                            reason
-                        }
-                    ));
-                }
-            }
+    for (variant, field, doc) in inline_fields(&enum_body) {
+        out.fields += 1;
+        let bound = word_in(&committed, &field);
+        let declared = signing_excluded(&doc);
+        if !bound && declared.is_none() {
+            out.problems.push(format!(
+                "{TX}: inline field {variant}.{field} rides inside a signed transaction \
+                 and is not in the signing preimage. A relaying node can rewrite it and \
+                 the signature still verifies. Append it in \
+                 `encode_transaction_type_payload`, or write `SIGNING: excluded - \
+                 <reason>` in the field's doc."
+            ));
         }
     }
 
@@ -477,6 +714,16 @@ enum Expect {
 }
 
 const CANARIES: &[Canary] = &[
+    Canary {
+        name: "inline_covered",
+        body: "pub struct Spec {\n    pub model_id: [u8; 32],\n}\npub enum TransactionType {\n    Register(Spec),\n    Mint {\n        amount: u64,\n        memo: String,\n    },\n}\nfn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>) {\n    match tx_type {\n        TransactionType::Register(spec) => put_fixed(out, &spec.model_id),\n        TransactionType::Mint { amount, memo } => {\n            put_u64(out, *amount);\n            put_str(out, memo);\n        }\n    }\n}",
+        expect: Expect::Pass,
+    },
+    Canary {
+        name: "inline_silent",
+        body: "pub struct Spec {\n    pub model_id: [u8; 32],\n}\npub enum TransactionType {\n    Register(Spec),\n    Mint {\n        amount: u64,\n        memo: String,\n    },\n}\nfn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>) {\n    match tx_type {\n        TransactionType::Register(spec) => put_fixed(out, &spec.model_id),\n        TransactionType::Mint { amount, .. } => {\n            put_u64(out, *amount);\n        }\n    }\n}",
+        expect: Expect::Finding,
+    },
     Canary {
         name: "covered",
         body: "pub struct Spec {\n    pub model_id: [u8; 32],\n    pub weights_digest: Option<[u8; 32]>,\n}\npub enum TransactionType {\n    Register(Spec),\n}\nfn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>) {\n    match tx_type {\n        TransactionType::Register(spec) => encode_spec(spec, out),\n    }\n}\nfn encode_spec(spec: &Spec, out: &mut Vec<u8>) {\n    put_fixed(out, &spec.model_id);\n    put_option_fixed32(out, spec.weights_digest);\n}",
@@ -536,7 +783,8 @@ fn verdict(tmp: &Path, case: &str, want: &Expect) -> Result<(), String> {
         (Err(msg), Expect::Finding) => {
             if msg.contains("no transaction module")
                 || msg.contains("no struct carried")
-                || msg.contains("TransactionType") && msg.contains("no")
+                || msg.contains("no `pub enum TransactionType`")
+                || msg.contains("`TransactionType` has no body")
             {
                 Err(format!(
                     "BROKEN: {case} measured nothing instead of finding: {msg}"
@@ -615,4 +863,50 @@ pub fn self_test() -> Result<String, String> {
          a covered variant, a declared exclusion, a two-level helper chain and an \
          array return all pass.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `TransactionType` variant that carries an enum must be walked into.
+    ///
+    /// The inner enum's variants carry the struct that rides the wire; if the
+    /// gate skipped the hop, a field on that struct could leave the preimage
+    /// with the gate green - exactly how `IdentityRecord.credential_roots`
+    /// decided a credential-validity outcome while signing nothing. A name
+    /// that appears only in a doc comment must not be followed, or the gate
+    /// reports payloads that never ride the wire.
+    #[test]
+    fn an_enum_carried_by_a_variant_is_walked_into_but_a_comment_is_not() {
+        let src = "pub struct Inner {\n    pub declared: u64,\n}\npub enum IdentityTx {\n    Register { record: Inner },\n}\npub enum TransactionType {\n    /// Replaces `Commented` in the doc.\n    Identity(IdentityTx),\n}\nfn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>) {\n    match tx_type {\n        TransactionType::Identity(tx) => encode_identity_tx(tx, out),\n    }\n}\nfn encode_identity_tx(tx: &IdentityTx, out: &mut Vec<u8>) {\n    match tx {\n        IdentityTx::Register { record } => put_u64(out, record.declared),\n    }\n}\n";
+        let tmp = scratch_dir().expect("scratch dir");
+        write_fixture(&tmp, "carried-enum-bound", src).expect("fixture");
+        let case = tmp.join("carried-enum-bound");
+        let result = run(&case);
+        assert!(
+            result.is_ok(),
+            "a field bound inside the carried enum's preimage must pass: {result:?}"
+        );
+
+        // Drop the binding: the gate must now name Inner.declared, which can
+        // only be reached by walking through the carried enum.
+        let unbound = src.replace("put_u64(out, record.declared)", "put_u8(out, 0)");
+        write_fixture(&tmp, "carried-enum-unbound", &unbound).expect("fixture");
+        let case = tmp.join("carried-enum-unbound");
+        let message = run(&case).expect_err("the unbound field must be reported");
+        assert!(
+            message.contains("Inner.declared"),
+            "the finding must name the struct the carried enum carries: {message}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn every_scan_root_exists() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for r in SCAN_ROOTS {
+            assert!(repo.join(r).is_dir(), "missing scan root {r}");
+        }
+    }
 }

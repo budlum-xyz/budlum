@@ -154,7 +154,7 @@ impl HardwareCostModel {
         tier: &TierBytes,
         tokens_per_second: f64,
     ) -> Option<f64> {
-        if tokens_per_second <= 0.0 {
+        if !tokens_per_second.is_finite() || tokens_per_second <= 0.0 {
             return None;
         }
         let accel_gb = tier.accelerator as f64 / 1_000_000_000.0;
@@ -236,6 +236,16 @@ mod metric_tests {
             dollar_per_accelerator_gb_hour: 12.0,
             dollar_per_system_gb_hour: 3.0,
         }
+    }
+
+    #[test]
+    fn a_non_finite_rate_has_no_cost() {
+        let (tb, _) = rent_everything();
+        assert_eq!(rates().cost_per_million_tokens_dollars(&tb, f64::NAN), None);
+        assert_eq!(
+            rates().cost_per_million_tokens_dollars(&tb, f64::INFINITY),
+            None
+        );
     }
 
     #[test]

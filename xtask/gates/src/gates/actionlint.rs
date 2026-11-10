@@ -31,7 +31,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         .current_dir(root)
         .output();
     match out {
-        Ok(o) if o.status.success() => Ok(String::from("actionlint temiz.")),
+        Ok(o) if o.status.success() => Ok(String::from("actionlint is clean.")),
         Ok(o) => Err(format!(
             "actionlint findings:\n{}",
             String::from_utf8_lossy(&o.stdout)

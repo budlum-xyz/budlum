@@ -31,23 +31,47 @@ use std::path::Path;
 /// lives in `xtask/gates` and the script is gone from the tree.
 const SHELL_GATES_AT_MIGRATION_START: &[&str] = &[];
 
-/// Read the shell gates actually present in the tree.
-fn present(root: &Path) -> Result<BTreeSet<String>, String> {
-    let dir = root.join("ops/scripts");
-    let entries =
-        std::fs::read_dir(&dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+/// Is this file name a shell script of any kind?
+fn is_shell_name(name: &str) -> bool {
+    std::path::Path::new(name).extension().is_some_and(|ext| {
+        ["sh", "bash", "ps1"]
+            .iter()
+            .any(|e| ext.eq_ignore_ascii_case(e))
+    })
+}
 
-    let mut found = BTreeSet::new();
+/// Collect every shell script under `dir`, as a path relative to `root`.
+fn collect_shell(root: &Path, dir: &Path, out: &mut BTreeSet<String>) -> Result<(), String> {
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
     for entry in entries {
-        let entry = entry.map_err(|e| format!("cannot read an entry under scripts/: {e}"))?;
+        let entry =
+            entry.map_err(|e| format!("cannot read an entry under {}: {e}", dir.display()))?;
+        let kind = entry
+            .file_type()
+            .map_err(|e| format!("cannot stat {}: {e}", entry.path().display()))?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        let is_shell = std::path::Path::new(&name)
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("sh"));
-        if name.starts_with("check-") && is_shell {
-            found.insert(name);
+        if kind.is_dir() {
+            if !matches!(name.as_str(), ".git" | "target" | "node_modules") {
+                collect_shell(root, &entry.path(), out)?;
+            }
+        } else if is_shell_name(&name) {
+            let path = entry.path();
+            let rel = path.strip_prefix(root).unwrap_or(&path);
+            out.insert(rel.to_string_lossy().replace('\\', "/"));
         }
     }
+    Ok(())
+}
+
+/// Read the shell scripts actually present anywhere in the tree.
+///
+/// The whole tree is walked, whatever the file is called and wherever it
+/// lives: a shell gate kept outside `ops/scripts`, or a `.bash` or `.ps1`
+/// file, is the same trust-boundary risk.
+fn present(root: &Path) -> Result<BTreeSet<String>, String> {
+    let mut found = BTreeSet::new();
+    collect_shell(root, root, &mut found)?;
     Ok(found)
 }
 
@@ -63,7 +87,7 @@ fn judge(found: &BTreeSet<String>, allowed: &BTreeSet<String>) -> Result<String,
             added.len()
         );
         for a in &added {
-            let _ = writeln!(msg, "  scripts/{a}");
+            let _ = writeln!(msg, "  {a}");
         }
         let _ = write!(
             msg,
@@ -200,4 +224,23 @@ pub fn self_test() -> Result<String, String> {
          swap that leaves the count unchanged; an unchanged inventory and a ported gate \
          both pass.",
     ))
+}
+
+#[cfg(test)]
+mod walk_tests {
+    use super::*;
+
+    #[test]
+    fn scripts_anywhere_and_of_any_kind_are_found() {
+        let dir = std::env::temp_dir().join(format!("shell-gates-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("tools/deep")).unwrap();
+        std::fs::write(dir.join("tools/deep/gate.bash"), "").unwrap();
+        std::fs::write(dir.join("run.ps1"), "").unwrap();
+        std::fs::write(dir.join("notes.md"), "").unwrap();
+        let found = present(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+        let found = found.unwrap();
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found.contains("tools/deep/gate.bash"));
+    }
 }

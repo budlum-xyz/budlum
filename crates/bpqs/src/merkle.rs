@@ -107,9 +107,12 @@ pub fn verify_path<H: BpqsHash, P: BpqsParams>(
     path: &[[u8; 32]; 16],
     expected_root: &[u8; 32],
 ) -> Result<(), BpqsError> {
+    if P::T_LOG2 > 16 {
+        return Err(BpqsError::Malformed("tree height exceeds the path budget"));
+    }
     let mut cur = leaf::<H, P>(leaf_value);
     let mut cursor = index;
-    for sib in path.iter().take(P::T_LOG2.min(16)) {
+    for sib in path.iter().take(P::T_LOG2) {
         cur = if cursor.is_multiple_of(2) {
             node::<H, P>(&cur, sib)
         } else {
@@ -153,6 +156,28 @@ mod merkle_tests {
             verify_path::<Sha3_256Hash, P>(vk, i, &path, &root)
                 .unwrap_or_else(|e| panic!("leaf {i} must verify: {e}"));
         }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    struct TooTall;
+
+    impl BpqsParams for TooTall {
+        const N: usize = 16;
+        const WIN: u32 = 16;
+        const LEN1: usize = 32;
+        const LEN2: usize = 3;
+        const LEN: usize = 35;
+        const T_LOG2: usize = 17;
+        const NAME: &'static str = "too-tall";
+    }
+
+    #[test]
+    fn a_row_taller_than_the_path_budget_refuses_at_verify() {
+        let path = [[0u8; 32]; 16];
+        assert_eq!(
+            verify_path::<Sha3_256Hash, TooTall>(&[0u8; 32], 0, &path, &[0u8; 32]),
+            Err(BpqsError::Malformed("tree height exceeds the path budget"))
+        );
     }
 
     #[test]

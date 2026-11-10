@@ -1,0 +1,42 @@
+# fuzz/osv-scanner.toml - OSV exceptions for the fuzz workspace
+#
+# The fuzzing target links the core crate, so fuzz/Cargo.lock is a resolver
+# snapshot of the same dependency family: atomic-polyfill (through heapless),
+# bincode, fxhash (through sled), instant (through parking_lot 0.11) and paste
+# (through plonky3 and netlink-packet-core). It is a SEPARATE lockfile, so
+# osv-scanner matches it against the config beside it and never against the
+# repository root one.
+#
+# WHY THIS FILE EXISTS NOW: the OpenSSF Scorecard `Vulnerabilities` check scans
+# the whole checkout recursively and reads the config beside each lockfile.
+# Without this file the fuzz lock reported five accepted "unmaintained" records
+# that the root config had already reasoned about, so the alert stayed open even
+# though every one of them is a maintenance notice, not a vulnerability. The
+# exceptions are the same records, with the same reasons, as the root
+# `osv-scanner.toml`; if one is updated the other must be too.
+#
+# POLICY (identical to the root file): every finding not listed here is a FAIL.
+# Each entry says why the record is not actionable in this tree. A reachable
+# vulnerability is upgraded, never listed. The records below are of the
+# "unmaintained" class only - RUSTSEC marks them as maintenance status, and
+# deny.toml carries the same policy through `unmaintained = "none"`.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2023-0089"
+reason = "atomic-polyfill unmaintained (a maintenance warning, not a vulnerability) - the OSV mirror of the deny.toml `unmaintained = \"none\"` policy."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0141"
+reason = "bincode 1.x unmaintained - tracked on the org roadmap (the bincode 2 migration touches consensus critical byte formats, a separate task)."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0057"
+reason = "fxhash unmaintained (a maintenance warning, not a vulnerability); reached only through sled's internal hasher."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0384"
+reason = "instant unmaintained (a maintenance warning); reached only through parking_lot 0.11's time source."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+reason = "paste unmaintained (a maintenance warning, not a vulnerability); a proc-macro, no runtime surface."

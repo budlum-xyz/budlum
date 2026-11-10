@@ -17,17 +17,25 @@ pub const LT_MAGIC: [u8; 8] = *b"\xB5LT01\0\0\0";
 /// produce symbols nobody can open.
 const LT_MAX_BLOCKS: usize = 16;
 
+/// The most symbols one call produces, and the most output bytes (symbols
+/// times block length) it may allocate.
+const LT_MAX_SYMBOLS: usize = 1 << 20;
+const LT_MAX_OUTPUT_BYTES: usize = 256 * 1024 * 1024;
+
 /// Produce n symbols from k blocks (deterministic - seeded generator).
 ///
 /// Every block must have the same length: a symbol is the XOR of its chosen
 /// blocks, sized by the first block, so a shorter block would be zero-padded
 /// on encode and come back padded on decode, and a longer one would be cut.
 pub fn lt_encode(blocks: &[Vec<u8>], n: usize, seed: u64) -> Option<Vec<(Vec<u8>, Vec<usize>)>> {
-    if blocks.is_empty() || n == 0 || blocks.len() > LT_MAX_BLOCKS {
+    if blocks.is_empty() || n == 0 || blocks.len() > LT_MAX_BLOCKS || n > LT_MAX_SYMBOLS {
         return None;
     }
     let blen = blocks[0].len();
     if blen == 0 || blocks.iter().any(|b| b.len() != blen) {
+        return None;
+    }
+    if n.checked_mul(blen)? > LT_MAX_OUTPUT_BYTES {
         return None;
     }
     let k = blocks.len();
@@ -90,9 +98,13 @@ pub fn lt_decode(symbols: &[(Vec<u8>, Vec<usize>)], k: usize) -> Option<Vec<Vec<
         }
         let mut mask = 0u64;
         for &i in chosen {
-            if i < 64 {
-                mask |= 1u64 << i;
+            // An index at or above `k` names a block that does not exist. Its
+            // bit would never be eliminated, and the recovered data would
+            // carry the foreign block. Refuse the whole set instead.
+            if i >= k {
+                return None;
             }
+            mask |= 1u64 << i;
         }
         rows.push((mask, data.clone()));
     }
@@ -193,6 +205,21 @@ mod tests {
         let dec = lt_decode(&sym[..24], 8).unwrap();
         for (a, b) in blocks.iter().zip(dec.iter()) {
             assert_eq!(a, b, "LT block lossless");
+        }
+    }
+
+    /// BLG-0615: a symbol that names a block at or above `k` (or at or above
+    /// 64) used to give `Some(wrong blocks)`.
+    #[test]
+    fn lt_decode_refuses_an_index_outside_the_block_range() {
+        let a = vec![1u8; 4];
+        let b = vec![2u8; 4];
+        let ab: Vec<u8> = a.iter().zip(&b).map(|(x, y)| x ^ y).collect();
+        let good = vec![(a.clone(), vec![0]), (ab.clone(), vec![0, 1])];
+        assert_eq!(lt_decode(&good, 2), Some(vec![a.clone(), b.clone()]));
+        for bad_index in [2usize, 5, 64, usize::MAX] {
+            let bad = vec![(a.clone(), vec![0]), (ab.clone(), vec![0, 1, bad_index])];
+            assert_eq!(lt_decode(&bad, 2), None, "index {bad_index}");
         }
     }
 
@@ -297,6 +324,9 @@ mod tests {
     #[test]
     fn invalid_input_is_refused() {
         assert!(lt_encode(&[], 4, 1).is_none());
+        // A symbol count no caller can honour is refused, not allocated.
+        assert!(lt_encode(&[vec![1u8]], usize::MAX / 8, 1).is_none());
+        assert!(lt_encode(&[vec![1u8; 1 << 20]], 1 << 19, 1).is_none());
         assert!(lt_encode(&[vec![1u8]], 0, 1).is_none());
         assert!(lt_decode(&[], 0).is_none());
         assert!(lt_decode(&[], 17).is_none());

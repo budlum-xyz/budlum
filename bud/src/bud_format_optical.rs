@@ -49,18 +49,36 @@ pub struct LogTemplateMiner;
 
 impl LogTemplateMiner {
     pub fn mine(log_line: &str) -> LogTemplate {
-        // Simple: split by space, numbers -> <NUM>, IPs -> <IP>
-        let mut template = log_line.to_string();
+        // Walk the line once: each token is replaced where it stands, so one
+        // token never rewrites a part of another, and the variables keep the
+        // order of the line. Spacing is kept as it is.
+        let mut template = String::with_capacity(log_line.len());
         let mut vars = Vec::new();
-        for token in log_line.split_whitespace() {
-            if token.parse::<f64>().is_ok() {
-                vars.push(token.to_string());
-                template = template.replace(token, "<NUM>");
-            } else if token.contains('.') && token.chars().filter(|c| *c == '.').count() == 3 {
-                vars.push(token.to_string());
-                template = template.replace(token, "<IP>");
+        let mut token = String::new();
+        let flush = |token: &mut String, template: &mut String, vars: &mut Vec<String>| {
+            if token.is_empty() {
+                return;
+            }
+            if is_ipv4(token) {
+                vars.push(token.clone());
+                template.push_str("<IP>");
+            } else if is_number(token) {
+                vars.push(token.clone());
+                template.push_str("<NUM>");
+            } else {
+                template.push_str(token);
+            }
+            token.clear();
+        };
+        for ch in log_line.chars() {
+            if ch.is_whitespace() {
+                flush(&mut token, &mut template, &mut vars);
+                template.push(ch);
+            } else {
+                token.push(ch);
             }
         }
+        flush(&mut token, &mut template, &mut vars);
         let id = {
             use sha3::{Digest, Sha3_256};
             let mut h = Sha3_256::new();
@@ -81,6 +99,31 @@ impl LogTemplateMiner {
         }
         original as f64 / templated as f64
     }
+}
+
+/// A plain decimal number: digits, a sign, a point and an exponent only, so
+/// `NaN` and `inf` are words, not numbers.
+fn is_number(token: &str) -> bool {
+    token
+        .chars()
+        .all(|c| c.is_ascii_digit() || matches!(c, '+' | '-' | '.' | 'e' | 'E'))
+        && token.chars().any(|c| c.is_ascii_digit())
+        && token.parse::<f64>().is_ok()
+}
+
+/// Four dot-separated decimal parts, each a byte.
+fn is_ipv4(token: &str) -> bool {
+    let mut parts = 0usize;
+    for part in token.split('.') {
+        parts += 1;
+        if part.is_empty() || part.len() > 3 || part.parse::<u8>().is_err() {
+            return false;
+        }
+        if !part.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+    }
+    parts == 4
 }
 
 pub struct OpticalGates;
@@ -114,6 +157,15 @@ mod tests {
         let p = OpticalPrompt::new("a cat 1920x1080", 1920, 1080, 5_000_000);
         assert!(p.ratio() > 1000.0);
         assert!(OpticalGates::k_bud_optical(&p).is_ok());
+    }
+    #[test]
+    fn log_template_replaces_whole_tokens_in_place() {
+        let t = LogTemplateMiner::mine("id 1 size 10 host 10.0.0.2 name a.b.c.d inf NaN");
+        assert_eq!(
+            t.template,
+            "id <NUM> size <NUM> host <IP> name a.b.c.d inf NaN"
+        );
+        assert_eq!(t.variables, vec!["1", "10", "10.0.0.2"]);
     }
     #[test]
     fn log_template() {

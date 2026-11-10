@@ -9,7 +9,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-const SCAN_ROOTS: &[&str] = &["src", "budzero", "wallet-core"];
+const SCAN_ROOTS: &[&str] = &["src", "budzero", "crates", "bud/src"];
 
 /// Balanced brace body starting at `open` (index of `{`).
 /// Skip a regular string literal starting at `b[j] == b'"'`. Returns the
@@ -168,27 +168,32 @@ fn strip_test_mods(src: &str) -> String {
             out.push_str(rest);
             return out;
         };
-        // Find `mod <name> {`
-        let after = &rest[m..];
-        let Some(brace_rel) = after.find('{') else {
-            out.push_str(rest);
-            return out;
-        };
-        // Only treat as a test-mod if the attribute is followed by `mod`.
-        let between = &after["#[cfg(test)]".len()..brace_rel];
-        if !between.contains("mod") {
-            out.push_str(&rest[..m + "#[cfg(test)]".len()]);
-            rest = &rest[m + "#[cfg(test)]".len()..];
+        let attr_end = m + "#[cfg(test)]".len();
+        // Only a `mod` item is a test module. Anything else is left in place.
+        let head = rest[attr_end..].trim_start();
+        let head = head.strip_prefix("pub ").unwrap_or(head).trim_start();
+        if !head.starts_with("mod ") {
+            out.push_str(&rest[..attr_end]);
+            rest = &rest[attr_end..];
             continue;
         }
-        let brace = m + brace_rel;
-        let body = balanced(rest, brace);
+        // `mod name;` has no body: the item ends at the semicolon.
+        let semi = rest[attr_end..].find(';');
+        let brace = rest[attr_end..].find('{');
+        let end = match (semi, brace) {
+            (Some(sc), Some(br)) if sc < br => attr_end + sc + 1,
+            (Some(sc), None) => attr_end + sc + 1,
+            (_, Some(br)) => {
+                let open = attr_end + br;
+                open + balanced(rest, open).len()
+            }
+            (None, None) => rest.len(),
+        };
         out.push_str(&rest[..m]);
-        // The block ends where its balanced body ends: at `brace`, not at
-        // the attribute. Advancing from `m` left the last `brace_rel` bytes
-        // of every test module in the scanned text, so a `remove(` or a
-        // `return Err(` in that tail was read as production code.
-        rest = &rest[brace + body.len()..];
+        // Keep the line breaks of the removed text so reported line numbers
+        // still match the file.
+        out.extend(rest[m..end].chars().filter(|c| *c == '\n'));
+        rest = &rest[end..];
     }
 }
 
@@ -270,7 +275,13 @@ fn is_result_fn(line: &str) -> bool {
     if !t.starts_with("fn ") {
         return false;
     }
-    t.contains("-> Result<")
+    // `Result<`, `io::Result<`, `anyhow::Result<`: the path before `<` ends
+    // in `Result`.
+    t.find("->").is_some_and(|at| {
+        let ret = t[at + 2..].trim_start();
+        ret.find('<')
+            .is_some_and(|lt| ret[..lt].trim_end().ends_with("Result"))
+    })
 }
 
 /// The shell regex is `self\s*\.\s*\w+\s*\.\s*remove\(`: a `self` receiver
@@ -278,7 +289,7 @@ fn is_result_fn(line: &str) -> bool {
 /// `map.remove(` (where `map` came from `self.inner.write()`) must NOT count,
 /// so the match is the full `self.<word>.remove(` chain, not just any
 /// `self.` in the window.
-fn receiver_is_self(lines: &[&str], idx: usize) -> bool {
+fn self_receiver(lines: &[&str], idx: usize) -> Option<String> {
     let lo = idx.saturating_sub(2);
     let window: String = lines[lo..=idx]
         .iter()
@@ -310,6 +321,7 @@ fn receiver_is_self(lines: &[&str], idx: usize) -> bool {
             while j < w.len() && (w[j].is_ascii_alphanumeric() || w[j] == b'_') {
                 j += 1;
             }
+            let id_end = j;
             if j == id_start {
                 i += 4;
                 continue;
@@ -327,14 +339,14 @@ fn receiver_is_self(lines: &[&str], idx: usize) -> bool {
             }
             // "remove("
             if w[j..].starts_with(b"remove(") {
-                return true;
+                return Some(String::from_utf8_lossy(&w[id_start..id_end]).into_owned());
             }
             i += 4;
         } else {
             i += 1;
         }
     }
-    false
+    None
 }
 
 /// # Errors
@@ -345,6 +357,23 @@ fn receiver_is_self(lines: &[&str], idx: usize) -> bool {
 /// Named so the scan offset and the name offset cannot disagree: the loop
 /// slices at this string, so the name is exactly this far in.
 const FN_KEYWORD: &str = "fn ";
+
+fn verdict(checked_fns: usize, problems: &[String]) -> Result<(), String> {
+    if checked_fns == 0 {
+        return Err(String::from(
+            "gate found no Result-returning fn that removes from a collection - \
+             wrong root, or the pattern changed shape.",
+        ));
+    }
+    if !problems.is_empty() {
+        let mut msg = String::new();
+        for p in problems {
+            writeln!(msg, "FAIL: {p}").expect("writing to a String cannot fail");
+        }
+        return Err(msg);
+    }
+    Ok(())
+}
 
 pub fn run(root: &Path) -> Result<String, String> {
     let files = collect_files(root)?;
@@ -390,7 +419,7 @@ pub fn run(root: &Path) -> Result<String, String> {
                 .filter(|(i, l)| {
                     !l.trim_start().starts_with("//")
                         && l.contains(".remove(")
-                        && receiver_is_self(&lines, *i)
+                        && self_receiver(&lines, *i).is_some()
                 })
                 .map(|(i, _)| i)
                 .collect();
@@ -401,6 +430,8 @@ pub fn run(root: &Path) -> Result<String, String> {
             }
             checked_fns += 1;
             let first_remove = removes[0];
+            let receiver = self_receiver(&lines, first_remove).unwrap_or_default();
+            let restore = format!("{receiver}.insert(");
             let later_err: Vec<usize> = lines
                 .iter()
                 .enumerate()
@@ -413,7 +444,7 @@ pub fn run(root: &Path) -> Result<String, String> {
                 .collect();
             let guarded = |err_line: usize| -> bool {
                 (first_remove + 1..err_line).any(|i| {
-                    !lines[i].trim_start().starts_with("//") && lines[i].contains(".insert(")
+                    !lines[i].trim_start().starts_with("//") && lines[i].contains(&restore)
                 })
             };
             let unguarded: Vec<usize> =
@@ -441,19 +472,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         }
     }
 
-    if checked_fns == 0 {
-        return Err(String::from(
-            "gate found no Result-returning fn that removes from a collection - \
-             wrong root, or the pattern changed shape.",
-        ));
-    }
-    if !problems.is_empty() {
-        let mut msg = String::new();
-        for p in problems {
-            writeln!(msg, "FAIL: {p}").expect("writing to a String cannot fail");
-        }
-        return Err(msg);
-    }
+    verdict(checked_fns, &problems)?;
     Ok(format!(
         "partial-write gate OK: {checked_fns} Result-returning fns remove from a \
          collection, each deciding its refusals first, restoring on failure, or \
@@ -468,7 +487,8 @@ pub fn self_test() -> Result<String, String> {
     let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-refusals")?;
     let _ = std::fs::create_dir_all(dir.join("src"));
     let _ = std::fs::create_dir_all(dir.join("budzero"));
-    let _ = std::fs::create_dir_all(dir.join("wallet-core"));
+    let _ = std::fs::create_dir_all(dir.join("crates/demo/src"));
+    let _ = std::fs::create_dir_all(dir.join("bud/src"));
 
     // Good: refusal before remove, or insert after.
     let good = "fn f(&mut self) -> Result<(), E> {\n    if !self.valid() { return Err(E::X); }\n    self.m.remove(&k);\n    Ok(())\n}\nfn g(&mut self) -> Result<(), E> {\n    let v = self.m.remove(&k)?;\n    let r = do_work()?;\n    self.m.insert(k, v);\n    Ok(())\n}\n";
@@ -485,6 +505,20 @@ pub fn self_test() -> Result<String, String> {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from("canary: Err after remove passed"));
     }
+
+    // A partial write under a standalone crate or the bud tree is scanned
+    // like one under src.
+    std::fs::write(dir.join("src/lib.rs"), good).map_err(|e| e.to_string())?;
+    for rel in ["crates/demo/src/lib.rs", "bud/src/lib.rs"] {
+        std::fs::write(dir.join(rel), bad).map_err(|e| e.to_string())?;
+        let missed = run(&dir).is_ok();
+        let _ = std::fs::remove_file(dir.join(rel));
+        if missed {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(format!("canary: a partial write in {rel} was not scanned"));
+        }
+    }
+    std::fs::write(dir.join("src/lib.rs"), good).map_err(|e| e.to_string())?;
 
     // A test module is not production code, whatever it does to its own
     // maps. The strip used to leave the tail of every `#[cfg(test)] mod`
@@ -517,6 +551,32 @@ pub fn self_test() -> Result<String, String> {
         return Err(String::from(
             "canary: a brace inside a string literal ended the test-module strip early",
         ));
+    }
+
+    // A bodiless test module declaration must not swallow the next block:
+    // the production function after it is still scanned.
+    let declared = format!("#[cfg(test)]\npub mod tests;\n{bad}");
+    std::fs::write(dir.join("src/lib.rs"), declared).map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a bodiless test module declaration hid the function after it",
+        ));
+    }
+
+    // An insert into another collection is not a restore, and a path
+    // qualified `Result` return is still a refusal.
+    let other = "fn f(&mut self) -> Result<(), E> {\n    self.m.remove(&k);\n    self.log.insert(k, 1);\n    if !self.valid() { return Err(E::X); }\n    Ok(())\n}\n";
+    let qualified = "fn f(&mut self) -> io::Result<()> {\n    self.m.remove(&k);\n    if !self.valid() { return Err(E::X); }\n    Ok(())\n}\n";
+    for (label, body) in [
+        ("another collection", other),
+        ("qualified Result", qualified),
+    ] {
+        std::fs::write(dir.join("src/lib.rs"), body).map_err(|e| e.to_string())?;
+        if run(&dir).is_ok() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(format!("canary: {label} hid a partial write"));
+        }
     }
 
     let _ = std::fs::remove_dir_all(&dir);

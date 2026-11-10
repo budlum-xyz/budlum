@@ -1,12 +1,12 @@
-//! Budlum L1 CLI - send transactions, query state, validator guidance.
+//! Budlum CLI - send transactions, query state, validator guidance.
 //!
-//! This binary talks to the L1 core (`budlum_core`):
+//! This binary talks to the Universal Settlement Layer core (`budlum_core`):
 //! build and send a signed transaction (`tx send`), read-only queries
 //! (`query balance`/`query block`/`query status`), and guidance for running
 //! a validator (`validator run`).
 //!
 //! The BudZKVM toolchain (`budzero/bud-cli`) is a separate workspace; this binary
-//! is for L1 chain interaction and uses the core types directly.
+//! is for chain interaction and uses the core types directly.
 //!
 //! # Design
 //! - JSON-RPC transport: a hand-written minimal HTTP/1.1 POST over a std
@@ -35,7 +35,7 @@ const MAX_RPC_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
     name = "bud",
     author,
     version,
-    about = "Budlum L1 CLI - send txs, query state, validator guidance"
+    about = "Budlum CLI - send txs, query state, validator guidance"
 )]
 struct Cli {
     /// The node's JSON-RPC endpoint.
@@ -122,6 +122,18 @@ enum TxAction {
         /// Transaction nonce (fetched from the node with `bud_getNonce` if omitted).
         #[arg(long)]
         nonce: Option<u64>,
+        /// The chain id this transfer is signed for: `45260` mainnet, `45261`
+        /// testnet, `45262` devnet.
+        ///
+        /// Required, and never taken from the node. The node's `bud_chainId`
+        /// answer is untrusted input; it is compared against this value and a
+        /// mismatch is refused before anything is signed. Without it the peer
+        /// chose the signature's replay domain: a seed controls the same
+        /// address on every network, so a hostile node could present itself as
+        /// another chain and submit the captured transfer there at a nonce it
+        /// also chose.
+        #[arg(long, required = true)]
+        chain_id: u64,
     },
 }
 
@@ -242,6 +254,7 @@ fn parse_address(s: &str) -> Result<Address, String> {
 /// `BUD_PRIV_KEY` environment variable, in that order, never from `argv`.
 fn load_priv_key(path: Option<&std::path::Path>) -> Result<String, String> {
     if let Some(path) = path {
+        check_key_file_mode(path)?;
         return std::fs::read_to_string(path)
             .map(|s| s.trim().to_string())
             .map_err(|e| format!("cannot read priv key file {}: {e}", path.display()));
@@ -252,6 +265,31 @@ fn load_priv_key(path: Option<&std::path::Path>) -> Result<String, String> {
              (the seed is not accepted as a command-line argument)",
         )
     })
+}
+
+/// Refuse a seed file that group or others can read (Unix only).
+///
+/// A world-readable seed file is a leaked key; the user must `chmod 600` it.
+#[cfg(unix)]
+fn check_key_file_mode(path: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = std::fs::metadata(path)
+        .map_err(|e| format!("cannot read priv key file {}: {e}", path.display()))?;
+    let mode = meta.permissions().mode();
+    if mode & 0o077 != 0 {
+        return Err(format!(
+            "priv key file {} has mode {:03o}; group and others must have no access \
+             (chmod 600)",
+            path.display(),
+            mode & 0o777
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn check_key_file_mode(_path: &std::path::Path) -> Result<(), String> {
+    Ok(())
 }
 
 fn parse_seed(hex_str: &str) -> Result<[u8; 32], String> {
@@ -275,6 +313,43 @@ fn parse_rpc_u64(value: &serde_json::Value, field: &str) -> Result<u64, String> 
     }
 }
 
+/// Build an unsigned transfer bound to `chain_id`.
+fn build_transfer(
+    from: Address,
+    to: Address,
+    amount: u64,
+    fee: u64,
+    nonce: u64,
+    chain_id: u64,
+) -> Transaction {
+    Transaction::new_with_chain_id(
+        from,
+        to,
+        amount,
+        fee,
+        nonce,
+        Vec::new(),
+        chain_id,
+        TransactionType::Transfer,
+    )
+}
+
+/// Refuse to sign for a network other than the one the user named.
+///
+/// `bud tx send` signs a transfer whose replay domain is the chain id inside
+/// it. Taking that id from the node let the node pick the network the
+/// signature would be valid on; the id the user typed is the only trusted
+/// source, so the node's answer can only agree or be refused.
+fn chain_id_must_match(node_chain_id: u64, requested_chain_id: u64) -> Result<(), String> {
+    if node_chain_id == requested_chain_id {
+        return Ok(());
+    }
+    Err(format!(
+        "the node serves chain id {node_chain_id}, but --chain-id {requested_chain_id} was \
+         requested; refusing to sign for a network you did not name"
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_tx_send(
     rpc_url: &str,
@@ -283,6 +358,7 @@ fn run_tx_send(
     priv_key_file: Option<&std::path::Path>,
     fee: u64,
     nonce: Option<u64>,
+    requested_chain_id: u64,
 ) -> Result<(), String> {
     let seed = parse_seed(&load_priv_key(priv_key_file)?)?;
     let keypair = KeyPair::from_seed(&seed).map_err(|e| format!("key derivation: {e}"))?;
@@ -300,11 +376,18 @@ fn run_tx_send(
         }
     };
 
+    // The node's answer is untrusted input: a hostile peer, or anyone on the
+    // plaintext path to it, would otherwise put its own replay domain inside
+    // the signature. It is checked against the chain id the user named, and a
+    // mismatch is refused before anything is signed.
+    let chain_id_value = rpc_call(rpc_url, "bud_chainId", serde_json::json!([]))?;
+    let node_chain_id = parse_rpc_u64(&chain_id_value, "bud_chainId")?;
+    chain_id_must_match(node_chain_id, requested_chain_id)?;
+    let chain_id = requested_chain_id;
+    println!("chain id: {chain_id} (node serves {node_chain_id})");
+
     // Build and sign the transaction.
-    let mut tx = Transaction::new(from, to_addr, amount, Vec::new());
-    tx.fee = fee;
-    tx.nonce = nonce;
-    tx.tx_type = TransactionType::Transfer;
+    let mut tx = build_transfer(from, to_addr, amount, fee, nonce, chain_id);
     tx.sign(&keypair);
 
     let tx_hash = tx.calculate_hash();
@@ -474,6 +557,7 @@ fn main() {
                 priv_key_file,
                 fee,
                 nonce,
+                chain_id,
             } => run_tx_send(
                 &cli.rpc_url,
                 to,
@@ -481,6 +565,7 @@ fn main() {
                 priv_key_file.as_deref(),
                 *fee,
                 *nonce,
+                *chain_id,
             ),
         },
         Command::Query { action } => match action {
@@ -509,6 +594,71 @@ fn main() {
 mod tests {
     use super::*;
 
+    /// BLG-1093: the CLI help names the product by its approved name, not
+    /// by the banned layer-one term.
+    #[test]
+    fn cli_help_does_not_use_the_layer_one_term() {
+        use clap::CommandFactory;
+        let help = Cli::command().render_long_help().to_string();
+        let banned = ["L", "1"].concat();
+        assert!(
+            !help
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .any(|w| w == banned),
+            "help text uses the banned term: {help}"
+        );
+        // BLG-0099 (P04-F17): the ban covers every surface the CLI PRINTS -
+        // long help, short help and the subcommand helps - instead of
+        // scanning the source file as text.
+        let short = Cli::command().render_help().to_string();
+        assert!(!short.contains(&banned), "short help uses the banned term");
+        for sub in Cli::command().get_subcommands() {
+            let sub_help = sub.clone().render_help().to_string();
+            assert!(
+                !sub_help.contains(&banned),
+                "subcommand help uses the banned term: {sub_help}"
+            );
+        }
+    }
+
+    /// The node may not choose the signature's replay domain: the chain id the
+    /// user named is the only one this CLI signs for.
+    #[test]
+    fn a_node_serving_another_chain_refuses_to_sign() {
+        assert!(chain_id_must_match(45262, 45262).is_ok());
+        let err = chain_id_must_match(45260, 45262)
+            .expect_err("a node on another network must not receive a signature");
+        assert!(
+            err.contains("refusing to sign for a network you did not name"),
+            "{err}"
+        );
+        assert!(err.contains("45260") && err.contains("45262"), "{err}");
+    }
+
+    /// The flag is required: a run that names no network cannot be signed for
+    /// one the node picked.
+    #[test]
+    fn tx_send_requires_an_explicit_chain_id() {
+        use clap::CommandFactory;
+        let cli = Cli::command();
+        let tx = cli
+            .get_subcommands()
+            .find(|sub| sub.get_name() == "tx")
+            .expect("tx subcommand");
+        let send = tx
+            .get_subcommands()
+            .find(|sub| sub.get_name() == "send")
+            .expect("tx send subcommand");
+        let chain_id = send
+            .get_arguments()
+            .find(|arg| arg.get_id() == "chain_id")
+            .expect("--chain-id is an argument of tx send");
+        assert!(
+            chain_id.is_required_set(),
+            "--chain-id must be required, or the node chooses the replay domain"
+        );
+    }
+
     #[test]
     fn parse_rpc_u64_accepts_hex_and_decimal() {
         assert_eq!(
@@ -526,6 +676,32 @@ mod tests {
         let (host, port) = parse_rpc_url("http://127.0.0.1").unwrap();
         assert_eq!(host, "127.0.0.1");
         assert_eq!(port, 8545);
+    }
+
+    /// A seed file readable by group or others is refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_world_readable_key_file_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("bud-key-mode-{}", std::process::id()));
+        std::fs::write(&path, "00").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let err = check_key_file_mode(&path).expect_err("mode 644 must be refused");
+        assert!(err.contains("chmod 600"), "{err}");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(check_key_file_mode(&path).is_ok());
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The transfer carries the chain id it was given, not the devnet default.
+    #[test]
+    fn a_transfer_is_bound_to_the_given_chain_id() {
+        let from = Address::zero();
+        let tx = build_transfer(from, from, 1, 2, 3, 45260);
+        assert_eq!(tx.chain_id, 45260);
+        assert_eq!(tx.fee, 2);
+        assert_eq!(tx.nonce, 3);
+        assert_eq!(tx.tx_type, TransactionType::Transfer);
     }
 
     const SOURCE_HASH: &str = "0909090909090909090909090909090909090909090909090909090909090909";

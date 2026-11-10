@@ -262,8 +262,8 @@ fn has_manifest_call(region: &str, method: &str) -> bool {
     false
 }
 
-/// The `ChainCommand::RegisterStorageManifest { ... } =>` match arm, plus the
-/// 2000 characters after its start.
+/// The `ChainCommand::RegisterStorageManifest { ... } =>` match arm body when
+/// it is a block, else the 2000 characters after its start.
 fn register_handler_region(actor_code: &str) -> Option<String> {
     let needle = "ChainCommand::RegisterStorageManifest";
     let mut from = 0usize;
@@ -279,47 +279,30 @@ fn register_handler_region(actor_code: &str) -> Option<String> {
             from = abs + 1;
             continue;
         };
-        if skip_py_ws(&rest[close + 1..]).starts_with("=>") {
+        let after_arrow = skip_py_ws(&rest[close + 1..]);
+        if let Some(body) = after_arrow.strip_prefix("=>") {
+            let body = skip_py_ws(body);
+            if body.starts_with('{') {
+                let mut depth = 0usize;
+                for (i, c) in body.char_indices() {
+                    match c {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return Some(body[..=i].to_string());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
             let region: String = actor_code[abs..].chars().take(2000).collect();
             return Some(region);
         }
         from = abs + 1;
     }
     None
-}
-
-/// `#[test]\s*(?:#\[[^\]]*\]\s*)*fn\s+TEST\s*\(` in the raw source.
-fn has_test_fn(src: &str, test: &str) -> bool {
-    let mut from = 0usize;
-    while let Some(pos) = src[from..].find("#[test]") {
-        let abs = from + pos;
-        let mut rest = &src[abs + "#[test]".len()..];
-        rest = skip_py_ws(rest);
-        while rest.starts_with("#[") {
-            let Some(close) = rest.find(']') else {
-                break;
-            };
-            rest = skip_py_ws(&rest[close + 1..]);
-        }
-        let Some(after_fn) = rest.strip_prefix("fn") else {
-            from = abs + 1;
-            continue;
-        };
-        if after_fn.len() == skip_py_ws(after_fn).len() {
-            from = abs + 1;
-            continue; // `\s+` after `fn` is required
-        }
-        let after_fn = skip_py_ws(after_fn);
-        let Some(tail) = after_fn.strip_prefix(test) else {
-            from = abs + 1;
-            continue;
-        };
-        if skip_py_ws(tail).starts_with('(') {
-            return true;
-        }
-        from = abs + 1;
-    }
-    false
 }
 
 fn check_strong(vu: Option<&str>, problems: &mut Vec<String>, checked: &mut usize) {
@@ -379,7 +362,7 @@ fn check_regressions(deal_src: &str, problems: &mut Vec<String>, checked: &mut u
     // The regressions must exist as real tests.
     *checked += 1;
     for test in REGRESSION_TESTS {
-        if !has_test_fn(deal_src, test) {
+        if !crate::gates::rust_literals::has_live_test(deal_src, test) {
             problems.push(format!(
                 "required regression test `{test}` is missing or is not a `#[test]`."
             ));
@@ -517,12 +500,17 @@ fn check_fixture(
             "manifest.verify_id()?;"
         };
         let mut tests = String::new();
-        if tests_mode == "present" {
+        if tests_mode == "present" || tests_mode == "ignored" {
+            let attr = if tests_mode == "ignored" {
+                format!("#[test]\n#[{}]", "ignore")
+            } else {
+                String::from("#[test]")
+            };
             for name in [
                 "a_deal_open_refuses_a_manifest_claiming_parity_it_does_not_have",
                 "a_deal_open_still_accepts_a_coherent_manifest",
             ] {
-                let _ = writeln!(tests, "#[test]\nfn {name}() {{}}");
+                let _ = writeln!(tests, "{attr}\nfn {name}() {{}}");
             }
         }
         (
@@ -629,7 +617,30 @@ pub fn self_test() -> Result<String, String> {
         "a door whose only validate_untrusted evidence is inside a string or comment",
     )?;
 
+    // 8. An ignored regression test is not a regression test.
+    check_fixture(
+        "strong",
+        "strong",
+        "ignored",
+        false,
+        false,
+        "a regression test marked ignored",
+    )?;
+
     Ok(String::from(
-        "untrusted manifest gate self-test OK: 7 canaries",
+        "untrusted manifest gate self-test OK: 8 canaries",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_handler_region_stops_at_the_end_of_its_arm() {
+        let code = "match c {\n    ChainCommand::RegisterStorageManifest { manifest, response } => {\n        store(manifest);\n    }\n    ChainCommand::Other { m } => {\n        m.validate_untrusted();\n    }\n}\n";
+        let region = register_handler_region(code).expect("arm found");
+        assert!(!region.contains("validate_untrusted"));
+        assert!(region.contains("store(manifest)"));
+    }
 }

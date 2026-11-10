@@ -299,10 +299,7 @@ fn scan_items(
                 {
                     continue;
                 }
-                let Fields::Named(named) = &s.fields else {
-                    continue;
-                };
-                for field in &named.named {
+                for field in &s.fields {
                     if field_is_handled(&field.attrs) {
                         continue;
                     }
@@ -374,6 +371,7 @@ fn scan_tree(root: &Path) -> Scan {
             .to_string_lossy()
             .replace('\\', "/");
         let Ok(text) = fs::read_to_string(&path) else {
+            scan.unparsed.push(rel);
             continue;
         };
         scan.files += 1;
@@ -684,5 +682,22 @@ pub fn self_test() -> Result<String, String> {
             "serialize-map-keys-are-strings self-test FAILED:\n  {}",
             failures.join("\n  ")
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tuple_struct_map_with_a_binary_key_is_found() {
+        let ast = syn::parse_file(
+            "#[derive(Serialize)]\nstruct T(std::collections::BTreeMap<[u8; 32], u64>);\n",
+        )
+        .expect("fixture parses");
+        let mut out = Vec::new();
+        let seen = scan_items(&ast.items, "x.rs", &[], &mut out);
+        assert_eq!(seen, 1);
+        assert_eq!(out.len(), 1);
     }
 }

@@ -66,7 +66,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::cold_quorum::{verify_quorum, DeviceSignature, QuorumError, SignerIdentity};
+use super::cold_quorum::{verify_quorum, DeviceSignature, QuorumError};
 
 /// The rotation log is an audit trail, not an append-only denial-of-service
 /// surface. Once this many entries exist the oldest entry is evicted; the
@@ -91,6 +91,10 @@ pub struct ColdWalletPolicy {
     /// consecutive heights; a larger number means the cold side will not be
     /// asked to sign on every block.
     pub min_height_advance: u64,
+    /// Block span of one settlement budget epoch (`height / epoch_length_blocks`).
+    /// Pinned on the cold policy so a compromised online host cannot reset the
+    /// cumulative epoch budget by incrementing `request.epoch` at arbitrary heights.
+    pub epoch_length_blocks: u64,
     /// How many cold devices must agree before a payload is released for
     /// signing.
     pub required_quorum: u32,
@@ -121,6 +125,9 @@ impl ColdWalletPolicy {
         if self.max_value_per_settlement_atoms > self.max_value_per_epoch_atoms {
             return Err("settlement-ceiling-above-epoch-budget");
         }
+        if self.epoch_length_blocks == 0 {
+            return Err("epoch-length-zero");
+        }
         if self.device_count == 0 {
             return Err("device-count-zero");
         }
@@ -131,6 +138,12 @@ impl ColdWalletPolicy {
             return Err("quorum-above-device-count");
         }
         Ok(())
+    }
+
+    /// Canonical budget epoch derived from block `height` under this policy.
+    #[must_use]
+    pub fn epoch_for_height(&self, height: u64) -> u64 {
+        height / self.epoch_length_blocks.max(1)
     }
 }
 
@@ -145,6 +158,7 @@ impl Default for ColdWalletPolicy {
             max_value_per_settlement_atoms: 0,
             max_value_per_epoch_atoms: 0,
             min_height_advance: 1,
+            epoch_length_blocks: 100,
             required_quorum: 2,
             device_count: 3,
             refusal_history_capacity: 64,
@@ -224,6 +238,15 @@ pub enum ColdRefusal {
         last_signed: u64,
         requested: u64,
     },
+    EpochMismatch {
+        height: u64,
+        expected: u64,
+        requested: u64,
+    },
+    BudgetEpochNotAdvanced {
+        active_epoch: u64,
+        requested: u64,
+    },
     NonceZero,
     HeightAdvanceTooSmall {
         required: u64,
@@ -249,6 +272,8 @@ impl ColdRefusal {
             Self::QuorumNotReached { .. } => "quorum-not-reached",
             Self::QuorumExceedsDeviceCount { .. } => "quorum-exceeds-device-count",
             Self::EpochRolledBack { .. } => "epoch-rolled-back",
+            Self::EpochMismatch { .. } => "epoch-mismatch",
+            Self::BudgetEpochNotAdvanced { .. } => "budget-epoch-not-advanced",
             Self::NonceZero => "nonce-zero",
             Self::HeightAdvanceTooSmall { .. } => "height-advance-too-small",
         }
@@ -307,6 +332,11 @@ pub struct ColdWalletState {
     /// device that has signed nothing since it was installed is a cold device
     /// nobody is using, and that is an operational fact worth seeing.
     pub signed_count: u64,
+    /// S2 (P03-F05 follow-up): the committee this wallet trusts, stored in
+    /// state. Verification used to take the identity set from the caller,
+    /// so any caller could present its own identities and pass the quorum.
+    #[serde(default)]
+    pub trusted_devices: Vec<super::cold_quorum::SignerIdentity>,
 }
 
 /// The result of a settlement cleared by both gates: the cryptographic quorum
@@ -385,7 +415,24 @@ impl ColdWalletState {
             rotations: Vec::new(),
             refusals: Vec::new(),
             signed_count: 0,
+            trusted_devices: Vec::new(),
         }
+    }
+
+    /// S2: pin the trusted committee at installation. A wallet without a
+    /// pinned committee refuses every quorum (fail closed).
+    ///
+    /// WIRING: the installation door for the dormant cold-wallet path named
+    /// in the module header; a restored wallet gets its committee back with
+    /// the persisted state instead, which is why nothing in-tree calls this
+    /// outside tests yet.
+    #[must_use]
+    pub fn with_trusted_devices(
+        mut self,
+        devices: Vec<super::cold_quorum::SignerIdentity>,
+    ) -> Self {
+        self.trusted_devices = devices;
+        self
     }
 
     /// Validate state restored from storage before it is allowed to sign.
@@ -408,13 +455,20 @@ impl ColdWalletState {
         if self.signed_count == 0
             && (self.last_signed_height != 0
                 || self.last_signed_nonce != 0
-                || self.epoch_spent_atoms != 0
-                || self.budget_epoch != 0)
+                || self.epoch_spent_atoms != 0)
         {
             return Err("counters-without-a-signed-settlement");
         }
         if self.epoch_spent_atoms > self.policy.max_value_per_epoch_atoms {
             return Err("epoch-spent-above-budget");
+        }
+        if self.signed_count > 0 {
+            let last_epoch = self.policy.epoch_for_height(self.last_signed_height);
+            if self.budget_epoch < last_epoch
+                || (self.budget_epoch > last_epoch && self.epoch_spent_atoms != 0)
+            {
+                return Err("budget-epoch-height-mismatch");
+            }
         }
         let mut previous = 0u32;
         for rotation in &self.rotations {
@@ -482,7 +536,11 @@ impl ColdWalletState {
     /// # Errors
     ///
     /// The first [`ColdRefusal`] that applies.
-    pub fn sign(
+    ///
+    /// BLG-0071 (P03-F14): module-private on purpose. The unauthenticated
+    /// path may only be reached through [`Self::sign_with_quorum`], which has
+    /// verified the device quorum before any budget or counter moves.
+    fn sign(
         &mut self,
         request: &SettlementRequest,
         presented_key_epoch: u32,
@@ -495,7 +553,8 @@ impl ColdWalletState {
                 // Compute every next value before mutating any field. This is
                 // important for a restored or hand-edited state: a late
                 // arithmetic refusal must not partially advance the epoch.
-                let next_spent = if request.epoch != self.budget_epoch {
+                let height_epoch = self.policy.epoch_for_height(request.height);
+                let next_spent = if self.signed_count == 0 {
                     request.value_atoms
                 } else {
                     match self.epoch_spent_atoms.checked_add(request.value_atoms) {
@@ -523,7 +582,7 @@ impl ColdWalletState {
                 };
                 self.last_signed_height = request.height;
                 self.last_signed_nonce = request.nonce;
-                self.budget_epoch = request.epoch;
+                self.budget_epoch = height_epoch;
                 self.epoch_spent_atoms = next_spent;
                 self.signed_count = next_count;
                 Ok(payload)
@@ -617,6 +676,20 @@ impl ColdWalletState {
                 requested: request.epoch,
             });
         }
+        let height_epoch = self.policy.epoch_for_height(request.height);
+        if request.epoch != height_epoch {
+            return Err(ColdRefusal::EpochMismatch {
+                height: request.height,
+                expected: height_epoch,
+                requested: request.epoch,
+            });
+        }
+        if (self.signed_count > 0 || self.budget_epoch > 0) && height_epoch > self.budget_epoch {
+            return Err(ColdRefusal::BudgetEpochNotAdvanced {
+                active_epoch: self.budget_epoch,
+                requested: height_epoch,
+            });
+        }
         if request.nonce == 0 {
             return Err(ColdRefusal::NonceZero);
         }
@@ -632,7 +705,7 @@ impl ColdWalletState {
                 requested: request.value_atoms,
             });
         }
-        let spent_before = if request.epoch == self.budget_epoch {
+        let spent_before = if self.signed_count > 0 && height_epoch == self.budget_epoch {
             self.epoch_spent_atoms
         } else {
             0
@@ -682,7 +755,7 @@ impl ColdWalletState {
     /// this device's counters, budget and refusal history untouched - a forged
     /// quorum must cost the cold side nothing, and a refusal entry written for
     /// a request that presented no valid signature would drink history capacity
-    /// the attacker controls. Once the signatures are proven, [`Self::sign`]
+    /// the attacker controls. Once the signatures are proven, `Self::sign`
     /// runs all eight policy rules and its counters as usual, with the proven
     /// signer count standing in for the presented one.
     ///
@@ -700,25 +773,39 @@ impl ColdWalletState {
         &mut self,
         request: &SettlementRequest,
         presented_key_epoch: u32,
-        identities: &[SignerIdentity],
         signatures: &[DeviceSignature],
     ) -> Result<VerifiedSettlement, ColdSettleError> {
+        // S2: the identity set is state, not caller input.
+        if self.trusted_devices.len() != self.policy.device_count as usize {
+            return Err(ColdSettleError::Quorum(
+                QuorumError::IdentitySetSizeMismatch {
+                    device_count: self.policy.device_count,
+                    presented: self.trusted_devices.len(),
+                },
+            ));
+        }
+        let identities = self.trusted_devices.clone();
         let payload = Self::payload_for(request, self.key_epoch);
         // The epoch pinned into the payload is this device's own epoch; the
         // epoch the request *claims* to target is checked inside `sign`. The
         // quorum gate however must refuse signatures pinned to any other
         // epoch right here, before the policy layer even looks at the request.
         if presented_key_epoch != self.key_epoch {
-            // Reuse the policy layer's refusal path so rotation boundaries
-            // stay recorded in the refusal history.
-            return match self.sign(request, presented_key_epoch, 0) {
-                Ok(_) => unreachable!("mismatched key epoch cannot pass check"),
+            // BLG-0072 (P03-F15): no signature has been checked yet, so this
+            // refusal must NOT enter the bounded refusal history - an
+            // unsigned caller could otherwise push real refusals out of it.
+            // `check` decides without recording; only the authenticated path
+            // below may append to the log.
+            return match self.check(request, presented_key_epoch, 0) {
                 Err(refusal) => Err(ColdSettleError::Policy(refusal)),
+                Ok(()) => Err(ColdSettleError::Policy(ColdRefusal::InvalidState {
+                    rule: "mismatched key epoch cannot pass check".to_string(),
+                })),
             };
         }
         let signer_ids = verify_quorum(
             &self.policy,
-            identities,
+            &identities,
             &payload,
             self.key_epoch,
             signatures,
@@ -739,7 +826,15 @@ impl ColdWalletState {
     /// a rotation that cannot be tied to a point in the chain cannot be audited.
     /// WIRING: unwired - key rotation is an operator action on the same
     /// dormant cold-wallet path; refusal rules are pinned by this file's tests.
-    pub fn rotate_key(&mut self, at_height: u64, reason: &str) -> Result<u32, RotationError> {
+    ///
+    /// BLG-0071 (P03-F14): crate-visible only, like [`Self::sign`] is
+    /// module-visible. The sole caller is the committee-gated rotation in
+    /// `pq_anchor`; an unauthenticated caller must not bump the key epoch.
+    pub(crate) fn rotate_key(
+        &mut self,
+        at_height: u64,
+        reason: &str,
+    ) -> Result<u32, RotationError> {
         if reason.is_empty() {
             return Err(RotationError::EmptyReason);
         }
@@ -775,14 +870,35 @@ impl ColdWalletState {
     /// has left; if a real consumer appears, this note converts to a named
     /// wiring target. Until then the view is pinned by tests only.
     pub fn budget_remaining(&self, epoch: u64) -> u128 {
-        let spent = if epoch < self.budget_epoch {
+        if self.signed_count > 0 && epoch < self.budget_epoch {
             return 0;
-        } else if epoch == self.budget_epoch {
+        }
+        let spent = if self.signed_count > 0 && epoch == self.budget_epoch {
             self.epoch_spent_atoms
         } else {
             0
         };
         self.policy.max_value_per_epoch_atoms.saturating_sub(spent)
+    }
+
+    /// WIRING: operator-side cold ceremony door called after verifying an
+    /// out-of-band finalized header at or above `next_epoch`.
+    /// Convenience: kept for the CLI
+    pub fn advance_budget_epoch(&mut self, next_epoch: u64) -> Result<u64, ColdRefusal> {
+        if let Err(rule) = self.validate() {
+            return Err(ColdRefusal::InvalidState {
+                rule: rule.to_string(),
+            });
+        }
+        if next_epoch <= self.budget_epoch {
+            return Err(ColdRefusal::EpochRolledBack {
+                last_signed: self.budget_epoch,
+                requested: next_epoch,
+            });
+        }
+        self.budget_epoch = next_epoch;
+        self.epoch_spent_atoms = 0;
+        Ok(self.budget_epoch)
     }
 }
 
@@ -790,12 +906,22 @@ impl ColdWalletState {
 mod tests {
     use super::*;
 
+    /// The six fixture devices as the trusted set a wallet is pinned to
+    /// (BLG-0062-S2).
+    fn quorum_identities() -> Vec<crate::settlement::cold_quorum::SignerIdentity> {
+        crate::settlement::cold_quorum::dev_fixture_device_signers()
+            .iter()
+            .map(|d| d.identity.clone())
+            .collect()
+    }
+
     fn policy() -> ColdWalletPolicy {
         ColdWalletPolicy {
             chain_id: 7,
             max_value_per_settlement_atoms: 1000,
             max_value_per_epoch_atoms: 3000,
             min_height_advance: 1,
+            epoch_length_blocks: 100,
             required_quorum: 2,
             device_count: 3,
             refusal_history_capacity: 4,
@@ -806,7 +932,7 @@ mod tests {
         SettlementRequest {
             chain_id: 7,
             height,
-            epoch: 1,
+            epoch: height / 100,
             global_root: [height as u8; 32],
             value_atoms: value,
             nonce,
@@ -818,7 +944,8 @@ mod tests {
         let mut cold = ColdWalletState::new(ColdWalletPolicy {
             required_quorum: 0,
             ..policy()
-        });
+        })
+        .with_trusted_devices(quorum_identities());
         let err = cold.sign(&request(10, 1, 500), 1, 0).unwrap_err();
         assert!(matches!(err, ColdRefusal::InvalidPolicy { .. }));
         assert_eq!(cold.signed_count, 0);
@@ -826,7 +953,7 @@ mod tests {
 
     #[test]
     fn a_first_settlement_signs_and_advances_everything() {
-        let mut cold = ColdWalletState::new(policy());
+        let mut cold = ColdWalletState::new(policy()).with_trusted_devices(quorum_identities());
         let payload = cold.sign(&request(10, 1, 500), 1, 2).expect("must sign");
         assert!(payload.starts_with(b"USL-COLD-SETTLEMENT-V1"));
         assert_eq!(cold.last_signed_height, 10);
@@ -839,7 +966,7 @@ mod tests {
     #[test]
     fn a_request_for_another_chain_is_refused() {
         // Without this a testnet signature verifies on mainnet.
-        let mut cold = ColdWalletState::new(policy());
+        let mut cold = ColdWalletState::new(policy()).with_trusted_devices(quorum_identities());
         let mut other = request(10, 1, 500);
         other.chain_id = 8;
         let err = cold.sign(&other, 1, 2).unwrap_err();
@@ -882,7 +1009,7 @@ mod tests {
     fn a_rotated_out_key_stops_signing_immediately() {
         // Rotating a leaked key has to actually stop the leak, not stop it at
         // some convenient moment.
-        let mut cold = ColdWalletState::new(policy());
+        let mut cold = ColdWalletState::new(policy()).with_trusted_devices(quorum_identities());
         let new_epoch = cold
             .rotate_key(100, "suspected leak")
             .expect("rotation must fit");
@@ -903,7 +1030,7 @@ mod tests {
 
     #[test]
     fn a_future_key_epoch_is_not_accepted_as_current() {
-        let mut cold = ColdWalletState::new(policy());
+        let mut cold = ColdWalletState::new(policy()).with_trusted_devices(quorum_identities());
         let err = cold.sign(&request(10, 1, 500), 2, 2).unwrap_err();
         assert_eq!(
             err,
@@ -917,7 +1044,7 @@ mod tests {
 
     #[test]
     fn a_single_device_cannot_sign_alone() {
-        let mut cold = ColdWalletState::new(policy());
+        let mut cold = ColdWalletState::new(policy()).with_trusted_devices(quorum_identities());
         let err = cold.sign(&request(10, 1, 500), 1, 1).unwrap_err();
         assert_eq!(
             err,
@@ -933,7 +1060,7 @@ mod tests {
     fn a_lower_height_is_a_rollback_and_is_refused() {
         // Signing an older settlement after a newer one is a rollback
         // signature: it re-attests a state the network has moved past.
-        let mut cold = ColdWalletState::new(policy());
+        let mut cold = ColdWalletState::new(policy()).with_trusted_devices(quorum_identities());
         cold.sign(&request(100, 1, 500), 1, 2).expect("sign 100");
         let err = cold.sign(&request(90, 2, 500), 1, 2).unwrap_err();
         assert_eq!(
@@ -949,7 +1076,7 @@ mod tests {
     fn a_second_settlement_for_the_same_height_is_refused_separately() {
         // Distinct from a rollback: the height is equal, not lower. A nonce that
         // keeps advancing does not make a double settlement legitimate.
-        let mut cold = ColdWalletState::new(policy());
+        let mut cold = ColdWalletState::new(policy()).with_trusted_devices(quorum_identities());
         cold.sign(&request(100, 1, 500), 1, 2).expect("sign 100");
         let err = cold.sign(&request(100, 2, 500), 1, 2).unwrap_err();
         assert_eq!(
@@ -961,7 +1088,7 @@ mod tests {
 
     #[test]
     fn a_replayed_nonce_is_refused_even_with_a_new_height() {
-        let mut cold = ColdWalletState::new(policy());
+        let mut cold = ColdWalletState::new(policy()).with_trusted_devices(quorum_identities());
         cold.sign(&request(10, 5, 500), 1, 2).expect("sign");
         let err = cold.sign(&request(20, 5, 500), 1, 2).unwrap_err();
         assert_eq!(
@@ -976,7 +1103,7 @@ mod tests {
 
     #[test]
     fn the_value_ceiling_is_the_cold_sides_own() {
-        let mut cold = ColdWalletState::new(policy());
+        let mut cold = ColdWalletState::new(policy()).with_trusted_devices(quorum_identities());
         let err = cold.sign(&request(10, 1, 1001), 1, 2).unwrap_err();
         assert_eq!(
             err,
@@ -995,12 +1122,12 @@ mod tests {
     fn the_epoch_budget_bounds_many_small_settlements() {
         // One large settlement is bounded by the per-settlement ceiling; a
         // thousand small ones are bounded by this.
-        let mut cold = ColdWalletState::new(policy());
+        let mut cold = ColdWalletState::new(policy()).with_trusted_devices(quorum_identities());
         cold.sign(&request(10, 1, 1000), 1, 2).expect("1st");
         cold.sign(&request(20, 2, 1000), 1, 2).expect("2nd");
         cold.sign(&request(30, 3, 1000), 1, 2)
             .expect("3rd fills the budget");
-        assert_eq!(cold.budget_remaining(1), 0);
+        assert_eq!(cold.budget_remaining(0), 0);
         let err = cold.sign(&request(40, 4, 1), 1, 2).unwrap_err();
         assert!(matches!(err, ColdRefusal::EpochBudgetExceeded { .. }));
     }
@@ -1010,34 +1137,66 @@ mod tests {
         // The epoch budget (3000) is filled in ceiling-sized steps: a single
         // 3000 request would trip the per-settlement ceiling (1000) first and
         // the test would measure the wrong refusal.
-        let mut cold = ColdWalletState::new(policy());
+        let mut cold = ColdWalletState::new(policy()).with_trusted_devices(quorum_identities());
         cold.sign(&request(10, 1, 1000), 1, 2).expect("1st");
         cold.sign(&request(20, 2, 1000), 1, 2).expect("2nd");
         cold.sign(&request(30, 3, 1000), 1, 2)
-            .expect("3rd fills epoch 1");
-        assert_eq!(cold.budget_remaining(1), 0);
+            .expect("3rd fills epoch 0");
+        assert_eq!(cold.budget_remaining(0), 0);
         assert_eq!(
-            cold.budget_remaining(2),
+            cold.budget_remaining(1),
             3000,
             "a new epoch has a fresh budget"
         );
-        let mut next = request(40, 4, 1000);
-        next.epoch = 2;
-        cold.sign(&next, 1, 2).expect("epoch 2 has its own budget");
-        assert_eq!(cold.budget_epoch, 2);
+        let next = request(100, 4, 1000);
+        assert_eq!(
+            cold.sign(&next, 1, 2).unwrap_err(),
+            ColdRefusal::BudgetEpochNotAdvanced {
+                active_epoch: 0,
+                requested: 1,
+            },
+            "online host height jump alone must not reset the cold budget"
+        );
+        cold.advance_budget_epoch(1)
+            .expect("cold operator advances epoch after verifying finalized header");
+        cold.sign(&next, 1, 2)
+            .expect("epoch 1 has its own budget after operator advances budget_epoch");
+        assert_eq!(cold.budget_epoch, 1);
         assert_eq!(cold.epoch_spent_atoms, 1000);
+    }
+
+    #[test]
+    fn a_forged_epoch_bump_within_the_same_height_window_cannot_reset_the_budget() {
+        let mut cold = ColdWalletState::new(policy()).with_trusted_devices(quorum_identities());
+        cold.sign(&request(10, 1, 1000), 1, 2).expect("1st");
+        cold.sign(&request(20, 2, 1000), 1, 2).expect("2nd");
+        cold.sign(&request(30, 3, 1000), 1, 2)
+            .expect("3rd fills epoch 0");
+        let mut forged = request(40, 4, 1000);
+        forged.epoch = 1;
+        let err = cold.sign(&forged, 1, 2).unwrap_err();
+        assert_eq!(
+            err,
+            ColdRefusal::EpochMismatch {
+                height: 40,
+                expected: 0,
+                requested: 1,
+            }
+        );
+        assert_eq!(cold.budget_epoch, 0);
+        assert_eq!(cold.epoch_spent_atoms, 3000);
     }
 
     #[test]
     fn an_old_epoch_cannot_reset_the_budget() {
         // Same fixture rule as above: the budget is filled under the
         // per-settlement ceiling, in three steps.
-        let mut cold = ColdWalletState::new(policy());
-        cold.sign(&request(10, 1, 1000), 1, 2).expect("1st");
-        cold.sign(&request(20, 2, 1000), 1, 2).expect("2nd");
-        cold.sign(&request(30, 3, 1000), 1, 2)
+        let mut cold = ColdWalletState::new(policy()).with_trusted_devices(quorum_identities());
+        cold.sign(&request(100, 1, 1000), 1, 2).expect("1st");
+        cold.sign(&request(110, 2, 1000), 1, 2).expect("2nd");
+        cold.sign(&request(120, 3, 1000), 1, 2)
             .expect("3rd fills epoch 1");
-        let mut old = request(40, 4, 1);
+        let mut old = request(130, 4, 1);
         old.epoch = 0;
         let err = cold.sign(&old, 1, 2).unwrap_err();
         assert_eq!(
@@ -1055,7 +1214,7 @@ mod tests {
     fn the_refusal_log_is_bounded() {
         // An unbounded refusal log is a way to fill a cold device's storage from
         // the network side - the one attack being offline is supposed to prevent.
-        let mut cold = ColdWalletState::new(policy());
+        let mut cold = ColdWalletState::new(policy()).with_trusted_devices(quorum_identities());
         for i in 0..20u64 {
             let mut bad = request(10, 1, 500);
             bad.chain_id = 99;
@@ -1072,7 +1231,7 @@ mod tests {
 
     #[test]
     fn a_refusal_leaves_the_device_untouched() {
-        let mut cold = ColdWalletState::new(policy());
+        let mut cold = ColdWalletState::new(policy()).with_trusted_devices(quorum_identities());
         cold.sign(&request(10, 1, 500), 1, 2).expect("sign");
         let before = cold.clone();
         let _ = cold.sign(&request(20, 1, 500), 1, 2);
@@ -1088,14 +1247,15 @@ mod tests {
         let mut cold = ColdWalletState::new(ColdWalletPolicy {
             refusal_history_capacity: 0,
             ..policy()
-        });
+        })
+        .with_trusted_devices(quorum_identities());
         let _ = cold.sign(&request(10, 1, 500), 1, 1);
         assert!(cold.refusals.is_empty());
     }
 
     #[test]
     fn rotation_reason_and_epoch_overflow_fail_closed() {
-        let mut cold = ColdWalletState::new(policy());
+        let mut cold = ColdWalletState::new(policy()).with_trusted_devices(quorum_identities());
         assert_eq!(
             cold.rotate_key(10, "").unwrap_err(),
             RotationError::EmptyReason
@@ -1120,7 +1280,7 @@ mod tests {
         // A replayed request that also exceeds the ceiling must be reported as a
         // replay: the operator needs to know somebody is trying again, not that
         // the amount was too big.
-        let mut cold = ColdWalletState::new(policy());
+        let mut cold = ColdWalletState::new(policy()).with_trusted_devices(quorum_identities());
         cold.sign(&request(10, 5, 500), 1, 2).expect("sign");
         let err = cold.sign(&request(20, 5, 99999), 1, 2).unwrap_err();
         assert!(
@@ -1134,7 +1294,8 @@ mod tests {
         let mut cold = ColdWalletState::new(ColdWalletPolicy {
             min_height_advance: 10,
             ..policy()
-        });
+        })
+        .with_trusted_devices(quorum_identities());
         cold.sign(&request(100, 1, 500), 1, 2).expect("sign");
         let err = cold.sign(&request(105, 2, 500), 1, 2).unwrap_err();
         assert_eq!(
@@ -1153,7 +1314,7 @@ mod tests {
         // The zero state must accept height 1. Comparing against a
         // `last_signed_height` of zero without guarding the "never signed" case
         // would make the first settlement on a fresh device look like a replay.
-        let mut cold = ColdWalletState::new(policy());
+        let mut cold = ColdWalletState::new(policy()).with_trusted_devices(quorum_identities());
         cold.sign(&request(1, 1, 100), 1, 2)
             .expect("a fresh device signs height 1");
         assert_eq!(cold.signed_count, 1);
@@ -1163,9 +1324,7 @@ mod tests {
 
     mod quorum_gate {
         use super::*;
-        use crate::settlement::cold_quorum::{
-            dev_fixture_device_signers, DeviceSignature, SignerIdentity,
-        };
+        use crate::settlement::cold_quorum::{dev_fixture_device_signers, DeviceSignature};
 
         fn quorum_policy() -> ColdWalletPolicy {
             ColdWalletPolicy {
@@ -1173,13 +1332,6 @@ mod tests {
                 device_count: 6,
                 ..policy()
             }
-        }
-
-        fn quorum_identities() -> Vec<SignerIdentity> {
-            dev_fixture_device_signers()
-                .iter()
-                .map(|d| d.identity.clone())
-                .collect()
         }
 
         fn signatures_for(
@@ -1196,11 +1348,12 @@ mod tests {
 
         #[test]
         fn a_valid_three_of_six_quorum_signs_and_counts_proven_devices() {
-            let mut cold = ColdWalletState::new(quorum_policy());
+            let mut cold =
+                ColdWalletState::new(quorum_policy()).with_trusted_devices(quorum_identities());
             let req = request(100, 1, 500);
             let sigs = signatures_for(&req, cold.key_epoch, 3);
             let out = cold
-                .sign_with_quorum(&req, cold.key_epoch, &quorum_identities(), &sigs)
+                .sign_with_quorum(&req, cold.key_epoch, &sigs)
                 .expect("valid quorum must pass both gates");
             assert_eq!(out.signer_ids, vec![1, 2, 3]);
             assert_eq!(out.key_epoch, 1);
@@ -1220,11 +1373,10 @@ mod tests {
             // `sign_with_quorum` must refuse the same request when the
             // signatures themselves are absent, even though the claimed count
             // would have passed the old count check.
-            let mut cold = ColdWalletState::new(quorum_policy());
+            let mut cold =
+                ColdWalletState::new(quorum_policy()).with_trusted_devices(quorum_identities());
             let req = request(100, 1, 500);
-            let err = cold
-                .sign_with_quorum(&req, 1, &quorum_identities(), &[])
-                .unwrap_err();
+            let err = cold.sign_with_quorum(&req, 1, &[]).unwrap_err();
             match err {
                 ColdSettleError::Quorum(err) => {
                     assert_eq!(err.kind(), "quorum-not-reached");
@@ -1242,13 +1394,12 @@ mod tests {
 
         #[test]
         fn a_forged_signature_is_refused_and_no_refusal_history_is_spent() {
-            let mut cold = ColdWalletState::new(quorum_policy());
+            let mut cold =
+                ColdWalletState::new(quorum_policy()).with_trusted_devices(quorum_identities());
             let req = request(100, 1, 500);
             let mut sigs = signatures_for(&req, 1, 3);
             sigs[0].signature[10] ^= 0x01;
-            let err = cold
-                .sign_with_quorum(&req, 1, &quorum_identities(), &sigs)
-                .unwrap_err();
+            let err = cold.sign_with_quorum(&req, 1, &sigs).unwrap_err();
             match err {
                 ColdSettleError::Quorum(err) => {
                     assert_eq!(err.kind(), "quorum-invalid-signature");
@@ -1265,12 +1416,11 @@ mod tests {
             // quorum over a value the policy forbids is refused by the policy
             // layer, and that refusal belongs in the history - the committee
             // genuinely attempted it.
-            let mut cold = ColdWalletState::new(quorum_policy());
+            let mut cold =
+                ColdWalletState::new(quorum_policy()).with_trusted_devices(quorum_identities());
             let req = request(100, 1, 2_000); // above the 1000 ceiling
             let sigs = signatures_for(&req, 1, 3);
-            let err = cold
-                .sign_with_quorum(&req, 1, &quorum_identities(), &sigs)
-                .unwrap_err();
+            let err = cold.sign_with_quorum(&req, 1, &sigs).unwrap_err();
             match err {
                 ColdSettleError::Policy(ColdRefusal::ValueAboveCeiling { .. }) => {}
                 other => panic!("expected a policy refusal, got {other:?}"),
@@ -1280,14 +1430,15 @@ mod tests {
 
         #[test]
         fn rotation_invalidates_earlier_quorum_signatures() {
-            let mut cold = ColdWalletState::new(quorum_policy());
+            let mut cold =
+                ColdWalletState::new(quorum_policy()).with_trusted_devices(quorum_identities());
             cold.rotate_key(100, "epoch one compromised")
                 .expect("rotation succeeds");
             let req = request(100, 1, 500);
             // Signed with the (now rotated-out) epoch 1 payload.
             let sigs = signatures_for(&req, 1, 3);
             let err = cold
-                .sign_with_quorum(&req, cold.key_epoch, &quorum_identities(), &sigs)
+                .sign_with_quorum(&req, cold.key_epoch, &sigs)
                 .unwrap_err();
             match err {
                 ColdSettleError::Quorum(err) => {
@@ -1300,13 +1451,14 @@ mod tests {
 
         #[test]
         fn a_rotated_community_can_still_sign_at_the_new_epoch() {
-            let mut cold = ColdWalletState::new(quorum_policy());
+            let mut cold =
+                ColdWalletState::new(quorum_policy()).with_trusted_devices(quorum_identities());
             cold.rotate_key(100, "epoch one compromised")
                 .expect("rotation succeeds");
             let req = request(100, 1, 500);
             let sigs = signatures_for(&req, cold.key_epoch, 3);
             let out = cold
-                .sign_with_quorum(&req, cold.key_epoch, &quorum_identities(), &sigs)
+                .sign_with_quorum(&req, cold.key_epoch, &sigs)
                 .expect("fresh-epoch signatures pass");
             assert_eq!(out.key_epoch, 2);
         }

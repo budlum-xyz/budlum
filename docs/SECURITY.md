@@ -26,10 +26,21 @@ If you believe you found a vulnerability, please report it privately.
 
 Preferred process:
 
-1. Open a private security advisory on GitHub if available.
-2. If private advisories are not available, contact the project maintainer directly.
+1. Open a private security advisory through GitHub:
+   https://github.com/budlum-xyz/budlum/security/advisories/new - the report,
+   the discussion and the fix stay private until an advisory is published.
+   GitHub's own description of the channel is at
+   https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability
+2. If the advisory form is unavailable to you, contact the project maintainer
+   directly instead of opening a public issue.
 3. Include enough detail to reproduce the issue.
 4. Do not publish exploit code or public issue details before coordination.
+
+The two links above are the reporting surface this policy commits to. They are
+here as addresses a reader can follow, not as decoration: the OpenSSF Scorecard
+security-policy check (the `SecurityPolicy` alert in the Security tab) reads a
+policy containing no reachable address as "no linked content found", so an
+unlinked policy scores as a weaker one than it is.
 
 Useful report details:
 

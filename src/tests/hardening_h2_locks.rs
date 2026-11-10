@@ -101,14 +101,22 @@ mod tests {
         assert!(!pm.can_admit_subnet(Some(s)));
     }
 
-    /// REGRESSION: L1 account Merkle trie uses 256-bit keys.
+    /// REGRESSION: chain account Merkle trie uses 256-bit keys.
     #[test]
     fn l1_merkle_trie_is_256bit_keys() {
         let mut trie = crate::storage::merkle_trie::MerkleTrie::new();
         let key = [0xABu8; 32];
         trie.insert(&key, 1, 0);
         assert_ne!(trie.root(), [0u8; 32]);
-        assert_eq!(key.len() * 8, 256);
+        // Two keys that differ only in the lowest bit stay distinct leaves.
+        let mut near = key;
+        near[31] ^= 1;
+        let mut near_trie = crate::storage::merkle_trie::MerkleTrie::new();
+        near_trie.insert(&near, 1, 0);
+        assert_ne!(trie.root(), near_trie.root());
+        let single_root = trie.root();
+        trie.insert(&near, 1, 0);
+        assert_ne!(trie.root(), single_root);
     }
 
     /// REGRESSION: burn_from clips and returns burned amount (no panic).

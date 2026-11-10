@@ -58,6 +58,7 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let ops = (take(data, &mut i) as usize % MAX_OPS) + 1;
+    let mut accepted_lock_total: u128 = 0;
     let mut last_message_id = None;
     let mut last_lock_msg = None;
     // (source, burn) domains of the last lock. Assets rotate per step, so the
@@ -90,6 +91,7 @@ fuzz_target!(|data: &[u8]| {
                     amount,
                     expiry,
                 ) {
+                    accepted_lock_total += u128::from(amount);
                     if let Some(ref msg) = event.message {
                         relayer.enqueue_relay(event.clone(), msg, height);
                         last_lock_msg = Some(msg.clone());
@@ -108,7 +110,11 @@ fuzz_target!(|data: &[u8]| {
             2 => {
                 // Burn
                 if let (Some(mid), Some((_, burn_dom))) = (last_message_id, last_lock_domains) {
-                    let _ = bridge.burn(mid, burn_dom);
+                    let mut recipient_eth = [0u8; 20];
+                    for slot in &mut recipient_eth {
+                        *slot = take(data, &mut i);
+                    }
+                    let _ = bridge.burn(mid, burn_dom, recipient_eth);
                 }
             }
             3 => {
@@ -184,7 +190,11 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    // Final conservation-ish probes (no panic).
+    // Conservation: the capital still locked never exceeds what locks accepted.
+    assert!(
+        bridge.locked_amount_total() <= accepted_lock_total,
+        "locked total exceeds the accepted lock amounts"
+    );
     let _ = bridge.root();
     let _ = bridge.replay_root();
     let _ = relayer.ledger_root();

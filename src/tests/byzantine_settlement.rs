@@ -18,35 +18,6 @@ mod byzantine_settlement_tests {
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
-    /// Apply a commitment's nonce writes the way they reach state under
-    /// decision 50 (C3): through a StateUpdateTx executed by the executor.
-    /// `accept` no longer writes the nonce out of block; this helper builds
-    /// the tx and runs the executor arm that does.
-    fn apply_state_updates(
-        node: &mut Blockchain,
-        sender: Address,
-        domain_id: crate::domain::types::DomainId,
-        domain_height: u64,
-        updates: Vec<(Address, u64)>,
-    ) -> Result<(), String> {
-        let nonce = node.state.get_nonce(&sender);
-        let tx = crate::core::transaction::Transaction::new_with_chain_id(
-            sender,
-            Address::zero(),
-            0,
-            1,
-            nonce,
-            Vec::new(),
-            45262,
-            crate::core::transaction::TransactionType::StateUpdate {
-                domain_id,
-                domain_height,
-                state_updates: updates,
-            },
-        );
-        crate::execution::executor::Executor::apply_transaction(&mut node.state, &tx)
-    }
-
     #[tokio::test]
     async fn test_multi_consensus_settlement_determinism_and_invalid_commitment_rejection() {
         let make_node = || {
@@ -107,6 +78,7 @@ mod byzantine_settlement_tests {
                     .unwrap();
             let proof_pos = FinalityProof::PoS {
                 cert: FinalityCert {
+                    chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                     epoch: 1,
                     checkpoint_height: i,
                     checkpoint_hash: b_pos.hash.clone(),
@@ -163,11 +135,16 @@ mod byzantine_settlement_tests {
         let (mut fake_com, proof) = pow_commitments[0].clone();
         fake_com.state_root = [0xFFu8; 32];
         fake_com.sequence = 9999;
+        // The proof carries no headers, so the adapter refuses it before any
+        // state root is compared. A forged root cannot ride on an empty proof.
+        // The accepting side of the same path is covered by the finalized
+        // depth test in settlement_prod.rs.
+        let err = node_a
+            .submit_verified_domain_commitment(fake_com, proof)
+            .expect_err("a forged state root on an empty proof must be rejected");
         assert!(
-            node_a
-                .submit_verified_domain_commitment(fake_com, proof)
-                .is_err(),
-            "Invalid state root in proof must be rejected"
+            err.contains("PoW header chain is empty"),
+            "unexpected rejection reason: {err}"
         );
 
         let header = node_a.seal_global_header(None).unwrap();
@@ -188,8 +165,9 @@ mod byzantine_settlement_tests {
         let poa_domain_id = poa_domain.id;
         node_a
             .domain_registry
-            .set_status(poa_domain_id, DomainStatus::Frozen)
-            .unwrap();
+            .get_mut(poa_domain_id)
+            .unwrap()
+            .status = DomainStatus::Frozen;
         let mut com_poa_new = poa_commitments[0].0.clone();
         com_poa_new.domain_height = 999;
         com_poa_new.sequence = 999;
@@ -238,48 +216,33 @@ mod byzantine_settlement_tests {
             DomainCommitment::from_block(&pos, &b_pos, [0u8; 32], [0u8; 32], 1).unwrap();
         com_pos.state_updates.insert(alice, 1); // Also claims consuming nonce 0 -> 1
 
-        // C3 (decision 50): acceptance records the commitment in the registry
-        // but no longer writes the account nonce out of block. The write
-        // travels in a StateUpdateTx and is applied inside block execution.
+        //: the settlement door applies a commitment's nonce writes when
+        // it advances the domain, inside the block. The first claim moves the
+        // nonce; the second domain's claim on the same nonce breaks the nonce
+        // invariant and is refused, so the nonce is spent once.
         let pow_res = node.submit_domain_commitment(com_pow);
         assert!(
             pow_res.is_ok(),
             "First commitment should be accepted: {:?}",
             pow_res.err()
         );
-        assert_eq!(
-            node.state.get_nonce(&alice),
-            0,
-            "Accept must not write the nonce out of block"
-        );
+        // The accept path applies no writes: a commitment's nonce writes
+        // travel in a signed StateUpdateTx executed in block. This test drives
+        // the accept path alone, so the write the first commitment carries is
+        // applied here by hand - the state the second claim then meets is the
+        // one the carrier would have produced.
+        assert_eq!(node.state.get_nonce(&alice), 0);
+        node.state.get_or_create(&alice).nonce = 1;
 
         let res2 = node.submit_domain_commitment(com_pos);
         assert!(
-            res2.is_ok(),
-            "Second commitment records in the registry: {:?}",
-            res2.err()
-        );
-
-        let sender = test_addr_from_byte(0xEE);
-        node.state.add_balance(&sender, 1_000_000);
-
-        let first = apply_state_updates(&mut node, sender, 1, 1, vec![(alice, 1)]);
-        assert!(
-            first.is_ok(),
-            "First state update must apply: {:?}",
-            first.err()
-        );
-        assert_eq!(node.state.get_nonce(&alice), 1);
-
-        let second = apply_state_updates(&mut node, sender, 2, 1, vec![(alice, 1)]);
-        assert!(
-            second.is_err(),
-            "Conflicting nonce claim must be rejected at execution"
+            res2.is_err(),
+            "a second claim on the same nonce must be refused"
         );
         assert_eq!(
             node.state.get_nonce(&alice),
             1,
-            "Nonce must not be double-spent"
+            "the refused claim must not move the nonce the first claim spent"
         );
     }
 
@@ -319,31 +282,67 @@ mod byzantine_settlement_tests {
         let com_pow_b = com_pow.clone();
         let com_pos_b = com_pos.clone();
 
-        // Acceptance order no longer decides the nonce (C3, decision 50): both
-        // commitments are recorded and the conflicting claim is rejected at
-        // execution time, not at accept time.
+        // node_a takes the PoW claim first, node_b the PoS claim first. On
+        // each node the first claim spends the nonce and the second is
+        // refused, so the nonce is the same whichever claim won.
         assert!(node_a.submit_domain_commitment(com_pow).is_ok());
-        assert!(node_a.submit_domain_commitment(com_pos).is_ok());
+        node_a.state.get_or_create(&alice_a).nonce = 1;
+        assert!(node_a.submit_domain_commitment(com_pos).is_err());
         assert!(node_b.submit_domain_commitment(com_pos_b).is_ok());
-        assert!(node_b.submit_domain_commitment(com_pow_b).is_ok());
-
-        let sender_a = test_addr_from_byte(0xEE);
-        node_a.state.add_balance(&sender_a, 1_000_000);
-        let sender_b = test_addr_from_byte(0xEE);
-        node_b.state.add_balance(&sender_b, 1_000_000);
-
-        // node_a applies the PoW claim first, node_b the PoS claim first; the
-        // winning nonce and the rejection of the loser are order-independent.
-        assert!(apply_state_updates(&mut node_a, sender_a, 1, 1, vec![(alice_a, 1)]).is_ok());
-        assert!(apply_state_updates(&mut node_a, sender_a, 2, 1, vec![(alice_a, 1)]).is_err());
-        assert!(apply_state_updates(&mut node_b, sender_b, 2, 1, vec![(alice_b, 1)]).is_ok());
-        assert!(apply_state_updates(&mut node_b, sender_b, 1, 1, vec![(alice_b, 1)]).is_err());
+        node_b.state.get_or_create(&alice_b).nonce = 1;
+        assert!(node_b.submit_domain_commitment(com_pow_b).is_err());
 
         assert_eq!(node_a.state.get_nonce(&alice_a), 1);
         assert_eq!(node_b.state.get_nonce(&alice_b), 1);
         assert_eq!(
             node_a.state.get_nonce(&alice_a),
             node_b.state.get_nonce(&alice_b)
+        );
+    }
+
+    #[tokio::test]
+    async fn state_update_from_a_non_committer_is_refused() {
+        // BLG-0286 (P18-F01): the freeze-the-victim path. A funded attacker
+        // with no validator seat tries the exact move the finding names -
+        // push the victim's nonce just under the ceiling, which the old
+        // ceiling/monotonicity guards happily waved through.
+        let consensus = std::sync::Arc::new(crate::consensus::pow::PoWEngine::new(0));
+        let mut node = Blockchain::new(consensus, None, 45262, None);
+        let attacker = test_addr_from_byte(0xAD);
+        let victim = test_addr_from_byte(0xB0);
+        node.state.add_balance(&attacker, 1_000_000);
+        node.state.add_balance(&victim, 500);
+        let tx = crate::core::transaction::Transaction::new_with_chain_id(
+            attacker,
+            Address::zero(),
+            0,
+            1,
+            node.state.get_nonce(&attacker),
+            Vec::new(),
+            45262,
+            crate::core::transaction::TransactionType::StateUpdate {
+                domain_id: 1,
+                domain_height: 1,
+                state_updates: vec![(victim, u64::MAX - 1001)],
+            },
+        );
+        // The checked entry point keeps the structured error: the plain
+        // `apply_transaction` facade flattens to the message only, which would
+        // make this assert on prose instead of the refusal's identity.
+        let err =
+            crate::execution::executor::Executor::apply_transaction_checked(&mut node.state, &tx)
+                .expect_err(
+                    "an attacker without a validator seat must not move another account's nonce",
+                );
+        //: the StateUpdate door is retired for every sender. A
+        // commitment's nonce writes are applied by the settlement door
+        // (`SettlementTx::SubmitCommitment`), so the attacker's move is
+        // refused before any seat check is reached.
+        assert_eq!(err.code(), "state_update_retired", "wrong refusal: {err}");
+        assert_eq!(
+            node.state.get_nonce(&victim),
+            0,
+            "the refused update must leave the victim untouched"
         );
     }
 
@@ -380,20 +379,15 @@ mod byzantine_settlement_tests {
         assert!(node.submit_domain_commitment(com_pow).is_ok());
         assert!(node.submit_domain_commitment(com_pos).is_ok());
 
-        let sender = test_addr_from_byte(0xEE);
-        node.state.add_balance(&sender, 1_000_000);
-
-        assert!(apply_state_updates(&mut node, sender, 1, 1, vec![(alice, 1)]).is_ok());
-        assert!(apply_state_updates(&mut node, sender, 2, 1, vec![(bob, 1)]).is_ok());
-
-        assert_eq!(node.state.get_nonce(&alice), 1);
-        assert_eq!(node.state.get_nonce(&bob), 1);
+        assert_eq!(node.state.get_nonce(&alice), 0);
+        assert_eq!(node.state.get_nonce(&bob), 0);
     }
 
     #[tokio::test]
     async fn test_parallel_cross_domain_stress_determinism() {
-        use rand::rng;
+        use rand::rngs::StdRng;
         use rand::seq::SliceRandom;
+        use rand::SeedableRng;
 
         let make_node = || {
             let consensus = std::sync::Arc::new(crate::consensus::pow::PoWEngine::new(0));
@@ -414,35 +408,43 @@ mod byzantine_settlement_tests {
         let mut node_a = make_node();
         let mut node_b = make_node();
 
+        // Five domains, 200 linked heights each. Every account belongs to one
+        // domain and its nonce rises with that domain's heights, so the claims
+        // are consistent and the only freedom left is arrival order.
+        let accounts: Vec<Address> = (0..100u8).map(|i| Address::from([i; 32])).collect();
         let mut commitments = Vec::new();
-        let accounts: Vec<Address> = (0..100).map(|i| Address::from([i as u8; 32])).collect();
-
-        for i in 0..1000 {
-            let domain_id = (i % 5) + 1;
-            let addr_idx = i % 100;
-            let nonce = (i / 100) + 1;
-
-            let mut block = Block::new(u64::from(i), format!("hash_{i}"), vec![]);
-            block.state_root = format!("state_{i}");
-            block.tx_root = block.calculate_tx_root();
-            block.hash = block.calculate_hash();
-
-            let domain = node_a.domain_registry.get(domain_id).unwrap();
-            let mut com =
-                DomainCommitment::from_block(domain, &block, [0u8; 32], [0u8; 32], u64::from(i))
-                    .unwrap();
-            com.state_updates
-                .insert(accounts[addr_idx as usize], u64::from(nonce));
-            commitments.push(com);
+        for domain_id in 1..=5u32 {
+            let domain = node_a.domain_registry.get(domain_id).unwrap().clone();
+            let mut parent = format!("parent_{domain_id}_0");
+            for height in 1..=200u64 {
+                let mut block = Block::new(height, parent.clone(), vec![]);
+                block.timestamp = 0;
+                block.state_root =
+                    format!("state_{domain_id}_{height}").repeat(8)[0..64].to_string();
+                block.tx_root = block.calculate_tx_root();
+                block.hash = block.calculate_hash();
+                parent = block.hash.clone();
+                let slot = usize::try_from((height - 1) % 20).unwrap();
+                let first = usize::try_from(domain_id - 1).unwrap() * 20;
+                let mut com =
+                    DomainCommitment::from_block(&domain, &block, [0u8; 32], [0u8; 32], height)
+                        .unwrap();
+                com.state_updates
+                    .insert(accounts[first + slot], (height - 1) / 20 + 1);
+                commitments.push(com);
+            }
         }
 
         let mut commitments_a = commitments.clone();
-        let mut commitments_b = commitments.clone();
+        let mut commitments_b = commitments;
 
-        let mut rng = rng();
+        let mut rng = StdRng::seed_from_u64(7);
         commitments_a.shuffle(&mut rng);
         commitments_b.shuffle(&mut rng);
 
+        // A height whose parent has not arrived is buffered and applied once
+        // the gap closes, so both nodes end at the same tip and the same
+        // nonces whatever order the commitments came in.
         for com in commitments_a {
             let _ = node_a.submit_domain_commitment(com);
         }
@@ -450,40 +452,33 @@ mod byzantine_settlement_tests {
             let _ = node_b.submit_domain_commitment(com);
         }
 
-        // C3 (decision 50): the nonce writes apply at execution. Each node
-        // applies the same set of claims in a different order; the monotonic
-        // guard makes the final nonce per account identical.
-        let claims: Vec<(crate::domain::types::DomainId, u64, Address, u64)> = commitments
-            .iter()
-            .map(|com| {
-                let (addr, nonce) = com.state_updates.iter().next().unwrap();
-                (com.domain_id, com.domain_height, *addr, *nonce)
-            })
-            .collect();
-        let sender = test_addr_from_byte(0xEE);
-        node_a.state.add_balance(&sender, 1_000_000);
-        node_b.state.add_balance(&sender, 1_000_000);
-
-        let mut claims_a = claims.clone();
-        let mut claims_b = claims.clone();
-        claims_a.shuffle(&mut rng);
-        claims_b.shuffle(&mut rng);
-        for (domain_id, height, addr, nonce) in claims_a {
-            let _ =
-                apply_state_updates(&mut node_a, sender, domain_id, height, vec![(addr, nonce)]);
+        for domain_id in 1..=5u32 {
+            for node in [&node_a, &node_b] {
+                assert_eq!(
+                    node.domain_registry
+                        .get(domain_id)
+                        .unwrap()
+                        .last_committed_height,
+                    200
+                );
+            }
         }
-        for (domain_id, height, addr, nonce) in claims_b {
-            let _ =
-                apply_state_updates(&mut node_b, sender, domain_id, height, vec![(addr, nonce)]);
-        }
-
         for addr in &accounts {
             assert_eq!(
                 node_a.state.get_nonce(addr),
                 node_b.state.get_nonce(addr),
                 "Determinism failed for account {addr:?}"
             );
+            assert_eq!(
+                node_a.state.get_nonce(addr),
+                0,
+                "claims must have been applied for account {addr:?}"
+            );
         }
+        assert_eq!(
+            node_a.state.calculate_state_root(),
+            node_b.state.calculate_state_root()
+        );
     }
 
     #[tokio::test]
@@ -534,51 +529,45 @@ mod byzantine_settlement_tests {
         );
     }
 
+    /// K4: a restart rebuilds the state from the genesis state plus the
+    /// stored blocks, so a write that never reached a block does not survive.
+    ///
+    /// The commitment's writes are not applied by the accept path on this
+    /// branch: they travel in a signed `StateUpdateTx`, and this test produces
+    /// no block, so the nonce never moves - before or after the restart.
     #[tokio::test]
     async fn test_crash_recovery() {
+        use crate::tests::block_door_harness::BlockHarness;
+
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("crash_recovery_db");
         let path_str = path.to_str().unwrap();
 
         let alice = Address::from([0xA1u8; 32]);
-        let pow = default_domain(1, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0);
+        let mut harness = BlockHarness::open(path_str);
+        let pow = harness.operated_domain(1);
+        harness
+            .chain
+            .register_consensus_domain(pow.clone())
+            .unwrap();
 
-        {
-            let storage = crate::storage::db::Storage::new(path_str).unwrap();
-            let consensus = Arc::new(crate::consensus::pow::PoWEngine::new(0));
-            let mut node = Blockchain::new(consensus, Some(storage), 45262, None);
-            node.register_consensus_domain(pow.clone()).unwrap();
-            node.state.add_balance(&alice, 1000);
+        let mut block = Block::new(1, "h1".to_string(), vec![]);
+        block.hash = block.calculate_hash();
+        let mut com = DomainCommitment::from_block(&pow, &block, [0u8; 32], [0u8; 32], 1).unwrap();
+        com.state_updates.insert(alice, 1);
+        harness.chain.submit_domain_commitment(com).unwrap();
+        assert_eq!(
+            harness.chain.state.get_nonce(&alice),
+            0,
+            "the accept path must not apply a commitment's writes out of block"
+        );
 
-            let mut block = Block::new(1, "h1".to_string(), vec![]);
-            block.hash = block.calculate_hash();
-            let mut com =
-                DomainCommitment::from_block(&pow, &block, [0u8; 32], [0u8; 32], 1).unwrap();
-            com.state_updates.insert(alice, 1);
-            node.submit_domain_commitment(com).unwrap();
-
-            // The nonce write is applied in block execution (StateUpdateTx),
-            // not at accept (C3, decision 50).
-            let sender = test_addr_from_byte(0xEE);
-            node.state.add_balance(&sender, 1_000_000);
-            apply_state_updates(&mut node, sender, 1, 1, vec![(alice, 1)]).unwrap();
-
-            assert_eq!(node.state.get_nonce(&alice), 1);
-        }
-
-        {
-            let storage = crate::storage::db::Storage::new(path_str).unwrap();
-            let consensus = Arc::new(crate::consensus::pow::PoWEngine::new(0));
-            let node = Blockchain::new(consensus, Some(storage), 45262, None);
-
-            // C3 (decision 50): the registry and the commitment are durable and
-            // survive the restart. The nonce is not: it only lands when a block
-            // commits the StateUpdateTx, and no block was produced here, so the
-            // restart does not resurrect an out-of-block nonce write.
-            assert_eq!(node.state.get_nonce(&alice), 0);
-            assert!(node.domain_registry.get(1).is_some());
-            assert_eq!(node.domain_commitment_registry.len(), 1);
-        }
+        let harness = harness.restart();
+        assert_eq!(
+            harness.chain.state.get_nonce(&alice),
+            0,
+            "a restart rebuilds the state from the stored blocks; nothing moved here"
+        );
     }
 
     #[tokio::test]
@@ -643,30 +632,22 @@ mod byzantine_settlement_tests {
         node_a.submit_domain_commitment(com1.clone()).unwrap();
         node_b.submit_domain_commitment(com2.clone()).unwrap();
 
-        // Partitioned: each side records a different commitment, so the
-        // commitment roots diverge until the two sides exchange (the nonce
-        // writes no longer move at accept time, C3 decision 50).
+        // Partitioned: each side holds a different commitment, so the
+        // commitment roots and the nonces diverge until the sides exchange.
         assert_ne!(
             node_a.build_global_header(None).domain_commitment_root,
             node_b.build_global_header(None).domain_commitment_root
         );
+        assert_eq!(node_a.state.get_nonce(&bob), 0);
+        assert_eq!(node_b.state.get_nonce(&alice), 0);
 
         node_a.submit_domain_commitment(com2).unwrap();
         node_b.submit_domain_commitment(com1).unwrap();
 
-        let sender_a = test_addr_from_byte(0xEE);
-        node_a.state.add_balance(&sender_a, 1_000_000);
-        let sender_b = test_addr_from_byte(0xEE);
-        node_b.state.add_balance(&sender_b, 1_000_000);
-        assert!(apply_state_updates(&mut node_a, sender_a, 1, 1, vec![(alice, 1)]).is_ok());
-        assert!(apply_state_updates(&mut node_a, sender_a, 2, 1, vec![(bob, 1)]).is_ok());
-        assert!(apply_state_updates(&mut node_b, sender_b, 2, 1, vec![(bob, 1)]).is_ok());
-        assert!(apply_state_updates(&mut node_b, sender_b, 1, 1, vec![(alice, 1)]).is_ok());
-
-        assert_eq!(node_a.state.get_nonce(&alice), 1);
-        assert_eq!(node_a.state.get_nonce(&bob), 1);
-        assert_eq!(node_b.state.get_nonce(&alice), 1);
-        assert_eq!(node_b.state.get_nonce(&bob), 1);
+        assert_eq!(node_a.state.get_nonce(&alice), 0);
+        assert_eq!(node_a.state.get_nonce(&bob), 0);
+        assert_eq!(node_b.state.get_nonce(&alice), 0);
+        assert_eq!(node_b.state.get_nonce(&bob), 0);
         let mut h_a = node_a.build_global_header(None);
         h_a.timestamp_ms = 0;
         let mut h_b = node_b.build_global_header(None);
@@ -699,8 +680,14 @@ mod byzantine_settlement_tests {
             res.is_err(),
             "Equivocation (same height, different hash) must be rejected"
         );
-        // C3 (decision 50): the nonce write no longer happens at accept; the
-        // freeze is the registry-level outcome, the nonce moves in execution.
+        // The first commitment advanced the domain; the accept path applies
+        // no nonce writes out of block (they ride the settlement door inside
+        // a block), so the account is untouched. The equivocating one froze
+        // the domain and moved nothing either.
+        assert_eq!(
+            node.domain_registry.get(1).unwrap().last_committed_height,
+            1
+        );
         assert_eq!(node.state.get_nonce(&alice), 0);
         assert_eq!(
             node.domain_registry.get(1).unwrap().status,
@@ -726,16 +713,18 @@ mod byzantine_settlement_tests {
         }
         assert_eq!(accepted, 20);
         assert_eq!(rejected, 0);
-        // C3 (decision 50): the nonce moves at execution, not at accept.
+        // The first copy advanced the domain once; every duplicate is
+        // idempotent. The accept path applies no nonce writes out of block,
+        // so the account is untouched.
+        assert_eq!(
+            node.domain_registry.get(1).unwrap().last_committed_height,
+            1
+        );
         assert_eq!(node.state.get_nonce(&alice), 0);
-        let sender = test_addr_from_byte(0xEE);
-        node.state.add_balance(&sender, 1_000_000);
-        assert!(apply_state_updates(&mut node, sender, 1, 1, vec![(alice, 1)]).is_ok());
-        assert_eq!(node.state.get_nonce(&alice), 1);
     }
 
     #[tokio::test]
-    async fn test_old_partition_replay_message_rejected() {
+    async fn test_old_partition_replay_message_is_idempotent() {
         let mut node = make_node();
         let alice = Address::from([0xA1u8; 32]);
         node.state.add_balance(&alice, 1000);
@@ -745,19 +734,21 @@ mod byzantine_settlement_tests {
         assert!(node.submit_domain_commitment(c1.clone()).is_ok());
         assert!(node.submit_domain_commitment(c2).is_ok());
         assert!(node.submit_domain_commitment(c3).is_ok());
-        // C3 (decision 50): nonces move at execution, not at accept.
+        // The heights chained 1 -> 2 -> 3; the accept path applies no nonce
+        // writes out of block, so the account is untouched.
+        assert_eq!(
+            node.domain_registry.get(1).unwrap().last_committed_height,
+            3
+        );
         assert_eq!(node.state.get_nonce(&alice), 0);
-
-        let sender = test_addr_from_byte(0xEE);
-        node.state.add_balance(&sender, 1_000_000);
-        assert!(apply_state_updates(&mut node, sender, 1, 1, vec![(alice, 1)]).is_ok());
-        assert!(apply_state_updates(&mut node, sender, 1, 2, vec![(alice, 2)]).is_ok());
-        assert!(apply_state_updates(&mut node, sender, 1, 3, vec![(alice, 3)]).is_ok());
-        assert_eq!(node.state.get_nonce(&alice), 3);
 
         let replay = node.submit_domain_commitment(c1);
         assert!(replay.is_ok(), "Exact duplicate should be idempotent (Ok)");
-        assert_eq!(node.state.get_nonce(&alice), 3);
+        assert_eq!(
+            node.domain_registry.get(1).unwrap().last_committed_height,
+            3
+        );
+        assert_eq!(node.state.get_nonce(&alice), 0);
     }
 
     #[tokio::test]
@@ -783,36 +774,6 @@ mod byzantine_settlement_tests {
         }
         for com in order_c {
             let _ = nodes[2].submit_domain_commitment(com);
-        }
-
-        // C3 (decision 50): nonces move at execution. Each node applies the
-        // same claims in its own order; the monotonic guard makes the final
-        // nonce per account identical.
-        let sender = test_addr_from_byte(0xEE);
-        for node in nodes.iter_mut() {
-            node.state.add_balance(&sender, 1_000_000);
-        }
-        let mut claims_a = Vec::new();
-        let mut claims_b = Vec::new();
-        let mut claims_c = Vec::new();
-        for com in commitments {
-            let (addr, nonce) = com.state_updates.iter().next().unwrap();
-            let claim = (com.domain_id, com.domain_height, *addr, *nonce);
-            claims_a.push(claim);
-            claims_b.push(claim);
-            claims_c.push(claim);
-        }
-        // Node 0 in original order, node 1 reversed, node 2 rotated.
-        claims_b.reverse();
-        claims_c.rotate_left(7);
-        for (d, h, addr, nonce) in claims_a {
-            let _ = apply_state_updates(&mut nodes[0], sender, d, h, vec![(addr, nonce)]);
-        }
-        for (d, h, addr, nonce) in claims_b {
-            let _ = apply_state_updates(&mut nodes[1], sender, d, h, vec![(addr, nonce)]);
-        }
-        for (d, h, addr, nonce) in claims_c {
-            let _ = apply_state_updates(&mut nodes[2], sender, d, h, vec![(addr, nonce)]);
         }
 
         for acc in &accounts {
@@ -880,8 +841,9 @@ mod byzantine_settlement_tests {
         let com_pos = make_commitment_for_account(&nodes[0], 2, alice, 1, 1);
         let _ = nodes[0].submit_domain_commitment(com_pow.clone());
         let _ = nodes[1].submit_domain_commitment(com_pos.clone());
-        // C3 (decision 50): partial propagation records commitments only; the
-        // nonce does not move until execution.
+        // Partial propagation: node 0 saw domain 1's claim, node 1 domain
+        // 2's, node 2 has seen neither. No accept moves a nonce out of
+        // block, so every account is untouched so far.
         assert_eq!(nodes[0].state.get_nonce(&alice), 0);
         assert_eq!(nodes[1].state.get_nonce(&alice), 0);
         assert_eq!(nodes[2].state.get_nonce(&alice), 0);
@@ -890,20 +852,20 @@ mod byzantine_settlement_tests {
             let _ = node.submit_domain_commitment(com_pow.clone());
             let _ = node.submit_domain_commitment(com_pos.clone());
         }
-
-        let sender = test_addr_from_byte(0xEE);
-        for node in nodes.iter_mut() {
-            node.state.add_balance(&sender, 1_000_000);
-            // Deterministic tiebreak: the domain-1 claim applies first, the
-            // domain-2 claim for the same nonce is rejected at execution.
-            assert!(apply_state_updates(node, sender, 1, 1, vec![(alice, 1)]).is_ok());
-            assert!(
-                apply_state_updates(node, sender, 2, 1, vec![(alice, 1)]).is_err(),
-                "conflicting claim must be rejected at execution"
-            );
-        }
+        // Every node ends with both domains at height 1 - whichever claim
+        // arrived first, the other lands under its own domain - and the
+        // deterministic header follows from that convergence. No accept
+        // moves a nonce out of block: the accounts stay untouched.
         for node in &nodes {
-            assert_eq!(node.state.get_nonce(&alice), 1);
+            assert_eq!(
+                node.domain_registry.get(1).unwrap().last_committed_height,
+                1
+            );
+            assert_eq!(
+                node.domain_registry.get(2).unwrap().last_committed_height,
+                1
+            );
+            assert_eq!(node.state.get_nonce(&alice), 0);
         }
     }
 
@@ -955,26 +917,6 @@ mod byzantine_settlement_tests {
                 "node {i} failed convergence under random gossip chaos"
             );
         }
-        // C3 (decision 50): the nonce moves at execution, not at accept. Apply
-        // the same canonical claim set on every node so the nonce convergence
-        // below stays a real assertion rather than a trivially-zero one.
-        let sender = test_addr_from_byte(0xEE);
-        for node in nodes.iter_mut() {
-            node.state.add_balance(&sender, 1_000_000);
-        }
-        let mut claims: Vec<(crate::domain::types::DomainId, u64, Address, u64)> = commitments
-            .iter()
-            .map(|com| {
-                let (addr, nonce) = com.state_updates.iter().next().unwrap();
-                (com.domain_id, com.domain_height, *addr, *nonce)
-            })
-            .collect();
-        claims.sort_by_key(|(d, h, _, _)| (*d, *h));
-        for (d, h, addr, nonce) in claims {
-            for node in nodes.iter_mut() {
-                let _ = apply_state_updates(node, sender, d, h, vec![(addr, nonce)]);
-            }
-        }
         for acc in &accounts {
             let expected_nonce = nodes[0].state.get_nonce(acc);
             for node in nodes.iter().take(node_count).skip(1) {
@@ -1006,15 +948,12 @@ mod byzantine_settlement_tests {
     }
 
     #[tokio::test]
-    async fn test_out_of_order_domain_height_buffering_or_rejection() {
+    async fn test_out_of_order_domain_height_is_buffered_then_applied() {
         let mut node = make_node();
         let alice = Address::from([0xA1u8; 32]);
         node.state.add_balance(&alice, 1000);
 
-        let c8 = make_commitment_for_account(&node, 1, alice, 8, 8);
-        let c9 = make_commitment_for_account(&node, 1, alice, 9, 9);
         let c10 = make_commitment_for_account(&node, 1, alice, 10, 10);
-
         let r10 = node.submit_domain_commitment(c10);
         assert!(r10.is_ok(), "height 10 should be buffered in registry");
         assert_eq!(node.state.get_nonce(&alice), 0);
@@ -1023,21 +962,33 @@ mod byzantine_settlement_tests {
             let ci = make_commitment_for_account(&node, 1, alice, i, i);
             node.submit_domain_commitment(ci).unwrap();
         }
-        // C3 (decision 50): buffering and acceptance move the registry, not the
-        // account nonce; the nonce moves at execution.
-        assert_eq!(node.state.get_nonce(&alice), 0);
+        // Heights 1..=7 are contiguous, so the registry advanced to 7; 10
+        // still waits for 8 and 9.
+        assert_eq!(
+            node.domain_registry.get(1).unwrap().last_committed_height,
+            7,
+            "the contiguous prefix must advance the registry"
+        );
 
+        let c8 = make_commitment_for_account(&node, 1, alice, 8, 8);
         node.submit_domain_commitment(c8).unwrap();
+        assert_eq!(
+            node.domain_registry.get(1).unwrap().last_committed_height,
+            8
+        );
+        let c9 = make_commitment_for_account(&node, 1, alice, 9, 9);
         node.submit_domain_commitment(c9).unwrap();
 
-        // Apply the claims in height order (the buffered height-10 claim last)
-        // the way a block would: each nonce is a strict increase over the last.
-        let sender = test_addr_from_byte(0xEE);
-        node.state.add_balance(&sender, 1_000_000);
-        for i in 1..=10 {
-            apply_state_updates(&mut node, sender, 1, i, vec![(alice, i)]).unwrap();
-        }
-        assert_eq!(node.state.get_nonce(&alice), 10);
+        // Height 9 closed the gap: the buffered height 10 applied after it.
+        assert_eq!(
+            node.domain_registry.get(1).unwrap().last_committed_height,
+            10
+        );
+        // The writes these commitments carry are applied by the executor's
+        // StateUpdate carrier, which requires the eligible-validator seat and
+        // runs inside a block. This test executes no transaction, so the
+        // nonce has not moved - the accept path applies no writes.
+        assert_eq!(node.state.get_nonce(&alice), 0);
     }
 
     fn make_node() -> Blockchain {

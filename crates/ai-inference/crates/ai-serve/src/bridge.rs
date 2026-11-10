@@ -21,7 +21,7 @@
 use crate::chain::{ChainClient, RpcError};
 use crate::config::{
     assert_consensus_ready_on_device, assert_served_name_is_ours, checked_system_prompt,
-    ServeConfig,
+    plan_local_on_device, ServeConfig,
 };
 use crate::health::Health;
 use crate::residency::{Demand, DeviceBudget, ResidencyPlan, SemanticProfile, WeightShard};
@@ -149,15 +149,36 @@ impl Bridge {
         // 2. The model has a dense part. Checked before planning, because the
         //    planner treats "no per-token shards" as a plan with nothing to
         //    hold in fast memory rather than as a malformed model.
-        if !shards.iter().any(|s| s.demand == Demand::EveryToken) {
+        if !shards
+            .iter()
+            .any(|s| s.demand == Demand::EveryToken && s.bytes > 0)
+        {
             return Err(StartupRefusal::NoPerTokenWeights);
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        if !shards.iter().all(|s| seen.insert(s.content_id)) {
+            return Err(StartupRefusal::NotReadyOnDevice(String::from(
+                "two shards carry the same content id",
+            )));
+        }
+        if semantics.weight_bits == 0 || semantics.context_tokens == 0 {
+            return Err(StartupRefusal::NotReadyOnDevice(String::from(
+                "the semantic profile has a zero weight width or context length",
+            )));
         }
 
         // 3. Prompt, determinism and residency. This is the composite check:
         //    it verifies the prompt the model will be given, refuses a device
         //    that cannot hold the per-token weights, and returns the plan.
-        let plan = assert_consensus_ready_on_device(&config, shards, budget, semantics)
-            .map_err(StartupRefusal::NotReadyOnDevice)?;
+        //    A configuration with a determinism profile asks to join the
+        //    consensus path and gets the strict check (no disk streaming). A
+        //    configuration without one is local by definition and may stream.
+        let plan = if config.determinism.is_some() {
+            assert_consensus_ready_on_device(&config, shards, budget, semantics)
+        } else {
+            plan_local_on_device(&config, shards, budget, semantics)
+        }
+        .map_err(StartupRefusal::NotReadyOnDevice)?;
 
         // 4. The chain, last, because it is the only step that leaves the
         //    machine. `NotConnected` is a refusal rather than a warning: a
@@ -301,6 +322,61 @@ mod tests {
         assert!(bridge.summary().contains("ai_inference-light"));
     }
 
+    /// A local bridge (no determinism profile) has a startup path.
+    #[test]
+    fn a_local_bridge_without_a_determinism_profile_starts() {
+        let local = ServeConfig::for_tier(ModelTier::Light, "v0.1");
+        assert!(local.determinism.is_none());
+        let bridge = Bridge::start(
+            local,
+            &[9; 32],
+            &shards(),
+            roomy(),
+            semantics(),
+            &FixedChain(true),
+            None,
+        )
+        .expect("a local bridge is allowed");
+        assert!(!bridge.plan().streams_from_disk());
+    }
+
+    /// Streaming is a local mode: allowed without a profile, refused with one.
+    #[test]
+    fn a_streaming_bridge_starts_locally_and_is_refused_for_consensus() {
+        // The dense 1 000 B fills the accelerator; the routed 400 B go to disk.
+        let tight = DeviceBudget {
+            accelerator_bytes: 1_000,
+            system_bytes: 0,
+        };
+        let local = ServeConfig::for_tier(ModelTier::Light, "v0.1");
+        let bridge = Bridge::start(
+            local,
+            &[9; 32],
+            &shards(),
+            tight,
+            semantics(),
+            &FixedChain(true),
+            None,
+        )
+        .expect("streaming serves locally");
+        assert!(bridge.plan().streams_from_disk());
+
+        let err = Bridge::start(
+            cfg(),
+            &[9; 32],
+            &shards(),
+            tight,
+            semantics(),
+            &FixedChain(true),
+            None,
+        )
+        .expect_err("streaming cannot join consensus");
+        assert!(
+            matches!(err, StartupRefusal::NotReadyOnDevice(ref m) if m.contains("streams")),
+            "{err:?}"
+        );
+    }
+
     /// The chain is consulted, and its "no" stops the bridge.
     #[test]
     fn an_unregistered_model_does_not_start() {
@@ -358,6 +434,39 @@ mod tests {
             matches!(err, StartupRefusal::NotReadyOnDevice(ref m) if m.contains("do not fit")),
             "expected a device refusal before any chain error, got: {err:?}"
         );
+    }
+
+    #[test]
+    fn duplicate_shard_ids_and_zero_semantics_are_refused() {
+        let mut dup = shards();
+        if let [first, second, ..] = dup.as_mut_slice() {
+            second.content_id = first.content_id;
+        }
+        let err = Bridge::start(
+            cfg(),
+            &[9; 32],
+            &dup,
+            roomy(),
+            semantics(),
+            &FixedChain(true),
+            None,
+        )
+        .expect_err("duplicate shard ids");
+        assert!(matches!(err, StartupRefusal::NotReadyOnDevice(ref m) if m.contains("same")));
+
+        let mut zero = semantics();
+        zero.weight_bits = 0;
+        let err = Bridge::start(
+            cfg(),
+            &[9; 32],
+            &shards(),
+            roomy(),
+            zero,
+            &FixedChain(true),
+            None,
+        )
+        .expect_err("zero weight width");
+        assert!(matches!(err, StartupRefusal::NotReadyOnDevice(ref m) if m.contains("zero")));
     }
 
     /// Attribution is checked first, before anything expensive.
@@ -512,6 +621,27 @@ mod tests {
         .expect_err("there is no dense part");
         assert_eq!(err, StartupRefusal::NoPerTokenWeights);
         assert!(err.to_string().contains("output head"), "{err}");
+    }
+
+    /// A per-token shard with no bytes is not a dense part.
+    #[test]
+    fn a_zero_byte_per_token_shard_does_not_start() {
+        let empty_dense = vec![WeightShard {
+            content_id: [3; 32],
+            bytes: 0,
+            demand: Demand::EveryToken,
+        }];
+        let err = Bridge::start(
+            cfg(),
+            &[9; 32],
+            &empty_dense,
+            roomy(),
+            semantics(),
+            &FixedChain(true),
+            None,
+        )
+        .expect_err("the dense part has no weights");
+        assert_eq!(err, StartupRefusal::NoPerTokenWeights);
     }
 
     /// A placement names the shard it placed.

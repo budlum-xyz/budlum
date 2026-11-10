@@ -11,12 +11,18 @@
 //!      mutation into blocks; it does not drop the fields from the root, which
 //!      would hide the divergence instead of fixing it.
 //!   2. `apply_pending_commitments` no longer writes account nonces out of
-//!      block; the executor's `StateUpdate` arm validates before it writes.
-//!   3. The validation itself rejects non-monotonic, near-`u64::MAX` and
-//!      over-ceiling updates.
-//!   4. Every out-of-block mutation leaves a durable trail
-//!      (`save_cross_domain_message`, `save_universal_relayer`,
-//!      `save_bridge_state`), so a restart can reconstruct the same state.
+//!      block; the executor's `StateUpdate` arm is retired and refuses
+//!      every `StateUpdate` outright (431d7fb).
+//!   3. `validate_commitment_state_updates` still rejects non-monotonic,
+//!      near-`u64::MAX` and over-ceiling updates for whatever door ends up
+//!      carrying the writes.
+//!   4. `message_registry` and `bridge_state` only change inside a block: the
+//!      executor's `BridgeBurn` and `CrossDomainMessage` arms are the only
+//!      writers, and the old request-path doors
+//!      (`submit_cross_domain_message`, `submit_relayed_cross_domain_message`,
+//!      `burn_bridge_transfer_with_event`) are not in production code. A
+//!      message that is in the state root must also be in the durable store,
+//!      so the lock path still calls `save_cross_domain_message`.
 //!
 //! An out-of-block, unvalidated or unpersisted mutation is how two honest
 //! nodes end up with different `state_root` values (partition), or how one
@@ -29,7 +35,14 @@ fn code_of(root: &Path, rel: &str) -> Result<String, String> {
     if !f.is_file() {
         return Err(format!("expected file missing: {}", f.display()));
     }
-    std::fs::read_to_string(&f).map_err(|e| e.to_string())
+    let text = std::fs::read_to_string(&f).map_err(|e| e.to_string())?;
+    Ok(production_text(&text))
+}
+
+/// The text without test items, comments and string literals: a needle in a
+/// comment, a string or a unit test is no evidence about production code.
+fn production_text(text: &str) -> String {
+    super::capability_modules_are_wired::code_only(text)
 }
 
 /// The text between `start` (inclusive) and `end` (exclusive, searched from
@@ -49,8 +62,8 @@ fn slice_of<'a>(src: &'a str, start: &str, end: &str) -> Result<&'a str, String>
 ///
 /// Returns the first violated claim.
 /// Checks 1 and 2: the state root still covers the consensus fields, and
-/// the nonce writes are block-scoped (no out-of-block write, the executor
-/// validates before it writes).
+/// the nonce writes are block-scoped (no out-of-block write; the executor
+/// refuses `StateUpdate` entirely).
 fn check_root_covers_and_nonces_are_block_scoped(
     bc: &str,
     acc: &str,
@@ -100,29 +113,21 @@ fn check_root_covers_and_nonces_are_block_scoped(
         );
     }
 
-    let arm = slice_of(ex, "TransactionType::StateUpdate", "Ok(())")?;
-    let val = arm
-        .find("*new_nonce <= current")
-        .ok_or("executor StateUpdate arm lost the monotonic nonce check")?;
-    let write = arm
-        .find("account.nonce = *new_nonce")
-        .ok_or("executor StateUpdate arm lost the nonce write")?;
-    if val > write {
-        return Err("executor StateUpdate arm writes nonces before validating".to_string());
+    let arm = slice_of(ex, "TransactionType::StateUpdate { domain_id", "Ok(())")?;
+    // The arm is RETIRED (431d7fb, BLG-0286 / P18-F01): it refuses every
+    // StateUpdate instead of validating and writing, so the strongest form
+    // of the block-scoping claim is that the arm carries the refusal and
+    // contains no nonce write at all. A write that reappears here without
+    // the validation stack around it is exactly the regression this gate
+    // exists for.
+    if !arm.contains("return Err") {
+        return Err("executor StateUpdate arm no longer refuses every StateUpdate".to_string());
     }
-    for (needle, msg) in [
-        (
-            "MAX_STATE_UPDATES",
-            "executor StateUpdate arm lost the update ceiling check",
-        ),
-        (
-            "u64::MAX - 1000",
-            "executor StateUpdate arm lost the near-u64::MAX nonce guard",
-        ),
-    ] {
-        if !arm.contains(needle) {
-            return Err(msg.to_string());
-        }
+    if arm.contains("*new_nonce") {
+        return Err(
+            "executor StateUpdate arm regained nonce logic; the arm must refuse every StateUpdate (431d7fb)"
+                .to_string(),
+        );
     }
     Ok(())
 }
@@ -130,7 +135,7 @@ fn check_root_covers_and_nonces_are_block_scoped(
 /// Checks 3 and 4: the validation rejects non-monotonic, near-MAX and
 /// over-ceiling updates, and every out-of-block mutator leaves a durable
 /// trail.
-fn check_validation_and_durable_trails(bc: &str) -> Result<(), String> {
+fn check_validation_and_durable_trails(bc: &str, ex: &str) -> Result<(), String> {
     // 3. The validation itself rejects non-monotonic, near-MAX and
     //    over-ceiling updates.
     let vcu = slice_of(
@@ -154,17 +159,53 @@ fn check_validation_and_durable_trails(bc: &str) -> Result<(), String> {
         }
     }
 
-    // 4. Out-of-block mutators leave a durable trail.
-    let scdm = slice_of(
-        bc,
-        "pub fn submit_cross_domain_message(",
-        "pub fn burn_bridge_transfer(",
-    )?;
-    if !scdm.contains("save_cross_domain_message(") {
-        return Err(
-            "submit_cross_domain_message no longer persists the message (durable trail lost)"
-                .to_string(),
-        );
+    // 4. `message_registry` and `bridge_state` only change inside a block.
+    //
+    // Both are folded into the state root, and both used to be written from the
+    // request path (`submit_cross_domain_message`,
+    // `submit_relayed_cross_domain_message`, `burn_bridge_transfer_with_event`).
+    // Those methods are now `#[cfg(test)]`, so the production text this gate
+    // scans must not contain them at all, and the write has to be in an
+    // executor arm instead. This is the stricter form the earlier "durable
+    // trail" check was standing in for.
+    for gone in [
+        "fn submit_cross_domain_message(",
+        "fn submit_relayed_cross_domain_message(",
+        "fn burn_bridge_transfer_with_event(",
+    ] {
+        if bc.contains(gone) {
+            return Err(format!(
+                "{gone} is reachable from production code: it writes consensus state outside block execution"
+            ));
+        }
+    }
+    for (needle, msg) in [
+        (
+            "TransactionType::BridgeBurn(burn)",
+            "the executor lost the in-block BridgeBurn arm",
+        ),
+        (
+            "apply_burn_to_state(",
+            "the in-block burn no longer runs the shared burn body",
+        ),
+        (
+            "TransactionType::CrossDomainMessage(message)",
+            "the executor lost the in-block CrossDomainMessage arm",
+        ),
+        (
+            "register_relayed_on_state(",
+            "the in-block relayed door no longer runs the gated body",
+        ),
+    ] {
+        if !ex.contains(needle) {
+            return Err(msg.to_string());
+        }
+    }
+    // The lock path still persists the message it registers; the lock itself is
+    // the one remaining out-of-block bridge mutation (tracked separately), and
+    // a message in the state root must also be in the durable store.
+    if !bc.contains("save_cross_domain_message(") {
+        return Err("the bridge lock no longer persists the message it registers".to_string());
     }
     let srp = slice_of(
         bc,
@@ -193,9 +234,9 @@ pub fn run(root: &Path) -> Result<String, String> {
     let ex = code_of(root, "src/execution/executor.rs")?;
 
     check_root_covers_and_nonces_are_block_scoped(&bc, &acc, &ex)?;
-    check_validation_and_durable_trails(&bc)?;
+    check_validation_and_durable_trails(&bc, &ex)?;
 
-    Ok("Consensus-state boundary OK: state root covers consensus fields, StateUpdate nonce writes are block-scoped (executor validates before writing, no out-of-block write), out-of-block mutators persist a durable trail. message_registry and bridge_state move in-block in later slices (decision 50).".to_string())
+    Ok("Consensus-state boundary OK: state root covers consensus fields, StateUpdate nonce writes are block-scoped (executor validates before writing, no out-of-block write), and `message_registry` / `bridge_state` now move only in block - the BridgeBurn and CrossDomainMessage transaction arms apply them, and the old request-path doors are not in production code. The bridge lock is the one remaining out-of-block bridge mutation, tracked separately.".to_string())
 }
 
 /// # Errors
@@ -259,14 +300,17 @@ pub fn self_test() -> Result<String, String> {
         "a state root without settlement_root passed",
     )?;
 
-    // Break 2: the executor StateUpdate arm accepts equal nonce.
+    // Break 2: the executor StateUpdate arm regains nonce logic. The arm
+    // is retired (431d7fb), so the canary plants a nonce touch inside it
+    // and the gate must refuse any StateUpdate arm that is not a pure
+    // refusal.
     break_and_expect_refusal(
         &tmp,
         &root,
         "src/execution/executor.rs",
-        "*new_nonce <= current",
-        "*new_nonce < current",
-        "an executor StateUpdate arm that accepts equal nonce passed",
+        "TransactionType::StateUpdate { domain_id, .. } => {",
+        "TransactionType::StateUpdate { domain_id, .. } => { let planted: u64 = *new_nonce; let _ = planted;",
+        "an executor StateUpdate arm that regained nonce logic passed",
     )?;
 
     // Break 3: apply_pending_commitments regains an out-of-block nonce write.
@@ -279,14 +323,24 @@ pub fn self_test() -> Result<String, String> {
         "an out-of-block nonce write in apply_pending_commitments passed",
     )?;
 
-    // Break 4: the cross-domain message durable trail is gone.
+    // Break 4: the in-block burn stops running the shared body.
     break_and_expect_refusal(
         &tmp,
         &root,
-        "src/chain/blockchain.rs",
-        "save_cross_domain_message(",
-        "save_cross_domain_message_gone(",
-        "an unpersisted cross-domain message passed",
+        "src/execution/executor.rs",
+        "apply_burn_to_state(",
+        "apply_burn_to_state_gone(",
+        "an executor whose burn arm skips the burn body passed",
+    )?;
+
+    // Break 4b: the executor's relayed arm stops gating.
+    break_and_expect_refusal(
+        &tmp,
+        &root,
+        "src/execution/executor.rs",
+        "register_relayed_on_state(",
+        "register_relayed_on_state_gone(",
+        "an executor whose relayed arm skips the gate passed",
     )?;
 
     // Break 5: the startup load path regains an out-of-block nonce write.
@@ -303,4 +357,19 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "consensus-state-only-changes-in-blocks canary OK (clean PASSes, broken FAILs).",
     ))
+}
+
+#[cfg(test)]
+mod production_text_tests {
+    use super::*;
+
+    #[test]
+    fn needles_in_comments_strings_and_tests_are_gone() {
+        let src = "// final_hasher.update(self.bridge_root)\nlet s = \"MAX_STATE_UPDATES\";\n#[cfg(test)]\nmod t { fn x() { save_cross_domain_message(); } }\nfn real() {}\n";
+        let out = production_text(src);
+        assert!(!out.contains("bridge_root"));
+        assert!(!out.contains("MAX_STATE_UPDATES"));
+        assert!(!out.contains("save_cross_domain_message"));
+        assert!(out.contains("fn real"));
+    }
 }

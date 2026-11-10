@@ -244,10 +244,7 @@ fn coded_object_kill_keeps_object_above_k_when_parity_remains() {
     );
     // (4,6) still reconstructs with 5 live pieces.
     assert!(
-        reg.objects_needing_repair(2)
-            .iter()
-            .all(|(id, _, _)| id != &manifest.manifest_id)
-            || reg.live_shard_count(&manifest.manifest_id) >= 4,
+        reg.live_shard_count(&manifest.manifest_id) >= 4,
         "with five of six live the object must still sit at or above k"
     );
 

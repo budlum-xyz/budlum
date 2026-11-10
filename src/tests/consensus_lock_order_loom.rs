@@ -1,18 +1,19 @@
 //! Every interleaving of the consensus engine's nested locks, checked.
 //!
-//! `PoSEngine` owns four `RwLock`s: `seen_blocks`, `slashing_evidence`,
-//! `checkpoints` and `epoch_seed`. Three call sites take two of them at once:
+//! `PoSEngine` owns five `RwLock`s: `seen_blocks`, `pending_checkpoints`,
+//! `slashing_evidence`, `checkpoints` and `epoch_seed`. Three call sites take
+//! two of them at once:
 //!
 //! | site | order |
 //! |---|---|
-//! | `record_block_header` on a double sign | `seen_blocks` then `slashing_evidence` |
-//! | `record_block_header` on a first sighting, via `add_checkpoint` | `seen_blocks` then `checkpoints` |
+//! | `record_block` on a double sign | `seen_blocks` then `slashing_evidence` |
+//! | `record_block` on a first boundary sighting (P01-F04 parking) | `seen_blocks` then `pending_checkpoints` |
 //! | `serialize_state` | `checkpoints` then `slashing_evidence` |
 //!
 //! Read those three as edges and they form a total order:
-//! `seen_blocks` before `checkpoints` before `slashing_evidence`. No call
-//! site takes them the other way round, so the graph is acyclic and the
-//! engine cannot deadlock against itself.
+//! `seen_blocks` before `pending_checkpoints` before `checkpoints` before
+//! `slashing_evidence`. No call site takes them the other way round, so the
+//! graph is acyclic and the engine cannot deadlock against itself.
 //!
 //! That paragraph is an argument, and an argument is what these tests replace.
 //! Reading the code is how a lock order gets believed and it is not how one
@@ -50,11 +51,12 @@ mod model {
     use loom::thread;
     use std::sync::Arc;
 
-    /// The four locks of `PoSEngine`, with the contents left out.
+    /// The five locks of `PoSEngine`, with the contents left out.
     ///
     /// Field order is the lock order, and it is the one the engine uses.
     struct Engine {
         seen_blocks: RwLock<u32>,
+        pending_checkpoints: RwLock<u32>,
         checkpoints: RwLock<u32>,
         slashing_evidence: RwLock<u32>,
         epoch_seed: RwLock<u32>,
@@ -64,6 +66,7 @@ mod model {
         fn new() -> Self {
             Self {
                 seen_blocks: RwLock::new(0),
+                pending_checkpoints: RwLock::new(0),
                 checkpoints: RwLock::new(0),
                 slashing_evidence: RwLock::new(0),
                 epoch_seed: RwLock::new(0),
@@ -79,13 +82,15 @@ mod model {
             *evidence += 1;
         }
 
-        /// `record_block_header`, first-sighting branch: `seen_blocks` is
-        /// held across the `add_checkpoint` call, which takes `checkpoints`.
+        /// `record_block`, first-sighting branch at a boundary (P01-F04):
+        /// `seen_blocks` is held across the parking write, which takes
+        /// `pending_checkpoints`. The promotion into `checkpoints` happens
+        /// later, with no nesting (see `note_finalized_height`).
         fn record_first_sighting(&self) {
             let mut seen = self.seen_blocks.write().unwrap();
             *seen += 1;
-            let mut checkpoints = self.checkpoints.write().unwrap();
-            *checkpoints += 1;
+            let mut pending = self.pending_checkpoints.write().unwrap();
+            *pending += 1;
         }
 
         /// `serialize_state`: both read guards are arguments to one `json!`,
@@ -262,15 +267,17 @@ fn the_model_matches_the_engines_lock_inventory() {
 
     assert_eq!(
         declared.len(),
-        4,
-        "PoSEngine's lock count moved. The loom model in this file covers four \
-         locks in the order seen_blocks, checkpoints, slashing_evidence, epoch_seed. \
+        5,
+        "PoSEngine's lock count moved. The loom model in this file covers five \
+         locks in the order seen_blocks, pending_checkpoints, checkpoints, \
+         slashing_evidence, epoch_seed. \
          A lock that is not in the model is a lock no interleaving was checked \
          against, so add it there before adding it here.\nFound: {declared:#?}"
     );
 
     for name in [
         "seen_blocks",
+        "pending_checkpoints",
         "slashing_evidence",
         "checkpoints",
         "epoch_seed",

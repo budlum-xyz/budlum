@@ -55,145 +55,27 @@ fn security_reject_zero_length_data_for_contract_call() {
     assert!(state.validate_transaction(&tx).is_err());
 }
 
-macro_rules! gen_security_tests {
-    ($($name:ident, $idx:expr),*) => {
-        $(
-            #[test]
-            fn $name() {
-                let a = addr($idx);
-                let mut tx = Transaction::new(a, addr(0), 0, vec![]);
-                // `as u64` here was a `u64 as u64` no-op (the literals are
-                // inferred as u64 from this very assignment) and tripped
-                // `trivial_numeric_casts`. `addr()` takes u8 separately.
-                tx.nonce = $idx;
-                // Proving that even with valid-looking nonces,
-                // Without balance it fails.
-                let state = crate::core::account::AccountState::new();
-                assert!(state.validate_transaction(&tx).is_err());
-            }
-        )*
+/// Sixty distinct senders with no account behind them. A wrong nonce is refused
+/// for the nonce, and the right nonce is refused for the missing balance, so each
+/// sender hits a different gate and the reason is pinned for both.
+#[test]
+fn security_unfunded_senders_are_refused_for_nonce_and_for_balance() {
+    let state = crate::core::account::AccountState::new();
+    let fee = state.base_fee + 1;
+    for idx in 1u8..=60 {
+        let sender = addr(idx);
+
+        let wrong_nonce =
+            Transaction::new_with_fee(sender, addr(0), 1, fee, u64::from(idx), vec![]);
+        let err = state
+            .validate_transaction(&wrong_nonce)
+            .expect_err("a nonce the account has not reached must be refused");
+        assert!(err.contains("Invalid nonce"), "sender {idx}: {err}");
+
+        let no_balance = Transaction::new_with_fee(sender, addr(0), 1, fee, 0, vec![]);
+        let err = state
+            .validate_transaction(&no_balance)
+            .expect_err("a sender without balance must be refused");
+        assert!(err.contains("Insufficient balance"), "sender {idx}: {err}");
     }
 }
-
-gen_security_tests!(
-    sec_test_1,
-    1,
-    sec_test_2,
-    2,
-    sec_test_3,
-    3,
-    sec_test_4,
-    4,
-    sec_test_5,
-    5,
-    sec_test_6,
-    6,
-    sec_test_7,
-    7,
-    sec_test_8,
-    8,
-    sec_test_9,
-    9,
-    sec_test_10,
-    10,
-    sec_test_11,
-    11,
-    sec_test_12,
-    12,
-    sec_test_13,
-    13,
-    sec_test_14,
-    14,
-    sec_test_15,
-    15,
-    sec_test_16,
-    16,
-    sec_test_17,
-    17,
-    sec_test_18,
-    18,
-    sec_test_19,
-    19,
-    sec_test_20,
-    20,
-    sec_test_21,
-    21,
-    sec_test_22,
-    22,
-    sec_test_23,
-    23,
-    sec_test_24,
-    24,
-    sec_test_25,
-    25,
-    sec_test_26,
-    26,
-    sec_test_27,
-    27,
-    sec_test_28,
-    28,
-    sec_test_29,
-    29,
-    sec_test_30,
-    30,
-    sec_test_31,
-    31,
-    sec_test_32,
-    32,
-    sec_test_33,
-    33,
-    sec_test_34,
-    34,
-    sec_test_35,
-    35,
-    sec_test_36,
-    36,
-    sec_test_37,
-    37,
-    sec_test_38,
-    38,
-    sec_test_39,
-    39,
-    sec_test_40,
-    40,
-    sec_test_41,
-    41,
-    sec_test_42,
-    42,
-    sec_test_43,
-    43,
-    sec_test_44,
-    44,
-    sec_test_45,
-    45,
-    sec_test_46,
-    46,
-    sec_test_47,
-    47,
-    sec_test_48,
-    48,
-    sec_test_49,
-    49,
-    sec_test_50,
-    50,
-    sec_test_51,
-    51,
-    sec_test_52,
-    52,
-    sec_test_53,
-    53,
-    sec_test_54,
-    54,
-    sec_test_55,
-    55,
-    sec_test_56,
-    56,
-    sec_test_57,
-    57,
-    sec_test_58,
-    58,
-    sec_test_59,
-    59,
-    sec_test_60,
-    60
-);

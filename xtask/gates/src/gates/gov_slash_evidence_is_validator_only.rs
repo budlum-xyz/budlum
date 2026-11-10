@@ -22,6 +22,36 @@ fn collect(root: &Path) -> Result<String, String> {
     std::fs::read_to_string(&p).map_err(|e| format!("cannot read {}: {e}", p.display()))
 }
 
+/// Blank a nested block comment starting at `pos`, keeping the newlines.
+///
+/// Rust block comments nest (`/* outer /* inner */ tail */`); a flat scan
+/// stops at the first `*/` and leaves the tail looking like live code
+/// (CWE-697). Track depth instead.
+fn blank_block_comment(bytes: &[u8], pos: &mut usize, out: &mut String) {
+    out.push(' ');
+    out.push(' ');
+    *pos += 2;
+    let mut depth = 1usize;
+    while *pos < bytes.len() && depth > 0 {
+        if bytes[*pos..].starts_with(b"/*") {
+            depth += 1;
+            out.push(' ');
+            out.push(' ');
+            *pos += 2;
+            continue;
+        }
+        if bytes[*pos..].starts_with(b"*/") {
+            depth -= 1;
+            out.push(' ');
+            out.push(' ');
+            *pos += 2;
+            continue;
+        }
+        out.push(if bytes[*pos] == b'\n' { '\n' } else { ' ' });
+        *pos += 1;
+    }
+}
+
 /// Strip Rust comments, ordinary strings and raw strings (preserving line
 /// structure) so dead text cannot satisfy the gate (CWE-697).
 fn strip_rust_noise(src: &str) -> String {
@@ -37,31 +67,7 @@ fn strip_rust_noise(src: &str) -> String {
             continue;
         }
         if bytes[pos..].starts_with(b"/*") {
-            // Rust block comments nest (`/* outer /* inner */ tail */`); a
-            // flat scan stops at the first `*/` and leaves the tail looking
-            // like live code. Track depth instead (CWE-697).
-            out.push(' ');
-            out.push(' ');
-            pos += 2;
-            let mut depth = 1usize;
-            while pos < bytes.len() && depth > 0 {
-                if bytes[pos..].starts_with(b"/*") {
-                    depth += 1;
-                    out.push(' ');
-                    out.push(' ');
-                    pos += 2;
-                    continue;
-                }
-                if bytes[pos..].starts_with(b"*/") {
-                    depth -= 1;
-                    out.push(' ');
-                    out.push(' ');
-                    pos += 2;
-                    continue;
-                }
-                out.push(if bytes[pos] == b'\n' { '\n' } else { ' ' });
-                pos += 1;
-            }
+            blank_block_comment(bytes, &mut pos, &mut out);
             continue;
         }
         if bytes[pos] == b'r' || bytes[pos] == b'b' {
@@ -111,6 +117,17 @@ fn strip_rust_noise(src: &str) -> String {
                 }
             }
         }
+        // A char literal such as `'"'` or `'\"'` must not open a string.
+        if bytes[pos] == b'\'' {
+            let len = char_literal_len(&bytes[pos..]);
+            if len > 0 {
+                for _ in 0..len {
+                    out.push(' ');
+                }
+                pos += len;
+                continue;
+            }
+        }
         if bytes[pos] == b'"' {
             out.push(' ');
             pos += 1;
@@ -132,6 +149,25 @@ fn strip_rust_noise(src: &str) -> String {
         pos += 1;
     }
     out
+}
+
+/// Byte length of a char literal at the start of `b` (which starts with `'`),
+/// or 0 when it is a lifetime or a label.
+fn char_literal_len(b: &[u8]) -> usize {
+    match b.get(1) {
+        Some(b'\\') => b[2..]
+            .iter()
+            .take(10)
+            .position(|c| *c == b'\'')
+            .map_or(0, |p| p + 3),
+        Some(c) if *c >= 0x80 => b[2..]
+            .iter()
+            .take(4)
+            .position(|x| *x == b'\'')
+            .map_or(0, |p| p + 3),
+        Some(_) if b.get(2) == Some(&b'\'') => 3,
+        _ => 0,
+    }
 }
 
 /// Extract the live `SlashValidator` arm body from the noise-stripped view:
@@ -190,7 +226,12 @@ fn judge(src: &str) -> Vec<String> {
         return problems;
     };
 
-    if !block.contains("record.report.role != crate::registry::role::roles::VALIDATOR") {
+    // The role test must be an `if` that refuses: `let _ = role != VALIDATOR;`
+    // only mentions the comparison.
+    let compact_block: String = block.chars().filter(|c| !c.is_whitespace()).collect();
+    if !compact_block
+        .contains("ifrecord.report.role!=crate::registry::role::roles::VALIDATOR{return")
+    {
         problems.push(String::from(
             "account.rs no longer requires the slashing evidence to be a VALIDATOR record inside the SlashValidator path. Any-role evidence reopens the governance-slash bypass (CWE-345).",
         ));
@@ -451,4 +492,18 @@ fn execute_proposal(&mut self, proposal: &Proposal) {
     Ok(String::from(
         "governance-slash gate self-test OK: the protected branch passes, bait outside the branch fails.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn char_quote_literal_does_not_flip_string_state() {
+        let src = "let q = '\"'; let after = 1; /* c */";
+        let out = strip_rust_noise(src);
+        assert!(out.contains("after"));
+        let lifetime = strip_rust_noise("fn f<'a>(x: &'a str) { marker(); }");
+        assert!(lifetime.contains("marker"));
+    }
 }

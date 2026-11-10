@@ -43,8 +43,9 @@ fn skip_py_ws(s: &str) -> &str {
     &s[idx..]
 }
 
-/// Blank line comments (`//` to end of line).
+/// Blank block comments and line comments (`//` to end of line).
 fn strip_comments(text: &str) -> String {
+    let text = crate::gates::rust_literals::strip_block_comments(text);
     let mut out = String::with_capacity(text.len());
     for line in text.split_inclusive('\n') {
         let Some(pos) = line.find("//") else {
@@ -601,4 +602,17 @@ pub fn self_test() -> Result<String, String> {
     )?;
 
     Ok(String::from("value pricing gate self-test OK: 10 canaries"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_comments_are_not_code() {
+        let out = strip_comments("/* relayer_fee_bps */ let a = 1; // note\nlet b = 2;\n");
+        assert!(!out.contains("relayer_fee_bps"));
+        assert!(!out.contains("note"));
+        assert!(out.contains("let a = 1;") && out.contains("let b = 2;"));
+    }
 }

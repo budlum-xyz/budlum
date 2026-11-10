@@ -280,6 +280,13 @@ pub struct NodeConfig {
     /// Vendor-native PQ mechanism ID for PKCS#11.
     #[arg(long)]
     pub pkcs11_pq_mechanism: Option<String>,
+    /// Operator-configured BLS public key (hex), cross-checked against the
+    /// HSM-held PUBLIC_KEY object at startup (P02-F01 decision B).
+    #[arg(long)]
+    pub pkcs11_bls_public_key: Option<String>,
+    /// Operator-configured PQ public key (hex), cross-checked the same way.
+    #[arg(long)]
+    pub pkcs11_pq_public_key: Option<String>,
 
     #[arg(long)]
     pub features_governance: bool,
@@ -310,39 +317,16 @@ pub struct NodeConfig {
 
     #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
     pub storage_mandatory_sharding: bool,
-
     // --- Outbound bridge (relayer) ---
     //
     // `RelayerWorker::with_adapters` existed and nothing called it, because
     // the node carried no way to say what an adapter should point at.
-    // `EvmChainAdapter::new` needs the bridge contract address and the
-    // `Deposit` event topic0, and there was no field for either, so the
-    // registry was empty on every deployed node and outbound relay answered
-    // `UnsupportedChain` for every chain.
-    /// Ethereum bridge contract address, hex, with or without `0x`.
-    ///
-    /// Absent means outbound relay stays off, which is the current behaviour
-    /// and the safe one: every receipt leaf binds to this address, so a node
-    /// that guesses would advertise Ethereum support while pointing at no
-    /// contract.
-    #[arg(long)]
-    pub evm_bridge_address: Option<String>,
-
-    /// `keccak256("Deposit(...)")` for the bridge contract, hex.
-    ///
-    /// Required alongside `--evm-bridge-address`; a deposit log is matched on
-    /// emitter and topic0 together, and a zero topic matches the first log the
-    /// contract ever emitted.
-    #[arg(long)]
-    pub evm_deposit_topic0: Option<String>,
-
-    /// Confirmations to wait before a deposit is treated as final.
-    ///
-    /// Defaults to the adapter's own `DEFAULT_CONFIRMATIONS`. Zero is refused
-    /// by `check_fit_for_relay`: a deposit from a block that can still be
-    /// reorged away would be minted against a transaction that did not happen.
-    #[arg(long)]
-    pub evm_confirmations: Option<u32>,
+    // BLG-0135 (P06-F06, decision B): the `--evm-bridge-address` registration
+    // is REMOVED. The EVM bridge leg has no live end-to-end route (the
+    // off-chain half is a stub that refuses at broadcast), and a registration
+    // surface that reads as "production" while the leg cannot operate was the
+    // finding. Outbound EVM relay stays off until the real receipt flow
+    // lands; there is nothing safe to point the adapter at.
 }
 
 impl Default for NodeConfig {
@@ -425,6 +409,8 @@ impl Default for NodeConfig {
             hsm_socket_path: "./data/hsm/socket.sock".to_string(),
             pkcs11_bls_mechanism: None,
             pkcs11_pq_mechanism: None,
+            pkcs11_bls_public_key: None,
+            pkcs11_pq_public_key: None,
             features_governance: false,
             features_zkvm_contracts: false,
             features_pruning: false,
@@ -433,9 +419,6 @@ impl Default for NodeConfig {
             storage_enabled: true,
             storage_replication_factor: 3,
             storage_mandatory_sharding: true,
-            evm_bridge_address: None,
-            evm_deposit_topic0: None,
-            evm_confirmations: None,
         }
     }
 }
@@ -550,6 +533,10 @@ pub struct Pkcs11Section {
     /// Hex or decimal string (e.g. "0x80000001" or "2147483649").
     /// If absent, BLS signing falls back to software (data object).
     pub bls_mechanism: Option<String>,
+    /// Operator-configured BLS/PQ public keys (hex) for the startup
+    /// cross-check (P02-F01 decision B).
+    pub bls_public_key: Option<String>,
+    pub pq_public_key: Option<String>,
     /// Vendor-native PQ/Dilithium mechanism ID.
     pub pq_mechanism: Option<String>,
 }
@@ -600,12 +587,23 @@ pub struct LegacyFileConfig {
 }
 
 impl NodeConfig {
+    /// Clap leaves the `#[arg(skip)]` RPC fields at type defaults (auth off,
+    /// allow list empty). Restore the secure `Default` values before the file
+    /// and environment overlays, so a flags-only start keeps them.
+    fn apply_secure_rpc_defaults(&mut self) {
+        let secure = Self::default();
+        self.rpc_auth_required = secure.rpc_auth_required;
+        self.rpc_allowed_ips = secure.rpc_allowed_ips;
+    }
+
     pub fn load_with_file(&mut self) {
+        self.apply_secure_rpc_defaults();
         if let Some(path) = self.config.clone() {
-            let content = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-                eprintln!("CRITICAL ERROR: Failed to read config file at {path}: {e}");
-                std::process::exit(1);
-            });
+            let content = read_to_string_bounded(Path::new(&path), MAX_CONFIG_FILE_BYTES)
+                .unwrap_or_else(|e| {
+                    eprintln!("CRITICAL ERROR: Failed to read config file at {path}: {e}");
+                    std::process::exit(1);
+                });
 
             // 1. Parse the file first, then overlay environment values.
             match toml::from_str::<FileConfig>(&content) {
@@ -863,6 +861,12 @@ impl NodeConfig {
                     if self.pkcs11_pq_mechanism.is_none() {
                         self.pkcs11_pq_mechanism = pkcs11.pq_mechanism;
                     }
+                    if self.pkcs11_bls_public_key.is_none() {
+                        self.pkcs11_bls_public_key = pkcs11.bls_public_key;
+                    }
+                    if self.pkcs11_pq_public_key.is_none() {
+                        self.pkcs11_pq_public_key = pkcs11.pq_public_key;
+                    }
                 }
                 if let Some(socket) = signer.hsm_socket_path {
                     self.hsm_socket_path = socket;
@@ -987,9 +991,12 @@ impl NodeConfig {
             self.role = role;
         }
         if let Ok(chain_id) = std::env::var("BUDLUM_CHAIN_ID") {
-            if let Ok(id) = chain_id.parse::<u64>() {
-                self.chain_id = Some(id);
-            }
+            // A bad value must stop the node: ignoring it would skip the chain id check.
+            let id = parse_env_chain_id(&chain_id).unwrap_or_else(|error| {
+                eprintln!("CRITICAL: invalid BUDLUM_CHAIN_ID: {error}");
+                std::process::exit(1);
+            });
+            self.chain_id = Some(id);
         }
         if let Ok(db) = std::env::var("BUDLUM_DB_PATH") {
             self.db_path = db;
@@ -1038,72 +1045,6 @@ impl NodeConfig {
     pub fn effective_max_peers(&self) -> usize {
         let profile_cap = self.network.security_config().max_peers.max(1);
         self.max_peers.unwrap_or(profile_cap).clamp(1, profile_cap)
-    }
-
-    /// Build the outbound EVM adapter this node was configured for, if any.
-    ///
-    /// `Ok(None)` means outbound relay stays off, which is what every node
-    /// does today. `Err` means the operator asked for it and got it wrong,
-    /// and the node must not start pretending to bridge: a half-configured
-    /// adapter is worse than none, because the registry advertises the chain
-    /// as supported.
-    ///
-    /// # Errors
-    ///
-    /// The half of the pair that is missing or malformed, or the reason the
-    /// assembled adapter is not fit to relay.
-    pub fn evm_adapter(
-        &self,
-    ) -> Result<Option<crate::cross_domain::evm::adapter::EvmChainAdapter>, String> {
-        let (Some(addr_hex), Some(topic_hex)) = (
-            self.evm_bridge_address.as_deref(),
-            self.evm_deposit_topic0.as_deref(),
-        ) else {
-            // Both or neither. One alone is a configuration half-written, and
-            // the missing half is not something to guess: a zero address binds
-            // every receipt leaf to nothing, and a zero topic0 matches the
-            // first log the contract ever emitted.
-            return match (
-                self.evm_bridge_address.is_some(),
-                self.evm_deposit_topic0.is_some(),
-            ) {
-                (false, false) => Ok(None),
-                (true, false) => Err(
-                    "--evm-bridge-address was given without --evm-deposit-topic0: a deposit \
-                     log is matched on emitter and topic together"
-                        .into(),
-                ),
-                _ => Err(
-                    "--evm-deposit-topic0 was given without --evm-bridge-address: the topic \
-                     alone does not say which contract emitted it"
-                        .into(),
-                ),
-            };
-        };
-
-        let address = hex::decode(addr_hex.strip_prefix("0x").unwrap_or(addr_hex))
-            .map_err(|e| format!("--evm-bridge-address is not hex: {e}"))?;
-        if address.len() != 20 {
-            return Err(format!(
-                "--evm-bridge-address must be 20 bytes, got {}",
-                address.len()
-            ));
-        }
-        let topic = hex::decode(topic_hex.strip_prefix("0x").unwrap_or(topic_hex))
-            .map_err(|e| format!("--evm-deposit-topic0 is not hex: {e}"))?;
-        let topic0: [u8; 32] = topic.try_into().map_err(|v: Vec<u8>| {
-            format!("--evm-deposit-topic0 must be 32 bytes, got {}", v.len())
-        })?;
-
-        let mut adapter = crate::cross_domain::evm::adapter::EvmChainAdapter::new(address, topic0);
-        if let Some(confirmations) = self.evm_confirmations {
-            adapter.required_confirmations = confirmations;
-        }
-        // Ask the adapter itself rather than re-deriving the rules here. It
-        // refuses a zero address and zero confirmations, and this is the last
-        // point before the registry where refusing is still cheap.
-        adapter.check_fit_for_relay()?;
-        Ok(Some(adapter))
     }
 
     pub fn pruning_policy(&self) -> Result<crate::storage::PruningPolicy, String> {
@@ -1168,6 +1109,10 @@ impl NodeConfig {
         }
 
         if self.network == Network::Mainnet {
+            if let Some(reason) = self.mainnet_rpc_violation() {
+                eprintln!("CRITICAL SECURITY FAILURE: {reason}");
+                std::process::exit(1);
+            }
             // A signing key on disk is refused on mainnet for every role and
             // consensus type. `main` loads `validator_key_file` twice before
             // the PoS engine's own refusal (for the producer address and for
@@ -1263,6 +1208,26 @@ impl NodeConfig {
         }
     }
 
+    /// Mainnet refuses an RPC listener that has auth off or allows every
+    /// address. Roles that open no listener are not checked.
+    fn mainnet_rpc_violation(&self) -> Option<&'static str> {
+        let exposed = match self.role.as_str() {
+            "validator" | "sentry" | "seed" | "relayer" => false,
+            "rpc" | "archive" => true,
+            _ => self.rpc_enabled,
+        };
+        if !exposed {
+            return None;
+        }
+        if !self.rpc_auth_required {
+            return Some("mainnet refuses an RPC listener with auth_required = false");
+        }
+        if self.rpc_allowed_ips.is_empty() {
+            return Some("mainnet refuses an RPC listener with an empty allowed_ips list");
+        }
+        None
+    }
+
     // Node role based rules to avoid opening unnecessary listeners.
     fn apply_role_rules(&mut self) {
         match self.role.as_str() {
@@ -1284,36 +1249,33 @@ impl NodeConfig {
         }
     }
 
-    pub fn load_validators(&self) -> Vec<String> {
+    /// Reads the validators file. A missing file is an empty list (the
+    /// default path is optional); an unreadable, oversized or malformed file
+    /// is an error, so a PoA node never starts on a silently empty set.
+    pub fn load_validators(&self) -> Result<Vec<String>, String> {
         let path = Path::new(&self.validators_file);
         if !path.exists() {
             println!(" Validators file not found: {}", self.validators_file);
-            return vec![];
+            return Ok(vec![]);
         }
-        match std::fs::read_to_string(path) {
-            Ok(content) => match serde_json::from_str::<ValidatorsConfig>(&content) {
-                Ok(config) => {
-                    println!(
-                        "Loaded {} validators from {}",
-                        config.validators.len(),
-                        self.validators_file
-                    );
-                    config.validators
-                }
-                Err(e) => {
-                    println!("Failed to parse validators file: {e}");
-                    vec![]
-                }
-            },
-            Err(e) => {
-                println!("Failed to read validators file: {e}");
-                vec![]
-            }
-        }
+        let content = read_to_string_bounded(path, MAX_CONFIG_FILE_BYTES)
+            .map_err(|e| format!("failed to read validators file: {e}"))?;
+        let config = serde_json::from_str::<ValidatorsConfig>(&content)
+            .map_err(|e| format!("failed to parse validators file: {e}"))?;
+        println!(
+            "Loaded {} validators from {}",
+            config.validators.len(),
+            self.validators_file
+        );
+        Ok(config.validators)
     }
 
     pub fn load_validator_addresses(&self) -> Vec<Address> {
-        self.load_validators()
+        let validators = self.load_validators().unwrap_or_else(|e| {
+            eprintln!("CRITICAL: {e}");
+            std::process::exit(1);
+        });
+        validators
             .into_iter()
             .filter_map(|validator| match Address::from_hex(&validator) {
                 Ok(address) => Some(address),
@@ -1334,6 +1296,13 @@ fn parse_env_bool(value: &str) -> Result<bool, String> {
             "expected one of true/false, 1/0, yes/no, or on/off; got '{value}'"
         )),
     }
+}
+
+fn parse_env_chain_id(value: &str) -> Result<u64, String> {
+    value
+        .trim()
+        .parse::<u64>()
+        .map_err(|error| format!("expected an unsigned integer, got '{value}': {error}"))
 }
 
 fn canonical_signer_backend(value: &str) -> Result<String, String> {
@@ -1406,6 +1375,24 @@ fn listener_string(host: &str, port: u16) -> String {
     }
 }
 
+/// Upper bound for the config and validators files (operator input).
+const MAX_CONFIG_FILE_BYTES: u64 = 1024 * 1024;
+
+fn read_to_string_bounded(path: &Path, max_bytes: u64) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut content = String::new();
+    std::fs::File::open(path)?
+        .take(max_bytes.saturating_add(1))
+        .read_to_string(&mut content)?;
+    if content.len() as u64 > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("file is larger than {max_bytes} bytes"),
+        ));
+    }
+    Ok(content)
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct ValidatorsConfig {
     validators: Vec<String>,
@@ -1414,6 +1401,23 @@ struct ValidatorsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_or_oversized_validators_file_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("validators.json");
+        let cfg = NodeConfig {
+            validators_file: file.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        assert_eq!(cfg.load_validators(), Ok(vec![]));
+        std::fs::write(&file, "{ not json").unwrap();
+        assert!(cfg.load_validators().is_err());
+        std::fs::write(&file, r#"{"validators":["aa"]}"#).unwrap();
+        assert_eq!(cfg.load_validators(), Ok(vec!["aa".to_string()]));
+        assert!(read_to_string_bounded(&file, 4).is_err());
+    }
+
     #[test]
     fn test_consensus_type_parsing() {
         assert_eq!(ConsensusType::PoW as u8, 0);
@@ -1549,6 +1553,41 @@ mod tests {
         assert_eq!(parse_env_bool("true"), Ok(true));
         assert_eq!(parse_env_bool("OFF"), Ok(false));
         assert!(parse_env_bool("typo").is_err());
+    }
+
+    #[test]
+    fn chain_id_environment_parser_refuses_a_bad_value() {
+        assert_eq!(parse_env_chain_id(" 7 "), Ok(7));
+        assert!(parse_env_chain_id("main").is_err());
+        assert!(parse_env_chain_id("").is_err());
+    }
+
+    #[test]
+    fn flags_only_start_restores_secure_rpc_defaults() {
+        let mut cfg = NodeConfig::parse_from(["budlum", "--rpc-host", "0.0.0.0"]);
+        assert!(!cfg.rpc_auth_required);
+        assert!(cfg.rpc_allowed_ips.is_empty());
+        cfg.apply_secure_rpc_defaults();
+        assert!(cfg.rpc_auth_required);
+        assert_eq!(cfg.rpc_allowed_ips, NodeConfig::default().rpc_allowed_ips);
+        assert!(!cfg.rpc_allowed_ips.is_empty());
+    }
+
+    #[test]
+    fn mainnet_rejects_open_rpc_listener() {
+        let mut cfg = NodeConfig {
+            network: Network::Mainnet,
+            role: "rpc".into(),
+            ..Default::default()
+        };
+        assert!(cfg.mainnet_rpc_violation().is_none());
+        cfg.rpc_auth_required = false;
+        assert!(cfg.mainnet_rpc_violation().is_some());
+        cfg.rpc_auth_required = true;
+        cfg.rpc_allowed_ips.clear();
+        assert!(cfg.mainnet_rpc_violation().is_some());
+        cfg.role = "validator".into();
+        assert!(cfg.mainnet_rpc_violation().is_none());
     }
 
     #[test]

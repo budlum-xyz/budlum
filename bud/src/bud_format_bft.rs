@@ -114,6 +114,16 @@ impl RatioVote {
     }
 }
 
+/// A finalised ratio must be a finite number with a clear sign bit. NaN,
+/// infinity, negative values and negative zero are refused: equal values with
+/// different bit patterns could never reach quorum together.
+fn check_ratio(ratio: f64) -> Result<(), &'static str> {
+    if !ratio.is_finite() || ratio.is_sign_negative() {
+        return Err("K-BUD-BFT: ratio must be finite and not negative");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct RatioFinalityCert {
     pub pipe_id: u16,
@@ -128,6 +138,12 @@ impl RatioFinalityCert {
     /// the same pipe and the same ratio the certificate publishes, and carry
     /// signatures that verify.
     pub fn verify(&self, validators: &ValidatorSet) -> Result<(), &'static str> {
+        // One key casts one vote, so more votes than validators cannot be
+        // valid. Refuse before any per-vote work.
+        if self.votes.len() > validators.len() {
+            return Err("K-BUD-BFT: more votes than validators");
+        }
+        check_ratio(self.ratio)?;
         let quorum = validators.quorum();
         if self.votes.len() < quorum {
             return Err("K-BUD-BFT: votes below the supermajority quorum");
@@ -201,6 +217,12 @@ impl BftRatioConsensus {
     ) -> Result<RatioFinalityCert, &'static str> {
         if votes.is_empty() {
             return Err("K-BUD-BFT: no votes");
+        }
+        if votes.len() > validators.len() {
+            return Err("K-BUD-BFT: more votes than validators");
+        }
+        for v in &votes {
+            check_ratio(v.ratio)?;
         }
         if votes.iter().any(|v| !validators.contains(&v.public_key)) {
             return Err("K-BUD-BFT: vote from a key outside the validator set");
@@ -385,6 +407,45 @@ mod tests {
             quorum: validators.quorum(),
         };
         assert!(cert.verify(&validators).is_err());
+    }
+
+    #[test]
+    fn oversized_and_meaningless_certificates_are_refused() {
+        let sks = [sk(1), sk(2), sk(3), sk(4)];
+        let validators = set(&sks);
+        // more votes than validators
+        let mut many: Vec<RatioVote> = (0..4)
+            .map(|i| vote(&format!("val-{i}"), &sks[i], 7, 16.68))
+            .collect();
+        many.push(many[0].clone());
+        let cert = RatioFinalityCert {
+            pipe_id: 7,
+            ratio: 16.68,
+            votes: many.clone(),
+            quorum: validators.quorum(),
+        };
+        assert_eq!(
+            cert.verify(&validators).err(),
+            Some("K-BUD-BFT: more votes than validators")
+        );
+        assert_eq!(
+            BftRatioConsensus::finalize_ratio(many, &validators).err(),
+            Some("K-BUD-BFT: more votes than validators")
+        );
+        // NaN, negative and infinite ratios with valid signatures
+        for bad in [f64::NAN, -1.0, f64::INFINITY, -0.0] {
+            let votes: Vec<RatioVote> = (0..4)
+                .map(|i| vote(&format!("val-{i}"), &sks[i], 7, bad))
+                .collect();
+            assert!(BftRatioConsensus::finalize_ratio(votes.clone(), &validators).is_err());
+            let cert = RatioFinalityCert {
+                pipe_id: 7,
+                ratio: bad,
+                votes,
+                quorum: validators.quorum(),
+            };
+            assert!(cert.verify(&validators).is_err(), "ratio {bad} refused");
+        }
     }
 
     /// Four validators of five, all on pipe 7, two of them with their own

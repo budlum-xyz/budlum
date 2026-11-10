@@ -136,15 +136,26 @@ impl BlsVerifier for PairingBls {
 /// silently stops serving, and that must be a loud error instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AdapterSpec {
-    /// Ethereum sync-committee finality, bound to one network and one signing
-    /// root. The BLS verifier is installed by the node at construction; the
-    /// spec carries only the data.
+    /// Ethereum sync-committee finality, bound to one network and one PINNED
+    /// sync committee (BLG-0130/P06-F01). The BLS verifier is installed by
+    /// the node at construction; the spec carries only the data. A spec
+    /// without a committee is the closed admission state (decision C,
+    /// interim): `register_domain` refuses it.
     EthereumSync {
         network: String,
-        signing_root: [u8; 32],
+        #[serde(default)]
+        committee: Option<crate::cross_domain::external::ethereum::PinnedCommittee>,
     },
-    /// BudZKVM validity proofs for one network.
-    ZkVm { network: String },
+    /// BudZKVM validity proofs for one network, pinned to one program and
+    /// one chain (BLG-0134/P06-F05, decision A). A spec without the pins is
+    /// the closed admission state: `register_domain` refuses it.
+    ZkVm {
+        network: String,
+        #[serde(default)]
+        program_hash: Option<[u8; 32]>,
+        #[serde(default)]
+        chain_id: Option<u64>,
+    },
 }
 
 impl AdapterSpec {
@@ -153,7 +164,7 @@ impl AdapterSpec {
     #[must_use]
     pub fn network(&self) -> &str {
         match self {
-            Self::EthereumSync { network, .. } | Self::ZkVm { network } => network,
+            Self::EthereumSync { network, .. } | Self::ZkVm { network, .. } => network,
         }
     }
 
@@ -170,19 +181,20 @@ impl AdapterSpec {
         golden: Option<RawConsensusEvidence>,
     ) -> Box<dyn ExternalFinalityAdapter> {
         match self {
-            Self::EthereumSync {
-                network,
-                signing_root,
-            } => {
-                let adapter = EthereumSyncAdapter::new(network, *signing_root, bls);
+            Self::EthereumSync { network, committee } => {
+                let adapter = EthereumSyncAdapter::new(network, committee.clone(), bls);
                 let adapter = match golden {
                     Some(g) => adapter.with_golden(g),
                     None => adapter,
                 };
                 Box::new(adapter)
             }
-            Self::ZkVm { network } => {
-                let adapter = ZkVmFinalityAdapter::new(network);
+            Self::ZkVm {
+                network,
+                program_hash,
+                chain_id,
+            } => {
+                let adapter = ZkVmFinalityAdapter::new(network, *program_hash, *chain_id);
                 let adapter = match golden {
                     Some(g) => adapter.with_golden(g),
                     None => adapter,
@@ -240,10 +252,30 @@ pub struct IntakeState {
     /// Multi-prover quorum rounds for vote-based domains. Serialized with
     /// the rest of the intake, so round progress is inside `state_digest`
     /// and two nodes cannot disagree about a round without disagreeing
-    /// about the digest. `default` keeps old serialized states readable:
-    /// a state written before rounds existed has no rounds.
+    /// about the digest.
+    ///
+    /// BLG-0154 (P07-F09): `serde(default)` does NOT keep old serialized
+    /// states readable here. Storage is bincode, which is not
+    /// self-describing - a state written before this field existed ends
+    /// before it, and the decode fails rather than defaulting. The old doc
+    /// claimed compatibility that never worked. The honest contract: a
+    /// state from before a trailing field was added cannot decode, and the
+    /// loader treats that as CRITICAL (refuses to start with a silently
+    /// empty intake). A shape change needs a migration, not an attribute.
     #[serde(default)]
     pub quorum: QuorumRounds,
+}
+
+/// The clock `max_age` measures against at submission: the domain's most
+/// recent accepted height, never lower than the stored registration value
+/// (BLG-0153/P07-F08 - the same high-water-mark rule as the EVM relay's
+/// policy clock).
+#[must_use]
+///
+/// Convenience: crate-visible so the intake policy reads one clock
+/// definition; the policy refresh in this file is its caller today.
+pub(crate) fn live_policy_clock(stored_now: u64, last_accepted_height: Option<u64>) -> u64 {
+    last_accepted_height.map_or(stored_now, |tip| tip.max(stored_now))
 }
 
 /// What went wrong at the intake boundary, as distinct from inside the
@@ -255,6 +287,8 @@ pub enum IntakeError {
     UnknownDomain,
     #[error("the ethereum adapter needs a BLS verifier and none is installed")]
     MissingBlsVerifier,
+    #[error("ethereum sync admission is closed: no sync committee is pinned")]
+    CommitteeNotPinned,
     #[error("admission failed: golden={golden_verified}, {passed}/{total} probes passed")]
     AdmissionRefused {
         golden_verified: bool,
@@ -274,7 +308,30 @@ pub enum IntakeError {
          AcceptMostCommon is never for a state root that will be committed to"
     )]
     PermissiveQuorumPolicy,
+    #[error("the quorum policy cannot decide safely: {reason}")]
+    InvalidQuorumPolicy { reason: &'static str },
+    #[error("an agreed quorum round holds no entry that carried the winning claim")]
+    MissingCarrier,
 }
+
+/// The first prover in arrival order whose entry carries `state_root`.
+fn first_carrier(
+    round: &crate::cross_domain::external::intake_quorum::QuorumRound,
+    state_root: &[u8; 32],
+) -> Option<Address> {
+    round
+        .entries
+        .iter()
+        .find_map(|e: &RoundEntry| match &e.attestation {
+            Some(att) if &att.state_root == state_root => Some(e.prover),
+            _ => None,
+        })
+}
+
+/// The most seats one quorum round may hold. Rounds are consensus state and
+/// are digested on every call, so the seat count must have a bound the
+/// operator cannot lift.
+const MAX_QUORUM_PARTICIPANTS: usize = 256;
 
 impl IntakeState {
     #[must_use]
@@ -318,6 +375,27 @@ impl IntakeState {
         } = request;
         if matches!(spec, AdapterSpec::EthereumSync { .. }) && bls.is_none() {
             return Err(IntakeError::MissingBlsVerifier);
+        }
+        // BLG-0130 (P06-F01, decision C interim): EthereumSync admission is
+        // closed until a sync committee is pinned - the old shape let the
+        // submitter name their own aggregate key.
+        if let AdapterSpec::EthereumSync { committee, .. } = &spec {
+            if committee.is_none() {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        // BLG-0134 (P06-F05, decision A): ZkVm admission needs the pinned
+        // program and chain - canonical-set membership alone attested
+        // anything the prover's inputs named.
+        if let AdapterSpec::ZkVm {
+            program_hash,
+            chain_id,
+            ..
+        } = &spec
+        {
+            if program_hash.is_none() || chain_id.is_none() {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
         }
         // Economics under which lying pays are refused at the door. The
         // framework checks the bond amount; whether the fee/penalty shape
@@ -389,7 +467,22 @@ impl IntakeState {
             return Err(IntakeError::MissingBlsVerifier);
         }
         let adapter = entry.spec.build(bls, None);
-        let policy = entry.policy.clone();
+        // BLG-0153 (P07-F08, decision B): `now` is the live clock, not the
+        // registration timestamp. A policy stored `now` forever, so
+        // `max_age` was measured against a frozen instant and newer evidence
+        // saturated the age subtraction to 0 - freshness was dead in
+        // practice. The deterministic clock Budlum has is the domain's own
+        // accepted tip: every node replays the same acceptances, so every
+        // node measures age against the same height. Until the domain has an
+        // accepted attestation the stored value stays (registration-time
+        // admission used it deliberately).
+        let mut policy = entry.policy.clone();
+        policy.now = live_policy_clock(
+            policy.now,
+            self.registry
+                .domain(&key)
+                .and_then(|reg| reg.record.last_accepted_height),
+        );
         if self.quorum.policy_of(&key).is_some() {
             return match self.submit_to_round(key, evidence, adapter.as_ref(), &policy)? {
                 Some(attestation) => Ok(attestation),
@@ -439,27 +532,47 @@ impl IntakeState {
             Err(other) => return Err(IntakeError::Registry(other.clone())),
         };
         let local_height = self.registry.height();
-        let state = self
+        // BLG-0160 (P07-F15): the round is already AgreedClaim
+        // or Disputed when a later step fails, and the error path used to
+        // persist that half-applied state - a round that says agreed with
+        // nothing committed, refusing every later vote. The quorum fold is
+        // transactional: if the consequence (commit, fault) fails, the round
+        // goes back to what it was before the vote was folded.
+        let quorum_before = self.quorum.clone();
+        let fold = self
             .quorum
-            .submit(key, evidence, &verdict_for_round, local_height)?;
-        match state {
+            .submit(key, evidence, &verdict_for_round, local_height);
+        let state = match fold {
+            Ok(state) => state,
+            Err(err) => {
+                self.quorum = quorum_before;
+                return Err(err.into());
+            }
+        };
+        let outcome = match state {
             RoundState::AgreedClaim { attestation, .. } => {
                 let winner = *attestation;
+                // The carrier is the first prover whose claim matches the
+                // winner. A missing one breaks a round invariant, so it is
+                // refused instead of crediting whoever closed the round.
                 let carrier = self
                     .quorum
                     .round_of(&key, evidence.declared_height)
-                    .and_then(|round| {
-                        round
-                            .entries
-                            .iter()
-                            .find_map(|e: &RoundEntry| match &e.attestation {
-                                Some(att) if att.state_root == winner.state_root => Some(e.prover),
-                                _ => None,
-                            })
-                    })
-                    .unwrap_or(evidence.submitter);
-                self.registry.commit_attestation(&winner, carrier)?;
-                Ok(Some(winner))
+                    .and_then(|round| first_carrier(round, &winner.state_root));
+                let carrier = match carrier {
+                    Some(carrier) => carrier,
+                    None => {
+                        self.quorum = quorum_before;
+                        return Err(IntakeError::MissingCarrier);
+                    }
+                };
+                match self.registry.commit_attestation(&winner, carrier) {
+                    Ok(()) => Ok(Some(winner)),
+                    Err(err) => {
+                        self.quorum = quorum_before;
+                        Err(IntakeError::Registry(err))
+                    }
+                }
             }
             RoundState::Disputed => {
                 // The fault reason names the groups by their stable keys, so
@@ -476,17 +589,23 @@ impl IntakeState {
                             .join(", ")
                     })
                     .unwrap_or_default();
-                self.registry.mark_faulted(
+                match self.registry.mark_faulted(
                     &key,
                     &format!(
                         "quorum round at external height {} froze in dispute; answers: [{standings}]",
                         evidence.declared_height
                     ),
-                )?;
-                Ok(None)
+                ) {
+                    Ok(()) => Ok(None),
+                    Err(err) => {
+                        self.quorum = quorum_before;
+                        Err(IntakeError::Registry(err))
+                    }
+                }
             }
             RoundState::AgreedRefusal { .. } | RoundState::Open => Ok(None),
-        }
+        };
+        outcome
     }
 
     /// Bonds an additional prover to a registered domain. Registration
@@ -528,10 +647,42 @@ impl IntakeState {
         }
         // The intake commits winning claims to the attestation book, and the
         // quorum module's own docs name the rule: `AcceptMostCommon` is
-        // "never for a state root that will be committed to". This surface
-        // commits, so the permissive behaviours are refused here - a policy
-        // that shrugs at disputes is not protection, it is the appearance
-        // of it.
+        // "never for a state root that will be committed to". BLG-0163
+        // (P07-F18): that refusal is enforced by `QuorumRounds::set_policy`
+        // itself - the pub setter used to bypass it - and the intake maps it
+        // to its own named error. The shape rules below are this surface's
+        // own: it is the surface that commits.
+        if policy.agreement_threshold == 0 {
+            return Err(IntakeError::InvalidQuorumPolicy {
+                reason: "the agreement threshold is zero",
+            });
+        }
+        if policy.agreement_threshold > policy.max_participants {
+            return Err(IntakeError::InvalidQuorumPolicy {
+                reason: "the threshold is above the number of seats",
+            });
+        }
+        if policy.max_participants > MAX_QUORUM_PARTICIPANTS {
+            return Err(IntakeError::InvalidQuorumPolicy {
+                reason: "too many seats",
+            });
+        }
+        // A threshold at or below half of the seats lets two rival groups
+        // both reach it, so the first group to fill wins a race.
+        if policy.agreement_threshold <= policy.max_participants / 2 {
+            return Err(IntakeError::InvalidQuorumPolicy {
+                reason: "the threshold is not a strict majority of the seats",
+            });
+        }
+        // The intake commits winning claims to the attestation book, and the
+        // quorum module's own docs name the rule: `AcceptMostCommon` is
+        // "never for a state root that will be committed to". A policy that
+        // shrugs at disputes is not protection, it is the appearance of it.
+        // `QuorumRounds::set_policy` is `pub(super)` (BLG-0163/P07-F18), so
+        // this refusal cannot be bypassed from outside the module. It is
+        // categorical - refused whatever the bonded seats are - so it is
+        // named before the state-dependent feasibility check below, which
+        // would otherwise shadow it behind "fewer provers are bonded".
         if matches!(policy.dispute, DisputeBehavior::AcceptMostCommon)
             || matches!(
                 policy.low_participants,
@@ -539,6 +690,12 @@ impl IntakeState {
             )
         {
             return Err(IntakeError::PermissiveQuorumPolicy);
+        }
+        let bonded = self.registry.domain(key).map_or(0, |reg| reg.provers.len());
+        if policy.agreement_threshold > bonded {
+            return Err(IntakeError::InvalidQuorumPolicy {
+                reason: "fewer provers are bonded than the threshold needs",
+            });
         }
         self.quorum.set_policy(*key, policy);
         Ok(())
@@ -630,6 +787,7 @@ impl IntakeState {
 mod tests {
     use super::*;
     use crate::cross_domain::external::ethereum::layout;
+    use crate::cross_domain::external::quorum::{DisputeBehavior, LowParticipantsBehavior};
     use crate::cross_domain::external::spec::AdapterId;
 
     fn addr(b: u8) -> Address {
@@ -667,7 +825,13 @@ mod tests {
     fn eth_spec() -> AdapterSpec {
         AdapterSpec::EthereumSync {
             network: "testnet".to_string(),
-            signing_root: [0; 32],
+            // BLG-0130 (P06-F01): the happy-path tests pin the committee the
+            // golden sample carries ([0x11; 96], period 0).
+            committee: Some(crate::cross_domain::external::ethereum::PinnedCommittee {
+                period: 0,
+                aggregate_pubkey: vec![0x11; 96],
+                next_committee_root: [0xbb; 32],
+            }),
         }
     }
 
@@ -687,7 +851,7 @@ mod tests {
         let adapter = spec.build(Some(Box::new(StrictTestBls)), None);
         RawConsensusEvidence {
             adapter: adapter.descriptor().id,
-            evidence_version: 1,
+            evidence_version: 2,
             network: "testnet".to_string(),
             payload,
             declared_height: 64,
@@ -698,7 +862,7 @@ mod tests {
 
     fn versions_for(spec: &AdapterSpec) -> VersionPolicy {
         let adapter = spec.build(Some(Box::new(StrictTestBls)), None);
-        VersionPolicy::single(adapter.descriptor().id, 1, 0)
+        VersionPolicy::single(adapter.descriptor().id, 2, 0)
     }
 
     fn register(state: &mut IntakeState) -> DomainKey {
@@ -938,6 +1102,8 @@ mod tests {
     fn a_zkvm_spec_builds_without_bls_and_keeps_its_network() {
         let spec = AdapterSpec::ZkVm {
             network: "mainnet".to_string(),
+            program_hash: None,
+            chain_id: None,
         };
         assert_eq!(spec.network(), "mainnet");
         let adapter = spec.build(None, None);
@@ -1001,6 +1167,51 @@ mod tests {
         policy.low_participants = LowParticipantsBehavior::AcceptMostCommon;
         let err = state.set_quorum_policy(&key, policy).unwrap_err();
         assert!(matches!(err, IntakeError::PermissiveQuorumPolicy));
+    }
+
+    #[test]
+    fn a_quorum_policy_that_cannot_decide_safely_is_refused() {
+        use crate::cross_domain::external::QuorumPolicy;
+        let mut state = IntakeState::new();
+        let key = register(&mut state);
+        for prover in [addr(2), addr(3)] {
+            state
+                .bond_prover(&key, prover, economics_bond())
+                .expect("bond");
+        }
+        let cases = [
+            QuorumPolicy::strict(0, 3),
+            QuorumPolicy::strict(4, 3),
+            QuorumPolicy::strict(2, 0),
+            QuorumPolicy::strict(1, 3),
+            QuorumPolicy::strict(2, 4),
+            QuorumPolicy::strict(3, MAX_QUORUM_PARTICIPANTS + 1),
+            // Three bonded provers, threshold four.
+            QuorumPolicy::strict(4, 5),
+        ];
+        for policy in cases {
+            let err = state.set_quorum_policy(&key, policy).unwrap_err();
+            assert!(
+                matches!(err, IntakeError::InvalidQuorumPolicy { .. }),
+                "policy {policy:?} must be refused, got: {err:?}"
+            );
+        }
+        state
+            .set_quorum_policy(&key, QuorumPolicy::strict(2, 3))
+            .expect("a strict majority with enough bonded provers installs");
+    }
+
+    /// BLG-0153 (P07-F08): the policy clock at submission is the domain's
+    /// accepted tip, not the frozen registration instant.
+    #[test]
+    fn the_policy_clock_advances_with_the_accepted_tip() {
+        assert_eq!(live_policy_clock(100, None), 100, "no tip: keep stored");
+        assert_eq!(live_policy_clock(100, Some(50)), 100, "never goes back");
+        assert_eq!(
+            live_policy_clock(100, Some(175)),
+            175,
+            "the accepted tip is the live clock - a frozen 100 made max_age dead"
+        );
     }
 
     #[test]
@@ -1120,7 +1331,7 @@ mod tests {
     }
 
     #[test]
-    fn a_split_that_cannot_recover_freezes_the_domain_faulted() {
+    fn a_recoverable_split_decides_deterministically() {
         let (mut state, key) = quorum_state();
         let spec = eth_spec();
         let honest_a = quorum_evidence(&spec, addr(2));
@@ -1129,8 +1340,11 @@ mod tests {
         let mut rival = quorum_evidence(&spec, addr(3));
         rival.payload[layout::STATE_ROOT].copy_from_slice(&[0xdd; 32]);
         rival.declared_root = [0xdd; 32];
-        let mut rival_b = rival.clone();
-        rival_b.submitter = addr(9); // the poster is bonded too
+        // A third, different claim from the bonded poster: three seats, three
+        // distinct answers, threshold 2.
+        let mut rival_b = quorum_evidence(&spec, addr(9));
+        rival_b.payload[layout::STATE_ROOT].copy_from_slice(&[0xee; 32]);
+        rival_b.declared_root = [0xee; 32];
         let _ = state.submit_evidence(&honest_a, Some(Box::new(StrictTestBls)));
         let _ = state.submit_evidence(&rival, Some(Box::new(StrictTestBls)));
         // 1 vs 1, threshold 2, one seat left: still recoverable, still open.
@@ -1143,21 +1357,92 @@ mod tests {
             crate::cross_domain::external::RoundState::Open
         ));
         let _ = state.submit_evidence(&rival_b, Some(Box::new(StrictTestBls)));
-        // 1 vs 2 at threshold 2: the rival group reached the threshold, so
-        // the round closed for the rival claim... unless the tie rule fired.
-        // With threshold 2 the rival group HAS quorum - the round agrees.
-        // To force the dispute, the policy would need threshold 3; that path
-        // is pinned in intake_quorum's own tests. What must hold here is
-        // that the round decided deterministically and the state is not
-        // silently Open.
+        // 1 vs 1 vs 1 with every seat taken: no group can reach 2.
         let round = state
             .quorum
             .round_of(&key, honest_a.declared_height)
             .expect("round exists");
-        assert!(
-            !matches!(round.state, crate::cross_domain::external::RoundState::Open),
-            "three answers under a 2-of-3 policy must have decided"
+        assert!(matches!(
+            round.state,
+            crate::cross_domain::external::RoundState::Disputed
+        ));
+        let reg = state.registry.domain(&key).expect("domain");
+        assert_eq!(
+            reg.record.state,
+            crate::cross_domain::external::DomainState::Faulted,
+            "an unrecoverable split must freeze the domain"
         );
+    }
+
+    /// BLG-0158 (P07-F13): the dispute-to-fault wiring through `IntakeState`
+    /// - the branch that calls `mark_faulted` when a round freezes in a
+    ///   dispute - had no test through the intake at all. A three-way split
+    ///   under a 3-of-3 policy reaches `Disputed` (no group can ever reach the
+    ///   threshold), and the domain must come out Faulted.
+    #[test]
+    fn a_disputed_round_faults_the_domain_through_the_intake() {
+        let mut state = IntakeState::new();
+        let key = register(&mut state);
+        for prover in [addr(2), addr(3), addr(4)] {
+            state
+                .bond_prover(&key, prover, economics_bond())
+                .expect("bonding a fresh prover must pass");
+        }
+        state
+            .set_quorum_policy(
+                &key,
+                crate::cross_domain::external::QuorumPolicy::strict(3, 3),
+            )
+            .expect("a 3-of-3 policy with three bonded provers installs");
+        let spec = eth_spec();
+        let a = quorum_evidence(&spec, addr(2));
+        let mut b = quorum_evidence(&spec, addr(3));
+        b.payload[layout::STATE_ROOT].copy_from_slice(&[0xdd; 32]);
+        b.declared_root = [0xdd; 32];
+        let mut c = quorum_evidence(&spec, addr(4));
+        c.payload[layout::STATE_ROOT].copy_from_slice(&[0xee; 32]);
+        c.declared_root = [0xee; 32];
+        let _ = state.submit_evidence(&a, Some(Box::new(StrictTestBls)));
+        let _ = state.submit_evidence(&b, Some(Box::new(StrictTestBls)));
+        let _ = state.submit_evidence(&c, Some(Box::new(StrictTestBls)));
+        let round = state
+            .quorum
+            .round_of(&key, a.declared_height)
+            .expect("round exists");
+        assert!(
+            matches!(
+                round.state,
+                crate::cross_domain::external::RoundState::Disputed
+            ),
+            "three different claims under a 3-of-3 policy must freeze in dispute"
+        );
+        let reg = state.registry.domain(&key).expect("domain");
+        assert_eq!(
+            reg.record.state,
+            crate::cross_domain::external::profile::DomainState::Faulted,
+            "a disputed round must fault the domain through the intake"
+        );
+    }
+
+    #[test]
+    fn the_carrier_is_the_first_prover_with_the_winning_claim() {
+        let (mut state, key) = quorum_state();
+        let spec = eth_spec();
+        let a = quorum_evidence(&spec, addr(2));
+        let b = quorum_evidence(&spec, addr(3));
+        let _ = state.submit_evidence(&a, Some(Box::new(StrictTestBls)));
+        let _ = state.submit_evidence(&b, Some(Box::new(StrictTestBls)));
+        let round = state
+            .quorum
+            .round_of(&key, a.declared_height)
+            .expect("round exists");
+        let root = round.entries[0]
+            .attestation
+            .as_ref()
+            .expect("claim")
+            .state_root;
+        assert_eq!(first_carrier(round, &root), Some(addr(2)));
+        assert_eq!(first_carrier(round, &[0x99; 32]), None);
     }
 
     #[test]
@@ -1172,6 +1457,121 @@ mod tests {
             before, after,
             "a recorded answer is consensus state and must move the digest"
         );
+    }
+
+    #[test]
+    fn a_refused_submission_does_not_fault_the_domain() {
+        let mut state = IntakeState::new();
+        let key = register(&mut state);
+        let spec = eth_spec();
+        // An unbonded caller and a malformed payload: both are refusals about
+        // the caller's input.
+        let unbonded = quorum_evidence(&spec, addr(50));
+        assert!(
+            state
+                .submit_evidence(&unbonded, Some(Box::new(StrictTestBls)))
+                .is_err(),
+            "an unbonded caller must be refused"
+        );
+        let mut malformed = quorum_evidence(&spec, addr(9));
+        malformed.payload.truncate(1);
+        assert!(
+            state
+                .submit_evidence(&malformed, Some(Box::new(StrictTestBls)))
+                .is_err(),
+            "a malformed payload must be refused"
+        );
+        let reg = state.registry.domain(&key).expect("domain");
+        assert_eq!(reg.record.attestations_refused, 2);
+        assert_eq!(
+            reg.record.state,
+            crate::cross_domain::external::DomainState::Admitted,
+            "a caller's bad input must not fault the domain"
+        );
+        // The poster (bonded) can still attest.
+        let good = quorum_evidence(&spec, addr(9));
+        state
+            .submit_evidence(&good, Some(Box::new(StrictTestBls)))
+            .expect("the domain must still serve");
+    }
+
+    #[test]
+    fn the_same_evidence_cannot_be_slashed_twice() {
+        let mut state = IntakeState::new();
+        let key = register(&mut state);
+        let spec = eth_spec();
+        let good = quorum_evidence(&spec, addr(9));
+        let attestation = state
+            .submit_evidence(&good, Some(Box::new(StrictTestBls)))
+            .expect("the poster is bonded and the evidence is valid");
+        let digest = attestation.evidence_digest;
+        let value = 1_000_000;
+        state
+            .registry
+            .slash(&key, addr(9), digest, value, addr(7))
+            .expect("the first slash lands");
+        let err = state
+            .registry
+            .slash(&key, addr(9), digest, value, addr(7))
+            .unwrap_err();
+        assert!(matches!(err, RegistryError::AlreadySlashed { .. }));
+        let bond = state
+            .registry
+            .domain(&key)
+            .expect("domain")
+            .provers
+            .get(&addr(9))
+            .expect("bond");
+        assert_eq!(bond.slashings.len(), 1);
+    }
+
+    #[test]
+    fn readmit_is_the_exit_from_faulted_and_refuses_a_noop_for_a_healthy_domain() {
+        let mut state = IntakeState::new();
+        let key = register(&mut state);
+        let report = state.entries.get(&key).expect("entry").admission.clone();
+        let err = state
+            .registry
+            .readmit(&key, &report, "no change")
+            .unwrap_err();
+        assert!(matches!(err, RegistryError::AdmissionDigestMismatch { .. }));
+        state
+            .registry
+            .mark_faulted(&key, "test dispute")
+            .expect("domain exists");
+        state
+            .registry
+            .readmit(&key, &report, "operator re-admission")
+            .expect("a faulted domain must be re-admittable on the same digest");
+        let reg = state.registry.domain(&key).expect("domain");
+        assert_eq!(
+            reg.record.state,
+            crate::cross_domain::external::DomainState::Admitted
+        );
+    }
+
+    #[test]
+    fn a_faulted_domain_takes_no_attestation() {
+        let mut state = IntakeState::new();
+        let key = register(&mut state);
+        state
+            .bond_prover(&key, addr(2), economics_bond())
+            .expect("bond");
+        state
+            .registry
+            .mark_faulted(&key, "test dispute")
+            .expect("domain exists");
+        let spec = eth_spec();
+        let evidence = quorum_evidence(&spec, addr(2));
+        let err = state
+            .submit_evidence(&evidence, Some(Box::new(StrictTestBls)))
+            .unwrap_err();
+        assert!(
+            matches!(err, IntakeError::Registry(RegistryError::NotServing { .. })),
+            "a faulted domain must refuse new evidence, got: {err:?}"
+        );
+        let reg = state.registry.domain(&key).expect("domain");
+        assert_eq!(reg.record.attestations_accepted, 0);
     }
 
     #[test]
@@ -1197,5 +1597,35 @@ mod tests {
                 .is_none(),
             "no policy, no round"
         );
+    }
+
+    /// BLG-0130 (P06-F01, decision C interim): EthereumSync admission is
+    /// closed until a sync committee is pinned - the old shape let the
+    /// submitter name their own aggregate key.
+    #[test]
+    fn committee_less_ethereum_sync_is_refused_at_admission() {
+        let mut state = IntakeState::new();
+        let spec = AdapterSpec::EthereumSync {
+            network: "testnet".to_string(),
+            committee: None,
+        };
+        let golden = golden_for(&eth_spec());
+        let versions = versions_for(&eth_spec());
+        let economics = IntakeState::conservative_economics(1_000_000);
+        let err = state
+            .register_domain(
+                RegistrationRequest {
+                    spec,
+                    policy: VerificationPolicy::strict(1_000),
+                    economics,
+                    versions,
+                    bond_atoms: economics_bond(),
+                    poster: addr(9),
+                    golden,
+                },
+                Some(Box::new(StrictTestBls)),
+            )
+            .unwrap_err();
+        assert!(matches!(err, IntakeError::CommitteeNotPinned), "got: {err}");
     }
 }

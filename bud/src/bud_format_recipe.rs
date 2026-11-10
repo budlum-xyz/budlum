@@ -23,7 +23,10 @@ pub const RECIPE_MAGIC: [u8; 8] = *b"\xB5RCP1\0\0\0";
 
 /// Y15: the opcodes that would require the interval machine, meaning floating
 /// point and division; under integer-only they are forbidden.
-const FORBIDDEN_OPS: &[&str] = &["fdiv", "fadd", "fmul", "fsqrt", "fpow", "float", "div"];
+const FORBIDDEN_OPS: &[&str] = &[
+    "fdiv", "fadd", "fsub", "fmul", "fneg", "fma", "fsqrt", "fpow", "float", "f32", "f64", "div",
+    "sqrt", "exp", "sin", "cos", "pow",
+];
 
 /// A recipe candidate (Y2): the miner publishes the recipe, the seed and the
 /// proof of the transformation.
@@ -39,7 +42,10 @@ impl RecipeCandidate {
     /// Y15: is the recipe integer-only? Interval machine opcodes are forbidden.
     pub fn integer_only(&self) -> bool {
         let txt = String::from_utf8_lossy(&self.recipe).to_lowercase();
-        !FORBIDDEN_OPS.iter().any(|op| txt.contains(op))
+        // Whole words only. A substring match refused `individual` (it holds
+        // `div`) and let `fsub` or `sqrt` through.
+        !txt.split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| FORBIDDEN_OPS.contains(&word) || word.starts_with("float"))
     }
 
     /// Y2: candidate verification. Do the bytes produced from the recipe and the
@@ -103,6 +109,23 @@ mod tests {
             seed: [3u8; 32],
         };
         assert!(!bad.integer_only(), "an interval machine opcode is refused");
+    }
+
+    /// BLG-0649: the gate matches whole words. `fsub` and `sqrt` are refused,
+    /// and `individual` (which holds `div`) is not.
+    #[test]
+    fn y15_gate_matches_whole_words() {
+        let recipe = |text: &str| RecipeCandidate {
+            miner: [1u8; 32],
+            pact_id: [2u8; 32],
+            recipe: text.as_bytes().to_vec(),
+            seed: [3u8; 32],
+        };
+        assert!(!recipe("load fsub store").integer_only());
+        assert!(!recipe("load sqrt store").integer_only());
+        assert!(!recipe("load F64 store").integer_only());
+        assert!(!recipe("load;fdiv;store").integer_only());
+        assert!(recipe("load individual video store").integer_only());
     }
 
     #[test]

@@ -116,6 +116,7 @@ mod gates {
     pub mod no_upstream_brands;
     pub mod node_classification_gate;
     pub mod one_house_guards;
+    pub mod ownerless_dependencies;
     pub mod paid_content;
     pub mod parallel_execution;
     pub mod pinned_downloads;
@@ -135,6 +136,7 @@ mod gates {
     pub mod required_tests;
     pub mod rust_literals;
     pub mod security_parameters;
+    pub mod security_quality_wired;
     pub mod security_scans_can_fail;
     pub mod self_derived_ids_cover_every_field;
     pub mod semver;
@@ -675,6 +677,14 @@ const GATES: &[Gate] = &[
         self_test: gates::ci_workflow_guards::self_test,
     },
     Gate {
+        name: "security-quality-tools-are-wired",
+        replaces: None,
+        run: gates::security_quality_wired::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::security_quality_wired::self_test,
+    },
+    Gate {
         name: "genesis-schema",
         replaces: None,
         run: gates::genesis_schema::run,
@@ -757,6 +767,18 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::cargo_vet::self_test,
+    },
+    Gate {
+        name: "ownerless-dependencies",
+        replaces: None,
+        run: |_| {
+            Err(String::from(
+                "ownerless-dependencies reads a cargo-supply-chain JSON file; pass its path as an argument",
+            ))
+        },
+        run_log: Some(gates::ownerless_dependencies::run),
+        run_args: None,
+        self_test: gates::ownerless_dependencies::self_test,
     },
     Gate {
         name: "udeps",
@@ -1373,7 +1395,7 @@ fn main() {
         }
     };
 
-    let mut failed = 0usize;
+    let mut failed: Vec<&str> = Vec::new();
     for g in selected {
         let outcome = if self_test {
             (g.self_test)()
@@ -1388,12 +1410,20 @@ fn main() {
             Ok(msg) => println!("{msg}"),
             Err(msg) => {
                 eprintln!("FAIL [{}]: {msg}", g.name);
-                failed += 1;
+                failed.push(g.name);
             }
         }
     }
 
-    if failed > 0 {
+    if !failed.is_empty() {
+        // The last line of the log names every failing gate. A gate that
+        // fails early prints its finding mid-log, and the tail of the log is
+        // what a reader sees first.
+        eprintln!(
+            "FAILED: {} gate(s): {}. Search the log for `FAIL [` for each reason.",
+            failed.len(),
+            failed.join(", ")
+        );
         std::process::exit(1);
     }
 }

@@ -10,44 +10,54 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::Path;
 
-/// Collect `rev=<40hex>` from every Cargo.lock under `root`.
-fn lockfile_revs(root: &Path) -> BTreeSet<String> {
+/// The 40-hex commit a lock `source = "git+..."` line builds.
+///
+/// A `?rev=` source names it twice; a `?branch=` or `?tag=` source names it
+/// only after the `#`. Both are read, so a branch or tag pin needs an audit
+/// record too.
+fn commit_of_source(line: &str) -> Option<String> {
+    let rest = line.trim().strip_prefix("source = \"git+")?;
+    let take40 = |text: &str| -> Option<String> {
+        let hex: String = text.chars().take_while(char::is_ascii_hexdigit).collect();
+        (hex.len() == 40).then_some(hex)
+    };
+    if let Some((_, frag)) = rest.rsplit_once('#') {
+        if let Some(hex) = take40(frag) {
+            return Some(hex);
+        }
+    }
+    rest.find("rev=").and_then(|i| take40(&rest[i + 4..]))
+}
+
+/// Collect the built git commits from every Cargo.lock under `root`.
+///
+/// # Errors
+///
+/// An unreadable directory or lock file: a gate that cannot look is not clean.
+fn lockfile_revs(root: &Path) -> Result<BTreeSet<String>, String> {
     let mut out = BTreeSet::new();
     let mut stack: Vec<std::path::PathBuf> = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else {
-            continue;
-        };
+        let rd =
+            std::fs::read_dir(&dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
         for e in rd.filter_map(Result::ok) {
             let Ok(path_kind) = e.file_type() else {
                 continue;
             };
             let path = e.path();
             if path_kind.is_dir() {
-                let s = path.to_string_lossy();
-                if !s.contains("/target") {
+                // The directory's own name, not a substring of the whole path.
+                if e.file_name() != "target" {
                     stack.push(path);
                 }
             } else if path.file_name().is_some_and(|n| n == "Cargo.lock") {
-                if let Ok(text) = std::fs::read_to_string(&path) {
-                    for l in text.lines() {
-                        let t = l.trim();
-                        if let Some(rest) = t.strip_prefix("source = \"git+") {
-                            if let Some(rev) = rest.find("rev=") {
-                                let rev = &rest[rev + 4..];
-                                let hex: String =
-                                    rev.chars().take_while(char::is_ascii_hexdigit).collect();
-                                if hex.len() == 40 {
-                                    out.insert(hex);
-                                }
-                            }
-                        }
-                    }
-                }
+                let text = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+                out.extend(text.lines().filter_map(commit_of_source));
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Collect `rev = "<40hex>"` from the audit record.
@@ -82,7 +92,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         ));
     }
     let record = std::fs::read_to_string(&record_path).map_err(|e| e.to_string())?;
-    let used = lockfile_revs(root);
+    let used = lockfile_revs(root)?;
     let recorded = recorded_revs(&record);
     if used.is_empty() && recorded.is_empty() {
         return Err(String::from(
@@ -158,4 +168,27 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "git-deps canary OK: a recorded rev PASSes and an unrecorded one FAILs.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn branch_and_tag_sources_name_a_commit() {
+        let h = "c".repeat(40);
+        assert_eq!(
+            commit_of_source(&format!("source = \"git+https://x/y?branch=main#{h}\"")),
+            Some(h.clone())
+        );
+        assert_eq!(
+            commit_of_source(&format!("source = \"git+https://x/y?tag=v1#{h}\"")),
+            Some(h.clone())
+        );
+        assert_eq!(
+            commit_of_source(&format!("source = \"git+https://x/y?rev={h}#{h}\"")),
+            Some(h)
+        );
+        assert_eq!(commit_of_source("source = \"registry+https://x\""), None);
+    }
 }

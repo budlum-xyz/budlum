@@ -118,8 +118,13 @@ pub fn social2_digest(p: &MultiSourcePact) -> [u8; 32] {
     let mut h = Sha3_256::new();
     h.update(SOCIAL2_MAGIC);
     h.update(p.pact_id);
+    // Every variable field is framed: the source count and each length are
+    // hashed, so two different splits of the same bytes cannot collide.
+    h.update((p.sources.len() as u64).to_le_bytes());
     for s in &p.sources {
+        h.update((s.url.len() as u64).to_le_bytes());
         h.update(&s.url);
+        h.update((s.post_id.len() as u64).to_le_bytes());
         h.update(&s.post_id);
         h.update(s.ts_unix.to_le_bytes());
         h.update([s.alive as u8]);
@@ -145,6 +150,23 @@ mod tests {
             ts_unix: 100,
             alive,
         }
+    }
+
+    #[test]
+    fn the_digest_frames_the_url_and_the_post_id() {
+        let mk = |url: &[u8], post: &[u8]| MultiSourcePact {
+            pact_id: [1u8; 32],
+            sources: vec![SocialSource {
+                url: url.to_vec(),
+                post_id: post.to_vec(),
+                ts_unix: 100,
+                alive: true,
+            }],
+        };
+        assert_ne!(
+            social2_digest(&mk(b"ab", b"c")),
+            social2_digest(&mk(b"a", b"bc"))
+        );
     }
 
     #[test]

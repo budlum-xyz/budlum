@@ -12,6 +12,21 @@ use std::collections::BTreeMap;
 pub mod vault;
 pub use vault::{execute_vault_tx, VaultError, VaultRegistry, VaultTx};
 
+/// Most NFTs one owner can hold.
+///
+/// Convenience: pub so minting callers can refuse past the same
+/// bound the NFT registry enforces in this module.
+pub const MAX_NFTS_PER_OWNER: usize = 100_000;
+/// Longest tag in bytes.
+pub const MAX_TAG_BYTES: usize = 64;
+/// Most tags one NFT can carry.
+pub const MAX_TAGS_PER_NFT: usize = 16;
+/// Longest author name in bytes.
+///
+/// Convenience: pub so minting callers can refuse past the same
+/// bound the NFT registry validates in this module.
+pub const MAX_AUTHOR_NAME_BYTES: usize = 64;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NftRegistry {
     /// Id -> nft
@@ -52,6 +67,19 @@ impl NftRegistry {
         epoch: u64,
         name: Option<String>,
     ) -> Result<u64, NftError> {
+        if name
+            .as_ref()
+            .is_some_and(|n| n.is_empty() || n.len() > MAX_AUTHOR_NAME_BYTES)
+        {
+            return Err(NftError::InvalidName);
+        }
+        if self
+            .ownership
+            .get(&owner)
+            .is_some_and(|ids| ids.len() >= MAX_NFTS_PER_OWNER)
+        {
+            return Err(NftError::TooManyNfts);
+        }
         let id = self.next_id;
         if self.nfts.contains_key(&id) {
             return Err(NftError::DuplicateId);
@@ -78,8 +106,14 @@ impl NftRegistry {
     }
 
     pub fn add_tag(&mut self, id: u64, tag: String) -> Result<(), NftError> {
+        if tag.is_empty() || tag.len() > MAX_TAG_BYTES {
+            return Err(NftError::InvalidTag);
+        }
         let nft = self.nfts.get_mut(&id).ok_or(NftError::NotFound)?;
         if !nft.tags.contains(&tag) {
+            if nft.tags.len() >= MAX_TAGS_PER_NFT {
+                return Err(NftError::TooManyTags);
+            }
             nft.tags.push(tag);
         }
         Ok(())
@@ -211,6 +245,38 @@ impl NftRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mint_refuses_an_owner_past_the_nft_cap() {
+        let mut reg = NftRegistry::new();
+        let owner = Address::from([1u8; 32]);
+        let cid = crate::storage::content_id::ContentId([0xCD; 32]);
+        reg.ownership
+            .insert(owner, (0..MAX_NFTS_PER_OWNER as u64).collect());
+        reg.next_id = MAX_NFTS_PER_OWNER as u64;
+        assert!(matches!(
+            reg.mint(owner, cid, 0, None),
+            Err(NftError::TooManyNfts)
+        ));
+        assert!(reg.nfts.is_empty());
+        assert!(reg.mint(Address::from([2u8; 32]), cid, 0, None).is_ok());
+    }
+
+    #[test]
+    fn mint_refuses_an_oversized_author_name() {
+        let mut reg = NftRegistry::new();
+        let owner = Address::from([1u8; 32]);
+        let cid = crate::storage::content_id::ContentId([0xCD; 32]);
+        let long = "a".repeat(MAX_AUTHOR_NAME_BYTES + 1);
+        assert!(matches!(
+            reg.mint(owner, cid, 0, Some(long)),
+            Err(NftError::InvalidName)
+        ));
+        assert!(reg.nfts.is_empty());
+        assert!(reg
+            .mint(owner, cid, 0, Some("a".repeat(MAX_AUTHOR_NAME_BYTES)))
+            .is_ok());
+    }
 
     /// An owner whose last NFT leaves them drops out of the ownership map
     /// entirely; the map never carries an owner with an empty id list.

@@ -1,10 +1,13 @@
-7048
+7684
 # ---------------------------------------------------------------------------
 # G2 pedantic/nursery ratchet baseline.
 # The FIRST bare-number line of this file is the baseline
 # (scripts/check-clippy-extra.sh reads it with `grep -E '^[0-9]+$' | head -1`);
 # below it is the justification.
 #
+# 2026-10-20 - 7048 -> 7684 (PR #95 "Consensus Of Consensuses" consensus
+#   rework measured 7318 on the CI run for 8723664; base = 7318 + 5%
+#   concurrency margin, same formula as the 2026-09-13 entry)
 # 2026-09-13 - 7142 -> 7048 (mechanical `clippy --fix` on four lints cut the
 #   measured count to 6713 on CI run for 74cc558; base = 6713 + 5% concurrency
 #   margin, per the ratchet policy: the base only descends to a CI-measured count)

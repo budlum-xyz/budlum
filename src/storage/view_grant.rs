@@ -147,12 +147,37 @@ impl std::error::Error for GrantAuthError {}
 /// registry believes. Before this existed, `issuer` and `caller` were strings a
 /// caller typed into an RPC field, so any caller could hand out view grants for
 /// content it does not own.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrantAuthorization {
     /// Account public key whose word this is.
+    #[serde(with = "owner_key_bytes")]
     pub owner_key: [u8; crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN],
     /// ML-DSA-87 signature over the mutation digest.
     pub signature: Vec<u8>,
+}
+
+/// Serde for the public key as one length-prefixed byte string: serde derives
+/// arrays only up to 32 elements, and a key is 2592 bytes. A wrong length is
+/// a decode error.
+mod owner_key_bytes {
+    use crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        key: &[u8; ML_DSA_87_PUBLIC_KEY_LEN],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(key)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<[u8; ML_DSA_87_PUBLIC_KEY_LEN], D::Error> {
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        <[u8; ML_DSA_87_PUBLIC_KEY_LEN]>::try_from(bytes.as_slice()).map_err(|_| {
+            serde::de::Error::invalid_length(bytes.len(), &"an ML-DSA-87 public key of 2592 bytes")
+        })
+    }
 }
 
 impl GrantAuthorization {
@@ -197,40 +222,66 @@ impl GrantAuthorization {
     }
 }
 
-/// Digest a grant issuance is signed over. The content, the derived `issuer`,
+/// The grant fields a signed issuance covers besides the chain, the nonce,
+/// the content and the issuer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrantIssueTerms {
+    pub grantee: Option<Address>,
+    pub key_id: [u8; 32],
+    pub policy: ViewPolicy,
+    pub opened_epoch: u64,
+}
+
+/// Digest a grant issuance is signed over.
+///
+/// `chain_id` keeps a signature from working on another network, and `nonce`
+/// is the grant id the registry will assign next (`ViewGrantRegistry::issued`).
+/// That counter only grows, so a captured issue authorisation cannot be
+/// replayed once any grant was issued after it, including after its own
+/// grant was revoked. The content, the derived `issuer`,
 /// the grantee, the key handle, the policy and the opening epoch all enter: a
 /// signature cannot be moved to another object, another key or another grant.
 #[must_use]
 pub fn grant_issue_digest(
+    chain_id: u64,
+    nonce: u64,
     content_id: &ContentId,
     issuer: &Address,
-    grantee: Option<&Address>,
-    key_id: &[u8; 32],
-    policy: ViewPolicy,
-    opened_epoch: u64,
+    terms: &GrantIssueTerms,
 ) -> [u8; 32] {
-    let policy_byte = [match policy {
+    let policy_byte = [match terms.policy {
         ViewPolicy::OwnerOnly => 1u8,
         ViewPolicy::NamedGrantee => 2u8,
         ViewPolicy::PublicKeyId => 3u8,
     }];
     let absent_grantee = [0u8; 32];
     hash_fields_bytes(&[
-        b"BDLM_GRANT_ISSUE_V1",
+        b"BDLM_GRANT_ISSUE_V2",
+        &chain_id.to_le_bytes(),
+        &nonce.to_le_bytes(),
         content_id.as_bytes(),
         issuer.as_bytes(),
-        grantee.map_or(absent_grantee.as_slice(), |g| g.as_bytes()),
-        key_id,
+        terms
+            .grantee
+            .as_ref()
+            .map_or(absent_grantee.as_slice(), |g| g.as_bytes()),
+        &terms.key_id,
         &policy_byte,
-        &opened_epoch.to_le_bytes(),
+        &terms.opened_epoch.to_le_bytes(),
     ])
 }
 
 /// Digest a grant revocation is signed over.
 #[must_use]
-pub fn grant_revoke_digest(grant_id: u64, caller: &Address, at_epoch: u64) -> [u8; 32] {
+pub fn grant_revoke_digest(
+    chain_id: u64,
+    grant_id: u64,
+    caller: &Address,
+    at_epoch: u64,
+) -> [u8; 32] {
     hash_fields_bytes(&[
-        b"BDLM_GRANT_REVOKE_V1",
+        b"BDLM_GRANT_REVOKE_V2",
+        &chain_id.to_le_bytes(),
         &grant_id.to_le_bytes(),
         caller.as_bytes(),
         &at_epoch.to_le_bytes(),
@@ -241,9 +292,17 @@ pub fn grant_revoke_digest(grant_id: u64, caller: &Address, at_epoch: u64) -> [u
 /// from issue and revoke: a delete is not a revoke of one grant, it is the
 /// owner retiring every grant of one content and its key id with them.
 #[must_use]
-pub fn social_delete_digest(content_id: &ContentId, caller: &Address, at_epoch: u64) -> [u8; 32] {
+pub fn social_delete_digest(
+    chain_id: u64,
+    nonce: u64,
+    content_id: &ContentId,
+    caller: &Address,
+    at_epoch: u64,
+) -> [u8; 32] {
     hash_fields_bytes(&[
-        b"BDLM_SOCIAL_DELETE_V1",
+        b"BDLM_SOCIAL_DELETE_V2",
+        &chain_id.to_le_bytes(),
+        &nonce.to_le_bytes(),
         content_id.as_bytes(),
         caller.as_bytes(),
         &at_epoch.to_le_bytes(),
@@ -297,20 +356,10 @@ pub const VIEW_CLAIM_MAX_AGE_SECS: u64 = 300;
 /// another cipher or another object.
 #[must_use]
 pub fn confidential_commit_digest(commit: &ConfidentialBodyCommit, owner: &Address) -> [u8; 32] {
-    let enc_byte: u8 = match commit.encryption {
-        crate::storage::ContentEncryption::Plaintext => 0,
-        crate::storage::ContentEncryption::ClientSide(cipher) => match cipher {
-            crate::storage::ContentCipher::Aes256Gcm => 1,
-            crate::storage::ContentCipher::ChaCha20Poly1305 => 2,
-            crate::storage::ContentCipher::XChaCha20Poly1305 => 3,
-        },
-    };
-    let proof_byte: u8 = match commit.proof_kind {
-        ConfidentialProofKind::RetrievalChallenge => 1,
-        ConfidentialProofKind::ZkStorageProof => 2,
-        ConfidentialProofKind::TeeAttested => 3,
-        ConfidentialProofKind::HybridZkTee => 4,
-    };
+    // One tag table for the digest and for `commitment()`, so the two byte
+    // encodings of the same enums cannot drift apart.
+    let enc_byte: u8 = commit.encryption.commitment_tag();
+    let proof_byte: u8 = commit.proof_kind.tag();
     hash_fields_bytes(&[
         b"BDLM_CONFIDENTIAL_COMMIT_V1",
         commit.content_id.as_bytes(),
@@ -331,6 +380,13 @@ pub enum ViewGrantError {
     NamedPolicyNeedsGrantee,
     OwnerOnlyMustNotNameGrantee,
     DuplicateLiveGrant,
+    /// The grant id counter reached `u64::MAX`.
+    GrantIdSpaceExhausted,
+    /// A revoke dated before the grant was opened.
+    RevokeBeforeOpen {
+        opened_epoch: u64,
+        at_epoch: u64,
+    },
     /// The address named as issuer is not the owner of the content, so it has
     /// no word to give about who may view it.
     NotOwner {
@@ -366,6 +422,14 @@ impl std::fmt::Display for ViewGrantError {
             ),
             Self::UnknownContent => write!(f, "no manifest describes this content"),
             Self::Authorization(e) => write!(f, "grant authorization refused: {e}"),
+            Self::RevokeBeforeOpen {
+                opened_epoch,
+                at_epoch,
+            } => write!(
+                f,
+                "revoke epoch {at_epoch} is before the grant opened at {opened_epoch}"
+            ),
+            Self::GrantIdSpaceExhausted => write!(f, "view grant id counter is exhausted"),
             Self::DuplicateLiveGrant => {
                 write!(
                     f,
@@ -378,12 +442,66 @@ impl std::fmt::Display for ViewGrantError {
 
 /// In-memory grant book. Deterministic `BTreeMap` for state root hashing later.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(try_from = "ViewGrantRegistryWire")]
 pub struct ViewGrantRegistry {
     next_id: u64,
     grants: BTreeMap<u64, ViewGrant>,
     /// Live index: content → grant ids (includes revoked; filter at read).
     #[serde(with = "crate::core::map_keys")]
     by_content: BTreeMap<ContentId, Vec<u64>>,
+}
+
+/// The stored shape of [`ViewGrantRegistry`]. A loaded row passes through
+/// [`TryFrom`], so three fields that disagree are refused instead of
+/// trusted: a stale `next_id` would let `issue` overwrite a stored grant.
+#[derive(Deserialize)]
+struct ViewGrantRegistryWire {
+    next_id: u64,
+    grants: BTreeMap<u64, ViewGrant>,
+    #[serde(with = "crate::core::map_keys")]
+    by_content: BTreeMap<ContentId, Vec<u64>>,
+}
+
+impl TryFrom<ViewGrantRegistryWire> for ViewGrantRegistry {
+    type Error = &'static str;
+
+    fn try_from(wire: ViewGrantRegistryWire) -> Result<Self, Self::Error> {
+        for (id, grant) in &wire.grants {
+            if *id != grant.grant_id {
+                return Err("view grant row is stored under another id");
+            }
+            if *id >= wire.next_id {
+                return Err("view grant id is not below next_id");
+            }
+            let indexed = wire
+                .by_content
+                .get(&grant.content_id)
+                .is_some_and(|ids| ids.contains(id));
+            if !indexed {
+                return Err("view grant is missing from the content index");
+            }
+        }
+        let mut indexed_rows: usize = 0;
+        for (content_id, ids) in &wire.by_content {
+            for id in ids {
+                match wire.grants.get(id) {
+                    Some(grant) if grant.content_id == *content_id => {}
+                    _ => return Err("content index names a grant that does not match"),
+                }
+            }
+            indexed_rows = indexed_rows.saturating_add(ids.len());
+        }
+        // Every grant is indexed at least once (above) and every index entry
+        // names a matching grant, so equal counts mean no entry repeats.
+        if indexed_rows != wire.grants.len() {
+            return Err("content index repeats a grant");
+        }
+        Ok(Self {
+            next_id: wire.next_id,
+            grants: wire.grants,
+            by_content: wire.by_content,
+        })
+    }
 }
 
 impl ViewGrantRegistry {
@@ -427,7 +545,10 @@ impl ViewGrantRegistry {
             return Err(ViewGrantError::DuplicateLiveGrant);
         }
         let grant_id = self.next_id;
-        self.next_id = self.next_id.saturating_add(1);
+        let next_id = grant_id
+            .checked_add(1)
+            .ok_or(ViewGrantError::GrantIdSpaceExhausted)?;
+        self.next_id = next_id;
         let grant = ViewGrant {
             grant_id,
             content_id,
@@ -464,6 +585,12 @@ impl ViewGrantRegistry {
         }
         if grant.revoked_epoch.is_some() {
             return Err(ViewGrantError::AlreadyRevoked(grant_id));
+        }
+        if at_epoch < grant.opened_epoch {
+            return Err(ViewGrantError::RevokeBeforeOpen {
+                opened_epoch: grant.opened_epoch,
+                at_epoch,
+            });
         }
         grant.revoked_epoch = Some(at_epoch);
         Ok(())
@@ -634,6 +761,19 @@ pub enum ConfidentialProofKind {
     HybridZkTee,
 }
 
+impl ConfidentialProofKind {
+    /// The byte this kind enters every digest as. Frozen: a change moves
+    /// every commitment already on chain.
+    const fn tag(self) -> u8 {
+        match self {
+            Self::RetrievalChallenge => 1,
+            Self::ZkStorageProof => 2,
+            Self::TeeAttested => 3,
+            Self::HybridZkTee => 4,
+        }
+    }
+}
+
 impl ConfidentialBodyCommit {
     /// # Errors
     ///
@@ -661,12 +801,7 @@ impl ConfidentialBodyCommit {
     #[must_use]
     pub fn commitment(&self) -> [u8; 32] {
         let enc = [self.encryption.commitment_tag()];
-        let kind = [match self.proof_kind {
-            ConfidentialProofKind::RetrievalChallenge => 1u8,
-            ConfidentialProofKind::ZkStorageProof => 2u8,
-            ConfidentialProofKind::TeeAttested => 3u8,
-            ConfidentialProofKind::HybridZkTee => 4u8,
-        }];
+        let kind = [self.proof_kind.tag()];
         hash_fields_bytes(&[
             b"BDLM_CONFIDENTIAL_BODY_V1",
             &self.content_id.0,
@@ -689,6 +824,85 @@ mod tests {
 
     fn cid(b: u8) -> ContentId {
         ContentId([b; 32])
+    }
+
+    /// P28-F17: a stored registry whose three fields disagree is refused.
+    #[test]
+    fn a_registry_row_whose_fields_disagree_is_refused_on_load() {
+        let mut reg = ViewGrantRegistry::new();
+        let g = reg
+            .issue(cid(1), addr(2), None, [3u8; 32], ViewPolicy::PublicKeyId, 5)
+            .unwrap();
+        let good = bincode::serialize(&reg).unwrap();
+        assert!(bincode::deserialize::<ViewGrantRegistry>(&good).is_ok());
+
+        let mut stale = reg.clone();
+        stale.next_id = g;
+        let bytes = bincode::serialize(&stale).unwrap();
+        assert!(bincode::deserialize::<ViewGrantRegistry>(&bytes).is_err());
+
+        let mut unindexed = reg.clone();
+        unindexed.by_content.clear();
+        let bytes = bincode::serialize(&unindexed).unwrap();
+        assert!(bincode::deserialize::<ViewGrantRegistry>(&bytes).is_err());
+
+        let mut repeated = reg.clone();
+        repeated.by_content.entry(cid(1)).or_default().push(g);
+        let bytes = bincode::serialize(&repeated).unwrap();
+        assert!(bincode::deserialize::<ViewGrantRegistry>(&bytes).is_err());
+    }
+
+    #[test]
+    fn a_revoke_dated_before_the_grant_opened_is_refused() {
+        let mut reg = ViewGrantRegistry::new();
+        let id = reg
+            .issue(
+                cid(1),
+                addr(2),
+                None,
+                [3u8; 32],
+                ViewPolicy::PublicKeyId,
+                10,
+            )
+            .unwrap();
+        assert_eq!(
+            reg.revoke(id, addr(2), 9),
+            Err(ViewGrantError::RevokeBeforeOpen {
+                opened_epoch: 10,
+                at_epoch: 9
+            })
+        );
+        assert!(reg.get(id).unwrap().is_live());
+        reg.revoke(id, addr(2), 10).unwrap();
+    }
+
+    /// P28-F19: the digest and the commitment share one tag table, and the
+    /// bytes stay what they were on chain.
+    #[test]
+    fn confidential_proof_and_cipher_tags_are_frozen() {
+        assert_eq!(ConfidentialProofKind::RetrievalChallenge.tag(), 1);
+        assert_eq!(ConfidentialProofKind::ZkStorageProof.tag(), 2);
+        assert_eq!(ConfidentialProofKind::TeeAttested.tag(), 3);
+        assert_eq!(ConfidentialProofKind::HybridZkTee.tag(), 4);
+        assert_eq!(ContentEncryption::Plaintext.commitment_tag(), 0);
+        assert_eq!(
+            ContentEncryption::ClientSide(ContentCipher::Aes256Gcm).commitment_tag(),
+            1
+        );
+        assert_eq!(
+            ContentEncryption::ClientSide(ContentCipher::XChaCha20Poly1305).commitment_tag(),
+            3
+        );
+    }
+
+    #[test]
+    fn a_full_grant_id_counter_refuses_instead_of_reusing_an_id() {
+        let mut reg = ViewGrantRegistry::new();
+        reg.next_id = u64::MAX;
+        assert_eq!(
+            reg.issue(cid(1), addr(2), None, [3u8; 32], ViewPolicy::PublicKeyId, 5),
+            Err(ViewGrantError::GrantIdSpaceExhausted)
+        );
     }
 
     /// Every field of a view claim moves the digest.
@@ -716,15 +930,47 @@ mod tests {
         assert_ne!(
             base,
             grant_issue_digest(
+                1,
+                0,
                 &cid(1),
                 &addr(2),
-                None,
-                &[3u8; 32],
-                ViewPolicy::PublicKeyId,
-                6
+                &GrantIssueTerms {
+                    grantee: None,
+                    key_id: [3u8; 32],
+                    policy: ViewPolicy::PublicKeyId,
+                    opened_epoch: 6
+                }
             ),
             "a view claim must not collide with a grant issue over the same fields"
         );
+    }
+
+    /// P28-F16: chain id and nonce enter every signed digest.
+    #[test]
+    fn signed_digests_bind_chain_id_and_nonce() {
+        let issue = |c: u64, n: u64| {
+            grant_issue_digest(
+                c,
+                n,
+                &cid(1),
+                &addr(2),
+                &GrantIssueTerms {
+                    grantee: None,
+                    key_id: [3u8; 32],
+                    policy: ViewPolicy::OwnerOnly,
+                    opened_epoch: 6,
+                },
+            )
+        };
+        assert_ne!(issue(1, 0), issue(2, 0));
+        assert_ne!(issue(1, 0), issue(1, 1));
+        assert_ne!(
+            grant_revoke_digest(1, 5, &addr(2), 6),
+            grant_revoke_digest(2, 5, &addr(2), 6)
+        );
+        let del = |c: u64, n: u64| social_delete_digest(c, n, &cid(1), &addr(2), 6);
+        assert_ne!(del(1, 0), del(2, 0));
+        assert_ne!(del(1, 0), del(1, 1));
     }
 
     /// The claim's lifetime matches the session it opens.

@@ -160,36 +160,46 @@ impl Scorable for RiskReport {
 ///
 /// If the weights do not sum to 100.
 pub fn weighted_score(report: &RiskReport, weights: ScoreWeights) -> Result<u8, String> {
-    let total_w = weights.onchain_pct
-        + weights.static_analysis_pct
-        + weights.behavior_pct
-        + weights.metadata_pct;
+    let total_w = u32::from(weights.onchain_pct)
+        + u32::from(weights.static_analysis_pct)
+        + u32::from(weights.behavior_pct)
+        + u32::from(weights.metadata_pct);
     if total_w != 100 {
         return Err(format!(
             "the weights must sum to 100, but {total_w} was given"
         ));
     }
 
-    let mut by_area: std::collections::BTreeMap<String, u8> = std::collections::BTreeMap::new();
+    // Areas that fall in the same weight bucket take the lowest score of the
+    // bucket, so a bucket counts once however many area names map to it.
+    let bucket_of = |area: &str| -> u8 {
+        match area {
+            a if a.contains("onchain") => 0,
+            a if a.contains("static") => 1,
+            a if a.contains("behav") => 2,
+            _ => 3,
+        }
+    };
+    let mut by_bucket: std::collections::BTreeMap<u8, u8> = std::collections::BTreeMap::new();
     for (score, area) in report.items_scored() {
-        by_area
-            .entry(area)
+        by_bucket
+            .entry(bucket_of(&area))
             .and_modify(|s| *s = (*s).min(score))
             .or_insert(score);
     }
 
-    let area_weight = |area: &str| -> u16 {
-        match area {
-            a if a.contains("onchain") => weights.onchain_pct,
-            a if a.contains("static") => weights.static_analysis_pct,
-            a if a.contains("behav") => weights.behavior_pct,
+    let bucket_weight = |bucket: u8| -> u16 {
+        match bucket {
+            0 => weights.onchain_pct,
+            1 => weights.static_analysis_pct,
+            2 => weights.behavior_pct,
             _ => weights.metadata_pct,
         }
     };
 
     let mut acc: u64 = 0;
-    for (area, score) in by_area {
-        acc += u64::from(score) * u64::from(area_weight(&area));
+    for (bucket, score) in by_bucket {
+        acc += u64::from(score) * u64::from(bucket_weight(bucket));
     }
     // acc is at most 80*100 = 8000, and dividing by 100 gives 80, which fits a u8.
     let score = u8::try_from(acc / 100).unwrap_or(u8::MAX);
@@ -246,6 +256,28 @@ mod tests {
         let s = weighted_score(&report, ScoreWeights::default()).unwrap();
         assert_eq!(s, 0);
         assert_eq!(rating(s), "poor");
+    }
+
+    #[test]
+    fn overflowing_weights_are_an_error_not_a_panic() {
+        let report = RiskReport::default();
+        let w = ScoreWeights {
+            onchain_pct: u16::MAX,
+            static_analysis_pct: 1,
+            behavior_pct: 0,
+            metadata_pct: 0,
+        };
+        assert!(weighted_score(&report, w).is_err());
+    }
+
+    #[test]
+    fn two_areas_in_one_bucket_count_once() {
+        let mut report = RiskReport::default();
+        report.push(RiskLevel::High, "onchain", "a", "-");
+        report.push(RiskLevel::High, "onchain-proxy", "b", "-");
+        let s = weighted_score(&report, ScoreWeights::default()).unwrap();
+        // One onchain bucket at 20 under weight 40: 20*40 / 100 = 8.
+        assert_eq!(s, 8);
     }
 
     #[test]

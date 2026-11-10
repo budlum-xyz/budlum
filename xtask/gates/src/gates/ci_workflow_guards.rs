@@ -19,6 +19,7 @@
 //!
 //! The self-test proves the gate can fail by tampering with a workflow copy.
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 /// The gate subcommands CI must invoke for the protection to be live.
@@ -31,17 +32,82 @@ const WORKFLOWS: &[&str] = &[
     ".github/workflows/diverse-double-compiling.yml",
 ];
 
+/// One `run:` block of a workflow step.
+struct RunBlock {
+    /// The step's `name:` (or `run` when it has none).
+    step: String,
+    /// The block's command lines, YAML comment lines dropped.
+    lines: Vec<String>,
+    /// Why the step cannot be counted as a live gate run (`continue-on-error`,
+    /// a constant-false or failure-only `if:`), or `None`.
+    softened: Option<String>,
+}
+
+/// Why a step-level `key: value` pair makes the step non-binding, if it does.
+fn softening(key: &str, value: &str) -> Option<String> {
+    let value = value.trim();
+    let bare = value
+        .trim_start_matches("${{")
+        .trim_end_matches("}}")
+        .trim()
+        .trim_matches(|c| c == '\'' || c == '"')
+        .trim();
+    match key {
+        "continue-on-error" if !bare.eq_ignore_ascii_case("false") => {
+            Some(format!("continue-on-error: {value}"))
+        }
+        "if" if bare.eq_ignore_ascii_case("false")
+            || bare == "0"
+            || bare.is_empty()
+            || bare.contains("failure()")
+            || bare.contains("cancelled()") =>
+        {
+            Some(format!("if: {value}"))
+        }
+        _ => None,
+    }
+}
+
+/// Keys that can open a step as `- key: value`.
+fn is_step_key(body: &str) -> bool {
+    [
+        "name:",
+        "uses:",
+        "run:",
+        "id:",
+        "if:",
+        "env:",
+        "with:",
+        "shell:",
+        "working-directory:",
+        "continue-on-error:",
+        "timeout-minutes:",
+    ]
+    .iter()
+    .any(|k| body.starts_with(k))
+}
+
 /// Extract the `run:` blocks (inline `run: cmd` and folded `run: | ...`)
-/// from a workflow file, with `(step_name, run_text)` pairs.
+/// from a workflow file.
 ///
 /// The scanner tracks YAML block indentation: a folded block ends at the
-/// first line whose indentation is <= the `run:` line's indentation, or at
-/// the next `- name:` / `- uses:` / `- run:` step marker.
-fn run_blocks(text: &str) -> Vec<(String, String)> {
-    let mut out = Vec::new();
+/// first line whose indentation is <= the `run:` key's indentation. A step
+/// that starts with `- run:` is recognised, comment lines inside a block are
+/// dropped, and the step's `continue-on-error` / `if:` keys are read so a
+/// softened step is not counted as a live run.
+fn run_blocks(text: &str) -> Vec<RunBlock> {
+    struct Raw {
+        step: String,
+        lines: Vec<String>,
+        step_idx: usize,
+    }
+    let mut raws: Vec<Raw> = Vec::new();
+    let mut soft: Vec<Option<String>> = Vec::new();
+    let mut step_idx = 0usize;
+    let mut step_item_indent: Option<usize> = None;
     let mut current_step = String::new();
     let mut in_run_block = false;
-    let mut block = String::new();
+    let mut block: Vec<String> = Vec::new();
     let mut run_indent = 0usize;
 
     let lines: Vec<&str> = text.lines().collect();
@@ -52,155 +118,187 @@ fn run_blocks(text: &str) -> Vec<(String, String)> {
         let indent = line.len() - trimmed.len();
 
         if in_run_block {
-            // Blank lines inside a folded block are kept.
             if trimmed.is_empty() {
-                block.push('\n');
                 i += 1;
                 continue;
             }
-            // Any line at or above the run: indent ends the block.
+            // Any line at or above the run: key indent ends the block.
             if indent <= run_indent {
-                out.push((current_step.clone(), std::mem::take(&mut block)));
+                raws.push(Raw {
+                    step: current_step.clone(),
+                    lines: std::mem::take(&mut block),
+                    step_idx,
+                });
                 in_run_block = false;
                 continue;
             }
-            block.push_str(trimmed);
-            block.push('\n');
+            if !trimmed.starts_with('#') {
+                block.push(trimmed.to_string());
+            }
             i += 1;
             continue;
         }
 
-        if let Some(step) = trimmed.strip_prefix("- name: ") {
-            current_step = step.to_string();
-            i += 1;
-            continue;
+        let (is_item, body) = match trimmed.strip_prefix("- ") {
+            Some(b) => (true, b.trim_start()),
+            None => (false, trimmed),
+        };
+        let key_indent = if is_item { indent + 2 } else { indent };
+        if is_item && is_step_key(body) && step_item_indent.is_none_or(|s| indent <= s) {
+            soft.push(None);
+            step_idx = soft.len() - 1;
+            step_item_indent = Some(indent);
+            current_step = String::from("run");
         }
-        if let Some(rest) = trimmed.strip_prefix("run:") {
-            current_step = if current_step.is_empty() {
-                "run".to_string()
-            } else {
-                current_step.clone()
-            };
-            let rest = rest.trim_start();
-            if rest.starts_with('|') || rest.starts_with('>') {
-                in_run_block = true;
-                run_indent = indent;
-                block = String::new();
-            } else if !rest.is_empty() {
-                out.push((current_step.clone(), rest.to_string()));
+        let at_step_key = step_item_indent.is_some_and(|s| key_indent == s + 2);
+        if at_step_key {
+            if let Some(step) = body.strip_prefix("name: ") {
+                current_step = step.to_string();
+            } else if let Some(rest) = body.strip_prefix("run:") {
+                let rest = rest.trim_start();
+                if rest.starts_with('|') || rest.starts_with('>') {
+                    in_run_block = true;
+                    run_indent = key_indent;
+                    block = Vec::new();
+                } else if !rest.is_empty() && !rest.starts_with('#') {
+                    raws.push(Raw {
+                        step: current_step.clone(),
+                        lines: vec![rest.to_string()],
+                        step_idx,
+                    });
+                }
+            } else if let Some((key, value)) = body.split_once(':') {
+                if let Some(why) = softening(key.trim(), value) {
+                    soft[step_idx] = Some(why);
+                }
             }
-            i += 1;
-            continue;
         }
         i += 1;
     }
     if in_run_block {
-        out.push((current_step, block));
+        raws.push(Raw {
+            step: current_step,
+            lines: block,
+            step_idx,
+        });
     }
-    out
+    raws.into_iter()
+        .map(|r| RunBlock {
+            step: r.step,
+            lines: r.lines,
+            softened: soft.get(r.step_idx).cloned().flatten(),
+        })
+        .collect()
 }
 
-/// True if the run text invokes the gate binary with the given subcommand.
+/// One gate-binary invocation found on a command line.
+struct Invocation {
+    gate: String,
+    self_test: bool,
+}
+
+/// Parse a command line as an invocation of the gate binary:
+/// `cargo run ... xtask/gates/... -- <gate> [--self-test]`, also inside a
+/// subshell `(cd xtask/gates && cargo run ... -- <gate>)`.
 ///
-/// The subcommand must appear as a standalone argument after `--` (the gate
-/// binary's subcommand form): `-- relay ` or `-- relay\n`. A bare substring
-/// match would count `relayer_escrow`, `relayer`, comments and prose.
-fn invokes(run: &str, subcommand: &str) -> bool {
-    let needle = format!("-- {subcommand}");
-    if !run.contains(&needle) {
-        return false;
+/// The subcommand is the token directly after the first standalone `--`, so
+/// `cargo run -p budlum-relayer`, a YAML comment, or another gate's
+/// `--self-test` on a different line cannot satisfy a protected gate.
+fn parse_invocation(line: &str) -> Option<Invocation> {
+    let line = line.trim();
+    if line.starts_with('#') || !line.contains("cargo run") || !line.contains("xtask/gates") {
+        return None;
     }
-    // The character after the subcommand must be whitespace or end-of-line,
-    // so `-- relayx` or `-- relayer` does not match `relay`.
-    run.split(&needle)
-        .skip(1)
-        .any(|tail| tail.chars().next().is_none_or(char::is_whitespace))
-}
-
-/// True if the run text invokes the gate binary with the given subcommand in
-/// any of the accepted invocation forms (see [`invokes`]). This is the
-/// public predicate used by the checks.
-fn invokes_anywhere(run: &str, subcommand: &str) -> bool {
-    // `-- <gate>` (the main form) or `-- <gate>` preceded by a path to the
-    // gate binary (`cargo run ... -- <gate>`, `./budlum-gates <gate>`).
-    if invokes(run, subcommand) {
-        return true;
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    let dashes = tokens.iter().position(|t| *t == "--")?;
+    let gate = tokens
+        .get(dashes + 1)?
+        .trim_end_matches([')', ';', '&', '|']);
+    if gate.is_empty() || gate.starts_with('-') {
+        return None;
     }
-    // The diverse-double-compiling workflow runs the gate binary from a
-    // subdirectory: `(cd xtask/gates && cargo run --release --quiet -- regeneration)`.
-    run.lines().any(|line| {
-        let trimmed = line.trim();
-        trimmed.contains("cargo run") && trimmed.contains("--") && trimmed.contains(subcommand)
+    let self_test = tokens[dashes + 2..]
+        .iter()
+        .any(|t| t.trim_end_matches([')', ';']) == "--self-test");
+    Some(Invocation {
+        gate: gate.to_string(),
+        self_test,
     })
 }
+
+/// Position of an invocation: (block index, line index).
+type Pos = (usize, usize);
 
 fn check_workflow(path: &Path, require_self_test: bool) -> Result<Vec<String>, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("ci-workflow-guards: cannot read {}: {e}", path.display()))?;
-    let blocks = run_blocks(&text);
+    Ok(check_text(
+        &text,
+        &path.display().to_string(),
+        require_self_test,
+    ))
+}
+
+fn check_text(text: &str, label: &str, require_self_test: bool) -> Vec<String> {
+    let blocks = run_blocks(text);
     let mut findings: Vec<String> = Vec::new();
 
     for gate in PROTECTED_GATES {
-        let plain = blocks
-            .iter()
-            .filter(|(_, r)| invokes_anywhere(r, gate))
-            .count();
-        let self_test = blocks
-            .iter()
-            .filter(|(_, r)| invokes_anywhere(r, gate) && r.contains("--self-test"))
-            .count();
-        if plain == 0 {
+        let mut plain: Vec<Pos> = Vec::new();
+        let mut canary: Vec<Pos> = Vec::new();
+        for (bi, b) in blocks.iter().enumerate() {
+            for (li, l) in b.lines.iter().enumerate() {
+                let Some(inv) = parse_invocation(l) else {
+                    continue;
+                };
+                if inv.gate != *gate {
+                    continue;
+                }
+                if let Some(why) = &b.softened {
+                    findings.push(format!(
+                        "{label}: gate `{gate}` runs in step `{}` which is softened ({why}) - \
+                         a failing gate would not fail the job",
+                        b.step
+                    ));
+                    continue;
+                }
+                if inv.self_test {
+                    canary.push((bi, li));
+                } else {
+                    plain.push((bi, li));
+                }
+            }
+        }
+        if plain.is_empty() {
             findings.push(format!(
-                "{}: gate `{gate}` is not invoked in any run block - the protection is not live",
-                path.display()
+                "{label}: gate `{gate}` is not invoked in any live run block - \
+                 the protection is not live"
             ));
         }
         // The self-test canary is mandatory in the main CI job. The
         // diverse-double-compiling workflow consumes the regeneration gate
         // for *production* (compiler comparison), not as a canary, so the
         // canary requirement is scoped to ci.yml.
-        if require_self_test && self_test == 0 {
-            findings.push(format!(
-                "{}: gate `{gate}` has no `--self-test` canary - a broken gate can pass",
-                path.display()
-            ));
-        }
-    }
-
-    // Canary order: for each protected gate, the first occurrence of
-    // `--self-test` must be in an earlier run block than the first plain
-    // invocation within the same step block ordering (red-before-green).
-    // A single run block that contains BOTH the canary and the plain run
-    // (the ci.yml convention: `--self-test` line first, plain line second)
-    // satisfies the canary rule.
-    if require_self_test {
-        for gate in PROTECTED_GATES {
-            let mut first_self_test: Option<usize> = None;
-            let mut first_plain: Option<usize> = None;
-            for (i, (_, r)) in blocks.iter().enumerate() {
-                if !invokes_anywhere(r, gate) {
-                    continue;
+        if require_self_test {
+            if canary.is_empty() {
+                findings.push(format!(
+                    "{label}: gate `{gate}` has no `--self-test` canary - a broken gate can pass"
+                ));
+            } else if let (Some(first_canary), Some(first_plain)) =
+                (canary.iter().min(), plain.iter().min())
+            {
+                // Red-before-green: the canary line must come before the
+                // first plain run, in the same block or an earlier one.
+                if first_canary > first_plain {
+                    findings.push(format!(
+                        "{label}: gate `{gate}` runs before its `--self-test` canary - \
+                         a broken gate could pass without being noticed"
+                    ));
                 }
-                let has_canary = r.contains("--self-test");
-                if has_canary && first_self_test.is_none() {
-                    first_self_test = Some(i);
-                }
-                if !has_canary && first_plain.is_none() {
-                    first_plain = Some(i);
-                }
-            }
-            match (first_self_test, first_plain) {
-                (Some(st), Some(p)) if st > p => findings.push(format!(
-                    "{}: gate `{gate}` runs before its `--self-test` canary - \
-                     a broken gate could pass without being noticed",
-                    path.display()
-                )),
-                _ => {}
             }
         }
     }
-
-    Ok(findings)
+    findings
 }
 
 pub fn run(root: &Path) -> Result<String, String> {
@@ -222,72 +320,128 @@ pub fn run(root: &Path) -> Result<String, String> {
     ))
 }
 
+fn gate_line(gate: &str, self_test: bool) -> String {
+    let suffix = if self_test { " --self-test" } else { "" };
+    format!("cargo run --release --manifest-path xtask/gates/Cargo.toml -- {gate}{suffix}")
+}
+
+const FIXTURE_HEAD: &str =
+    "name: ci\non: [push]\njobs:\n  gates:\n    runs-on: ubuntu-latest\n    steps:\n";
+
+/// Build a workflow with one step per protected gate. `extra` is an optional
+/// step-level key line, and `lines(gate)` gives the step's run lines.
+fn workflow_with(extra: &str, lines: impl Fn(&str) -> Vec<String>) -> String {
+    let mut out = String::from(FIXTURE_HEAD);
+    for gate in PROTECTED_GATES {
+        writeln!(out, "      - name: {gate} + canary").expect("writing to a String cannot fail");
+        if !extra.is_empty() {
+            writeln!(out, "        {extra}").expect("writing to a String cannot fail");
+        }
+        out.push_str("        run: |\n");
+        for l in lines(gate) {
+            writeln!(out, "          {l}").expect("writing to a String cannot fail");
+        }
+    }
+    out
+}
+
 /// Self-test: the gate must fail on every tamper it is built to catch.
+///
+/// # Errors
+///
+/// Returns a finding when a tampered workflow passes or a good one fails.
 pub fn self_test() -> Result<String, String> {
-    // A workflow that runs everything correctly passes.
-    let good = format!(
-        "name: ci\non: [push]\njobs:\n  gates:\n    runs-on: ubuntu-latest\n    steps:\n\
-         - name: run {g}\n      run: |\n        cargo run -- gate {g} --self-test\n\
-         - name: check {g}\n      run: |\n        cargo run -- gate {g}\n",
-        g = PROTECTED_GATES[0]
-    );
-    let blocks = run_blocks(&good);
-    if blocks.len() != 2 {
+    let good = |g: &str| vec![gate_line(g, true), gate_line(g, false)];
+    let expect_red = |name: &str, text: &str| -> Result<(), String> {
+        if check_text(text, "fixture", true).is_empty() {
+            Err(format!("ci-workflow-guards self-test: {name} passed"))
+        } else {
+            Ok(())
+        }
+    };
+
+    let good_wf = workflow_with("", good);
+    let blocks = run_blocks(&good_wf);
+    if blocks.len() != PROTECTED_GATES.len() || blocks.iter().any(|b| b.lines.len() != 2) {
         return Err(String::from(
             "ci-workflow-guards self-test: run-block extraction failed on a good workflow",
         ));
     }
-    if !invokes_anywhere(&blocks[0].1, PROTECTED_GATES[0]) {
-        return Err(String::from(
-            "ci-workflow-guards self-test: invocation detection failed",
+    let f = check_text(&good_wf, "fixture", true);
+    if !f.is_empty() {
+        return Err(format!(
+            "ci-workflow-guards self-test: a workflow that runs everything correctly was refused: {}",
+            f.join("; ")
         ));
     }
 
-    // 1. Gate deleted from the workflow -> finding.
-    let no_gate = "name: ci\non: [push]\njobs:\n  other:\n    runs-on: ubuntu-latest\n    steps:\n      - name: x\n        run: echo hi\n";
-    let f = check_workflow_path_text(no_gate, true)?;
-    if f.is_empty() {
-        return Err(String::from(
-            "ci-workflow-guards self-test: a workflow without the protected gate passed",
-        ));
+    // 1. Gate deleted from the workflow.
+    expect_red(
+        "a workflow without the protected gates",
+        "name: ci\non: [push]\njobs:\n  other:\n    runs-on: ubuntu-latest\n    steps:\n      - name: x\n        run: echo hi\n",
+    )?;
+    // 2. Self-test canary missing.
+    expect_red(
+        "a workflow without the self-test canary",
+        &workflow_with("", |g| vec![gate_line(g, false)]),
+    )?;
+    // 3. Canary order inverted (plain before self-test).
+    expect_red(
+        "an inverted canary order",
+        &workflow_with("", |g| vec![gate_line(g, false), gate_line(g, true)]),
+    )?;
+    // 4. The plain invocation survives only as a YAML comment.
+    expect_red(
+        "a commented-out invocation",
+        &workflow_with("", |g| {
+            vec![gate_line(g, true), format!("# {}", gate_line(g, false))]
+        }),
+    )?;
+    // 5. A step with continue-on-error, a constant-false `if:`, or a
+    //    failure-only `if:`.
+    for (extra, label) in [
+        ("continue-on-error: true", "a continue-on-error step"),
+        ("if: false", "an `if: false` step"),
+        ("if: ${{ failure() }}", "a failure-only step"),
+    ] {
+        expect_red(label, &workflow_with(extra, good))?;
     }
-    // 2. Self-test canary missing -> finding.
-    let no_canary = format!(
-        "name: ci\non: [push]\njobs:\n  gates:\n    runs-on: ubuntu-latest\n    steps:\n      - name: run {g}\n        run: cargo run -- gate {g}\n",
-        g = PROTECTED_GATES[0]
-    );
-    let f = check_workflow_path_text(&no_canary, true)?;
-    if f.is_empty() {
+    // 6. A lookalike command that merely contains the gate name, and another
+    //    gate's canary in the same block, must not satisfy the gate.
+    expect_red(
+        "a lookalike command and a foreign canary",
+        &workflow_with("", |g| {
+            vec![
+                format!("cargo run --release -p budlum-{g}er"),
+                gate_line("other", true),
+                gate_line("other", false),
+            ]
+        }),
+    )?;
+    // 7. The `- run:` step form and the subshell form of the diverse
+    //    double-compiling workflow are read.
+    let ddc = "name: ddc\njobs:\n  j:\n    steps:\n      - run: (cd xtask/gates && cargo run --release --quiet -- regeneration) > /tmp/x 2>&1\n";
+    let found = run_blocks(ddc)
+        .iter()
+        .flat_map(|b| b.lines.iter())
+        .filter_map(|l| parse_invocation(l))
+        .any(|inv| inv.gate == "regeneration" && !inv.self_test);
+    if !found {
         return Err(String::from(
-            "ci-workflow-guards self-test: a workflow without the self-test canary passed",
-        ));
-    }
-    // 3. Canary order inverted (plain before self-test) -> finding.
-    let inverted = format!(
-        "name: ci\non: [push]\njobs:\n  gates:\n    runs-on: ubuntu-latest\n    steps:\n\
-         - name: run {g}\n        run: cargo run -- gate {g}\n\
-         - name: canary {g}\n        run: cargo run -- gate {g} --self-test\n",
-        g = PROTECTED_GATES[0]
-    );
-    let f = check_workflow_path_text(&inverted, true)?;
-    if f.is_empty() {
-        return Err(String::from(
-            "ci-workflow-guards self-test: inverted canary order passed",
+            "ci-workflow-guards self-test: the `- run:` subshell form was not read",
         ));
     }
 
     Ok(String::from(
-        "ci-workflow-guards self-test: extraction, invocation, canary presence and \
-         canary order all behave",
+        "ci-workflow-guards self-test: extraction, invocation, comments, softened steps, \
+         lookalikes, canary presence and canary order all behave",
     ))
 }
 
-/// Helper for self-test: check workflow text without touching the repo.
-fn check_workflow_path_text(text: &str, require_self_test: bool) -> Result<Vec<String>, String> {
-    let tmp = super::rust_literals::exclusive_scratch_dir("bud-cwg")?;
-    let path = tmp.join("wf.yml");
-    std::fs::write(&path, text).map_err(|e| e.to_string())?;
-    let res = check_workflow(&path, require_self_test);
-    let _ = std::fs::remove_dir_all(&tmp);
-    res
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn self_test_passes() {
+        super::self_test().expect("ci-workflow-guards self-test");
+    }
 }

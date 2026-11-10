@@ -51,6 +51,11 @@ impl Pact {
         if mode_flag > 2 {
             return Err("KQ-STORAGE-PACT: mode_flag >2");
         }
+        // The mode and the residual must tell the same story: a pure
+        // production pact carries no residual, the other two modes do.
+        if (mode_flag == 0) != (residual == [0u8; 32]) {
+            return Err("KQ-STORAGE-PACT: mode_flag does not match residual_commitment");
+        }
         Ok(Self {
             id,
             recipe_hash,
@@ -94,6 +99,12 @@ pub struct PactRegistry {
     pub root: [u8; 32],
 }
 
+/// Most pacts one registry may hold. The root hashes every pact, so the count bounds that work.
+///
+/// Convenience: pub so a pact caller can refuse past the same
+/// bound the registry enforces in this module.
+pub const MAX_PACTS: usize = 1024;
+
 impl Default for PactRegistry {
     fn default() -> Self {
         Self::new()
@@ -112,9 +123,19 @@ impl PactRegistry {
         }
     }
 
-    pub fn add_pact(&mut self, pact: Pact) {
+    /// # Errors
+    ///
+    /// Returns an error when the id is already registered or the registry is full.
+    pub fn add_pact(&mut self, pact: Pact) -> Result<(), &'static str> {
+        if self.pacts.len() >= MAX_PACTS {
+            return Err("KQ-STORAGE-PACT: registry is full");
+        }
+        if self.pacts.iter().any(|existing| existing.id == pact.id) {
+            return Err("KQ-STORAGE-PACT: duplicate pact id");
+        }
         self.pacts.push(pact);
         self.recompute_root();
+        Ok(())
     }
 
     pub fn recompute_root(&mut self) {
@@ -230,7 +251,8 @@ mod tests {
         reg.add_pact(
             Pact::new([1u8; 32], [0u8; 32], [0u8; 32], [2u8; 32], [0u8; 32], 10, 0)
                 .expect("valid pact"),
-        );
+        )
+        .expect("pact accepted");
         assert_ne!(
             reg.root, [0u8; 32],
             "a non-empty set cannot share a root with the empty set"
@@ -245,7 +267,8 @@ mod tests {
         reg.add_pact(
             Pact::new([1u8; 32], [0u8; 32], [0u8; 32], [2u8; 32], [0u8; 32], 10, 0)
                 .expect("valid pact"),
-        );
+        )
+        .expect("pact accepted");
         reg.root = [0xAA; 32];
         assert!(reg.verify_root().is_err());
     }
@@ -259,7 +282,8 @@ mod tests {
             reg.add_pact(
                 Pact::new([1u8; 32], [3u8; 32], [4u8; 32], [2u8; 32], [5u8; 32], 10, 1)
                     .expect("valid pact"),
-            );
+            )
+            .expect("pact accepted");
             reg
         };
         assert!(base().verify_root().is_ok());
@@ -281,6 +305,18 @@ mod tests {
     }
 
     #[test]
+    fn a_pact_id_cannot_be_added_twice() {
+        let mut reg = PactRegistry::new();
+        let make = || Pact::new([1u8; 32], [0u8; 32], [0u8; 32], [2u8; 32], [0u8; 32], 10, 0);
+        reg.add_pact(make().expect("valid pact"))
+            .expect("first add");
+        let root = reg.root;
+        assert!(reg.add_pact(make().expect("valid pact")).is_err());
+        assert_eq!(reg.root, root);
+        assert_eq!(reg.pacts.len(), 1);
+    }
+
+    #[test]
     fn registry_root() {
         let mut reg = PactRegistry::new();
         let payload = b"data";
@@ -288,7 +324,19 @@ mod tests {
         h.update(payload);
         let comm: [u8; 32] = h.finalize().into();
         let pact = Pact::new([1u8; 32], [0u8; 32], [0u8; 32], comm, [0u8; 32], 10, 0).unwrap();
-        reg.add_pact(pact);
+        reg.add_pact(pact).expect("pact accepted");
         assert!(reg.verify_root().is_ok());
+    }
+
+    #[test]
+    fn pact_mode_must_match_the_residual_commitment() {
+        let z = [0u8; 32];
+        let r = [9u8; 32];
+        assert!(Pact::new([1u8; 32], z, z, z, r, 10, 0).is_err());
+        assert!(Pact::new([1u8; 32], z, z, z, z, 10, 1).is_err());
+        assert!(Pact::new([1u8; 32], z, z, z, z, 10, 2).is_err());
+        assert!(Pact::new([1u8; 32], z, z, z, z, 10, 0).is_ok());
+        assert!(Pact::new([1u8; 32], z, z, z, r, 10, 1).is_ok());
+        assert!(Pact::new([1u8; 32], z, z, z, r, 10, 2).is_ok());
     }
 }

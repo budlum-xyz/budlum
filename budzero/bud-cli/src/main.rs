@@ -8,6 +8,50 @@ use tiny_keccak::{Hasher, Keccak};
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 
+const _: () = assert!(
+    bud_compiler::MIN_VM_MEMORY_BYTES as u64 <= bud_vm::MAX_MEMORY_BYTES,
+    "MIN_VM_MEMORY_BYTES must not exceed bud_vm::MAX_MEMORY_BYTES, the proof address space"
+);
+
+/// Which opcode activation state the CLI executes and verifies under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum ActivationArg {
+    /// The staged opcodes (`VerifyMerkle`, `VerifyInference`) stay closed:
+    /// the VM refuses them and the verifier refuses a proof whose program
+    /// contains one.
+    Default,
+    /// Every staged opcode is open. For a network that has activated them,
+    /// and for testing; never the production setting while they are closed.
+    Full,
+}
+
+impl ActivationArg {
+    fn state(self) -> bud_isa::MainnetActivation {
+        match self {
+            ActivationArg::Default => bud_isa::MainnetActivation::default(),
+            ActivationArg::Full => bud_isa::MainnetActivation::full(),
+        }
+    }
+
+    /// The activation state a signed relay report may be made under.
+    ///
+    /// The signed payload does not record the activation state. A report made
+    /// under `full` would be byte-compatible with one made under the closed
+    /// default, so a reader could not tell that a program the production
+    /// verifier refuses had been accepted. Only the closed state is allowed.
+    fn relay_state(self) -> Result<bud_isa::MainnetActivation, String> {
+        match self {
+            ActivationArg::Default => Ok(self.state()),
+            ActivationArg::Full => Err(
+                "relay refuses --activation full: the signed report does not record the \
+                 activation state, so it could not be told from a report made under the \
+                 closed default"
+                    .to_string(),
+            ),
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(
     author,
@@ -18,10 +62,19 @@ use tracing_subscriber::EnvFilter;
 struct Cli {
     #[arg(
         long,
-        default_value_t = 1,
-        help = "The unique chain identifier for execution context"
+        default_value_t = 45262,
+        help = "The unique chain identifier for execution context (Budlum: mainnet 45260, testnet 45261, devnet 45262; 0 is refused)"
     )]
     chain_id: u64,
+
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        default_value_t = ActivationArg::Default,
+        help = "Opcode activation state for execution and verification: `default` keeps VerifyMerkle and VerifyInference closed (the VM refuses them; proofs whose program contains one are refused), `full` opens them"
+    )]
+    activation: ActivationArg,
 
     #[command(subcommand)]
     command: Commands,
@@ -207,6 +260,7 @@ struct ExecutionConfig {
     chain_id: u64,
     state_in_file: Option<String>,
     commit_state: bool,
+    activation: bud_isa::MainnetActivation,
 }
 
 struct ExecutionOutput {
@@ -219,8 +273,17 @@ struct ExecutionOutput {
     vm: Vm,
 }
 
+/// Chain id 0 binds a proof to no network at all.
+fn check_chain_id(chain_id: u64) -> Result<(), String> {
+    if chain_id == 0 {
+        return Err("chain id 0 is not a network id".to_string());
+    }
+    Ok(())
+}
+
 fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std::error::Error>> {
     use bud_state::StateBackend;
+    check_chain_id(config.chain_id)?;
 
     debug!("Starting pipeline");
 
@@ -234,7 +297,11 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
     // HIGH (2026-08-17): Vm::new leaves mainnet_mode=false; gated
     // opcode'lar (VerifyMerkle/VerifyInference) non-mainnet decoder'da
     // runs. The CLI default must be mainnet safe: mainnet_mode=true.
-    let mut vm = Vm::with_mainnet_mode(bud_compiler::MIN_VM_MEMORY_BYTES, 1_000_000, true);
+    //
+    // Only `--activation full` opens them: then the VM decodes without the
+    // gate, and the proof it just produced is verified under the same state.
+    let mainnet_mode = config.activation == bud_isa::MainnetActivation::default();
+    let mut vm = Vm::with_mainnet_mode(bud_compiler::MIN_VM_MEMORY_BYTES, 1_000_000, mainnet_mode);
     if let Some(s) = config.sender {
         vm.context.sender = s;
         // Security review (MEDIUM): creating an automatically funded account for
@@ -254,10 +321,17 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
         vm.context.block_height = bh;
     }
 
+    // Registers 1..=31 carry inputs. An extra argument used to be dropped
+    // silently, so the program was run and proven with fewer inputs than given.
+    if config.args.len() > 31 {
+        return Err(format!(
+            "{} arguments given, at most 31 fit the input registers",
+            config.args.len()
+        )
+        .into());
+    }
     for (i, val) in config.args.iter().enumerate() {
-        if i < 31 {
-            vm.registers[i + 1] = *val;
-        }
+        vm.registers[i + 1] = *val;
     }
 
     let receipt = vm.run_receipt(&config.bytecode);
@@ -293,7 +367,13 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
             let mut acc = state
                 .get_account(s)
                 .ok_or("Sender account not found in state")?;
-            acc.nonce += 1;
+            // The persisted nonce follows the nonce the proof binds
+            // (`--nonce` overrides the account's), not a blind +1.
+            acc.nonce = vm
+                .context
+                .nonce
+                .checked_add(1)
+                .ok_or("transaction nonce overflow")?;
             state.set_account(s, acc);
         }
     }
@@ -335,7 +415,13 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
         chain_id: config.chain_id,
         program_hash: prog_hash,
         initial_state_root,
-        final_state_root: post_root,
+        // The AIR ties the final root to the storage-writes fold (2a), so
+        // the proof's final root is the write digest - the commit refusal
+        // above already keeps storage writes out of committed runs, and
+        // `post_root` (the bud-state tree root) still rides in the run
+        // output for display. Passing `post_root` here claimed a
+        // post-state commitment the proof never made.
+        final_state_root: receipt.state_writes_digest,
         sender: vm.context.sender,
         nonce: vm.context.nonce,
         block_height: vm.context.block_height,
@@ -363,7 +449,13 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
     info!(proof_bytes = envelope.proof_bytes.len(), "Proof generated");
 
     info!("Verifying proof...");
-    let ok = Prover::verify(&envelope, &pi, &config.bytecode).is_ok();
+    let ok = bud_proof::Plonky3Adapter::verify_with_activation(
+        &envelope,
+        &pi,
+        &config.bytecode,
+        config.activation,
+    )
+    .is_ok();
 
     if !ok {
         if config.commit_state {
@@ -454,6 +546,7 @@ struct RelayRequest<'a> {
     payload_out: Option<&'a str>,
     reexecute: bool,
     spent_set: Option<&'a str>,
+    activation: bud_isa::MainnetActivation,
 }
 
 /// In-memory spent-set oracle for the relay's double-spend check (S1): the
@@ -527,27 +620,58 @@ fn quarantine_reason_of(
 }
 
 /// Record the relay's alarm into the node ledger and quarantine the offending
-/// program, then assert the chained log still verifies.
+/// program, then check the chained log still verifies.
 fn record_relay_outcome(
     ledger: &mut NodeLedger,
     report: &bud_proof::relayer::CanonicalRelayReport,
     program_hash: [u8; 32],
-) {
+) -> Result<(), String> {
     if report.status != bud_proof::relayer::RelayStatus::Alarm {
-        return;
+        return Ok(());
     }
     let Some(bud_proof::relayer::AlarmDetail { code, detail }) = &report.alarm else {
-        return;
+        return Ok(());
     };
     let kind = alarm_kind_of(*code);
     ledger.alarms.record(report.report_sig, kind, detail);
     if let Some(reason) = quarantine_reason_of(kind) {
         ledger.quarantine.ban(program_hash, reason);
     }
-    debug_assert!(
-        ledger.alarms.verify_integrity(),
-        "the chained alarm log must verify after a record"
-    );
+    if !ledger.alarms.verify_integrity() {
+        return Err("the chained alarm log does not verify after a record".to_string());
+    }
+    Ok(())
+}
+
+/// The quarantine ledger lives next to the relay report it belongs to.
+fn quarantine_path_for(output: &str) -> String {
+    format!("{output}.quarantine")
+}
+
+/// Read the persisted ledger; a missing file is an empty ledger, an
+/// unreadable or malformed one is an error so a ban is never dropped.
+fn load_quarantine(path: &str) -> Result<bud_proof::quarantine::QuarantineLedger, String> {
+    if !std::path::Path::new(path).exists() {
+        return Ok(bud_proof::quarantine::QuarantineLedger::new());
+    }
+    let text =
+        fs::read_to_string(path).map_err(|e| format!("Failed to read quarantine ledger: {e}"))?;
+    bud_proof::quarantine::QuarantineLedger::from_text(&text)
+}
+
+/// Write the ledger through a temp file and a rename. An empty ledger writes
+/// nothing, so clean runs leave no file behind.
+fn save_quarantine(
+    path: &str,
+    ledger: &bud_proof::quarantine::QuarantineLedger,
+) -> Result<(), String> {
+    if ledger.is_empty() {
+        return Ok(());
+    }
+    let temp = format!("{path}.tmp");
+    fs::write(&temp, ledger.to_text())
+        .map_err(|e| format!("Failed to write quarantine ledger: {e}"))?;
+    fs::rename(&temp, path).map_err(|e| format!("Failed to replace quarantine ledger: {e}"))
 }
 
 /// The system clock, or the caller-pinned timestamp. Naming the clock error
@@ -575,6 +699,13 @@ fn write_signed_relay_report(req: &RelayRequest<'_>) -> Result<String, Box<dyn s
     };
     let (envelope, expected_inputs, program) =
         load_verifier_inputs(req.proof_file, req.public_inputs_file, req.bytecode_file)?;
+    // The ban ledger survives between runs: a program banned earlier is
+    // refused before any verification work.
+    let quarantine_path = quarantine_path_for(req.output);
+    let quarantine = load_quarantine(&quarantine_path)?;
+    if quarantine.is_banned(&expected_inputs.program_hash) {
+        return Err("program is quarantined by an earlier relay run; refusing it".into());
+    }
     let at = clock_stamp(req.verified_at)
         .map_err(|e| format!("cannot read the system clock to stamp the report: {e}"))?;
 
@@ -583,21 +714,33 @@ fn write_signed_relay_report(req: &RelayRequest<'_>) -> Result<String, Box<dyn s
     let report = match &req.spent_set {
         Some(spent_set) => {
             let oracle = InMemorySpentSet::from_file(spent_set)?;
-            verify_and_report_with_spentset_at(&envelope, &expected_inputs, &program, &oracle, at)
+            verify_and_report_with_spentset_at(
+                &envelope,
+                &expected_inputs,
+                &program,
+                req.activation,
+                &oracle,
+                at,
+            )
         }
-        None if req.reexecute => {
-            verify_and_report_with_reexecution_at(&envelope, &expected_inputs, &program, at)
-        }
-        None => verify_and_report_at(&envelope, &expected_inputs, &program, at),
+        None if req.reexecute => verify_and_report_with_reexecution_at(
+            &envelope,
+            &expected_inputs,
+            &program,
+            req.activation,
+            at,
+        ),
+        None => verify_and_report_at(&envelope, &expected_inputs, &program, req.activation, at),
     };
 
     // Record the outcome into the node-side ledger (K3/K4) so the alarm chain
     // and the derived ban are observable on every relay run.
     let mut ledger = NodeLedger {
         alarms: bud_proof::alarm_log::AlarmLog::new(),
-        quarantine: bud_proof::quarantine::QuarantineLedger::new(),
+        quarantine,
     };
-    record_relay_outcome(&mut ledger, &report, expected_inputs.program_hash);
+    record_relay_outcome(&mut ledger, &report, expected_inputs.program_hash)?;
+    save_quarantine(&quarantine_path, &ledger.quarantine)?;
     if !ledger.alarms.is_empty() {
         let entries: Vec<&bud_proof::alarm_log::AlarmEntry> = ledger.alarms.iter().collect();
         info!(
@@ -730,6 +873,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 chain_id: cli.chain_id,
                 state_in_file: state_in.clone(),
                 commit_state: true,
+                activation: cli.activation.state(),
             })?;
 
             // ATOMIC STATE SAVE
@@ -799,6 +943,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 chain_id: cli.chain_id,
                 state_in_file: None,
                 commit_state: false,
+                activation: cli.activation.state(),
             })?;
 
             let data = serde_json::to_string_pretty(&out.envelope)
@@ -835,7 +980,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let bytecode = bud_compiler::compile(&content, profile)
                     .map_err(|e| format!("Compilation of {p} failed: {e}"))?;
 
-                let step_nonce = nonce.map(|n| n + index as u64);
+                let step_nonce = match nonce {
+                    Some(n) => Some(
+                        n.checked_add(index as u64)
+                            .ok_or("transaction nonce overflow")?,
+                    ),
+                    None => None,
+                };
 
                 let out = run_pipeline(ExecutionConfig {
                     bytecode,
@@ -846,6 +997,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     chain_id: cli.chain_id,
                     state_in_file: Some(state_file.clone()),
                     commit_state: true,
+                    activation: cli.activation.state(),
                 })?;
 
                 out.state.save_atomic().map_err(|e| {
@@ -903,6 +1055,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 chain_id: cli.chain_id,
                 state_in_file: None,
                 commit_state: true,
+                activation: cli.activation.state(),
             })?;
 
             out.state
@@ -921,7 +1074,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (envelope, expected_inputs, program) =
                 load_verifier_inputs(proof_file, public_inputs_file, bytecode_file)?;
 
-            match Prover::verify(&envelope, &expected_inputs, &program) {
+            match bud_proof::Plonky3Adapter::verify_with_activation(
+                &envelope,
+                &expected_inputs,
+                &program,
+                cli.activation.state(),
+            ) {
                 Ok(_) => {
                     println!("Result: VALID");
                 }
@@ -951,6 +1109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 payload_out: payload_out.as_deref(),
                 reexecute: *reexecute,
                 spent_set: spent_set.as_deref(),
+                activation: cli.activation.relay_state()?,
             };
             let line = write_signed_relay_report(&req)?;
             println!("{line}");
@@ -993,6 +1152,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_alarm_is_recorded_and_the_program_is_banned() {
+        use bud_proof::relayer::{
+            AlarmCode, AlarmDetail, CanonicalRelayReport, ProofFingerprint, RelayStatus,
+        };
+        let report = CanonicalRelayReport {
+            schema_version: 1,
+            status: RelayStatus::Alarm,
+            verified_at_unix: 0,
+            program_hash: [7u8; 32],
+            is_canonical: false,
+            canonical_set_digest: [0u8; 32],
+            proof: ProofFingerprint {
+                proof_format_version: 1,
+                backend: String::new(),
+                p3_version: String::new(),
+                fri_params_id: String::new(),
+                degree_bits: 0,
+                public_inputs_hash: [0u8; 32],
+                proof_bytes_len: 0,
+            },
+            alarm: Some(AlarmDetail {
+                code: AlarmCode::InvalidProof,
+                detail: "bad".to_string(),
+            }),
+            report_sig: [1u8; 32],
+        };
+        let mut ledger = NodeLedger {
+            alarms: bud_proof::alarm_log::AlarmLog::new(),
+            quarantine: bud_proof::quarantine::QuarantineLedger::new(),
+        };
+        assert!(record_relay_outcome(&mut ledger, &report, [7u8; 32]).is_ok());
+        assert!(!ledger.alarms.is_empty());
+    }
+
+    #[test]
+    fn quarantine_ledger_survives_a_save_and_load() {
+        let path = std::env::temp_dir().join(format!("budcli-quarantine-{}", std::process::id()));
+        let path = path.to_string_lossy().to_string();
+        let _ = fs::remove_file(&path);
+        assert!(load_quarantine(&path).unwrap().is_empty());
+        let mut ledger = bud_proof::quarantine::QuarantineLedger::new();
+        ledger.ban(
+            [3u8; 32],
+            bud_proof::quarantine::QuarantineReason::InvalidProof,
+        );
+        save_quarantine(&path, &ledger).unwrap();
+        let loaded = load_quarantine(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        assert!(loaded.is_banned(&[3u8; 32]));
+    }
+
+    #[test]
+    fn chain_id_zero_is_refused() {
+        assert!(check_chain_id(0).is_err());
+        assert!(check_chain_id(45262).is_ok());
+    }
 
     /// The VM the CLI constructs must be **in mainnet mode**.
     ///
@@ -1038,6 +1255,7 @@ mod tests {
             chain_id: 1,
             state_in_file: Some(path.to_string_lossy().into_owned()),
             commit_state: false,
+            activation: bud_isa::MainnetActivation::default(),
         })
         .expect("an empty Halt program had to run");
 
@@ -1050,8 +1268,55 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    #[test]
+    fn relay_refuses_the_open_activation_state() {
+        assert_eq!(
+            ActivationArg::Default.relay_state().unwrap(),
+            bud_isa::MainnetActivation::default()
+        );
+        let err = ActivationArg::Full
+            .relay_state()
+            .expect_err("a signed report under the open state must be refused");
+        assert!(err.contains("does not record"), "{err}");
+    }
+
     /// The relay's argument set has to parse, and `--output` has to default:
     /// a monitor that forgets the path must still land on a known file.
+    /// The activation flag defaults to the closed state and has to be asked
+    /// for by name to open the staged opcodes; it is accepted after the
+    /// subcommand as well.
+    #[test]
+    fn activation_flag_defaults_to_closed_and_must_be_asked_for() {
+        let parse = |extra: &[&str]| {
+            let mut args = vec![
+                "bud-cli", "verify", "-f", "p.json", "-i", "i.json", "-b", "b.budc",
+            ];
+            args.extend_from_slice(extra);
+            Cli::try_parse_from(args).expect("verify must parse")
+        };
+        assert_eq!(parse(&[]).activation, ActivationArg::Default);
+        assert_eq!(
+            parse(&["--activation", "default"]).activation,
+            ActivationArg::Default
+        );
+        assert_eq!(
+            parse(&["--activation", "full"]).activation,
+            ActivationArg::Full
+        );
+        assert_eq!(
+            ActivationArg::Default.state(),
+            bud_isa::MainnetActivation::default()
+        );
+        assert_eq!(
+            ActivationArg::Full.state(),
+            bud_isa::MainnetActivation::full()
+        );
+        assert!(
+            Cli::try_parse_from(["bud-cli", "--activation", "bogus", "test"]).is_err(),
+            "an unknown activation state is refused"
+        );
+    }
+
     #[test]
     fn relay_subcommand_parses_with_its_default_output() {
         let cli = Cli::try_parse_from([
@@ -1145,6 +1410,7 @@ mod tests {
             payload_out: None,
             reexecute: false,
             spent_set: None,
+            activation: bud_isa::MainnetActivation::default(),
         };
         let r = write_signed_relay_report(&req);
         assert!(r.is_err(), "a missing proof file had to be refused");
@@ -1192,6 +1458,7 @@ mod tests {
             chain_id: 1,
             state_in_file: Some(path.to_string_lossy().into_owned()),
             commit_state: false,
+            activation: bud_isa::MainnetActivation::default(),
         };
 
         let result = run_pipeline(config);

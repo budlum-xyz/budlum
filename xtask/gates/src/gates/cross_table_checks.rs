@@ -47,6 +47,17 @@ fn binding_blocks(src: &str, column: &str) -> Vec<(usize, String)> {
     out
 }
 
+/// Every `COL_*_ACC` name the scrubbed AIR text uses.
+fn accumulator_columns(scrubbed: &str) -> std::collections::BTreeSet<String> {
+    let mut found = std::collections::BTreeSet::new();
+    for word in scrubbed.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+        if word.starts_with("COL_") && word.ends_with("_ACC") {
+            found.insert(word.to_string());
+        }
+    }
+    found
+}
+
 /// # Errors
 ///
 /// Returns the list of violated claims.
@@ -62,6 +73,18 @@ pub fn run(root: &Path) -> Result<String, String> {
     let scrubbed = rust_literals::scrub(&src);
     let mut problems: Vec<String> = Vec::new();
     let mut checked = 0usize;
+
+    // A new accumulator column must be registered here, or its binding is never
+    // checked.
+    for column in accumulator_columns(&scrubbed) {
+        if !ACCUMULATORS.iter().any(|(c, _)| *c == column) {
+            problems.push(format!(
+                "{column} is a side-table accumulator the AIR uses, and it is not in the \
+                 ACCUMULATORS list of this gate, so nothing checks that its binding uses \
+                 `when_last_row`. Add it with its table."
+            ));
+        }
+    }
 
     for (column, table) in ACCUMULATORS {
         if !src.contains(column) {
@@ -152,4 +175,18 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "cross-table canary OK: last_row PASSes and is_halt FAILs.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unregistered_accumulator_columns_are_found() {
+        let cols =
+            accumulator_columns("cur[COL_MEM_INIT_ACC] + cur[COL_NEW_THING_ACC] + COL_GAS_USED");
+        assert!(cols.contains("COL_NEW_THING_ACC"));
+        assert!(cols.contains("COL_MEM_INIT_ACC"));
+        assert!(!cols.contains("COL_GAS_USED"));
+    }
 }

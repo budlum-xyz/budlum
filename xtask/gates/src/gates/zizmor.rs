@@ -80,9 +80,9 @@ fn bin_path() -> Result<ZizmorBin, String> {
         .arg(&tgz)
         .arg(&url)
         .status()
-        .map_err(|e| format!("zizmor indirilemedi (curl): {e}"))?;
+        .map_err(|e| format!("zizmor download failed (curl): {e}"))?;
     if !ok.success() {
-        return Err(String::from("zizmor indirilemedi (curl exit != 0)"));
+        return Err(String::from("zizmor download failed (curl exit != 0)"));
     }
     // Verify the pinned sha256 before extracting; a tampered download is
     // refused the same way the shell gate refused it.
@@ -137,6 +137,16 @@ fn private_work_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// The failure text: both streams, so a tool error that only reaches stderr
+/// is not lost.
+fn findings_report(stdout: &[u8], stderr: &[u8]) -> String {
+    format!(
+        "zizmor findings:\n{}{}",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    )
+}
+
 /// # Errors
 ///
 /// Returns zizmor's findings when it reports any, or a bootstrap/run failure.
@@ -148,10 +158,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         .output();
     match out {
         Ok(o) if o.status.success() => Ok(String::from("zizmor clean (0 findings).")),
-        Ok(o) => Err(format!(
-            "zizmor findings:\n{}",
-            String::from_utf8_lossy(&o.stdout)
-        )),
+        Ok(o) => Err(findings_report(&o.stdout, &o.stderr)),
         Err(e) => Err(format!("zizmor did not run ({}): {e}", bin.path.display())),
     }
 }
@@ -217,5 +224,16 @@ pub fn self_test() -> Result<String, String> {
             }
         }
         Err(e) => Err(format!("zizmor did not run ({bin_shown}): {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_failure_report_keeps_stderr() {
+        let report = findings_report(b"out line\n", b"tool error\n");
+        assert!(report.contains("out line") && report.contains("tool error"));
     }
 }

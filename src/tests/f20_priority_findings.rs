@@ -230,12 +230,13 @@ fn f15_maintenance_audit_tag_is_inventoried() {
 }
 
 #[test]
-fn f17_class_command_cannot_name_a_third_party() {
-    let src = include_str!("../chain/chain_actor.rs");
-    assert!(src.contains("set_storage_operator_class"));
+fn f17_class_declaration_has_only_the_in_block_path() {
+    let tx_src = include_str!("../domain/storage_tx.rs");
+    assert!(tx_src.contains("DeclareOperatorClass"));
+    let actor = include_str!("../chain/chain_actor.rs");
     assert!(
-        src.contains("no validator key is loaded"),
-        "F-17: the actor must refuse when it has no local signer"
+        !actor.contains("SetStorageOperatorClass"),
+        "F-17: the class changes only through a signed transaction in a block"
     );
 }
 

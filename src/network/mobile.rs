@@ -443,10 +443,15 @@ impl MobileNodeProfile {
     }
 
     pub fn set_relay_address(&mut self, relay_address: String) -> Result<(), String> {
-        self.nat_status.using_relay = true;
-        self.nat_status.relay_address = Some(relay_address);
-        self.nat_status.hole_punched = false;
-        self.nat_status.validate()
+        // Validate a candidate first, like `update_nat`: a refused address leaves the
+        // profile as it was.
+        let mut candidate = self.nat_status.clone();
+        candidate.using_relay = true;
+        candidate.relay_address = Some(relay_address);
+        candidate.hole_punched = false;
+        candidate.validate()?;
+        self.nat_status = candidate;
+        Ok(())
     }
 
     /// Can the node take on active tasks?
@@ -581,6 +586,18 @@ mod tests {
         profile.update_nat(NatType::None, true).unwrap();
         assert!(!profile.nat_status.using_relay);
         assert!(profile.nat_status.hole_punched);
+    }
+
+    #[test]
+    fn a_refused_relay_address_leaves_the_profile_unchanged() {
+        let mut profile = MobileNodeProfile::new(test_address(), DeviceType::Phone);
+        assert!(profile.set_relay_address("   ".to_string()).is_err());
+        assert!(!profile.nat_status.using_relay);
+        assert!(profile.nat_status.relay_address.is_none());
+        assert!(profile
+            .set_relay_address("relay.example:4001".to_string())
+            .is_ok());
+        assert!(profile.nat_status.using_relay);
     }
 
     /// `NatType::None` without a public address is a contradiction the

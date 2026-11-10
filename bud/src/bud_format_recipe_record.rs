@@ -117,7 +117,8 @@ pub fn rent(recipe: &RecipeRecord, erasure: f64, compression_ratio: f64) -> f64 
     if held == 0 {
         return 0.0; // R1: no rent, no bytes held
     }
-    let ratio = if compression_ratio > 1.0 {
+    // A NaN or infinite ratio would give a zero or undefined rent: it counts as 1.
+    let ratio = if compression_ratio.is_finite() && compression_ratio > 1.0 {
         compression_ratio
     } else {
         1.0
@@ -212,6 +213,14 @@ mod tests {
         // R3: it does not compress -> ratio=1 -> 0.23342*1.031 = about 0.241
         let t3 = RecipeRecord::bodied(body, 0);
         assert!((rent(&t3, 1.031, 1.0) - 0.241).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_non_finite_ratio_does_not_zero_the_rent() {
+        let t = RecipeRecord::bodied(vec![0u8; 10], 0);
+        let base = rent(&t, 1.0, 1.0);
+        assert_eq!(rent(&t, 1.0, f64::INFINITY), base);
+        assert_eq!(rent(&t, 1.0, f64::NAN), base);
     }
 
     #[test]

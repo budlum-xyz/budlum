@@ -59,14 +59,10 @@ async fn test_state_bit_identical_after_reload() {
             let _ = bc.produce_block(Address::zero());
         }
 
-        // Compare masked: executable consensus surface only (overlay fields
-        // Are commit-path projections; see reload arm for full rationale).
-        let mut live_masked = bc.state.clone();
-        live_masked.bridge_root = [0u8; 32];
-        live_masked.message_root = [0u8; 32];
-        live_masked.settlement_root = [0u8; 32];
-        live_masked.global_header_summary = [0u8; 32];
-        root_live = live_masked.calculate_state_root();
+        // The full root, overlay fields included. Zeroing them would hide a
+        // fork after restart.
+        let mut live_state = bc.state.clone();
+        root_live = live_state.calculate_state_root();
         assert_ne!(root_live, "0".repeat(64));
         // Drop and close DB
     }
@@ -85,20 +81,12 @@ async fn test_state_bit_identical_after_reload() {
             Some(funded_genesis()),
         );
 
-        // Overlay fields (bridge/message/settlement/global-header roots) are
-        // Commit-path projections not mirrored by the replay loop, normalize
-        // On both sides (see load_test.rs for the full rationale) and
-        // Compare the executable consensus surface bit-for-bit.
-        let mut state_reloaded_masked = bc_reloaded.state.clone();
-        state_reloaded_masked.bridge_root = [0u8; 32];
-        state_reloaded_masked.message_root = [0u8; 32];
-        state_reloaded_masked.settlement_root = [0u8; 32];
-        state_reloaded_masked.global_header_summary = [0u8; 32];
-        let root_reloaded = state_reloaded_masked.calculate_state_root();
+        let mut state_reloaded = bc_reloaded.state.clone();
+        let root_reloaded = state_reloaded.calculate_state_root();
 
         assert_eq!(
             root_live, root_reloaded,
-            "Reloaded executable state root must match live state root exactly"
+            "Reloaded state root must match live state root exactly"
         );
         // Alice spent 5x(amount 10 + fee 1); bob received 5x10.
         assert_eq!(bc_reloaded.state.get_balance(&alice), 945);

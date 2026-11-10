@@ -90,7 +90,7 @@ async fn test_chaos_v2_heavy_load_under_pressure() {
     println!("Phase: Verifying V3-Anchored state root determinism...");
     // Snapshot the live state before the restart; the map-level diff is
     // The diagnostic layer for any replay divergence.
-    let live_state = bc.state.clone();
+    let mut live_state = bc.state.clone();
     let live_accounts = bc.state.accounts.clone();
 
     // Simulate restart and reload (same funded genesis => same genesis hash,
@@ -105,7 +105,7 @@ async fn test_chaos_v2_heavy_load_under_pressure() {
         Some(funded_genesis()),
     );
 
-    let state2 = bc2.state.clone();
+    let mut state2 = bc2.state.clone();
 
     // The state root is a pure function of (pubkey, balance, nonce) over the
     // Accounts map - diagnose at map level first so any replay divergence
@@ -133,29 +133,13 @@ async fn test_chaos_v2_heavy_load_under_pressure() {
         panic!("{} accounts differ after replay", mismatches.len());
     }
 
-    // The V2 root also hashes the four commit-path overlay fields
-    // (bridge_root, message_root, settlement_root, global_header_summary).
-    // Those are projections from Blockchain-level structures captured
-    // As-of-production-height; the reload replay loop does not (yet) mirror
-    // Them per-block - that mirroring is the V3 replay-anchoring work item.
-    // The executable consensus surface - accounts, validators, unbonding,
-    // Epoch, base_fee, block_reward - is fully replayable and MUST be
-    // Bit-identical. Normalize the overlays on both sides and compare.
-    let mut live_masked = live_state.clone();
-    live_masked.bridge_root = [0u8; 32];
-    live_masked.message_root = [0u8; 32];
-    live_masked.settlement_root = [0u8; 32];
-    live_masked.global_header_summary = [0u8; 32];
-    let mut replay_h = state2.clone();
-    replay_h.bridge_root = [0u8; 32];
-    replay_h.message_root = [0u8; 32];
-    replay_h.settlement_root = [0u8; 32];
-    replay_h.global_header_summary = [0u8; 32];
-
+    // The full root, overlay fields included, must be identical after a
+    // restart. Masking the bridge, message, settlement and header summary
+    // roots on both sides would hide a fork after restart.
     assert_eq!(
-        live_masked.calculate_state_root(),
-        replay_h.calculate_state_root(),
-        "Executable consensus state must be bit-identical after heavy load and restart"
+        live_state.calculate_state_root(),
+        state2.calculate_state_root(),
+        "the full state root must be bit-identical after heavy load and restart"
     );
     println!("LOAD TEST SUCCESS: 1000 txs processed, state consistent.");
 }
@@ -165,84 +149,57 @@ async fn test_chaos_v2_differential_vm_oracle() {
     use crate::execution::zkvm::ZkVmExecutor;
     use bud_isa::{Instruction, Opcode};
 
-    // Simple arithmetic program: (10 + 20) * 2 = 60
-    let program = [
+    fn inst(opcode: Opcode, rd: u8, rs1: u8, rs2: u8, imm: i32) -> u64 {
         Instruction {
-            opcode: Opcode::Load,
-            rd: 1,
-            rs1: 0,
-            rs2: 0,
-            imm: 10,
+            opcode,
+            rd,
+            rs1,
+            rs2,
+            imm,
         }
-        .encode(),
-        Instruction {
-            opcode: Opcode::Load,
-            rd: 2,
-            rs1: 0,
-            rs2: 0,
-            imm: 20,
-        }
-        .encode(),
-        Instruction {
-            opcode: Opcode::Add,
-            rd: 3,
-            rs1: 1,
-            rs2: 2,
-            imm: 0,
-        }
-        .encode(),
-        Instruction {
-            opcode: Opcode::Load,
-            rd: 4,
-            rs1: 0,
-            rs2: 0,
-            imm: 2,
-        }
-        .encode(),
-        Instruction {
-            opcode: Opcode::Mul,
-            rd: 5,
-            rs1: 3,
-            rs2: 4,
-            imm: 0,
-        }
-        .encode(),
-        Instruction {
-            opcode: Opcode::Log,
-            rd: 0,
-            rs1: 5,
-            rs2: 0,
-            imm: 0,
-        }
-        .encode(),
-        Instruction {
-            opcode: Opcode::Halt,
-            rd: 0,
-            rs1: 0,
-            rs2: 0,
-            imm: 0,
-        }
-        .encode(),
-    ];
+        .encode()
+    }
 
-    let bytecode: Vec<u8> = program.iter().flat_map(|inst| inst.to_le_bytes()).collect();
+    // Deterministic inputs below 2^20, so every native result stays far from
+    // the field modulus and the native oracle needs no reduction.
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % (1 << 20)) as i32
+    };
+    let mut inputs: Vec<(i32, i32)> = vec![(0, 0), (1, 0), (0, 1), (1, 1), ((1 << 20) - 1, 1)];
+    for _ in 0..27 {
+        inputs.push((next(), next()));
+    }
 
-    // 1. ZKVM Execution (Oracle A)
-    let receipt = ZkVmExecutor::execute_bytecode(
-        &bytecode,
-        1_000_000,
-        crate::execution::zkvm::TxContext::default(),
-    )
-    .unwrap();
-    let zkvm_result = receipt.events[0];
-
-    // 2. Rust Native Oracle (Oracle B)
-    let rust_result = (10u64 + 20u64) * 2u64;
-
-    // Differential Assert
-    assert_eq!(
-        zkvm_result, rust_result,
-        "ZKVM result {zkvm_result} must match Rust Oracle {rust_result}"
-    );
-    println!("DIFFERENTIAL VM TEST SUCCESS: ZKVM == Rust Oracle");
+    for (a, b) in inputs {
+        let (hi, lo) = if a >= b { (a, b) } else { (b, a) };
+        let cases = [
+            (Opcode::Add, a, b, a as u64 + b as u64),
+            (Opcode::Sub, hi, lo, hi as u64 - lo as u64),
+            (Opcode::Mul, a, b, a as u64 * b as u64),
+        ];
+        for (op, x, y, native) in cases {
+            let program = [
+                inst(Opcode::Load, 1, 0, 0, x),
+                inst(Opcode::Load, 2, 0, 0, y),
+                inst(op, 3, 1, 2, 0),
+                inst(Opcode::Log, 0, 3, 0, 0),
+                inst(Opcode::Halt, 0, 0, 0, 0),
+            ];
+            let bytecode: Vec<u8> = program.iter().flat_map(|i| i.to_le_bytes()).collect();
+            let receipt = ZkVmExecutor::execute_bytecode(
+                &bytecode,
+                1_000_000,
+                crate::execution::zkvm::TxContext::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                receipt.events[0], native,
+                "ZKVM {op:?}({x}, {y}) must match the native result {native}"
+            );
+        }
+    }
 }

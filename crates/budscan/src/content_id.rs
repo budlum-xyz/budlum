@@ -78,6 +78,10 @@ impl std::fmt::Display for ContentId {
 /// The comparison is not constant-time and does not need to be: both sides are
 /// public. Nothing here is secret, so there is nothing to leak.
 #[must_use]
+///
+/// Convenience: the one-line identity check for the fetch path that
+/// compares a reassembled object to its address; in-tree callers
+/// compare `ContentId`s directly today.
 pub fn bytes_match(expected: ContentId, bytes: &[u8]) -> bool {
     ContentId::of(bytes) == expected
 }

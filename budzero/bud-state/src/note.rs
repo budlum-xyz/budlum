@@ -30,7 +30,7 @@
 
 use crate::Hash;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A private transfer note. `commitment` binds amount+recipient+blinding
 /// (Poseidon); `nullifier` is the single use spend marker
@@ -70,7 +70,8 @@ impl PrivacyNote {
 #[derive(Debug, Clone, Default)]
 pub struct NoteRegistry {
     /// The live (unspent) note commitments.
-    notes: BTreeSet<Hash>,
+    /// Live commitment -> the nullifier that spends it (P16-F18).
+    notes: BTreeMap<Hash, Hash>,
     /// The spent nullifiers - double spend prevention.
     spent_nullifiers: BTreeSet<Hash>,
 }
@@ -83,13 +84,18 @@ impl NoteRegistry {
     /// Add a newly created note commitment. A duplicate commitment or an already
     /// spent nullifier is refused.
     pub fn insert(&mut self, note: &PrivacyNote) -> Result<(), String> {
-        if self.notes.contains(&note.commitment) {
+        if self.notes.contains_key(&note.commitment) {
             return Err("note commitment already exists".into());
+        }
+        // Two live notes with one nullifier: the first spend would make the
+        // second unspendable.
+        if self.notes.values().any(|n| n == &note.nullifier) {
+            return Err("note nullifier already belongs to a live note".into());
         }
         if self.spent_nullifiers.contains(&note.nullifier) {
             return Err("note nullifier already spent".into());
         }
-        self.notes.insert(note.commitment);
+        self.notes.insert(note.commitment, note.nullifier);
         Ok(())
     }
 
@@ -104,9 +110,15 @@ impl NoteRegistry {
         if self.spent_nullifiers.contains(&nullifier) {
             return Err("double-spend: nullifier already spent".into());
         }
-        if !self.notes.remove(&commitment) {
-            return Err("spend: commitment not found in live note set".into());
+        match self.notes.get(&commitment) {
+            None => return Err("spend: commitment not found in live note set".into()),
+            // P16-F18: the nullifier must be the one this note was created with.
+            Some(bound) if *bound != nullifier => {
+                return Err("spend: nullifier does not belong to this commitment".into())
+            }
+            Some(_) => {}
         }
+        self.notes.remove(&commitment);
         self.spent_nullifiers.insert(nullifier);
         Ok(())
     }
@@ -118,7 +130,7 @@ impl NoteRegistry {
 
     /// Is the commitment in the live (unspent) set.
     pub fn contains(&self, commitment: Hash) -> bool {
-        self.notes.contains(&commitment)
+        self.notes.contains_key(&commitment)
     }
 
     pub fn live_count(&self) -> usize {
@@ -206,6 +218,21 @@ mod tests {
                 nullifier: h(2)
             })
             .is_err());
+    }
+
+    /// P16-F18: a nullifier cannot spend a commitment it was not created with.
+    #[test]
+    fn spend_with_a_foreign_nullifier_rejected() {
+        let mut r = NoteRegistry::new();
+        r.insert(&PrivacyNote {
+            commitment: h(1),
+            nullifier: h(2),
+        })
+        .unwrap();
+        let err = r.spend(h(7), h(1)).unwrap_err();
+        assert!(err.contains("does not belong"));
+        assert!(r.contains(h(1)));
+        assert!(!r.is_spent(h(7)));
     }
 
     #[test]

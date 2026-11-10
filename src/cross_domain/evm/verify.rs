@@ -1,14 +1,17 @@
 //! F10.2 security core: `verify_evm_receipt`, the deterministic orchestrator.
 //!
 //! Combines the steps of RFC section 4.1 (the ETH -> Budlum mint flow) into a
-//! single verification surface. It **runs on-chain, inside Budlum consensus**,
+//! single verification surface. It runs on-chain, inside Budlum consensus,
 //! so it is deterministic and touches no network. The relayer produces the
 //! proof; Budlum verifies it here.
 //!
 //! # Verification flow
 //!
-//! 1. `header_chain`: target plus confirmations, N-confirmation finality
-//!    (RFC Q2, N-conf).
+//! 1. `header_chain`: target plus confirmations. The chain is linked by
+//!    parent hash and number - that alone is not finality. Finality comes
+//!    from `sync_attestation` (verified) or the trusted checkpoint that the
+//!    chain must touch (BLG-0111 interim); the deposit refuses with
+//!    neither (RFC Q2, N-conf).
 //! 2. `proof_nodes` plus `target_header.receipts_root`: MPT verify yields the
 //!    receipt bytes.
 //! 3. `receipt` RLP decode (F10.2 `receipt.rs`) yields `{status, logs}`.
@@ -116,6 +119,10 @@ pub struct VerifiedDeposit {
     /// receipts trie, `RLP(tx_index)`. `(block_hash, receipt_key)` names one
     /// receipt on one chain; it is the replay key.
     pub receipt_key: Vec<u8>,
+    /// Position of the proven deposit log inside the receipt. The replay key
+    /// is `(block_hash, receipt_key, log_index)`: without the third part a
+    /// receipt holding two deposit logs paid one of them under one key.
+    pub log_index: usize,
     /// The log extracted from the bridge contract; its data field is the
     /// deposit payload.
     pub deposit_log_data: Vec<u8>,
@@ -242,7 +249,10 @@ pub struct SyncAttestation<'a> {
 /// On success the caller gets a `VerifiedDeposit` holding every proven field
 /// the mint needs. On failure it gets a `VerifyError` naming the step at which
 /// the proof turned out to be invalid.
-pub fn verify_evm_receipt(proof: &EvmDepositProof<'_>) -> Result<VerifiedDeposit, VerifyError> {
+pub fn verify_evm_receipt(
+    proof: &EvmDepositProof<'_>,
+    trusted_checkpoint: Option<&(u64, [u8; 32])>,
+) -> Result<VerifiedDeposit, VerifyError> {
     // The receipt proof cannot prove a transaction hash, but the relay result
     // still needs a non-empty identifier to correlate the proof with the
     // external action it claims to observe. Refuse the ambiguous value before
@@ -259,8 +269,13 @@ pub fn verify_evm_receipt(proof: &EvmDepositProof<'_>) -> Result<VerifiedDeposit
         .map(|raw| decode_header_or_err(raw))
         .collect();
     let confs = confs?;
-    verify_chain(&target, &confs, proof.required_confirmations)
-        .map_err(|e| VerifyError::Header(e.to_string()))?;
+    verify_chain(
+        &target,
+        &confs,
+        proof.required_confirmations,
+        trusted_checkpoint,
+    )
+    .map_err(|e| VerifyError::Header(e.to_string()))?;
 
     // 2. MPT verify: receiptsRoot → receipt bytes.
     let receipt_bytes = mpt::verify(proof.proof_nodes, &target.receipts_root, proof.receipt_key)?;
@@ -274,8 +289,10 @@ pub fn verify_evm_receipt(proof: &EvmDepositProof<'_>) -> Result<VerifiedDeposit
     }
 
     // 5. Deposit log match.
-    let log = receipt
-        .find_log(proof.emitter_address, proof.deposit_topic0)
+    // BLG-0139 (P06-F10): the log WITH its position. A receipt can hold two
+    // deposit logs; the replay identity names the one that was proven.
+    let (log_index, log) = receipt
+        .find_log_indexed(proof.emitter_address, proof.deposit_topic0)
         .ok_or(VerifyError::LogNotFound)?;
 
     // 5b. PoS attestation, when the relayer supplied one.
@@ -290,14 +307,32 @@ pub fn verify_evm_receipt(proof: &EvmDepositProof<'_>) -> Result<VerifiedDeposit
     // indistinguishable from one that is switched off. What it does buy is
     // that a proof which *claims* PoS finality has that claim checked rather
     // than trusted.
-    if let Some(ref attestation) = proof.sync_attestation {
-        verify_execution_block_finality(
-            attestation.state,
-            attestation.aggregate,
-            attestation.beacon,
-            attestation.chain,
-            &target.hash,
-        )?;
+    // BLG-0111 (P05-F04, karar B with A interim): finality evidence is
+    // MANDATORY in one of two forms. B is the standing rule - a sync
+    // committee attestation is verified rather than trusted. A is the
+    // interim form - the chain must touch the operator's trusted
+    // checkpoint (already enforced inside `verify_chain`). Neither ->
+    // the deposit refuses: counting confirmations alone is a bet that no
+    // reorg is that deep, not proof that none can be.
+    match &proof.sync_attestation {
+        Some(attestation) => {
+            verify_execution_block_finality(
+                attestation.state,
+                attestation.aggregate,
+                attestation.beacon,
+                attestation.chain,
+                &target.hash,
+            )?;
+        }
+        None => {
+            if trusted_checkpoint.is_none() {
+                return Err(VerifyError::Header(
+                    "no finality evidence: neither a sync-committee attestation nor a \
+                     trusted checkpoint is configured"
+                        .into(),
+                ));
+            }
+        }
     }
 
     // 6. Replay protection lives in the caller's domain. What is returned
@@ -307,6 +342,7 @@ pub fn verify_evm_receipt(proof: &EvmDepositProof<'_>) -> Result<VerifiedDeposit
         tx_hash: proof.tx_hash.to_string(),
         block_hash: target.hash,
         receipt_key: proof.receipt_key.to_vec(),
+        log_index,
         deposit_log_data: log.data.clone(),
         block_number: target.number,
         receipts_root: target.receipts_root,
@@ -393,9 +429,9 @@ pub(crate) mod fixtures {
         // Single-leaf trie: the key is RLP(tx_index=0), the leaf value is the
         // receipt.
         let receipt_bytes = receipt_rlp(success, vec![log_item(emitter, topic0, log_data)]);
-        // MPT key = keccak256(rlp(0)) nibbles; leaf path = full 64 nibbles.
+        // Plain trie: the path is the nibbles of rlp(0) = 0x80, as in Ethereum.
         let key_bytes = encode(&Item::String(vec![])); // rlp(0) = 0x80
-        let nibbles = to_nibbles(&keccak256(&key_bytes));
+        let nibbles = to_nibbles(&key_bytes);
 
         // Leaf node RLP.
         let leaf_node = Item::List(vec![
@@ -434,8 +470,18 @@ pub(crate) mod fixtures {
 
 #[cfg(test)]
 mod tests {
-    use super::fixtures::{build_fixture, conf_refs, header_rlp, Fixture};
     use super::*;
+
+    /// BLG-0111 (P05-F04): the fixtures anchor at their own target header -
+    /// the checkpoint rule is pinned by its own tests; every other fixture
+    /// test keeps its old contract under that anchor.
+    fn verify_fixture(proof: &EvmDepositProof<'_>) -> Result<VerifiedDeposit, VerifyError> {
+        match decode_header_or_err(proof.target_header) {
+            Ok(target) => verify_evm_receipt(proof, Some(&(target.number, target.hash))),
+            Err(_) => verify_evm_receipt(proof, Some(&(u64::MAX, [0xFF; 32]))),
+        }
+    }
+    use super::fixtures::{build_fixture, conf_refs, header_rlp, Fixture};
     use crate::cross_domain::evm::header::DEFAULT_CONFIRMATIONS;
 
     // ---- Pozitif: tam happy-path ----
@@ -457,7 +503,7 @@ mod tests {
             sync_attestation: None,
         };
         assert_eq!(
-            verify_evm_receipt(&proof),
+            verify_fixture(&proof),
             Err(VerifyError::EmptyTransactionHash)
         );
     }
@@ -480,8 +526,12 @@ mod tests {
             deposit_topic0: &topic0,
             sync_attestation: None,
         };
-        let verified = verify_evm_receipt(&proof).unwrap();
+        let verified = verify_fixture(&proof).unwrap();
         assert_eq!(verified.tx_hash, "0xabc123");
+        assert_eq!(
+            verified.log_index, 0,
+            "the fixture holds one deposit log, at position 0"
+        );
         assert_eq!(verified.deposit_log_data, data);
         assert_eq!(verified.block_number, 100);
         assert_eq!(verified.receipts_root, f.receipts_root);
@@ -513,8 +563,8 @@ mod tests {
             deposit_topic0: &topic0,
             sync_attestation: None,
         };
-        let first = verify_evm_receipt(&under("0xaaaa")).unwrap();
-        let second = verify_evm_receipt(&under("0xbbbb")).unwrap();
+        let first = verify_fixture(&under("0xaaaa")).unwrap();
+        let second = verify_fixture(&under("0xbbbb")).unwrap();
         assert_ne!(first.tx_hash, second.tx_hash);
         assert_eq!(
             (first.block_hash, first.receipt_key.clone()),
@@ -541,10 +591,7 @@ mod tests {
             deposit_topic0: &topic0,
             sync_attestation: None,
         };
-        assert_eq!(
-            verify_evm_receipt(&proof).unwrap_err(),
-            VerifyError::TxFailed
-        );
+        assert_eq!(verify_fixture(&proof).unwrap_err(), VerifyError::TxFailed);
     }
 
     // ---- Negative: too few confirmations ----
@@ -565,7 +612,7 @@ mod tests {
             deposit_topic0: &topic0,
             sync_attestation: None,
         };
-        let err = verify_evm_receipt(&proof).unwrap_err();
+        let err = verify_fixture(&proof).unwrap_err();
         assert!(matches!(err, VerifyError::Header(_)));
     }
 
@@ -590,7 +637,7 @@ mod tests {
             deposit_topic0: &topic0,
             sync_attestation: None,
         };
-        let err = verify_evm_receipt(&proof).unwrap_err();
+        let err = verify_fixture(&proof).unwrap_err();
         assert!(matches!(err, VerifyError::Header(_)));
     }
 
@@ -614,7 +661,7 @@ mod tests {
             sync_attestation: None,
         };
         assert_eq!(
-            verify_evm_receipt(&proof).unwrap_err(),
+            verify_fixture(&proof).unwrap_err(),
             VerifyError::LogNotFound
         );
     }
@@ -639,7 +686,7 @@ mod tests {
             sync_attestation: None,
         };
         assert_eq!(
-            verify_evm_receipt(&proof).unwrap_err(),
+            verify_fixture(&proof).unwrap_err(),
             VerifyError::LogNotFound
         );
     }
@@ -662,7 +709,7 @@ mod tests {
             deposit_topic0: &topic0,
             sync_attestation: None,
         };
-        let err = verify_evm_receipt(&proof).unwrap_err();
+        let err = verify_fixture(&proof).unwrap_err();
         assert!(matches!(err, VerifyError::Mpt(_)));
     }
 
@@ -686,7 +733,10 @@ mod tests {
             deposit_topic0: &[0u8; 32],
             sync_attestation: None,
         };
-        let _ = verify_evm_receipt(&proof); // Err beklenir, panic YOK.
+        assert!(
+            verify_fixture(&proof).is_err(),
+            "a wholly garbage proof must be refused, not accepted"
+        );
     }
 
     // ---- Sync-committee attestation ----
@@ -757,7 +807,7 @@ mod tests {
 
         let proof = proof_with_attestation(&f, &confs, &emitter, &topic0, None);
         assert!(
-            verify_evm_receipt(&proof).is_ok(),
+            verify_fixture(&proof).is_ok(),
             "N-confirmation finality must keep working; this is what every \
              existing caller relies on"
         );
@@ -798,7 +848,7 @@ mod tests {
             }),
         );
 
-        let err = verify_evm_receipt(&proof)
+        let err = verify_fixture(&proof)
             .expect_err("an attestation nobody signed must not pass as finality");
         assert!(
             matches!(
@@ -849,7 +899,7 @@ mod tests {
             }),
         );
 
-        let err = verify_evm_receipt(&proof)
+        let err = verify_fixture(&proof)
             .expect_err("a bitmap claiming 512 signers over 512 zero keys must not pass");
         assert!(
             matches!(err, VerifyError::SyncCommittee(_)),
@@ -891,7 +941,7 @@ mod tests {
             }),
         );
 
-        let err = verify_evm_receipt(&proof).expect_err("a reverted transaction must be refused");
+        let err = verify_fixture(&proof).expect_err("a reverted transaction must be refused");
         assert_eq!(
             err,
             VerifyError::TxFailed,
@@ -931,7 +981,7 @@ mod tests {
             }),
         );
         assert_eq!(
-            verify_evm_receipt(&proof).unwrap_err(),
+            verify_fixture(&proof).unwrap_err(),
             VerifyError::SyncCommittee(SyncCommitteeError::ExecutionBlockNotInBeaconBody),
             "a committee signature over a header that does not contain the \
              target block says nothing about the target block"
@@ -952,7 +1002,7 @@ mod tests {
             }),
         );
         assert_eq!(
-            verify_evm_receipt(&proof).unwrap_err(),
+            verify_fixture(&proof).unwrap_err(),
             VerifyError::SyncCommittee(SyncCommitteeError::PeriodMismatch {
                 slot_period: 3,
                 state_period: 0,
@@ -974,7 +1024,7 @@ mod tests {
             }),
         );
         assert_eq!(
-            verify_evm_receipt(&proof).unwrap_err(),
+            verify_fixture(&proof).unwrap_err(),
             VerifyError::SyncCommittee(SyncCommitteeError::InvalidPubkey),
             "a header that does commit to the target reaches the key checks"
         );

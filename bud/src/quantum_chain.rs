@@ -53,8 +53,16 @@ pub struct HybridTx {
     pub pq_pub_hash: [u8; 32],
 }
 impl HybridTx {
+    /// The commitment a transaction carries to its ML-DSA public key.
+    fn pq_pub_hash_of(pq_pk: &[u8]) -> [u8; 32] {
+        Sha3Hasher::hash_fields(&[b"BUD_PQ_PUB_HASH_V1", pq_pk])
+    }
     pub fn verify(&self, msg: &[u8], ed_pk: &[u8], pq_pk: &[u8]) -> bool {
-        use ed25519_dalek::{Signature as EdSig, Verifier as EdVerifier, VerifyingKey as EdVk};
+        use ed25519_dalek::{Signature as EdSig, VerifyingKey as EdVk};
+        // 0) The PQ key must be the one this transaction commits to.
+        if self.pq_pub_hash != Self::pq_pub_hash_of(pq_pk) {
+            return false;
+        }
         // 1) Verify the Ed25519 signature.
         let pk32: [u8; 32] = match ed_pk.try_into() {
             Ok(v) => v,
@@ -68,7 +76,7 @@ impl HybridTx {
             Ok(s) => s,
             Err(_) => return false,
         };
-        if vk.verify(msg, &ed_sig).is_err() {
+        if vk.verify_strict(msg, &ed_sig).is_err() {
             return false;
         }
         // 2) Verify the ML-DSA-87 signature (FIPS 204).
@@ -96,10 +104,16 @@ pub struct HybridFinalityVote {
     pub pq_sig: Vec<u8>,
 }
 impl HybridFinalityVote {
-    pub fn verify_quorum(bls_ok: bool, pq_ok: bool, count: usize, n: usize) -> bool {
+    /// `bls_ok` and `pq_ok` are the results of the aggregate checks done by the caller.
+    /// The quorum counts DISTINCT signer indexes below `n`; repeats and strangers add nothing.
+    pub fn verify_quorum(bls_ok: bool, pq_ok: bool, signers: &[usize], n: usize) -> bool {
         if n == 0 {
             return false;
         }
+        let mut ids: Vec<usize> = signers.iter().copied().filter(|&i| i < n).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let count = ids.len();
         // Strict supermajority, `floor(2n/3) + 1`: two quorums always share
         // an honest signer. `ceil(2n/3)` admitted two of three.
         let quorum = n - (n - 1) / 3;
@@ -108,10 +122,17 @@ impl HybridFinalityVote {
 }
 
 /// Dual Wallet - dual_required_new, no address, SHA3(ed||pq) bud1...
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DualWallet {
     pub ed_seed: [u8; 32],
     pub pq_seed: [u8; 32],
+}
+
+/// The seeds are secrets: the debug form never prints them.
+impl std::fmt::Debug for DualWallet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DualWallet { seeds: <redacted> }")
+    }
 }
 impl DualWallet {
     pub fn from_bip39_seed(seed: &[u8; 64]) -> Self {
@@ -126,14 +147,19 @@ impl DualWallet {
             pq_seed: pq,
         }
     }
+    /// The address commits to the PUBLIC keys, so a verifier holding the keys can recompute it.
+    fn address_from_pubkeys(ed_pk: &[u8], pq_pk: &[u8]) -> [u8; 32] {
+        Sha3Hasher::hash_fields(&[b"BUD_DUAL_ADDR_V1", ed_pk, pq_pk])
+    }
     pub fn address(&self) -> [u8; 32] {
-        let mut h = Sha3_256::new();
-        h.update(self.ed_seed);
-        h.update(self.pq_seed);
-        h.finalize().into()
+        let ed_pk = ed25519_dalek::SigningKey::from_bytes(&self.ed_seed).verifying_key();
+        let pq_sk = ml_dsa::SigningKey::<ml_dsa::MlDsa87>::from_seed(&self.pq_seed.into());
+        let pq_vk: &ml_dsa::VerifyingKey<ml_dsa::MlDsa87> = pq_sk.as_ref();
+        let pq_pk: Vec<u8> = pq_vk.encode().into_iter().collect();
+        Self::address_from_pubkeys(ed_pk.as_bytes(), &pq_pk)
     }
     pub fn has_dual(&self) -> bool {
-        true
+        self.ed_seed != [0u8; 32] && self.pq_seed != [0u8; 32]
     }
 }
 
@@ -162,9 +188,9 @@ impl FiatShamirTranscript {
             "polynomial_degree",
             "proof_data",
         ];
-        required
-            .iter()
-            .all(|r| self.observed.iter().any(|o| o == r))
+        // The labels must appear in this order (other labels may sit between them).
+        let mut it = self.observed.iter();
+        required.iter().all(|r| it.any(|o| o == r))
     }
 }
 
@@ -186,11 +212,12 @@ impl MobileSelfProvider {
 /// Snow hybrid X25519 + ML-KEM-768 - P2P
 pub struct SnowHybrid;
 impl SnowHybrid {
+    /// No ML-KEM handshake exists in this tree (no ML-KEM crate is a dependency).
     pub fn handshake_ml_kem_ok() -> bool {
-        true
+        false
     }
     pub fn is_quantum_resistant() -> bool {
-        true
+        Self::handshake_ml_kem_ok()
     }
 }
 
@@ -205,23 +232,23 @@ impl Sha3Sponge {
 /// Gates KQ-*
 pub struct QuantumChainGates;
 impl QuantumChainGates {
-    pub fn kq_hash(is_sha3: bool) -> bool {
-        is_sha3
+    pub fn kq_hash(data: &[u8], digest: &[u8; 32]) -> bool {
+        Sha3Hasher::hash_bytes(data) == *digest
     }
-    pub fn kq_tx(ed_ok: bool, pq_ok: bool) -> bool {
-        ed_ok && pq_ok
+    pub fn kq_tx(tx: &HybridTx, msg: &[u8], ed_pk: &[u8], pq_pk: &[u8]) -> bool {
+        tx.verify(msg, ed_pk, pq_pk)
     }
-    pub fn kq_final(bls_ok: bool, pq_ok: bool, count: usize, n: usize) -> bool {
-        HybridFinalityVote::verify_quorum(bls_ok, pq_ok, count, n)
+    pub fn kq_final(bls_ok: bool, pq_ok: bool, signers: &[usize], n: usize) -> bool {
+        HybridFinalityVote::verify_quorum(bls_ok, pq_ok, signers, n)
     }
-    pub fn kq_wallet(has_dual: bool) -> bool {
-        has_dual
+    pub fn kq_wallet(wallet: &DualWallet) -> bool {
+        wallet.has_dual()
     }
-    pub fn kq_p2p(ml_kem_ok: bool) -> bool {
-        ml_kem_ok
+    pub fn kq_p2p() -> bool {
+        SnowHybrid::handshake_ml_kem_ok()
     }
-    pub fn kq_stark(transcript_ok: bool) -> bool {
-        transcript_ok
+    pub fn kq_stark(transcript: &FiatShamirTranscript) -> bool {
+        transcript.is_complete()
     }
     pub fn kq_feat(scheme: &str) -> bool {
         scheme == PQ_SCHEME_ID_FINAL
@@ -229,14 +256,24 @@ impl QuantumChainGates {
     pub fn kq_block(size: usize) -> bool {
         size <= MAX_BLOCK_BYTES
     }
-    pub fn kq_media_device_only(cost_zero: bool) -> bool {
-        cost_zero
+    pub fn kq_media_device_only(cost_units: u64) -> bool {
+        cost_units == 0
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_debug_form_of_a_wallet_does_not_print_the_seeds() {
+        let w = DualWallet {
+            ed_seed: [0xAB; 32],
+            pq_seed: [0xCD; 32],
+        };
+        let shown = format!("{w:?}");
+        assert!(!shown.contains("171") && !shown.contains("205"), "{shown}");
+    }
     use ed25519_dalek::Signer as Ed25519Signer;
     #[test]
     fn sha3_hasher() {
@@ -261,7 +298,7 @@ mod tests {
         let tx = HybridTx {
             ed_sig,
             pq_sig: pq_sig.clone(),
-            pq_pub_hash: [0u8; 32],
+            pq_pub_hash: HybridTx::pq_pub_hash_of(&pq_pk_bytes),
         };
         // the right input -> PASSES
         assert!(tx.verify(msg, ed_pk.as_bytes(), &pq_pk_bytes));
@@ -271,6 +308,19 @@ mod tests {
         let other_sk = ml_dsa::SigningKey::<ml_dsa::MlDsa87>::generate();
         let other_pk: Vec<u8> = other_sk.as_ref().encode().into_iter().collect();
         assert!(!tx.verify(msg, ed_pk.as_bytes(), &other_pk));
+        // a PQ key that does not match the committed hash -> REFUSED, even with a valid signature
+        let other_sk2 = ml_dsa::SigningKey::<ml_dsa::MlDsa87>::generate();
+        let other_pk2: Vec<u8> = other_sk2.as_ref().encode().into_iter().collect();
+        let other_sig: Vec<u8> = other_sk2.sign(msg).encode().into_iter().collect();
+        let swapped = HybridTx {
+            ed_sig,
+            pq_sig: other_sig,
+            pq_pub_hash: [0u8; 32],
+        };
+        assert!(
+            !swapped.verify(msg, ed_pk.as_bytes(), &other_pk2),
+            "a PQ key not bound by pq_pub_hash is REFUSED"
+        );
         // a tampered pq_sig byte -> REFUSED (K38)
         let mut bad_pq = pq_sig.clone();
         let mid = bad_pq.len() / 2;
@@ -278,7 +328,7 @@ mod tests {
         let bad_tx = HybridTx {
             ed_sig,
             pq_sig: bad_pq,
-            pq_pub_hash: [0u8; 32],
+            pq_pub_hash: HybridTx::pq_pub_hash_of(&pq_pk_bytes),
         };
         assert!(
             !bad_tx.verify(msg, ed_pk.as_bytes(), &pq_pk_bytes),
@@ -290,7 +340,7 @@ mod tests {
         let bad_ed_tx = HybridTx {
             ed_sig: bad_ed,
             pq_sig: pq_sig.clone(),
-            pq_pub_hash: [0u8; 32],
+            pq_pub_hash: HybridTx::pq_pub_hash_of(&pq_pk_bytes),
         };
         assert!(
             !bad_ed_tx.verify(msg, ed_pk.as_bytes(), &pq_pk_bytes),
@@ -303,12 +353,43 @@ mod tests {
     }
     #[test]
     fn finality_same_set() {
-        assert!(HybridFinalityVote::verify_quorum(true, true, 3, 4));
-        assert!(!HybridFinalityVote::verify_quorum(true, false, 3, 4));
+        assert!(HybridFinalityVote::verify_quorum(true, true, &[0, 1, 2], 4));
+        assert!(!HybridFinalityVote::verify_quorum(
+            true,
+            false,
+            &[0, 1, 2],
+            4
+        ));
         // Two of three is not a supermajority; three of three is.
-        assert!(!HybridFinalityVote::verify_quorum(true, true, 2, 3));
-        assert!(HybridFinalityVote::verify_quorum(true, true, 3, 3));
-        assert!(!HybridFinalityVote::verify_quorum(true, true, 0, 0));
+        assert!(!HybridFinalityVote::verify_quorum(true, true, &[0, 1], 3));
+        assert!(HybridFinalityVote::verify_quorum(true, true, &[0, 1, 2], 3));
+        assert!(!HybridFinalityVote::verify_quorum(true, true, &[], 0));
+        // Repeated or out-of-range signers add nothing.
+        assert!(!HybridFinalityVote::verify_quorum(
+            true,
+            true,
+            &[0, 0, 0, 1, 9],
+            3
+        ));
+    }
+    #[test]
+    fn the_p2p_gate_is_false_without_a_handshake() {
+        assert!(!SnowHybrid::handshake_ml_kem_ok());
+        assert!(!SnowHybrid::is_quantum_resistant());
+        assert!(!QuantumChainGates::kq_p2p());
+        let mut t = FiatShamirTranscript::new();
+        for l in [
+            "proof_data",
+            "polynomial_degree",
+            "fri_config",
+            "public_inputs",
+        ] {
+            t.observe(l);
+        }
+        assert!(
+            !QuantumChainGates::kq_stark(&t),
+            "labels out of order are refused"
+        );
     }
     #[test]
     fn dual_wallet_required() {
@@ -317,6 +398,21 @@ mod tests {
         assert!(w.has_dual());
         let addr = w.address();
         assert_ne!(addr, [0u8; 32]);
+        // the address is a function of the public keys: a verifier can recompute it
+        let ed_pk = ed25519_dalek::SigningKey::from_bytes(&w.ed_seed).verifying_key();
+        let pq_sk = ml_dsa::SigningKey::<ml_dsa::MlDsa87>::from_seed(&w.pq_seed.into());
+        let pq_vk: &ml_dsa::VerifyingKey<ml_dsa::MlDsa87> = pq_sk.as_ref();
+        let pq_pk: Vec<u8> = pq_vk.encode().into_iter().collect();
+        assert_eq!(
+            addr,
+            DualWallet::address_from_pubkeys(ed_pk.as_bytes(), &pq_pk)
+        );
+        // the old construction hashed the secret seeds; it must differ
+        let mut old = Sha3_256::new();
+        old.update(w.ed_seed);
+        old.update(w.pq_seed);
+        let old: [u8; 32] = old.finalize().into();
+        assert_ne!(addr, old);
     }
     #[test]
     fn device_10dk() {
@@ -340,12 +436,13 @@ mod tests {
         t.observe("polynomial_degree");
         t.observe("proof_data");
         assert!(t.is_complete());
-        assert!(QuantumChainGates::kq_stark(t.is_complete()));
+        assert!(QuantumChainGates::kq_stark(&t));
     }
     #[test]
     fn gates_kq_final() {
-        assert!(QuantumChainGates::kq_hash(true));
-        assert!(QuantumChainGates::kq_tx(true, true));
+        let d = Sha3Hasher::hash_bytes(b"x");
+        assert!(QuantumChainGates::kq_hash(b"x", &d));
+        assert!(!QuantumChainGates::kq_hash(b"y", &d));
         assert!(QuantumChainGates::kq_feat("ml-dsa-87"));
         assert!(!QuantumChainGates::kq_feat("dilithium5"));
         assert!(QuantumChainGates::kq_block(128 * 1024));
@@ -354,6 +451,6 @@ mod tests {
     #[test]
     fn media_device_only_holds() {
         // no_social + device-only → cost 0 ≤0.016
-        assert!(QuantumChainGates::kq_media_device_only(true));
+        assert!(QuantumChainGates::kq_media_device_only(0));
     }
 }

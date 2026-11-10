@@ -35,12 +35,8 @@ pub fn due(tier: ScrubTier, last_scrub_sec: u64, now_sec: u64) -> bool {
 
 /// Record verification: does it match the expected content_id? (bit rot detection)
 pub fn verify_content(data: &[u8], expected: &[u8; 32]) -> bool {
-    let mut h = Sha3_256::new();
-    h.update(b"BDLM_BUD_CONTENT_V1");
-    h.update((data.len() as u64).to_le_bytes());
-    h.update(data);
-    let digest: [u8; 32] = h.finalize().into();
-    &digest == expected
+    // The same identity the container records: one tag, one definition.
+    &crate::bud_format_container::content_id(data) == expected
 }
 
 pub fn scrub_digest(t: ScrubTier, last: u64, now: u64) -> [u8; 32] {
@@ -74,11 +70,7 @@ mod tests {
 
     #[test]
     fn bit_rot_is_detected() {
-        let mut h = Sha3_256::new();
-        h.update(b"BDLM_BUD_CONTENT_V1");
-        h.update((7u64).to_le_bytes());
-        h.update(b"payload");
-        let cid: [u8; 32] = h.finalize().into();
+        let cid = crate::bud_format_container::content_id(b"payload");
         assert!(verify_content(b"payload", &cid));
         assert!(!verify_content(b"payloaX", &cid), "bit rot is caught");
     }

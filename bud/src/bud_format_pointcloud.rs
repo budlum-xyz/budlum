@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 use sha3::{Digest, Sha3_256};
+use std::collections::HashSet;
 
 pub const PC_MAGIC: [u8; 8] = *b"\xB5PCL1\0\0\0";
 
@@ -34,25 +35,39 @@ pub fn quantize(
     }
     let mut cells: Vec<(i64, i64, i64)> = Vec::with_capacity(pc.coords.len());
     let mut residual: Vec<(f64, f64, f64)> = Vec::with_capacity(pc.coords.len());
+    // A cell index must fit an i64 with room to spare; NaN and infinity never do.
+    let limit = (1u64 << 62) as f64;
     for &(x, y, z) in &pc.coords {
+        let fits = |v: f64| v.is_finite() && (v / grid).abs() < limit;
+        if !(fits(x) && fits(y) && fits(z)) {
+            return None;
+        }
         let cx = (x / grid).round() as i64;
         let cy = (y / grid).round() as i64;
         let cz = (z / grid).round() as i64;
         cells.push((cx, cy, cz));
         if !lossy {
-            residual.push((
+            let r = (
                 x - cx as f64 * grid,
                 y - cy as f64 * grid,
                 z - cz as f64 * grid,
-            ));
+            );
+            // Lossless or nothing: the inverse must give back the same bits
+            // (a negative zero or a lost low bit is refused).
+            let same = |c: i64, r: f64, v: f64| (c as f64 * grid + r).to_bits() == v.to_bits();
+            if !(same(cx, r.0, x) && same(cy, r.1, y) && same(cz, r.2, z)) {
+                return None;
+            }
+            residual.push(r);
         }
     }
     // deduplication (several points in one cell become one representative plus
     // a count)
     if lossy {
         let mut seen: Vec<(i64, i64, i64)> = Vec::new();
+        let mut set: HashSet<(i64, i64, i64)> = HashSet::new();
         for c in &cells {
-            if !seen.contains(c) {
+            if set.insert(*c) {
                 seen.push(*c);
             }
         }
@@ -145,6 +160,22 @@ mod tests {
         )
         .is_none());
         assert!(dequantize_lossless(&[(0, 0, 0)], &[], 1.0).is_none());
+    }
+
+    #[test]
+    fn non_finite_and_sign_losing_input_is_refused() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let pc = PointCloud {
+                coords: vec![(bad, 0.0, 0.0)],
+            };
+            assert!(quantize(&pc, 1.0, true).is_none());
+            assert!(quantize(&pc, 1.0, false).is_none());
+        }
+        // A negative zero would come back as a positive zero: lossless refuses it.
+        let nz = PointCloud {
+            coords: vec![(-0.0, 0.0, 0.0)],
+        };
+        assert!(quantize(&nz, 1.0, false).is_none());
     }
 
     #[test]

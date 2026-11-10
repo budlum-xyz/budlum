@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-const TESTS: &[&str] = &[
+pub(crate) const TESTS: &[&str] = &[
     "rate_limit_exhaustion_uses_dedicated_penalty",
     "repeated_rate_limit_exhaustion_bans_peer",
     "peer_rate_limit_security_profile",

@@ -119,7 +119,17 @@ pub fn check_mainnet_validator_key_policy(
     // Security review (HIGH): a SoftHSM module PATH (libsofthsm2.so) could pass
     // under the `pkcs11` backend; refusing the "softhsm" backend alone was not
     // enough. If softhsm appears in the path, it is the same violation.
-    if module.to_ascii_lowercase().contains("softhsm") {
+    // A symlink with a neutral name must not hide the real library, so the resolved
+    // path is checked as well. A module that cannot be resolved here is left to the
+    // loader, which fails on a path that does not exist.
+    let resolved = std::fs::canonicalize(module).ok();
+    let names_softhsm = |path: &str| path.to_ascii_lowercase().contains("softhsm");
+    if names_softhsm(module)
+        || resolved
+            .as_deref()
+            .and_then(std::path::Path::to_str)
+            .is_some_and(names_softhsm)
+    {
         return Err(MainnetKeyPolicyViolation::SoftwareHsmBackend);
     }
     let pin_env = cfg.pkcs11_token_pin_env.unwrap_or("");
@@ -219,6 +229,42 @@ mod tests {
     }
 
     #[test]
+    fn rejects_softhsm_in_module_path() {
+        let mut c = base();
+        c.pkcs11_module_path = Some("/usr/lib/softhsm/libsofthsm2.so");
+        assert_eq!(
+            check_mainnet_validator_key_policy(&c),
+            Err(MainnetKeyPolicyViolation::SoftwareHsmBackend)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_softhsm_behind_neutral_symlink() {
+        // BLG-0044: a symlink with a neutral name must not hide a software
+        // token, so the resolved path is checked too.
+        let dir = std::env::temp_dir().join(format!("bud_softhsm_link_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("libsofthsm2.so");
+        std::fs::write(&real, b"fake").unwrap();
+        let link = dir.join("neutral-name.so");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let path_str = link.to_str().unwrap().to_string();
+        let cfg = MainnetValidatorKeyConfig {
+            signer_backend: Some("pkcs11"),
+            raw_signer_backend: Some("pkcs11"),
+            validator_key_file: None,
+            pkcs11_module_path: Some(path_str.as_str()),
+            pkcs11_token_pin_env: Some("BUD_HSM_PIN"),
+            resolve_pin_env: false,
+        };
+        let outcome = check_mainnet_validator_key_policy(&cfg);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(outcome, Err(MainnetKeyPolicyViolation::SoftwareHsmBackend));
+    }
+
+    #[test]
     fn rejects_missing_pin_when_resolve_enabled() {
         let mut c = base();
         c.pkcs11_token_pin_env = Some("BUD_HSM_PIN_DOES_NOT_EXIST_XYZ");
@@ -226,6 +272,74 @@ mod tests {
         assert_eq!(
             check_mainnet_validator_key_policy(&c),
             Err(MainnetKeyPolicyViolation::EmptyPkcs11Pin)
+        );
+    }
+
+    #[test]
+    fn rejects_softhsm_backend_in_any_case() {
+        for spelling in ["softhsm", "SoftHSM", "SOFTHSM"] {
+            let mut c = base();
+            c.signer_backend = Some("pkcs11");
+            c.raw_signer_backend = Some(spelling);
+            assert_eq!(
+                check_mainnet_validator_key_policy(&c),
+                Err(MainnetKeyPolicyViolation::SoftwareHsmBackend),
+                "{spelling}"
+            );
+        }
+        let mut c = base();
+        c.signer_backend = Some("softhsm");
+        c.raw_signer_backend = None;
+        assert_eq!(
+            check_mainnet_validator_key_policy(&c),
+            Err(MainnetKeyPolicyViolation::SoftwareHsmBackend)
+        );
+    }
+
+    #[test]
+    fn rejects_mock_alias_in_any_case() {
+        for spelling in ["mock", "Mock", "MOCK"] {
+            let mut c = base();
+            c.signer_backend = Some(spelling);
+            c.raw_signer_backend = None;
+            assert_eq!(
+                check_mainnet_validator_key_policy(&c),
+                Err(MainnetKeyPolicyViolation::HsmMockBackend),
+                "{spelling}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_softhsm_module_path_in_any_case() {
+        for module in [
+            "/usr/lib/softhsm/libsofthsm2.so",
+            "/usr/lib/SoftHSM/LIBSOFTHSM2.SO",
+        ] {
+            let mut c = base();
+            c.pkcs11_module_path = Some(module);
+            assert_eq!(
+                check_mainnet_validator_key_policy(&c),
+                Err(MainnetKeyPolicyViolation::SoftwareHsmBackend),
+                "{module}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_symlink_that_hides_softhsm() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("libsofthsm2.so");
+        std::fs::write(&real, b"x").unwrap();
+        let link = dir.path().join("libvendor.so");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let link_str = link.to_str().unwrap().to_string();
+        let mut c: MainnetValidatorKeyConfig<'_> = base();
+        c.pkcs11_module_path = Some(&link_str);
+        assert_eq!(
+            check_mainnet_validator_key_policy(&c),
+            Err(MainnetKeyPolicyViolation::SoftwareHsmBackend)
         );
     }
 }

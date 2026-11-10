@@ -74,6 +74,19 @@ const WRITE_METHODS: &[&str] = &[
     "add_by",
     "start_timer",
     "observe_closure_duration",
+    "with_label_values",
+];
+
+/// Metric field types the gate reads, plain and labelled.
+const METRIC_TYPES: &[&str] = &[
+    "IntCounter",
+    "IntGauge",
+    "Histogram",
+    "IntCounterVec",
+    "IntGaugeVec",
+    "HistogramVec",
+    "Gauge",
+    "Counter",
 ];
 
 /// A scan that finds too few fields is vacuous and must fail rather than pass.
@@ -106,73 +119,11 @@ impl Metric {
 
 /// Remove every `#[cfg(test)]` item, bodyful or bodyless.
 ///
-/// A bodyless item (`#[cfg(test)] use foo;`) has no `{`. Matching braces from
-/// the next `{` in the file would swallow the rest of the crate. The scan
-/// therefore asks whether the decorated item has a body before walking.
+/// The shared stripper ends a body-less item at its own `;` and skips strings
+/// and comments inside a body, so a `;` in `[u8; 4]` or a brace in a string
+/// cannot leave test code in the production blob.
 fn strip_cfg_test(src: &str) -> String {
-    let mut out = String::with_capacity(src.len());
-    let bytes = src.as_bytes();
-    let mut i = 0usize;
-    while i < src.len() {
-        let Some(rel) = src[i..].find("#[cfg(test)]") else {
-            out.push_str(&src[i..]);
-            break;
-        };
-        let at = i + rel;
-        out.push_str(&src[i..at]);
-        let mut j = at + "#[cfg(test)]".len();
-        // Skip whitespace and further attributes on the same item.
-        loop {
-            while j < src.len() && bytes[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            if j + 1 < src.len() && bytes[j] == b'#' && bytes[j + 1] == b'[' {
-                if let Some(close) = src[j..].find(']') {
-                    j += close + 1;
-                    continue;
-                }
-                j = src.len();
-                break;
-            }
-            break;
-        }
-        // Does the item have a `{` body, or is it bodyless (`...;`)?
-        let mut k = j;
-        let mut has_body = false;
-        while k < src.len() {
-            match bytes[k] {
-                b'{' => {
-                    has_body = true;
-                    break;
-                }
-                b';' => break,
-                _ => k += 1,
-            }
-        }
-        if !has_body {
-            i = (k + 1).min(src.len());
-            continue;
-        }
-        let open = k;
-        let mut depth = 0usize;
-        let mut p = open;
-        while p < bytes.len() {
-            match bytes[p] {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        p += 1;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-            p += 1;
-        }
-        i = p.min(src.len());
-    }
-    out
+    super::capability_modules_are_wired::strip_test_mods(src)
 }
 
 /// Replace line comments, block comments and string literals with spaces so a
@@ -337,7 +288,7 @@ fn parse_metrics(src: &str) -> Vec<Metric> {
         };
         let name = name.trim();
         let ty = ty.trim().trim_end_matches(',').trim();
-        if !matches!(ty, "IntCounter" | "IntGauge" | "Histogram") {
+        if !METRIC_TYPES.contains(&ty) {
             continue;
         }
         if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
@@ -827,4 +778,19 @@ fn baseline_case(tmp: &Path) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod type_tests {
+    use super::*;
+
+    #[test]
+    fn labelled_metric_types_are_parsed_and_array_semicolons_do_not_leak_tests() {
+        let src = "pub a: IntCounterVec,\npub b: HistogramVec,\npub c: Gauge,\npub d: u64,\n";
+        let kinds: Vec<String> = parse_metrics(src).into_iter().map(|m| m.kind).collect();
+        assert_eq!(kinds, vec!["IntCounterVec", "HistogramVec", "Gauge"]);
+        let leaked =
+            "#[cfg(test)]\nmod t {\n    fn f(a: [u8; 4]) { hidden.x.inc(); }\n}\nfn prod() {}\n";
+        assert!(!strip_cfg_test(leaked).contains("hidden"));
+    }
 }

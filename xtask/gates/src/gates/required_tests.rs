@@ -1,260 +1,232 @@
-//! Every name in a gate's `required_tests` must really be a `#[test]`.
+//! Every name a Rust gate requires must really be a `#[test]`.
 //!
-//! Ported from `scripts/check-required-tests-are-tests.sh`. A name in a
-//! gate's `required_tests=(...)` list that carries no `#[test]` attribute is
-//! a gate describing a test the tree does not have. Each name must appear
-//! exactly once as a `#[test]`-annotated function, and exactly once as a
-//! function definition at all, within the declared scope.
+//! The required-test lists used to live in `required_tests=(...)` arrays of
+//! shell gates; this gate read `ops/scripts/check-*.sh` for them. Those
+//! scripts are gone, so the gate had nothing to read and returned OK without
+//! checking one name. The lists now live in the `TESTS` constants of the Rust
+//! gates that read a cargo test log (`named_tests`, `exact_named_tests`), and
+//! this gate checks those lists directly: a name in a list that no
+//! `#[test]` function carries is a gate describing a test the tree does not
+//! have, and the log check can then never be satisfied or, worse, be
+//! satisfied by a lookalike.
+//!
+//! A name counts when exactly one function of that name exists in the tree,
+//! it carries `#[test]` or `#[tokio::test(..)]`, and no `#[ignore]`
+//! attribute sits in the same attribute block. A name written as a module
+//! path (`tests::bns::tests::name`) must also live in a file whose path
+//! carries those modules.
 
 use std::fmt::Write as _;
 use std::path::Path;
 
-/// Collect `path:name` for every `#[test]`/`#[tokio::test]` function.
-fn marked_tests(root: &Path) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    let mut stack: Vec<std::path::PathBuf> = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for e in rd.filter_map(Result::ok) {
-            let Ok(path_kind) = e.file_type() else {
-                continue;
-            };
-            let path = e.path();
-            if path_kind.is_dir() {
-                let s = path.to_string_lossy();
-                if !s.contains("/target") && !s.contains("/.git") {
-                    stack.push(path);
-                }
-            } else if path.extension().is_some_and(|x| x == "rs") {
-                let Ok(text) = std::fs::read_to_string(&path) else {
-                    continue;
-                };
-                let rel = path
-                    .strip_prefix(root)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                let lines: Vec<&str> = text.lines().collect();
-                let mut pending = 0i32;
-                for l in &lines {
-                    if l.contains("#[test]") || l.contains("#[tokio::test]") {
-                        pending = 5;
-                        continue;
-                    }
-                    if pending > 0 {
-                        if let Some(pos) = l.find("fn ") {
-                            let after = &l[pos + 3..];
-                            let name: String = after
-                                .chars()
-                                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                                .collect();
-                            if !name.is_empty() {
-                                out.push((rel.clone(), name));
-                                pending = 0;
-                                continue;
-                            }
-                        }
-                        pending -= 1;
-                    }
-                }
-            }
-        }
-    }
-    out
+/// The gate modules that carry a required-test list, with the list.
+fn registry() -> Vec<(&'static str, &'static [&'static str])> {
+    vec![
+        ("bns", super::bns_gate::TESTS),
+        ("bud-e2e", super::bud_e2e::TESTS),
+        ("economy-invariants", super::economy_invariants::TESTS),
+        ("fork-choice", super::fork_choice_gate::TESTS),
+        ("governance-invariants", super::governance_invariants::TESTS),
+        ("network-hardening", super::network_hardening_gate::TESTS),
+        (
+            "node-classification",
+            super::node_classification_gate::TESTS,
+        ),
+        ("poa-compliance", super::poa_compliance_gate::TESTS),
+        ("storage-provider", super::storage_provider_gate::TESTS),
+        ("wallet-core", super::wallet_core_gate::TESTS),
+    ]
 }
 
-/// Collect every `fn <name>` definition in the tree.
-fn all_fns(root: &Path) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut stack: Vec<std::path::PathBuf> = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for e in rd.filter_map(Result::ok) {
-            let Ok(path_kind) = e.file_type() else {
-                continue;
-            };
-            let path = e.path();
-            if path_kind.is_dir() {
-                let s = path.to_string_lossy();
-                if !s.contains("/target") && !s.contains("/.git") {
-                    stack.push(path);
-                }
-            } else if path.extension().is_some_and(|x| x == "rs") {
-                let Ok(text) = std::fs::read_to_string(&path) else {
-                    continue;
-                };
-                for l in text.lines() {
-                    if let Some(pos) = l.find("fn ") {
-                        let after = &l[pos + 3..];
-                        let name: String = after
-                            .chars()
-                            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                            .collect();
-                        if !name.is_empty() {
-                            out.push(name);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    out
+/// One `fn` definition found in the tree.
+struct FnDef {
+    /// Repository-relative path of the file.
+    file: String,
+    name: String,
+    /// `#[test]` or `#[tokio::test]` present in the attribute block.
+    is_test: bool,
+    /// `#[ignore]` present in the attribute block.
+    ignored: bool,
 }
 
-/// Parse `required_tests_scope="..."` and `required_tests=(...)` from a
-/// shell gate script.
-fn script_requirements(script: &std::path::Path) -> (String, Vec<String>) {
-    let text = std::fs::read_to_string(script).unwrap_or_default();
-    let mut scope = String::from(".*");
-    for l in text.lines() {
-        let t = l.trim_start();
-        if let Some(rest) = t.strip_prefix("required_tests_scope=\"") {
-            if let Some(end) = rest.find('"') {
-                scope = rest[..end].to_string();
-            }
-        }
+/// The name after `fn ` on a line, if the line defines a function.
+fn fn_name(line: &str) -> Option<String> {
+    let pos = line.find("fn ")?;
+    // `fn` must start a word: `pub fn`, `async fn`, line start, or `{ fn`.
+    let before = line[..pos].chars().next_back();
+    if before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
     }
-    let mut names = Vec::new();
-    let mut inside = false;
-    for l in text.lines() {
-        let t = l.trim_start();
-        if t.starts_with("required_tests=(") {
-            inside = true;
-            continue;
-        }
-        if inside && t.starts_with(')') {
-            inside = false;
-            continue;
-        }
-        if inside {
-            let name = t.split_whitespace().next().unwrap_or("");
-            if !name.is_empty()
-                && name
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-            {
-                names.push(name.to_string());
-            }
-        }
-    }
-    (scope, names)
+    let name: String = line[pos + 3..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
 }
 
-/// Is `path` inside the declared `required_tests_scope`?
+fn is_test_attr(t: &str) -> bool {
+    t.starts_with("#[test]") || t.starts_with("#[tokio::test")
+}
+
+/// Every function definition under `root` with its attribute facts.
 ///
-/// A scope is `.*` (everything) or one or more path prefixes, `a/b` or
-/// `(a/b|c)`, matched at a path boundary: `src/tests` covers
-/// `src/tests/x.rs` and `src/tests.rs`, not `src/tests_extra/x.rs`. An
-/// earlier form of this check compared the scope text with a string built
-/// from the scope text, which was true for every scope, so a required
-/// name counted wherever it lived.
-fn path_in_scope(path: &str, scope: &str) -> bool {
-    if scope == ".*" {
-        return true;
+/// Attributes are the contiguous lines above the `fn` that start with `#[`,
+/// plus any on the same line; doc comments and blank comment lines between
+/// them are skipped.
+fn collect_fns(root: &Path) -> Result<Vec<FnDef>, String> {
+    let mut out = Vec::new();
+    let mut stack: Vec<std::path::PathBuf> = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let rd = std::fs::read_dir(&dir)
+            .map_err(|e| format!("required-tests: cannot read {}: {e}", dir.display()))?;
+        for e in rd.filter_map(Result::ok) {
+            let path = e.path();
+            let kind = e
+                .file_type()
+                .map_err(|err| format!("required-tests: cannot stat {}: {err}", path.display()))?;
+            let name = e.file_name().to_string_lossy().into_owned();
+            if kind.is_dir() {
+                if name != "target" && name != ".git" && name != "node_modules" {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if path.extension().is_none_or(|x| x != "rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path)
+                .map_err(|err| format!("required-tests: cannot read {}: {err}", path.display()))?;
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let lines: Vec<&str> = text.lines().collect();
+            for (i, l) in lines.iter().enumerate() {
+                let Some(fname) = fn_name(l) else {
+                    continue;
+                };
+                let mut is_test = false;
+                let mut ignored = false;
+                // Attributes on the same line, before the `fn`.
+                let head = &l[..l.find("fn ").unwrap_or(0)];
+                for part in head.split("#[").skip(1) {
+                    let attr = format!("#[{part}");
+                    is_test |= is_test_attr(&attr);
+                    ignored |= attr.starts_with("#[ignore");
+                }
+                // The attribute block above.
+                let mut j = i;
+                while j > 0 {
+                    j -= 1;
+                    let t = lines[j].trim();
+                    if t.starts_with("#[") {
+                        is_test |= is_test_attr(t);
+                        ignored |= t.starts_with("#[ignore");
+                    } else if !t.starts_with("//") {
+                        break;
+                    }
+                }
+                out.push(FnDef {
+                    file: rel.clone(),
+                    name: fname,
+                    is_test,
+                    ignored,
+                });
+            }
+        }
     }
-    scope
-        .trim_start_matches('(')
-        .trim_end_matches(')')
-        .split('|')
-        .map(|alt| alt.trim().trim_matches('/'))
-        .filter(|alt| !alt.is_empty())
-        .any(|alt| {
-            path == alt
-                || path
-                    .strip_prefix(alt)
-                    .is_some_and(|rest| rest.starts_with('/') || rest == ".rs")
-        })
+    Ok(out)
+}
+
+/// Does the file path carry the module path (minus inline test modules and
+/// the function name)?
+fn file_carries_modules(file: &str, modules: &[&str]) -> bool {
+    let comps: Vec<String> = file
+        .trim_end_matches(".rs")
+        .split('/')
+        .map(str::to_string)
+        .collect();
+    modules
+        .iter()
+        .filter(|m| **m != "tests" || modules.len() == 1)
+        .all(|m| comps.iter().any(|c| c == m))
+        // A bare leading `tests` is a real directory in this tree.
+        && (modules.first() != Some(&"tests") || comps.iter().any(|c| c == "tests"))
+}
+
+/// Check one gate's list; returns the problems.
+fn check_list(gate: &str, names: &[&str], defs: &[FnDef]) -> Vec<String> {
+    let mut problems = Vec::new();
+    if names.is_empty() {
+        problems.push(format!("{gate}: the required-test list is empty"));
+    }
+    for full in names {
+        let mut segs: Vec<&str> = full.split("::").collect();
+        let Some(name) = segs.pop() else {
+            continue;
+        };
+        let found: Vec<&FnDef> = defs.iter().filter(|d| d.name == name).collect();
+        let tests: Vec<&&FnDef> = found.iter().filter(|d| d.is_test && !d.ignored).collect();
+        let in_scope: Vec<&&&FnDef> = tests
+            .iter()
+            .filter(|d| segs.is_empty() || file_carries_modules(&d.file, &segs))
+            .collect();
+        if found.is_empty() {
+            problems.push(format!("{gate}: `{full}` has no function in the tree"));
+        } else if found.iter().any(|d| d.ignored) {
+            problems.push(format!("{gate}: `{full}` carries #[ignore]"));
+        } else if tests.is_empty() {
+            problems.push(format!(
+                "{gate}: `{full}` exists but carries no #[test] attribute"
+            ));
+        } else if in_scope.is_empty() {
+            problems.push(format!(
+                "{gate}: `{full}` is a test, but not in a file under the module path it names"
+            ));
+        } else if found.len() != 1 {
+            problems.push(format!(
+                "{gate}: `{full}` is defined {} times; a log line cannot say which one ran",
+                found.len()
+            ));
+        }
+    }
+    problems
 }
 
 /// # Errors
 ///
 /// Returns a finding per required name that is not a real test.
 pub fn run(root: &Path) -> Result<String, String> {
-    let marked = marked_tests(root);
-    if marked.is_empty() {
+    let defs = collect_fns(root)?;
+    if !defs.iter().any(|d| d.is_test) {
         return Err(format!(
             "no #[test] functions found under {} - wrong root?",
             root.display()
         ));
     }
-    let fns = all_fns(root);
-
-    let mut scripts_with_lists = 0usize;
     let mut total = 0usize;
-    let mut missing_total: Vec<String> = Vec::new();
-
-    let scripts_dir = root.join("ops/scripts");
-    let Ok(rd) = std::fs::read_dir(&scripts_dir) else {
-        return Err(format!("no scripts/ dir under {}", root.display()));
-    };
-    let mut scripts: Vec<std::path::PathBuf> = rd
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("check-") && n.to_ascii_lowercase().ends_with(".sh"))
-        })
-        .collect();
-    scripts.sort();
-
-    for script in &scripts {
-        let (scope, names) = script_requirements(script);
-        if names.is_empty() {
-            continue;
-        }
-        scripts_with_lists += 1;
-        let mut missing: Vec<String> = Vec::new();
-        for name in &names {
-            total += 1;
-            let test_matches = marked
-                .iter()
-                .filter(|(p, n)| n == name && path_in_scope(p, &scope))
-                .count();
-            let function_matches = fns.iter().filter(|n| *n == name).count();
-            if test_matches != 1 || function_matches != 1 {
-                missing.push(name.clone());
-            }
-        }
-        if !missing.is_empty() {
-            let sname = script
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            let mut msg = format!("FAIL: {sname} requires tests that are not tests:\n");
-            for m in &missing {
-                writeln!(msg, "  - {m}").expect("writing to a String cannot fail");
-            }
-            missing_total.push(msg);
-        }
+    let mut all: Vec<String> = Vec::new();
+    let reg = registry();
+    for (gate, names) in &reg {
+        total += names.len();
+        all.extend(check_list(gate, names, &defs));
     }
-
-    if scripts_with_lists == 0 {
-        // All required-test lists have migrated to Rust gates; nothing left
-        // to check in shell.
-        return Ok(String::from(
-            "Required-test gate OK: no shell gate declares required_tests=() (all migrated to Rust).",
-        ));
-    }
-    if !missing_total.is_empty() {
-        let mut all = String::new();
-        for m in &missing_total {
-            all.push_str(m);
+    if !all.is_empty() {
+        let mut msg = String::from("FAIL: required tests that are not tests:\n");
+        for p in &all {
+            writeln!(msg, "  - {p}").expect("writing to a String cannot fail");
         }
-        all.push_str(
-            "\nA name in required_tests=() that carries no #[test] attribute is a\n\
+        msg.push_str(
+            "\nA name in a gate's TESTS list that carries no #[test] attribute is a\n\
              gate describing a test the tree does not have. Restore the attribute,\n\
              or remove the name and say why in the same commit.",
         );
-        return Err(all);
+        return Err(msg);
     }
     Ok(format!(
-        "Required-test gate OK: {total} required names across {scripts_with_lists} gate scripts all carry #[test]."
+        "Required-test gate OK: {total} required names across {} gates all carry #[test].",
+        reg.len()
     ))
 }
 
@@ -263,58 +235,83 @@ pub fn run(root: &Path) -> Result<String, String> {
 /// Returns a finding when a required name that is not a test passes.
 pub fn self_test() -> Result<String, String> {
     let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-rtt")?;
-    let _ = std::fs::create_dir_all(dir.join("ops/scripts"));
-    let _ = std::fs::create_dir_all(dir.join("src"));
+    let write = |rel: &str, body: &str| -> Result<(), String> {
+        let p = dir.join(rel);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(p, body).map_err(|e| e.to_string())
+    };
+    let check = |names: &[&str]| -> Result<Vec<String>, String> {
+        let defs = collect_fns(&dir)?;
+        Ok(check_list("fixture", names, &defs))
+    };
+    let fail = |msg: &str| -> Result<String, String> {
+        let _ = std::fs::remove_dir_all(&dir);
+        Err(format!("required-tests canary: {msg}"))
+    };
 
-    std::fs::write(
-        dir.join("ops/scripts/check-example-gate.sh"),
-        "required_tests=(\n  a_real_test\n)\n",
-    )
-    .map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("src/lib.rs"), "#[test]\nfn a_real_test() {}\n")
-        .map_err(|e| e.to_string())?;
-    if run(&dir).is_err() {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: a correct tree was refused"));
+    write("src/lib.rs", "#[test]\nfn a_real_test() {}\n")?;
+    if !check(&["a_real_test"])?.is_empty() {
+        return fail("a correct tree was refused");
     }
-    // Remove the #[test] attribute.
-    std::fs::write(dir.join("src/lib.rs"), "fn a_real_test() {}\n").map_err(|e| e.to_string())?;
-    if run(&dir).is_ok() {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: a name carrying no #[test] passed"));
+    write("src/lib.rs", "fn a_real_test() {}\n")?;
+    if check(&["a_real_test"])?.is_empty() {
+        return fail("a name carrying no #[test] passed");
     }
-    // The scope is a rule, not a comment: a required test that lives
-    // outside the declared scope does not count. The old check compared
-    // the scope with itself and let every location through.
-    std::fs::write(
-        dir.join("ops/scripts/check-example-gate.sh"),
-        "required_tests_scope=\"src/tests\"\nrequired_tests=(\n  a_real_test\n)\n",
-    )
-    .map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("src/lib.rs"), "#[test]\nfn a_real_test() {}\n")
-        .map_err(|e| e.to_string())?;
-    if run(&dir).is_ok() {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from(
-            "canary: a required test outside the declared scope was accepted",
-        ));
+    write("src/lib.rs", "#[test]\n#[ignore]\nfn a_real_test() {}\n")?;
+    if check(&["a_real_test"])?.is_empty() {
+        return fail("an #[ignore]d test passed");
     }
-    let _ = std::fs::create_dir_all(dir.join("src/tests"));
-    std::fs::write(dir.join("src/lib.rs"), "mod tests;\n").map_err(|e| e.to_string())?;
-    std::fs::write(
-        dir.join("src/tests/mod.rs"),
-        "#[test]\nfn a_real_test() {}\n",
-    )
-    .map_err(|e| e.to_string())?;
-    if run(&dir).is_err() {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from(
-            "canary: a required test inside the declared scope was refused",
-        ));
+    write("src/lib.rs", "#[ignore]\n#[test]\nfn a_real_test() {}\n")?;
+    if check(&["a_real_test"])?.is_empty() {
+        return fail("an #[ignore] above #[test] passed");
+    }
+    write(
+        "src/lib.rs",
+        "#[tokio::test(flavor = \"multi_thread\")]\nasync fn a_real_test() {}\n",
+    )?;
+    if !check(&["a_real_test"])?.is_empty() {
+        return fail("a #[tokio::test(..)] test was refused");
+    }
+    write("src/lib.rs", "#[test] fn a_real_test() {}\n")?;
+    if !check(&["a_real_test"])?.is_empty() {
+        return fail("a one-line #[test] fn was refused");
+    }
+    write("src/lib.rs", "// #[test]\nfn a_real_test() {}\n")?;
+    if check(&["a_real_test"])?.is_empty() {
+        return fail("a commented-out #[test] passed");
+    }
+    write(
+        "src/lib.rs",
+        "#[test]\nfn a_real_test() {}\nfn other() {}\nmod m { fn a_real_test() {} }\n",
+    )?;
+    if check(&["a_real_test"])?.is_empty() {
+        return fail("a name defined twice passed");
+    }
+    // A module path must be carried by the file path.
+    let _ = std::fs::remove_file(dir.join("src/lib.rs"));
+    write("src/tests/bns.rs", "#[test]\nfn t_one() {}\n")?;
+    if !check(&["tests::bns::tests::t_one"])?.is_empty() {
+        return fail("a test under its module path was refused");
+    }
+    if check(&["tests::other::tests::t_one"])?.is_empty() {
+        return fail("a test outside the module path it names passed");
+    }
+    if check(&["missing_everywhere"])?.is_empty() {
+        return fail("a name with no function passed");
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "required-tests canary OK: with a test it PASSes, without one it FAILs, and the \
-         scope is enforced.",
+        "required-tests canary OK: a #[test] passes; a missing attribute, #[ignore], a \
+         commented-out attribute, a duplicate name and a wrong module path each FAIL.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn self_test_passes() {
+        super::self_test().expect("required-tests self-test");
+    }
 }

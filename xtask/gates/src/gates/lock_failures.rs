@@ -8,48 +8,22 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-const SCAN_ROOTS: &[&str] = &["src", "budzero", "wallet-core"];
+const SCAN_ROOTS: &[&str] = &[
+    "src",
+    "budzero",
+    "bud",
+    "crates/ai-inference",
+    "crates/bpqs",
+    "crates/budscan",
+    "crates/note-packing",
+    "crates/wallet-core",
+];
 
-/// Remove `#[cfg(test)] mod ... { }` blocks (only `mod` items, mirroring the
-/// shell regex).
+/// Remove every `#[cfg(test)]` item. The shared stripper ends a body-less item
+/// at its own `;`, so code after `#[cfg(test)] mod tests;` is still scanned and
+/// a name containing "mod" cannot start a cut.
 fn strip_test_mods(text: &str) -> String {
-    let mut out = String::new();
-    let mut rest = text;
-    loop {
-        let Some(at) = rest.find("#[cfg(test)]") else {
-            out.push_str(rest);
-            return out;
-        };
-        let head = &rest[at..];
-        let Some(brace_rel) = head.find('{') else {
-            return out;
-        };
-        let between = &head["#[cfg(test)]".len()..brace_rel];
-        if !between.contains("mod") {
-            out.push_str(&rest[..at + "#[cfg(test)]".len()]);
-            rest = &rest[at + "#[cfg(test)]".len()..];
-            continue;
-        }
-        out.push_str(&rest[..at]);
-        let brace = at + brace_rel;
-        let mut depth = 0i32;
-        let mut j = brace;
-        let b = rest.as_bytes();
-        while j < b.len() {
-            match b[j] {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                _ => {}
-            }
-            j += 1;
-        }
-        rest = if j < rest.len() { &rest[j + 1..] } else { "" };
-    }
+    super::capability_modules_are_wired::strip_test_mods(text)
 }
 
 fn is_test_path(rel: &str) -> bool {
@@ -57,8 +31,17 @@ fn is_test_path(rel: &str) -> bool {
 }
 
 fn is_open_default(line: &str) -> bool {
-    let t = line.trim();
-    t.contains("unwrap_or(true)") || t.contains("unwrap_or_else(|_| true)")
+    // Spaces are dropped so `|_|true` and `|_| true` are one spelling.
+    let t: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+    [
+        "unwrap_or(true)",
+        "unwrap_or_else(|_|true)",
+        "unwrap_or_else(|e|true)",
+        "map_or(true,",
+        "Err(_)=>true",
+    ]
+    .iter()
+    .any(|p| t.contains(p))
 }
 
 fn collect_files(root: &Path) -> Vec<(std::path::PathBuf, String)> {
@@ -207,4 +190,67 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "lock-failures canary OK: a guard PASSes and a fail-open FAILs.",
     ))
+}
+
+#[cfg(test)]
+mod scan_root_tests {
+    use super::SCAN_ROOTS;
+
+    /// A scan root that is not a directory is skipped without a word, so a
+    /// wrong path turns the gate off for that tree.
+    #[test]
+    fn every_scan_root_is_a_directory_of_the_repository() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for root in SCAN_ROOTS {
+            assert!(
+                repo.join(root).is_dir(),
+                "scan root `{root}` is not a directory of the repository"
+            );
+        }
+    }
+
+    /// Every crate directory under `crates/` and the `bud` tree must be
+    /// scanned, so a new crate cannot sit outside the gate unnoticed.
+    #[test]
+    fn every_crate_directory_is_a_scan_root() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        assert!(SCAN_ROOTS.contains(&"bud"), "bud/ is not scanned");
+        let entries = std::fs::read_dir(repo.join("crates")).expect("crates/ is readable");
+        for e in entries.flatten() {
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                let rel = format!("crates/{}", e.file_name().to_string_lossy());
+                assert!(
+                    SCAN_ROOTS.contains(&rel.as_str()),
+                    "`{rel}` is not a scan root of the lock-failure gate"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn more_fail_open_spellings_are_seen() {
+        for l in [
+            "x.lock().map_or(true, |g| g.ok())",
+            "x.lock().unwrap_or_else(|e| true)",
+            "x.lock().unwrap_or_else(|_|true)",
+            "Err(_) => true,",
+            "x.lock().unwrap_or(true)",
+        ] {
+            assert!(is_open_default(l), "{l}");
+        }
+        assert!(!is_open_default("x.lock().unwrap_or(false)"));
+    }
+
+    #[test]
+    fn bodyless_test_mod_at_the_end_keeps_the_code_before_it() {
+        let src = "fn a() { m.lock().unwrap_or(true); }\n#[cfg(test)]\nmod tests;\n";
+        assert!(strip_test_mods(src).contains("unwrap_or(true)"));
+        let model = "#[cfg(test)]\nconst X: u8 = 1;\nfn model() { m.lock().unwrap_or(true); }\n";
+        assert!(strip_test_mods(model).contains("unwrap_or(true)"));
+    }
 }

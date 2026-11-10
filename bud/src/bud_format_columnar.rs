@@ -397,6 +397,11 @@ pub fn columnar_from_blob(bytes: &[u8]) -> Option<JsonColumnar> {
         }
         let k = std::str::from_utf8(&bytes[pos..pos + kl]).ok()?.to_string();
         pos += kl;
+        // A repeated key would make `columnar_decode` drop all but the last
+        // column. The encoder never writes one.
+        if keys.contains(&k) {
+            return None;
+        }
         keys.push(k);
     }
     if bytes.len() < pos + 4 {
@@ -478,7 +483,13 @@ fn parse_value(bytes: &[u8], pos: &mut usize, t: ColType) -> Option<Value> {
             }
             let bits = u64::from_le_bytes(bytes[*pos..*pos + 8].try_into().ok()?);
             *pos += 8;
-            Some(Value::from(f64::from_bits(bits)))
+            // NaN and infinity have no JSON form; `Value::from` would turn
+            // them into null. The encoder never writes them.
+            let f = f64::from_bits(bits);
+            if !f.is_finite() {
+                return None;
+            }
+            Some(Value::from(f))
         }
         ColType::Bool => {
             if bytes.len() < *pos + 1 {
@@ -547,6 +558,55 @@ mod tests {
         let digest: [u8; 32] = h.finalize().into();
         out.extend_from_slice(&digest);
         assert!(columnar_from_blob(&out).is_none());
+    }
+
+    fn sealed(mut out: Vec<u8>) -> Vec<u8> {
+        use sha3::{Digest, Sha3_256};
+        let mut h = Sha3_256::new();
+        h.update(b"BDLM_BUD_COLUMNAR_V1");
+        h.update(&out);
+        let digest: [u8; 32] = h.finalize().into();
+        out.extend_from_slice(&digest);
+        out
+    }
+
+    fn head(keys: &[&str], t: ColType) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&COLUMNAR_MAGIC);
+        out.push(COLUMNAR_VERSION);
+        out.push(ColumnarMode::Exact.to_u8());
+        out.extend_from_slice(&(keys.len() as u16).to_le_bytes());
+        for k in keys {
+            out.extend_from_slice(&(k.len() as u32).to_le_bytes());
+            out.extend_from_slice(k.as_bytes());
+        }
+        out.extend_from_slice(&1u32.to_le_bytes());
+        for _ in keys {
+            out.push(t.to_u8());
+        }
+        out
+    }
+
+    #[test]
+    fn a_blob_with_duplicate_keys_is_refused() {
+        let mut out = head(&["a", "a"], ColType::Bool);
+        out.extend_from_slice(&[1, 0]);
+        assert!(columnar_from_blob(&sealed(out)).is_none());
+        let mut ok = head(&["a", "b"], ColType::Bool);
+        ok.extend_from_slice(&[1, 0]);
+        assert!(columnar_from_blob(&sealed(ok)).is_some());
+    }
+
+    #[test]
+    fn a_blob_with_a_non_finite_float_is_refused() {
+        for bits in [f64::NAN.to_bits(), f64::INFINITY.to_bits()] {
+            let mut out = head(&["f"], ColType::F64);
+            out.extend_from_slice(&bits.to_le_bytes());
+            assert!(columnar_from_blob(&sealed(out)).is_none());
+        }
+        let mut out = head(&["f"], ColType::F64);
+        out.extend_from_slice(&1.5f64.to_bits().to_le_bytes());
+        assert!(columnar_from_blob(&sealed(out)).is_some());
     }
 
     #[test]

@@ -60,9 +60,18 @@ impl AccessTracker {
         }
         for i in 0..self.capacity {
             let age = now.saturating_sub(self.touches[i]);
-            if age > 0 {
-                let halvings = (age / half_life_sec).min(63) as u32;
-                self.counts[i] >>= halvings.min(63); // 2^-halvings
+            let periods = age / half_life_sec;
+            if periods > 0 {
+                let halvings = periods.min(63) as u32;
+                self.counts[i] >>= halvings; // 2^-halvings
+                                             // The elapsed time is now spent: a second call must not halve
+                                             // the same period again. A count that went through all 63
+                                             // halvings is cold, so it takes the current time.
+                self.touches[i] = if periods > 63 {
+                    now
+                } else {
+                    self.touches[i].saturating_add(periods.saturating_mul(half_life_sec))
+                };
             }
         }
     }
@@ -100,6 +109,20 @@ impl AccessTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decay_does_not_halve_the_same_period_twice() {
+        let mut t = AccessTracker::new(1).unwrap();
+        for _ in 0..8 {
+            t.record(0, 0);
+        }
+        t.decay(100, 100);
+        assert_eq!(t.snapshot()[0], 4);
+        t.decay(101, 100);
+        assert_eq!(t.snapshot()[0], 4, "no new full period has passed");
+        t.decay(200, 100);
+        assert_eq!(t.snapshot()[0], 2);
+    }
 
     #[test]
     fn the_tracker_counts_and_produces_a_plan() {

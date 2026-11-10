@@ -96,17 +96,7 @@ impl CullingPlan {
         }
         let tiers: Vec<ClusterTier> = access
             .iter()
-            .map(|&a| {
-                if a >= hot_threshold.max(1) {
-                    ClusterTier::Hot
-                } else if a >= cold_threshold.max(1) {
-                    ClusterTier::Warm
-                } else if a > 0 {
-                    ClusterTier::Cold
-                } else {
-                    ClusterTier::Culled // never accessed, so culled and not stored
-                }
-            })
+            .map(|&a| Self::tier_for(a, hot_threshold, cold_threshold))
             .collect();
         Some(CullingPlan {
             cluster_count: access.len(),
@@ -116,6 +106,19 @@ impl CullingPlan {
             cold_threshold: cold_threshold.max(1),
             ts_unix: ts,
         })
+    }
+
+    /// The tier of one cluster, from its access count and the thresholds.
+    fn tier_for(a: u64, hot_threshold: u64, cold_threshold: u64) -> ClusterTier {
+        if a >= hot_threshold.max(1) {
+            ClusterTier::Hot
+        } else if a >= cold_threshold.max(1) {
+            ClusterTier::Warm
+        } else if a > 0 {
+            ClusterTier::Cold
+        } else {
+            ClusterTier::Culled // never accessed, so culled and not stored
+        }
     }
 
     /// How many clusters must be stored, excluding the culled ones; this is the
@@ -189,10 +192,13 @@ impl CullingPlan {
         if bytes.len() < HDR + 32 || bytes[0..8] != CULL_MAGIC || bytes[8] != CULL_VERSION {
             return None;
         }
-        let payload_len = bytes.len() - 32;
         let count = u32::from_le_bytes(bytes[9..13].try_into().ok()?) as usize;
-        let _ = payload_len;
         if count > MAX_CLUSTERS {
+            return None;
+        }
+        // Each cluster takes 9 bytes. Refuse a count the blob cannot hold
+        // before anything is reserved for it.
+        if count > (bytes.len() - HDR - 32) / 9 {
             return None;
         }
         let mut pos = HDR;
@@ -232,6 +238,16 @@ impl CullingPlan {
         if bytes[pos..] != plan.record_hash() {
             return None;
         }
+        // The hash covers the tiers but does not tie them to the counts.
+        // A reader that trusts `tiers` could delete data, so recompute them.
+        let consistent = plan
+            .tiers
+            .iter()
+            .zip(plan.access_counts.iter())
+            .all(|(t, &a)| *t == Self::tier_for(a, hot_threshold, cold_threshold));
+        if !consistent {
+            return None;
+        }
         Some(plan)
     }
 }
@@ -266,6 +282,21 @@ mod tests {
         // The limits.
         assert!(CullingPlan::from_access(&[], 10, 1, 1).is_none());
         assert!(CullingPlan::from_blob(&[0u8; 10]).is_none());
+    }
+
+    #[test]
+    fn a_blob_whose_tiers_disagree_with_the_counts_is_refused() {
+        let mut plan = CullingPlan::from_access(&[1000, 0], 10, 1, 1).unwrap();
+        plan.tiers[0] = ClusterTier::Culled; // a hot cluster marked culled
+        assert!(CullingPlan::from_blob(&plan.to_blob()).is_none());
+    }
+
+    #[test]
+    fn a_count_the_blob_cannot_hold_is_refused() {
+        let plan = CullingPlan::from_access(&[1, 2], 10, 1, 1).unwrap();
+        let mut blob = plan.to_blob();
+        blob[9..13].copy_from_slice(&(MAX_CLUSTERS as u32).to_le_bytes());
+        assert!(CullingPlan::from_blob(&blob).is_none());
     }
 
     #[test]

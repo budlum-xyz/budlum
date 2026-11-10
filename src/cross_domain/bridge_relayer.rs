@@ -8,19 +8,20 @@
 //! This module ties `BridgeState`, `UniversalRelayer`, and
 //! `CrossDomainMessageRegistry` into a coherent pipeline.
 //!
-//! WIRING: unwired - measured: no production path drives this orchestration
-//! today. The three steps it sequences all exist and are reached
-//! individually; what is missing is the loop that runs them in order, which
-//! is a node-lifecycle concern rather than a consensus one. Wiring it means
-//! deciding who owns that loop and how it is scheduled, and that decision has
-//! not been made.
+//! WIRING: partially wired - the relay-enqueue stage runs in production
+//! through `Blockchain::enqueue_bridge_relay` (BLG-0117), which builds the
+//! pipeline around the chain's own bridge, relayer and registry state. The
+//! remaining stages (lock, relay, mint, burn, unlock) still have no
+//! production loop sequencing them end to end: the components are reached
+//! individually, and who owns that loop and how it is scheduled is a
+//! node-lifecycle decision that has not been made.
 
 use crate::core::address::Address;
 use crate::cross_domain::bridge::{BridgeError, BridgeState};
 use crate::cross_domain::event_tree::{DomainEvent, DomainEventTree, MerkleProof};
 use crate::cross_domain::message::{CrossDomainMessage, MessageId, MessageKind};
 use crate::cross_domain::message_registry::CrossDomainMessageRegistry;
-use crate::cross_domain::relayer::{RelayerConfig, RelayerError, UniversalRelayer};
+use crate::cross_domain::relayer::{RelayerError, UniversalRelayer};
 use crate::domain::types::{DomainId, Hash32};
 
 /// Errors from the bridge-relayer integration pipeline.
@@ -78,24 +79,53 @@ impl From<RelayerError> for PipelineError {
 /// Holds references to all the pieces: bridge state, relayer, message registry,
 /// And event trees (one per domain). The pipeline methods drive the state
 /// Machine through each stage of a cross-domain transfer.
-pub struct BridgeRelayerPipeline {
-    /// The bridge state machine (lock/mint/burn/unlock lifecycle).
-    pub bridge: BridgeState,
+pub struct BridgeRelayerPipeline<'a> {
+    /// The bridge state machine (lock/mint/burn/unlock lifecycle). Borrowed:
+    /// production lends the pipeline ITS OWN state (BLG-0117/P05-F10), so
+    /// there is no second copy of the bridge to keep in sync.
+    pub bridge: &'a mut BridgeState,
     /// The universal relayer (pending relays, proof verification).
-    pub relayer: UniversalRelayer,
+    pub relayer: &'a mut UniversalRelayer,
     /// Registry of all cross-domain messages (dedup, root computation).
-    pub messages: CrossDomainMessageRegistry,
+    pub messages: &'a mut CrossDomainMessageRegistry,
     /// Event trees per domain (for Merkle proof generation).
     event_trees: std::collections::BTreeMap<DomainId, DomainEventTree>,
 }
 
-impl BridgeRelayerPipeline {
-    pub fn new(relayer_config: RelayerConfig) -> Self {
+impl<'a> BridgeRelayerPipeline<'a> {
+    /// Construct the pipeline around existing state - the production
+    /// wiring (BLG-0117/P05-F10): `Blockchain` builds one of these around
+    /// its own bridge/relayer/registry and runs the stage work through it.
+    pub fn from_parts(
+        bridge: &'a mut BridgeState,
+        relayer: &'a mut UniversalRelayer,
+        messages: &'a mut CrossDomainMessageRegistry,
+    ) -> Self {
         Self {
-            bridge: BridgeState::new(),
-            relayer: UniversalRelayer::new(relayer_config),
-            messages: CrossDomainMessageRegistry::new(),
+            bridge,
+            relayer,
+            messages,
             event_trees: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Stage 2 alone: enqueue the relay for an already-registered message.
+    /// This is the step `Blockchain::enqueue_bridge_relay` runs, and it runs
+    /// it THROUGH the pipeline (BLG-0117/P05-F10 wiring) rather than around
+    /// it.
+    pub fn enqueue_stage(
+        &mut self,
+        source_event: &DomainEvent,
+        message: &CrossDomainMessage,
+        source_height: u64,
+    ) {
+        // BLG-0129 (P05-F22): the stage refuses an event that does not
+        // carry the enqueued message.
+        if let Err(e) = self
+            .relayer
+            .enqueue_relay(source_event.clone(), message, source_height)
+        {
+            tracing::error!(error = %e, "bridge relay enqueue refused");
         }
     }
 
@@ -120,7 +150,10 @@ impl BridgeRelayerPipeline {
     /// Enqueues the relay request.
     ///
     /// Returns the event (for the caller's audit log).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "BLG-0128 (P05-F21): the pipeline's lock mirrors BridgeState::lock's parameter set one-for-one"
+    )]
     pub fn lock(
         &mut self,
         source_domain: DomainId,
@@ -136,13 +169,11 @@ impl BridgeRelayerPipeline {
 
         // The bridge is mutated before the registry is consulted, because
         // the message id is derived inside `lock` (it consumes the replay
-        // nonce). If the registry then refuses the message, nothing after
-        // this point may stand: the transfer row, the asset location and
-        // the nonce are all rolled back, so a refused lock leaves the state
-        // as it found it rather than a locked asset that no relay will ever
-        // move.
-        let before = self.bridge.clone();
-        let (_transfer, event) = self.bridge.lock(
+        // nonce). If the registry then refuses the message, the row is
+        // UNWOUND (BLG-0117/P05-F10): `unwind_lock` removes exactly what the
+        // lock added - no whole-`BridgeState` clone per call, which cost a
+        // full state copy on every stage and was itself a DoS surface.
+        let (transfer, event) = self.bridge.lock(
             source_domain,
             target_domain,
             source_height,
@@ -158,20 +189,20 @@ impl BridgeRelayerPipeline {
         let message = match event.message.clone() {
             Some(message) => message,
             None => {
-                self.bridge = before;
+                self.bridge.unwind_lock(&transfer.message_id, source_domain);
                 return Err(PipelineError::Relayer(RelayerError::Other(
                     "lock event missing message".into(),
                 )));
             }
         };
         if let Err(e) = self.messages.insert(message.clone()) {
-            self.bridge = before;
+            self.bridge.unwind_lock(&message.message_id, source_domain);
             return Err(PipelineError::MessageRegistry(e));
         }
 
         // Enqueue relay
         self.relayer
-            .enqueue_relay(event.clone(), &message, source_height);
+            .enqueue_relay(event.clone(), &message, source_height)?;
 
         // Add to event tree
         self.get_or_create_tree(source_domain).push(event.clone());
@@ -240,32 +271,42 @@ impl BridgeRelayerPipeline {
         domain: DomainId,
         domain_height: u64,
         expiry_height: u64,
+        recipient_eth: [u8; 20],
     ) -> Result<DomainEvent, PipelineError> {
         let event_index = self.get_or_create_tree(domain).events().len() as u32;
 
         // Same shape as `lock`: the burn moves the transfer to `Burned`
         // before the message can be registered, so a registry refusal
-        // restores the bridge instead of leaving a burned transfer whose
-        // unlock message nobody holds.
-        let before = self.bridge.clone();
+        // UNWINDS the burn (`unwind_burn`, BLG-0117/P05-F10) instead of
+        // restoring a whole-`BridgeState` clone, and instead of leaving a
+        // burned transfer whose unlock message nobody holds.
+        let previous_expiry = self
+            .bridge
+            .get_transfer(&message_id)
+            .map_or(0, |t| t.expiry_height);
         let event = self.bridge.burn_with_event(
             message_id,
             domain,
             domain_height,
             event_index,
             expiry_height,
+            recipient_eth,
         )?;
 
         // Register the burn message
         if let Some(ref message) = event.message {
             if let Err(e) = self.messages.insert(message.clone()) {
-                self.bridge = before;
+                self.bridge.unwind_burn(
+                    &message_id,
+                    crate::cross_domain::bridge::BridgeStatus::Minted { domain },
+                    previous_expiry,
+                );
                 return Err(PipelineError::MessageRegistry(e));
             }
 
             // Enqueue relay back to source
             self.relayer
-                .enqueue_relay(event.clone(), message, domain_height);
+                .enqueue_relay(event.clone(), message, domain_height)?;
         }
 
         // Add to event tree
@@ -316,12 +357,12 @@ impl BridgeRelayerPipeline {
 
     /// Get the bridge state for inspection.
     pub fn bridge_state(&self) -> &BridgeState {
-        &self.bridge
+        self.bridge
     }
 
     /// Get the relayer for inspection.
     pub fn relayer(&self) -> &UniversalRelayer {
-        &self.relayer
+        self.relayer
     }
 
     /// Sweep expired bridge locks (DoS prevention).
@@ -348,7 +389,8 @@ mod tests {
 
     #[test]
     fn full_lock_relay_mint_lifecycle() {
-        let mut p = pipeline();
+        let mut rig = pipeline();
+        let mut p = rig.pipeline();
         let a = asset(1);
 
         // Register asset on domain 1 (source)
@@ -381,7 +423,8 @@ mod tests {
 
     #[test]
     fn full_round_trip_lock_mint_burn_unlock() {
-        let mut p = pipeline();
+        let mut rig = pipeline();
+        let mut p = rig.pipeline();
         let a = asset(2);
 
         p.register_asset(a, 1).unwrap();
@@ -398,7 +441,7 @@ mod tests {
         p.mint(&mint_msg, 0).unwrap();
 
         // Burn on target domain (sends back to source)
-        let burn_event = p.burn(lock_msg_id, 2, 200, 1000).unwrap();
+        let burn_event = p.burn(lock_msg_id, 2, 200, 1000, [7u8; 20]).unwrap();
         assert!(burn_event.message.is_some());
         assert_eq!(p.relayer().pending_count(), 1); // burn relay pending
 
@@ -430,7 +473,8 @@ mod tests {
 
     #[test]
     fn lock_rejects_unknown_asset() {
-        let mut p = pipeline();
+        let mut rig = pipeline();
+        let mut p = rig.pipeline();
         let a = asset(99);
         let err = p
             .lock(1, 2, 100, a, owner(), recipient(), 100, 1000)
@@ -440,7 +484,8 @@ mod tests {
 
     #[test]
     fn mint_rejects_wrong_message_kind() {
-        let mut p = pipeline();
+        let mut rig = pipeline();
+        let mut p = rig.pipeline();
         let a = asset(3);
         p.register_asset(a, 1).unwrap();
 
@@ -459,7 +504,8 @@ mod tests {
 
     #[test]
     fn relay_without_event_tree_fails() {
-        let mut p = pipeline();
+        let mut rig = pipeline();
+        let mut p = rig.pipeline();
         let bad_proof = MerkleProof {
             leaf: hash(b"bad"),
             index: 0,
@@ -475,7 +521,8 @@ mod tests {
 
     #[test]
     fn event_tree_grows_with_locks() {
-        let mut p = pipeline();
+        let mut rig = pipeline();
+        let mut p = rig.pipeline();
         let a1 = asset(10);
         let a2 = asset(11);
         p.register_asset(a1, 1).unwrap();
@@ -503,8 +550,36 @@ mod tests {
         AssetId(hash(&[id]))
     }
 
-    fn pipeline() -> BridgeRelayerPipeline {
-        BridgeRelayerPipeline::new(RelayerConfig::default())
+    /// Owned state + a borrow-based pipeline over it: the production shape
+    /// (BLG-0117/P05-F10) - one state, the pipeline borrowing it.
+    struct Rig {
+        bridge: BridgeState,
+        relayer: UniversalRelayer,
+        messages: CrossDomainMessageRegistry,
+    }
+
+    impl Rig {
+        fn new() -> Self {
+            Self {
+                bridge: BridgeState::new(),
+                relayer: UniversalRelayer::new(
+                    crate::cross_domain::relayer::RelayerConfig::default(),
+                ),
+                messages: CrossDomainMessageRegistry::new(),
+            }
+        }
+
+        fn pipeline(&mut self) -> BridgeRelayerPipeline<'_> {
+            BridgeRelayerPipeline::from_parts(
+                &mut self.bridge,
+                &mut self.relayer,
+                &mut self.messages,
+            )
+        }
+    }
+
+    fn pipeline() -> Rig {
+        Rig::new()
     }
 
     fn owner() -> Address {
@@ -522,7 +597,8 @@ mod tests {
     /// refuses it and the lock has to undo itself.
     #[test]
     fn a_lock_whose_message_is_refused_leaves_the_bridge_untouched() {
-        let mut p = pipeline();
+        let mut rig = pipeline();
+        let mut p = rig.pipeline();
         let a = asset(7);
         p.register_asset(a, 1).unwrap();
         let root_before = p.bridge_state().root();
@@ -531,7 +607,8 @@ mod tests {
         // first. `lock` consumes nonce 0 for (1, 2, owner), so the derived
         // message uses nonce 0 as well.
         let dry = {
-            let mut scratch = pipeline();
+            let mut scratch_rig = pipeline();
+            let mut scratch = scratch_rig.pipeline();
             scratch.register_asset(a, 1).unwrap();
             scratch
                 .lock(1, 2, 100, a, owner(), recipient(), 1000, 1000)
@@ -569,7 +646,8 @@ mod tests {
     /// transfer `Minted`, so it can still be burned once the conflict clears.
     #[test]
     fn a_burn_whose_message_is_refused_leaves_the_transfer_minted() {
-        let mut p = pipeline();
+        let mut rig = pipeline();
+        let mut p = rig.pipeline();
         let a = asset(8);
         p.register_asset(a, 1).unwrap();
         let lock_event = p
@@ -584,9 +662,9 @@ mod tests {
 
         // Pre-register the burn message the next burn will derive.
         let dry_burn = {
-            let mut scratch = p.bridge.clone();
+            let mut scratch = p.bridge_state().clone();
             scratch
-                .burn_with_event(lock_msg_id, 2, 200, 0, 1000)
+                .burn_with_event(lock_msg_id, 2, 200, 0, 1000, [7u8; 20])
                 .unwrap()
                 .message
                 .unwrap()
@@ -594,7 +672,7 @@ mod tests {
         p.messages.insert(dry_burn.clone()).unwrap();
         let root_before = p.bridge_state().root();
 
-        let err = p.burn(lock_msg_id, 2, 200, 1000).unwrap_err();
+        let err = p.burn(lock_msg_id, 2, 200, 1000, [7u8; 20]).unwrap_err();
         assert!(
             matches!(err, PipelineError::MessageRegistry(_)),
             "got: {err}"
@@ -611,7 +689,8 @@ mod tests {
     /// The error names the kind that arrived, not a placeholder.
     #[test]
     fn an_unexpected_kind_is_reported_by_name() {
-        let mut p = pipeline();
+        let mut rig = pipeline();
+        let mut p = rig.pipeline();
         let a = asset(9);
         p.register_asset(a, 1).unwrap();
         let lock_event = p
@@ -640,7 +719,8 @@ mod tests {
 
     #[test]
     fn pipeline_register_asset_rejects_duplicate() {
-        let mut p = pipeline();
+        let mut rig = pipeline();
+        let mut p = rig.pipeline();
         let a = asset(50);
         p.register_asset(a, 1).unwrap();
         let err = p.register_asset(a, 1).unwrap_err();
@@ -649,7 +729,8 @@ mod tests {
 
     #[test]
     fn pipeline_burn_rejects_unminted_transfer() {
-        let mut p = pipeline();
+        let mut rig = pipeline();
+        let mut p = rig.pipeline();
         let a = asset(51);
         p.register_asset(a, 1).unwrap();
 
@@ -660,20 +741,22 @@ mod tests {
         let msg_id = event.message.as_ref().unwrap().message_id;
 
         // Burn should fail (transfer is Locked, not Minted)
-        let err = p.burn(msg_id, 2, 200, 1000).unwrap_err();
+        let err = p.burn(msg_id, 2, 200, 1000, [7u8; 20]).unwrap_err();
         assert!(matches!(err, PipelineError::Bridge(_)));
     }
 
     #[test]
     fn pipeline_sweep_expired_locks_returns_empty_initially() {
-        let mut p = pipeline();
+        let mut rig = pipeline();
+        let mut p = rig.pipeline();
         let released = p.sweep_expired_locks(10000);
         assert!(released.is_empty());
     }
 
     #[test]
     fn pipeline_bridge_state_root_is_deterministic() {
-        let mut p = pipeline();
+        let mut rig = pipeline();
+        let mut p = rig.pipeline();
         let a = asset(52);
         p.register_asset(a, 1).unwrap();
 
