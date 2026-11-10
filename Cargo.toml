@@ -143,7 +143,7 @@ sha2_010 = { package = "sha2", version = "0.10" }
 # the CVE-2026-24850 and RUSTSEC-2025-0144 fixes) and `libcrux-ml-dsa` (portable
 # backend only: `simd128` and `simd256` stay off, so the AVX2 advisories
 # RUSTSEC-2026-0125 and RUSTSEC-2026-0126 have no code path here).
-ml-dsa = { version = "=0.1.1", features = ["alloc", "rand_core", "zeroize"] }
+ml-dsa = { version = "=0.1.2", features = ["alloc", "rand_core", "zeroize"] }
 libcrux-ml-dsa = { version = "=0.0.11", default-features = false, features = ["std", "mldsa65", "mldsa87"] }
 # SLH-DSA (FIPS 205): recovery key, Root Seal, cold committee. One library, so
 # the ACVP vectors in `tests/vectors/pq` are mandatory.
