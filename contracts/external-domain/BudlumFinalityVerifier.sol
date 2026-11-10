@@ -7,6 +7,7 @@ pragma solidity 0.8.26;
 interface IBudlumFinality {
     function rootAtHeight(uint64 height) external view returns (bytes32);
     function heightFinal(uint64 height) external view returns (bool);
+    function latestFinalHeight() external view returns (uint64);
 }
 
 /// @title BudlumFinalityVerifier
@@ -83,6 +84,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
     mapping(uint64 => bytes32) public pendingRootAtHeight;
     mapping(uint64 => bytes32) public pendingAttestationAtHeight;
     mapping(uint64 => bool) public override heightFinal;
+    uint64 public override latestFinalHeight;
     mapping(bytes32 => Challenge) public challenges;
     mapping(bytes32 => bool) public fraudulent;
     mapping(uint64 => mapping(bytes32 => bool)) public fraudulentRoot;
@@ -250,6 +252,9 @@ contract BudlumFinalityVerifier is IBudlumFinality {
             accepted[identity] = true;
             rootAtHeight[a.height] = a.stateRoot;
             heightFinal[a.height] = true;
+            if (a.height > latestFinalHeight) {
+                latestFinalHeight = a.height;
+            }
             if (pendingDigest == identity) {
                 pendingAttestationAtHeight[a.height] = bytes32(0);
                 pendingRootAtHeight[a.height] = bytes32(0);
@@ -351,6 +356,9 @@ contract BudlumFinalityVerifier is IBudlumFinality {
             pendingRootAtHeight[c.height] = bytes32(0);
             rootAtHeight[c.height] = c.stateRoot;
             heightFinal[c.height] = true;
+            if (c.height > latestFinalHeight) {
+                latestFinalHeight = c.height;
+            }
         }
         c.resolved = true;
         accepted[digest] = true;

@@ -2208,24 +2208,25 @@ impl StorageRegistry {
         owner: Address,
         commit: crate::storage::ConfidentialBodyCommit,
     ) -> Result<[u8; 32], String> {
-        if let Some(m) = self.manifests.get(&commit.content_id) {
-            if !m.edition.admits_body() {
-                return Err(String::from(
-                    "confidential body commit refused: registered manifest is Three (recipe-only); bodies are Classic/2.0",
-                ));
-            }
-            // Defence in depth for the authority order in `owner_of`: a commit
-            // registered against somebody else's manifest would leave two
-            // records disagreeing about who speaks for the content. Refusing it
-            // here means the disagreement never exists to be resolved.
-            if let Some(manifest_owner) = self.owner_of(&commit.content_id) {
-                if manifest_owner != owner {
-                    return Err(format!(
-                        "confidential body commit refused: 0x{:?} is registered to {manifest_owner:?}",
-                        commit.content_id
-                    ));
-                }
-            }
+        // A body commit names the owner of an object the chain cannot see, so
+        // the only authority it may carry is one the chain can check: a
+        // registered manifest whose recorded owner is `owner`.
+        let Some(m) = self.manifests.get(&commit.content_id) else {
+            return Err(format!(
+                "confidential body commit refused: 0x{:?} has no registered manifest, so the chain cannot check who owns it",
+                commit.content_id
+            ));
+        };
+        if !m.edition.admits_body() {
+            return Err(String::from(
+                "confidential body commit refused: registered manifest is Three (recipe-only); bodies are Classic/2.0",
+            ));
+        }
+        if self.owner_of(&commit.content_id) != Some(owner) {
+            return Err(format!(
+                "confidential body commit refused: 0x{:?} is not registered to {owner:?}",
+                commit.content_id
+            ));
         }
         let commitment = commit.commitment();
         let content_id = commit.content_id;
@@ -5039,6 +5040,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn confidential_commit_as_refuses_unmanifested_or_foreign_content_id() {
+        use crate::storage::{
+            ConfidentialBodyCommit, ConfidentialProofKind, ContentCipher, ContentEncryption,
+        };
+        let mut reg = StorageRegistry::new();
+        let attacker = Address::from([0xEE; 32]);
+        let victim = Address::from([0x11; 32]);
+        let mut m = ContentManifest::from_bytes_sliced(b"classic private body bytes!!", 8).unwrap();
+        m.owner = victim;
+        let commit = ConfidentialBodyCommit::new(
+            m.manifest_id,
+            ContentEncryption::ClientSide(ContentCipher::Aes256Gcm),
+            [7u8; 32],
+            ConfidentialProofKind::HybridZkTee,
+        )
+        .unwrap();
+        // Un-manifested id: refused, owner_of stays None.
+        assert!(reg
+            .register_confidential_commit_as(attacker, commit.clone())
+            .is_err());
+        assert_eq!(reg.owner_of(&m.manifest_id), None);
+
+        // Manifest registered to victim: attacker still refused, victim succeeds.
+        reg.register_manifest(&m);
+        assert!(reg
+            .register_confidential_commit_as(attacker, commit.clone())
+            .is_err());
+        assert_eq!(reg.owner_of(&m.manifest_id), Some(victim));
+        assert!(reg.register_confidential_commit_as(victim, commit).is_ok());
+    }
+
     /// A manifest claim outranks a confidential body commit.
     ///
     /// `owner_of` resolves who may issue a view grant, declare a self-host
@@ -6035,10 +6068,13 @@ mod tests {
             )
         };
 
+        let kp1 = WalletKeyPair::generate();
+        let mut m1 = m.clone();
+        m1.owner = kp1.address();
         let mut reg = StorageRegistry::new();
-        reg.register_manifest(&m);
+        reg.register_manifest(&m1);
         let before = reg.root();
-        let (commit, auth) = signed_commit(&WalletKeyPair::generate());
+        let (commit, auth) = signed_commit(&kp1);
         reg.register_confidential_commit(commit, &auth).unwrap();
         let after = reg.root();
         assert_ne!(before, after, "the body commit must reach the root");
@@ -6046,9 +6082,12 @@ mod tests {
         // The owner alone moves the root too: same commitment, different
         // speaker. A fold over the commitments only would let a node swap who
         // owns an object without any state-root change.
+        let kp2 = WalletKeyPair::generate();
+        let mut m2 = m.clone();
+        m2.owner = kp2.address();
         let mut other_registry = StorageRegistry::new();
-        other_registry.register_manifest(&m);
-        let (commit2, auth2) = signed_commit(&WalletKeyPair::generate());
+        other_registry.register_manifest(&m2);
+        let (commit2, auth2) = signed_commit(&kp2);
         other_registry
             .register_confidential_commit(commit2, &auth2)
             .unwrap();
@@ -9371,7 +9410,10 @@ mod demand_driven_replication_tests {
             ConfidentialBodyCommit, ConfidentialProofKind, ContentCipher, ContentEncryption,
         };
 
-        let m = ContentManifest::from_bytes_sliced(b"classic private body bytes!!", 8).unwrap();
+        let kp = WalletKeyPair::generate();
+        let owner = kp.address();
+        let mut m = ContentManifest::from_bytes_sliced(b"classic private body bytes!!", 8).unwrap();
+        m.owner = owner;
         let mut reg = StorageRegistry::new();
         reg.register_manifest(&m);
         let commit = ConfidentialBodyCommit::new(
@@ -9381,8 +9423,6 @@ mod demand_driven_replication_tests {
             ConfidentialProofKind::HybridZkTee,
         )
         .unwrap();
-        let kp = WalletKeyPair::generate();
-        let owner = kp.address();
         let digest = crate::storage::confidential_commit_digest(&commit, &owner);
         let auth = crate::storage::GrantAuthorization {
             owner_key: kp.public_key_bytes(),
