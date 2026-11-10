@@ -4505,6 +4505,52 @@ impl StorageRegistry {
         self.deals.values()
     }
 
+    /// Union byte count of non-self retrieval challenges on `deal_id` that
+    /// resolved `ChallengeOutcome::Answered`, gated by `proofs_checkable`.
+    #[must_use]
+    pub(crate) fn verified_challenge_bytes_with_gate(
+        &self,
+        deal_id: u64,
+        operator: Address,
+        proofs_checkable: bool,
+    ) -> u64 {
+        if !proofs_checkable {
+            return 0;
+        }
+        let mut ranges: Vec<(u64, u64)> = self
+            .challenges
+            .values()
+            .filter(|c| {
+                c.deal_id == deal_id
+                    && c.opener != operator
+                    && c.byte_end > c.byte_start
+                    && self
+                        .results
+                        .get(&c.challenge_id)
+                        .is_some_and(|r| r.outcome == ChallengeOutcome::Answered)
+            })
+            .map(|c| (c.byte_start, c.byte_end))
+            .collect();
+        ranges.sort_unstable();
+        let mut iter = ranges.into_iter();
+        let Some((mut cur_start, mut cur_end)) = iter.next() else {
+            return 0;
+        };
+        let mut total = 0u64;
+        for (start, end) in iter {
+            if start <= cur_end {
+                if end > cur_end {
+                    cur_end = end;
+                }
+            } else {
+                total = total.saturating_add(cur_end - cur_start);
+                cur_start = start;
+                cur_end = end;
+            }
+        }
+        total.saturating_add(cur_end - cur_start)
+    }
+
     pub fn all_deals(&self) -> Vec<&StorageDeal> {
         self.deals.values().collect()
     }

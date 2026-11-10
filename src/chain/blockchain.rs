@@ -8275,6 +8275,27 @@ impl Blockchain {
         state: &mut AccountState,
         boost_share: u64,
     ) -> Result<(), String> {
+        Self::distribute_bud_boost_share_with_proof_gate(
+            state,
+            boost_share,
+            crate::domain::storage_deal::StorageRegistry::storage_challenge_proofs_are_checkable(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn distribute_bud_boost_share_for_test(
+        state: &mut AccountState,
+        boost_share: u64,
+        proofs_checkable: bool,
+    ) -> Result<(), String> {
+        Self::distribute_bud_boost_share_with_proof_gate(state, boost_share, proofs_checkable)
+    }
+
+    fn distribute_bud_boost_share_with_proof_gate(
+        state: &mut AccountState,
+        boost_share: u64,
+        proofs_checkable: bool,
+    ) -> Result<(), String> {
         if boost_share == 0 {
             return Ok(());
         }
@@ -8283,13 +8304,21 @@ impl Blockchain {
             .all_deals()
             .iter()
             .filter(|deal| deal.is_active() && deal.payer != Some(deal.operator))
-            // Weight by verified stored shard bytes capped by locked slashable
-            // operator bond rather than caller-chosen refundable deal price, so
-            // permissionless self-deals or inflated fee rates cannot capture the pool.
+            // Weight strictly by challenge-verified byte ranges (from non-self
+            // openers, gated on `storage_challenge_proofs_are_checkable`) capped
+            // by `shard_bytes` and locked `operator_bond`, never by the
+            // caller-declared `shard_bytes` alone.
             .map(|deal| {
+                let verified = state.storage_registry.verified_challenge_bytes_with_gate(
+                    deal.deal_id,
+                    deal.operator,
+                    proofs_checkable,
+                );
                 (
                     deal.operator,
-                    deal.shard_bytes.min(deal.economics.operator_bond),
+                    verified
+                        .min(deal.shard_bytes)
+                        .min(deal.economics.operator_bond),
                 )
             })
             .filter(|(_, weight)| *weight > 0)
@@ -9071,7 +9100,31 @@ mod tests {
             .unwrap();
         let boost_share = 10_000_000_000u64;
         let before = state.get_balance(&operator);
+        // Unverified caller-declared shard size alone earns zero boost share.
+        state.pending_bud_boost_share = boost_share;
         Blockchain::distribute_bud_boost_share_in_state(&mut state, boost_share).unwrap();
+        assert_eq!(state.get_balance(&operator), before);
+        assert_eq!(state.pending_bud_boost_share, 0);
+
+        // Once an independent challenge is answered under a checkable proof gate,
+        // the verified byte range weights the distribution without overflow.
+        let deal_id = state.storage_registry.all_deals()[0].deal_id;
+        let cid = state
+            .storage_registry
+            .open_challenge(deal_id, 0, 4, 110, 120, Address::from([0x99; 32]), 50)
+            .unwrap();
+        state
+            .storage_registry
+            .answer_challenge(
+                cid,
+                crate::storage::content_id::ContentId([1u8; 32]),
+                operator,
+                115,
+                Some(b"test-mock-proof"),
+            )
+            .unwrap();
+        Blockchain::distribute_bud_boost_share_with_proof_gate(&mut state, boost_share, true)
+            .unwrap();
         assert_eq!(state.get_balance(&operator), before + boost_share);
         assert_eq!(state.pending_bud_boost_share, 0);
     }
@@ -11868,7 +11921,34 @@ mod bond_and_reorg_tests {
 
         let honest_before = state.get_balance(&honest_op);
         let self_before = state.get_balance(&self_deal_op);
-        Blockchain::distribute_bud_boost_share_in_state(&mut state, 1_000).unwrap();
+        // Without a verified challenge answer, caller-declared shard sizes earn zero.
+        Blockchain::distribute_bud_boost_share_with_proof_gate(&mut state, 1_000, true).unwrap();
+        assert_eq!(state.get_balance(&honest_op), honest_before);
+
+        // Answer independent challenges on both deals; self-funded deal still gets zero.
+        for d in state
+            .storage_registry
+            .all_deals()
+            .into_iter()
+            .map(|d| (d.deal_id, d.operator, d.shard_bytes))
+            .collect::<Vec<_>>()
+        {
+            let cid = state
+                .storage_registry
+                .open_challenge(d.0, 0, d.2, 1, 4, client, 50)
+                .unwrap();
+            state
+                .storage_registry
+                .answer_challenge(
+                    cid,
+                    crate::storage::content_id::ContentId([1u8; 32]),
+                    d.1,
+                    2,
+                    Some(b"test-mock-proof"),
+                )
+                .unwrap();
+        }
+        Blockchain::distribute_bud_boost_share_with_proof_gate(&mut state, 1_000, true).unwrap();
 
         assert_eq!(state.get_balance(&honest_op), honest_before + 1_000);
         assert_eq!(
