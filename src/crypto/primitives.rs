@@ -914,7 +914,7 @@ pub fn wallet_address_from_ml_dsa_87_public_key(
 /// This form reads the statuses of a fresh genesis: every path that decides on
 /// behalf of a chain calls [`verify_ml_dsa_87_signature_in`] with the
 /// chain-state registry.
-pub fn verify_ml_dsa_87_signature(
+fn verify_ml_dsa_87_signature(
     ctx: &[u8],
     message: &[u8],
     signature: &[u8],
@@ -982,7 +982,7 @@ pub fn verify_ml_dsa_87_signature_in(
 }
 
 #[cfg(not(feature = "wallet-ml-dsa"))]
-pub fn verify_ml_dsa_87_signature(
+fn verify_ml_dsa_87_signature(
     _ctx: &[u8],
     _message: &[u8],
     _signature: &[u8],

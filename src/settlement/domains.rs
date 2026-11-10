@@ -607,20 +607,25 @@ pub fn verify_commitment_finality_observed(
                 reg.record.last_accepted_height,
             )
             .max(domain.last_committed_height);
+            let has_quorum_policy = state
+                .settlement
+                .external_intake
+                .quorum
+                .policy_of(&key)
+                .is_some();
             let eval_adapter = entry.spec.build(is_eth_sync.then(bls), None);
             let evaluated = state
                 .settlement
                 .external_intake
                 .registry
-                .evaluate(eval_adapter.as_ref(), &evidence, &policy)
+                .evaluate_for_commitment(
+                    eval_adapter.as_ref(),
+                    &evidence,
+                    &policy,
+                    has_quorum_policy,
+                )
                 .map_err(|e| format!("External domain policy refused commitment: {e}"))?;
-            if state
-                .settlement
-                .external_intake
-                .quorum
-                .policy_of(&key)
-                .is_some()
-            {
+            if has_quorum_policy {
                 let Some(committed_att) = reg
                     .attestations
                     .get(&(commitment.domain_height, evidence.evidence_version))
