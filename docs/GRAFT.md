@@ -108,7 +108,11 @@ An application checks a payment itself:
    reached from its trust anchor.
 
 A payment is provable once a checkpoint passes after it (every 5 blocks on
-the testnet), and while it stays in the window.
+the testnet), and while it stays in the window. On EVM chains,
+`BudlumPaymentReceiver` binds `origin_recipient` to
+`abi.encode("budlum/graft/payment-target/v1", block.chainid, address(receiver))`
+and refuses checkpoint headers older than 30 days so a proof cannot be replayed
+against another deployment or after leaving the active window.
 
 ## 6. Intents (level 2)
 

@@ -376,6 +376,23 @@ pub fn register_relayed_cross_domain_on_state(
     state: &mut crate::core::account::AccountState,
     message: &CrossDomainMessage,
 ) -> Result<(), String> {
+    let source_domain = state
+        .settlement
+        .domains
+        .get(message.source_domain)
+        .ok_or_else(|| format!("unknown source domain {}", message.source_domain))?;
+    if source_domain.status != crate::domain::types::DomainStatus::Active {
+        return Err(format!(
+            "source domain {} is not active (status={:?})",
+            message.source_domain, source_domain.status
+        ));
+    }
+    if !source_domain.bridge_enabled {
+        return Err(format!(
+            "source domain {} is not bridge-enabled",
+            message.source_domain
+        ));
+    }
     let derived = state
         .settlement
         .domains
@@ -387,9 +404,14 @@ pub fn register_relayed_cross_domain_on_state(
             message.source_quantum_class, derived, message.source_domain
         ));
     }
+    let anchored_height = state
+        .settlement
+        .commitments
+        .earliest_accepted_height(message.source_domain, message.source_height);
     crate::core::account::enforce_classical_message_intake(
         message,
         state.settlement.quantum.alarm(),
+        anchored_height,
         state.current_block_height,
     )?;
     register_cross_domain_on_state(state, message)
@@ -627,6 +649,44 @@ mod tests {
         assert!(
             held_err.contains("held by the quantum alarm"),
             "got: {held_err}"
+        );
+
+        // 5) Unknown, frozen, or bridge-disabled source domains are refused at
+        //    the relayed doors before any row reaches the message registry.
+        let mut unknown_state = AccountState::new();
+        unknown_state.add_balance(
+            &relayer,
+            min_stake.saturating_mul(4).saturating_add(1_000_000),
+        );
+        unknown_state
+            .bond_relayer(&relayer, min_stake)
+            .expect("bond relayer");
+        let unknown_msg = build_msg(5, None, true);
+        let unknown_err = register_relayed_on_state(&mut unknown_state, &unknown_msg, relayer)
+            .expect_err("unknown source domain must be refused");
+        assert!(
+            unknown_err.contains("unknown source domain"),
+            "got: {unknown_err}"
+        );
+
+        let mut disabled_dom = crate::domain::plugin::default_domain(
+            2,
+            crate::domain::ConsensusKind::PoW,
+            2000,
+            crate::domain::POW_HEADER_CHAIN_ADAPTER,
+            1,
+        );
+        disabled_dom.bridge_enabled = false;
+        unknown_state
+            .settlement
+            .domains
+            .register(disabled_dom)
+            .expect("register bridge-disabled domain");
+        let disabled_err = register_relayed_on_state(&mut unknown_state, &unknown_msg, relayer)
+            .expect_err("bridge-disabled source domain must be refused");
+        assert!(
+            disabled_err.contains("not bridge-enabled"),
+            "got: {disabled_err}"
         );
     }
 }

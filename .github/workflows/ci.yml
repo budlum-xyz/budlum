@@ -1462,7 +1462,7 @@ jobs:
           - { name: root, manifest: "./Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: budzero, manifest: "budzero/Cargo.toml", config: "" }
           - { name: bud, manifest: "bud/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: fuzz, manifest: "fuzz/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: fuzz, manifest: "fuzz/Cargo.toml", config: "--config .quality/deny-fuzz.toml" }
           - { name: ai-inference, manifest: "crates/ai-inference/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: bpqs, manifest: "crates/bpqs/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: budscan, manifest: "crates/budscan/Cargo.toml", config: "--config .quality/deny.toml" }
@@ -1501,7 +1501,7 @@ jobs:
           - { name: root, manifest: "./Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: budzero, manifest: "budzero/Cargo.toml", config: "" }
           - { name: bud, manifest: "bud/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: fuzz, manifest: "fuzz/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: fuzz, manifest: "fuzz/Cargo.toml", config: "--config .quality/deny-fuzz.toml" }
           - { name: ai-inference, manifest: "crates/ai-inference/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: bpqs, manifest: "crates/bpqs/Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: budscan, manifest: "crates/budscan/Cargo.toml", config: "--config .quality/deny.toml" }

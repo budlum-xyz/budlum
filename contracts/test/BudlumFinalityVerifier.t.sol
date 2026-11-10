@@ -172,4 +172,22 @@ contract BudlumFinalityVerifierTest is Harness {
         vm.expectPartialRevert(BudlumFinalityVerifier.ConflictingRoot.selector);
         bls.verify(_attestation(42, bytes32(uint256(8))));
     }
+
+    function test_F06_a_mutated_ml_dsa_blob_cannot_shadow_the_committee_attestation() public {
+        BudlumFinalityVerifier bls = verifier;
+        bytes32 root = bytes32(uint256(7));
+        Attestation memory malleable = _attestation(42, root);
+        malleable.mlDsaSignature = _filled(3309, 0xAA);
+        bytes32 malleableDigest = bls.verify(malleable);
+
+        Attestation memory committeeAtt = _attestation(42, root);
+        bytes32 committeeDigest = bls.verify(committeeAtt);
+        assertTrue(malleableDigest != committeeDigest, "distinct envelope digests");
+
+        vm.roll(block.number + WINDOW);
+        bls.settle(malleableDigest);
+        bls.settle(committeeDigest);
+        assertTrue(bls.isAccepted(committeeDigest), "committee digest accepted");
+        assertTrue(bls.isAccepted(bls.pendingIdentity(42, root)), "substance identity accepted");
+    }
 }

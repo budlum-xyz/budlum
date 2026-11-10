@@ -3761,7 +3761,7 @@ dependencies = [
  "p3-matrix",
  "p3-maybe-rayon",
  "p3-util",
- "spin 0.12.2",
+ "spin 0.12.3",
  "tracing",
 ]
 
@@ -3798,7 +3798,7 @@ dependencies = [
  "p3-util",
  "rand 0.10.3",
  "serde",
- "spin 0.12.2",
+ "spin 0.12.3",
  "thiserror 2.0.21",
  "tracing",
 ]
@@ -3819,7 +3819,7 @@ dependencies = [
  "p3-util",
  "rand 0.10.3",
  "serde",
- "spin 0.12.2",
+ "spin 0.12.3",
 ]
 
 [[package]]
@@ -3882,7 +3882,7 @@ dependencies = [
  "p3-util",
  "rand 0.10.3",
  "serde",
- "spin 0.12.2",
+ "spin 0.12.3",
  "thiserror 2.0.21",
  "tracing",
 ]
@@ -5331,9 +5331,9 @@ dependencies = [
 
 [[package]]
 name = "spin"
-version = "0.12.2"
+version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8abadc99fd9c7bbb7d0ca2b31d72a067d0c0dcd7aad25ab8cac71ba91417694b"
+checksum = "0134f9043ed38b087ac4f7d4af44c79e2c9e5094421fe3164f435ce585953b10"
 dependencies = [
  "lock_api",
 ]
@@ -5473,7 +5473,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

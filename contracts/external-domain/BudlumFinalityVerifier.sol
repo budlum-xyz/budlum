@@ -149,6 +149,10 @@ contract BudlumFinalityVerifier is IBudlumFinality {
                 || _probeRejectsMalformed(PRECOMPILE_MLDSA_ETH);
     }
 
+    function pendingIdentity(uint64 height, bytes32 stateRoot) public pure returns (bytes32) {
+        return keccak256(abi.encode("bud-attestation-pending-v1", height, stateRoot));
+    }
+
     function attestationDigest(Attestation calldata a) public pure returns (bytes32) {
         return keccak256(
             abi.encode(
@@ -212,8 +216,9 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         if (held != bytes32(0) && held != a.stateRoot && heightFinal[a.height]) {
             revert ConflictingRoot(a.height, held, a.stateRoot);
         }
+        bytes32 identity = pendingIdentity(a.height, a.stateRoot);
         bytes32 pendingDigest = pendingAttestationAtHeight[a.height];
-        if (pendingDigest != bytes32(0) && pendingDigest != digest) {
+        if (pendingDigest != bytes32(0) && pendingDigest != identity) {
             revert PendingAttestation(a.height, pendingDigest);
         }
         bytes32 pendingRoot = pendingRootAtHeight[a.height];
@@ -242,8 +247,13 @@ contract BudlumFinalityVerifier is IBudlumFinality {
 
         if (blsOk && pqOk) {
             accepted[digest] = true;
+            accepted[identity] = true;
             rootAtHeight[a.height] = a.stateRoot;
             heightFinal[a.height] = true;
+            if (pendingDigest == identity) {
+                pendingAttestationAtHeight[a.height] = bytes32(0);
+                pendingRootAtHeight[a.height] = bytes32(0);
+            }
             emit AttestationVerified(digest, a.height, a.stateRoot);
             return digest;
         }
@@ -267,7 +277,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
             stateRoot: a.stateRoot
         });
         pendingRootAtHeight[a.height] = a.stateRoot;
-        pendingAttestationAtHeight[a.height] = digest;
+        pendingAttestationAtHeight[a.height] = identity;
         emit AttestationOptimistic(digest, a.height, reason);
     }
 
@@ -285,12 +295,14 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         }
         uint64 challengeHeight = c.height;
         bytes32 challengeRoot = c.stateRoot;
+        bytes32 challengeIdentity = pendingIdentity(challengeHeight, challengeRoot);
         c.challenger = msg.sender;
         c.resolved = true;
         fraudulent[digest] = true;
         fraudulentRoot[challengeHeight][challengeRoot] = true;
         accepted[digest] = false;
-        if (pendingAttestationAtHeight[challengeHeight] == digest) {
+        accepted[challengeIdentity] = false;
+        if (pendingAttestationAtHeight[challengeHeight] == challengeIdentity) {
             pendingAttestationAtHeight[challengeHeight] = bytes32(0);
             pendingRootAtHeight[challengeHeight] = bytes32(0);
         }
@@ -326,16 +338,23 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         if (held != bytes32(0) && held != c.stateRoot) {
             revert ConflictingRoot(c.height, held, c.stateRoot);
         }
-        if (pendingAttestationAtHeight[c.height] != digest
-            || pendingRootAtHeight[c.height] != c.stateRoot) {
+        bytes32 identity = pendingIdentity(c.height, c.stateRoot);
+        bool sameFinalized = heightFinal[c.height] && rootAtHeight[c.height] == c.stateRoot;
+        if (!sameFinalized
+            && (pendingAttestationAtHeight[c.height] != identity
+                || pendingRootAtHeight[c.height] != c.stateRoot))
+        {
             revert PendingAttestation(c.height, pendingAttestationAtHeight[c.height]);
         }
-        pendingAttestationAtHeight[c.height] = bytes32(0);
-        pendingRootAtHeight[c.height] = bytes32(0);
+        if (!sameFinalized) {
+            pendingAttestationAtHeight[c.height] = bytes32(0);
+            pendingRootAtHeight[c.height] = bytes32(0);
+            rootAtHeight[c.height] = c.stateRoot;
+            heightFinal[c.height] = true;
+        }
         c.resolved = true;
         accepted[digest] = true;
-        rootAtHeight[c.height] = c.stateRoot;
-        heightFinal[c.height] = true;
+        accepted[identity] = true;
         emit ChallengeProven(digest, c.challenger, false);
     }
 

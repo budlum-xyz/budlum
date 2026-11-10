@@ -239,7 +239,7 @@ contract GraftTest is Harness {
             payer: bytes32(uint256(9)),
             recipient: bytes32(uint256(10)),
             amount: 500,
-            originRecipient: hex"aa",
+            originRecipient: abi.encode("budlum/graft/payment-target/v1", block.chainid, address(receiver)),
             memoHash: bytes32(0),
             paidAtBlock: 3
         });
@@ -248,6 +248,7 @@ contract GraftTest is Harness {
         proof.paymentsRoot = receiver.paymentLeaf(proof.payment);
         proof.restHash = keccak256("rest");
         proof.header.version = 7;
+        proof.header.timestampMs = uint128(block.timestamp) * 1000;
         proof.header.checkpointHeight = 20;
         proof.header.hasGraftRoot = true;
         proof.header.graftRoot = receiver.graftRegistryRoot(proof.paymentsRoot, proof.restHash);
@@ -271,6 +272,28 @@ contract GraftTest is Harness {
         Receiver receiver = new Receiver(finality, graftId);
         PaymentProof memory proof = _proof(receiver, finality, graftId);
         proof.payment.amount = 501;
+        vm.expectPartialRevert(BudlumPaymentReceiver.ProofInvalid.selector);
+        receiver.consume(proof);
+    }
+
+    function test_a_payment_bound_to_another_receiver_is_refused() public {
+        FinalityStub finality = new FinalityStub();
+        bytes32 graftId = keccak256("app");
+        Receiver first = new Receiver(finality, graftId);
+        Receiver second = new Receiver(finality, graftId);
+        PaymentProof memory proof = _proof(first, finality, graftId);
+        assertEq(keccak256(bytes(second.checkPayment(proof))), keccak256("receiver binding"), "wrong receiver refused");
+        vm.expectPartialRevert(BudlumPaymentReceiver.ProofInvalid.selector);
+        second.consume(proof);
+    }
+
+    function test_a_stale_payment_proof_is_refused() public {
+        FinalityStub finality = new FinalityStub();
+        bytes32 graftId = keccak256("app");
+        Receiver receiver = new Receiver(finality, graftId);
+        PaymentProof memory proof = _proof(receiver, finality, graftId);
+        vm.warp(block.timestamp + 30 days + 1);
+        assertEq(keccak256(bytes(receiver.checkPayment(proof))), keccak256("proof too old"), "stale proof refused");
         vm.expectPartialRevert(BudlumPaymentReceiver.ProofInvalid.selector);
         receiver.consume(proof);
     }
