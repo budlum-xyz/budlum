@@ -298,6 +298,10 @@ impl PeerManager {
                 }
             }
         }
+        if self.peers.len() > self.max_tracked_peers {
+            let _ = self.prune_spent_records();
+            while self.peers.len() > self.max_tracked_peers && self.evict_stalest_penalty() {}
+        }
         true
     }
 
@@ -341,25 +345,28 @@ impl PeerManager {
                     self.last_empty_prune = None;
                 }
             }
-            if self.peers.len() >= self.max_tracked_peers
-                && !(self.connected_peers.contains(peer_id) && self.evict_stalest_penalty())
-            {
-                warn!(
-                    "Peer score table full ({}), refusing a record for {}",
-                    self.max_tracked_peers, peer_id
-                );
-                return None;
+            if self.peers.len() >= self.max_tracked_peers {
+                let is_connected = self.connected_peers.contains(peer_id);
+                let reclaimed = is_connected && self.evict_stalest_penalty();
+                let within_connected_headroom =
+                    is_connected && self.peers.len() < self.max_tracked_peers.saturating_add(1_024);
+                if !reclaimed && !within_connected_headroom {
+                    warn!(
+                        "Peer score table full ({}), refusing a record for {}",
+                        self.max_tracked_peers, peer_id
+                    );
+                    return None;
+                }
             }
         }
         Some(self.peers.entry(*peer_id).or_default())
     }
 
     /// Make room for a connected peer by dropping the least recently seen
-    /// unbanned, unconnected penalty record. A running ban is never dropped.
-    /// Connected peers are bounded by the connection limits, so this cannot
-    /// be driven faster than connections are admitted. Without it a table
-    /// full of fresh penalty records refuses to track a live peer, which
-    /// then can never complete its handshake.
+    /// unbanned, unconnected record. Running bans are never evicted here, so
+    /// admitting a connected peer can never clear an active ban; if every
+    /// tracked slot holds a live ban, connected peers use bounded session
+    /// headroom instead.
     fn evict_stalest_penalty(&mut self) -> bool {
         let connected = &self.connected_peers;
         let victim = self
@@ -408,6 +415,7 @@ impl PeerManager {
     /// score, so a live session does not lose its handshake to a table full
     /// of strangers.
     pub fn prune_spent_records(&mut self) -> usize {
+        self.cleanup_expired_bans();
         let before = self.peers.len();
         let connected = &self.connected_peers;
         self.peers.retain(|id, s| {
@@ -1678,5 +1686,60 @@ mod tests {
         manager.reload_banned_peers(&bans);
         assert!(manager.peers.len() <= 4);
         assert!(manager.get_banned_peers().len() <= 4);
+    }
+
+    #[test]
+    fn connected_peer_handshakes_when_table_is_saturated_with_running_bans() {
+        let mut manager = PeerManager::new();
+        manager.max_tracked_peers = 4;
+        let now = unix_now_secs();
+        let soonest_peer = test_peer_id();
+        let mut others = Vec::new();
+        for _ in 0..3 {
+            let p = test_peer_id();
+            others.push(p);
+        }
+        let bans = vec![
+            PersistedBan {
+                peer_id: soonest_peer.to_base58(),
+                expires_unix: now + 60,
+            },
+            PersistedBan {
+                peer_id: others[0].to_base58(),
+                expires_unix: now + 300,
+            },
+            PersistedBan {
+                peer_id: others[1].to_base58(),
+                expires_unix: now + 600,
+            },
+            PersistedBan {
+                peer_id: others[2].to_base58(),
+                expires_unix: now + 900,
+            },
+        ];
+        manager.reload_banned_peers(&bans);
+        assert_eq!(manager.tracked_peer_count(), 4);
+
+        let honest = test_peer_id();
+        assert!(manager.note_connected(honest, None));
+        assert!(
+            manager.check_rate_limit(&honest),
+            "connected peer must still be admitted when every unconnected slot holds a ban"
+        );
+        manager.set_handshaked(&honest, true);
+        assert!(manager.is_handshaked(&honest));
+        assert!(
+            manager.is_banned(&soonest_peer),
+            "admitting a connected peer must never evict a live ban"
+        );
+        for kept in &others {
+            assert!(manager.is_banned(kept), "longer-lived bans remain enforced");
+        }
+        assert!(manager.note_disconnected(&honest));
+        assert_eq!(
+            manager.tracked_peer_count(),
+            4,
+            "disconnecting sheds session headroom back to max_tracked_peers while keeping all bans"
+        );
     }
 }

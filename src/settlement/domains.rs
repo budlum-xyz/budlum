@@ -406,13 +406,6 @@ fn require_active_attester_authorities(
     proof: &FinalityProof,
     purpose: &str,
 ) -> Result<(), String> {
-    if state
-        .registry
-        .total_stake(crate::registry::role::roles::ATTESTER)
-        == 0
-    {
-        return Ok(());
-    }
     let check = |authority: &Address| {
         if state.registry.is_active_attester(authority) {
             Ok(())
@@ -423,11 +416,23 @@ fn require_active_attester_authorities(
         }
     };
     match proof {
-        FinalityProof::PoA { authorities, .. } => authorities.iter().try_for_each(check),
-        FinalityProof::PoAPq { authorities, .. } => authorities
-            .iter()
-            .try_for_each(|entry| check(&entry.authority)),
-        _ => Ok(()),
+        FinalityProof::PoA { authorities, .. } => {
+            if authorities.is_empty() {
+                return Err(format!("{purpose} proof carries no authorities"));
+            }
+            authorities.iter().try_for_each(check)
+        }
+        FinalityProof::PoAPq { authorities, .. } => {
+            if authorities.is_empty() {
+                return Err(format!("{purpose} proof carries no authorities"));
+            }
+            authorities
+                .iter()
+                .try_for_each(|entry| check(&entry.authority))
+        }
+        _ => Err(format!(
+            "{purpose} commitment finality requires PoA or PoAPq authority signatures that bind commitment roots"
+        )),
     }
 }
 
@@ -585,18 +590,57 @@ pub fn verify_commitment_finality_observed(
                     commitment.domain_id
                 ));
             };
-            let pairing = matches!(
+            let Some(reg) = state.settlement.external_intake.registry.domain(&key) else {
+                return Err(format!(
+                    "Domain {} external registration {} is missing from the framework registry",
+                    commitment.domain_id,
+                    hex::encode(key.0)
+                ));
+            };
+            let is_eth_sync = matches!(
                 entry.spec,
                 crate::cross_domain::external::AdapterSpec::EthereumSync { .. }
-            )
-            .then(bls);
-            // The policy's `now` is the verification
-            // time: the domain's committed external height, the only clock
-            // with evidence behind it.
+            );
             let mut policy = entry.policy.clone();
-            policy.now = policy.now.max(domain.last_committed_height);
+            policy.now = crate::cross_domain::external::live_policy_clock(
+                policy.now,
+                reg.record.last_accepted_height,
+            )
+            .max(domain.last_committed_height);
+            let eval_adapter = entry.spec.build(is_eth_sync.then(bls), None);
+            let evaluated = state
+                .settlement
+                .external_intake
+                .registry
+                .evaluate(eval_adapter.as_ref(), &evidence, &policy)
+                .map_err(|e| format!("External domain policy refused commitment: {e}"))?;
+            if state
+                .settlement
+                .external_intake
+                .quorum
+                .policy_of(&key)
+                .is_some()
+            {
+                let Some(committed_att) = reg
+                    .attestations
+                    .get(&(commitment.domain_height, evidence.evidence_version))
+                else {
+                    return Err(format!(
+                        "Domain {} height {} requires a decided external quorum attestation before advancing commitment",
+                        commitment.domain_id, commitment.domain_height
+                    ));
+                };
+                if committed_att.state_root != commitment.state_root
+                    || committed_att.state_root != evaluated.state_root
+                {
+                    return Err(format!(
+                        "Domain {} height {} commitment state root does not match decided external quorum attestation",
+                        commitment.domain_id, commitment.domain_height
+                    ));
+                }
+            }
             let bridge = crate::cross_domain::external::ExternalDomainFinalityBridge::new(
-                entry.spec.build(pairing, None),
+                entry.spec.build(is_eth_sync.then(bls), None),
                 policy,
             );
             if bridge.adapter_id() != evidence.adapter {
@@ -3172,5 +3216,170 @@ mod tests {
         )
         .expect_err("governance admission cannot authorize a native account's nonce");
         assert!(err.contains("account-owner authorization"), "got: {err}");
+    }
+
+    #[test]
+    fn attestation_finality_rejects_pos_bft_and_zero_stake_unregistered_poa() {
+        let state = AccountState::new();
+        assert_eq!(
+            state
+                .registry
+                .total_stake(crate::registry::role::roles::ATTESTER),
+            0
+        );
+        let kp = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let unregistered = Address::from(kp.public_key_bytes());
+        let poa_proof = FinalityProof::PoA {
+            authorities: vec![unregistered],
+            signatures: Vec::new(),
+        };
+        let err = require_active_attester_authorities(&state, &poa_proof, "Storage attestation")
+            .expect_err("zero total ATTESTER stake must not bypass active-attester check");
+        assert!(err.contains("not an active attester"), "got: {err}");
+
+        let empty_poa = FinalityProof::PoA {
+            authorities: Vec::new(),
+            signatures: Vec::new(),
+        };
+        let err_empty =
+            require_active_attester_authorities(&state, &empty_poa, "Storage attestation")
+                .expect_err("empty authority list must be refused");
+        assert!(err_empty.contains("no authorities"), "got: {err_empty}");
+
+        let raw_proof = FinalityProof::Raw(vec![1, 2, 3]);
+        let err_non_poa =
+            require_active_attester_authorities(&state, &raw_proof, "Execution attestation")
+                .expect_err("non-PoA/PoAPq proof must be refused for attestation finality");
+        assert!(
+            err_non_poa.contains("requires PoA or PoAPq"),
+            "got: {err_non_poa}"
+        );
+    }
+
+    #[test]
+    fn external_commitment_requires_decided_quorum_attestation_when_quorum_policy_configured() {
+        struct AcceptTestBls;
+        impl crate::cross_domain::external::BlsVerifier for AcceptTestBls {
+            fn verify_aggregate(
+                &self,
+                _signing_root: &[u8; 32],
+                aggregate_pubkey: &[u8],
+                signature: &[u8],
+                participants: u64,
+            ) -> Result<(), String> {
+                if participants == 0
+                    || signature.iter().all(|b| *b == 0)
+                    || aggregate_pubkey.iter().all(|b| *b == 0)
+                {
+                    return Err("invalid aggregate signature".to_string());
+                }
+                Ok(())
+            }
+        }
+        fn test_bls() -> Box<dyn crate::cross_domain::external::BlsVerifier> {
+            Box::new(AcceptTestBls)
+        }
+
+        let mut state = AccountState::new();
+        let spec = crate::cross_domain::external::AdapterSpec::EthereumSync {
+            network: "testnet".to_string(),
+            committee: Some(crate::cross_domain::external::ethereum::PinnedCommittee {
+                period: 0,
+                aggregate_pubkey: vec![0x11; 96],
+                next_committee_root: [0xbb; 32],
+            }),
+        };
+        let adapter = spec.build(Some(test_bls()), None);
+        let adapter_id = adapter.descriptor().id;
+
+        let build_eth_evidence = |height: u64, root: [u8; 32]| {
+            use crate::cross_domain::external::ethereum::layout;
+            let mut payload = vec![0u8; layout::LEN];
+            payload[layout::FINALIZED_ROOT].copy_from_slice(&[0xaa; 32]);
+            payload[layout::FINALIZED_SLOT].copy_from_slice(&height.to_le_bytes());
+            payload[layout::ATTESTED_SLOT].copy_from_slice(&(height + 64).to_le_bytes());
+            payload[layout::PERIOD].copy_from_slice(&0u64.to_le_bytes());
+            payload[layout::NEXT_COMMITTEE_ROOT].copy_from_slice(&[0xbb; 32]);
+            payload[layout::AGGREGATE_PUBKEY].copy_from_slice(&[0x11; 96]);
+            payload[layout::SIGNATURE].copy_from_slice(&[0x22; 96]);
+            payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0xff; 64]);
+            payload[layout::STATE_ROOT].copy_from_slice(&root);
+            crate::cross_domain::external::RawConsensusEvidence {
+                adapter: adapter_id,
+                evidence_version: 2,
+                network: "testnet".to_string(),
+                payload,
+                declared_height: height,
+                declared_root: root,
+                submitter: Address::from([0x31; 32]),
+            }
+        };
+
+        let golden = build_eth_evidence(64, [0xcc; 32]);
+        let economics =
+            crate::cross_domain::external::IntakeState::conservative_economics(1_000_000);
+        let bond_atoms = economics.required_bond_atoms();
+        let key = state
+            .settlement
+            .external_intake
+            .register_domain(
+                crate::cross_domain::external::RegistrationRequest {
+                    spec,
+                    policy: crate::cross_domain::external::VerificationPolicy::strict(1_000),
+                    economics,
+                    versions: crate::cross_domain::external::VersionPolicy::single(
+                        adapter_id, 2, 0,
+                    ),
+                    bond_atoms,
+                    poster: Address::from([0x39; 32]),
+                    golden,
+                },
+                Some(test_bls()),
+            )
+            .unwrap();
+
+        let prover = Address::from([0x31; 32]);
+        state
+            .settlement
+            .external_intake
+            .bond_prover(&key, prover, bond_atoms)
+            .unwrap();
+        state
+            .settlement
+            .external_intake
+            .set_quorum_policy(
+                &key,
+                crate::cross_domain::external::QuorumPolicy::strict(2, 3),
+            )
+            .unwrap();
+
+        let mut domain = default_domain(
+            77,
+            ConsensusKind::Custom("external".to_string()),
+            45262,
+            crate::cross_domain::external::EXTERNAL_DOMAIN_FINALITY_ADAPTER,
+            1,
+        );
+        domain.config_hash = *key.as_bytes();
+        domain.last_committed_height = 64;
+        domain.last_committed_hash = [0xcc; 32];
+        domain.status = DomainStatus::Active;
+        state.settlement.domains.register(domain.clone()).unwrap();
+
+        let next_evidence = build_eth_evidence(65, [0xdd; 32]);
+        let proof =
+            crate::cross_domain::external::encode_external_evidence(&next_evidence).unwrap();
+        let mut blk = block(65, &hex::encode([0xcc; 32]), 0xdd);
+        blk.state_root = hex::encode([0xdd; 32]);
+        blk.hash = blk.calculate_hash();
+        let mut com = commitment(&domain, &blk, 0);
+        com.finality_proof_hash = hash_finality_proof(&proof).unwrap();
+
+        let err = verify_commitment_finality(&state, &com, &proof, test_bls)
+            .expect_err("unattested external height must be refused when quorum policy exists");
+        assert!(
+            err.contains("requires a decided external quorum attestation"),
+            "got: {err}"
+        );
     }
 }

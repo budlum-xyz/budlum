@@ -187,12 +187,29 @@ impl CrossDomainMessage {
     /// WIRING: called by `register_relayed_on_state`, the body of the
     /// `CrossDomainMessage` transaction, and by the relayer suite that asserts
     /// an unsigned or wrongly signed message is refused.
+    /// Convenience: kept for the CLI and stateless tests; relayed chain ingress
+    /// calls [`Self::verify_sender_signature_in`].
     pub fn verify_sender_signature(&self) -> Result<(), String> {
+        self.verify_sender_signature_in(&crate::crypto::scheme::SchemeStatusRegistry::genesis())
+    }
+
+    /// WIRING: wired into `register_relayed_on_state` so relayed cross-domain
+    /// messages consult the chain's live `SchemeStatusRegistry`.
+    pub fn verify_sender_signature_in(
+        &self,
+        scheme_registry: &crate::crypto::scheme::SchemeStatusRegistry,
+    ) -> Result<(), String> {
         if self.sender_public_key.is_empty() || self.sender_signature.is_empty() {
             return Err("cross-domain message carries no sender signature".into());
         }
+        if self.message_id != self.calculate_message_id() {
+            return Err("message_id does not match message fields".into());
+        }
         // Ed25519: the 32-byte address IS the public key (V4 derivation).
         if self.sender_public_key.len() == 32 {
+            if !scheme_registry.scheme_verifies(crate::crypto::scheme::SchemeId::ED25519) {
+                return Err("message sender scheme Ed25519 is disabled".to_string());
+            }
             let mut pk = [0u8; 32];
             pk.copy_from_slice(&self.sender_public_key);
             if Address::from(pk) != self.sender {
@@ -213,7 +230,8 @@ impl CrossDomainMessage {
         if addr != self.sender {
             return Err("message signer is not the declared sender".into());
         }
-        crate::crypto::primitives::verify_ml_dsa_87_signature(
+        crate::crypto::primitives::verify_ml_dsa_87_signature_in(
+            scheme_registry,
             crate::crypto::ctx::CROSS_DOMAIN_V1,
             &self.message_id,
             &self.sender_signature,
@@ -333,7 +351,7 @@ pub fn register_relayed_on_state(
     // self-declared field alone let anybody name an active relayer and
     // register arbitrary messages - or pre-register a predictable lock id out
     // from under the real one.
-    message.verify_sender_signature()?;
+    message.verify_sender_signature_in(&state.scheme_registry)?;
     register_cross_domain_on_state(state, message)
 }
 
