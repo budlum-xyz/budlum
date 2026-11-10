@@ -23,8 +23,8 @@ ml-dsa = { version = "=0.1.2", features = ["alloc", "zeroize", "rand_core"] }
 libcrux-ml-dsa = { version = "=0.0.11", default-features = false, features = ["std", "mldsa65", "mldsa87"] }
 slh-dsa = { version = "=0.2.0-rc.5", features = ["zeroize"] }
 ed25519-dalek = "=3.0.0"
-sha3 = "0.10"
-sha2 = "0.10"
+sha3 = "0.12"
+sha2 = "0.11"
 hex = "0.4"
 zeroize = { version = "=1.9.1", features = ["derive"] }
 # SHAKE256 of the key derivation, the same crate and pin as the root manifest.
