@@ -28,7 +28,7 @@ path = "src/bin/budscan.rs"
 # SHA-384 for the Arweave `data_root`. Both come from the same crate.
 sha2 = "0.10"
 # The ENS namehash (EIP-137) is Keccak-256, not SHA3-256.
-sha3 = "0.10"
+sha3 = "0.12"
 hex = "0.4"
 # `evidence.rs` derives Serialize/Deserialize on the evidence records. A
 # serialiser (serde_json and friends) is NOT A DEPENDENCY here: the caller
