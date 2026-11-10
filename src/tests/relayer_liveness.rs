@@ -28,7 +28,19 @@ fn addr(b: u8) -> Address {
 
 fn fresh_chain() -> Blockchain {
     let consensus = Arc::new(PoWEngine::new(0));
-    Blockchain::new(consensus, None, 45262, None)
+    let mut bc = Blockchain::new(consensus, None, 45262, None);
+    let _ = bc
+        .state
+        .settlement
+        .domains
+        .register(crate::domain::default_domain(
+            1,
+            crate::domain::types::ConsensusKind::PoS,
+            1338,
+            "pos",
+            0,
+        ));
+    bc
 }
 
 /// The default is observe-only (`liveness_slashing_enabled = false`), so the
@@ -192,17 +204,19 @@ fn a_relayed_message_must_carry_the_class_derived_for_its_source_domain() {
 
     let mut bc = fresh_chain();
     let (_, relayer) = bonded_relayer(&mut bc);
-    bc.state
-        .settlement
-        .domains
-        .register(crate::domain::default_domain(
-            1,
-            ConsensusKind::PoS,
-            1338,
-            "pos",
-            0,
-        ))
-        .expect("source domain registers");
+    if bc.state.settlement.domains.get(1).is_none() {
+        bc.state
+            .settlement
+            .domains
+            .register(crate::domain::default_domain(
+                1,
+                ConsensusKind::PoS,
+                1338,
+                "pos",
+                0,
+            ))
+            .expect("source domain registers");
+    }
 
     // Nothing observed: the derived class is none, and a lattice label lies.
     let lie = relayed_message(relayer, 1).with_source_quantum_class(Some(QuantumClass::Lattice));

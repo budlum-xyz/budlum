@@ -99,6 +99,9 @@ struct EarlyFinalityVotes {
 /// buffer drops the oldest instead of growing.
 const MAX_EARLY_FINALITY_VOTES: usize = 64;
 
+type ValidatorCacheRow = (Address, u64, Vec<u8>, Vec<u8>, Vec<u8>);
+type CurrentEpochValidatorKey = (u64, u64, Vec<ValidatorCacheRow>);
+
 pub struct Blockchain {
     pub chain: Vec<Block>,
     pub consensus: Arc<dyn ConsensusEngine>,
@@ -120,6 +123,10 @@ pub struct Blockchain {
     /// Disk-backed nodes can still load an older blob through `get_qc_blob`.
     pub max_qc_blobs: usize,
     pub validator_snapshots: BTreeMap<u64, ValidatorSetSnapshot>,
+    /// Cached current-epoch validator snapshot keyed by exact active-validator
+    /// state tuple, so off-round votes do not repeat O(N) BLS PoP pairings when
+    /// `state.validators` has not changed.
+    current_epoch_snapshot_cache: Option<(CurrentEpochValidatorKey, ValidatorSetSnapshot)>,
     /// Maximum number of validator snapshots to keep in memory.
     /// Older snapshots are pruned at epoch boundaries.
     pub max_validator_snapshots: usize,
@@ -1045,6 +1052,7 @@ impl Blockchain {
             verified_qc_blobs: BTreeMap::new(),
             max_qc_blobs: 1000, // Keep last 1000 QC blobs
             validator_snapshots,
+            current_epoch_snapshot_cache: None,
             max_validator_snapshots: MAX_VALIDATOR_SNAPSHOTS,
             pending_finality_certs: BTreeMap::new(),
             max_pending_certs: 100, // Keep last 100 pending cert batches
@@ -3209,8 +3217,48 @@ impl Blockchain {
     /// Returning `None` makes the caller say "I cannot check this" instead of
     /// answering with the wrong set. The current epoch still builds from state,
     /// because there the current set *is* the right answer.
+    fn current_epoch_validator_key(&self, epoch: u64) -> CurrentEpochValidatorKey {
+        let rows = self
+            .state
+            .get_active_validators()
+            .into_iter()
+            .filter(|v| v.is_consensus_ready())
+            .map(|v| {
+                (
+                    v.address,
+                    v.voting_weight(),
+                    v.bls_public_key.clone(),
+                    v.pop_signature.clone(),
+                    v.pq_public_key.clone(),
+                )
+            })
+            .collect();
+        (epoch, self.chain_id, rows)
+    }
+
+    fn cached_validator_snapshot_for_epoch(&mut self, epoch: u64) -> Option<ValidatorSetSnapshot> {
+        if epoch == self.state.epoch_index {
+            let key = self.current_epoch_validator_key(epoch);
+            if let Some((ref cached_key, ref cached_snapshot)) = self.current_epoch_snapshot_cache {
+                if *cached_key == key {
+                    return Some(cached_snapshot.clone());
+                }
+            }
+            let built = self.build_validator_snapshot(epoch);
+            self.current_epoch_snapshot_cache = Some((key, built.clone()));
+            return Some(built);
+        }
+        self.validator_snapshots.get(&epoch).cloned()
+    }
+
     fn validator_snapshot_for_epoch(&self, epoch: u64) -> Option<ValidatorSetSnapshot> {
         if epoch == self.state.epoch_index {
+            let key = self.current_epoch_validator_key(epoch);
+            if let Some((ref cached_key, ref cached_snapshot)) = self.current_epoch_snapshot_cache {
+                if *cached_key == key {
+                    return Some(cached_snapshot.clone());
+                }
+            }
             return Some(self.build_validator_snapshot(epoch));
         }
         self.validator_snapshots.get(&epoch).cloned()
@@ -7452,6 +7500,23 @@ impl Blockchain {
         // Prefer the active round's immutable membership/index snapshot. The
         // chain's epoch snapshot may not yet be retained when an early round
         // already exists, and silently skipping PQ verification is unsafe.
+        let off_round = match self.finality_aggregator.as_ref() {
+            None => true,
+            Some(agg) => agg.checkpoint_height != vote.checkpoint_height,
+        };
+        if off_round
+            || self
+                .finality_aggregator
+                .as_ref()
+                .is_some_and(|agg| !agg.prevote_quorum_reached)
+        {
+            let max_early_height = (self.chain.len() as u64).saturating_add(
+                crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL.saturating_mul(8),
+            );
+            if vote.checkpoint_height > max_early_height {
+                return Err("Rejecting early precommit beyond finality horizon".into());
+            }
+        }
         let active_round_snapshot = self
             .finality_aggregator
             .as_ref()
@@ -7459,23 +7524,96 @@ impl Blockchain {
                 round.epoch == vote.epoch && round.checkpoint_height == vote.checkpoint_height
             })
             .map(|round| round.validator_snapshot.clone());
-        // Membership before cost: when this node holds no matching round at the
-        // vote's height, `validator_snapshot_for_epoch` rebuilds the whole set
-        // from state, verifying one BLS PoP pairing per validator. Reject any
-        // voter absent from `state.validators` before triggering that rebuild.
-        if active_round_snapshot.is_none()
-            && !self
+        // Authenticate the voter's consensus readiness and PQ attestation
+        // BEFORE building a full validator snapshot (which runs one BLS PoP
+        // pairing per validator when the current-epoch cache is cold).
+        if active_round_snapshot.is_none() {
+            let Some(voter) = self
                 .state
                 .validators
                 .get(&vote.voter_id)
-                .is_some_and(|v| !v.bls_public_key.is_empty())
-        {
-            return Err(
-                "Rejecting precommit: voter is not a registered validator with a BLS key".into(),
-            );
+                .filter(|v| !v.bls_public_key.is_empty())
+            else {
+                return Err(
+                    "Rejecting precommit: voter is not a registered validator with a BLS key"
+                        .into(),
+                );
+            };
+            if !voter.pq_public_key.is_empty() && vote.pq_sig.is_empty() {
+                return Err("Missing PQ attestation in precommit".into());
+            }
+            if !vote.pq_sig.is_empty() {
+                if vote.epoch == self.state.epoch_index {
+                    let ready = self
+                        .state
+                        .get_active_validators()
+                        .into_iter()
+                        .filter(|v| v.is_consensus_ready())
+                        .collect::<Vec<_>>();
+                    let Some(max_pos) = ready.iter().position(|v| v.address == vote.voter_id)
+                    else {
+                        return Err("PQ attestation signer is not in the validator snapshot".into());
+                    };
+                    let mut verified_any = false;
+                    for candidate in (0..=max_pos).rev() {
+                        let Ok(idx) = u32::try_from(candidate) else {
+                            continue;
+                        };
+                        let candidate_msg = crate::consensus::qc::pq_signing_message(
+                            vote.epoch,
+                            vote.checkpoint_height,
+                            &vote.checkpoint_hash,
+                            idx,
+                        );
+                        if crate::crypto::primitives::PqKeyPair::verify_in(
+                            &self.state.scheme_registry,
+                            &voter.pq_public_key,
+                            crate::crypto::ctx::QC_V2,
+                            &candidate_msg,
+                            &vote.pq_sig,
+                        )
+                        .is_ok()
+                        {
+                            verified_any = true;
+                            break;
+                        }
+                    }
+                    if !verified_any {
+                        return Err(
+                            "Invalid PQ attestation in precommit: signature verification failed"
+                                .into(),
+                        );
+                    }
+                } else if let Some(retained) = self.validator_snapshots.get(&vote.epoch) {
+                    let entry = retained
+                        .find_validator(&vote.voter_id)
+                        .ok_or("PQ attestation signer is not in the validator snapshot")?;
+                    let index = retained
+                        .validator_index(&vote.voter_id)
+                        .ok_or("PQ attestation signer has no snapshot index")?;
+                    let index: u32 = index.try_into().map_err(|_| {
+                        "Precommit attests a validator index that does not fit its wire field"
+                            .to_string()
+                    })?;
+                    let msg = crate::consensus::qc::pq_signing_message(
+                        vote.epoch,
+                        vote.checkpoint_height,
+                        &vote.checkpoint_hash,
+                        index,
+                    );
+                    crate::crypto::primitives::PqKeyPair::verify_in(
+                        &self.state.scheme_registry,
+                        &entry.pq_public_key,
+                        crate::crypto::ctx::QC_V2,
+                        &msg,
+                        &vote.pq_sig,
+                    )
+                    .map_err(|e| format!("Invalid PQ attestation in precommit: {e}"))?;
+                }
+            }
         }
         let snapshot =
-            active_round_snapshot.or_else(|| self.validator_snapshot_for_epoch(vote.epoch));
+            active_round_snapshot.or_else(|| self.cached_validator_snapshot_for_epoch(vote.epoch));
         let entry = snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.find_validator(&vote.voter_id));
@@ -7508,10 +7646,6 @@ impl Blockchain {
             )
             .map_err(|e| format!("Invalid PQ attestation in precommit: {e}"))?;
         }
-        let off_round = match self.finality_aggregator.as_ref() {
-            None => true,
-            Some(agg) => agg.checkpoint_height != vote.checkpoint_height,
-        };
         let no_round_yet = self.finality_aggregator.is_none();
         if off_round
             || self
@@ -8507,6 +8641,7 @@ impl Clone for Blockchain {
             verified_qc_blobs: self.verified_qc_blobs.clone(),
             max_qc_blobs: self.max_qc_blobs,
             validator_snapshots: self.validator_snapshots.clone(),
+            current_epoch_snapshot_cache: self.current_epoch_snapshot_cache.clone(),
             max_validator_snapshots: self.max_validator_snapshots,
             pending_finality_certs: self.pending_finality_certs.clone(),
             max_pending_certs: self.max_pending_certs,
@@ -12224,6 +12359,79 @@ mod bond_and_reorg_tests {
         assert!(
             err.contains("not a registered validator with a BLS key"),
             "got: {err}"
+        );
+    }
+
+    #[test]
+    fn off_round_precommit_rejects_horizon_and_tampered_pq_before_snapshot_rebuild() {
+        let consensus = Arc::new(crate::consensus::pow::PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
+
+        let bls_kp = crate::crypto::primitives::BlsKeypair::generate().unwrap();
+        let pq_kp = crate::crypto::primitives::PqKeyPair::generate();
+        let voter = Address::from([0x66; 32]);
+        let pop_msg =
+            crate::chain::finality::pop_signing_message(45262, &voter, &bls_kp.public_key);
+        let pop = crate::chain::finality::sign_bls_pop(&bls_kp.secret_key, &pop_msg);
+        bc.state.add_validator(voter, 50_000);
+        let v = bc.state.validators.get_mut(&voter).unwrap();
+        v.vrf_public_key = vec![0x11; 32];
+        v.bls_public_key = bls_kp.public_key.clone();
+        v.pop_signature = pop;
+        v.pq_public_key = pq_kp.public_key_bytes().to_vec();
+        assert!(v.is_consensus_ready());
+        bc.current_epoch_snapshot_cache = None;
+
+        let build_bls_valid_precommit = |checkpoint_height: u64, pq_sig: Vec<u8>| {
+            let checkpoint_hash = "bb".repeat(32);
+            let msg = crate::chain::finality::checkpoint_signing_message(
+                45262,
+                0,
+                checkpoint_height,
+                &checkpoint_hash,
+            );
+            let sig_bls = crate::chain::finality::sign_bls(&bls_kp.secret_key, &msg);
+            let mut vote = crate::chain::finality::Precommit {
+                chain_id: 45262,
+                epoch: 0,
+                checkpoint_height,
+                checkpoint_hash,
+                voter_id: voter,
+                sig_bls,
+                auth_sig: Vec::new(),
+                pq_sig,
+            };
+            let auth_msg = vote.auth_signing_message();
+            vote.auth_sig = crate::chain::finality::sign_bls(&bls_kp.secret_key, &auth_msg);
+            vote
+        };
+
+        // 1) Beyond finality horizon: rejected before touching snapshot cache.
+        let far = build_bls_valid_precommit(999_999, vec![0x22; 64]);
+        let far_err = bc
+            .handle_precommit(far)
+            .expect_err("horizon overflow precommit must be rejected");
+        assert!(
+            far_err.contains("beyond finality horizon"),
+            "got: {far_err}"
+        );
+        assert!(
+            bc.current_epoch_snapshot_cache.is_none(),
+            "horizon check must fire before building validator snapshot"
+        );
+
+        // 2) Valid BLS signatures + tampered PQ signature: rejected before building snapshot.
+        let tampered_pq = build_bls_valid_precommit(10, vec![0x33; 64]);
+        let pq_err = bc
+            .handle_precommit(tampered_pq)
+            .expect_err("tampered pq_sig must be rejected before snapshot rebuild");
+        assert!(
+            pq_err.contains("Invalid PQ attestation in precommit"),
+            "got: {pq_err}"
+        );
+        assert!(
+            bc.current_epoch_snapshot_cache.is_none(),
+            "tampered pq_sig must not trigger O(N) validator snapshot rebuild"
         );
     }
 }

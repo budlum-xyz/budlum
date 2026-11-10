@@ -189,30 +189,48 @@ fn deliver_message(
             message.source_quantum_class
         )));
     }
-    crate::core::account::enforce_classical_message_intake(
-        &message,
-        state.settlement.quantum.alarm(),
-        state.current_block_height,
-    )
-    .map_err(SettlementTxError::Refused)?;
     // A finalized commitment may arrive out of order and sit staged in the
     // commitment registry until its parent chain links up; delivering its
     // message may not consume it before `last_committed_height` reaches
     // `delivery.domain_height`.
-    let (bridge_enabled, committed_tip) = state
+    let (domain_status, bridge_enabled, committed_tip) = state
         .settlement
         .domains
         .get(delivery.domain_id)
-        .map(|domain| (domain.bridge_enabled, domain.last_committed_height))
+        .map(|domain| {
+            (
+                domain.status,
+                domain.bridge_enabled,
+                domain.last_committed_height,
+            )
+        })
         .ok_or_else(|| {
             SettlementTxError::Refused(format!("unknown domain {}", delivery.domain_id))
         })?;
+    if domain_status != crate::domain::types::DomainStatus::Active {
+        return Err(SettlementTxError::Refused(format!(
+            "domain {} is not active (status={domain_status:?})",
+            delivery.domain_id
+        )));
+    }
     if !bridge_enabled {
         return Err(SettlementTxError::Refused(format!(
             "domain {} is not bridge-enabled",
             delivery.domain_id
         )));
     }
+    let anchored_height = state.settlement.commitments.accepted_height(
+        delivery.domain_id,
+        delivery.domain_height,
+        delivery.sequence,
+    );
+    crate::core::account::enforce_classical_message_intake(
+        &message,
+        state.settlement.quantum.alarm(),
+        anchored_height,
+        state.current_block_height,
+    )
+    .map_err(SettlementTxError::Refused)?;
     if delivery.domain_height > committed_tip {
         return Err(SettlementTxError::Refused(format!(
             "domain {} commitment at height {} is not on the applied domain chain (tip {committed_tip})",
@@ -919,7 +937,11 @@ pub fn accept_commitment(
         }
     }
     let domain_id = commitment.domain_id;
-    state.settlement.commitments.insert(commitment)?;
+    let budlum_height = state.current_block_height;
+    state
+        .settlement
+        .commitments
+        .insert_at_height(commitment, budlum_height)?;
     apply_pending_commitments(state, domain_id)
 }
 
@@ -3720,20 +3742,51 @@ mod tests {
         };
 
         let clear = alarm_with(&[]);
-        assert!(crate::core::account::enforce_classical_message_intake(&msg, &clear, 11).is_ok());
+        assert!(
+            crate::core::account::enforce_classical_message_intake(&msg, &clear, None, 11).is_ok()
+        );
 
         let watch = alarm_with(&[CanaryId::Ecc192]);
-        let watch_err = crate::core::account::enforce_classical_message_intake(&msg, &watch, 11)
-            .expect_err("Watch must hold classical message during wait window");
+        let unanchored_err =
+            crate::core::account::enforce_classical_message_intake(&msg, &watch, None, 10_000_000)
+                .expect_err("Watch must refuse classical message whose commitment is not anchored");
+        assert!(
+            unanchored_err.contains("not anchored on Budlum"),
+            "got: {unanchored_err}"
+        );
+        // Even if the sender sets `source_height = 0`, aging runs strictly from
+        // the Budlum consensus anchor height (e.g. 5_000_000), never `source_height`.
+        let mut stale_source = msg.clone();
+        stale_source.source_height = 0;
+        let watch_err = crate::core::account::enforce_classical_message_intake(
+            &stale_source,
+            &watch,
+            Some(5_000_000),
+            5_000_010,
+        )
+        .expect_err("Watch must hold classical message even when source_height is 0");
         assert!(
             watch_err.contains("held by the quantum alarm"),
             "got: {watch_err}"
         );
+        let ready_height =
+            5_000_000 + crate::security::alarm_effects::CLASSICAL_MESSAGE_WAIT_BLOCKS;
+        assert!(crate::core::account::enforce_classical_message_intake(
+            &stale_source,
+            &watch,
+            Some(5_000_000),
+            ready_height,
+        )
+        .is_ok());
 
         let restrict = alarm_with(&[CanaryId::Ecc224]);
-        let restrict_err =
-            crate::core::account::enforce_classical_message_intake(&msg, &restrict, 10_000_000)
-                .expect_err("Restrict must refuse classical message");
+        let restrict_err = crate::core::account::enforce_classical_message_intake(
+            &msg,
+            &restrict,
+            Some(1),
+            10_000_000,
+        )
+        .expect_err("Restrict must refuse classical message");
         assert!(
             restrict_err.contains("stopped the intake"),
             "got: {restrict_err}"

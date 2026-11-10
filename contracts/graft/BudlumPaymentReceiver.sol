@@ -66,6 +66,7 @@ abstract contract BudlumPaymentReceiver {
     uint256 private constant HEADER_V7_FIELDS = 20;
     uint256 private constant U128_BYTE_LEN = 16;
     uint256 private constant BITS_PER_BYTE = 8;
+    uint256 private constant MAX_PROOF_AGE_SECONDS = 30 days;
     uint8 private constant TAG_ABSENT = 0;
     uint8 private constant TAG_PRESENT = 1;
 
@@ -112,6 +113,19 @@ abstract contract BudlumPaymentReceiver {
         if (!proof.header.hasGraftRoot
             || proof.header.graftRoot != graftRegistryRoot(proof.paymentsRoot, proof.restHash)) {
             return "graft root opening";
+        }
+        // The payment must name this chain and this contract in the field the
+        // payer chooses and the leaf commits, so a proof redeemed here cannot
+        // be redeemed again on another deployment of the same Graft application.
+        if (keccak256(proof.payment.originRecipient)
+            != keccak256(abi.encode("budlum/graft/payment-target/v1", block.chainid, address(this))))
+        {
+            return "receiver binding";
+        }
+        // The finality mappings are append-only, so without an age bound a
+        // stored proof stays redeemable after the payment has left the window.
+        if (block.timestamp > uint256(proof.header.timestampMs) / 1000 + MAX_PROOF_AGE_SECONDS) {
+            return "proof too old";
         }
         uint64 height = proof.header.checkpointHeight;
         if (!finality.heightFinal(height)) {
