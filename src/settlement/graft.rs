@@ -361,14 +361,26 @@ pub enum GraftProofError {
     NoStateRootBody,
     #[error("the checkpoint lies outside the active payment window")]
     Window,
+    #[error("the payment was made to a different Graft application")]
+    Application,
+    #[error("the payment names a different chain or receiver than this deployment")]
+    Receiver,
     #[error("the header is not the one the finalized checkpoint commits: {0}")]
     Header(String),
 }
 
 /// Check a Graft payment proof against a finalized checkpoint the caller
 /// already trusts (a [`crate::light_client::VerifiedCheckpoint`] reached
-/// from its trust anchor). The chain checked is: finalized checkpoint ->
-/// state root -> global header -> Graft root -> payment window -> payment.
+/// from its trust anchor) for one specific deployment. The chain checked
+/// is: the payment's application and chain/receiver binding -> finalized
+/// checkpoint -> state root -> global header -> Graft root -> payment
+/// window -> payment.
+///
+/// `expected_graft_id` is the verifying application's own Graft id, and
+/// `expected_target_chain_id` / `expected_target_receiver` are that
+/// deployment's chain and receiver (zero and empty when the payment names
+/// none). A payment made to another application, chain or receiver is
+/// refused.
 ///
 /// # Errors
 ///
@@ -376,9 +388,20 @@ pub enum GraftProofError {
 pub fn verify_graft_payment(
     proof: &GraftPaymentProof,
     checkpoint: &crate::light_client::VerifiedCheckpoint,
+    expected_graft_id: [u8; 32],
+    expected_target_chain_id: u64,
+    expected_target_receiver: &[u8],
 ) -> Result<(), GraftProofError> {
     if proof.path.leaf != proof.payment.leaf_hash() {
         return Err(GraftProofError::Leaf);
+    }
+    if proof.payment.graft_id != expected_graft_id {
+        return Err(GraftProofError::Application);
+    }
+    if proof.payment.target_chain_id != expected_target_chain_id
+        || proof.payment.target_receiver.as_slice() != expected_target_receiver
+    {
+        return Err(GraftProofError::Receiver);
     }
     if !proof.path.verify(proof.opening.payments_root) {
         return Err(GraftProofError::Path);
@@ -1845,5 +1868,76 @@ mod tests {
             },
         )
         .is_err());
+    }
+    #[test]
+    fn offchain_graft_verifier_binds_application_chain_and_receiver() {
+        let payment = GraftPayment {
+            payment_id: [0x11; 32],
+            graft_id: [0x22; 32],
+            payer: Address::from([0x33; 32]),
+            recipient: Address::from([0x44; 32]),
+            amount: 500,
+            origin_recipient: vec![0x55; 20],
+            memo_hash: [0x66; 32],
+            paid_at_block: 10,
+            target_chain_id: 8453,
+            target_receiver: vec![0x77; 20],
+        };
+        let leaf = payment.leaf_hash();
+        let proof = GraftPaymentProof {
+            payment,
+            path: crate::cross_domain::event_tree::MerkleProof {
+                leaf,
+                index: 0,
+                siblings: Vec::new(),
+            },
+            opening: GraftRootOpening {
+                payments_root: leaf,
+                rest_hash: [0x88; 32],
+            },
+            header: crate::settlement::GlobalBlockHeader {
+                version: 7,
+                global_height: 15,
+                previous_global_hash: [0u8; 32],
+                chain_id: 45261,
+                timestamp_ms: 1_000,
+                domain_registry_root: [0u8; 32],
+                domain_commitment_root: [0u8; 32],
+                message_root: [0u8; 32],
+                bridge_state_root: [0u8; 32],
+                replay_nonce_root: [0u8; 32],
+                proposer: None,
+                settlement_finality_root: [0u8; 32],
+                storage_root: None,
+                ai_root: None,
+                identity_root: None,
+                checkpoint_height: 15,
+                external_intake_root: None,
+                graft_root: None,
+                delegation_root: None,
+            },
+            block_height: 15,
+            state_root: "00".repeat(32),
+            state_root_body: None,
+        };
+        let cp = crate::light_client::VerifiedCheckpoint {
+            height: 15,
+            block_hash: "00".repeat(32),
+            set_hash: "00".repeat(32),
+            epoch: 0,
+            state_root: "00".repeat(32),
+        };
+        assert_eq!(
+            verify_graft_payment(&proof, &cp, [0x99; 32], 8453, &[0x77; 20]),
+            Err(GraftProofError::Application)
+        );
+        assert_eq!(
+            verify_graft_payment(&proof, &cp, [0x22; 32], 1, &[0x77; 20]),
+            Err(GraftProofError::Receiver)
+        );
+        assert_eq!(
+            verify_graft_payment(&proof, &cp, [0x22; 32], 8453, &[0x99; 20]),
+            Err(GraftProofError::Receiver)
+        );
     }
 }

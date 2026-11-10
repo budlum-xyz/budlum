@@ -102,7 +102,7 @@ An application checks a payment itself:
 1. `bud_graftPaymentProof(payment_id)` returns the payment, its Merkle path,
    the registry opening, the checkpoint global header and the state root
    opening of the checkpoint block.
-2. `verify_graft_payment(proof, checkpoint)` checks: finalized checkpoint ->
+2. `verify_graft_payment(proof, checkpoint, expected_graft_id, expected_target_chain_id, expected_target_receiver)` checks: application and deployment (`target_chain_id`, `target_receiver`) binding -> finalized checkpoint ->
    state root -> global header -> `graft_root` -> payment window -> payment.
    `checkpoint` is a `VerifiedCheckpoint` the application's light client
    reached from its trust anchor.
