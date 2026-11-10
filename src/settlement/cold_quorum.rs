@@ -533,6 +533,7 @@ mod tests {
             max_value_per_settlement_atoms: 1_000,
             max_value_per_epoch_atoms: 3_000,
             min_height_advance: 1,
+            epoch_length_blocks: 100,
             required_quorum: 3,
             device_count: 6,
             refusal_history_capacity: 8,
@@ -543,7 +544,7 @@ mod tests {
         let req = SettlementRequest {
             chain_id: 7,
             height: 10,
-            epoch: 1,
+            epoch: 0,
             global_root: [9u8; 32],
             value_atoms: 100,
             nonce: 1,
