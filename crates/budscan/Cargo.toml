@@ -26,7 +26,7 @@ path = "src/bin/budscan.rs"
 # Content addressing: SHA-256 for the B.U.D. `ContentId` and the IPFS sha2-256
 # multihash,
 # SHA-384 for the Arweave `data_root`. Both come from the same crate.
-sha2 = "0.10"
+sha2 = "0.11"
 # The ENS namehash (EIP-137) is Keccak-256, not SHA3-256.
 sha3 = "0.10"
 hex = "0.4"
