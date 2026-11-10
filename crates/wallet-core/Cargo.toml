@@ -20,7 +20,7 @@ ml-dsa = { version = "0.1.1", features = ["alloc", "zeroize", "rand_core"] }
 # adapter below implements TryRng by hand from the crate's own CSPRNG path,
 # so wasm builds keep working exactly as before.
 rand_core = { version = "0.10", default-features = false }
-sha3 = "0.10"
+sha3 = "0.12"
 sha2 = "0.10"
 hex = "0.4"
 zeroize = { version = "1", features = ["derive"] }
