@@ -7463,8 +7463,16 @@ impl Blockchain {
         // vote's height, `validator_snapshot_for_epoch` rebuilds the whole set
         // from state, verifying one BLS PoP pairing per validator. Reject any
         // voter absent from `state.validators` before triggering that rebuild.
-        if active_round_snapshot.is_none() && !self.state.validators.contains_key(&vote.voter_id) {
-            return Err("Rejecting precommit: voter is not a registered validator".into());
+        if active_round_snapshot.is_none()
+            && !self
+                .state
+                .validators
+                .get(&vote.voter_id)
+                .is_some_and(|v| !v.bls_public_key.is_empty())
+        {
+            return Err(
+                "Rejecting precommit: voter is not a registered validator with a BLS key".into(),
+            );
         }
         let snapshot =
             active_round_snapshot.or_else(|| self.validator_snapshot_for_epoch(vote.epoch));
@@ -12170,5 +12178,52 @@ mod bond_and_reorg_tests {
         bc.note_invalid_vote(6, offender);
         assert_eq!(bc.local_invalid_votes.current_epoch(), 5);
         assert_eq!(bc.local_invalid_votes.invalid_count(&offender), 2);
+    }
+
+    #[test]
+    fn unauthenticated_bonded_validator_precommit_rejected_before_snapshot() {
+        let mut bc = Blockchain::new(
+            Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+            None,
+            45262,
+            None,
+        );
+        let keyless_validator = Address::from([0x55; 32]);
+        bc.state.add_validator(keyless_validator, 50_000);
+        assert!(bc
+            .state
+            .validators
+            .get(&keyless_validator)
+            .unwrap()
+            .bls_public_key
+            .is_empty());
+
+        let forged = crate::chain::finality::Precommit {
+            chain_id: 45262,
+            epoch: bc.state.epoch_index,
+            checkpoint_height: 100,
+            checkpoint_hash: "aa".repeat(32),
+            voter_id: keyless_validator,
+            sig_bls: crate::chain::finality::sign_bls_pop(
+                &crate::crypto::primitives::BlsKeypair::generate()
+                    .unwrap()
+                    .secret_key,
+                b"sig",
+            ),
+            auth_sig: crate::chain::finality::sign_bls_pop(
+                &crate::crypto::primitives::BlsKeypair::generate()
+                    .unwrap()
+                    .secret_key,
+                b"auth",
+            ),
+            pq_sig: vec![0x11; 64],
+        };
+        let err = bc.handle_precommit(forged).expect_err(
+            "bonded validator without BLS key must be rejected before snapshot rebuild",
+        );
+        assert!(
+            err.contains("not a registered validator with a BLS key"),
+            "got: {err}"
+        );
     }
 }

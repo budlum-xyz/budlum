@@ -199,14 +199,20 @@ fn deliver_message(
     // commitment registry until its parent chain links up; delivering its
     // message may not consume it before `last_committed_height` reaches
     // `delivery.domain_height`.
-    let committed_tip = state
+    let (bridge_enabled, committed_tip) = state
         .settlement
         .domains
         .get(delivery.domain_id)
-        .map(|domain| domain.last_committed_height)
+        .map(|domain| (domain.bridge_enabled, domain.last_committed_height))
         .ok_or_else(|| {
             SettlementTxError::Refused(format!("unknown domain {}", delivery.domain_id))
         })?;
+    if !bridge_enabled {
+        return Err(SettlementTxError::Refused(format!(
+            "domain {} is not bridge-enabled",
+            delivery.domain_id
+        )));
+    }
     if delivery.domain_height > committed_tip {
         return Err(SettlementTxError::Refused(format!(
             "domain {} commitment at height {} is not on the applied domain chain (tip {committed_tip})",
@@ -3732,5 +3738,119 @@ mod tests {
             restrict_err.contains("stopped the intake"),
             "got: {restrict_err}"
         );
+    }
+
+    #[test]
+    fn deliver_message_refuses_bridge_disabled_source_domain() {
+        use crate::cross_domain::event_tree::DomainEventTree;
+        use crate::cross_domain::message::{
+            CrossDomainMessage, CrossDomainMessageParams, MessageKind,
+        };
+        use crate::cross_domain::{DomainEvent, DomainEventKind};
+        use crate::domain::plugin::default_domain;
+        use crate::domain::{ConsensusKind, DomainCommitment, POW_HEADER_CHAIN_ADAPTER};
+
+        let mut state = AccountState::new();
+        let operator = Address::from([0x31; 32]);
+        let relayer = Address::from([0x32; 32]);
+        let min_stake = state.registry.params().min_stake;
+        state.add_balance(&relayer, min_stake.saturating_mul(2));
+        state
+            .bond_relayer(&relayer, min_stake)
+            .expect("bond relayer");
+
+        let mut d_disabled =
+            default_domain(70, ConsensusKind::PoW, 7000, POW_HEADER_CHAIN_ADAPTER, 1);
+        d_disabled.operator = Some(operator);
+        d_disabled.bridge_enabled = false;
+        d_disabled.last_committed_height = 1;
+        state
+            .settlement
+            .domains
+            .register(d_disabled)
+            .expect("register disabled");
+
+        let mut d_enabled =
+            default_domain(71, ConsensusKind::PoW, 7001, POW_HEADER_CHAIN_ADAPTER, 1);
+        d_enabled.operator = Some(operator);
+        d_enabled.bridge_enabled = true;
+        d_enabled.last_committed_height = 1;
+        state
+            .settlement
+            .domains
+            .register(d_enabled)
+            .expect("register enabled");
+
+        let make_delivery = |state: &mut AccountState, domain_id: u32, nonce: u64| {
+            let msg = CrossDomainMessage::new(CrossDomainMessageParams {
+                source_domain: domain_id,
+                target_domain: 1,
+                source_height: 1,
+                event_index: 0,
+                nonce,
+                sender: relayer,
+                recipient: operator,
+                payload_hash: [nonce as u8; 32],
+                kind: MessageKind::Custom(b"bridge-check".to_vec()),
+                expiry_height: 100,
+            });
+            let ev = DomainEvent {
+                domain_id,
+                domain_height: 1,
+                event_index: 0,
+                kind: DomainEventKind::Custom(b"dispatched".to_vec()),
+                emitter: relayer,
+                message: Some(msg),
+                payload_hash: [0u8; 32],
+            };
+            let mut tree = DomainEventTree::new();
+            tree.push(ev.clone());
+            let proof = tree.proof(0).expect("merkle proof");
+            let block_hash = [domain_id as u8; 32];
+            let comm = DomainCommitment {
+                domain_id,
+                domain_height: 1,
+                domain_block_hash: block_hash,
+                parent_domain_block_hash: [0u8; 32],
+                state_root: [0x11; 32],
+                tx_root: [0u8; 32],
+                event_root: tree.root(),
+                validator_set_hash: [0u8; 32],
+                consensus_kind: ConsensusKind::PoW,
+                finality_proof_hash: [0x22; 32],
+                timestamp_ms: 1_000,
+                sequence: 0,
+                producer: None,
+                state_updates: std::collections::BTreeMap::new(),
+            };
+            state
+                .settlement
+                .commitments
+                .insert(comm)
+                .expect("insert commitment");
+            DeliverMessage {
+                domain_id,
+                domain_height: 1,
+                sequence: 0,
+                block_hash,
+                event: ev,
+                proof,
+            }
+        };
+
+        let ctx = SettlementTxContext {
+            sender: relayer,
+            chain_id: 45261,
+            fee: 0,
+            bls: || Box::new(crate::cross_domain::external::ethereum::AcceptAllBls),
+        };
+        let disabled_delivery = make_delivery(&mut state, 70, 1);
+        let err = deliver_message(&mut state, &ctx, &disabled_delivery)
+            .expect_err("bridge_enabled: false domain must be refused");
+        assert!(err.to_string().contains("not bridge-enabled"), "got: {err}");
+
+        let enabled_delivery = make_delivery(&mut state, 71, 2);
+        deliver_message(&mut state, &ctx, &enabled_delivery)
+            .expect("bridge_enabled: true domain must succeed");
     }
 }

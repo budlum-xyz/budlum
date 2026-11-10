@@ -3058,10 +3058,12 @@ impl Executor {
                          signature envelope must be empty",
                     ));
                 }
-                crate::cross_domain::message::register_cross_domain_on_state(state, message)
-                    .map_err(|e| {
-                        BudlumError::validation("cross_domain_message_failed", e.to_string())
-                    })?;
+                crate::cross_domain::message::register_relayed_cross_domain_on_state(
+                    state, message,
+                )
+                .map_err(|e| {
+                    BudlumError::validation("cross_domain_message_failed", e.to_string())
+                })?;
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
