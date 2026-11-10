@@ -190,4 +190,42 @@ contract BudlumFinalityVerifierTest is Harness {
         assertTrue(bls.isAccepted(committeeDigest), "committee digest accepted");
         assertTrue(bls.isAccepted(bls.pendingIdentity(42, root)), "substance identity accepted");
     }
+
+    function test_F06_a_challenged_malleable_envelope_cannot_bar_honest_finality() public {
+        BudlumFinalityVerifier bls = verifier;
+        bytes32 root = bytes32(uint256(7));
+
+        // 1. Both envelopes open; proving fraud on the mutated envelope leaves
+        //    the committee's own envelope free to settle the height.
+        Attestation memory malleable = _attestation(42, root);
+        malleable.mlDsaSignature = _filled(3309, 0xAA);
+        bytes32 malleableDigest = bls.verify(malleable);
+        Attestation memory committeeAtt = _attestation(42, root);
+        bytes32 committeeDigest = bls.verify(committeeAtt);
+
+        fraud.set(true);
+        bls.challenge(malleableDigest, hex"01");
+        vm.roll(block.number + WINDOW);
+        vm.expectPartialRevert(BudlumFinalityVerifier.ChallengeResolved.selector);
+        bls.settle(malleableDigest);
+        bls.settle(committeeDigest);
+        assertTrue(bls.heightFinal(42), "honest height settled despite challenged malleable envelope");
+        assertEq(bls.rootAtHeight(42), root, "honest root recorded");
+
+        // 2. Mutated envelope arrives first and is challenged before the honest
+        //    committee envelope is submitted; the honest envelope still verifies and settles.
+        BudlumFinalityVerifier bls2 = new BudlumFinalityVerifier(
+            CHAIN, WINDOW, address(fraud), keccak256(committee), keccak256(generator), keccak256(mlDsaKey)
+        );
+        Attestation memory earlyBad = _attestation(42, root);
+        earlyBad.mlDsaSignature = _filled(3309, 0xBB);
+        bytes32 earlyBadDigest = bls2.verify(earlyBad);
+        bls2.challenge(earlyBadDigest, hex"01");
+
+        Attestation memory honest = _attestation(42, root);
+        bytes32 honestDigest = bls2.verify(honest);
+        vm.roll(block.number + WINDOW);
+        bls2.settle(honestDigest);
+        assertTrue(bls2.heightFinal(42), "honest height settled after early bad envelope challenged");
+    }
 }
