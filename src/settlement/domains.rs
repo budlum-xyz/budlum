@@ -181,8 +181,15 @@ fn deliver_message(
     let derived = state
         .settlement
         .domains
-        .observed(message.source_domain)
-        .quantum_class();
+        .get(message.source_domain)
+        .map(|domain| {
+            state
+                .settlement
+                .domains
+                .observed(message.source_domain)
+                .quantum_class()
+                .unwrap_or_else(|| crate::settlement::pq_anchor::domain_quantum_class(&domain.kind))
+        });
     if message.source_quantum_class != derived {
         return Err(SettlementTxError::Refused(format!(
             "the message carries source class {:?}; the chain derives {derived:?}",
@@ -2499,7 +2506,8 @@ mod tests {
             payload_hash: [0x53; 32],
             kind: MessageKind::Custom(b"app/transfer/v1".to_vec()),
             expiry_height: 0,
-        });
+        })
+        .with_source_quantum_class(Some(crate::crypto::facts::QuantumClass::Hash));
         let event = DomainEvent {
             domain_id: 1,
             domain_height: 1,
@@ -3846,7 +3854,8 @@ mod tests {
                 payload_hash: [nonce as u8; 32],
                 kind: MessageKind::Custom(b"bridge-check".to_vec()),
                 expiry_height: 100,
-            });
+            })
+            .with_source_quantum_class(Some(crate::crypto::facts::QuantumClass::Hash));
             let ev = DomainEvent {
                 domain_id,
                 domain_height: 1,

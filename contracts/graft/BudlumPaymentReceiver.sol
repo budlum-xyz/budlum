@@ -16,6 +16,8 @@ struct GraftPayment {
     bytes originRecipient;
     bytes32 memoHash;
     uint64 paidAtBlock;
+    uint64 targetChainId;
+    bytes targetReceiver;
 }
 
 /// @notice A Budlum checkpoint header (`GlobalBlockHeader`, V7).
@@ -61,11 +63,13 @@ struct PaymentProof {
 /// @title BudlumPaymentReceiver
 /// @notice On-chain check of a Budlum Graft payment (8.5, level 1 in a contract).
 abstract contract BudlumPaymentReceiver {
-    uint256 private constant PAYMENT_LEAF_FIELDS = 10;
+    uint256 private constant PAYMENT_LEAF_FIELDS = 13;
     uint256 private constant OPENING_TRIPLE_FIELDS = 3;
     uint256 private constant HEADER_V7_FIELDS = 20;
     uint256 private constant U128_BYTE_LEN = 16;
+    uint256 private constant EVM_ADDRESS_BYTE_LEN = 20;
     uint256 private constant BITS_PER_BYTE = 8;
+    uint64 private constant MAX_PAYMENT_WINDOW_BLOCKS = 1e4;
     uint256 private constant MAX_PROOF_AGE_SECONDS = 30 days;
     uint8 private constant TAG_ABSENT = 0;
     uint8 private constant TAG_PRESENT = 1;
@@ -105,6 +109,9 @@ abstract contract BudlumPaymentReceiver {
     }
 
     function checkPayment(PaymentProof calldata proof) public view returns (string memory) {
+        if (proof.payment.graftId != graftId) {
+            return "wrong graft";
+        }
         (bool fits, bytes32 window) =
             BudlumHash.rootFromProof(paymentLeaf(proof.payment), proof.index, proof.path);
         if (!fits || window != proof.paymentsRoot) {
@@ -114,17 +121,23 @@ abstract contract BudlumPaymentReceiver {
             || proof.header.graftRoot != graftRegistryRoot(proof.paymentsRoot, proof.restHash)) {
             return "graft root opening";
         }
-        // The payment must name this chain and this contract in the field the
-        // payer chooses and the leaf commits, so a proof redeemed here cannot
-        // be redeemed again on another deployment of the same Graft application.
-        if (keccak256(proof.payment.originRecipient)
-            != keccak256(abi.encode("budlum/graft/payment-target/v1", block.chainid, address(this))))
+        // Consensus-committed deployment binding: targetChainId and
+        // targetReceiver live in GraftTx::Pay and BDLM_GRAFT_PAYMENT_LEAF_V1.
+        if (uint256(proof.payment.targetChainId) != block.chainid
+            || proof.payment.targetReceiver.length != EVM_ADDRESS_BYTE_LEN
+            || address(bytes20(proof.payment.targetReceiver)) != address(this))
         {
             return "receiver binding";
         }
+        if (proof.header.checkpointHeight < proof.payment.paidAtBlock
+            || proof.header.checkpointHeight - proof.payment.paidAtBlock > MAX_PAYMENT_WINDOW_BLOCKS)
+        {
+            return "payment window";
+        }
         // The finality mappings are append-only, so without an age bound a
         // stored proof stays redeemable after the payment has left the window.
-        if (block.timestamp > uint256(proof.header.timestampMs) / 1000 + MAX_PROOF_AGE_SECONDS) {
+        uint256 headerSeconds = uint256(proof.header.timestampMs) / 1000;
+        if (headerSeconds > block.timestamp || block.timestamp - headerSeconds > MAX_PROOF_AGE_SECONDS) {
             return "proof too old";
         }
         uint64 height = proof.header.checkpointHeight;
@@ -150,6 +163,9 @@ abstract contract BudlumPaymentReceiver {
         fields[7] = p.originRecipient;
         fields[8] = bytes.concat(p.memoHash);
         fields[9] = BudlumHash.le64(p.paidAtBlock);
+        fields[10] = BudlumHash.le64(p.targetChainId);
+        fields[11] = BudlumHash.le64(uint64(p.targetReceiver.length));
+        fields[12] = p.targetReceiver;
         return BudlumHash.hashFields(fields);
     }
 
