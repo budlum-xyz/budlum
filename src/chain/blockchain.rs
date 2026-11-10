@@ -11967,7 +11967,7 @@ mod bond_and_reorg_tests {
         // 3b. Timed burn expiring at height 200 debits `held` on burn and restores exact `held` on sweep.
         state
             .bridge_state
-            .burn_with_event(mid, 2, 70, 0, 200, [0x88; 20])
+            .burn_with_event(mid, 2, 70, 0, 200, [0u8; 20])
             .unwrap();
         state.get_or_create(&recipient).balance -= held.get();
         state.bridge_state.record_burn_debit(&mid, held);
