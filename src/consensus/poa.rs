@@ -631,6 +631,9 @@ impl ConsensusEngine for PoAEngine {
     fn note_block_seen(&self, block_hash: &str, at_ms: u128) {
         self.round_prices.note_tip_block(block_hash, at_ms);
     }
+    fn round_price_sightings(&self) -> Vec<(String, u128)> {
+        self.round_prices.snapshot()
+    }
     fn consensus_type(&self) -> &'static str {
         "PoA"
     }
