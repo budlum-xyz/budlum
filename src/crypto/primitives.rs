@@ -930,7 +930,7 @@ fn verify_ml_dsa_87_signature(
 }
 
 #[cfg(feature = "wallet-ml-dsa")]
-/// [`verify_ml_dsa_87_signature`] under the scheme statuses of a chain
+/// `verify_ml_dsa_87_signature` under the scheme statuses of a chain
 ///. A family the registry marks
 /// `Disabled` or not yet `Active` is refused before any key is decoded.
 pub fn verify_ml_dsa_87_signature_in(

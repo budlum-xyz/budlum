@@ -66,7 +66,7 @@ pub struct CrossDomainMessage {
     /// arbitrary messages (or pre-register a predictable lock id).
     ///
     /// IDENTITY: excluded - the key is the envelope that authenticates the
-    /// id, and [`CrossDomainMessage::verify_sender_signature`] requires it
+    /// id, and [`CrossDomainMessage::verify_sender_signature_in`] requires it
     /// to derive the `sender` the id already binds, so a different key
     /// under the same id proves control of nothing new.
     #[serde(default)]

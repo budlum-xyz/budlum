@@ -484,6 +484,36 @@ pub struct AccountState {
     /// sees no root change from this field existing.
     pub proof_market: crate::settlement::ProofMarketState,
 }
+/// Shared quantum-alarm intake gate for cross-domain message registration doors
+/// (`AccountState::register_relayed_cross_domain_message` and
+/// `settlement::domains::deliver_message`).
+pub(crate) fn enforce_classical_message_intake(
+    message: &crate::cross_domain::message::CrossDomainMessage,
+    alarm: &crate::security::quantum_canary::QuantumAlarmState,
+    current_block_height: u64,
+) -> Result<(), String> {
+    if message.source_quantum_class == Some(crate::crypto::facts::QuantumClass::Classical) {
+        use crate::security::alarm_effects::{classical_intake, ClassicalIntake};
+        match classical_intake(alarm) {
+            ClassicalIntake::Open => {}
+            ClassicalIntake::Wait(blocks) => {
+                let ready = message.source_height.saturating_add(blocks);
+                if current_block_height < ready {
+                    return Err(format!(
+                        "classical-class message is held by the quantum alarm until height {ready} (now {current_block_height})"
+                    ));
+                }
+            }
+            ClassicalIntake::Stopped => {
+                return Err(
+                    "the quantum alarm stopped the intake of classical-class messages".into(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 impl AccountState {
     pub fn new() -> Self {
         AccountState {
@@ -1209,28 +1239,11 @@ impl AccountState {
                 message.source_quantum_class, derived, message.source_domain
             ));
         }
-        // a classical-class message is slowed at Watch and stopped from
-        // Restrict on. A lattice or hash class message is not touched.
-        if message.source_quantum_class == Some(crate::crypto::facts::QuantumClass::Classical) {
-            use crate::security::alarm_effects::{classical_intake, ClassicalIntake};
-            match classical_intake(self.settlement.quantum.alarm()) {
-                ClassicalIntake::Open => {}
-                ClassicalIntake::Wait(blocks) => {
-                    let ready = message.source_height.saturating_add(blocks);
-                    if self.current_block_height < ready {
-                        return Err(format!(
-                            "classical-class message is held by the quantum alarm until height {ready} (now {})",
-                            self.current_block_height
-                        ));
-                    }
-                }
-                ClassicalIntake::Stopped => {
-                    return Err(
-                        "the quantum alarm stopped the intake of classical-class messages".into(),
-                    );
-                }
-            }
-        }
+        enforce_classical_message_intake(
+            message,
+            self.settlement.quantum.alarm(),
+            self.current_block_height,
+        )?;
         if message.source_domain == message.target_domain {
             return Err(format!(
                 "Cross-domain message source and target domains must differ (both={})",

@@ -7208,6 +7208,23 @@ impl Blockchain {
         }
     }
 
+    /// Resolves the canonical epoch for `checkpoint_height` when that height is
+    /// either the active finality round or already present on the local chain,
+    /// returning `None` only for early votes ahead of the local chain tip.
+    fn expected_vote_epoch(&self, checkpoint_height: u64) -> Option<u64> {
+        if let Some(agg) = self.finality_aggregator.as_ref() {
+            if agg.checkpoint_height == checkpoint_height {
+                return Some(agg.epoch);
+            }
+        }
+        if checkpoint_height > 0 {
+            if let Some(blk) = self.chain.get(checkpoint_height as usize) {
+                return Some(blk.epoch);
+            }
+        }
+        None
+    }
+
     pub fn handle_prevote(&mut self, vote: Prevote) -> Result<(), String> {
         if vote.checkpoint_hash.len() > MAX_CHECKPOINT_HASH_LEN {
             return Err("Rejecting prevote: checkpoint_hash is not a block hash".into());
@@ -7233,14 +7250,21 @@ impl Blockchain {
                 vote.chain_id, self.chain_id
             ));
         }
-        let expected_epoch = self
-            .finality_aggregator
-            .as_ref()
-            .map_or(self.state.epoch_index, |agg| agg.epoch);
-        if vote.epoch != expected_epoch {
+        if let Some(expected_epoch) = self.expected_vote_epoch(vote.checkpoint_height) {
+            if vote.epoch != expected_epoch {
+                return Err(format!(
+                    "Prevote epoch mismatch: vote epoch {} != checkpoint epoch {}",
+                    vote.epoch, expected_epoch
+                ));
+            }
+        } else if vote.epoch < self.state.epoch_index
+            || vote.epoch > self.state.epoch_index.saturating_add(1)
+        {
             return Err(format!(
-                "Prevote epoch {} does not match active epoch {}",
-                vote.epoch, expected_epoch
+                "Prevote epoch mismatch: early vote epoch {} outside active window {}..={}",
+                vote.epoch,
+                self.state.epoch_index,
+                self.state.epoch_index.saturating_add(1)
             ));
         }
         // BLG-0083 (P04-F01): authenticate BEFORE attributing. A garbage
@@ -7368,14 +7392,21 @@ impl Blockchain {
                 vote.chain_id, self.chain_id
             ));
         }
-        let expected_epoch = self
-            .finality_aggregator
-            .as_ref()
-            .map_or(self.state.epoch_index, |agg| agg.epoch);
-        if vote.epoch != expected_epoch {
+        if let Some(expected_epoch) = self.expected_vote_epoch(vote.checkpoint_height) {
+            if vote.epoch != expected_epoch {
+                return Err(format!(
+                    "Precommit epoch mismatch: vote epoch {} != checkpoint epoch {}",
+                    vote.epoch, expected_epoch
+                ));
+            }
+        } else if vote.epoch < self.state.epoch_index
+            || vote.epoch > self.state.epoch_index.saturating_add(1)
+        {
             return Err(format!(
-                "Precommit epoch {} does not match active epoch {}",
-                vote.epoch, expected_epoch
+                "Precommit epoch mismatch: early vote epoch {} outside active window {}..={}",
+                vote.epoch,
+                self.state.epoch_index,
+                self.state.epoch_index.saturating_add(1)
             ));
         }
         // BLG-0083 (P04-F01): authenticate BEFORE attributing (see
@@ -7421,14 +7452,22 @@ impl Blockchain {
         // Prefer the active round's immutable membership/index snapshot. The
         // chain's epoch snapshot may not yet be retained when an early round
         // already exists, and silently skipping PQ verification is unsafe.
-        let snapshot = self
+        let active_round_snapshot = self
             .finality_aggregator
             .as_ref()
             .filter(|round| {
                 round.epoch == vote.epoch && round.checkpoint_height == vote.checkpoint_height
             })
-            .map(|round| round.validator_snapshot.clone())
-            .or_else(|| self.validator_snapshot_for_epoch(vote.epoch));
+            .map(|round| round.validator_snapshot.clone());
+        // Membership before cost: when this node holds no matching round at the
+        // vote's height, `validator_snapshot_for_epoch` rebuilds the whole set
+        // from state, verifying one BLS PoP pairing per validator. Reject any
+        // voter absent from `state.validators` before triggering that rebuild.
+        if active_round_snapshot.is_none() && !self.state.validators.contains_key(&vote.voter_id) {
+            return Err("Rejecting precommit: voter is not a registered validator".into());
+        }
+        let snapshot =
+            active_round_snapshot.or_else(|| self.validator_snapshot_for_epoch(vote.epoch));
         let entry = snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.find_validator(&vote.voter_id));
@@ -10618,6 +10657,30 @@ mod tests {
         // The current epoch still counts: the guard is a bound, not a lockout.
         bc.note_invalid_vote(bc.state.epoch_index, voter);
         assert_eq!(bc.local_invalid_votes.invalid_count(&voter), 1);
+    }
+
+    #[test]
+    fn test_handle_precommit_rejects_unknown_voter_before_snapshot_rebuild() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
+        let _bls = register_signed_early_voter(&mut bc, Address::from([1u8; 32]));
+        let unknown = Precommit {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+            epoch: 0,
+            checkpoint_height: 10,
+            checkpoint_hash: "ab".repeat(32),
+            voter_id: Address::from([9u8; 32]),
+            sig_bls: vec![0u8; 48],
+            auth_sig: vec![0u8; 48],
+            pq_sig: vec![1u8; 32],
+        };
+        let err = bc
+            .handle_precommit(unknown)
+            .expect_err("unknown voter precommit must be rejected before snapshot rebuild");
+        assert!(
+            err.contains("voter is not a registered validator"),
+            "got: {err}"
+        );
     }
 
     #[test]
