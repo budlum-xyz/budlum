@@ -731,15 +731,32 @@ impl Blockchain {
                         #[cfg(test)]
                         panic!("Invalid startup V2 snapshot authentication: {error}");
                     }
-                    state = crate::core::account::AccountState::from_snapshot_v2(&v2_snapshot);
-                    snapshot_height = v2_snapshot.height;
-                    restored_finalized_height = v2_snapshot.finalized_height;
-                    restored_finalized_hash = v2_snapshot.finalized_hash.clone();
-                    info!(
-                        "Restored state from V2 snapshot at height {} (finalized={}, epoch={}, base_fee={})",
-                        snapshot_height, restored_finalized_height, v2_snapshot.epoch_index, v2_snapshot.base_fee
-                    );
-                    true
+                    match Self::validate_startup_v2_snapshot(
+                        chain_id,
+                        &v2_snapshot,
+                        &chain_vec,
+                        &resolved_genesis_config,
+                        consensus.domain_kind(),
+                    ) {
+                        Ok(restored_state) => {
+                            state = restored_state;
+                            snapshot_height = v2_snapshot.height;
+                            restored_finalized_height = v2_snapshot.finalized_height;
+                            restored_finalized_hash = v2_snapshot.finalized_hash.clone();
+                            info!(
+                                "Restored state from V2 snapshot at height {} (finalized={}, epoch={}, base_fee={})",
+                                snapshot_height, restored_finalized_height, v2_snapshot.epoch_index, v2_snapshot.base_fee
+                            );
+                            true
+                        }
+                        Err(reason) => {
+                            error!(
+                                "Refusing unbacked startup V2 snapshot at height {}: {reason}. Falling back to local chain replay.",
+                                v2_snapshot.height
+                            );
+                            false
+                        }
+                    }
                 } else {
                     warn!(
                         "V2 snapshot chain_id mismatch (expected {}, got {}). Trying V1 fallback.",
@@ -6079,6 +6096,7 @@ impl Blockchain {
                 self.global_headers =
                     Self::validated_global_header_prefix(stored_global_headers, self.chain_id);
             }
+            self.state.bridge_root = self.state.bridge_state.root();
         }
         // The archive follows the headers the new branch's state commits.
         Self::reconcile_global_header_archive(&mut self.global_headers, &self.state);
@@ -6370,6 +6388,72 @@ impl Blockchain {
             == crate::core::chain_config::Network::Mainnet
                 .chain_id()
                 .value()
+    }
+
+    fn validate_startup_v2_snapshot(
+        chain_id: u64,
+        v2: &crate::chain::snapshot::StateSnapshotV2,
+        chain_vec: &[Block],
+        genesis_config: &crate::chain::genesis::GenesisConfig,
+        domain_kind: crate::domain::ConsensusKind,
+    ) -> Result<AccountState, String> {
+        if v2.finalized_height > v2.height {
+            return Err(format!(
+                "finalized height {} exceeds snapshot height {}",
+                v2.finalized_height, v2.height
+            ));
+        }
+        let Some(genesis_block) = chain_vec.first() else {
+            return Err("local chain has no genesis block".into());
+        };
+        if matches!(Network::from_chain_id(chain_id), Some(Network::Mainnet))
+            && v2.genesis_hash.is_empty()
+        {
+            return Err("mainnet V2 snapshot requires a non-empty genesis hash".into());
+        }
+        if !v2.genesis_hash.is_empty() && v2.genesis_hash != genesis_block.hash {
+            return Err("V2 snapshot genesis hash mismatch".into());
+        }
+        let Some(snapshot_block) = chain_vec.get(v2.height as usize) else {
+            return Err(format!(
+                "V2 snapshot height {} exceeds local chain length {}",
+                v2.height,
+                chain_vec.len()
+            ));
+        };
+        if snapshot_block.hash != v2.block_hash {
+            return Err("V2 snapshot block hash mismatch".into());
+        }
+        let Some(finalized_block) = chain_vec.get(v2.finalized_height as usize) else {
+            return Err(format!(
+                "V2 snapshot finalized height {} not in local chain",
+                v2.finalized_height
+            ));
+        };
+        if finalized_block.hash != v2.finalized_hash {
+            return Err("V2 snapshot finalized hash mismatch".into());
+        }
+        let expected_state_root = if !snapshot_block.state_root.is_empty() {
+            snapshot_block.state_root.clone()
+        } else if snapshot_block.index == 0 {
+            let mut genesis_state = genesis_config.build_state();
+            genesis_state.execution_domain = domain_kind.clone();
+            genesis_state.calculate_state_root()
+        } else {
+            return Err(format!(
+                "target block at height {} carries an empty state root",
+                snapshot_block.index
+            ));
+        };
+        let mut restored = AccountState::from_snapshot_v2(v2);
+        restored.execution_domain = domain_kind;
+        let actual_state_root = restored.calculate_state_root();
+        if actual_state_root != expected_state_root {
+            return Err(format!(
+                "V2 snapshot state root mismatch (expected {expected_state_root}, got {actual_state_root})"
+            ));
+        }
+        Ok(restored)
     }
 
     fn expected_snapshot_state_root(&self, block: &Block) -> Result<String, String> {
@@ -7084,8 +7168,12 @@ impl Blockchain {
     /// WIRING: local invalid-vote accounting door without mutating committed
     /// `AccountState` outside block execution.
     pub fn note_invalid_vote(&mut self, epoch: u64, voter: Address) {
-        if epoch > self.state.epoch_index.saturating_add(1) {
-            tracing::warn!(epoch, "Invalid vote names an epoch far ahead; not counted");
+        if epoch != self.state.epoch_index {
+            tracing::warn!(
+                epoch,
+                active_epoch = self.state.epoch_index,
+                "Invalid vote does not name the active epoch; not counted"
+            );
             return;
         }
         let params = *self.state.registry.params();
@@ -7103,8 +7191,12 @@ impl Blockchain {
         voter: Address,
         sample: (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>),
     ) {
-        if epoch > self.state.epoch_index.saturating_add(1) {
-            tracing::warn!(epoch, "Invalid vote names an epoch far ahead; not counted");
+        if epoch != self.state.epoch_index {
+            tracing::warn!(
+                epoch,
+                active_epoch = self.state.epoch_index,
+                "Invalid vote sample does not name the active epoch; not counted"
+            );
             return;
         }
         let params = *self.state.registry.params();
@@ -7141,7 +7233,17 @@ impl Blockchain {
                 vote.chain_id, self.chain_id
             ));
         }
-        // Authenticate BEFORE attributing. A garbage
+        let expected_epoch = self
+            .finality_aggregator
+            .as_ref()
+            .map_or(self.state.epoch_index, |agg| agg.epoch);
+        if vote.epoch != expected_epoch {
+            return Err(format!(
+                "Prevote epoch {} does not match active epoch {}",
+                vote.epoch, expected_epoch
+            ));
+        }
+        // BLG-0083 (P04-F01): authenticate BEFORE attributing. A garbage
         // vote naming a victim must not count against the victim: only a
         // vote whose `auth_sig` proves control of the registered key may
         // later earn an invalid-vote tick (self-incrimination). Unverified
@@ -7266,7 +7368,17 @@ impl Blockchain {
                 vote.chain_id, self.chain_id
             ));
         }
-        // Authenticate BEFORE attributing (see
+        let expected_epoch = self
+            .finality_aggregator
+            .as_ref()
+            .map_or(self.state.epoch_index, |agg| agg.epoch);
+        if vote.epoch != expected_epoch {
+            return Err(format!(
+                "Precommit epoch {} does not match active epoch {}",
+                vote.epoch, expected_epoch
+            ));
+        }
+        // BLG-0083 (P04-F01): authenticate BEFORE attributing (see
         // `handle_prevote`).
         if let Some(v) = self.state.validators.get(&vote.voter_id) {
             if !v.bls_public_key.is_empty()
@@ -11817,7 +11929,7 @@ mod bond_and_reorg_tests {
     }
 
     #[test]
-    fn restored_round_price_sightings_reload_from_storage_and_clamp_stale_ancestors() {
+    fn restored_round_price_sightings_reload_from_disk_and_clamp_stale_ancestors() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().to_str().unwrap().to_string();
         let now = crate::consensus::now_millis();
@@ -11872,5 +11984,128 @@ mod bond_and_reorg_tests {
             .map(|(_, at)| *at)
             .expect("persisted sighting reloaded on startup");
         assert_eq!(reloaded_at, now.saturating_sub(7_000));
+    }
+    #[test]
+    fn reorg_preserves_replayed_bridge_state_over_orphaned_persisted_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_a = dir.path().join("node_a");
+        let db_b = dir.path().join("node_b");
+        let store_a = Storage::new(db_a.to_str().unwrap()).unwrap();
+        let store_b = Storage::new(db_b.to_str().unwrap()).unwrap();
+
+        let mut bc_a = Blockchain::new(
+            Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+            Some(store_a),
+            45262,
+            None,
+        );
+        let mut bc_b = Blockchain::new(
+            Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+            Some(store_b),
+            45262,
+            None,
+        );
+
+        let miner_a = Address::from([0x11; 32]);
+        let miner_b = Address::from([0x22; 32]);
+        let _ = bc_a.produce_block(miner_a).unwrap();
+        let _ = bc_b.produce_block(miner_b).unwrap();
+        let _ = bc_b.produce_block(miner_b).unwrap();
+
+        let mut orphaned_bs = BridgeState::new();
+        orphaned_bs
+            .replay
+            .mark_processed_at(1, 2, &Address::from([0x99; 32]), 42, 0)
+            .unwrap();
+        bc_a.storage
+            .as_ref()
+            .unwrap()
+            .save_bridge_state(&orphaned_bs)
+            .unwrap();
+
+        assert_eq!(bc_a.try_reorg(bc_b.chain.clone()), Ok(true));
+        assert!(
+            !bc_a
+                .state
+                .bridge_state
+                .replay
+                .is_processed(1, 2, &Address::from([0x99; 32]), 42),
+            "reorg must retain candidate fork bridge_state rather than orphaned disk row"
+        );
+        assert_eq!(bc_a.state.bridge_root, bc_a.state.bridge_state.root());
+    }
+
+    #[test]
+    fn startup_rejects_v2_snapshot_with_forged_block_or_state_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("chain_db");
+        let snap_dir = dir.path().join("snaps").to_str().unwrap().to_string();
+        let miner = Address::from([0x33; 32]);
+        let attacker = Address::from([0x77; 32]);
+
+        let (h1_hash, genesis_hash) = {
+            let store = Storage::new(db_path.to_str().unwrap()).unwrap();
+            let mut bc = Blockchain::new(
+                Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+                Some(store),
+                45262,
+                None,
+            );
+            let _ = bc.produce_block(miner).unwrap();
+            let _ = bc.produce_block(miner).unwrap();
+            (bc.chain[1].hash.clone(), bc.chain[0].hash.clone())
+        };
+
+        let mut forged_state = AccountState::default();
+        forged_state.add_balance(&attacker, 999_999_999);
+        let pm = PruningManager::new(10, 10, snap_dir.clone());
+        let forged_snap = crate::chain::snapshot::StateSnapshotV2::from_state(
+            &forged_state,
+            crate::chain::snapshot::StateSnapshotV2Params {
+                height: 1,
+                block_hash: h1_hash,
+                genesis_hash,
+                chain_id: 45262,
+                finalized_height: 1,
+                finalized_hash: "ff".repeat(32),
+                finality_certificates: vec![],
+            },
+        );
+        pm.save_snapshot_v2(&forged_snap).unwrap();
+
+        let store = Storage::new(db_path.to_str().unwrap()).unwrap();
+        let bc = Blockchain::new(
+            Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+            Some(store),
+            45262,
+            Some(PruningManager::new(10, 10, snap_dir)),
+        );
+        assert_eq!(bc.state.get_balance(&attacker), 0);
+        assert_eq!(bc.finalized_height, 0);
+    }
+
+    #[test]
+    fn non_active_epoch_invalid_votes_cannot_wipe_or_advance_live_tracker() {
+        let mut bc = Blockchain::new(
+            Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+            None,
+            45262,
+            None,
+        );
+        bc.state.epoch_index = 5;
+        let offender = Address::from([0x44; 32]);
+
+        bc.note_invalid_vote(1, offender);
+        bc.note_invalid_vote(4, offender);
+        assert_eq!(bc.local_invalid_votes.invalid_count(&offender), 0);
+
+        bc.note_invalid_vote(5, offender);
+        bc.note_invalid_vote(5, offender);
+        assert_eq!(bc.local_invalid_votes.current_epoch(), 5);
+        assert_eq!(bc.local_invalid_votes.invalid_count(&offender), 2);
+
+        bc.note_invalid_vote(6, offender);
+        assert_eq!(bc.local_invalid_votes.current_epoch(), 5);
+        assert_eq!(bc.local_invalid_votes.invalid_count(&offender), 2);
     }
 }
