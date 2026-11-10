@@ -21,7 +21,7 @@ ml-dsa = { version = "0.1.1", features = ["alloc", "zeroize", "rand_core"] }
 # so wasm builds keep working exactly as before.
 rand_core = { version = "0.10", default-features = false }
 sha3 = "0.10"
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 zeroize = { version = "1", features = ["derive"] }
 # The wallet packs the field elements the chain will look up by. That packing
