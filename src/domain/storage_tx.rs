@@ -791,11 +791,12 @@ fn open_deal(
         return Err(StorageTxError::OpenDealOnMainnet);
     }
     // Cloned so the registry can be written while the terms borrow it.
-    let manifest = state
+    let mut manifest = state
         .storage_registry
         .get_manifest(&open.manifest_id)
         .ok_or(StorageTxError::ManifestNotRegistered)?
         .clone();
+    manifest.owner = ctx.sender;
     // The payer has to be the content's authority. Everything the registry
     // reports about durability - repair, the last-copy release guard, the
     // operator's standing - is derived from `Active` deal rows and nothing
@@ -806,7 +807,7 @@ fn open_deal(
     // read and prune doors use.
     if !state
         .storage_registry
-        .has_claim(&open.manifest_id, &ctx.sender)
+        .has_manifest_claim(&open.manifest_id, &ctx.sender)
     {
         return Err(StorageTxError::DealManifestNotOwned { sender: ctx.sender });
     }
@@ -957,7 +958,11 @@ fn register_manifest(
             });
         }
     }
-    if state.storage_registry.is_registered(&manifest.manifest_id) {
+    if state.storage_registry.is_registered(&manifest.manifest_id)
+        && state
+            .storage_registry
+            .has_manifest_claim(&manifest.manifest_id, sender)
+    {
         return Err(StorageTxError::AlreadyRegistered);
     }
     if matches!(manifest.source, crate::storage::ContentSource::Generated(_)) {
@@ -2206,5 +2211,134 @@ mod tests {
             "unexpected error: {err}"
         );
         assert_eq!(state.calculate_state_root(), before_root);
+    }
+
+    #[test]
+    fn squatter_first_manifest_cannot_block_or_hijack_real_owner_doors() {
+        use crate::storage::{
+            ConfidentialBodyCommit, ConfidentialProofKind, ContentCipher, ContentEncryption,
+        };
+
+        let mut state = AccountState::new();
+        let squatter = Address::from([0xEE; 32]);
+        let victim = Address::from([0x11; 32]);
+        let grantee = Address::from([0x22; 32]);
+
+        let victim_manifest = manifest_owned_by(victim);
+        let mut squatter_manifest = victim_manifest.clone();
+        squatter_manifest.owner = squatter;
+        assert_eq!(squatter_manifest.manifest_id, victim_manifest.manifest_id);
+        let mid = victim_manifest.manifest_id;
+
+        // 1. Squatter front-runs manifest registration and commits its own body/grant/policy.
+        execute_storage_tx(
+            &mut state,
+            &ctx(squatter),
+            &StorageTx::RegisterManifest {
+                manifest: squatter_manifest,
+            },
+        )
+        .expect("squatter registers first");
+        let squatter_commit = ConfidentialBodyCommit::new(
+            mid,
+            ContentEncryption::ClientSide(ContentCipher::Aes256Gcm),
+            [0xAA; 32],
+            ConfidentialProofKind::HybridZkTee,
+        )
+        .unwrap();
+        execute_storage_tx(
+            &mut state,
+            &ctx(squatter),
+            &StorageTx::CommitConfidentialBody {
+                commit: squatter_commit,
+            },
+        )
+        .expect("squatter commits under its own namespace");
+        let mut blocking_policy = policy_for(squatter, victim_manifest.shards[0].shard_id);
+        blocking_policy.self_host_allowed = false;
+        execute_storage_tx(
+            &mut state,
+            &ctx(squatter),
+            &StorageTx::DeclareSelfHostPolicy {
+                manifest_id: mid,
+                policy: blocking_policy,
+                profile: profile_for(squatter),
+            },
+        )
+        .expect("squatter policy scoped to squatter");
+
+        // 2. Real owner is NOT locked out: RegisterManifest, CommitConfidentialBody,
+        //    IssueViewGrant, SocialDelete, and self-host check all succeed for victim.
+        execute_storage_tx(
+            &mut state,
+            &ctx(victim),
+            &StorageTx::RegisterManifest {
+                manifest: victim_manifest.clone(),
+            },
+        )
+        .expect("real owner registers despite squatter");
+        // Ambiguous while neither holds a third-party deal: squatter cannot claim sole owner_of.
+        assert_eq!(state.storage_registry.owner_of(&mid), None);
+        assert!(state.storage_registry.has_claim(&mid, &victim));
+
+        let victim_commit = ConfidentialBodyCommit::new(
+            mid,
+            ContentEncryption::ClientSide(ContentCipher::Aes256Gcm),
+            [0xBB; 32],
+            ConfidentialProofKind::HybridZkTee,
+        )
+        .unwrap();
+        execute_storage_tx(
+            &mut state,
+            &ctx(victim),
+            &StorageTx::CommitConfidentialBody {
+                commit: victim_commit,
+            },
+        )
+        .expect("real owner commits confidential body in its own namespace");
+        execute_storage_tx(
+            &mut state,
+            &ctx(victim),
+            &StorageTx::IssueViewGrant {
+                content_id: mid,
+                grantee: Some(grantee),
+                key_id: [0x55; 32],
+                policy: ViewPolicy::NamedGrantee,
+            },
+        )
+        .expect("real owner issues view grant");
+        // Squatter social delete cannot revoke victim's grant.
+        execute_storage_tx(
+            &mut state,
+            &ctx(squatter),
+            &StorageTx::SocialDelete { content_id: mid },
+        )
+        .expect("squatter social delete runs in squatter namespace");
+        assert_eq!(
+            state
+                .storage_registry
+                .view_grants
+                .live_for_content(&mid)
+                .len(),
+            1,
+            "squatter social delete must leave victim's grant live"
+        );
+        // Squatter's self_host_allowed = false policy does not block victim.
+        assert!(state
+            .storage_registry
+            .check_self_host_allowed_for_owner(&mid, &victim_manifest.shards[0].shard_id, &victim)
+            .is_ok());
+        // Victim's own social delete revokes victim's grant.
+        execute_storage_tx(
+            &mut state,
+            &ctx(victim),
+            &StorageTx::SocialDelete { content_id: mid },
+        )
+        .expect("victim social delete");
+        assert!(state
+            .storage_registry
+            .view_grants
+            .live_for_content(&mid)
+            .is_empty());
     }
 }
