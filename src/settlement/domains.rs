@@ -189,6 +189,12 @@ fn deliver_message(
             message.source_quantum_class
         )));
     }
+    crate::core::account::enforce_classical_message_intake(
+        &message,
+        state.settlement.quantum.alarm(),
+        state.current_block_height,
+    )
+    .map_err(SettlementTxError::Refused)?;
     // A finalized commitment may arrive out of order and sit staged in the
     // commitment registry until its parent chain links up; delivering its
     // message may not consume it before `last_committed_height` reaches
@@ -618,12 +624,7 @@ pub fn verify_commitment_finality_observed(
                 .settlement
                 .external_intake
                 .registry
-                .evaluate_for_commitment(
-                    eval_adapter.as_ref(),
-                    &evidence,
-                    &policy,
-                    has_quorum_policy,
-                )
+                .evaluate_for_commitment(eval_adapter.as_ref(), &evidence, &policy)
                 .map_err(|e| format!("External domain policy refused commitment: {e}"))?;
             if has_quorum_policy {
                 let Some(committed_att) = reg
@@ -637,6 +638,11 @@ pub fn verify_commitment_finality_observed(
                 };
                 if committed_att.state_root != commitment.state_root
                     || committed_att.state_root != evaluated.state_root
+                    || !reg.is_quorum_decided(
+                        commitment.domain_height,
+                        evidence.evidence_version,
+                        &commitment.state_root,
+                    )
                 {
                     return Err(format!(
                         "Domain {} height {} commitment state root does not match decided external quorum attestation",
@@ -3385,6 +3391,346 @@ mod tests {
         assert!(
             err.contains("requires a decided external quorum attestation"),
             "got: {err}"
+        );
+    }
+
+    #[test]
+    fn quorum_less_external_domain_not_frozen_by_prefilled_attestation_slot() {
+        struct AcceptTestBls;
+        impl crate::cross_domain::external::BlsVerifier for AcceptTestBls {
+            fn verify_aggregate(
+                &self,
+                _signing_root: &[u8; 32],
+                aggregate_pubkey: &[u8],
+                signature: &[u8],
+                participants: u64,
+            ) -> Result<(), String> {
+                if participants == 0
+                    || signature.iter().all(|b| *b == 0)
+                    || aggregate_pubkey.iter().all(|b| *b == 0)
+                {
+                    return Err("invalid aggregate signature".to_string());
+                }
+                Ok(())
+            }
+        }
+        fn test_bls() -> Box<dyn crate::cross_domain::external::BlsVerifier> {
+            Box::new(AcceptTestBls)
+        }
+
+        let mut state = AccountState::new();
+        let spec = crate::cross_domain::external::AdapterSpec::EthereumSync {
+            network: "testnet".to_string(),
+            committee: Some(crate::cross_domain::external::ethereum::PinnedCommittee {
+                period: 0,
+                aggregate_pubkey: vec![0x11; 96],
+                next_committee_root: [0xbb; 32],
+            }),
+        };
+        let adapter = spec.build(Some(test_bls()), None);
+        let adapter_id = adapter.descriptor().id;
+        let prover = Address::from([0x41; 32]);
+        let build_eth_evidence = |height: u64, root: [u8; 32]| {
+            use crate::cross_domain::external::ethereum::layout;
+            let mut payload = vec![0u8; layout::LEN];
+            payload[layout::FINALIZED_ROOT].copy_from_slice(&[0xaa; 32]);
+            payload[layout::FINALIZED_SLOT].copy_from_slice(&height.to_le_bytes());
+            payload[layout::ATTESTED_SLOT].copy_from_slice(&(height + 64).to_le_bytes());
+            payload[layout::PERIOD].copy_from_slice(&0u64.to_le_bytes());
+            payload[layout::NEXT_COMMITTEE_ROOT].copy_from_slice(&[0xbb; 32]);
+            payload[layout::AGGREGATE_PUBKEY].copy_from_slice(&[0x11; 96]);
+            payload[layout::SIGNATURE].copy_from_slice(&[0x22; 96]);
+            payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0xff; 64]);
+            payload[layout::STATE_ROOT].copy_from_slice(&root);
+            crate::cross_domain::external::RawConsensusEvidence {
+                adapter: adapter_id,
+                evidence_version: 2,
+                network: "testnet".to_string(),
+                payload,
+                declared_height: height,
+                declared_root: root,
+                submitter: prover,
+            }
+        };
+
+        let golden = build_eth_evidence(64, [0xcc; 32]);
+        let economics =
+            crate::cross_domain::external::IntakeState::conservative_economics(1_000_000);
+        let bond_atoms = economics.required_bond_atoms();
+        let key = state
+            .settlement
+            .external_intake
+            .register_domain(
+                crate::cross_domain::external::RegistrationRequest {
+                    spec,
+                    policy: crate::cross_domain::external::VerificationPolicy::strict(1_000),
+                    economics,
+                    versions: crate::cross_domain::external::VersionPolicy::single(
+                        adapter_id, 2, 0,
+                    ),
+                    bond_atoms,
+                    poster: prover,
+                    golden,
+                },
+                Some(test_bls()),
+            )
+            .unwrap();
+
+        // A bonded prover fills height 65 in the intake book on a quorum-less domain.
+        let next_evidence = build_eth_evidence(65, [0xdd; 32]);
+        state
+            .settlement
+            .external_intake
+            .submit_evidence(&next_evidence, Some(test_bls()))
+            .unwrap();
+
+        let mut domain = default_domain(
+            78,
+            ConsensusKind::Custom("external".to_string()),
+            45262,
+            crate::cross_domain::external::EXTERNAL_DOMAIN_FINALITY_ADAPTER,
+            1,
+        );
+        domain.config_hash = *key.as_bytes();
+        domain.last_committed_height = 64;
+        domain.last_committed_hash = [0xcc; 32];
+        domain.status = DomainStatus::Active;
+        state.settlement.domains.register(domain.clone()).unwrap();
+
+        let proof =
+            crate::cross_domain::external::encode_external_evidence(&next_evidence).unwrap();
+        let mut blk = block(65, &hex::encode([0xcc; 32]), 0xdd);
+        blk.state_root = hex::encode([0xdd; 32]);
+        blk.hash = blk.calculate_hash();
+        let mut com = commitment(&domain, &blk, 0);
+        com.domain_block_hash = [0xaa; 32];
+        com.tx_root = [0u8; 32];
+        com.event_root = [0u8; 32];
+        com.validator_set_hash = [0u8; 32];
+        com.timestamp_ms = 0;
+        com.producer = None;
+        com.state_updates.clear();
+        com.finality_proof_hash = hash_finality_proof(&proof).unwrap();
+
+        verify_commitment_finality(&state, &com, &proof, test_bls)
+            .expect("quorum-less external domain commitment must not freeze on prefilled slot");
+    }
+
+    #[test]
+    fn pre_policy_single_prover_attestation_is_withdrawn_when_quorum_policy_installed() {
+        struct AcceptTestBls;
+        impl crate::cross_domain::external::BlsVerifier for AcceptTestBls {
+            fn verify_aggregate(
+                &self,
+                _signing_root: &[u8; 32],
+                aggregate_pubkey: &[u8],
+                signature: &[u8],
+                participants: u64,
+            ) -> Result<(), String> {
+                if participants == 0
+                    || signature.iter().all(|b| *b == 0)
+                    || aggregate_pubkey.iter().all(|b| *b == 0)
+                {
+                    return Err("invalid aggregate signature".to_string());
+                }
+                Ok(())
+            }
+        }
+        fn test_bls() -> Box<dyn crate::cross_domain::external::BlsVerifier> {
+            Box::new(AcceptTestBls)
+        }
+
+        let mut state = AccountState::new();
+        let spec = crate::cross_domain::external::AdapterSpec::EthereumSync {
+            network: "testnet".to_string(),
+            committee: Some(crate::cross_domain::external::ethereum::PinnedCommittee {
+                period: 0,
+                aggregate_pubkey: vec![0x11; 96],
+                next_committee_root: [0xbb; 32],
+            }),
+        };
+        let adapter = spec.build(Some(test_bls()), None);
+        let adapter_id = adapter.descriptor().id;
+        let p1 = Address::from([0x51; 32]);
+        let p2 = Address::from([0x52; 32]);
+        let build_eth_evidence = |height: u64, root: [u8; 32], submitter: Address| {
+            use crate::cross_domain::external::ethereum::layout;
+            let mut payload = vec![0u8; layout::LEN];
+            payload[layout::FINALIZED_ROOT].copy_from_slice(&[0xaa; 32]);
+            payload[layout::FINALIZED_SLOT].copy_from_slice(&height.to_le_bytes());
+            payload[layout::ATTESTED_SLOT].copy_from_slice(&(height + 64).to_le_bytes());
+            payload[layout::PERIOD].copy_from_slice(&0u64.to_le_bytes());
+            payload[layout::NEXT_COMMITTEE_ROOT].copy_from_slice(&[0xbb; 32]);
+            payload[layout::AGGREGATE_PUBKEY].copy_from_slice(&[0x11; 96]);
+            payload[layout::SIGNATURE].copy_from_slice(&[0x22; 96]);
+            payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0xff; 64]);
+            payload[layout::STATE_ROOT].copy_from_slice(&root);
+            crate::cross_domain::external::RawConsensusEvidence {
+                adapter: adapter_id,
+                evidence_version: 2,
+                network: "testnet".to_string(),
+                payload,
+                declared_height: height,
+                declared_root: root,
+                submitter,
+            }
+        };
+
+        let golden = build_eth_evidence(64, [0xcc; 32], p1);
+        let economics =
+            crate::cross_domain::external::IntakeState::conservative_economics(1_000_000);
+        let bond_atoms = economics.required_bond_atoms();
+        let key = state
+            .settlement
+            .external_intake
+            .register_domain(
+                crate::cross_domain::external::RegistrationRequest {
+                    spec,
+                    policy: crate::cross_domain::external::VerificationPolicy::strict(1_000),
+                    economics,
+                    versions: crate::cross_domain::external::VersionPolicy::single(
+                        adapter_id, 2, 0,
+                    ),
+                    bond_atoms,
+                    poster: p1,
+                    golden,
+                },
+                Some(test_bls()),
+            )
+            .unwrap();
+        state
+            .settlement
+            .external_intake
+            .bond_prover(&key, p2, bond_atoms)
+            .unwrap();
+
+        // Single prover lands height 65 BEFORE quorum policy exists.
+        let pre_ev = build_eth_evidence(65, [0xdd; 32], p1);
+        state
+            .settlement
+            .external_intake
+            .submit_evidence(&pre_ev, Some(test_bls()))
+            .unwrap();
+
+        // Installing quorum policy withdraws pre-policy attestations.
+        state
+            .settlement
+            .external_intake
+            .set_quorum_policy(
+                &key,
+                crate::cross_domain::external::QuorumPolicy::strict(2, 3),
+            )
+            .unwrap();
+
+        let mut domain = default_domain(
+            79,
+            ConsensusKind::Custom("external".to_string()),
+            45262,
+            crate::cross_domain::external::EXTERNAL_DOMAIN_FINALITY_ADAPTER,
+            1,
+        );
+        domain.config_hash = *key.as_bytes();
+        domain.last_committed_height = 64;
+        domain.last_committed_hash = [0xcc; 32];
+        domain.status = DomainStatus::Active;
+        state.settlement.domains.register(domain.clone()).unwrap();
+
+        let proof = crate::cross_domain::external::encode_external_evidence(&pre_ev).unwrap();
+        let mut blk = block(65, &hex::encode([0xcc; 32]), 0xdd);
+        blk.state_root = hex::encode([0xdd; 32]);
+        blk.hash = blk.calculate_hash();
+        let mut com = commitment(&domain, &blk, 0);
+        com.domain_block_hash = [0xaa; 32];
+        com.tx_root = [0u8; 32];
+        com.event_root = [0u8; 32];
+        com.validator_set_hash = [0u8; 32];
+        com.timestamp_ms = 0;
+        com.producer = None;
+        com.state_updates.clear();
+        com.finality_proof_hash = hash_finality_proof(&proof).unwrap();
+
+        let err = verify_commitment_finality(&state, &com, &proof, test_bls)
+            .expect_err("pre-policy attestation must not satisfy quorum commitment gate");
+        assert!(
+            err.contains("requires a decided external quorum attestation"),
+            "got: {err}"
+        );
+
+        // Honest quorum round can still open and decide height 65 cleanly.
+        let r1 = state
+            .settlement
+            .external_intake
+            .submit_evidence(&pre_ev, Some(test_bls()));
+        assert!(matches!(
+            r1,
+            Err(crate::cross_domain::external::IntakeError::RoundPending)
+        ));
+        let p2_ev = build_eth_evidence(65, [0xdd; 32], p2);
+        state
+            .settlement
+            .external_intake
+            .submit_evidence(&p2_ev, Some(test_bls()))
+            .expect("second bonded prover closes quorum round");
+        verify_commitment_finality(&state, &com, &proof, test_bls)
+            .expect("quorum-decided external height must verify");
+    }
+
+    #[test]
+    fn classical_intake_gate_blocks_classical_messages_under_watch_and_restrict() {
+        use crate::crypto::facts::QuantumClass;
+        use crate::security::quantum_canary::{CanaryBook, CanaryClaim, CanaryId};
+
+        let alarm_with = |ids: &[CanaryId]| {
+            let mut book = CanaryBook::new();
+            for id in ids {
+                book.force_solved(
+                    *id,
+                    CanaryClaim {
+                        commit_height: 1,
+                        claimer: Address::from([1u8; 32]),
+                        accepted_height: 2,
+                    },
+                );
+            }
+            book.alarm().clone()
+        };
+
+        let msg = crate::cross_domain::message::CrossDomainMessage {
+            message_id: [0x11; 32],
+            correlation_id: None,
+            source_domain: 2,
+            target_domain: 3,
+            source_height: 10,
+            event_index: 0,
+            nonce: 1,
+            sender: Address::from([0x22; 32]),
+            recipient: Address::from([0x33; 32]),
+            payload_hash: [0x44; 32],
+            kind: crate::cross_domain::message::MessageKind::BridgeMint,
+            expiry_height: 0,
+            sender_public_key: Vec::new(),
+            sender_signature: Vec::new(),
+            source_quantum_class: Some(QuantumClass::Classical),
+        };
+
+        let clear = alarm_with(&[]);
+        assert!(crate::core::account::enforce_classical_message_intake(&msg, &clear, 11).is_ok());
+
+        let watch = alarm_with(&[CanaryId::Ecc192]);
+        let watch_err = crate::core::account::enforce_classical_message_intake(&msg, &watch, 11)
+            .expect_err("Watch must hold classical message during wait window");
+        assert!(
+            watch_err.contains("held by the quantum alarm"),
+            "got: {watch_err}"
+        );
+
+        let restrict = alarm_with(&[CanaryId::Ecc224]);
+        let restrict_err =
+            crate::core::account::enforce_classical_message_intake(&msg, &restrict, 10_000_000)
+                .expect_err("Restrict must refuse classical message");
+        assert!(
+            restrict_err.contains("stopped the intake"),
+            "got: {restrict_err}"
         );
     }
 }
