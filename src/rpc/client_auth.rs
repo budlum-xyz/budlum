@@ -65,7 +65,7 @@ pub fn api_key_file_from_env() -> Result<Option<PathBuf>, String> {
 ///
 /// # Errors
 /// Returns an error - never the key itself - when the file cannot be read, is
-/// larger than [`MAX_API_KEY_BYTES`], is readable by group or others, or holds
+/// larger than `MAX_API_KEY_BYTES`, is readable by group or others, or holds
 /// nothing but whitespace.
 pub fn api_key_from_env() -> Result<Option<String>, String> {
     match api_key_file_from_env()? {

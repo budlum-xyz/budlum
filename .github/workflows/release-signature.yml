@@ -7,7 +7,7 @@ name: Release signature
 
 on:
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum]
+    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet, 'arena/**']
   push:
     branches: [main]
   workflow_dispatch:

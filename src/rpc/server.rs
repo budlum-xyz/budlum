@@ -170,6 +170,7 @@ pub enum RpcMode {
 struct RpcSecurityLayer {
     config: Arc<RpcSecurityConfig>,
     per_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
+    per_authed_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
     metrics: Option<Arc<crate::core::metrics::Metrics>>,
     mode: RpcMode,
 }
@@ -183,6 +184,7 @@ impl RpcSecurityLayer {
         Self {
             config: Arc::new(config),
             per_ip_rates: Arc::new(Mutex::new(HashMap::new())),
+            per_authed_ip_rates: Arc::new(Mutex::new(HashMap::new())),
             metrics,
             mode,
         }
@@ -197,6 +199,7 @@ impl<S> Layer<S> for RpcSecurityLayer {
             inner,
             config: self.config.clone(),
             per_ip_rates: self.per_ip_rates.clone(),
+            per_authed_ip_rates: self.per_authed_ip_rates.clone(),
             metrics: self.metrics.clone(),
             mode: self.mode.clone(),
         }
@@ -208,6 +211,7 @@ struct RpcSecurityService<S> {
     inner: S,
     config: Arc<RpcSecurityConfig>,
     per_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
+    per_authed_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
     metrics: Option<Arc<crate::core::metrics::Metrics>>,
     mode: RpcMode,
 }
@@ -252,10 +256,19 @@ where
             }
         }
 
-        // The limiter runs before the key check so that failed key guesses
-        // count against the client's budget.
+        // Authentication is evaluated in constant time and carries no state
+        // mutation, so selecting an unauthenticated vs authenticated per-IP
+        // bucket keeps brute-force guesses throttled ahead of 401 while
+        // preventing unauthenticated noise on a shared IP/NAT from exhausting
+        // the authenticated caller's rate-limit budget.
+        let authed = is_authorized(&self.config, &req);
         let client_ip = extract_client_ip(&self.config, &req);
-        if !is_per_ip_rate_limited(&self.config, &self.per_ip_rates, client_ip) {
+        let rate_bucket = if authed {
+            &self.per_authed_ip_rates
+        } else {
+            &self.per_ip_rates
+        };
+        if !is_per_ip_rate_limited(&self.config, rate_bucket, client_ip) {
             if let Some(ref m) = self.metrics {
                 m.rpc_rate_limited_total.inc();
             }
@@ -269,7 +282,7 @@ where
             });
         }
 
-        if !is_authorized(&self.config, &req) {
+        if !authed {
             return Box::pin(async move {
                 let mut response = text_response(StatusCode::UNAUTHORIZED, "Unauthorized");
                 if let CorsOutcome::Allow(ref origin) = cors {
@@ -869,14 +882,9 @@ pub fn constant_time_eq_str(a: &str, b: &str) -> bool {
     use subtle::ConstantTimeEq;
     // Walk the expected value `b` in full on every call, fold the length
     // difference into the accumulator, and clamp the candidate index into
-    // range instead of branching on a length mismatch: the work performed
-    // then depends only on `b.len()`, never on whether the lengths match or
-    // where the first differing byte sits. A short candidate re-reads its
-    // last byte and an empty one reads `b` itself; the length fold still
-    // refuses both. The earlier shape dummy-compared `b` against itself on
-    // the mismatch path, and same-pointer loads do not cost what
-    // cross-buffer loads cost - a small but systematic gap the timing_safe
-    // regression bench measured at several nanoseconds.
+    // range via bitwise masking instead of `core::cmp::min`: `min` lowered to
+    // a branch/cmov that mispredicted on the tail byte of a one-byte-short
+    // candidate (`len - 1`), leaking ~1.5 ns in dudect.
     let a_b = a.as_bytes();
     let b_b = b.as_bytes();
     let mut acc: u8 = 0;
@@ -884,10 +892,12 @@ pub fn constant_time_eq_str(a: &str, b: &str) -> bool {
         acc |= byte;
     }
     let src: &[u8] = if a_b.is_empty() { b_b } else { a_b };
+    let last = src.len().saturating_sub(1);
     for (i, &expected) in b_b.iter().enumerate() {
-        // `src` is empty only when `b` is empty too, in which case this
-        // loop body never runs and the length fold alone decides.
-        let provided = src[core::cmp::min(i, src.len() - 1)];
+        let in_bounds = usize::from(u8::from(std::hint::black_box(i < last)));
+        let mask = usize::MAX.wrapping_mul(in_bounds);
+        let idx = last ^ (mask & (last ^ i));
+        let provided = src[idx];
         acc |= provided ^ expected;
         acc = std::hint::black_box(acc);
     }
@@ -7321,6 +7331,56 @@ mod tests {
         assert_eq!(statuses[0], StatusCode::UNAUTHORIZED);
         assert_eq!(statuses[1], StatusCode::UNAUTHORIZED);
         assert_eq!(statuses[2], StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_noise_does_not_starve_authenticated_caller_on_same_ip() {
+        let layer = RpcSecurityLayer::new(
+            RpcSecurityConfig {
+                auth_required: true,
+                api_key: Some("right-key".into()),
+                allowed_ips: Vec::new(),
+                rate_limit_per_minute: Some(2),
+                ..Default::default()
+            },
+            None,
+            RpcMode::Public,
+        );
+        let inner = tower::service_fn(|_req: HttpRequest<()>| async {
+            Ok::<_, std::convert::Infallible>(text_response(StatusCode::OK, "ok"))
+        });
+        let mut svc = layer.layer(inner);
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40001);
+
+        // Exhaust the unauthenticated bucket from the shared IP.
+        for expected in [
+            StatusCode::UNAUTHORIZED,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::TOO_MANY_REQUESTS,
+        ] {
+            let mut bad = HttpRequest::builder()
+                .uri("/")
+                .header("x-api-key", "wrong-key")
+                .body(())
+                .unwrap();
+            bad.extensions_mut().insert(addr);
+            assert_eq!(svc.call(bad).await.unwrap().status(), expected);
+        }
+
+        // Legitimate authenticated caller behind the same IP keeps its own budget.
+        for expected in [
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::TOO_MANY_REQUESTS,
+        ] {
+            let mut good = HttpRequest::builder()
+                .uri("/")
+                .header("x-api-key", "right-key")
+                .body(())
+                .unwrap();
+            good.extensions_mut().insert(addr);
+            assert_eq!(svc.call(good).await.unwrap().status(), expected);
+        }
     }
 
     #[tokio::test]

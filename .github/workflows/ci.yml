@@ -4,10 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    # Run on the normal protected bases and on stacked continuation bases.
-    # `arena/**` covers this repository's generated continuation branches;
-    # `consensus-of-consensuses` keeps upstream stack covered.
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, 'arena/**']
+    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet, 'arena/**']
 
 concurrency:
   group: ci-${{ github.ref }}

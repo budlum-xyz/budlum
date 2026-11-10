@@ -358,8 +358,25 @@ impl BridgeBurnTx {
     ///
     /// A missing authorization, a key that is not the holder, or a signature
     /// that does not open over the authorization hash.
+    /// Convenience: kept for the CLI and stateless callers; chain execution calls
+    /// [`Self::verify_holder_authorization_in`].
     pub fn verify_holder_authorization(
         &self,
+        holder: crate::core::address::Address,
+        chain_id: u64,
+    ) -> Result<(), String> {
+        self.verify_holder_authorization_in(
+            &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            holder,
+            chain_id,
+        )
+    }
+
+    /// WIRING: wired into `Executor` bridge-burn verification so a quantum-alarm
+    /// disable of classical or ML-DSA-87 schemes takes effect immediately.
+    pub fn verify_holder_authorization_in(
+        &self,
+        scheme_registry: &crate::crypto::scheme::SchemeStatusRegistry,
         holder: crate::core::address::Address,
         chain_id: u64,
     ) -> Result<(), String> {
@@ -367,6 +384,9 @@ impl BridgeBurnTx {
             return Err("a bridge burn carries no holder authorization".into());
         }
         if self.holder_public_key.len() == 32 {
+            if !scheme_registry.scheme_verifies(crate::crypto::scheme::SchemeId::ED25519) {
+                return Err("bridge burn holder scheme Ed25519 is disabled".to_string());
+            }
             let mut pk = [0u8; 32];
             pk.copy_from_slice(&self.holder_public_key);
             if crate::core::address::Address::from(pk) != holder {
@@ -388,7 +408,8 @@ impl BridgeBurnTx {
         if addr != holder {
             return Err("bridge burn authorization is not from the transfer's holder".to_string());
         }
-        crate::crypto::primitives::verify_ml_dsa_87_signature(
+        crate::crypto::primitives::verify_ml_dsa_87_signature_in(
+            scheme_registry,
             crate::crypto::ctx::BRIDGE_V1,
             &self.authorization_hash(chain_id),
             &self.holder_signature,

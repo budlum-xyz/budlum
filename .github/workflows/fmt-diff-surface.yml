@@ -11,6 +11,7 @@ name: Diff surface
 
 on:
   pull_request:
+    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet, 'arena/**']
     types: [opened, synchronize, reopened]
 
 permissions:

@@ -932,6 +932,7 @@ mod tests {
     fn cold_committee() -> ColdWalletState {
         ColdWalletState::new(ColdWalletPolicy {
             chain_id: DEVNET,
+            epoch_length_blocks: 100,
             max_value_per_settlement_atoms: 1000,
             max_value_per_epoch_atoms: 3000,
             min_height_advance: 1,

@@ -1052,6 +1052,23 @@ impl Storage {
         self.db.flush()?;
         Ok(())
     }
+
+    pub(crate) fn save_round_price_sightings(
+        &self,
+        sightings: &[(String, u128)],
+    ) -> std::io::Result<()> {
+        let val = encode(&sightings.to_vec())?;
+        self.db.insert("ROUND_PRICE_SIGHTINGS", val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    pub(crate) fn load_round_price_sightings(&self) -> std::io::Result<Vec<(String, u128)>> {
+        match self.db.get("ROUND_PRICE_SIGHTINGS")? {
+            Some(bytes) => decode(&bytes),
+            None => Ok(Vec::new()),
+        }
+    }
     /// # Errors
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused

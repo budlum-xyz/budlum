@@ -188,6 +188,9 @@ pub struct Blockchain {
     /// Signature checks that run on behalf of the chain read it through
     /// `crypto::pq::verify_in`.
     pub scheme_registry: crate::crypto::scheme::SchemeStatusRegistry,
+    /// Rolling post-end-of-block state checkpoints so candidate-chain validation
+    /// replays from the nearest ancestor anchor rather than genesis (CWE-400).
+    reorg_anchors: Vec<(usize, String, AccountState)>,
 }
 
 /// Heights one finality event looks at for witness pruning: finality
@@ -877,6 +880,7 @@ impl Blockchain {
             }
         }
 
+        let mut init_reorg_anchors: Vec<(usize, String, AccountState)> = Vec::new();
         for block in chain_vec.iter().skip(start_index) {
             let preceding = &chain_vec[..block.index as usize];
             state = match Self::apply_block_effects(&state, block, preceding) {
@@ -901,6 +905,15 @@ impl Blockchain {
                 state.epoch_index,
                 Self::build_validator_snapshot_from_state(state.epoch_index, &state, chain_id),
             );
+            if block.index > 0
+                && block.index.is_multiple_of(50)
+                && state.calculate_state_root() == block.state_root
+            {
+                if init_reorg_anchors.len() >= 6 {
+                    init_reorg_anchors.remove(0);
+                }
+                init_reorg_anchors.push((block.index as usize, block.hash.clone(), state.clone()));
+            }
         }
 
         let mempool_config = Network::from_chain_id(chain_id)
@@ -1035,6 +1048,7 @@ impl Blockchain {
             anchor_classes: BTreeMap::new(),
             cold_wallet: None,
             scheme_registry: crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            reorg_anchors: init_reorg_anchors,
         };
 
         if let Some(first) = bc.chain.first() {
@@ -1049,6 +1063,11 @@ impl Blockchain {
         if let Some(store) = bc.storage.as_ref() {
             if let Err(e) = bc.consensus.load_state(store) {
                 tracing::error!(error = %e, "Failed to load consensus state from store during startup");
+            }
+            if let Ok(sightings) = store.load_round_price_sightings() {
+                for (hash, seen_ms) in sightings {
+                    bc.consensus.note_block_seen(&hash, seen_ms);
+                }
             }
         }
 
@@ -1075,6 +1094,15 @@ impl Blockchain {
     /// onward (the tip on startup/snapshot restore, or `fork_point..` on a
     /// reorg) are anchored at `now`. Existing sightings in [`RoundPriceBook`]
     /// are preserved ("first sighting wins").
+    fn persist_round_price_sightings(&self) {
+        if let Some(store) = self.storage.as_ref() {
+            let sightings = self.consensus.round_price_sightings();
+            if !sightings.is_empty() {
+                let _ = store.save_round_price_sightings(&sightings);
+            }
+        }
+    }
+
     fn seed_round_price_window_from(&self, adopted_from: usize) {
         let now = crate::consensus::now_millis();
         let window = MAX_REORG_DEPTH + 1;
@@ -1082,7 +1110,19 @@ impl Blockchain {
         if let Some(slice) = self.chain.get(start..) {
             for (offset, block) in slice.iter().enumerate() {
                 let index = start.saturating_add(offset);
-                let seen_ms = if index >= adopted_from {
+                // A restored ancestor without a persisted local sighting carries
+                // a producer-written header stamp. Once that stamp lags enough
+                // to saturate the round ladder, anchor it at restore time `now`
+                // so a peer suffix cannot claim wide rounds off a stale stamp.
+                let stale = block
+                    .timestamp
+                    .saturating_add(crate::consensus::MIN_BLOCK_INTERVAL_MS)
+                    .saturating_add(
+                        crate::consensus::ROUND_TIMEOUT_MS
+                            .saturating_mul(u128::from(crate::consensus::MAX_LEADER_ROUNDS)),
+                    )
+                    < now;
+                let seen_ms = if index >= adopted_from || stale {
                     now
                 } else {
                     block.timestamp.min(now)
@@ -1090,6 +1130,7 @@ impl Blockchain {
                 self.consensus.note_block_seen(&block.hash, seen_ms);
             }
         }
+        self.persist_round_price_sightings();
     }
 
     fn seed_round_price_window(&self) {
@@ -3463,23 +3504,51 @@ impl Blockchain {
         // Set returned by `verify_against_snapshot`. The unique
         // Count is what actually counts as "this many validators
         // Have attested", which is the definition of quorum.
-        use crate::core::chain_config::{FINALITY_QUORUM_DENOMINATOR, FINALITY_QUORUM_NUMERATOR};
-        let n_validators = snapshot.validators.len();
-        let min_signers = (n_validators * FINALITY_QUORUM_NUMERATOR as usize)
-            .div_ceil(FINALITY_QUORUM_DENOMINATOR as usize);
         let verified_signers = blob.verify_against_snapshot_in(
             &self.state.scheme_registry,
             &snapshot,
             None,
             Some(self.state.epoch_index),
         )?;
-        if verified_signers.len() < min_signers {
+        let verified_stake: u128 = verified_signers
+            .iter()
+            .filter_map(|idx| snapshot.validators.get(*idx))
+            .map(|validator| u128::from(validator.stake))
+            .sum();
+        if verified_signers.len() < snapshot.quorum_count()
+            || verified_stake < snapshot.quorum_stake()
+        {
             return Err(format!(
-                "QcBlob has {} unique verified signers, need at least {} (2/3 of {} validators)",
+                "QcBlob quorum not met: {} signers (need {}), stake {} (need {})",
                 verified_signers.len(),
-                min_signers,
-                n_validators
+                snapshot.quorum_count(),
+                verified_stake,
+                snapshot.quorum_stake()
             ));
+        }
+
+        if let Some(existing) = self.get_qc_blob(blob.checkpoint_height) {
+            if existing.checkpoint_hash == block.hash {
+                if let Ok(existing_signers) = existing.verify_against_snapshot_in(
+                    &self.state.scheme_registry,
+                    &snapshot,
+                    None,
+                    Some(self.state.epoch_index),
+                ) {
+                    let existing_stake: u128 = existing_signers
+                        .iter()
+                        .filter_map(|idx| snapshot.validators.get(*idx))
+                        .map(|validator| u128::from(validator.stake))
+                        .sum();
+                    if existing_signers.len() >= snapshot.quorum_count()
+                        && existing_stake >= snapshot.quorum_stake()
+                        && (!existing_signers.is_subset(&verified_signers)
+                            || verified_signers.len() <= existing_signers.len())
+                    {
+                        return Ok(());
+                    }
+                }
+            }
         }
 
         self.verified_qc_blobs
@@ -4907,8 +4976,10 @@ impl Blockchain {
         // Made the producer's `liveness` root unreproducible by replay.
 
         self.chain.push(block.clone());
+        self.maybe_record_reorg_anchor(block.index as usize, &block.hash, &block.state_root);
         self.consensus
             .note_block_seen(&block.hash, crate::consensus::now_millis());
+        self.persist_round_price_sightings();
         // Only what this block actually carried leaves the queues. Retaining
         // the rest is what makes a deferred proof survive a slot it did not
         // fit into: the queue is the only copy the node has once the gossip
@@ -5483,11 +5554,19 @@ impl Blockchain {
 
         // Counter and tx-type metrics must be read before `push` consumes the block.
         let applied_tx_count = block.transactions.len() as u64;
+        let committed_index = block.index;
         let committed_hash = block.hash.clone();
+        let committed_state_root = block.state_root.clone();
         self.emit_applied_tx_metrics(&block.transactions, ai_outcomes_before);
         self.chain.push(block);
+        self.maybe_record_reorg_anchor(
+            committed_index as usize,
+            &committed_hash,
+            &committed_state_root,
+        );
         self.consensus
             .note_block_seen(&committed_hash, crate::consensus::now_millis());
+        self.persist_round_price_sightings();
 
         if let Some(last_block) = self.chain.last() {
             // Call record_block_with_chain first (chain-aware hooks like PoW difficulty adjustment)
@@ -5576,6 +5655,27 @@ impl Blockchain {
         self.validate_candidate_chain(chain).is_ok()
     }
 
+    fn maybe_record_reorg_anchor(
+        &mut self,
+        index: usize,
+        block_hash: &str,
+        committed_state_root: &str,
+    ) {
+        if index == 0 || !index.is_multiple_of(50) {
+            return;
+        }
+        if self.state.calculate_state_root() != committed_state_root {
+            return;
+        }
+        let anchor_state = self.state.clone();
+        self.reorg_anchors.retain(|(idx, _, _)| *idx < index);
+        if self.reorg_anchors.len() >= 6 {
+            self.reorg_anchors.remove(0);
+        }
+        self.reorg_anchors
+            .push((index, block_hash.to_string(), anchor_state));
+    }
+
     fn validate_candidate_chain(&self, chain: &[Block]) -> Result<AccountState, String> {
         let genesis = chain
             .first()
@@ -5585,9 +5685,31 @@ impl Blockchain {
             return Err("Candidate genesis does not match configured genesis".into());
         }
 
-        let mut state = self.genesis_config.build_state();
-        state.execution_domain = self.consensus.domain_kind();
-        for (index, block) in chain.iter().enumerate().skip(1) {
+        let anchor = self.reorg_anchors.iter().rev().find(|(idx, hash, _)| {
+            *idx < chain.len()
+                && *idx < self.chain.len()
+                && chain
+                    .iter()
+                    .take(*idx + 1)
+                    .zip(self.chain.iter().take(*idx + 1))
+                    .all(|(cand, local)| cand.hash == local.hash && cand.index == local.index)
+                && chain.get(*idx).is_some_and(|b| &b.hash == hash)
+        });
+
+        let (mut state, replay_from) = match anchor {
+            Some((idx, _, anchored_state)) => {
+                let mut cloned = anchored_state.clone();
+                cloned.execution_domain = self.consensus.domain_kind();
+                (cloned, idx + 1)
+            }
+            None => {
+                let mut fresh = self.genesis_config.build_state();
+                fresh.execution_domain = self.consensus.domain_kind();
+                (fresh, 1usize)
+            }
+        };
+
+        for (index, block) in chain.iter().enumerate().skip(replay_from) {
             let expected_height = index as u64;
             let parent = &chain[index - 1];
             if block.index != expected_height || block.previous_hash != parent.hash {
@@ -5821,6 +5943,33 @@ impl Blockchain {
                 suffix.len()
             ));
         }
+        let parent_hash = self.chain[start_index - 1].hash.clone();
+        let mut expected_height = start_index as u64;
+        let mut expected_prev_hash = parent_hash.as_str();
+        for blk in &suffix {
+            if blk.index != expected_height || blk.previous_hash != expected_prev_hash {
+                return Err("Candidate chain is not a structurally valid chain".into());
+            }
+            if blk.chain_id != self.chain_id {
+                return Err("Candidate chain is not a structurally valid chain".into());
+            }
+            if blk.tx_root != blk.calculate_tx_root()
+                || !blk.witness_root_is_valid()
+                || blk.hash != blk.calculate_hash()
+            {
+                return Err("Candidate chain is not a structurally valid chain".into());
+            }
+            Self::check_block_slashing_evidence(blk)
+                .map_err(|e| format!("Candidate chain is not a structurally valid chain: {e}"))?;
+            for tx in &blk.transactions {
+                if tx.chain_id != self.chain_id {
+                    return Err("Candidate chain is not a structurally valid chain".into());
+                }
+            }
+            expected_height = expected_height.saturating_add(1);
+            expected_prev_hash = blk.hash.as_str();
+        }
+
         let mut candidate = Vec::with_capacity(candidate_len);
         candidate.extend_from_slice(&self.chain[..start_index]);
         candidate.extend(suffix);
@@ -5894,8 +6043,12 @@ impl Blockchain {
             }
         }
 
+        self.reorg_anchors.retain(|(idx, _, _)| *idx < fork_point);
         self.chain = new_chain;
         self.state = new_state;
+        if let Some(tip) = self.chain.last().cloned() {
+            self.maybe_record_reorg_anchor(tip.index as usize, &tip.hash, &tip.state_root);
+        }
         self.seed_round_price_window_from(fork_point);
 
         // The DISK still holds FINALITY_CERT and
@@ -7511,6 +7664,7 @@ impl Blockchain {
     /// yet, bounded and de-duplicated by (voter, epoch, height): a re-delivered
     /// or repeated gossip of the same vote must not fill the buffer.
     fn keep_early_prevote(&mut self, vote: Prevote) {
+        const MAX_EARLY_VOTES_PER_VOTER: usize = 2;
         let votes = &mut self.early_finality_votes.prevotes;
         if votes.iter().any(|kept| {
             kept.voter_id == vote.voter_id
@@ -7519,13 +7673,22 @@ impl Blockchain {
         }) {
             return;
         }
-        if votes.len() >= MAX_EARLY_FINALITY_VOTES {
+        let voter_count = votes
+            .iter()
+            .filter(|kept| kept.voter_id == vote.voter_id)
+            .count();
+        if voter_count >= MAX_EARLY_VOTES_PER_VOTER {
+            if let Some(pos) = votes.iter().position(|kept| kept.voter_id == vote.voter_id) {
+                votes.remove(pos);
+            }
+        } else if votes.len() >= MAX_EARLY_FINALITY_VOTES {
             votes.remove(0);
         }
         votes.push(vote);
     }
 
     fn keep_early_precommit(&mut self, vote: Precommit) {
+        const MAX_EARLY_VOTES_PER_VOTER: usize = 2;
         let votes = &mut self.early_finality_votes.precommits;
         if votes.iter().any(|kept| {
             kept.voter_id == vote.voter_id
@@ -7534,7 +7697,15 @@ impl Blockchain {
         }) {
             return;
         }
-        if votes.len() >= MAX_EARLY_FINALITY_VOTES {
+        let voter_count = votes
+            .iter()
+            .filter(|kept| kept.voter_id == vote.voter_id)
+            .count();
+        if voter_count >= MAX_EARLY_VOTES_PER_VOTER {
+            if let Some(pos) = votes.iter().position(|kept| kept.voter_id == vote.voter_id) {
+                votes.remove(pos);
+            }
+        } else if votes.len() >= MAX_EARLY_FINALITY_VOTES {
             votes.remove(0);
         }
         votes.push(vote);
@@ -7818,11 +7989,17 @@ impl Blockchain {
             .storage_registry
             .all_deals()
             .iter()
-            .filter(|deal| deal.is_active())
-            // Weight by what the deal is worth for one epoch, which is now a
-            // function of the bytes it holds: an operator storing more data
-            // carries more of the network and earns a larger share.
-            .map(|deal| (deal.operator, deal.total_fee(1)))
+            .filter(|deal| deal.is_active() && deal.payer != Some(deal.operator))
+            // Weight by verified stored shard bytes capped by locked slashable
+            // operator bond rather than caller-chosen refundable deal price, so
+            // permissionless self-deals or inflated fee rates cannot capture the pool.
+            .map(|deal| {
+                (
+                    deal.operator,
+                    deal.shard_bytes.min(deal.economics.operator_bond),
+                )
+            })
+            .filter(|(_, weight)| *weight > 0)
             .collect();
         // The math runs in u128. A deal weight is bounded only by the payer
         // balance, so `boost_share * weight` can pass u64 and a u64 overflow
@@ -8191,6 +8368,7 @@ impl Clone for Blockchain {
             anchor_classes: self.anchor_classes.clone(),
             cold_wallet: self.cold_wallet.clone(),
             scheme_registry: self.scheme_registry.clone(),
+            reorg_anchors: Vec::new(),
         }
     }
 }
@@ -11182,7 +11360,7 @@ mod bond_and_reorg_tests {
         // 3b. Timed burn expiring at height 200 debits `held` on burn and restores exact `held` on sweep.
         state
             .bridge_state
-            .burn_with_event(mid, 2, 70, 0, 200, [0x88; 20])
+            .burn_with_event(mid, 2, 70, 0, 200, [0u8; 20])
             .unwrap();
         state.get_or_create(&recipient).balance -= held.get();
         state.bridge_state.record_burn_debit(&mid, held);
@@ -11284,5 +11462,415 @@ mod bond_and_reorg_tests {
             crate::domain::storage_deal::StorageRegistry::validate_challenge_window(5, 9, 10)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn bud_boost_ignores_self_deals_and_weights_by_capped_bytes_not_inflated_price() {
+        let mut state = AccountState::new();
+        let client = Address::from([0x11; 32]);
+        let honest_op = Address::from([0x22; 32]);
+        let self_deal_op = Address::from([0x33; 32]);
+        for addr in [client, honest_op, self_deal_op] {
+            state.add_balance(&addr, 50_000_000);
+        }
+
+        let mut honest_manifest =
+            crate::storage::ContentManifest::from_bytes_sliced(&[0xAA; 200], 200).unwrap();
+        honest_manifest.owner = client;
+        let mut self_manifest =
+            crate::storage::ContentManifest::from_bytes_sliced(&[0xBB; 400], 400).unwrap();
+        self_manifest.owner = self_deal_op;
+
+        let honest_shard = honest_manifest.shards.first().unwrap().shard_id;
+        let self_shard = self_manifest.shards.first().unwrap().shard_id;
+
+        state.storage_registry.register_manifest(&honest_manifest);
+        state.storage_registry.register_manifest(&self_manifest);
+
+        let proof_bytes = bincode::serialize(&bud_proof::ProofEnvelope {
+            proof_format_version: 1,
+            backend: "test-backend".to_string(),
+            p3_version: "0.6".to_string(),
+            fri_params_id: "test-fri".to_string(),
+            public_inputs_hash: [0x42u8; 32],
+            proof_bytes: vec![0xABu8; 96],
+            degree_bits: 8,
+        })
+        .unwrap();
+
+        // Honest operator stores 200 bytes at minimal fee rate (1).
+        crate::domain::deal_open::open_deal_escrowed(
+            &mut state,
+            &crate::domain::deal_open::DealOpenTerms {
+                domain_id: 42,
+                manifest: &honest_manifest,
+                shard_id: honest_shard,
+                replica_index: 0,
+                operator: honest_op,
+                start_epoch: 0,
+                end_epoch: 5,
+                economics: crate::domain::storage_deal::StorageEconomicsParams {
+                    operator_bond: crate::domain::storage_params::STORAGE_MIN_OPERATOR_BOND,
+                    fee_per_byte_epoch: 1,
+                },
+                merkle_proof: Some(proof_bytes.clone()),
+                storage_root: Some([0x42; 32]),
+            },
+            client,
+            0,
+            crate::domain::storage_params::STORAGE_MIN_OPERATOR_BOND,
+            0,
+        )
+        .unwrap();
+
+        // Self-dealing operator opens a deal with itself as payer at 100_000x fee rate.
+        crate::domain::deal_open::open_deal_escrowed(
+            &mut state,
+            &crate::domain::deal_open::DealOpenTerms {
+                domain_id: 42,
+                manifest: &self_manifest,
+                shard_id: self_shard,
+                replica_index: 0,
+                operator: self_deal_op,
+                start_epoch: 0,
+                end_epoch: 5,
+                economics: crate::domain::storage_deal::StorageEconomicsParams {
+                    operator_bond: crate::domain::storage_params::STORAGE_MIN_OPERATOR_BOND,
+                    fee_per_byte_epoch: 100_000,
+                },
+                merkle_proof: Some(proof_bytes),
+                storage_root: Some([0x42; 32]),
+            },
+            self_deal_op,
+            0,
+            crate::domain::storage_params::STORAGE_MIN_OPERATOR_BOND,
+            0,
+        )
+        .unwrap();
+
+        let honest_before = state.get_balance(&honest_op);
+        let self_before = state.get_balance(&self_deal_op);
+        Blockchain::distribute_bud_boost_share_in_state(&mut state, 1_000).unwrap();
+
+        assert_eq!(state.get_balance(&honest_op), honest_before + 1_000);
+        assert_eq!(
+            state.get_balance(&self_deal_op),
+            self_before,
+            "self-funded storage deal must receive zero BUD boost share"
+        );
+    }
+
+    #[test]
+    fn early_finality_vote_buffer_enforces_per_voter_quota() {
+        let consensus = std::sync::Arc::new(crate::consensus::PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
+        let honest = Address::from([0x41; 32]);
+        let spammer = Address::from([0x42; 32]);
+
+        bc.keep_early_prevote(crate::chain::finality::Prevote {
+            chain_id: 45262,
+            epoch: 0,
+            checkpoint_height: 100,
+            checkpoint_hash: "aa".repeat(32),
+            voter_id: honest,
+            sig_bls: vec![1; 48],
+            auth_sig: vec![2; 48],
+        });
+        for h in 200..220 {
+            bc.keep_early_prevote(crate::chain::finality::Prevote {
+                chain_id: 45262,
+                epoch: 0,
+                checkpoint_height: h,
+                checkpoint_hash: "bb".repeat(32),
+                voter_id: spammer,
+                sig_bls: vec![3; 48],
+                auth_sig: vec![4; 48],
+            });
+        }
+
+        assert!(
+            bc.early_finality_votes
+                .prevotes
+                .iter()
+                .any(|v| v.voter_id == honest && v.checkpoint_height == 100),
+            "single spammer must not evict honest validator's buffered prevote"
+        );
+        let spammer_kept = bc
+            .early_finality_votes
+            .prevotes
+            .iter()
+            .filter(|v| v.voter_id == spammer)
+            .count();
+        assert_eq!(spammer_kept, 2);
+    }
+
+    #[test]
+    fn import_qc_blob_enforces_stake_quorum_and_never_replaces_canonical_blob() {
+        use crate::chain::finality::{pop_signing_message, sign_bls_pop};
+        use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
+
+        let make_val = |seed: u8| {
+            let mut sk_bytes = [0u8; 64];
+            sk_bytes[0] = seed;
+            let bls_sk = bls12_381::Scalar::from_bytes_wide(&sk_bytes);
+            let bls_pk = bls12_381::G2Affine::from(bls12_381::G2Projective::generator() * bls_sk)
+                .to_compressed()
+                .to_vec();
+            let support = crate::crypto::primitives::ValidatorKeys::generate().unwrap();
+            let vrf_pk = support.vrf_key.public.to_bytes().to_vec();
+            let pq_kp = support.pq_key.unwrap();
+            let addr = Address::from([seed; 32]);
+            (addr, bls_sk, bls_pk, vrf_pk, pq_kp)
+        };
+        let (v1, sk1, pk1, vrf1, pq1) = make_val(11);
+        let (v2, sk2, pk2, vrf2, pq2) = make_val(12);
+        let (v3, sk3, pk3, vrf3, pq3) = make_val(13);
+
+        let mut state = AccountState::new();
+        // v1 holds 80% of stake; v2 + v3 hold 20% combined (count quorum 2/3, stake < 2/3).
+        for (v, stake, sk, pk, vrf_pk, pq) in [
+            (v1, 8_000u64, &sk1, pk1, vrf1, &pq1),
+            (v2, 1_000u64, &sk2, pk2, vrf2, &pq2),
+            (v3, 1_000u64, &sk3, pk3, vrf3, &pq3),
+        ] {
+            state.add_balance(&v, 20_000);
+            state.add_validator(v, stake);
+            let pop_msg = pop_signing_message(45262, &v, &pk);
+            let val_entry = state.validators.get_mut(&v).unwrap();
+            val_entry.vrf_public_key = vrf_pk;
+            val_entry.bls_public_key = pk;
+            val_entry.pop_signature = sign_bls_pop(sk, &pop_msg);
+            val_entry.pq_public_key = pq.public_key_bytes().to_vec();
+            val_entry.active = true;
+        }
+
+        let consensus = std::sync::Arc::new(crate::consensus::PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
+        bc.state = state;
+        bc.record_validator_snapshot(0);
+
+        let cp_height = FINALITY_CHECKPOINT_INTERVAL;
+        for _ in 1..=cp_height {
+            bc.produce_block(v1).unwrap();
+        }
+        let cp_hash = bc.chain.get(cp_height as usize).unwrap().hash.clone();
+        let epoch = bc.state.epoch_index;
+        let snapshot = bc.validator_snapshot_for_epoch(epoch).unwrap();
+
+        let build_blob = |signers: &[(&Address, &crate::crypto::primitives::PqKeyPair)]| {
+            let mut pq_signatures = Vec::new();
+            for (addr, pq_kp) in signers {
+                let pos = snapshot
+                    .validators
+                    .iter()
+                    .position(|val| &val.address == *addr)
+                    .unwrap();
+                let pq_msg = crate::consensus::qc::pq_signing_message(
+                    epoch, cp_height, &cp_hash, pos as u32,
+                );
+                pq_signatures.push(crate::consensus::qc::PqSignatureEntry {
+                    validator_index: pos as u32,
+                    validator_address: addr.to_hex(),
+                    pq_signature: pq_kp.sign(crate::crypto::ctx::QC_V2, &pq_msg).unwrap(),
+                });
+            }
+            crate::consensus::qc::QcBlob::new(epoch, cp_height, cp_hash.clone(), pq_signatures)
+        };
+
+        // Count-only quorum (v2 + v3 = 2/3 count, 20% stake) must be rejected.
+        let low_stake_blob = build_blob(&[(&v2, &pq2), (&v3, &pq3)]);
+        let err = bc.import_qc_blob(low_stake_blob).unwrap_err();
+        assert!(err.contains("quorum not met"), "got: {err}");
+
+        // Valid stake + count quorum (v1 + v2 = 90% stake, 2/3 count) imports cleanly.
+        let valid_two_signer = build_blob(&[(&v1, &pq1), (&v2, &pq2)]);
+        bc.import_qc_blob(valid_two_signer.clone()).unwrap();
+
+        // Competing non-superset 2-signer blob (v1 + v3) must NOT overwrite existing canonical blob.
+        let competing_blob = build_blob(&[(&v1, &pq1), (&v3, &pq3)]);
+        bc.import_qc_blob(competing_blob).unwrap();
+        assert_eq!(
+            bc.get_qc_blob(cp_height).unwrap().merkle_root,
+            valid_two_signer.merkle_root
+        );
+
+        // Strict superset (v1 + v2 + v3) upgrades cleanly.
+        let superset_blob = build_blob(&[(&v1, &pq1), (&v2, &pq2), (&v3, &pq3)]);
+        bc.import_qc_blob(superset_blob.clone()).unwrap();
+        assert_eq!(
+            bc.get_qc_blob(cp_height).unwrap().merkle_root,
+            superset_blob.merkle_root
+        );
+    }
+
+    #[test]
+    fn bridge_burn_and_relayed_message_obey_live_scheme_disable() {
+        let kp = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let holder = Address::from(kp.public_key_bytes());
+        let mid: crate::cross_domain::message::MessageId = [0x55; 32];
+        let mut burn = crate::core::transaction::BridgeBurnTx {
+            message_id: mid,
+            domain: 2,
+            domain_height: 10,
+            event_index: 0,
+            expiry_height: 0,
+            recipient_eth: [0u8; 20],
+            holder_public_key: kp.public_key_bytes().to_vec(),
+            holder_signature: Vec::new(),
+        };
+        let auth_hash = burn.authorization_hash(45262);
+        burn.holder_signature = kp.sign(&auth_hash).to_vec();
+        burn.verify_holder_authorization(holder, 45262).unwrap();
+
+        let mut disabled_ed = crate::crypto::scheme::SchemeStatusRegistry::genesis();
+        disabled_ed
+            .transition_scheme(
+                crate::crypto::scheme::SchemeId::ED25519,
+                crate::crypto::scheme::SchemeStatus::Deprecated,
+                crate::crypto::scheme::TransitionSource::ColdCommittee,
+            )
+            .unwrap();
+        disabled_ed
+            .transition_scheme(
+                crate::crypto::scheme::SchemeId::ED25519,
+                crate::crypto::scheme::SchemeStatus::Disabled,
+                crate::crypto::scheme::TransitionSource::ColdCommittee,
+            )
+            .unwrap();
+        let err = burn
+            .verify_holder_authorization_in(&disabled_ed, holder, 45262)
+            .unwrap_err();
+        assert!(err.contains("disabled"), "got: {err}");
+
+        let mut msg = crate::cross_domain::message::CrossDomainMessage::new(
+            crate::cross_domain::message::CrossDomainMessageParams {
+                source_domain: 1,
+                target_domain: 2,
+                source_height: 10,
+                event_index: 0,
+                nonce: 1,
+                sender: holder,
+                recipient: Address::from([0x66; 32]),
+                payload_hash: [0x77; 32],
+                kind: crate::cross_domain::message::MessageKind::BridgeLock,
+                expiry_height: 100,
+            },
+        );
+        msg.sender_public_key = kp.public_key_bytes().to_vec();
+        msg.sender_signature = kp.sign(&msg.message_id).to_vec();
+        msg.verify_sender_signature().unwrap();
+        let msg_err = msg.verify_sender_signature_in(&disabled_ed).unwrap_err();
+        assert!(msg_err.contains("disabled"), "got: {msg_err}");
+    }
+
+    #[test]
+    fn try_reorg_suffix_prevalidates_and_replays_from_nearest_anchor() {
+        let pow_cfg = crate::consensus::PoWConfig {
+            difficulty: 0,
+            adjustment_interval: 0,
+            ..Default::default()
+        };
+        let miner = Address::from([0x91; 32]);
+        let mut node_a = Blockchain::new(
+            std::sync::Arc::new(crate::consensus::PoWEngine::with_config(pow_cfg.clone())),
+            None,
+            45262,
+            None,
+        );
+        let mut node_b = Blockchain::new(
+            std::sync::Arc::new(crate::consensus::PoWEngine::with_config(pow_cfg)),
+            None,
+            45262,
+            None,
+        );
+
+        // Advance shared prefix past block 50 so rolling reorg anchor at height 50 is recorded.
+        for _ in 1..=52 {
+            let (blk, _) = node_a.produce_block(miner).unwrap();
+            node_b.validate_and_add_block(blk).unwrap();
+        }
+        assert!(
+            node_a.reorg_anchors.iter().any(|(idx, _, _)| *idx == 50),
+            "expected rolling reorg anchor at height 50"
+        );
+
+        // Diverge: node_a produces 1 block (height 53), node_b produces 3 blocks (heights 53..=55).
+        node_a.produce_block(miner).unwrap();
+        let mut suffix = Vec::new();
+        for _ in 0..3 {
+            let (blk, _) = node_b.produce_block(Address::from([0x92; 32])).unwrap();
+            suffix.push(blk);
+        }
+
+        // Tampered hash in suffix is rejected before candidate replay.
+        let mut bad_suffix = suffix.clone();
+        bad_suffix.last_mut().unwrap().hash = "ff".repeat(32);
+        assert!(node_a.try_reorg_suffix(bad_suffix).is_err());
+
+        // Valid longer suffix reorgs cleanly from anchor 50 and matches node_b state root.
+        assert!(node_a.try_reorg_suffix(suffix).unwrap());
+        assert_eq!(node_a.chain.len(), node_b.chain.len());
+        assert_eq!(
+            node_a.state.calculate_state_root(),
+            node_b.state.calculate_state_root()
+        );
+    }
+
+    #[test]
+    fn restored_round_price_sightings_reload_from_storage_and_clamp_stale_ancestors() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().to_str().unwrap().to_string();
+        let now = crate::consensus::now_millis();
+        let stale_ts = now.saturating_sub(120_000);
+
+        // 1. Fresh in-memory restore (no prior persisted sightings): a lagging
+        // ancestor below the tip must be clamped to restore time `now`, not `stale_ts`.
+        let pos1 = std::sync::Arc::new(crate::consensus::PoSEngine::new(
+            crate::consensus::pos::PoSConfig::default(),
+            None,
+        ));
+        let mut bc_mem = Blockchain::new(pos1.clone(), None, 45262, None);
+        let mut anc = Block::new(1, bc_mem.chain.first().unwrap().hash.clone(), Vec::new());
+        anc.timestamp = stale_ts;
+        anc.hash = anc.calculate_hash();
+        let anc_hash = anc.hash.clone();
+        let mut tip = Block::new(2, anc_hash.clone(), Vec::new());
+        tip.timestamp = now;
+        tip.hash = tip.calculate_hash();
+        bc_mem.chain.push(anc);
+        bc_mem.chain.push(tip);
+        bc_mem.seed_round_price_window();
+
+        let sightings = pos1.round_price_sightings();
+        let anc_seen = sightings
+            .iter()
+            .find(|(h, _)| h == &anc_hash)
+            .map(|(_, at)| *at)
+            .expect("ancestor sighting recorded");
+        assert!(
+            anc_seen >= now,
+            "stale ancestor must anchor at restore time rather than producer stamp"
+        );
+
+        // 2. Persisted storage round-trip preserves exact local adoption time across restart.
+        {
+            let store = std::sync::Arc::new(crate::storage::db::Storage::new(&db_path).unwrap());
+            store
+                .save_round_price_sightings(&[(anc_hash.clone(), now.saturating_sub(7_000))])
+                .unwrap();
+        }
+        let store2 = crate::storage::db::Storage::new(&db_path).unwrap();
+        let pos2 = std::sync::Arc::new(crate::consensus::PoSEngine::new(
+            crate::consensus::pos::PoSConfig::default(),
+            None,
+        ));
+        let _bc_restarted = Blockchain::new(pos2.clone(), Some(store2), 45262, None);
+        let reloaded = pos2.round_price_sightings();
+        let reloaded_at = reloaded
+            .iter()
+            .find(|(h, _)| h == &anc_hash)
+            .map(|(_, at)| *at)
+            .expect("persisted sighting reloaded on startup");
+        assert_eq!(reloaded_at, now.saturating_sub(7_000));
     }
 }

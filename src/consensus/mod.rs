@@ -47,11 +47,7 @@ pub const MAX_LEADER_ROUNDS: u64 = 16;
 /// the parent" steering channel: a later round can no longer be
 /// claimed on the minimum step.
 pub const ROUND_TIMEOUT_MS: u128 = 3 * 1000;
-/// Full wall-clock span of the leader-round retry ladder (`0..=MAX_LEADER_ROUNDS`).
-///
-/// Once a parent's header stamp lags wall time by more than this span, pricing
-/// from the stamp alone would make every round `0..=MAX_LEADER_ROUNDS`
-/// affordable at once on every node (CWE-807).
+#[cfg(test)]
 const ROUND_LADDER_SPAN_MS: u128 =
     MIN_BLOCK_INTERVAL_MS + ROUND_TIMEOUT_MS * (MAX_LEADER_ROUNDS as u128);
 /// Small producer-side propagation cushion applied before claiming a retry
@@ -153,6 +149,14 @@ impl RoundPriceBook {
     /// When this node first committed `block_hash`, while it is still inside
     /// the window.
     #[must_use]
+    pub(crate) fn snapshot(&self) -> Vec<(String, u128)> {
+        let Ok(seen) = self.seen.lock() else {
+            return Vec::new();
+        };
+        seen.iter().cloned().collect()
+    }
+
+    #[must_use]
     fn seen_at(&self, block_hash: &str) -> Option<u128> {
         let Ok(seen) = self.seen.lock() else {
             return None;
@@ -174,7 +178,7 @@ impl RoundPriceBook {
     /// from a stamp that may sit far behind wall time, so a node that joins a
     /// schedule-lagged chain does not fire a wide round in its first second.
     /// Once wall time since adoption has walked the ladder, retry rounds
-    /// (`round >= 1`) wait an additional [`PRODUCER_ROUND_CUSHION_MS`] so normal
+    /// (`round >= 1`) wait an additional `PRODUCER_ROUND_CUSHION_MS` so normal
     /// gossip stagger does not place peers on opposite sides of a timeout
     /// boundary.
     #[must_use]
@@ -184,22 +188,20 @@ impl RoundPriceBook {
         parent_timestamp_ms: u128,
         now_ms: u128,
     ) -> u64 {
+        let validation_cap = affordable_leader_round(parent_timestamp_ms, now_ms);
         let Some(seen) = self.seen_at(parent_hash) else {
-            return affordable_leader_round(parent_timestamp_ms, now_ms);
+            return validation_cap;
         };
-        // Never let a sighting raise the anchor above the shared stamp unless
-        // the stamp itself has gone stale: a future-dated header must not buy
-        // rounds even for the block's own producer.
-        let mut anchor_ms = seen.min(parent_timestamp_ms);
-        let stale_stamp = parent_timestamp_ms.saturating_add(ROUND_LADDER_SPAN_MS) < now_ms;
-        if stale_stamp {
-            anchor_ms = anchor_ms.max(seen);
-        }
+        // Producer pacing is at least as strict as validation (`parent_timestamp_ms`)
+        // AND waits from when this node actually adopted the parent (`seen`), so
+        // the effective anchor is the later of the two timestamps.
+        let anchor_ms = seen.max(parent_timestamp_ms);
         let raw = round_affordable_from_anchor(anchor_ms, now_ms);
-        if raw == 0 || !stale_stamp {
-            return raw;
+        if raw == 0 {
+            return 0;
         }
         round_affordable_from_anchor(anchor_ms, now_ms.saturating_sub(PRODUCER_ROUND_CUSHION_MS))
+            .min(validation_cap)
     }
 }
 /// The highest leader round a slot can have reached by `now_ms`, priced from
@@ -372,6 +374,9 @@ pub trait ConsensusEngine: Send + Sync {
     /// rounds on a schedule-lagged parent are priced from local commit time
     /// rather than from a stale schedule-derived header stamp (CWE-807).
     fn note_block_seen(&self, _block_hash: &str, _at_ms: u128) {}
+    fn round_price_sightings(&self) -> Vec<(String, u128)> {
+        Vec::new()
+    }
 
     /// The chain reports the height finalised by quorum certificates.
     ///

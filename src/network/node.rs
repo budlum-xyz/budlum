@@ -307,6 +307,27 @@ fn prevote_is_due(checkpoint_height: u64, last_prevote_height: u64, retry: bool)
     checkpoint_height > last_prevote_height || retry
 }
 
+fn record_cast_prevote(
+    last_prevote_height: &mut u64,
+    prevote_published: &mut Option<PublishedVote>,
+    epoch: u64,
+    checkpoint_height: u64,
+    checkpoint_hash: &str,
+    now: std::time::Instant,
+) -> bool {
+    let advanced = checkpoint_height > *last_prevote_height;
+    if advanced {
+        *last_prevote_height = checkpoint_height;
+    }
+    *prevote_published = Some(PublishedVote {
+        epoch,
+        checkpoint_height,
+        checkpoint_hash: checkpoint_hash.to_string(),
+        at: now,
+    });
+    advanced
+}
+
 /// Whether a refused vote was refused for belonging to another round rather
 /// than for being wrong.
 ///
@@ -3010,30 +3031,31 @@ impl Node {
                                 // stops the node re-signing and re-publishing the
                                 // same vote every beat while the round waits for
                                 // its quorum.
-                                let delivered = publish.as_ref().err().is_none_or(publish_reached_the_mesh);
-                                if !delivered {
-                                    if let Err(e) = &publish {
-                                        // Same rule as the precommit above: a vote
-                                        // that did not leave the node is not
-                                        // recorded as cast, so the next beat
-                                        // retries the same bytes.
-                                        warn!(
-                                            "Failed to gossip a finality vote: {e}; height {checkpoint_height} stays unvoted and is retried on the next beat"
+                                // The vote is cast when the signature exists,
+                                // not when the mesh acknowledges it: advancing
+                                // the high-water mark and remembering the signed
+                                // round before inspecting `publish` prevents a
+                                // reorg after a failed publish from making the
+                                // validator sign a second hash at one height.
+                                if record_cast_prevote(
+                                    &mut self.last_prevote_height,
+                                    &mut self.prevote_published,
+                                    epoch,
+                                    checkpoint_height,
+                                    &agg_state.checkpoint_hash,
+                                    std::time::Instant::now(),
+                                ) {
+                                    self.save_vote_history();
+                                }
+                                if let Err(e) = &publish {
+                                    if publish_reached_the_mesh(e) {
+                                        tracing::debug!(
+                                            "prevote for height {checkpoint_height} is already in the mesh: {e}"
                                         );
-                                    }
-                                } else {
-                                    let advanced = checkpoint_height > self.last_prevote_height;
-                                    if advanced {
-                                        self.last_prevote_height = checkpoint_height;
-                                    }
-                                    self.prevote_published = Some(PublishedVote {
-                                        epoch,
-                                        checkpoint_height,
-                                        checkpoint_hash: agg_state.checkpoint_hash.clone(),
-                                        at: std::time::Instant::now(),
-                                    });
-                                    if advanced {
-                                        self.save_vote_history();
+                                    } else {
+                                        warn!(
+                                            "Failed to gossip a finality vote: {e}; the vote for height {checkpoint_height} stands and its bytes are re-published on the next beat"
+                                        );
                                     }
                                 }
                             }
@@ -6031,6 +6053,26 @@ mod sync_handler_order_tests {
             "the unsolicited gossip batch must not be handed to a reconstruction"
         );
     }
+
+    #[test]
+    fn gossip_cross_domain_message_does_not_sign_or_fund_local_relay_tx() {
+        let code = production();
+        assert!(
+            !code.contains("submit_relayed_cross_domain_message"),
+            "gossip must never make the local node sign or fund a relayed cross-domain tx"
+        );
+        let at = code
+            .find("NetworkMessage::CrossDomainMessage(msg_obj) =>")
+            .expect("the CrossDomainMessage gossip arm exists");
+        let arm = code[at..]
+            .split("NetworkMessage::GlobalHeader(")
+            .next()
+            .expect("the arm ends before GlobalHeader");
+        assert!(
+            arm.contains("MessageAcceptance::Ignore"),
+            "unauthenticated CrossDomainMessage gossip must be ignored without forwarding"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -6106,5 +6148,53 @@ mod finality_publish_tests {
         assert!(!publish_reached_the_mesh(&PublishError::TransformFailed(
             std::io::Error::other("compression")
         )));
+    }
+
+    #[test]
+    fn failed_prevote_publish_still_advances_high_water_mark_and_blocks_reorg_equivocation() {
+        use super::{
+            prevote_is_due, record_cast_prevote, vote_retry_due, PublishedVote, FINALITY_VOTE_RETRY,
+        };
+        let mut last_prevote_height = 0u64;
+        let mut prevote_published: Option<PublishedVote> = None;
+        let t0 = std::time::Instant::now();
+
+        // Validator signs prevote for hash_a at height 100; publish fails (e.g. NoPeersSubscribedToTopic).
+        assert!(prevote_is_due(100, last_prevote_height, false));
+        let advanced = record_cast_prevote(
+            &mut last_prevote_height,
+            &mut prevote_published,
+            1,
+            100,
+            "aa".repeat(32).as_str(),
+            t0,
+        );
+        assert!(advanced);
+        assert_eq!(last_prevote_height, 100);
+
+        // Reorg replaces height 100 with hash_b: retry is false and height is NOT > last_prevote_height.
+        let retry_different_hash = vote_retry_due(
+            prevote_published.as_ref(),
+            1,
+            100,
+            "bb".repeat(32).as_str(),
+            t0 + FINALITY_VOTE_RETRY,
+        );
+        assert!(!retry_different_hash);
+        assert!(
+            !prevote_is_due(100, last_prevote_height, retry_different_hash),
+            "validator must stay silent rather than signing a second hash at height 100"
+        );
+
+        // Identical round (epoch 1, height 100, hash_a) IS eligible for retry after FINALITY_VOTE_RETRY.
+        let retry_same_hash = vote_retry_due(
+            prevote_published.as_ref(),
+            1,
+            100,
+            "aa".repeat(32).as_str(),
+            t0 + FINALITY_VOTE_RETRY,
+        );
+        assert!(retry_same_hash);
+        assert!(prevote_is_due(100, last_prevote_height, retry_same_hash));
     }
 }

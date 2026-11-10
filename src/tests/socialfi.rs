@@ -145,11 +145,11 @@ async fn boost_share_distributes_by_deal_fee_weight_with_dust_to_first() {
     // is 1e9, so for a weight of 100 the rate has to be 100 * 1e9 / 4 = 25e9. We
     // derive the rates from that so what the test measures stays the 100/300
     // share.
-    let manifest = ContentManifest::from_bytes_sliced(b"boost pool content", 4).unwrap();
-    let shard_bytes = u64::from(manifest.shards[0].size);
-    let rate_for = |weight: u64| weight * (FEE_RATE_SCALE as u64) / shard_bytes;
-    open_weighted_deal(&mut bc, &manifest, op1, 0, rate_for(100));
-    open_weighted_deal(&mut bc, &manifest, op2, 1, rate_for(300));
+    let manifest_100 = ContentManifest::from_bytes_sliced(&[0xA1u8; 100], 100).unwrap();
+    let manifest_300 = ContentManifest::from_bytes_sliced(&[0xB2u8; 300], 300).unwrap();
+    let _ = FEE_RATE_SCALE;
+    open_weighted_deal(&mut bc, &manifest_100, op1, 0, 1);
+    open_weighted_deal(&mut bc, &manifest_300, op2, 0, 1);
 
     mint_nft(&mut bc, &alice_kp, ContentId([0x77; 32]));
     assert_eq!(bc.state.get_balance(&alice), 999);

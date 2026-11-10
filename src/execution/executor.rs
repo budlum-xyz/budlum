@@ -3154,7 +3154,7 @@ impl Executor {
                             "Unknown bridge transfer".to_string(),
                         )
                     })?;
-                burn.verify_holder_authorization(holder, tx.chain_id)
+                burn.verify_holder_authorization_in(&state.scheme_registry, holder, tx.chain_id)
                     .map_err(|e| BudlumError::validation("bridge_burn_failed", e))?;
                 // The refund window is a number of blocks past the burn, so
                 // its base is a height this chain has actually reached, not a

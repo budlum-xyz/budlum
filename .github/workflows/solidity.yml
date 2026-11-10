@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, 'arena/**']
+    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet, 'arena/**']
 
 concurrency:
   group: solidity-${{ github.ref }}

@@ -2090,4 +2090,121 @@ mod tests {
             "{err}"
         );
     }
+
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn accept_reallocation_tx_refuses_operator_already_serving_shard() {
+        use crate::crypto::primitives::WalletKeyPair;
+
+        let mut state = AccountState::new();
+        let m = registered(&mut state);
+        let payer = owner();
+        let slashed_op = Address::from([0x61; 32]);
+        let existing_wkp = WalletKeyPair::generate();
+        let existing_op = existing_wkp.address();
+        let opener = Address::from([0x62; 32]);
+
+        for addr in [payer, slashed_op, existing_op, opener] {
+            state.add_balance(&addr, 50_000_000);
+        }
+
+        let shard_id = m.shards.first().unwrap().shard_id;
+        let econ = StorageEconomicsParams {
+            operator_bond: STORAGE_MIN_OPERATOR_BOND,
+            fee_per_byte_epoch: 10_000,
+        };
+
+        let deal0_id = open_deal_escrowed(
+            &mut state,
+            &DealOpenTerms {
+                domain_id: 42,
+                manifest: &m,
+                shard_id,
+                operator: slashed_op,
+                replica_index: 0,
+                start_epoch: 100,
+                end_epoch: 200,
+                economics: econ.clone(),
+                merkle_proof: Some(proof()),
+                storage_root: Some([0x42; 32]),
+            },
+            payer,
+            100,
+            STORAGE_MIN_OPERATOR_BOND,
+            0,
+        )
+        .unwrap();
+        open_deal_escrowed(
+            &mut state,
+            &DealOpenTerms {
+                domain_id: 42,
+                manifest: &m,
+                shard_id,
+                operator: existing_op,
+                replica_index: 1,
+                start_epoch: 100,
+                end_epoch: 200,
+                economics: econ.clone(),
+                merkle_proof: Some(proof()),
+                storage_root: Some([0x42; 32]),
+            },
+            payer,
+            100,
+            STORAGE_MIN_OPERATOR_BOND,
+            0,
+        )
+        .unwrap();
+
+        state.epoch_index = 120;
+        execute_storage_tx(&mut state, &ctx(opener), &open_challenge_tx(deal0_id)).unwrap();
+        let ch_id = only_challenge_id(&state);
+        state.epoch_index = 170;
+        state
+            .storage_registry
+            .finalize_missed_challenge(ch_id, 170)
+            .unwrap();
+        let ticket_id = state
+            .storage_registry
+            .all_reallocation_tickets()
+            .first()
+            .expect("repair ticket opened")
+            .ticket_id;
+
+        let accept_ctx = ctx(payer);
+        let mut accept = StorageReallocationAccept {
+            ticket_id,
+            replacement_operator: existing_op,
+            start_epoch: 120,
+            end_epoch: 200,
+            economics: econ,
+            merkle_proof: proof(),
+            storage_root: [0x42; 32],
+            operator_consent: GrantAuthorization {
+                owner_key: existing_wkp.public_key_bytes(),
+                signature: Vec::new(),
+            },
+        };
+        let digest = accept_reallocation_consent_digest(
+            accept_ctx.chain_id,
+            &payer,
+            accept_ctx.nonce,
+            &accept,
+        );
+        accept.operator_consent.signature = existing_wkp
+            .sign(crate::crypto::ctx::STORAGE_V2, &digest)
+            .to_vec();
+
+        let before_root = state.calculate_state_root();
+        let err = execute_storage_tx(
+            &mut state,
+            &accept_ctx,
+            &StorageTx::AcceptReallocation(Box::new(accept)),
+        )
+        .expect_err("operator already serving shard must be refused");
+        assert!(
+            matches!(err, StorageTxError::ReallocationRefused(ref msg) if msg.contains("active deal already covers shard")),
+            "unexpected error: {err}"
+        );
+        assert_eq!(state.calculate_state_root(), before_root);
+    }
 }

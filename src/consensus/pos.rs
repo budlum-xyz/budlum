@@ -90,7 +90,7 @@ use tracing::{info, warn};
 /// signature. Named so `PoSEngine`'s fields stay readable without an
 /// `allow(clippy::type_complexity)`.
 type SeenBlocks = HashMap<(Address, u64), (BlockHeader, Vec<u8>)>;
-type SignedRounds = HashMap<(u64, u64, String), String>;
+type SignedRounds = HashMap<(u64, u64, u64, u64, String), String>;
 
 pub struct PoSEngine {
     pub config: PoSConfig,
@@ -841,7 +841,13 @@ impl ConsensusEngine for PoSEngine {
                 }
             }
         }
-        let round_key = (block.index, block.nonce, block.previous_hash.clone());
+        let round_key = (
+            block.index,
+            block.epoch,
+            block.slot,
+            block.nonce,
+            block.previous_hash.clone(),
+        );
         if let Ok(signed) = self.signed_rounds.read() {
             if let Some(prev_hash) = signed.get(&round_key) {
                 if *prev_hash != candidate_hash {
@@ -1148,6 +1154,9 @@ impl ConsensusEngine for PoSEngine {
     }
     fn note_block_seen(&self, block_hash: &str, at_ms: u128) {
         self.round_prices.note_tip_block(block_hash, at_ms);
+    }
+    fn round_price_sightings(&self) -> Vec<(String, u128)> {
+        self.round_prices.snapshot()
     }
     fn consensus_type(&self) -> &'static str {
         "PoS"
