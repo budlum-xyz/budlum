@@ -1,62 +1,45 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
-pragma solidity ^0.8.24;
+// EIP-2537/Cancun+ target chains support EIP-3855 PUSH0 natively.
+// aderyn-fp-next-line(push-zero-opcode)
+pragma solidity 0.8.26;
 
 /// @title BudlumHash
-/// @notice The Budlum field hash, `hash_fields_bytes` in src/core/hash.rs:
-///         SHA-256 over every field, each preceded by its length as a
-///         little-endian u64. Contracts that emit payloads Budlum checks must
-///         hash them exactly this way, so the two sides agree byte for byte.
+/// @notice Exact Solidity counterpart of Budlum's length-prefixed SHA-256 and
+///         settlement Merkle root (`hash_fields_bytes` in src/crypto/hash.rs
+///         and `merkle_root_from_proof` in src/settlement/graft.rs).
 library BudlumHash {
-    /// A u64 as 8 little-endian bytes.
+    uint256 private constant U64_BYTE_LEN = 8;
+    uint256 private constant BITS_PER_BYTE = 8;
+    uint256 private constant MERKLE_PAIR_ARITY = 2;
+    uint256 private constant MERKLE_PROMOTE_FIELDS = 2;
+    uint256 private constant MERKLE_NODE_FIELDS = 3;
+    uint256 private constant SENTINEL_FIELDS = 1;
+
+    /// 8-byte little-endian encoding of `value`.
     function le64(uint64 value) internal pure returns (bytes memory out) {
-        out = new bytes(8);
-        for (uint256 i = 0; i < 8; i++) {
-            out[i] = bytes1(uint8(value >> (8 * i)));
+        out = new bytes(U64_BYTE_LEN);
+        for (uint256 i = 0; i < U64_BYTE_LEN; i++) {
+            out[i] = bytes1(uint8(value >> (BITS_PER_BYTE * i)));
         }
     }
 
-    /// One length-prefixed field.
-    function field(bytes memory value) internal pure returns (bytes memory) {
-        return abi.encodePacked(le64(uint64(value.length)), value);
-    }
-
-    /// `hash_fields_bytes(fields)`.
+    /// `hash_fields_bytes`: each slice prefixed with its 8-byte little-endian
+    /// length, then one SHA-256 over the concatenation.
     function hashFields(bytes[] memory fields) internal pure returns (bytes32) {
         bytes memory preimage;
         for (uint256 i = 0; i < fields.length; i++) {
-            preimage = abi.encodePacked(preimage, field(fields[i]));
+            bytes memory item = fields[i];
+            preimage = bytes.concat(preimage, BudlumHash.le64(uint64(item.length)), item);
         }
         return sha256(preimage);
     }
 
-    /// The Budlum address an EVM contract emits as: the 20-byte address
-    /// right-aligned in a zeroed 32-byte word (`origin_emitter`).
-    function originEmitter(address emitter) internal pure returns (bytes32) {
-        return bytes32(uint256(uint160(emitter)));
-    }
-
-    /// `merkle_node_hash` of the settlement tree.
+    /// `merkle_node`: `H("BDLM_MERKLE_NODE_V1", left, right)`.
     function merkleNode(bytes32 left, bytes32 right) internal pure returns (bytes32) {
-        bytes[] memory fields = new bytes[](3);
+        bytes[] memory fields = new bytes[](MERKLE_NODE_FIELDS);
         fields[0] = "BDLM_MERKLE_NODE_V1";
-        fields[1] = abi.encodePacked(left);
-        fields[2] = abi.encodePacked(right);
-        return hashFields(fields);
-    }
-
-    /// `merkle_odd_promote_hash` of the settlement tree.
-    function merklePromote(bytes32 node) internal pure returns (bytes32) {
-        bytes[] memory fields = new bytes[](2);
-        fields[0] = "BDLM_MERKLE_ODD_PROMOTE_V1";
-        fields[1] = abi.encodePacked(node);
-        return hashFields(fields);
-    }
-
-    /// `odd_promotion_sentinel`: the sibling a proof records for a promoted
-    /// step.
-    function oddSentinel() internal pure returns (bytes32) {
-        bytes[] memory fields = new bytes[](1);
-        fields[0] = "BDLM_MERKLE_ODD_SENTINEL_V1";
+        fields[1] = bytes.concat(left);
+        fields[2] = bytes.concat(right);
         return hashFields(fields);
     }
 
@@ -69,16 +52,21 @@ library BudlumHash {
     {
         bytes32 cur = leaf;
         uint256 idx = index;
-        bytes32 sentinel = oddSentinel();
+        bytes[] memory sentinelFields = new bytes[](SENTINEL_FIELDS);
+        sentinelFields[0] = "BDLM_MERKLE_ODD_SENTINEL_V1";
+        bytes32 sentinel = hashFields(sentinelFields);
         for (uint256 i = 0; i < siblings.length; i++) {
             if (siblings[i] == sentinel) {
-                cur = merklePromote(cur);
-            } else if (idx % 2 == 0) {
+                bytes[] memory promoteFields = new bytes[](MERKLE_PROMOTE_FIELDS);
+                promoteFields[0] = "BDLM_MERKLE_ODD_PROMOTE_V1";
+                promoteFields[1] = bytes.concat(cur);
+                cur = hashFields(promoteFields);
+            } else if (idx % MERKLE_PAIR_ARITY == 0) {
                 cur = merkleNode(cur, siblings[i]);
             } else {
                 cur = merkleNode(siblings[i], cur);
             }
-            idx /= 2;
+            idx /= MERKLE_PAIR_ARITY;
         }
         if (idx != 0) {
             return (false, bytes32(0));
