@@ -239,9 +239,11 @@ contract GraftTest is Harness {
             payer: bytes32(uint256(9)),
             recipient: bytes32(uint256(10)),
             amount: 500,
-            originRecipient: abi.encode("budlum/graft/payment-target/v1", block.chainid, address(receiver)),
+            originRecipient: hex"aa",
             memoHash: bytes32(0),
-            paidAtBlock: 3
+            paidAtBlock: 3,
+            targetChainId: uint64(block.chainid),
+            targetReceiver: abi.encodePacked(address(receiver))
         });
         proof.index = 0;
         proof.path = new bytes32[](0);
@@ -273,6 +275,17 @@ contract GraftTest is Harness {
         PaymentProof memory proof = _proof(receiver, finality, graftId);
         proof.payment.amount = 501;
         vm.expectPartialRevert(BudlumPaymentReceiver.ProofInvalid.selector);
+        receiver.consume(proof);
+    }
+
+    function test_check_payment_refuses_wrong_graft() public {
+        FinalityStub finality = new FinalityStub();
+        bytes32 appA = keccak256("app-a");
+        bytes32 appB = keccak256("app-b");
+        Receiver receiver = new Receiver(finality, appA);
+        PaymentProof memory proof = _proof(receiver, finality, appB);
+        assertEq(keccak256(bytes(receiver.checkPayment(proof))), keccak256("wrong graft"), "wrong graft refused");
+        vm.expectPartialRevert(BudlumPaymentReceiver.WrongGraft.selector);
         receiver.consume(proof);
     }
 
