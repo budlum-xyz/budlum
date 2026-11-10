@@ -368,10 +368,10 @@ dependencies = [
  "p3-goldilocks",
  "p3-keccak",
  "p3-matrix",
- "p3-maybe-rayon",
+ "p3-maybe-rayon 0.7.0",
  "p3-merkle-tree",
  "p3-symmetric",
- "p3-util",
+ "p3-util 0.8.0",
  "postcard",
  "serde",
  "serde_json",
@@ -857,7 +857,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2355,9 +2355,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d33cda6d6dadf1e541121a479589206b83877889d04a3e6a42610c834d348ed2"
 dependencies = [
  "p3-field",
- "p3-maybe-rayon",
+ "p3-maybe-rayon 0.7.0",
  "p3-symmetric",
- "p3-util",
+ "p3-util 0.7.0",
  "tracing",
 ]
 
@@ -2372,7 +2372,7 @@ dependencies = [
  "p3-field",
  "p3-matrix",
  "p3-multilinear-util",
- "p3-util",
+ "p3-util 0.7.0",
  "serde",
 ]
 
@@ -2385,8 +2385,8 @@ dependencies = [
  "itertools 0.15.0",
  "p3-field",
  "p3-matrix",
- "p3-maybe-rayon",
- "p3-util",
+ "p3-maybe-rayon 0.7.0",
+ "p3-util 0.7.0",
  "spin 0.12.2",
  "tracing",
 ]
@@ -2399,8 +2399,8 @@ checksum = "f45f7364ae3aac1bd42e8dfec4aa76d1bc9087c4749649c893a671e386e96727"
 dependencies = [
  "itertools 0.15.0",
  "num-bigint 0.5.1",
- "p3-maybe-rayon",
- "p3-util",
+ "p3-maybe-rayon 0.7.0",
+ "p3-util 0.7.0",
  "paste",
  "rand 0.10.1",
  "serde",
@@ -2419,9 +2419,9 @@ dependencies = [
  "p3-dft",
  "p3-field",
  "p3-matrix",
- "p3-maybe-rayon",
+ "p3-maybe-rayon 0.7.0",
  "p3-security",
- "p3-util",
+ "p3-util 0.7.0",
  "rand 0.10.1",
  "serde",
  "spin 0.12.2",
@@ -2442,7 +2442,7 @@ dependencies = [
  "p3-poseidon1",
  "p3-poseidon2",
  "p3-symmetric",
- "p3-util",
+ "p3-util 0.7.0",
  "paste",
  "rand 0.10.1",
  "serde",
@@ -2456,7 +2456,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc78b429da6c572d3d3764d5da86d711f75c0937c9821a8741dd0b4c2314819d"
 dependencies = [
  "p3-symmetric",
- "p3-util",
+ "p3-util 0.7.0",
  "tiny-keccak",
 ]
 
@@ -2468,8 +2468,8 @@ checksum = "92f322bd7dded657d51f4c3adcc64bed27ffe4894dbd0f9c077d5670ce73217e"
 dependencies = [
  "itertools 0.15.0",
  "p3-field",
- "p3-maybe-rayon",
- "p3-util",
+ "p3-maybe-rayon 0.7.0",
+ "p3-util 0.7.0",
  "rand 0.10.1",
  "serde",
  "tracing",
@@ -2482,6 +2482,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "486d6396b0d22274f862a6c5987bb25f9ea61b34f21b54c23a2ee53f2d8c20ea"
 
 [[package]]
+name = "p3-maybe-rayon"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe1d83295d958b3d098e11b7868ac35c866c9c0432ce5266b90f7844dad513de"
+
+[[package]]
 name = "p3-mds"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2490,7 +2496,7 @@ dependencies = [
  "p3-dft",
  "p3-field",
  "p3-symmetric",
- "p3-util",
+ "p3-util 0.7.0",
  "rand 0.10.1",
 ]
 
@@ -2504,9 +2510,9 @@ dependencies = [
  "p3-commit",
  "p3-field",
  "p3-matrix",
- "p3-maybe-rayon",
+ "p3-maybe-rayon 0.7.0",
  "p3-symmetric",
- "p3-util",
+ "p3-util 0.7.0",
  "rand 0.10.1",
  "serde",
  "spin 0.12.2",
@@ -2523,8 +2529,8 @@ dependencies = [
  "itertools 0.15.0",
  "p3-field",
  "p3-matrix",
- "p3-maybe-rayon",
- "p3-util",
+ "p3-maybe-rayon 0.7.0",
+ "p3-util 0.7.0",
  "rand 0.10.1",
  "serde",
  "tracing",
@@ -2551,7 +2557,7 @@ dependencies = [
  "p3-field",
  "p3-mds",
  "p3-symmetric",
- "p3-util",
+ "p3-util 0.7.0",
  "rand 0.10.1",
 ]
 
@@ -2564,7 +2570,7 @@ dependencies = [
  "libm",
  "p3-air",
  "p3-field",
- "p3-util",
+ "p3-util 0.7.0",
  "serde",
 ]
 
@@ -2576,7 +2582,7 @@ checksum = "3335886a1e2bec45877e050f76e6bf7a1a77019111c5f599d8b41c5889a2ea1c"
 dependencies = [
  "itertools 0.15.0",
  "p3-field",
- "p3-util",
+ "p3-util 0.7.0",
  "serde",
 ]
 
@@ -2586,7 +2592,17 @@ version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e020b468e9188da32310d8c876225e5183df105a1970368df97f8a76b85dcc5b"
 dependencies = [
- "p3-maybe-rayon",
+ "p3-maybe-rayon 0.7.0",
+ "serde",
+]
+
+[[package]]
+name = "p3-util"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2deb6b0e30be32c696ab3cd443cc6f10b2ffce0faa31d37bd59e58789dd6df1"
+dependencies = [
+ "p3-maybe-rayon 0.8.0",
  "serde",
 ]
 
@@ -2890,7 +2906,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3075,7 +3091,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3862,7 +3878,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
