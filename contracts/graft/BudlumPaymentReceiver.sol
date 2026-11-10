@@ -144,6 +144,10 @@ abstract contract BudlumPaymentReceiver {
         if (!finality.heightFinal(height)) {
             return "checkpoint not final";
         }
+        uint64 latest = finality.latestFinalHeight();
+        if (latest < height || (latest > proof.payment.paidAtBlock && latest - proof.payment.paidAtBlock > MAX_PAYMENT_WINDOW_BLOCKS)) {
+            return "proof too old";
+        }
         bytes32 stateRoot = stateRootFromOpening(proof.stateRootBody, headerHash(proof.header));
         if (finality.rootAtHeight(height) != stateRoot) {
             return "state root opening";
