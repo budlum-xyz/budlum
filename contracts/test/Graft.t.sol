@@ -32,9 +32,13 @@ contract ClaimingApp is BudlumGraftClaimer {
 
 contract FinalityStub is IBudlumFinality {
     mapping(uint64 => bytes32) public roots;
+    uint64 public latestFinalHeight;
 
     function set(uint64 height, bytes32 root) external {
         roots[height] = root;
+        if (root != bytes32(0) && height > latestFinalHeight) {
+            latestFinalHeight = height;
+        }
     }
 
     function rootAtHeight(uint64 height) external view returns (bytes32) {
