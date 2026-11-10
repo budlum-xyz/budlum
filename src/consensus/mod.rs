@@ -144,6 +144,14 @@ impl RoundPriceBook {
     /// When this node first committed `block_hash`, while it is still inside
     /// the window.
     #[must_use]
+    pub(crate) fn snapshot(&self) -> Vec<(String, u128)> {
+        let Ok(seen) = self.seen.lock() else {
+            return Vec::new();
+        };
+        seen.iter().cloned().collect()
+    }
+
+    #[must_use]
     fn seen_at(&self, block_hash: &str) -> Option<u128> {
         let Ok(seen) = self.seen.lock() else {
             return None;
@@ -370,6 +378,9 @@ pub trait ConsensusEngine: Send + Sync {
     /// milliseconds apart, or a legitimate retry block inside that chain would
     /// be refused.
     fn note_block_seen(&self, _block_hash: &str, _at_ms: u128) {}
+    fn round_price_sightings(&self) -> Vec<(String, u128)> {
+        Vec::new()
+    }
 
     /// The kind of chain this engine produces blocks for.
     ///
