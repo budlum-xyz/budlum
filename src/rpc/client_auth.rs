@@ -44,7 +44,7 @@ const MAX_API_KEY_BYTES: u64 = 4 * 1024;
 /// Returns an error when the variable is set but empty - an empty `--rpc-key`
 /// path is a configuration mistake that would otherwise silently fall back to
 /// an unauthenticated request against a node that then answers `401`.
-pub fn api_key_file_from_env() -> Result<Option<PathBuf>, String> {
+fn api_key_file_from_env() -> Result<Option<PathBuf>, String> {
     match std::env::var(API_KEY_FILE_ENV) {
         Ok(value) if value.trim().is_empty() => Err(format!(
             "{API_KEY_FILE_ENV} is set but empty; unset it or point it at the file holding the \
@@ -83,7 +83,7 @@ pub fn api_key_from_env() -> Result<Option<String>, String> {
 ///
 /// # Errors
 /// As [`api_key_from_env`], for the given path.
-pub fn read_api_key(path: &Path) -> Result<String, String> {
+fn read_api_key(path: &Path) -> Result<String, String> {
     let metadata = std::fs::metadata(path)
         .map_err(|e| format!("cannot stat RPC key file {}: {e}", path.display()))?;
     if !metadata.is_file() {
@@ -139,7 +139,6 @@ fn check_secret_file_mode(_path: &Path) -> Result<(), String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

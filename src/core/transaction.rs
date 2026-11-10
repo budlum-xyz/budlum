@@ -360,6 +360,7 @@ impl BridgeBurnTx {
     /// that does not open over the authorization hash.
     /// Convenience: kept for the CLI and stateless callers; chain execution calls
     /// [`Self::verify_holder_authorization_in`].
+    #[cfg(test)]
     pub fn verify_holder_authorization(
         &self,
         holder: crate::core::address::Address,

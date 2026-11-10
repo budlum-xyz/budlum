@@ -2461,33 +2461,36 @@ impl Node {
         }
     }
 
-    /// Record the vote high-water marks.
+    /// Record the vote high-water marks before any vote reaches the wire.
     ///
-    /// Written BEFORE the vote is published, never
-    /// batched, and atomically. Persist-then-publish can at worst lose a
-    /// round (mark ahead of the wire); the old publish-then-persist order lost
-    /// the record of a vote everyone else saw.
-    fn save_vote_history(&self) {
+    /// Written BEFORE the vote is admitted or published, never batched, and
+    /// atomically. If `vote_history_db` is configured and persisting fails,
+    /// callers refuse to admit or gossip the vote so no peer ever observes a
+    /// signature whose high-water mark was not durably recorded on disk.
+    fn save_vote_history(&self) -> Result<(), String> {
         let Some(ref path) = self.vote_history_db else {
-            return;
+            return Ok(());
         };
-        let Some(parent) = path.parent() else {
+        Self::write_vote_history_file(path, self.last_prevote_height, self.last_precommit_height)
+    }
+
+    fn write_vote_history_file(
+        path: &std::path::Path,
+        last_prevote_height: u64,
+        last_precommit_height: u64,
+    ) -> Result<(), String> {
+        let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
             warn!(path = %path.display(), "vote-history path has no parent directory");
-            return;
+            return Err("vote-history path has no parent directory".into());
         };
         if let Err(e) = std::fs::create_dir_all(parent) {
             warn!(error = %e, path = %path.display(), "Cannot create vote-history directory");
-            return;
+            return Err(format!("cannot create vote-history directory: {e}"));
         }
         let body = serde_json::json!({
-            "last_prevote_height": self.last_prevote_height,
-            "last_precommit_height": self.last_precommit_height,
+            "last_prevote_height": last_prevote_height,
+            "last_precommit_height": last_precommit_height,
         });
-        // Tmp + fsync + rename. A plain `fs::write` left
-        // a truncated file behind when a crash landed mid-write; the loader
-        // parsed nothing, reset BOTH high-water marks to zero, and the vote
-        // that triggered the write was already on the wire - the exact
-        // double-sign window the marks exist to close.
         let tmp = parent.join(format!(
             ".{}.tmp",
             path.file_name()
@@ -2502,7 +2505,6 @@ impl Node {
                 f.sync_all()?;
             }
             std::fs::rename(&tmp, path)?;
-            // Durability of the rename itself; directory sync is best-effort.
             if let Ok(d) = std::fs::File::open(parent) {
                 let _ = d.sync_all();
             }
@@ -2510,9 +2512,14 @@ impl Node {
         })();
         if let Err(e) = write {
             let _ = std::fs::remove_file(&tmp);
-            warn!(error = %e, path = %path.display(),
-                  "Failed to persist vote history; a restart could re-sign a checkpoint");
+            warn!(
+                error = %e,
+                path = %path.display(),
+                "Failed to persist vote history; withholding finality vote rather than risking a restart double-sign"
+            );
+            return Err(format!("failed to persist vote history: {e}"));
         }
+        Ok(())
     }
 
     fn load_banned_peers_from_db(&self) {
@@ -2847,13 +2854,22 @@ impl Node {
                                 // `vote_retry_due` matches on epoch, height and
                                 // hash, and a round that has moved to another
                                 // hash at the same height is never signed again.
+                                let prev_precommit_height = self.last_precommit_height;
                                 let advanced = precommit_height_is_new(
                                     agg_state.checkpoint_height,
                                     self.last_precommit_height,
                                 );
                                 if advanced {
                                     self.last_precommit_height = agg_state.checkpoint_height;
-                                    self.save_vote_history();
+                                    if let Err(e) = self.save_vote_history() {
+                                        self.last_precommit_height = prev_precommit_height;
+                                        tracing::error!(
+                                            error = %e,
+                                            height = agg_state.checkpoint_height,
+                                            "Refusing to publish precommit without durable vote-history mark"
+                                        );
+                                        continue;
+                                    }
                                 }
                                 self.precommit_published = Some(PublishedVote {
                                     epoch: agg_state.epoch,
@@ -2999,12 +3015,33 @@ impl Node {
                         {
                             Ok(prevote) => {
                                 info!("Finality: voting for checkpoint height {checkpoint_height} (epoch {epoch})");
-                                // The same one-signature gap as the
-                                // precommit below: a published vote is not
-                                // delivered back to its publisher.
+                                // Persist the high-water mark BEFORE admitting
+                                // or gossiping the prevote so neither a mid-round
+                                // crash nor a disk write failure can leave a
+                                // signed prevote on the wire with a stale mark
+                                // on disk.
+                                let prev_prevote_height = self.last_prevote_height;
+                                let prev_published = self.prevote_published.clone();
+                                if record_cast_prevote(
+                                    &mut self.last_prevote_height,
+                                    &mut self.prevote_published,
+                                    epoch,
+                                    checkpoint_height,
+                                    &agg_state.checkpoint_hash,
+                                    std::time::Instant::now(),
+                                ) {
+                                    if let Err(e) = self.save_vote_history() {
+                                        self.last_prevote_height = prev_prevote_height;
+                                        self.prevote_published = prev_published;
+                                        tracing::error!(
+                                            error = %e,
+                                            height = checkpoint_height,
+                                            "Refusing to publish prevote without durable vote-history mark"
+                                        );
+                                        continue;
+                                    }
+                                }
                                 match self.chain.handle_prevote(prevote.clone()).await {
-                                    // A retry re-publishes bytes this node
-                                    // already admitted; see the precommit above.
                                     Err(e) if e.contains("Duplicate") => {
                                         tracing::debug!("own prevote re-published: {e}");
                                     }
@@ -3025,28 +3062,6 @@ impl Node {
                                     .behaviour_mut()
                                     .gossipsub
                                     .publish(topic, vote_msg.to_bytes());
-                                // `Duplicate` means the bytes are already in the
-                                // mesh (see `publish_reached_the_mesh`), which is
-                                // a delivery, not a failure: recording it is what
-                                // stops the node re-signing and re-publishing the
-                                // same vote every beat while the round waits for
-                                // its quorum.
-                                // The vote is cast when the signature exists,
-                                // not when the mesh acknowledges it: advancing
-                                // the high-water mark and remembering the signed
-                                // round before inspecting `publish` prevents a
-                                // reorg after a failed publish from making the
-                                // validator sign a second hash at one height.
-                                if record_cast_prevote(
-                                    &mut self.last_prevote_height,
-                                    &mut self.prevote_published,
-                                    epoch,
-                                    checkpoint_height,
-                                    &agg_state.checkpoint_hash,
-                                    std::time::Instant::now(),
-                                ) {
-                                    self.save_vote_history();
-                                }
                                 if let Err(e) = &publish {
                                     if publish_reached_the_mesh(e) {
                                         tracing::debug!(
@@ -6120,7 +6135,6 @@ mod gossip_author_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod finality_publish_tests {
     use super::publish_reached_the_mesh;
     use libp2p::gossipsub::PublishError;
@@ -6196,5 +6210,21 @@ mod finality_publish_tests {
         );
         assert!(retry_same_hash);
         assert!(prevote_is_due(100, last_prevote_height, retry_same_hash));
+    }
+    #[test]
+    fn write_vote_history_file_persists_atomically_and_reports_unwritable_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let history_path = dir.path().join("votes").join("history.json");
+        super::Node::write_vote_history_file(&history_path, 14, 12).unwrap();
+        let persisted: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&history_path).unwrap()).unwrap();
+        assert_eq!(persisted["last_prevote_height"], 14);
+        assert_eq!(persisted["last_precommit_height"], 12);
+
+        // Pointing the history file at an existing directory must fail loudly
+        // so the caller withholds the vote instead of gossiping unrecorded bytes.
+        let dir_as_file = dir.path().join("occupied_dir");
+        std::fs::create_dir_all(&dir_as_file).unwrap();
+        assert!(super::Node::write_vote_history_file(&dir_as_file, 16, 14).is_err());
     }
 }

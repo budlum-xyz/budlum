@@ -189,6 +189,7 @@ impl CrossDomainMessage {
     /// an unsigned or wrongly signed message is refused.
     /// Convenience: kept for the CLI and stateless tests; relayed chain ingress
     /// calls [`Self::verify_sender_signature_in`].
+    #[cfg(test)]
     pub fn verify_sender_signature(&self) -> Result<(), String> {
         self.verify_sender_signature_in(&crate::crypto::scheme::SchemeStatusRegistry::genesis())
     }
