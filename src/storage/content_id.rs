@@ -186,4 +186,32 @@ mod tests {
         assert_ne!(oor, ContentId::of_subrange(chunk, 0, 1));
         assert_ne!(oor, ContentId::of(chunk));
     }
+
+    /// Fixed-seed xorshift bytes. Same generator is used in `bud-node` tests.
+    fn seeded_bytes(len: usize) -> Vec<u8> {
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        (0..len)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x >> 24) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bud_node_content_id_matches_core_definition() {
+        let inputs: [Vec<u8>; 4] = [vec![], vec![0u8], seeded_bytes(65_536), seeded_bytes(1000)];
+        for data in &inputs {
+            let core = ContentId::of(data);
+            let node = bud_node::store::ContentId::of(data);
+            assert_eq!(core.0, node.0, "len {}", data.len());
+        }
+        // Same golden vectors as the `bud-node` store tests.
+        assert_eq!(
+            hex::encode(ContentId::of(&[]).0),
+            "b9c2e41839278bfe0711bbdfb660ed31087513891bc2fa80c84f2bb6fa160104"
+        );
+    }
 }

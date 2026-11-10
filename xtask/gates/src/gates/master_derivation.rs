@@ -13,7 +13,9 @@ fn code_of(root: &Path) -> Result<String, String> {
     if !f.is_file() {
         return Err(format!("derived-content module missing at {}", f.display()));
     }
-    std::fs::read_to_string(&f).map_err(|e| e.to_string())
+    let text = std::fs::read_to_string(&f).map_err(|e| e.to_string())?;
+    // Comments and string literals are blanked: a name in prose is no code.
+    Ok(super::rust_literals::scrub(&text))
 }
 
 /// # Errors
@@ -53,8 +55,8 @@ pub fn run(root: &Path) -> Result<String, String> {
         "a_new_derivation_cancels_a_pending_release",
         "a_derivation_of_an_unheld_master_is_refused",
     ] {
-        if !code.contains(&format!("fn {t}")) {
-            return Err(format!("missing test: {t}"));
+        if !super::capability_modules_are_wired::test_is_live(&code, t) {
+            return Err(format!("missing, ignored or empty test: {t}"));
         }
     }
     Ok(String::from(
@@ -79,7 +81,8 @@ pub fn self_test() -> Result<String, String> {
         "a_new_derivation_cancels_a_pending_release",
         "a_derivation_of_an_unheld_master_is_refused",
     ] {
-        writeln!(good, "fn {t}() {{}}").expect("writing to a String cannot fail");
+        writeln!(good, "#[test]\nfn {t}() {{ assert!(true); }}")
+            .expect("writing to a String cannot fail");
     }
     std::fs::write(dir.join("src/storage/derived.rs"), &good).map_err(|e| e.to_string())?;
     if run(&dir).is_err() {

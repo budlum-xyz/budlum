@@ -129,6 +129,9 @@ pub fn msr_decode(nodes: &[(usize, [u8; 2])]) -> Option<[u8; 4]> {
     }
     let (i, a) = nodes[0];
     let (j, b) = nodes[1];
+    if i >= N || j >= N {
+        return None; // there are only N nodes
+    }
     // packet0_i = r0*s1 + r2*s2 + r1*s3, packet1_i = r0*s2 + r2*s3 + r1*s4
     let r = |idx: usize| PSI[idx];
     let mut aug = [[0u8; 5]; 4];
@@ -283,6 +286,12 @@ pub fn msr_digest(nodes: &[[u8; 2]; N]) -> [u8; 32] {
 mod tests {
     use super::*;
     use rand_core::RngCore;
+
+    #[test]
+    fn a_node_index_outside_the_code_is_refused() {
+        assert!(msr_decode(&[(7, [0, 0]), (1, [0, 0])]).is_none());
+        assert!(msr_decode(&[(0, [0, 0]), (4, [0, 0])]).is_none());
+    }
 
     #[test]
     fn any_two_nodes_decode_all_four_symbols() {

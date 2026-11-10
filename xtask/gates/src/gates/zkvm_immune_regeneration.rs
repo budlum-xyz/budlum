@@ -32,6 +32,30 @@ fn read(root: &Path, rel: &str) -> Result<String, String> {
     std::fs::read_to_string(&f).map_err(|e| e.to_string())
 }
 
+/// Source with block and line comments removed. String contents stay, so a
+/// `//` inside a literal is not taken as a comment.
+fn without_comments(text: &str) -> String {
+    let blocks = crate::gates::rust_literals::strip_block_comments(text);
+    let mut out = String::with_capacity(blocks.len());
+    for line in blocks.lines() {
+        let mut in_str = false;
+        let mut prev = '\0';
+        let mut cut = line.len();
+        for (i, c) in line.char_indices() {
+            if c == '"' && prev != '\\' {
+                in_str = !in_str;
+            } else if !in_str && c == '/' && prev == '/' {
+                cut = i - 1;
+                break;
+            }
+            prev = c;
+        }
+        out.push_str(&line[..cut]);
+        out.push('\n');
+    }
+    out
+}
+
 /// Is `code` named inside a validation error rather than in prose?
 fn code_is_a_rejection(src: &str, code: &str) -> bool {
     let needle = "BudlumError::validation(";
@@ -70,8 +94,8 @@ fn rejections(exec: &str) -> (usize, Vec<String>) {
 ///
 /// Returns the list of violated claims.
 pub fn run(root: &Path) -> Result<String, String> {
-    let exec = read(root, "src/execution/executor.rs")?;
-    let verifier = read(root, "src/execution/proof_verifier.rs")?;
+    let exec = without_comments(&read(root, "src/execution/executor.rs")?);
+    let verifier = without_comments(&read(root, "src/execution/proof_verifier.rs")?);
     let zkvm = read(root, "src/execution/zkvm.rs")?;
     let mut problems: Vec<String> = Vec::new();
     let mut checked = 0usize;
@@ -94,7 +118,10 @@ pub fn run(root: &Path) -> Result<String, String> {
         .lines()
         .find(|l| l.contains("pub const MAX_PROOF_BYTES"))
     {
-        if line.contains("1 << 20") {
+        let value = line
+            .split_once('=')
+            .map(|(_, v)| v.trim().trim_end_matches(';').trim());
+        if value == Some("1 << 20") {
             checked += 1;
         } else {
             problems.push(format!(
@@ -108,7 +135,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         problems.push("no `pub const MAX_PROOF_BYTES` in `proof_verifier.rs`.".to_string());
     }
 
-    let callers = ungated_callers(root);
+    let callers = ungated_callers(root)?;
     if callers.is_empty() {
         checked += 1;
     } else {
@@ -214,6 +241,40 @@ pub fn self_test() -> Result<String, String> {
             "canary: an RPC path reaching the un-gated executor passed",
         ));
     }
+    std::fs::remove_file(dir.join("src/rpc/server.rs")).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(dir.join("src/chain/deep")).map_err(|e| e.to_string())?;
+    std::fs::write(
+        dir.join("src/chain/deep/actor.rs"),
+        "fn h() { execute_bytecode_ungated(&b); }\n",
+    )
+    .map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a nested chain path reaching the un-gated executor passed",
+        ));
+    }
+    std::fs::remove_dir_all(dir.join("src/chain")).map_err(|e| e.to_string())?;
+    // A rejection that survives only in a comment is not a rejection.
+    let commented = exec.replace(
+        "return Err(BudlumError::validation(\"ai_exec_stark\", e));",
+        "// return Err(BudlumError::validation(\"ai_exec_stark\", e));",
+    );
+    std::fs::write(dir.join("src/execution/executor.rs"), commented).map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from("canary: a commented-out rejection passed"));
+    }
+    std::fs::write(dir.join("src/execution/executor.rs"), exec).map_err(|e| e.to_string())?;
+    std::fs::write(
+        dir.join("src/execution/proof_verifier.rs"),
+        "pub const MAX_PROOF_BYTES: usize = 11 << 20;\n",
+    )
+    .map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from("canary: a lookalike size ceiling passed"));
+    }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
         "ZKVM containment canary OK (contained PASSes; a missing rejection, a raised \n         ceiling, and an un-gated production caller each FAIL).",
@@ -224,25 +285,33 @@ pub fn self_test() -> Result<String, String> {
 /// entry point exists for tests and local tooling; a production path that calls
 /// it runs bytecode with no gas or mainnet gate, which is what the proof is
 /// supposed to make unnecessary.
-fn ungated_callers(root: &Path) -> Vec<String> {
+fn ungated_callers(root: &Path) -> Result<Vec<String>, String> {
     let mut callers: Vec<String> = Vec::new();
-    for dir in ["src/execution", "src/rpc"] {
-        let Ok(rd) = std::fs::read_dir(root.join(dir)) else {
+    collect_callers(&root.join("src"), &mut callers)?;
+    Ok(callers)
+}
+
+fn collect_callers(dir: &Path, callers: &mut Vec<String>) -> Result<(), String> {
+    let rd = std::fs::read_dir(dir).map_err(|e| format!("cannot scan {}: {e}", dir.display()))?;
+    let mut entries: Vec<_> = rd.flatten().collect();
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for e in entries {
+        let path = e.path();
+        if path.is_dir() {
+            collect_callers(&path, callers)?;
             continue;
-        };
-        for e in rd.flatten() {
-            let path = e.path();
-            if path.extension().and_then(|x| x.to_str()) != Some("rs") {
-                continue;
-            }
-            if path.file_name().is_some_and(|n| n == "zkvm.rs") {
-                continue;
-            }
-            let body = std::fs::read_to_string(&path).unwrap_or_default();
-            if body.contains("execute_bytecode_ungated") {
-                callers.push(path.display().to_string());
-            }
+        }
+        if path.extension().and_then(|x| x.to_str()) != Some("rs") {
+            continue;
+        }
+        if path.file_name().is_some_and(|n| n == "zkvm.rs") {
+            continue;
+        }
+        let body = std::fs::read_to_string(&path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        if crate::gates::rust_literals::scrub(&body).contains("execute_bytecode_ungated") {
+            callers.push(path.display().to_string());
         }
     }
-    callers
+    Ok(())
 }

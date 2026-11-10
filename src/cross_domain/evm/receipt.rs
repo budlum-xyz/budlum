@@ -1,9 +1,9 @@
 //! Ethereum receipt decode + deposit-log matching.
 //!
 //! Receipt envelope types (EIP-658/2481/2930/1559/4844):
-//! - **Legacy** (`envelope[0] >= 0xc0`): whole bytes = `rlp([status_or_postState,
+//! - Legacy (`envelope[0] >= 0xc0`): whole bytes = `rlp([status_or_postState,
 //!   CumulativeGasUsed, logsBloom(256), logs])`.
-//! - **Typed** (`envelope[0] in 0x00..=0x7f`): `[type_byte] ++ rlp([status,
+//! - Typed (`envelope[0] in 0x00..=0x7f`): `[type_byte] ++ rlp([status,
 //!   CumulativeGasUsed, logsBloom(256), logs [, accessList]])`. Types: 0x01
 //!   (EIP-2930), 0x02 (EIP-1559), 0x03 (EIP-4844).
 //!
@@ -18,7 +18,7 @@ use crate::cross_domain::evm::rlp::{self, Item, RlpError};
 pub struct EthLog {
     /// Emitter contract address (20 bytes).
     pub address: Vec<u8>,
-    /// Indexed topics (her biri 32 byte).
+    /// Indexed topics (each 32 bytes).
     pub topics: Vec<[u8; 32]>,
     /// Non-indexed data payload.
     pub data: Vec<u8>,
@@ -68,11 +68,15 @@ pub fn decode_receipt(envelope: &[u8]) -> Result<EthReceipt, ReceiptError> {
         return Err(ReceiptError::InvalidEnvelope);
     }
     let first = envelope[0];
-    // Legacy receipt: ilk byte >= 0xc0 (RLP list prefix). Typed: 0x01/0x02/0x03.
+    // Legacy receipt: first byte >= 0xc0 (RLP list prefix). Typed: 0x01/0x02/0x03.
+    // BLG-0125 (P05-F18): the typed envelope type byte is CHECKED - any other
+    // nonzero prefix used to be accepted and its payload decoded as a receipt.
     let payload = if first >= 0xc0 {
         envelope
-    } else {
+    } else if (0x01..=0x03).contains(&first) {
         &envelope[1..]
+    } else {
+        return Err(ReceiptError::InvalidEnvelope);
     };
 
     let item = rlp::decode(payload)?;
@@ -96,9 +100,15 @@ pub fn decode_receipt(envelope: &[u8]) -> Result<EthReceipt, ReceiptError> {
 /// which defaults to success.
 fn decode_status(b: &[u8]) -> Result<bool, ReceiptError> {
     match b.len() {
-        0 => Ok(false),     // status 0 (fail)
-        1 => Ok(b[0] != 0), // 0x01 success, 0x00 fail
-        32 => Ok(true),     // pre-Byzantium postState root
+        0 => Ok(false), // status 0 (fail)
+        32 => Ok(true), // pre-Byzantium postState root
+        // BLG-0125 (P05-F18): the status byte is EXACTLY 0 or 1. Any other
+        // nonzero value (0x02, 0xff) used to read as "success".
+        1 => match b[0] {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(ReceiptError::InvalidEnvelope),
+        },
         _ => Err(ReceiptError::InvalidEnvelope),
     }
 }
@@ -148,10 +158,27 @@ impl EthReceipt {
     /// Returns the first log matching the given `(emitter_address, topic0)`.
     /// Bridge: `topic0` is an event signature such as
     /// keccak256("Deposit(address,uint256,bytes32,uint256)"); `emitter_address` is the bridge contract address.
+    ///
+    /// Convenience: the receipt lookup the EVM adapter's deposit scan
+    /// is built on, pub with the rest of this receipt reader.
     pub fn find_log<'a>(&'a self, emitter: &[u8], topic0: &[u8; 32]) -> Option<&'a EthLog> {
         self.logs
             .iter()
             .find(|log| log.address == emitter && log.topics.first().is_some_and(|t| t == topic0))
+    }
+
+    /// Like [`Self::find_log`], but returns the log WITH its position in the
+    /// receipt (BLG-0125/P05-F18): `(log_index, log)`. The pair
+    /// `(tx, log_index)` is the deposit id a bridge can bind; the bare log
+    /// cannot be told apart from a same-shaped sibling later in the list.
+    pub fn find_log_indexed<'a>(
+        &'a self,
+        emitter: &[u8],
+        topic0: &[u8; 32],
+    ) -> Option<(usize, &'a EthLog)> {
+        self.logs.iter().enumerate().find(|(_, log)| {
+            log.address == emitter && log.topics.first().is_some_and(|t| t == topic0)
+        })
     }
 }
 
@@ -324,5 +351,69 @@ mod tests {
             decode_receipt(&bytes).unwrap_err(),
             ReceiptError::InvalidLog
         );
+    }
+
+    /// BLG-0126 (P05-F19): trailing bytes after the receipt are refused -
+    /// an injection surface.
+    #[test]
+    fn neg_trailing_bytes_rejected() {
+        let mut env = build_legacy_receipt(true, Vec::new());
+        env.push(0x00);
+        assert_eq!(
+            decode_receipt(&env),
+            Err(ReceiptError::Rlp(
+                crate::cross_domain::evm::rlp::RlpError::TrailingBytes
+            ))
+        );
+    }
+
+    /// BLG-0126 (P05-F19): the status byte is exactly 0 or 1.
+    #[test]
+    fn neg_bad_status_byte_rejected() {
+        let bloom = Item::String(vec![0u8; 256]);
+        let item = Item::List(vec![
+            Item::String(vec![0x02]), // status 0x02: neither 0 nor 1
+            Item::String(vec![]),
+            bloom,
+            Item::List(Vec::new()),
+        ]);
+        assert_eq!(
+            decode_receipt(&encode(&item)),
+            Err(ReceiptError::InvalidEnvelope)
+        );
+    }
+
+    /// BLG-0126 (P05-F19): an unknown typed-envelope type byte is refused.
+    #[test]
+    fn neg_bad_type_byte_rejected() {
+        let mut env = build_typed_receipt(0x04, true, Vec::new());
+        // 0x04 is not a receipt type; also try 0x00 which is not either.
+        assert_eq!(decode_receipt(&env), Err(ReceiptError::InvalidEnvelope));
+        env[0] = 0x00;
+        assert_eq!(decode_receipt(&env), Err(ReceiptError::InvalidEnvelope));
+        // The accepted range still works.
+        assert!(decode_receipt(&build_typed_receipt(0x02, true, Vec::new())).is_ok());
+    }
+
+    /// BLG-0125 (P05-F18): find_log_indexed binds (tx, log index) - two
+    /// same-shaped logs are told apart by position.
+    #[test]
+    fn find_log_indexed_binds_the_position() {
+        let sig = [7u8; 32];
+        let addr = [0xAAu8; 20];
+        let log_a = rlp_log(&addr, &[sig], b"a");
+        let log_b = rlp_log(&addr, &[sig], b"b");
+        let receipt = decode_receipt(&build_legacy_receipt(true, vec![log_a, log_b])).unwrap();
+        let (idx, log) = receipt.find_log_indexed(&addr, &sig).unwrap();
+        assert_eq!(idx, 0);
+        assert_eq!(log.data, b"a".to_vec());
+        // The same shape further down is a DIFFERENT deposit id.
+        let mut second = 0;
+        for (i, l) in receipt.logs.iter().enumerate() {
+            if l.data == b"b".to_vec() {
+                second = i;
+            }
+        }
+        assert_eq!(second, 1);
     }
 }

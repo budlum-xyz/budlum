@@ -22,7 +22,7 @@ pub enum ConnState {
 }
 
 /// The connection configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WsConfig {
     pub url: String,
     /// The wait between reconnection attempts (in seconds).
@@ -30,6 +30,17 @@ pub struct WsConfig {
     /// The maximum number of consecutive reconnection attempts (0 means
     /// unlimited).
     pub max_reconnects: u32,
+}
+
+/// The url may carry credentials, so `Debug` never prints it.
+impl std::fmt::Debug for WsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsConfig")
+            .field("url", &"<redacted>")
+            .field("reconnect_delay_secs", &self.reconnect_delay_secs)
+            .field("max_reconnects", &self.max_reconnects)
+            .finish()
+    }
 }
 
 /// The kill signal: broadcast to every listener; once `trigger()` is called,
@@ -91,8 +102,22 @@ impl SessionTracker {
 
     /// Updates the session state from an incoming message.
     pub fn observe(&mut self, item: &serde_json::Value) {
-        if crate::is_success_connected_or_authed(item) {
-            self.state = ConnState::Authenticated;
+        let kind = item.get("T").and_then(serde_json::Value::as_str);
+        if kind == Some("error") {
+            self.state = ConnState::Failed;
+            return;
+        }
+        if !crate::is_success_connected_or_authed(item) {
+            return;
+        }
+        match item.get("msg").and_then(serde_json::Value::as_str) {
+            Some("connected") if self.state != ConnState::Authenticated => {
+                self.state = ConnState::Connected;
+            }
+            Some("authenticated") if self.state == ConnState::Connected => {
+                self.state = ConnState::Authenticated;
+            }
+            _ => {}
         }
     }
 
@@ -105,6 +130,16 @@ impl SessionTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_output_does_not_show_the_url() {
+        let config = WsConfig {
+            url: "wss://host/stream?key=hunter2".into(),
+            reconnect_delay_secs: 1,
+            max_reconnects: 3,
+        };
+        assert!(!format!("{config:?}").contains("hunter2"));
+    }
 
     #[test]
     fn kill_signal_is_idempotent() {
@@ -120,6 +155,31 @@ mod tests {
         let mut tracker = SessionTracker::new();
         assert_eq!(tracker.state(), ConnState::Disconnected);
         tracker.observe(&serde_json::json!({"T": "success", "msg": "authenticated"}));
+        assert_eq!(tracker.state(), ConnState::Disconnected);
+        tracker.observe(&serde_json::json!({"T": "success", "msg": "connected"}));
+        assert_eq!(tracker.state(), ConnState::Connected);
+        tracker.observe(&serde_json::json!({"T": "success", "msg": "authenticated"}));
         assert_eq!(tracker.state(), ConnState::Authenticated);
+        tracker.observe(&serde_json::json!({"T": "error", "msg": "auth failed"}));
+        assert_eq!(tracker.state(), ConnState::Failed);
+    }
+
+    #[test]
+    fn repeated_connected_does_not_downgrade_and_odd_messages_are_ignored() {
+        let mut tracker = SessionTracker::new();
+        tracker.observe(&serde_json::json!({"T": "success", "msg": "connected"}));
+        tracker.observe(&serde_json::json!({"T": "success", "msg": "authenticated"}));
+        tracker.observe(&serde_json::json!({"T": "success", "msg": "connected"}));
+        assert_eq!(tracker.state(), ConnState::Authenticated);
+        tracker.observe(&serde_json::json!({"T": 5, "msg": 7}));
+        tracker.observe(&serde_json::json!(null));
+        assert_eq!(tracker.state(), ConnState::Authenticated);
+    }
+
+    #[test]
+    fn connected_message_alone_is_not_authenticated() {
+        let mut tracker = SessionTracker::new();
+        tracker.observe(&serde_json::json!({"T": "success", "msg": "connected"}));
+        assert_eq!(tracker.state(), ConnState::Connected);
     }
 }

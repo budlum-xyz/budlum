@@ -3,7 +3,7 @@
 
 [network]
 profile = "testnet"
-chain_id = 42
+chain_id = 45261
 genesis_file = "./config/testnet-genesis.json"
 
 [node]

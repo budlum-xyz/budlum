@@ -1,20 +1,22 @@
-#![allow(clippy::pedantic, clippy::nursery)]
-
-//! F10.4 EvmChainAdapter - the real ChainAdapter impl (the H4 fully live path).
+//! F10.4 EvmChainAdapter - the ChainAdapter impl for the EVM leg. NOT a
+//! fully live path (BLG-0135/P06-F06): the off-chain half is a stub that
+//! refuses at broadcast, so the Ethereum-to-Budlum leg has no live end-to-end
+//! route. The on-chain verification below is real and deterministic; what it
+//! verifies today is produced only in tests.
 //!
 //! Two sides:
 //!
-//! - **On-chain (verify_receipt_proof):** deterministic in Budlum consensus.
+//! - On-chain (verify_receipt_proof): deterministic in Budlum consensus.
 //!   It uses F10.1 (MPT) + F10.2 (receipt/header/verify). The sync committee
 //!   (F10.3) runs only if `EvmDepositProof.sync_attestation` is populated;
 //!   this line said "uses" for a long time while no path called it.
 //!   Network-free - the relayer produces the proof, Budlum verifies it.
 //!
-//! - **Off-chain (generate/submit/wait):** in the relayer binary (`src/bin/
+//! - Off-chain (generate/submit/wait): in the relayer binary (`src/bin/
 //!   budlum-relayer.rs`). It connects to Ethereum RPC. This module provides the
 //!   structure + a minimal impl; the production RPC client is separate (reqwest/alloy - after mainnet).
 //!
-//! **Security invariant:** `verify_receipt_proof` NEVER connects to the network.
+//! Security invariant: `verify_receipt_proof` NEVER connects to the network.
 //!
 //! ## The cryptographic binding between receipt and tx_hash
 //!
@@ -25,10 +27,10 @@
 //! same binding also prevents cross-bridge proof reuse (the leaf is bound to
 //! bridge_address).
 //!
-//! **Security boundary:** the wire format changed - the off-chain relayer tool
-//! must produce the leaf with the same formula. `verify_deposit` (the real safe
-//! path) is unaffected: it already does MPT + header chain + status + log match
-//! over the full `EvmDepositProof`.
+//! Security boundary: the wire format changed - the off-chain relayer tool
+//! must produce the leaf with the same formula. `verify_deposit` does MPT +
+//! header chain + status + log match over the full `EvmDepositProof`, but it
+//! is UNREACHABLE today (BLG-0135): no production path calls it.
 
 use crate::core::hash::hash_fields_bytes;
 use crate::core::transaction::{ExternalChain, ExternalTransaction, RelayerExternalResult};
@@ -51,18 +53,24 @@ const MAX_DEPOSIT_PACKAGE_BYTES: u64 = 1024 * 1024;
 /// set with the chain config during the ceremony. A placeholder here (CI test).
 pub const DEFAULT_DEPOSIT_TOPIC0: [u8; 32] = [0u8; 32];
 
-/// EvmChainAdapter - the real ChainAdapter for Ethereum.
+/// EvmChainAdapter - the ChainAdapter for Ethereum.
 ///
-/// `verify_receipt_proof` on-chain deterministik. Off-chain metodlar
-/// (`generate_receipt_proof`/`submit_transaction`/`wait_for_confirmation`)
-/// connect to Ethereum RPC in the relayer binary; in this impl they are in
-/// offline-test mode (the StubAdapter pattern) - production RPC is separate.
+/// `verify_receipt_proof` is deterministic in Budlum consensus. The off-chain
+/// methods (`generate_receipt_proof`/`submit_transaction`/
+/// `wait_for_confirmation`) are an offline-test stub (the StubAdapter
+/// pattern) that REFUSES at broadcast - there is no live Ethereum RPC route
+/// (BLG-0135/P06-F06).
 ///
 /// `Debug` so a caller can `expect` on a `Result` carrying one. All three
 /// fields are public configuration already: a contract address, an event
 /// topic and a confirmation count. There is no key material here to leak
 /// into a log line.
 #[derive(Debug)]
+///
+/// WIRING: the EVM deposit adapter for the relayer's adapter
+/// registry; no production relayer registers an EVM adapter yet
+/// (a lock test holds that line), so deposit verification is
+/// pinned by this module's tests.
 pub struct EvmChainAdapter {
     /// The Ethereum bridge contract address (the deposit event emitter).
     pub bridge_address: Vec<u8>,
@@ -70,6 +78,9 @@ pub struct EvmChainAdapter {
     pub deposit_topic0: [u8; 32],
     /// The N-confirmation threshold (the reorg window; mainnet is about 64).
     pub required_confirmations: u32,
+    /// BLG-0111 (P05-F04): the operator's trusted checkpoint `(number,
+    /// hash)` - the interim anchor the header chain must touch.
+    pub trusted_checkpoint: Option<(u64, [u8; 32])>,
 }
 
 impl EvmChainAdapter {
@@ -78,7 +89,22 @@ impl EvmChainAdapter {
             bridge_address,
             deposit_topic0,
             required_confirmations: DEFAULT_CONFIRMATIONS,
+            trusted_checkpoint: None,
         }
+    }
+
+    /// Pins the operator's trusted checkpoint - BLG-0111 (P05-F04) interim
+    /// form A of the finality rule: until relayers ship sync-committee
+    /// attestations (form B), the deposit's header chain must touch this
+    /// anchor or the deposit refuses.
+    #[must_use]
+    ///
+    /// WIRING: the operator configuration for the interim finality rule
+    /// above; it is set when an operator actually registers this
+    /// adapter, which no production relayer does yet.
+    pub fn with_trusted_checkpoint(mut self, number: u64, hash: [u8; 32]) -> Self {
+        self.trusted_checkpoint = Some((number, hash));
+        self
     }
 
     /// Is this adapter configured well enough to be trusted with deposits?
@@ -103,6 +129,17 @@ impl EvmChainAdapter {
     ///
     /// A message naming which of the two is wrong.
     pub fn check_fit_for_relay(&self) -> Result<(), String> {
+        // BLG-0111 (P05-F04): without finality evidence every deposit would
+        // refuse at verify time anyway - say it once, at setup. Form B
+        // (sync-committee attestation) supersedes the anchor when relayers
+        // ship it.
+        if self.trusted_checkpoint.is_none() {
+            return Err(
+                "EVM adapter has no trusted checkpoint: deposits need finality \
+                 evidence (a sync-committee attestation or the interim anchor)"
+                    .to_string(),
+            );
+        }
         if self.bridge_address.len() != 20 {
             return Err(format!(
                 "EVM adapter bridge address must be exactly 20 bytes, got {}",
@@ -148,8 +185,9 @@ impl ChainAdapter for EvmChainAdapter {
 
     /// Off-chain (the relayer binary): produce a receipt + MPT proof from Ethereum RPC.
     ///
-    /// This impl is an offline-test stub (the StubAdapter pattern). The production
-    /// RPC client lives in `src/bin/budlum-relayer.rs` (after mainnet, reqwest/alloy).
+    /// This impl is an offline-test stub (the StubAdapter pattern) and
+    /// REFUSES - there is no live Ethereum RPC route (BLG-0135/P06-F06).
+    /// A production RPC client does not exist in this tree.
     async fn generate_receipt_proof(
         &self,
         tx_hash: &str,
@@ -178,14 +216,14 @@ impl ChainAdapter for EvmChainAdapter {
     /// path: this method only checks the Merkle proof + leaf binding, while the
     /// full package (`EvmDepositProof`) goes to `verify_deposit`.
     ///
-    /// **Wire format:** `proof.leaf` =
+    /// Wire format: `proof.leaf` =
     /// `hash(BDLM_EVM_RECEIPT_LEAF_V1 || tx_hash || bridge_address)`;
     /// `external_state_root` = header.receiptsRoot; `expected_tx_hash` = tx_hash.
     /// Header chain + sync-committee verification is NOT in this method, it is
     /// inside `verify_evm_receipt`, and only `verify_deposit` goes there.
     ///
     ///
-    /// **Two-part verification:**
+    /// Two-part verification:
     /// 1) `proof.verify(external_state_root)` - Merkle self-consistency.
     /// 2) `proof.leaf == derive_receipt_leaf(tx_hash, bridge_address)` -
     ///    The cryptographic leaf binding. An attacker cannot present the same
@@ -268,7 +306,21 @@ impl ChainAdapter for EvmChainAdapter {
                     .into(),
             ));
         }
-        Ok(())
+        // BLG-0136 (P06-F07, decision B interim): no sync attestation, no
+        // accepted observation. `DepositProofPackage` cannot yet carry the
+        // attestation and finality branch (decision A lands with the
+        // committee work), and this seam built its proof with
+        // `sync_attestation: None`, which let fabricated header chains read
+        // as final behind the confirmation count. The verification above
+        // still runs (so its specific refusals fire first); the seam itself
+        // refuses to ACCEPT the result until the package can carry the
+        // evidence.
+        Err(AdapterError::ProofVerificationFailed(
+            "the deposit package carries no sync attestation; BLG-0136 interim: this \
+             observation seam refuses until the package can carry the attestation and \
+             finality branch"
+                .into(),
+        ))
     }
 
     fn verify_receipt_proof(
@@ -351,7 +403,8 @@ impl ChainAdapter for EvmChainAdapter {
             tx_hash: hash,
             success: true,
             message: None,
-            receipt_proof: bincode::serialize(&proof).unwrap_or_default(),
+            receipt_proof: bincode::serialize(&proof)
+                .map_err(|e| AdapterError::ProofGenerationFailed(e.to_string()))?,
             external_state_root: root,
         })
     }
@@ -362,7 +415,7 @@ impl EvmChainAdapter {
     ///
     /// This is the enriched form of `ChainAdapter::verify_receipt_proof`: the
     /// relayer supplies the full proof package (header chain + MPT nodes +
-    /// receipt), and what comes back is a **proven deposit**.
+    /// receipt), and what comes back is a proven deposit.
     ///
     /// This function used to throw away the result of `verify_evm_receipt` as
     /// `_verified`, resolve the header chain and the MPT a second time and hand
@@ -398,7 +451,9 @@ impl EvmChainAdapter {
                 proof.required_confirmations, self.required_confirmations
             )));
         }
-        verify_evm_receipt(proof)
+        // BLG-0111 (P05-F04): the operator's trusted checkpoint is the
+        // interim finality anchor when the proof carries no sync attestation.
+        verify_evm_receipt(proof, self.trusted_checkpoint.as_ref())
     }
 }
 
@@ -437,7 +492,7 @@ mod tests {
 
     /// It refuses to produce a proof for a chain it does not read.
     ///
-    /// It used to return a single-leaf tree and its test **pinned** the equality
+    /// It used to return a single-leaf tree and its test pinned the equality
     /// `proof.leaf == root`. That equality was precisely the defect:
     /// `MerkleProof::verify` takes no hash step with an empty sibling list, falls
     /// through to the `leaf == root` comparison and passes. So the proof produced
@@ -513,14 +568,16 @@ mod tests {
 
     #[test]
     fn a_bridge_address_with_the_wrong_shape_cannot_be_registered() {
-        let adapter = EvmChainAdapter::new(vec![7u8; 19], TEST_DEPOSIT_TOPIC0);
+        let adapter = EvmChainAdapter::new(vec![7u8; 19], TEST_DEPOSIT_TOPIC0)
+            .with_trusted_checkpoint(1, [1; 32]);
         let err = EvmChainAdapter::check_fit_for_relay(&adapter).unwrap_err();
         assert!(err.contains("exactly 20 bytes"), "got: {err}");
     }
 
     #[test]
     fn a_zero_deposit_topic_cannot_be_registered() {
-        let adapter = EvmChainAdapter::new(vec![7u8; 20], DEFAULT_DEPOSIT_TOPIC0);
+        let adapter = EvmChainAdapter::new(vec![7u8; 20], DEFAULT_DEPOSIT_TOPIC0)
+            .with_trusted_checkpoint(1, [1; 32]);
         let err = EvmChainAdapter::check_fit_for_relay(&adapter).unwrap_err();
         assert!(err.contains("zero deposit topic"), "got: {err}");
     }
@@ -531,14 +588,16 @@ mod tests {
         // is a legitimate thing for a test to do and not a legitimate thing
         // to relay with: every receipt leaf binds to `bridge_address`, so a
         // zero address binds to nothing in particular.
-        let adapter = EvmChainAdapter::test_default();
+        let adapter = EvmChainAdapter::test_default().with_trusted_checkpoint(1, [1; 32]);
         let err = EvmChainAdapter::check_fit_for_relay(&adapter).unwrap_err();
         assert!(err.contains("zero bridge address"), "got: {err}");
 
         let mut registry = crate::cross_domain::chain_adapter::AdapterRegistry::new();
         assert!(
             registry
-                .register(Box::new(EvmChainAdapter::test_default()))
+                .register(Box::new(
+                    EvmChainAdapter::test_default().with_trusted_checkpoint(1, [1; 32])
+                ))
                 .is_err(),
             "a zero-address adapter must not reach the registry: the node would \
              advertise Ethereum support while pointing at no contract"
@@ -549,7 +608,8 @@ mod tests {
     fn zero_confirmations_cannot_be_registered() {
         // A deposit from a block that can still be reorged away would be
         // minted against a transaction that did not happen.
-        let mut adapter = EvmChainAdapter::new(vec![7u8; 20], TEST_DEPOSIT_TOPIC0);
+        let mut adapter = EvmChainAdapter::new(vec![7u8; 20], TEST_DEPOSIT_TOPIC0)
+            .with_trusted_checkpoint(1, [1; 32]);
         assert!(EvmChainAdapter::check_fit_for_relay(&adapter).is_ok());
 
         adapter.required_confirmations = 0;
@@ -598,15 +658,16 @@ mod tests {
     #[test]
     fn a_configured_adapter_registers() {
         // The refusal has to stay narrow, or it is just a ban on Ethereum.
-        let adapter = EvmChainAdapter::new(vec![7u8; 20], TEST_DEPOSIT_TOPIC0);
+        let adapter = EvmChainAdapter::new(vec![7u8; 20], TEST_DEPOSIT_TOPIC0)
+            .with_trusted_checkpoint(1, [1; 32]);
         assert!(EvmChainAdapter::check_fit_for_relay(&adapter).is_ok());
 
         let mut registry = crate::cross_domain::chain_adapter::AdapterRegistry::new();
         registry
-            .register(Box::new(EvmChainAdapter::new(
-                vec![7u8; 20],
-                TEST_DEPOSIT_TOPIC0,
-            )))
+            .register(Box::new(
+                EvmChainAdapter::new(vec![7u8; 20], TEST_DEPOSIT_TOPIC0)
+                    .with_trusted_checkpoint(1, [1; 32]),
+            ))
             .expect("a configured adapter must register");
     }
 
@@ -812,20 +873,49 @@ mod tests {
         }
     }
 
-    fn floor_three() -> EvmChainAdapter {
+    /// `adapter` anchored at the target header of `source`'s fixture chain -
+    /// the interim finality anchor (BLG-0111) the chain must touch for the
+    /// later, more specific refusals to be reachable.
+    fn anchored_to(adapter: EvmChainAdapter, source: &EvmChainAdapter) -> EvmChainAdapter {
+        let f = fixtures::build_fixture(
+            &source.bridge_address,
+            source.deposit_topic0,
+            b"deposit-payload",
+            true,
+            3,
+        );
+        let target = crate::cross_domain::evm::header::decode_header(&f.target_header)
+            .expect("the fixture target header decodes");
+        adapter.with_trusted_checkpoint(target.number, target.hash)
+    }
+
+    fn unanchored_floor_three() -> EvmChainAdapter {
         let mut adapter = EvmChainAdapter::new(vec![0xcc; 20], [0xab; 32]);
         adapter.required_confirmations = 3;
         adapter
     }
 
-    /// The positive half: a package that proves the deposit is accepted.
+    fn floor_three() -> EvmChainAdapter {
+        let base = unanchored_floor_three();
+        anchored_to(unanchored_floor_three(), &base)
+    }
+
+    /// BLG-0136 (P06-F07, decision B interim): even a fully proven package
+    /// is REFUSED at this seam while it cannot carry a sync attestation. The
+    /// old positive pinned the missing rule: an attestation-less package
+    /// verified as final. Until the package gains the attestation and
+    /// finality branch (decision A), acceptance is impossible here.
     #[test]
-    fn a_full_deposit_package_is_accepted() {
+    fn a_full_deposit_package_without_an_attestation_is_refused() {
         let adapter = floor_three();
         let observation = observation_for(&adapter, 3);
-        adapter
+        let err = adapter
             .verify_observation(&observation)
-            .expect("a proven deposit at the floor verifies");
+            .expect_err("no sync attestation, no accepted observation (BLG-0136 interim)");
+        // Either refusal is the contract: the 0111 finality rule (no
+        // attestation and no checkpoint) or this seam's own attestation
+        // gate. What is pinned is that attestation-less is not accepted.
+        assert!(format!("{err}").contains("attestation"), "got: {err}");
     }
 
     /// A bare Merkle path, the shape the trait default accepts and the
@@ -893,9 +983,11 @@ mod tests {
     /// A bridge address other than this adapter's finds no deposit log.
     #[test]
     fn an_observation_from_another_bridge_is_refused() {
-        let adapter = floor_three();
         let mut other = EvmChainAdapter::new(vec![0xdd; 20], [0xab; 32]);
         other.required_confirmations = 3;
+        // Anchored at the other chain's header: the refusal under test is the
+        // emitter, not the checkpoint.
+        let adapter = anchored_to(unanchored_floor_three(), &other);
         let observation = observation_for(&other, 3);
         let err = adapter
             .verify_observation(&observation)

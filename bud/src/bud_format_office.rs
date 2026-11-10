@@ -8,9 +8,10 @@
 //! STORE, no compression, when repacking. The plain XML bytes then compress
 //! under zstd-19 inside the `.bud` container.
 //!
-//! It is LOSSLESS: `office_restore` reproduces the original ZIP, in entry order
-//! and with STORE, and the content is byte for byte identical, since the
-//! deflate level is independent of the content.
+//! It is LOSSLESS or it refuses: `office_transform` checks that `office_restore`
+//! gives back the input ZIP byte for byte. Only a STORE ZIP in the restore layout
+//! (entries in name order, no extra fields, zero times) passes. A ZIP with DEFLATE
+//! entries is refused until a DEFLATE decoder is added.
 
 #![forbid(unsafe_code)]
 
@@ -38,7 +39,12 @@ pub fn zip_read(data: &[u8]) -> Option<Vec<OfficeEntry>> {
         if sig != ZIP_LOCAL {
             break;
         }
+        let flags = u16::from_le_bytes(data[pos + 6..pos + 8].try_into().ok()?);
+        if flags & 0x0009 != 0 {
+            return None; // a data descriptor (bit 3) or encryption (bit 0)
+        }
         let method = u16::from_le_bytes(data[pos + 8..pos + 10].try_into().ok()?);
+        let crc = u32::from_le_bytes(data[pos + 14..pos + 18].try_into().ok()?);
         let comp_len = u32::from_le_bytes(data[pos + 18..pos + 22].try_into().ok()?) as usize;
         let uncomp_len = u32::from_le_bytes(data[pos + 22..pos + 26].try_into().ok()?) as usize;
         let name_len = u16::from_le_bytes(data[pos + 26..pos + 28].try_into().ok()?) as usize;
@@ -46,11 +52,17 @@ pub fn zip_read(data: &[u8]) -> Option<Vec<OfficeEntry>> {
         if data.len() < pos + 30 + name_len + extra_len + comp_len {
             return None;
         }
-        let name = String::from_utf8_lossy(&data[pos + 30..pos + 30 + name_len]).to_string();
+        let name = String::from_utf8(data[pos + 30..pos + 30 + name_len].to_vec()).ok()?;
         let comp =
             &data[pos + 30 + name_len + extra_len..pos + 30 + name_len + extra_len + comp_len];
         let raw = match method {
-            0 => comp.to_vec(),                  // STORE
+            0 => {
+                // STORE: the sizes and the CRC must agree with the bytes.
+                if comp_len != uncomp_len || crc32(comp) != crc {
+                    return None;
+                }
+                comp.to_vec()
+            }
             8 => inflate_raw(comp, uncomp_len)?, // DEFLATE, raw, without zlib
             _ => return None,                    // an unsupported method
         };
@@ -85,17 +97,22 @@ pub fn office_transform(zip: &[u8]) -> Option<Vec<u8>> {
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     let mut out = Vec::new();
     out.extend_from_slice(b"OFC1|");
-    out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    out.extend_from_slice(&u32::try_from(entries.len()).ok()?.to_le_bytes());
     let mut body = Vec::new();
     for e in &entries {
-        out.extend_from_slice(&(e.name.len() as u32).to_le_bytes());
+        out.extend_from_slice(&u32::try_from(e.name.len()).ok()?.to_le_bytes());
         out.extend_from_slice(e.name.as_bytes());
-        out.extend_from_slice(&(e.data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&u32::try_from(e.data.len()).ok()?.to_le_bytes());
         out.extend_from_slice(&e.data);
         body.extend_from_slice(&e.data); // the common-prefix pool, for zstd
     }
     out.push(0xFF);
     out.extend_from_slice(&body);
+    // Lossless or nothing: a different entry order, times, extra fields or
+    // anything else the restore does not rebuild is refused here.
+    if office_restore(&out).as_deref() != Some(zip) {
+        return None;
+    }
     Some(out)
 }
 
@@ -120,7 +137,7 @@ pub fn office_restore(transformed: &[u8]) -> Option<Vec<u8>> {
         if nl > 64 * 1024 {
             return None; // a huge name is refused
         }
-        let name = String::from_utf8_lossy(transformed.get(pos..pos + nl)?).to_string();
+        let name = String::from_utf8(transformed.get(pos..pos + nl)?.to_vec()).ok()?;
         pos += nl;
         let dl = u32::from_le_bytes(transformed.get(pos..pos + 4)?.try_into().ok()?) as usize;
         pos += 4;
@@ -134,6 +151,18 @@ pub fn office_restore(transformed: &[u8]) -> Option<Vec<u8>> {
     if transformed.get(pos) != Some(&0xFF) {
         return None;
     }
+    // The body pool must be exactly the entry data again, so it is authenticated.
+    let pool = transformed.get(pos + 1..)?;
+    let mut at = 0usize;
+    for (_, data) in &entries {
+        if pool.get(at..at.checked_add(data.len())?)? != data.as_slice() {
+            return None;
+        }
+        at += data.len();
+    }
+    if at != pool.len() {
+        return None;
+    }
     // Produce the STORE-only ZIP.
     let mut local = Vec::new();
     let mut central = Vec::new();
@@ -145,14 +174,17 @@ pub fn office_restore(transformed: &[u8]) -> Option<Vec<u8>> {
         // a mismatch on extraction, and the same value is written into the
         // central record below.
         let crc = crc32(data);
+        // Every width the ZIP format fixes is checked, not truncated.
+        let name_len = u16::try_from(nb.len()).ok()?;
+        let data_len = u32::try_from(data.len()).ok()?;
         local.extend_from_slice(&ZIP_LOCAL.to_le_bytes());
         local.extend_from_slice(&[0x14, 0x00, 0x00, 0x00]); // version(2)+flags(2)
         local.extend_from_slice(&0u16.to_le_bytes()); // method STORE
         local.extend_from_slice(&0u32.to_le_bytes()); // time(2)+date(2)
         local.extend_from_slice(&crc.to_le_bytes()); // crc
-        local.extend_from_slice(&(data.len() as u32).to_le_bytes()); // comp
-        local.extend_from_slice(&(data.len() as u32).to_le_bytes()); // uncomp
-        local.extend_from_slice(&(nb.len() as u16).to_le_bytes()); // name_len
+        local.extend_from_slice(&data_len.to_le_bytes()); // comp
+        local.extend_from_slice(&data_len.to_le_bytes()); // uncomp
+        local.extend_from_slice(&name_len.to_le_bytes()); // name_len
         local.extend_from_slice(&0u16.to_le_bytes()); // extra_len
                                                       // The central directory points at the local header, which begins
                                                       // where this entry's bytes begin: 30 header bytes, the name, the data.
@@ -171,9 +203,9 @@ pub fn office_restore(transformed: &[u8]) -> Option<Vec<u8>> {
         central.extend_from_slice(&0u16.to_le_bytes()); // time
         central.extend_from_slice(&0u16.to_le_bytes()); // date
         central.extend_from_slice(&crc.to_le_bytes()); // crc
-        central.extend_from_slice(&(data.len() as u32).to_le_bytes()); // comp
-        central.extend_from_slice(&(data.len() as u32).to_le_bytes()); // uncomp
-        central.extend_from_slice(&(nb.len() as u16).to_le_bytes()); // name_len
+        central.extend_from_slice(&data_len.to_le_bytes()); // comp
+        central.extend_from_slice(&data_len.to_le_bytes()); // uncomp
+        central.extend_from_slice(&name_len.to_le_bytes()); // name_len
         central.extend_from_slice(&0u16.to_le_bytes()); // extra_len
         central.extend_from_slice(&0u16.to_le_bytes()); // comment_len
         central.extend_from_slice(&0u16.to_le_bytes()); // disk
@@ -181,16 +213,20 @@ pub fn office_restore(transformed: &[u8]) -> Option<Vec<u8>> {
         central.extend_from_slice(&0u32.to_le_bytes()); // external attrs
         central.extend_from_slice(&local_start.to_le_bytes());
         central.extend_from_slice(nb);
-        offset = local_start + 30 + nb.len() as u32 + data.len() as u32;
+        offset = local_start
+            .checked_add(30)?
+            .checked_add(u32::from(name_len))?
+            .checked_add(data_len)?;
     }
+    let entry_count = u16::try_from(entries.len()).ok()?;
     let mut out = local;
-    let cd_start = out.len() as u32;
+    let cd_start = u32::try_from(out.len()).ok()?;
+    let cd_len = u32::try_from(central.len()).ok()?;
     out.extend_from_slice(&central);
-    let cd_len = out.len() as u32 - cd_start;
     out.extend_from_slice(&ZIP_EOCD.to_le_bytes());
     out.extend_from_slice([0u16.to_le_bytes(), 0u16.to_le_bytes()].concat().as_slice());
-    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
-    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    out.extend_from_slice(&entry_count.to_le_bytes());
+    out.extend_from_slice(&entry_count.to_le_bytes());
     out.extend_from_slice(&cd_len.to_le_bytes());
     out.extend_from_slice(&cd_start.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes());
@@ -228,7 +264,7 @@ mod tests {
     /// A STORE-only ZIP builder, the test corpus of docx- and xlsx-like XML
     /// entries.
     fn sample_opc() -> Vec<u8> {
-        let entries = vec![
+        let entries = [
             (
                 "[Content_Types].xml".to_string(),
                 b"<?xml version=\"1.0\"?><Types/>".to_vec(),
@@ -246,11 +282,15 @@ mod tests {
                 b"<w:styles><w:style/></w:styles>".to_vec(),
             ),
         ];
-        // A STORE zip built by hand, in the same shape office_restore produces.
+        store_zip(&entries)
+    }
+
+    /// A STORE zip built by hand, in the same shape office_restore produces.
+    fn store_zip(entries: &[(String, Vec<u8>)]) -> Vec<u8> {
         let mut local = Vec::new();
         let mut central = Vec::new();
         let mut offset = 0u32;
-        for (name, data) in &entries {
+        for (name, data) in entries {
             let nb = name.as_bytes();
             let crc = crc32(data);
             local.extend_from_slice(&ZIP_LOCAL.to_le_bytes());
@@ -288,6 +328,39 @@ mod tests {
         out.extend_from_slice(&cd.to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes());
         out
+    }
+
+    #[test]
+    fn a_data_descriptor_zip_is_refused_not_truncated() {
+        // Bit 3 set and zero sizes in the local header: the entry would read as empty.
+        let mut z = sample_opc();
+        z[6] |= 0x08;
+        z[18..26].copy_from_slice(&[0u8; 8]);
+        assert!(zip_read(&z).is_none());
+        assert!(office_transform(&z).is_none());
+    }
+
+    #[test]
+    fn a_zip_that_would_not_restore_identically_is_refused() {
+        // Entries out of name order: the transform sorts them, so the restore
+        // could not return the input. It must refuse, not change the order.
+        let mut entries = [
+            ("b.xml".to_string(), b"<b/>".to_vec()),
+            ("a.xml".to_string(), b"<a/>".to_vec()),
+        ];
+        assert!(office_transform(&store_zip(&entries)).is_none());
+        entries.reverse();
+        let z = store_zip(&entries);
+        assert_eq!(office_restore(&office_transform(&z).unwrap()).unwrap(), z);
+    }
+
+    #[test]
+    fn a_tampered_body_pool_is_refused() {
+        let t = office_transform(&sample_opc()).unwrap();
+        let mut bad = t.clone();
+        let last = bad.len() - 1;
+        bad[last] ^= 0x01;
+        assert!(office_restore(&bad).is_none());
     }
 
     #[test]

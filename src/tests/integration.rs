@@ -190,10 +190,19 @@ mod integration_tests {
 
         let mut block = Block::new(1, "0".repeat(64), vec![]);
         block.producer = Some(validator_pubkey);
+        // Slot and epoch match the index, so the block cannot fail on them.
+        block.epoch = 0;
+        block.slot = 1;
         block.hash = block.calculate_hash();
 
-        let result = engine.validate_block(&block, &[], &state);
-        assert!(result.is_err(), "PoS should reject unsigned blocks");
+        let error = engine
+            .validate_block(&block, &[], &state)
+            .expect_err("PoS should reject unsigned blocks");
+        assert!(
+            error.0.contains("Invalid block signature"),
+            "rejected for the wrong reason: {}",
+            error.0
+        );
     }
 
     #[test]
@@ -271,6 +280,11 @@ mod integration_tests {
         blockchain.add_transaction(tx1.clone()).unwrap();
         let miner = test_addr_from_byte(3);
         let _ = blockchain.produce_block(miner);
+        assert!(
+            blockchain.chain.len() > 1,
+            "the transaction must be included in a block before the replay"
+        );
+        assert_eq!(blockchain.state.get_nonce(&pubkey), 1);
 
         let result = blockchain.add_transaction(tx1);
         assert!(result.is_err(), "Replay attack should be prevented");
@@ -335,7 +349,6 @@ mod integration_tests {
         let config = PoAConfig {
             quorum_numerator: 2,
             quorum_denominator: 3,
-            block_period: 5,
             ..PoAConfig::default()
         };
 
@@ -343,9 +356,7 @@ mod integration_tests {
 
         let validators = state.get_active_validators();
 
-        if validators.len() < 2 {
-            return;
-        }
+        assert_eq!(validators.len(), 2, "both validators are active");
 
         let expected = engine.expected_proposer(0, &validators).unwrap();
 
@@ -353,19 +364,32 @@ mod integration_tests {
 
         let mut block = Block::new(0, "0".repeat(64), vec![]);
 
-        let mut my_slot = 0;
-        if expected.address != pubkey1 {
-            my_slot = 1;
-        }
+        // The leader is an entropy draw (V5-SECURITY-12), not a rotation:
+        // slots 0 and 1 can name the same validator, so "the other slot goes
+        // to the other validator" is a coin flip as a premise. What must
+        // hold is that both validators win the draw somewhere and the local
+        // key signs exactly on its own slots. 64 draws make a one-sided run
+        // a 2^-63 event, not a flake source.
+        let my_slot = (0..64)
+            .find(|&slot| engine.expected_proposer(slot, &validators).unwrap().address == pubkey1)
+            .expect("the draw reaches the first validator within 64 slots");
+        assert!(
+            (0..64).any(|slot| {
+                engine.expected_proposer(slot, &validators).unwrap().address == pubkey2
+            }),
+            "the draw reaches the second validator within 64 slots"
+        );
         block.index = my_slot;
 
         let expected_my_slot = engine.expected_proposer(my_slot, &validators).unwrap();
 
-        if expected_my_slot.address == pubkey1 {
-            let result = engine.prepare_block(&mut block, &state);
-            assert!(result.is_ok());
-            assert!(block.signature.is_some());
-        }
+        assert_eq!(
+            expected_my_slot.address, pubkey1,
+            "the slot drawn for the local key names the local key"
+        );
+        let result = engine.prepare_block(&mut block, &state);
+        assert!(result.is_ok());
+        assert!(block.signature.is_some());
     }
     #[test]
     fn test_finality_checkpoint_enforcement() {
@@ -420,6 +444,7 @@ mod integration_tests {
         let checkpoint_block = blockchain.chain[10].clone();
 
         let mut cert = FinalityCert {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 1,
             checkpoint_height: 10,
             checkpoint_hash: checkpoint_block.hash.clone(),
@@ -480,13 +505,11 @@ mod integration_tests {
             .validate_and_add_block(conflicting_block)
             .map(|_| ());
         assert!(result.is_err());
-        // Finality conflict is checked before tip continuity; accept either
-        // Message if ordering changes again.
+        // The finality conflict is checked before tip continuity.
         let err = result.unwrap_err();
         assert!(
-            err.contains("conflicts with finalized checkpoint")
-                || err.contains("height discontinuity")
-                || err.contains("Block height discontinuity")
+            err.contains("conflicts with finalized checkpoint"),
+            "the finalized checkpoint rule must refuse the block: {err}"
         );
     }
 
@@ -625,7 +648,7 @@ mod integration_tests {
     }
 
     #[test]
-    fn test_qc_fault_proof_invalidates_cert_without_slashing() {
+    fn test_qc_fault_proof_on_unverifiable_signature_is_refused() {
         use crate::chain::finality::{FinalityCert, ValidatorEntry, ValidatorSetSnapshot};
         use crate::consensus::qc::{sign_attestation, QcBlob};
 
@@ -671,6 +694,7 @@ mod integration_tests {
 
         let checkpoint_block = blockchain.chain[10].clone();
         let mut cert = FinalityCert {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 1,
             checkpoint_height: 10,
             checkpoint_hash: checkpoint_block.hash.clone(),
@@ -725,12 +749,20 @@ mod integration_tests {
             .verified_qc_blobs
             .insert(invalid_blob.checkpoint_height, invalid_blob);
 
-        blockchain.handle_qc_fault_proof(proof).unwrap();
+        // P01-F22: an unverifiable signature is not evidence against the
+        // named validator - garbage bytes naming anyone are free to produce,
+        // so acting on them would make the permissionless challenge RPC a
+        // frame-up rail. The challenge is refused and neither finality nor
+        // the named validator's stake moves.
+        let err = blockchain.handle_qc_fault_proof(proof).unwrap_err();
+        assert!(
+            err.contains("not evidence"),
+            "the refusal must say why no verdict issues, got: {err}"
+        );
 
         let validator = blockchain.state.get_validator(&pubkey).unwrap();
-        // InvalidDilithium fault proof slashes the offender.
-        assert!(validator.slashed);
-        assert_eq!(blockchain.finalized_height, 0);
+        assert!(!validator.slashed);
+        assert_eq!(blockchain.finalized_height, 10);
     }
 
     #[test]
@@ -803,23 +835,29 @@ mod integration_tests {
         let hash = block.hash.clone();
 
         let mut vote1 = Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch,
             checkpoint_height: cp_height,
             checkpoint_hash: hash.clone(),
             voter_id: validator_addr,
             sig_bls: vec![],
+            auth_sig: Vec::new(),
         };
         vote1.sig_bls = sign_bls(&bls_sk, &vote1.signing_message());
+        vote1.auth_sig = sign_bls(&bls_sk, &vote1.auth_signing_message());
         assert!(bc.handle_prevote(vote1).is_ok());
 
         let mut vote2 = Precommit {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch,
             checkpoint_height: cp_height,
             checkpoint_hash: hash.clone(),
             voter_id: validator_addr,
             sig_bls: vec![],
+            auth_sig: Vec::new(),
         };
         vote2.sig_bls = sign_bls(&bls_sk, &vote2.signing_message());
+        vote2.auth_sig = sign_bls(&bls_sk, &vote2.auth_signing_message());
         let result = bc.handle_precommit(vote2);
         assert!(
             result.is_ok(),
@@ -864,13 +902,16 @@ mod integration_tests {
         // Validly signed over the WRONG hash: passes ingest signature check, then
         // Is rejected for hash mismatch (: sig verified before hash check).
         let mut wrong_vote = Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch,
             checkpoint_height: cp_height,
             checkpoint_hash: "wrong_hash".to_string(),
             voter_id: v_addr,
             sig_bls: vec![],
+            auth_sig: Vec::new(),
         };
         wrong_vote.sig_bls = sign_bls(&bls_sk, &wrong_vote.signing_message());
+        wrong_vote.auth_sig = sign_bls(&bls_sk, &wrong_vote.auth_signing_message());
         let result = bc.handle_prevote(wrong_vote);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("hash mismatch"));
@@ -918,11 +959,13 @@ mod integration_tests {
         let voter = test_addr_from_byte(1u8);
 
         let vote = Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 1,
             checkpoint_height: 10,
             checkpoint_hash: "test_cp_hash".to_string(),
             voter_id: voter,
             sig_bls: vec![],
+            auth_sig: Vec::new(),
         };
 
         let msg = vote.signing_message();
@@ -942,7 +985,12 @@ mod integration_tests {
     fn test_bls_sign_precommit_and_verify() {
         let bls_key = BlsKeypair::generate().unwrap();
 
-        let msg = checkpoint_signing_message(1, 10, "test_cp_hash");
+        let msg = checkpoint_signing_message(
+            crate::core::transaction::DEFAULT_CHAIN_ID,
+            1,
+            10,
+            "test_cp_hash",
+        );
         let sig = sign_bls(&bls_key.secret_key, &msg);
         assert_eq!(sig.len(), 48);
 
@@ -1031,17 +1079,21 @@ mod integration_tests {
         // 3 out of 4 validators send BLS-signed prevotes (meets 2/3 quorum)
         for i in 0..3 {
             let vote = Prevote {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 epoch: 1,
                 checkpoint_height: 10,
                 checkpoint_hash: "cp_hash".into(),
                 voter_id: addrs[i].0,
                 sig_bls: vec![],
+                auth_sig: Vec::new(),
             };
             let msg = vote.signing_message();
             let sig = sign_bls(&bls_keys[i].secret_key, &msg);
 
             let signed_vote = Prevote {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 sig_bls: sig,
+                auth_sig: Vec::new(),
                 ..vote
             };
             agg.add_prevote(signed_vote).unwrap();
@@ -1052,11 +1104,13 @@ mod integration_tests {
         // 3 validators send BLS-signed precommits
         for i in 0..3 {
             let pc = Precommit {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 epoch: 1,
                 checkpoint_height: 10,
                 checkpoint_hash: "cp_hash".into(),
                 voter_id: addrs[i].0,
                 sig_bls: vec![],
+                auth_sig: Vec::new(),
             };
             let msg = pc.signing_message();
             let sig = sign_bls(&bls_keys[i].secret_key, &msg);
@@ -1110,16 +1164,20 @@ mod integration_tests {
 
         // Add prevote
         let vote = Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 1,
             checkpoint_height: 10,
             checkpoint_hash: "cp_hash".into(),
             voter_id: addr,
             sig_bls: vec![],
+            auth_sig: Vec::new(),
         };
         let msg = vote.signing_message();
         let sig = sign_bls(&bls_key.secret_key, &msg);
         agg.add_prevote(Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             sig_bls: sig,
+            auth_sig: Vec::new(),
             ..vote
         })
         .unwrap();
@@ -1141,24 +1199,30 @@ mod integration_tests {
         let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snapshot);
 
         let vote1 = Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 1,
             checkpoint_height: 10,
             checkpoint_hash: "cp_hash".into(),
             voter_id: addr,
             sig_bls: vec![],
+            auth_sig: Vec::new(),
         };
         let msg = vote1.signing_message();
         let sig = sign_bls(&bls_key.secret_key, &msg);
 
         agg.add_prevote(Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             sig_bls: sig.clone(),
+            auth_sig: Vec::new(),
             ..vote1.clone()
         })
         .unwrap();
 
         // Duplicate prevote from same validator should be rejected
         let result = agg.add_prevote(Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             sig_bls: sig,
+            auth_sig: Vec::new(),
             ..vote1
         });
         assert!(result.is_err());
@@ -1177,11 +1241,13 @@ mod integration_tests {
         let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snapshot);
 
         let pc = Precommit {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 1,
             checkpoint_height: 10,
             checkpoint_hash: "cp_hash".into(),
             voter_id: addr,
             sig_bls: vec![],
+            auth_sig: Vec::new(),
         };
         let msg = pc.signing_message();
         let sig = sign_bls(&bls_key.secret_key, &msg);
@@ -1211,16 +1277,20 @@ mod integration_tests {
 
         for i in 0..3 {
             let vote = Prevote {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 epoch: 1,
                 checkpoint_height: 10,
                 checkpoint_hash: "cp_hash".into(),
                 voter_id: addrs[i].0,
                 sig_bls: vec![],
+                auth_sig: Vec::new(),
             };
             let msg = vote.signing_message();
             let sig = sign_bls(&bls_keys[i].secret_key, &msg);
             agg.add_prevote(Prevote {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 sig_bls: sig,
+                auth_sig: Vec::new(),
                 ..vote
             })
             .unwrap();
@@ -1228,11 +1298,13 @@ mod integration_tests {
 
         for i in 0..3 {
             let pc = Precommit {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 epoch: 1,
                 checkpoint_height: 10,
                 checkpoint_hash: "cp_hash".into(),
                 voter_id: addrs[i].0,
                 sig_bls: vec![],
+                auth_sig: Vec::new(),
             };
             let msg = pc.signing_message();
             let sig = sign_bls(&bls_keys[i].secret_key, &msg);
@@ -1330,6 +1402,12 @@ mod integration_tests {
         let peer_id1 = libp2p::PeerId::from(key1.public());
 
         assert!(path.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "the identity key must be private");
+        }
 
         // Second call: loads existing key
         let key2 = load_or_generate_identity_key(Some(path_str));
@@ -1345,18 +1423,17 @@ mod integration_tests {
     fn test_dns_seed_resolution_resolves_addresses() {
         use crate::network::node::resolve_dns_seeds;
 
-        let addrs = resolve_dns_seeds(&["localhost".to_string()], 4001);
-        assert!(!addrs.is_empty(), "localhost should resolve");
-        for addr in &addrs {
-            assert!(addr.starts_with("/ip4/") || addr.starts_with("/ip6/"));
-        }
+        // A literal address needs no resolver, so the result is fixed.
+        let addrs = resolve_dns_seeds(&["127.0.0.1".to_string()], 4001);
+        assert_eq!(addrs, vec!["/ip4/127.0.0.1/tcp/4001".to_string()]);
     }
 
     #[test]
     fn test_dns_seed_resolution_handles_invalid() {
         use crate::network::node::resolve_dns_seeds;
 
-        let addrs = resolve_dns_seeds(&["invalid.nonexistent.domain.test".to_string()], 4001);
+        // An empty seed never reaches the network resolver.
+        let addrs = resolve_dns_seeds(&[String::new()], 4001);
         // Should not panic, returns empty
         assert!(addrs.is_empty());
     }
@@ -1668,9 +1745,11 @@ mod integration_tests {
             0,
             "no locked bridge inventory at genesis"
         );
-        // finality_lag = height - finalized; genesis shape is whatever the
-        // chain recorded - just must be a finite scrape value.
-        let _ = metrics.finality_lag.get();
+        // finality_lag = height - finalized, from the same scrape.
+        assert_eq!(
+            metrics.finality_lag.get(),
+            metrics.chain_height.get() - metrics.finalized_height.get()
+        );
     }
 
     /// Prometheus text scrape must list every registered series after a real

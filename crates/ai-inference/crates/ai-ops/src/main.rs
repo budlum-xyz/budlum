@@ -31,17 +31,20 @@ fn load_records(path: &str) -> Vec<ai_data::jsonl::InstructionRecord> {
             std::process::exit(2);
         }
     };
-    let mut records = Vec::new();
-    for line in text.lines() {
-        match ai_data::jsonl::decode(line) {
-            Ok(r) => records.push(r),
-            Err(e) => {
-                eprintln!("the dataset line is not a valid record: {e}");
-                std::process::exit(1);
-            }
+    match decode_dataset(&text) {
+        Ok(records) => records,
+        Err(e) => {
+            eprintln!("the dataset did not pass the schema gate: {e}");
+            std::process::exit(1);
         }
     }
-    records
+}
+
+/// Run the schema gate (line size ceiling, empty fields, decoding) over a
+/// dataset, the same gate the `validate` command uses.
+fn decode_dataset(text: &str) -> Result<Vec<ai_data::jsonl::InstructionRecord>, String> {
+    let lines: Vec<String> = text.lines().map(str::to_string).collect();
+    ai_tune::schema::validate_records(&lines).map_err(|e| format!("{e:?}"))
 }
 
 /// Print the failing cases of a scored report, one line each.
@@ -131,6 +134,14 @@ fn main() {
                     Ok(()) => {}
                 }
                 let set = EvalDataSet::from_golden(dp.clone(), &records);
+                // The file is read a second time and must give the same
+                // digest, so a dataset edited while the plan is being drafted
+                // is not bound under a digest of bytes that no longer exist.
+                let reread = EvalDataSet::from_golden(dp.clone(), &load_records(&dp));
+                if reread.digest() != set.digest() {
+                    eprintln!("the dataset changed while the plan was being drafted");
+                    std::process::exit(1);
+                }
                 plan.dataset_hashes.push(set.digest());
                 // train/eval identity: the plan carries the eval-set digest
                 // it will be graded under, and the binding survives the push.
@@ -165,7 +176,7 @@ fn main() {
             println!("eval set: {}", set.name);
             println!("records: {}", set.len());
             println!(
-                "content digest (B.U.D. hash): {}",
+                "eval set digest (not a B.U.D. content id): {}",
                 digest_hex(&set.digest())
             );
             // A golden rule that passes on an empty answer grades nothing.
@@ -294,4 +305,15 @@ fn digest_hex(hash: &[u8; 32]) -> String {
             let _ = write!(acc, "{b:02x}");
             acc
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_dataset;
+
+    #[test]
+    fn a_record_with_an_empty_assistant_does_not_load() {
+        let text = r#"{"user":"hello","assistant":"   "}"#;
+        assert!(decode_dataset(text).is_err());
+    }
 }

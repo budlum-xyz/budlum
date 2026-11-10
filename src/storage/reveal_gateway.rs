@@ -15,7 +15,7 @@
 //!
 //! The grant is checked before a session opens: [`RevealGateway::open`]
 //! re-derives it from a registry (in-process gateways);
-//! [`RevealGateway::open_prechecked`] trusts a decision the chain actor
+//! [`RevealGateway::prepare_prechecked`] trusts a decision the chain actor
 //! already made. Both funnel into the same meter-and-budget construction, so
 //! a sealed recipe with no live grant is refused either way.
 
@@ -23,6 +23,7 @@ use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
 use crate::storage::content_id::ContentId;
 use crate::storage::qr_recipe::ThreeRecipe;
+use crate::storage::three_reveal::RevealSession;
 use crate::storage::three_rpc::{
     open_reveal_session, open_reveal_session_prechecked, RevealHandle, RevealRequest,
     RevealRpcError,
@@ -162,6 +163,17 @@ struct GatewaySession {
     grant: Option<GrantScope>,
 }
 
+/// A session whose emitter is built but not yet in the table.
+#[derive(Debug)]
+///
+/// Convenience: pub because it is the session between
+/// `prepare_prechecked` and `open_prepared`, held by the caller
+/// across the two phases of the reveal door.
+pub struct PreparedReveal {
+    handle: RevealHandle,
+    grant: Option<GrantScope>,
+}
+
 /// The session table a gateway/RPC handler owns.
 #[derive(Debug, Clone)]
 pub struct RevealGateway {
@@ -256,16 +268,55 @@ impl RevealGateway {
         self.admit(handle, GrantScope::of(&req), now)
     }
 
-    /// A request that names no budget gets the default cap. Both open paths
-    /// go through here: the gateway is a network-facing table, and
-    /// "uncapped" is not a remote option on either of them. The registry
-    /// path used to pass `None` straight through, so an in-process caller
-    /// that omitted the budget opened an unmetered session.
+    /// A request that names no budget gets the default cap, and a request
+    /// that names a larger one is cut down to it. Both open paths go
+    /// through here: the gateway is a network-facing table, and "uncapped"
+    /// is not a remote option on either of them. The registry path used to
+    /// pass `None` straight through, and a caller supplied `u64::MAX` used
+    /// to replace the cap, so the budget was only a ceiling for callers
+    /// that left the field out.
     const fn with_default_budget(mut req: RevealRequest) -> RevealRequest {
-        if req.meter_budget.is_none() {
-            req.meter_budget = Some(DEFAULT_REVEAL_BUDGET_FRAMES);
-        }
+        req.meter_budget = match req.meter_budget {
+            Some(asked) if asked < DEFAULT_REVEAL_BUDGET_FRAMES => Some(asked),
+            _ => Some(DEFAULT_REVEAL_BUDGET_FRAMES),
+        };
         req
+    }
+
+    /// Do the expensive part of an open with a grant decision the chain actor
+    /// already made, without touching the table.
+    ///
+    /// The emitter builds a whole one-shot pass to check the recipe's stream
+    /// pin. That work needs no table, so a handler runs it before it takes
+    /// the gateway lock and the lock only covers [`Self::open_prepared`].
+    ///
+    /// # Errors
+    ///
+    /// [`RevealGatewayError::Reveal`] when the decision or the emitter
+    /// refuses.
+    pub fn prepare_prechecked(
+        req: RevealRequest,
+        grant_allows: bool,
+    ) -> Result<PreparedReveal, RevealGatewayError> {
+        let req = Self::with_default_budget(req);
+        let handle = open_reveal_session_prechecked(&req, grant_allows)?;
+        Ok(PreparedReveal {
+            grant: GrantScope::of(&req),
+            handle,
+        })
+    }
+
+    /// Admit a session prepared by [`Self::prepare_prechecked`].
+    ///
+    /// # Errors
+    ///
+    /// [`RevealGatewayError::SessionLimit`] at the cap.
+    pub fn open_prepared(
+        &mut self,
+        prepared: PreparedReveal,
+        now: u64,
+    ) -> Result<u64, RevealGatewayError> {
+        self.admit(prepared.handle, prepared.grant, now)
     }
 
     /// Open a session with a grant decision the chain actor already made.
@@ -274,15 +325,15 @@ impl RevealGateway {
     ///
     /// [`RevealGatewayError::Reveal`] when the decision or the emitter
     /// refuses; [`RevealGatewayError::SessionLimit`] at the cap.
+    #[cfg(test)]
     pub fn open_prechecked(
         &mut self,
         req: RevealRequest,
         grant_allows: bool,
         now: u64,
     ) -> Result<u64, RevealGatewayError> {
-        let req = Self::with_default_budget(req);
-        let handle = open_reveal_session_prechecked(&req, grant_allows)?;
-        self.admit(handle, GrantScope::of(&req), now)
+        let prepared = Self::prepare_prechecked(req, grant_allows)?;
+        self.open_prepared(prepared, now)
     }
 
     /// Shared admission: sweep first (an expired session cannot be pinned by
@@ -336,6 +387,31 @@ impl RevealGateway {
         self.sessions
             .get(&id)
             .map(|session| session.grant)
+            .ok_or(RevealGatewayError::UnknownSession(id))
+    }
+
+    /// The session itself, so the caller can do its one expensive step
+    /// ([`RevealSession::verify_stream_pin`]) OUTSIDE this table's lock.
+    ///
+    /// The pin check is the only part of serving a frame that can cost a whole
+    /// one-shot carousel pass. Every caller that reaches `emit_frames` holds
+    /// the table lock, so running it there made one session holder's first
+    /// frame a stall for every other viewer; the pass is bounded (`k` is at
+    /// most [`crate::storage::MAX_K`]) and cached per payload, but bounded is
+    /// not free and it must not be serialised (CWE-407). The handle is an
+    /// `Arc`, so the table can be closed or the session dropped while it is
+    /// held; `emit_frames` re-checks the session on the way back.
+    ///
+    /// # Errors
+    ///
+    /// [`RevealGatewayError::UnknownSession`] for an unknown id.
+    pub fn session_handle(
+        &self,
+        id: u64,
+    ) -> Result<std::sync::Arc<RevealSession>, RevealGatewayError> {
+        self.sessions
+            .get(&id)
+            .map(|session| session.handle.session_handle())
             .ok_or(RevealGatewayError::UnknownSession(id))
     }
 
@@ -481,6 +557,31 @@ mod gateway_tests {
             key_id,
             meter_budget: budget,
         }
+    }
+
+    /// P30-F04: the expensive half of an open needs no table, so a handler
+    /// can run it before it takes the gateway lock. The prepared session is
+    /// admitted later and is the same session an open would have made.
+    #[test]
+    fn a_session_is_prepared_without_the_table_and_admitted_later() {
+        let (full, packed) = sample();
+        let make = || {
+            req(
+                ThreeRecipe::Public(full.clone()),
+                None,
+                packed.clone(),
+                addr(1),
+                addr(2),
+                [3u8; 32],
+                None,
+            )
+        };
+        let prepared = RevealGateway::prepare_prechecked(make(), false).unwrap();
+        let mut gw = RevealGateway::new();
+        assert_eq!(gw.session_count(), 0, "preparing must not touch the table");
+        let id = gw.open_prepared(prepared, 100).unwrap();
+        assert_eq!(gw.session_count(), 1);
+        assert!(gw.emit_frames(id, 0, 1, 101, false).is_ok());
     }
 
     /// A public recipe opens without a grant and serves frames back, with a
@@ -871,6 +972,45 @@ mod gateway_tests {
             }
         }
         assert!(refused, "an unbudgeted registry session was never metered");
+        assert!(served <= DEFAULT_REVEAL_BUDGET_FRAMES);
+    }
+
+    /// A caller supplied budget above the default is cut to the default, so
+    /// the cap holds for a remote caller that names a huge number.
+    #[test]
+    fn a_huge_caller_budget_is_cut_to_the_default() {
+        let (full, packed) = sample();
+        let owner = addr(1);
+        let mut gw = RevealGateway::new();
+        let id = gw
+            .open(
+                &ViewGrantRegistry::new(),
+                &owner,
+                req(
+                    ThreeRecipe::Public(full),
+                    None,
+                    packed,
+                    addr(2),
+                    owner,
+                    [7u8; 32],
+                    Some(u64::MAX),
+                ),
+                100,
+            )
+            .unwrap();
+        let mut served = 0u64;
+        let mut refused = false;
+        for _ in 0..(DEFAULT_REVEAL_BUDGET_FRAMES / u64::from(MAX_FRAMES_PER_CALL) + 2) {
+            match gw.emit_frames(id, 0, MAX_FRAMES_PER_CALL, 100, true) {
+                Ok(_) => served += u64::from(MAX_FRAMES_PER_CALL),
+                Err(RevealGatewayError::Reveal(_)) => {
+                    refused = true;
+                    break;
+                }
+                Err(other) => panic!("unexpected refusal: {other:?}"),
+            }
+        }
+        assert!(refused, "a u64::MAX budget replaced the cap");
         assert!(served <= DEFAULT_REVEAL_BUDGET_FRAMES);
     }
 

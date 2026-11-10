@@ -120,6 +120,15 @@ fn names_target(text: &str, target: &str) -> bool {
     })
 }
 
+/// A corpus seed is a regular, non-hidden file. A `.gitkeep` keeps the directory
+/// in git and seeds nothing.
+fn is_seed_file(path: &Path) -> bool {
+    path.is_file()
+        && !path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+}
+
 fn measure(root: &Path) -> Result<Inventory, String> {
     let manifest_path = root.join("fuzz/Cargo.toml");
     let manifest = std::fs::read_to_string(&manifest_path)
@@ -177,8 +186,9 @@ fn measure(root: &Path) -> Result<Inventory, String> {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            let count = std::fs::read_dir(entry.path())
-                .map_or(0, |d| d.flatten().filter(|f| f.path().is_file()).count());
+            let count = std::fs::read_dir(entry.path()).map_or(0, |d| {
+                d.flatten().filter(|f| is_seed_file(&f.path())).count()
+            });
             corpora.insert(name, count);
         }
     }
@@ -363,4 +373,22 @@ path = "fuzz_targets/beta.rs"
         ));
     }
     Err(problems.join("\n"))
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+
+    #[test]
+    fn gitkeep_is_not_a_seed() {
+        let dir = std::env::temp_dir().join(format!("fuzz-seed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".gitkeep"), "").unwrap();
+        std::fs::write(dir.join("seed1"), "x").unwrap();
+        let keep = is_seed_file(&dir.join(".gitkeep"));
+        let seed = is_seed_file(&dir.join("seed1"));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(!keep);
+        assert!(seed);
+    }
 }

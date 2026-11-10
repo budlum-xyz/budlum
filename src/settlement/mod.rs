@@ -3,12 +3,15 @@ pub mod cold_wallet;
 pub mod commitment_tree;
 pub mod global_block;
 pub mod pq_anchor;
+pub mod pq_anchor_verify;
 pub mod proof_market;
 pub mod proof_verifier;
 
+#[cfg(test)]
+pub use cold_quorum::dev_fixture_device_signers;
 pub use cold_quorum::{
-    dev_fixture_device_signers, verify_quorum, DeviceSignature, DeviceSigner, QuorumError,
-    SignerIdentity, DEV_FIXTURE_DEVICE_COUNT,
+    verify_quorum, DeviceSignature, DeviceSigner, QuorumError, SignerIdentity,
+    DEV_FIXTURE_DEVICE_COUNT,
 };
 pub use cold_wallet::{
     ColdRefusal, ColdSettleError, ColdWalletPolicy, ColdWalletState, KeyRotation, RefusalRecord,

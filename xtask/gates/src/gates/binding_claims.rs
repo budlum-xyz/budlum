@@ -34,6 +34,16 @@ fn strip_block_comments(text: &str) -> String {
     out
 }
 
+/// Does the `'` at `i` open a char literal? A lifetime (`<'a>`) does not.
+fn is_char_literal(b: &[u8], i: usize) -> bool {
+    match b.get(i + 1) {
+        Some(b'\\') => true,
+        Some(c) if *c >= 0x80 => b[i + 2..].iter().take(4).any(|x| *x == b'\''),
+        Some(_) => b.get(i + 2) == Some(&b'\''),
+        None => false,
+    }
+}
+
 fn strip_non_code(text: &str) -> String {
     let mut out = String::new();
     for l in text.lines() {
@@ -47,7 +57,7 @@ fn strip_non_code(text: &str) -> String {
     let b = out.as_bytes();
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'"' || b[i] == b'\'' {
+        if b[i] == b'"' || (b[i] == b'\'' && is_char_literal(b, i)) {
             let q = b[i];
             out2.push(if q == b'"' { '"' } else { '\'' });
             i += 1;
@@ -100,7 +110,8 @@ fn unwired_message(has_mobile: bool, has_browser: bool) -> String {
 fn scan_bindings(root: &Path) -> (bool, bool) {
     let mut has_mobile = false;
     let mut has_browser = false;
-    let mut stack: Vec<std::path::PathBuf> = vec![root.to_path_buf()];
+    // The claim is about the wallet core, so only its crate can back it.
+    let mut stack: Vec<std::path::PathBuf> = vec![root.join("crates/wallet-core")];
     while let Some(dir) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&dir) else {
             continue;
@@ -148,7 +159,8 @@ pub fn run(root: &Path) -> Result<String, String> {
         return Err(format!("no wallet core at {}", f.display()));
     }
     let src = std::fs::read_to_string(&f).map_err(|e| e.to_string())?;
-    let code = strip_non_code(&src);
+    // A fixture above the real constant, inside a test item, is not the claim.
+    let code = strip_non_code(&super::capability_modules_are_wired::strip_test_mods(&src));
     let mut problems: Vec<String> = Vec::new();
     let mut checked = 0usize;
 
@@ -253,4 +265,16 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "binding-claims canary OK (honest PASSes, an unfounded claim FAILs).",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lifetime_does_not_swallow_following_code() {
+        let out = strip_non_code("fn f<'a>(x: &'a str) { wasm_marker(); }\nlet c = 'x';\n");
+        assert!(out.contains("wasm_marker"));
+        assert!(!out.contains("'x'"));
+    }
 }

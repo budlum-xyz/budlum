@@ -74,6 +74,14 @@ pub enum PoaMembershipError {
     InvalidTransition { from: MembershipStatus },
     /// Missing / zero KYC commitment.
     MissingKyc,
+    /// The last admin of a domain may not be removed through the admin door
+    /// (BLG-0094); governance can.
+    LastAdmin,
+    /// The requested KYC validity horizon exceeds the bound (BLG-0094).
+    InvalidValidityHorizon { requested: u64, max: u64 },
+    /// The domain has no admin, so it is not running admission control and an
+    /// application to it could never be decided.
+    NotPermissioned { domain: DomainId },
 }
 
 impl std::fmt::Display for PoaMembershipError {
@@ -92,6 +100,24 @@ impl std::fmt::Display for PoaMembershipError {
                 write!(f, "invalid membership transition from {from:?}")
             }
             PoaMembershipError::MissingKyc => write!(f, "missing KYC commitment"),
+            PoaMembershipError::LastAdmin => {
+                write!(
+                    f,
+                    "the last admin of a PoA domain cannot be removed by admins"
+                )
+            }
+            PoaMembershipError::InvalidValidityHorizon { requested, max } => {
+                write!(
+                    f,
+                    "KYC validity horizon {requested} exceeds the bound {max}"
+                )
+            }
+            PoaMembershipError::NotPermissioned { domain } => {
+                write!(
+                    f,
+                    "PoA domain {domain} runs no admission control, so there is no one to decide an application"
+                )
+            }
         }
     }
 }
@@ -125,6 +151,71 @@ impl PoaMembershipRegistry {
         self.admins.insert((domain, admin), ());
     }
 
+    /// BLG-0094 (P04-F12): an admin may be removed. Refusing to remove the
+    /// last admin keeps a permissioned domain from silently dropping back to
+    /// unpermissioned with pending applications in flight - governance can
+    /// still take the last seat away through its own action, where the
+    /// decision is recorded as such.
+    ///
+    /// WIRING: the admin-seat half of PoA membership governance; the
+    /// membership door that calls it lands with the admin-action
+    /// transaction path, and the refusal rules are pinned by tests.
+    pub fn remove_admin(
+        &mut self,
+        domain: DomainId,
+        admin: Address,
+    ) -> Result<(), PoaMembershipError> {
+        if !self.admins.contains_key(&(domain, admin)) {
+            return Err(PoaMembershipError::NotFound {
+                account: admin,
+                domain,
+            });
+        }
+        let remaining = self
+            .admins
+            .range((domain, Address::zero())..)
+            .take_while(|((d, _), ())| *d == domain)
+            .count();
+        if remaining <= 1 {
+            return Err(PoaMembershipError::LastAdmin);
+        }
+        self.admins.remove(&(domain, admin));
+        Ok(())
+    }
+
+    /// The governance override for [`Self::remove_admin`]: may take the last
+    /// admin too. Only the governance execution arm calls this, where the
+    /// decision to unpermission the domain is recorded as a proposal.
+    pub fn force_remove_admin(&mut self, domain: DomainId, admin: Address) {
+        self.admins.remove(&(domain, admin));
+    }
+
+    /// BLG-0093 (P04-F11): write the refreshed KYC commitment into the
+    /// member record. `renew_kyc` used to push the expiry horizon forward
+    /// and leave the commitment itself untouched, so the record kept naming
+    /// the original dossier forever.
+    pub fn update_kyc_commitment(
+        &mut self,
+        domain: DomainId,
+        account: Address,
+        new_kyc_commitment: KycCommitment,
+    ) -> Result<(), PoaMembershipError> {
+        if new_kyc_commitment == [0u8; 32] {
+            return Err(PoaMembershipError::MissingKyc);
+        }
+        let member = self
+            .members
+            .get_mut(&(domain, account))
+            .ok_or(PoaMembershipError::NotFound { account, domain })?;
+        if !matches!(member.status, MembershipStatus::Approved) {
+            return Err(PoaMembershipError::InvalidTransition {
+                from: member.status,
+            });
+        }
+        member.kyc_commitment = new_kyc_commitment;
+        Ok(())
+    }
+
     /// Has anyone been made admin of `domain`?
     ///
     /// This is how a domain declares itself permissioned. There is no
@@ -142,6 +233,38 @@ impl PoaMembershipRegistry {
 
     pub fn is_admin(&self, domain: DomainId, account: &Address) -> bool {
         self.admins.contains_key(&(domain, *account))
+    }
+
+    /// BLG-0090 (P04-F08): fold the registry (admins + members) together
+    /// with the onboarding layer's KYC expiry map - one digest over the
+    /// whole admission state, computed by
+    /// [`crate::registry::poa_onboarding::PoAOnboarding::root`].
+    pub fn root_with_expiry(&self, kyc_expiry: &BTreeMap<(DomainId, Address), u64>) -> [u8; 32] {
+        use sha3::{Digest, Sha3_256};
+        let mut hasher = Sha3_256::new();
+        hasher.update(b"BDLM_POA_ADMISSION_ROOT_V1");
+        for ((domain, admin), ()) in &self.admins {
+            hasher.update(domain.to_le_bytes());
+            hasher.update(admin.as_bytes());
+        }
+        for ((domain, account), member) in &self.members {
+            hasher.update(domain.to_le_bytes());
+            hasher.update(account.as_bytes());
+            hasher.update(member.kyc_commitment);
+            hasher.update([member.status as u8]);
+            if let Some(decider) = member.decided_by {
+                hasher.update([1u8]);
+                hasher.update(decider.as_bytes());
+            } else {
+                hasher.update([0u8]);
+            }
+        }
+        for ((domain, account), expiry) in kyc_expiry {
+            hasher.update(domain.to_le_bytes());
+            hasher.update(account.as_bytes());
+            hasher.update(expiry.to_le_bytes());
+        }
+        hasher.finalize().into()
     }
 
     /// Step 1 of admission: a candidate submits a KYC commitment. This does NOT

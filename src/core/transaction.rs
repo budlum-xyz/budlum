@@ -1,3 +1,5 @@
+use std::fmt;
+
 use crate::core::address::Address;
 #[cfg(test)]
 fn test_addr_from_byte(byte: u8) -> crate::core::address::Address {
@@ -168,6 +170,42 @@ impl ExternalChain {
             Self::Custom(id) => id,
         }
     }
+
+    /// The chain the id names, if it names one of the canonical chains.
+    ///
+    /// The inverse of [`Self::domain_id`] over the named variants. `Custom(id)`
+    /// is deliberately not matched: every unclaimed id is a custom chain, and
+    /// treating them all as canonical ids would make the set unbounded.
+    #[must_use]
+    pub const fn from_domain_id(id: u32) -> Option<Self> {
+        match id {
+            1 => Some(Self::Ethereum),
+            2 => Some(Self::Solana),
+            3 => Some(Self::Bitcoin),
+            4 => Some(Self::Avalanche),
+            5 => Some(Self::Polygon),
+            6 => Some(Self::Arbitrum),
+            7 => Some(Self::Optimism),
+            _ => None,
+        }
+    }
+
+    /// The chain's own identifier on its own network: the EIP-155 chain id where
+    /// the chain has one, `101` for Solana, `0` for Bitcoin (whose identity is
+    /// its genesis hash, not a numeric id).
+    #[must_use]
+    pub const fn canonical_chain_id(self) -> u64 {
+        match self {
+            Self::Ethereum => 1,
+            Self::Solana => 101,
+            Self::Bitcoin => 0,
+            Self::Avalanche => 43_114,
+            Self::Polygon => 137,
+            Self::Arbitrum => 42_161,
+            Self::Optimism => 10,
+            Self::Custom(id) => id as u64,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -176,6 +214,141 @@ pub struct ExternalTransaction {
     pub target_address: String,
     pub payload: Vec<u8>,
     pub external_nonce: u64,
+}
+
+/// Payload of [`TransactionType::BridgeBurn`].
+///
+/// The burn is the debit half of a bridge mint: it takes the minted units back
+/// from the transfer's recipient and registers the burn message the far side
+/// unlocks against. It moves value and writes `bridge_state`, both of which are
+/// in the state root, so it is a transaction and not an RPC mutation - a node
+/// that served the call and a node that did not must not disagree.
+///
+/// Every field is a claim the executor re-derives: the transfer row supplies
+/// the amount and the burner, `bridge_state.burn_with_event` re-checks the
+/// status and the expiry against the row it holds. The payload carries ids and
+/// heights only, never an amount or an actor.
+///
+/// WIRING: `executor.rs` destructures one from every `BridgeBurn` it applies
+/// and verifies the holder's authorization; `tests/bridge_lifecycle.rs` builds
+/// and signs one from the holder's side, theft and re-pointed payout included.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BridgeBurnTx {
+    /// The transfer being burned back out of this domain.
+    pub message_id: crate::cross_domain::message::MessageId,
+    /// The domain the burn happens on; must be the domain the transfer was
+    /// minted on.
+    pub domain: crate::domain::types::DomainId,
+    pub domain_height: u64,
+    pub event_index: u32,
+    /// Height after which an unrelayed burn returns to `Minted`. Zero means no
+    /// expiry.
+    pub expiry_height: u64,
+    /// The Ethereum destination the burner declares; committed in the burn
+    /// payload hash.
+    pub recipient_eth: [u8; 20],
+    /// The holder's key. The burn destroys the minted units of the transfer's
+    /// recipient and picks the address they leave to, so the payload has to
+    /// carry the holder's own consent: the executor verifies it against the
+    /// row's holder before anything moves. Without this, any funded account
+    /// could burn somebody else's minted balance.
+    pub holder_public_key: Vec<u8>,
+    /// The holder's signature over [`BridgeBurnTx::authorization_hash`].
+    pub holder_signature: Vec<u8>,
+}
+
+/// Domain tag for the holder's burn authorization.
+///
+/// A separate tag from the transaction preimage: the holder authorizes *the
+/// burn*, and the fee payer authorizes *the transaction*. One may be the other
+/// (a holder submitting their own transaction signs both) and neither is
+/// implied by the other.
+const BRIDGE_BURN_AUTHORIZATION_TAG: &[u8] = b"BDLM_BRIDGE_BURN_AUTHORIZATION_V1";
+
+impl BridgeBurnTx {
+    /// WIRING: read by `verify_holder_authorization` below, which the executor
+    /// calls on every `BridgeBurn` it applies.
+    ///
+    /// What the holder signs: every effect the burn will have, bound to the
+    /// chain it happens on.
+    ///
+    /// `holder_signature` itself is not in here (it is the result of signing
+    /// this value), and neither is an amount: the amount comes from the
+    /// transfer row, which the row's own id pins.
+    pub fn authorization_hash(&self, chain_id: u64) -> [u8; 32] {
+        crate::core::hash::hash_fields_bytes(&[
+            BRIDGE_BURN_AUTHORIZATION_TAG,
+            &chain_id.to_le_bytes(),
+            &self.message_id,
+            &self.domain.to_le_bytes(),
+            &self.domain_height.to_le_bytes(),
+            &self.event_index.to_le_bytes(),
+            &self.expiry_height.to_le_bytes(),
+            &self.recipient_eth,
+        ])
+    }
+
+    /// WIRING: the holder side of the door - `src/tests/bridge_lifecycle.rs`
+    /// and any client building a burn of its own.
+    ///
+    /// Signs the authorization with the holder's Ed25519 account key.
+    ///
+    /// The V4 derivation makes the key bytes the address itself, so the
+    /// authorization is self-identifying: the executor derives the address from
+    /// [`BridgeBurnTx::holder_public_key`] and requires it to be the row's
+    /// holder.
+    pub fn sign_holder_authorization(
+        &mut self,
+        keypair: &crate::crypto::primitives::KeyPair,
+        chain_id: u64,
+    ) {
+        self.holder_public_key = keypair.public_key_bytes().to_vec();
+        self.holder_signature = keypair.sign(&self.authorization_hash(chain_id)).to_vec();
+    }
+
+    /// Verifies that `holder` authorized this exact burn.
+    ///
+    /// # Errors
+    ///
+    /// A missing authorization, a key that is not the holder, or a signature
+    /// that does not open over the authorization hash.
+    pub fn verify_holder_authorization(
+        &self,
+        holder: crate::core::address::Address,
+        chain_id: u64,
+    ) -> Result<(), String> {
+        if self.holder_public_key.is_empty() || self.holder_signature.is_empty() {
+            return Err("a bridge burn carries no holder authorization".into());
+        }
+        if self.holder_public_key.len() == 32 {
+            let mut pk = [0u8; 32];
+            pk.copy_from_slice(&self.holder_public_key);
+            if crate::core::address::Address::from(pk) != holder {
+                return Err(
+                    "bridge burn authorization is not from the transfer's holder".to_string(),
+                );
+            }
+            return crate::crypto::primitives::verify_signature(
+                &self.authorization_hash(chain_id),
+                &self.holder_signature,
+                &self.holder_public_key,
+            )
+            .map_err(|e| format!("bridge burn holder signature does not verify: {e}"));
+        }
+        let addr = crate::crypto::primitives::wallet_address_from_ml_dsa_87_public_key(
+            &self.holder_public_key,
+        )
+        .map_err(|e| format!("bridge burn holder key is invalid: {e}"))?;
+        if addr != holder {
+            return Err("bridge burn authorization is not from the transfer's holder".to_string());
+        }
+        crate::crypto::primitives::verify_ml_dsa_87_signature(
+            &self.authorization_hash(chain_id),
+            &self.holder_signature,
+            &self.holder_public_key,
+        )
+        .map_err(|e| format!("bridge burn holder signature does not verify: {e}"))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -217,6 +390,28 @@ impl RelayerExternalResult {
         hasher.update([u8::from(self.success)]);
         if let Some(ref msg) = self.message {
             hasher.update(msg.message_id);
+            // P18-F03: the executor acts on these message fields (bridge
+            // state, unlock domain, correlation). Left out of the leaf, a
+            // valid anchored result could be reused with a different kind or
+            // correlation id and settle a transfer it never proved.
+            hasher.update(b"BDLM_RELAYER_RESULT_MSG_V1");
+            let kind_bytes =
+                bincode::serialize(&msg.kind).unwrap_or_else(|_| TX_SERIALIZE_FAILED.to_vec());
+            hasher.update(
+                u64::try_from(kind_bytes.len())
+                    .unwrap_or(u64::MAX)
+                    .to_be_bytes(),
+            );
+            hasher.update(&kind_bytes);
+            match msg.correlation_id {
+                Some(correlation) => {
+                    hasher.update([1u8]);
+                    hasher.update(correlation);
+                }
+                None => hasher.update([0u8]),
+            }
+            hasher.update(msg.source_domain.to_be_bytes());
+            hasher.update(msg.target_domain.to_be_bytes());
         }
         hasher.finalize().into()
     }
@@ -352,12 +547,12 @@ pub enum TransactionType {
     /// Reclaim an expired escrowed agent payment back to the sender.
     AiAgentPaymentReclaim([u8; 32]),
     /// Submit private transfer (note commitments + nullifiers).
-    /// Mainnet opcode activation is separate; L1 registry updates here.
+    /// Mainnet opcode activation is separate; chain registry updates here.
     PrivateTransferSubmit(crate::privacy::PrivateTransferSubmit),
     /// Faucet/test helper - insert a live note commitment (governance/tests).
     PrivacyNoteInsert([u8; 32]),
     /// AI execution layer: attach BudZKVM execution proof to a result
-    /// (active RoleId(8) operator-submitted; structural verify on L1).
+    /// (active RoleId(8) operator-submitted; structural verify on the chain).
     AiAttachExecutionProof {
         request_id: crate::ai::types::AiRequestId,
         proof: crate::ai::types::AiExecutionProof,
@@ -400,6 +595,45 @@ pub enum TransactionType {
     /// named in a doc comment here was resolved as if a transaction
     /// carried the whole registry.)
     Vault(crate::socialfi::VaultTx),
+    /// B.U.D. storage write, applied in block. The sender is `tx.from`; the
+    /// payload carries no actor field. The signing preimage commits every
+    /// field of the payload, a registered manifest included, so a relay
+    /// cannot change any of it without changing the hash. (Written without
+    /// naming types: the signing gate reads the enum
+    /// body's identifiers to resolve carried payload types.)
+    Storage(crate::domain::storage_tx::StorageTx),
+    /// PoA admission door: a candidate applies for themselves, an admin of
+    /// the target domain decides, and the admin set changes only through
+    /// admins or governance. Ids, a dossier commitment and reasons - no
+    /// authority fields, because the sender IS the claimed actor at the one
+    /// execution body. (Written without naming types: the signing gate reads
+    /// the enum body's identifiers to resolve carried payload types.)
+    PoaOnboarding(crate::registry::poa_onboarding::PoAOnboardingTx),
+    /// Bond into a permissionless application role of the verifier family
+    /// (BLG-0092 / P04-F10): the role id and the bond amount in the signed
+    /// header, nothing else. The five role seats that had no production
+    /// registration path - without one, the ATTESTER stake stayed at zero
+    /// and the storage-attestation authority check never ran.
+    RoleBond {
+        role: u32,
+    },
+    /// Burn the minted half of a bridge transfer, in block.
+    ///
+    /// Replaces the out-of-block `Blockchain::burn_bridge_transfer_with_event`,
+    /// which debited the recipient and wrote `bridge_state` from the RPC path:
+    /// both are in the state root, so a node that served the call sealed blocks
+    /// its peers rejected. The body is the same one, reached through the
+    /// executor, and the relay enqueue that follows it is node-local and drains
+    /// after the block.
+    BridgeBurn(BridgeBurnTx),
+    /// Register a relayed cross-domain message, in block.
+    ///
+    /// The message is already signed by its sender (`verify_sender_signature`),
+    /// so the transaction body carries it rather than a new authority. The
+    /// executor re-runs the relayer gate and the registry's own checks against
+    /// consensus state; the old out-of-block door inserted into
+    /// `message_registry`, which is in the state root.
+    CrossDomainMessage(crate::cross_domain::message::CrossDomainMessage),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -448,16 +682,147 @@ pub struct Transaction {
 /// stateless. Instead the set travels with the transaction, and because the
 /// `from` address is derived from the set, a transaction bringing the wrong set
 /// cannot point at somebody else's account: the address will not match.
+/// Maximum owner public keys accepted inside a decoded `MultisigAuthorizationV6`
+/// payload (matches `MAX_THRESHOLD_OWNERS` = 16).
+pub const MAX_V6_AUTHORIZATION_OWNERS: usize = 16;
+
+/// Maximum `(owner_public_key, signature)` entries accepted inside a decoded
+/// `MultisigAuthorizationV6` payload (`MAX_THRESHOLD_OWNERS` = 16).
+pub const MAX_V6_AUTHORIZATION_SIGNATURES: usize = 16;
+
+/// Maximum byte length of `MultisigAuthorizationV6::scheme_id` on the wire.
+pub const MAX_V6_SCHEME_ID_BYTES: usize = 64;
+
+/// Maximum byte length of a single owner public key entry on the wire
+/// (`ML_DSA_87_PUBLIC_KEY_LEN` = 2,592).
+pub const MAX_V6_OWNER_KEY_BYTES: usize = 2592;
+
+/// Maximum byte length of a single signature entry on the wire
+/// (`ML_DSA_87_SIGNATURE_LEN` = 4,627).
+pub const MAX_V6_SIGNATURE_BYTES: usize = 4627;
+
+type RawOwnerSignatures = Vec<(Vec<u8>, Vec<u8>)>;
+
+fn deserialize_bounded_scheme_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    if s.len() > MAX_V6_SCHEME_ID_BYTES {
+        return Err(serde::de::Error::custom(format!(
+            "MultisigAuthorizationV6 scheme_id length {} exceeds max {}",
+            s.len(),
+            MAX_V6_SCHEME_ID_BYTES
+        )));
+    }
+    Ok(s)
+}
+
+fn deserialize_bounded_owners<'de, D>(deserializer: D) -> Result<Vec<Vec<u8>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct BoundedOwnersVisitor;
+    impl<'de> serde::de::Visitor<'de> for BoundedOwnersVisitor {
+        type Value = Vec<Vec<u8>>;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                f,
+                "at most {MAX_V6_AUTHORIZATION_OWNERS} owner public keys of <= {MAX_V6_OWNER_KEY_BYTES} bytes"
+            )
+        }
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let cap = seq
+                .size_hint()
+                .unwrap_or(0)
+                .min(MAX_V6_AUTHORIZATION_OWNERS);
+            let mut out = Vec::with_capacity(cap);
+            while let Some(owner) = seq.next_element::<Vec<u8>>()? {
+                if out.len() >= MAX_V6_AUTHORIZATION_OWNERS {
+                    return Err(serde::de::Error::custom(format!(
+                        "MultisigAuthorizationV6 owners exceeds max {MAX_V6_AUTHORIZATION_OWNERS}"
+                    )));
+                }
+                if owner.len() > MAX_V6_OWNER_KEY_BYTES {
+                    return Err(serde::de::Error::custom(format!(
+                        "MultisigAuthorizationV6 owner key length {} exceeds max {MAX_V6_OWNER_KEY_BYTES}",
+                        owner.len()
+                    )));
+                }
+                out.push(owner);
+            }
+            Ok(out)
+        }
+    }
+    deserializer.deserialize_seq(BoundedOwnersVisitor)
+}
+
+fn deserialize_bounded_owner_signatures<'de, D>(
+    deserializer: D,
+) -> Result<RawOwnerSignatures, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct BoundedSignaturesVisitor;
+    impl<'de> serde::de::Visitor<'de> for BoundedSignaturesVisitor {
+        type Value = RawOwnerSignatures;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                f,
+                "at most {MAX_V6_AUTHORIZATION_SIGNATURES} owner signature pairs"
+            )
+        }
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let cap = seq
+                .size_hint()
+                .unwrap_or(0)
+                .min(MAX_V6_AUTHORIZATION_SIGNATURES);
+            let mut out = Vec::with_capacity(cap);
+            while let Some((pk, sig)) = seq.next_element::<(Vec<u8>, Vec<u8>)>()? {
+                if out.len() >= MAX_V6_AUTHORIZATION_SIGNATURES {
+                    return Err(serde::de::Error::custom(format!(
+                        "MultisigAuthorizationV6 signatures exceeds max {MAX_V6_AUTHORIZATION_SIGNATURES}"
+                    )));
+                }
+                if pk.len() > MAX_V6_OWNER_KEY_BYTES {
+                    return Err(serde::de::Error::custom(format!(
+                        "MultisigAuthorizationV6 signer key length {} exceeds max {MAX_V6_OWNER_KEY_BYTES}",
+                        pk.len()
+                    )));
+                }
+                if sig.len() > MAX_V6_SIGNATURE_BYTES {
+                    return Err(serde::de::Error::custom(format!(
+                        "MultisigAuthorizationV6 signature length {} exceeds max {MAX_V6_SIGNATURE_BYTES}",
+                        sig.len()
+                    )));
+                }
+                out.push((pk, sig));
+            }
+            Ok(out)
+        }
+    }
+    deserializer.deserialize_seq(BoundedSignaturesVisitor)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MultisigAuthorizationV6 {
     /// Explicit algorithm/profile id. Empty or unknown ids are refused; the
     /// verifier must never infer a scheme from a key length alone.
+    #[serde(deserialize_with = "deserialize_bounded_scheme_id")]
     pub scheme_id: String,
     /// The owner ML-DSA-87 public keys.
+    #[serde(deserialize_with = "deserialize_bounded_owners")]
     pub owners: Vec<Vec<u8>>,
     /// The number of valid signatures required.
     pub threshold: u32,
     /// `(owner public key, signature)` pairs.
+    #[serde(deserialize_with = "deserialize_bounded_owner_signatures")]
     pub signatures: Vec<(Vec<u8>, Vec<u8>)>,
 }
 impl Transaction {
@@ -954,6 +1319,10 @@ impl Transaction {
             debug!("V6 owner set size is out of range");
             return false;
         }
+        if auth.signatures.len() > MAX_THRESHOLD_OWNERS {
+            debug!("V6 signature list exceeds MAX_THRESHOLD_OWNERS");
+            return false;
+        }
         let mut owners = Vec::with_capacity(auth.owners.len());
         for owner in &auth.owners {
             let Ok(key) = <[u8; ML_DSA_87_PUBLIC_KEY_LEN]>::try_from(owner.as_slice()) else {
@@ -1152,6 +1521,12 @@ impl Transaction {
             TransactionType::UniversalRelay(_) | TransactionType::RelayerResult(_) => {
                 schedule.contract_call_gas * 3
             }
+            // Both write registry state and one moves the transfer's balance;
+            // priced with the other state-writing doors rather than as a plain
+            // transfer.
+            TransactionType::BridgeBurn(_) | TransactionType::CrossDomainMessage(_) => {
+                schedule.contract_call_gas
+            }
             TransactionType::AiOfferData { .. } | TransactionType::AiPurchaseData { .. } => {
                 schedule.transfer_gas * 5
             }
@@ -1193,6 +1568,16 @@ impl Transaction {
             // `NftRegistry` beside their own map, which is exactly what the
             // registry arms already price.
             TransactionType::Vault(_) => schedule.contract_call_gas * 2,
+            TransactionType::PoaOnboarding(_) => schedule.contract_call_gas * 2,
+            TransactionType::RoleBond { .. } => schedule.contract_call_gas,
+            // A registry write that re-derives the manifest id over every
+            // shard: priced like the registry arms beside it. Opening a deal
+            // also verifies the operator's consent signature, so it adds
+            // one signature check on top.
+            TransactionType::Storage(crate::domain::storage_tx::StorageTx::OpenDeal(_)) => {
+                schedule.contract_call_gas * 2 + schedule.gas_per_signature
+            }
+            TransactionType::Storage(_) => schedule.contract_call_gas * 2,
         };
         let signature_gas = if self.signature.is_some() {
             schedule.gas_per_signature
@@ -1421,6 +1806,11 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::StateUpdate { .. } => 44,
         TransactionType::Identity(_) => 45,
         TransactionType::Vault(_) => 46,
+        TransactionType::Storage(_) => 47,
+        TransactionType::PoaOnboarding(_) => 48,
+        TransactionType::RoleBond { .. } => 49,
+        TransactionType::BridgeBurn(_) => 50,
+        TransactionType::CrossDomainMessage(_) => 51,
     }
 }
 fn encode_chain(chain: ExternalChain, out: &mut Vec<u8>) {
@@ -1465,6 +1855,81 @@ fn encode_message(message: &crate::cross_domain::message::CrossDomainMessage, ou
     encode_message_kind(&message.kind, out);
     put_u64(out, message.expiry_height);
 }
+/// Canonical preimage of a PoA admission transaction (BLG-0089).
+///
+/// Operation tag, domain id, and the addresses/commitments/reasons each arm
+/// carries - every field the execution body reads is under the signature, so
+/// a relay cannot retarget a decision or swap a dossier without changing the
+/// signing hash. Strings are length-prefixed; horizons are fixed-width.
+fn encode_poa_onboarding_tx(
+    tx: &crate::registry::poa_onboarding::PoAOnboardingTx,
+    out: &mut Vec<u8>,
+) {
+    use crate::registry::poa_onboarding::PoAOnboardingTx as T;
+    match tx {
+        T::AddAdmin { domain, admin } => {
+            put_u8(out, 0);
+            put_u32(out, *domain);
+            put_fixed(out, admin.as_bytes());
+        }
+        T::RemoveAdmin { domain, admin } => {
+            put_u8(out, 1);
+            put_u32(out, *domain);
+            put_fixed(out, admin.as_bytes());
+        }
+        T::SubmitApplication {
+            domain,
+            kyc_commitment,
+        } => {
+            put_u8(out, 2);
+            put_u32(out, *domain);
+            put_fixed(out, kyc_commitment);
+        }
+        T::Approve {
+            domain,
+            member,
+            validity_horizon,
+        } => {
+            put_u8(out, 3);
+            put_u32(out, *domain);
+            put_fixed(out, member.as_bytes());
+            put_u64(out, *validity_horizon);
+        }
+        T::Reject {
+            domain,
+            member,
+            reason,
+        } => {
+            put_u8(out, 4);
+            put_u32(out, *domain);
+            put_fixed(out, member.as_bytes());
+            put_string(out, reason);
+        }
+        T::Revoke {
+            domain,
+            member,
+            reason,
+        } => {
+            put_u8(out, 5);
+            put_u32(out, *domain);
+            put_fixed(out, member.as_bytes());
+            put_string(out, reason);
+        }
+        T::RenewKyc {
+            domain,
+            member,
+            kyc_commitment,
+            validity_horizon,
+        } => {
+            put_u8(out, 6);
+            put_u32(out, *domain);
+            put_fixed(out, member.as_bytes());
+            put_fixed(out, kyc_commitment);
+            put_u64(out, *validity_horizon);
+        }
+    }
+}
+
 /// Canonical preimage of a vault transaction. Fixed-width ids throughout -
 /// there is nothing variable-length to length-prefix here, and the
 /// operation tag is the only separation the shape needs (an id is an id in
@@ -1499,6 +1964,154 @@ fn encode_vault_tx(tx: &crate::socialfi::VaultTx, out: &mut Vec<u8>) {
     }
 }
 
+/// Canonical preimage of a storage transaction.
+///
+/// A manifest is committed whole: its id, the owner and sizes (written out
+/// again so the signature does not rely on the id alone), and then the
+/// shards, the scheme, the dictionary, the source, the edition and the
+/// encryption claim written out. A relay that rewrites any field changes
+/// the signing hash, so a bad copy cannot take the place of the honest one in
+/// a mempool that dedups on the hash.
+fn encode_storage_tx(tx: &crate::domain::storage_tx::StorageTx, out: &mut Vec<u8>) {
+    match tx {
+        crate::domain::storage_tx::StorageTx::RegisterManifest { manifest } => {
+            put_u8(out, 0);
+            out.extend_from_slice(manifest.manifest_id.as_bytes());
+            out.extend_from_slice(manifest.owner.as_bytes());
+            put_u64(out, manifest.content_size);
+            put_u64(out, manifest.total_size);
+            put_u32(out, manifest.shard_count);
+            encode_manifest_body(manifest, out);
+        }
+        crate::domain::storage_tx::StorageTx::DeclareOperatorClass { class } => {
+            put_u8(out, 1);
+            put_u8(
+                out,
+                match class {
+                    crate::domain::storage_deal::OperatorClass::AlwaysOn => 0,
+                    crate::domain::storage_deal::OperatorClass::Mobile => 1,
+                },
+            );
+        }
+        crate::domain::storage_tx::StorageTx::DeclareSelfHostPolicy {
+            manifest_id,
+            policy,
+            profile,
+        } => {
+            put_u8(out, 2);
+            put_fixed(out, manifest_id.as_bytes());
+            put_fixed(out, policy.content_id.as_bytes());
+            put_fixed(out, policy.owner.as_bytes());
+            put_u8(out, u8::from(policy.critical));
+            out.extend_from_slice(&policy.required_paid_replicas.to_le_bytes());
+            put_u8(out, u8::from(policy.self_host_allowed));
+            put_fixed(out, profile.owner.as_bytes());
+            put_fixed(out, &profile.device_commitment);
+            put_u8(
+                out,
+                match profile.availability {
+                    crate::storage::MobileAvailabilityClass::Opportunistic => 0,
+                    crate::storage::MobileAvailabilityClass::Scheduled => 1,
+                    crate::storage::MobileAvailabilityClass::AlwaysOnReplica => 2,
+                },
+            );
+            put_u64(out, profile.max_storage_bytes);
+            put_u8(out, u8::from(profile.metered_network_ok));
+            put_u8(out, u8::from(profile.battery_saver_aware));
+            put_u64(out, profile.last_seen_block);
+        }
+        crate::domain::storage_tx::StorageTx::OpenDeal(open) => {
+            put_u8(out, 3);
+            put_u32(out, open.domain_id);
+            put_fixed(out, open.manifest_id.as_bytes());
+            put_fixed(out, open.shard_id.as_bytes());
+            put_fixed(out, open.operator.as_bytes());
+            put_u8(out, open.replica_index);
+            put_u64(out, open.start_epoch);
+            put_u64(out, open.end_epoch);
+            put_u64(out, open.economics.operator_bond);
+            put_u64(out, open.economics.fee_per_byte_epoch);
+            put_bytes(out, &open.merkle_proof);
+            put_fixed(out, &open.storage_root);
+            // The consent is committed whole, signature included, so a relay
+            // cannot strip it or swap in another valid one.
+            put_fixed(out, &open.operator_consent.owner_key);
+            put_bytes(out, &open.operator_consent.signature);
+        }
+        crate::domain::storage_tx::StorageTx::AnswerCodingAudit {
+            audit_id,
+            data_column,
+            parity_byte,
+            column_proof,
+        } => {
+            put_u8(out, 4);
+            put_u64(out, *audit_id);
+            put_bytes(out, data_column);
+            put_u8(out, *parity_byte);
+            // The proof is part of the signed body: a relay that dropped it
+            // would turn a proven answer into an unproven one, and a relay that
+            // swapped it would answer for a byte the operator never held.
+            put_u32(out, column_proof.len() as u32);
+            for sibling in column_proof {
+                put_fixed(out, sibling);
+            }
+        }
+    }
+}
+
+/// Every field of a manifest that the id and the fields above leave out or
+/// fold ambiguously, written explicitly. The id preimage appends the source
+/// bytes and the dictionary bytes without tags, so two different splits of
+/// source and dictionary can share an id; writing both here keeps them apart.
+fn encode_manifest_body(manifest: &crate::storage::ContentManifest, out: &mut Vec<u8>) {
+    put_u64(out, manifest.shards.len() as u64);
+    for shard in &manifest.shards {
+        put_u32(out, shard.index);
+        put_fixed(out, shard.shard_id.as_bytes());
+        put_u32(out, shard.size);
+        put_u8(
+            out,
+            match shard.kind {
+                crate::storage::ShardKind::Data => 0,
+                crate::storage::ShardKind::Parity => 1,
+            },
+        );
+    }
+    put_u32(out, manifest.erasure.k);
+    put_u32(out, manifest.erasure.n);
+    match &manifest.dictionary_id {
+        None => put_u8(out, 0),
+        Some(dictionary) => {
+            put_u8(out, 1);
+            put_fixed(out, dictionary.as_bytes());
+        }
+    }
+    // The source commitment is injective: a variant tag plus the digest of
+    // the recipe, so a spec is committed without spelling it out.
+    put_bytes(
+        out,
+        &crate::storage::generated::source_commitment_bytes(&manifest.source),
+    );
+    put_u8(
+        out,
+        match manifest.edition {
+            crate::storage::BudStorageEdition::Classic => 1,
+            crate::storage::BudStorageEdition::Three => 3,
+        },
+    );
+    put_u8(out, manifest.encryption.commitment_tag());
+    // Column commitments of the parity shards. Length-prefixed and written on
+    // every encoding (an empty list is a zero length, not an absence) so the
+    // signing preimage cannot tell two manifests apart by their roots alone.
+    // They are also inside `manifest_id`, which the preimage already carries -
+    // that makes a rewrite detectable, this makes it a signature failure
+    // rather than a refused registration.
+    put_u32(out, manifest.column_roots.len() as u32);
+    for root in &manifest.column_roots {
+        put_fixed(out, root);
+    }
+}
+
 /// Canonical preimage of an identity transaction. Every pub field of every
 /// carried struct is written explicitly - nothing is bincode-ed here: bincode
 /// is the wire format, and the signature preimage is the consensus commitment
@@ -1510,9 +2123,22 @@ fn encode_identity_tx(tx: &crate::registry::IdentityTx, out: &mut Vec<u8>) {
             put_u8(out, 0);
             encode_identity_record(record, out);
         }
-        crate::registry::IdentityTx::Issue { credential } => {
+        crate::registry::IdentityTx::Issue {
+            credential,
+            consent,
+        } => {
             put_u8(out, 1);
             encode_credential_commitment(credential, out);
+            // BLG-0095: the consent is committed whole, key and signature
+            // included, so a relay cannot strip it or swap another valid one.
+            match consent {
+                Some(consent) => {
+                    put_u8(out, 1);
+                    put_bytes(out, &consent.public_key);
+                    put_bytes(out, &consent.signature);
+                }
+                None => put_u8(out, 0),
+            }
         }
         crate::registry::IdentityTx::Revoke { credential } => {
             put_u8(out, 2);
@@ -1557,6 +2183,13 @@ fn encode_identity_record(record: &crate::registry::IdentityRecord, out: &mut Ve
         }
     }
     put_option_fixed32(out, record.credential_root);
+    // Every asserted root feeds `is_credential_valid`, so each one is inside
+    // the signed preimage: a relay must not be able to add or drop a root on a
+    // record whose signature still verifies. `BTreeSet` fixes the order.
+    put_u64(out, record.credential_roots.len() as u64);
+    for root in &record.credential_roots {
+        put_fixed(out, root);
+    }
     put_u64(out, record.guardians.len() as u64);
     for guardian in &record.guardians {
         put_fixed(out, guardian.as_bytes());
@@ -1869,6 +2502,10 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
             for n in &sub.nullifiers {
                 put_fixed(out, n);
             }
+            put_u64(out, sub.nullifier_proofs.len() as u64);
+            for pr in &sub.nullifier_proofs {
+                put_fixed(out, pr);
+            }
             put_u64(out, sub.output_commitments.len() as u64);
             for c in &sub.output_commitments {
                 put_fixed(out, c);
@@ -1927,7 +2564,61 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
             }
         }
         TransactionType::Identity(identity_tx) => encode_identity_tx(identity_tx, out),
+        TransactionType::PoaOnboarding(poa_tx) => encode_poa_onboarding_tx(poa_tx, out),
+        TransactionType::RoleBond { role } => {
+            put_u8(out, 49);
+            put_u32(out, *role);
+        }
         TransactionType::Vault(vault_tx) => encode_vault_tx(vault_tx, out),
+        TransactionType::Storage(storage_tx) => encode_storage_tx(storage_tx, out),
+        TransactionType::BridgeBurn(burn) => {
+            put_u8(out, 50);
+            put_fixed(out, &burn.message_id);
+            put_u32(out, burn.domain);
+            put_u64(out, burn.domain_height);
+            put_u32(out, burn.event_index);
+            put_u64(out, burn.expiry_height);
+            put_fixed(out, &burn.recipient_eth);
+            // The holder's authorization is part of the preimage: the executor
+            // verifies it, so a relaying node that swapped it for another
+            // holder's - or for garbage the gate then rejects - would otherwise
+            // change the executed outcome under an unchanged transaction hash.
+            put_bytes(out, &burn.holder_public_key);
+            put_bytes(out, &burn.holder_signature);
+        }
+        TransactionType::CrossDomainMessage(message) => {
+            put_u8(out, 51);
+            // Every field is written out: the id binds them too, but the id is
+            // a hash the sender computed, and a signature over the id alone
+            // would not commit to WHICH fields the executor is about to insert.
+            // Written explicitly, a relay that rewrote one changes the
+            // transaction hash.
+            put_fixed(out, &message.message_id);
+            match message.correlation_id {
+                None => put_u8(out, 0),
+                Some(correlation) => {
+                    put_u8(out, 1);
+                    put_fixed(out, &correlation);
+                }
+            }
+            put_u32(out, message.source_domain);
+            put_u32(out, message.target_domain);
+            put_u64(out, message.source_height);
+            put_u32(out, message.event_index);
+            put_u64(out, message.nonce);
+            put_fixed(out, message.sender.as_bytes());
+            put_fixed(out, message.recipient.as_bytes());
+            put_fixed(out, &message.payload_hash);
+            put_bytes(out, &message.kind.as_bytes());
+            put_u64(out, message.expiry_height);
+            put_bytes(out, &message.sender_public_key);
+            // The sender's own signature is part of the preimage too: the
+            // executor verifies it against `sender`, so a relaying node that
+            // rewrote it (say, to a different valid signature by the same key,
+            // or to garbage that the gate then rejects) would otherwise change
+            // the executed outcome under an unchanged transaction hash.
+            put_bytes(out, &message.sender_signature);
+        }
     }
 }
 
@@ -1965,6 +2656,7 @@ mod v29_signing_tests {
                 revoked_at: None,
             }],
             credential_root: None,
+            credential_roots: Default::default(),
             guardians: vec![],
             recovery_threshold: 0,
         };
@@ -1998,7 +2690,10 @@ mod v29_signing_tests {
         let register =
             |record: IdentityRecord| TransactionType::Identity(IdentityTx::Register { record });
         let issue = |credential: CredentialCommitment| {
-            TransactionType::Identity(IdentityTx::Issue { credential })
+            TransactionType::Identity(IdentityTx::Issue {
+                credential,
+                consent: None,
+            })
         };
 
         let base_register = hash_of(register(base_record.clone()));
@@ -2021,6 +2716,17 @@ mod v29_signing_tests {
         let mut r = base_record.clone();
         r.credential_root = Some([6u8; 32]);
         assert_ne!(base_register, hash_of(register(r)), "credential_root");
+        // The live root set decides `is_credential_valid`, so a relay that
+        // added or dropped one would be changing an authorization outcome
+        // behind a signature that still verifies. Both the presence of a root
+        // and the identity of each root must move the preimage.
+        let mut r = base_record.clone();
+        r.credential_roots.insert([6u8; 32]);
+        let with_one = hash_of(register(r.clone()));
+        assert_ne!(base_register, with_one, "credential_roots");
+        let mut r2 = r;
+        r2.credential_roots.insert([7u8; 32]);
+        assert_ne!(with_one, hash_of(register(r2)), "each credential root");
         let mut r = base_record.clone();
         r.guardians = vec![test_addr_from_byte(4u8)];
         assert_ne!(base_register, hash_of(register(r)), "guardians");
@@ -2667,7 +3373,7 @@ mod v29_signing_tests {
             assert!(!tx.verify(), "V6 does not exist without an authorization");
         }
 
-        /// What is signed is the transaction itself: change the amount and the authority falls.
+        /// Tampering with the amount invalidates the authorization.
         #[test]
         fn tampering_with_the_amount_invalidates_the_authorization() {
             let (keys, owners) = owner_set(3);
@@ -2677,5 +3383,80 @@ mod v29_signing_tests {
             tx.hash = tx.calculate_hash();
             assert!(!tx.verify(), "the amount is signed");
         }
+
+        /// Oversized signature arrays on V6 must be rejected both by `verify()` and by serde decode.
+        #[test]
+        fn a_v6_transaction_with_excessive_signatures_is_refused() {
+            let (keys, owners) = owner_set(3);
+            let mut tx = tx_for(multisig_address(&owners, 2));
+            tx.sign_v6(&owners, 2, &[&keys[0], &keys[1]]);
+            let sample = tx.authorization.as_ref().unwrap().signatures[0].clone();
+            tx.authorization.as_mut().unwrap().signatures =
+                vec![sample; MAX_V6_AUTHORIZATION_SIGNATURES + 1];
+            assert!(
+                !tx.verify(),
+                "V6 verify must reject signature arrays exceeding MAX_THRESHOLD_OWNERS"
+            );
+            let encoded = serde_json::to_vec(&tx).expect("serialize oversized V6");
+            assert!(
+                serde_json::from_slice::<Transaction>(&encoded).is_err(),
+                "bounded deserializer must reject V6 authorization with >16 signatures"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod relayer_result_leaf_tests {
+    use super::*;
+    use crate::cross_domain::message::{CrossDomainMessage, CrossDomainMessageParams, MessageKind};
+
+    fn result_with(kind: MessageKind, correlation: Option<[u8; 32]>) -> RelayerExternalResult {
+        let params = CrossDomainMessageParams {
+            source_domain: 1,
+            target_domain: 2,
+            source_height: 10,
+            event_index: 0,
+            nonce: 7,
+            sender: Address::from([1u8; 32]),
+            recipient: Address::from([2u8; 32]),
+            payload_hash: [3u8; 32],
+            kind,
+            expiry_height: 100,
+        };
+        let message = match correlation {
+            Some(c) => CrossDomainMessage::new_correlated(params, c),
+            None => CrossDomainMessage::new(params),
+        };
+        RelayerExternalResult {
+            chain: ExternalChain::Solana,
+            tx_hash: "0xabc".into(),
+            success: true,
+            message: Some(message),
+            receipt_proof: vec![1],
+            external_state_root: [9u8; 32],
+        }
+    }
+
+    /// P18-F03: a valid anchored result cannot be reused under another
+    /// message kind, correlation id, or domain pair.
+    #[test]
+    fn leaf_binds_message_kind_correlation_and_domains() {
+        let lock = result_with(MessageKind::BridgeLock, None);
+        let burn = result_with(MessageKind::BridgeBurn, None);
+        assert_ne!(lock.result_leaf(), burn.result_leaf());
+
+        let uncorrelated = result_with(MessageKind::BridgeBurn, None);
+        let correlated = result_with(MessageKind::BridgeBurn, Some([5u8; 32]));
+        assert_ne!(uncorrelated.result_leaf(), correlated.result_leaf());
+
+        let mut other_domain = result_with(MessageKind::BridgeBurn, None);
+        if let Some(ref mut m) = other_domain.message {
+            m.target_domain = 3;
+        }
+        assert_ne!(uncorrelated.result_leaf(), other_domain.result_leaf());
+
+        let same = result_with(MessageKind::BridgeBurn, None);
+        assert_eq!(uncorrelated.result_leaf(), same.result_leaf());
     }
 }

@@ -5,7 +5,7 @@
 //!
 //! | target           | fetched over | verification             | in the bar      |
 //! |------------------|--------------|--------------------------|-----------------|
-//! | Budlum manifest  | B.U.D.       | hash equals `manifest_id`| verified        |
+//! | Budlum manifest  | B.U.D.       | manifest hashes to the id, shards to the manifest | verified |
 //! | IPFS CID         | IPFS         | hash equals the CID      | verified        |
 //! | Arweave tx       | Arweave      | hash equals `data_root`  | verified        |
 //! | HTTPS URL        | HTTP         | TLS only                 | transport only  |
@@ -20,7 +20,7 @@
 
 use crate::arweave::{self, ArweaveVerdict};
 use crate::cid::{self, CidVerdict};
-use crate::content_id::{bytes_match, ContentId};
+use crate::content_id::{hash_fields_bytes, ContentId};
 use crate::evidence::{Claim, Evidence, Strength};
 
 /// A target: the thing a name resolves to.
@@ -68,8 +68,180 @@ pub trait Transport {
     /// # Errors
     ///
     /// A network error, content that is not found, or the size limit being
-    /// exceeded.
-    fn fetch(&self, target: &Target) -> Result<Vec<u8>, String>;
+    /// exceeded. `max_bytes` is the most the caller will accept: a transport
+    /// stops reading past it instead of buffering the whole body.
+    fn fetch(&self, target: &Target, max_bytes: usize) -> Result<Vec<u8>, String>;
+
+    /// Fetch the manifest a `bud://` manifest id names.
+    ///
+    /// A manifest id is the hash of the manifest preimage, not the hash of the
+    /// content, so the bytes alone can never be compared with it. Without the
+    /// manifest the fetcher cannot verify, so the default refuses.
+    ///
+    /// # Errors
+    ///
+    /// A network error, a manifest that is not found, or a transport that
+    /// cannot serve manifests (the default).
+    fn fetch_bud_manifest(&self, _manifest_id: &ContentId) -> Result<BudManifest, String> {
+        Err(String::from(
+            "this transport cannot serve B.U.D. manifests, so a bud:// target cannot be verified",
+        ))
+    }
+}
+
+/// One shard entry of a [`BudManifest`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// WIRING: exposed as the shard entry of the browser-side manifest
+/// above; it travels wherever a `BudManifest` is built or read.
+pub struct BudShard {
+    pub index: u32,
+    pub shard_id: ContentId,
+    pub size: u32,
+    /// Parity shards carry redundancy, not content.
+    pub parity: bool,
+}
+
+/// The fields of a B.U.D. manifest that its id commits to
+/// (`BDLM_MANIFEST_V4`, the same preimage as `budlum-core`'s
+/// `manifest_id_from_parts`).
+///
+/// The source, edition and dictionary commitments are carried as the exact
+/// bytes the chain writes into the preimage, so a manifest with a source regime
+/// verifies without this crate knowing the regime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// WIRING: exposed for the Budscan browser core, which fetches and
+/// verifies manifests off-chain through this crate's API; in-tree the
+/// parity tests pin its shape against the node's manifest.
+pub struct BudManifest {
+    pub shards: Vec<BudShard>,
+    pub erasure_k: u32,
+    pub erasure_n: u32,
+    pub encryption_tag: u8,
+    pub content_size: u64,
+    pub total_size: u64,
+    pub source_commitment: Vec<u8>,
+    pub edition_commitment: Vec<u8>,
+    pub dictionary_id: Option<ContentId>,
+}
+
+impl BudManifest {
+    /// A manifest of plain stored content: one data shard, classic edition,
+    /// no encryption, no dictionary. This is what a small unsharded upload
+    /// registers.
+    #[must_use]
+    ///
+    /// WIRING: exposed for the browser-side upload path that registers a
+    /// small object without sharding it; in-tree the constructor is
+    /// exercised through the parity fixtures.
+    pub fn single_shard(bytes: &[u8]) -> Self {
+        let size = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+        Self {
+            shards: vec![BudShard {
+                index: 0,
+                shard_id: ContentId::of(bytes),
+                size,
+                parity: false,
+            }],
+            erasure_k: 1,
+            erasure_n: 1,
+            encryption_tag: 0,
+            content_size: bytes.len() as u64,
+            total_size: bytes.len() as u64,
+            source_commitment: Vec::new(),
+            edition_commitment: Vec::new(),
+            dictionary_id: None,
+        }
+    }
+
+    /// The manifest id, recomputed from the fields.
+    #[must_use]
+    pub fn manifest_id(&self) -> ContentId {
+        let mut buf = Vec::with_capacity(32 + self.shards.len() * 41);
+        buf.extend_from_slice(b"BDLM_MANIFEST_V4");
+        let count = u32::try_from(self.shards.len()).unwrap_or(u32::MAX);
+        buf.extend_from_slice(&count.to_le_bytes());
+        for s in &self.shards {
+            buf.extend_from_slice(&s.index.to_le_bytes());
+            buf.extend_from_slice(&s.shard_id.0);
+            buf.extend_from_slice(&s.size.to_le_bytes());
+            buf.push(u8::from(s.parity));
+        }
+        buf.extend_from_slice(&self.erasure_k.to_le_bytes());
+        buf.extend_from_slice(&self.erasure_n.to_le_bytes());
+        buf.push(self.encryption_tag);
+        buf.extend_from_slice(&self.content_size.to_le_bytes());
+        buf.extend_from_slice(&self.total_size.to_le_bytes());
+        buf.extend_from_slice(&self.source_commitment);
+        buf.extend_from_slice(&self.edition_commitment);
+        if let Some(dict) = &self.dictionary_id {
+            // The chain's `manifest_id_from_parts` writes the field label
+            // before the presence byte. Without it, every dictionary-bound
+            // manifest hashes differently here than on the chain, so a
+            // legitimately registered object fails the id check that decides
+            // whether the fetched content may be shown at all.
+            buf.extend_from_slice(b"BDLM_DICTIONARY");
+            buf.push(1u8);
+            buf.extend_from_slice(&dict.0);
+        }
+        ContentId(hash_fields_bytes(&[b"BDLM_MANIFEST_V4", &buf]))
+    }
+
+    /// Whether `bytes` are the object this manifest describes: the data shards
+    /// in index order cut `bytes` (the last one zero padded) and every cut has
+    /// the shard's `ContentId`, and the object is exactly `content_size` long.
+    #[must_use]
+    ///
+    /// WIRING: exposed for the browser-side fetch that verifies a joined
+    /// object against its manifest before handing it to the page; the
+    /// parity tests pin the rule against the node's manifest in-tree.
+    pub fn describes(&self, bytes: &[u8]) -> bool {
+        if bytes.len() as u64 != self.content_size {
+            return false;
+        }
+        if self.shards.len() > MAX_MANIFEST_SHARDS
+            || self
+                .shards
+                .iter()
+                .any(|s| s.size as usize > MAX_CONTENT_BYTES)
+        {
+            return false;
+        }
+        let mut data: Vec<&BudShard> = self.shards.iter().filter(|s| !s.parity).collect();
+        data.sort_by_key(|s| s.index);
+        let data_count = data.len();
+        let mut off = 0usize;
+        for (position, shard) in data.iter().enumerate() {
+            let len = shard.size as usize;
+            let Some(end) = off.checked_add(len) else {
+                return false;
+            };
+            if position + 1 < data_count && end > bytes.len() {
+                // Only the final stripe may run past the object. Without this
+                // check every earlier stripe whose declared size ran past the
+                // end was zero-padded up to its declared size and hashed, so a
+                // manifest carrying `MAX_MANIFEST_SHARDS` maximal stripes made
+                // a single fetch hash hundreds of gigabytes. A cut that ends
+                // inside the object cannot describe it.
+                return false;
+            }
+            let id = if end <= bytes.len() {
+                ContentId::of(&bytes[off..end])
+            } else {
+                // Only the final stripe may run past the object, and only with
+                // zero padding.
+                let mut padded = bytes.get(off..).unwrap_or_default().to_vec();
+                padded.resize(len, 0);
+                ContentId::of(&padded)
+            };
+            if id != shard.shard_id {
+                return false;
+            }
+            off = end;
+        }
+        off >= bytes.len()
+    }
 }
 
 /// The result of a fetch: the bytes **and** how strongly they were verified.
@@ -95,6 +267,9 @@ impl Fetched {
 /// refuses.
 pub const MAX_CONTENT_BYTES: usize = 10 * 1024 * 1024;
 
+/// Maximum shard count accepted in a fetched manifest, matching `budlum-core`.
+const MAX_MANIFEST_SHARDS: usize = 65_536;
+
 /// Fetch a target and verify it.
 ///
 /// Verification is **always** performed; when it fails, the bytes are still
@@ -108,7 +283,7 @@ pub const MAX_CONTENT_BYTES: usize = 10 * 1024 * 1024;
 /// A transport error, a size overrun, or a target identifier that cannot be
 /// parsed.
 pub fn fetch_and_verify<T: Transport>(transport: &T, target: &Target) -> Result<Fetched, String> {
-    let bytes = transport.fetch(target)?;
+    let bytes = transport.fetch(target, MAX_CONTENT_BYTES)?;
     if bytes.len() > MAX_CONTENT_BYTES {
         return Err(format!(
             "{} content is {} bytes; the limit is {MAX_CONTENT_BYTES}",
@@ -119,18 +294,32 @@ pub fn fetch_and_verify<T: Transport>(transport: &T, target: &Target) -> Result<
 
     let evidence = match target {
         Target::Bud(manifest_id) => {
-            if bytes_match(*manifest_id, &bytes) {
+            // A manifest id names the manifest, not the bytes: the manifest has
+            // to hash to the id, and the bytes have to be what the manifest
+            // describes. Either step failing is a refusal; a transport that
+            // cannot serve the manifest is an error, never "verified".
+            let manifest = transport.fetch_bud_manifest(manifest_id)?;
+            let recomputed = manifest.manifest_id();
+            if recomputed != *manifest_id {
+                Evidence::new().with(Claim::new(
+                    "bud-fetcher",
+                    Strength::Refused,
+                    &format!(
+                        "the manifest hashes to {recomputed} but the manifest_id is {manifest_id}"
+                    ),
+                ))
+            } else if manifest.describes(&bytes) {
                 Evidence::new().with(Claim::new(
                     "bud-fetcher",
                     Strength::Verified,
-                    "the ContentId of the bytes equals the manifest_id",
+                    "the manifest hashes to the manifest_id and its shards hash to the bytes",
                 ))
             } else {
                 Evidence::new().with(Claim::new(
                     "bud-fetcher",
                     Strength::Refused,
                     &format!(
-                        "the ContentId of the bytes is {} but the manifest_id is {manifest_id}",
+                        "the bytes are not the object manifest {manifest_id} describes (ContentId of the bytes is {})",
                         ContentId::of(&bytes)
                     ),
                 ))
@@ -187,50 +376,210 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    struct Table(HashMap<String, Vec<u8>>);
+    struct Table {
+        bytes: HashMap<String, Vec<u8>>,
+        manifests: HashMap<String, BudManifest>,
+    }
 
     impl Table {
         fn with(key: &str, bytes: &[u8]) -> Self {
             let mut m = HashMap::new();
             m.insert(key.to_string(), bytes.to_vec());
-            Table(m)
+            Table {
+                bytes: m,
+                manifests: HashMap::new(),
+            }
+        }
+
+        /// A Budlum object: `served` arrives under the id of `manifest`.
+        fn bud(manifest: &BudManifest, served: &[u8]) -> Self {
+            let key = manifest.manifest_id().to_string();
+            let mut t = Table::with(&key, served);
+            t.manifests.insert(key, manifest.clone());
+            t
         }
     }
 
     impl Transport for Table {
-        fn fetch(&self, target: &Target) -> Result<Vec<u8>, String> {
+        fn fetch(&self, target: &Target, _max_bytes: usize) -> Result<Vec<u8>, String> {
             let key = match target {
                 Target::Bud(id) => id.to_string(),
                 Target::Ipfs(s) | Target::Https(s) => s.clone(),
                 Target::Arweave(r) => hex::encode(r),
             };
-            self.0
+            self.bytes
                 .get(&key)
                 .cloned()
                 .ok_or_else(|| format!("{key} bulunamadi"))
+        }
+
+        fn fetch_bud_manifest(&self, id: &ContentId) -> Result<BudManifest, String> {
+            self.manifests
+                .get(&id.to_string())
+                .cloned()
+                .ok_or_else(|| format!("manifest {id} not found"))
         }
     }
 
     #[test]
     fn bud_content_that_hashes_correctly_is_verified() {
         let bytes = b"<html>ayaz</html>";
-        let id = ContentId::of(bytes);
-        let t = Table::with(&id.to_string(), bytes);
+        let manifest = BudManifest::single_shard(bytes);
+        let id = manifest.manifest_id();
+        let t = Table::bud(&manifest, bytes);
         let got = fetch_and_verify(&t, &Target::Bud(id)).unwrap();
         assert_eq!(got.evidence.weakest(), Strength::Verified);
         assert!(got.is_displayable());
     }
 
     #[test]
+    fn the_transport_is_told_the_size_limit() {
+        struct Probe(std::cell::Cell<usize>);
+        impl Transport for Probe {
+            fn fetch(&self, _target: &Target, max_bytes: usize) -> Result<Vec<u8>, String> {
+                self.0.set(max_bytes);
+                Ok(Vec::new())
+            }
+        }
+        let probe = Probe(std::cell::Cell::new(0));
+        let _ = fetch_and_verify(&probe, &Target::Https(String::from("https://x/y")));
+        assert_eq!(probe.0.get(), MAX_CONTENT_BYTES);
+    }
+
+    #[test]
     fn bud_content_that_does_not_hash_is_refused_and_not_displayed() {
-        let id = ContentId::of(b"beklenen");
-        let t = Table::with(&id.to_string(), b"something else arrived");
+        let manifest = BudManifest::single_shard(b"beklenen");
+        let id = manifest.manifest_id();
+        let t = Table::bud(&manifest, b"something else arrived");
         let got = fetch_and_verify(&t, &Target::Bud(id)).unwrap();
         assert_eq!(got.evidence.weakest(), Strength::Refused);
         assert!(!got.is_displayable());
-        // The reason must carry both identities, or the user cannot tell what
-        // happened.
+        // The reason must carry the manifest identity, or the user cannot tell
+        // what happened.
         assert!(got.evidence.badge().contains(&id.to_string()));
+    }
+
+    /// P43-F01: a manifest id is not the `ContentId` of the bytes. Bytes whose
+    /// `ContentId` equals the id (the old, wrong comparison) are refused when no
+    /// manifest backs them.
+    #[test]
+    fn the_content_id_of_the_bytes_is_not_a_manifest_id() {
+        let bytes = b"<html>ayaz</html>";
+        let wrong_id = ContentId::of(bytes);
+        let t = Table::with(&wrong_id.to_string(), bytes);
+        // No manifest is served: the fetch fails closed.
+        assert!(fetch_and_verify(&t, &Target::Bud(wrong_id)).is_err());
+        // A manifest served under that id does not hash to it: refused.
+        let mut t = t;
+        t.manifests
+            .insert(wrong_id.to_string(), BudManifest::single_shard(bytes));
+        let got = fetch_and_verify(&t, &Target::Bud(wrong_id)).unwrap();
+        assert_eq!(got.evidence.weakest(), Strength::Refused);
+        assert!(!got.is_displayable());
+    }
+
+    /// The preimage is the chain's `manifest_id_from_parts`: this vector is
+    /// pinned on both sides (`src/storage/manifest.rs`, same bytes).
+    #[test]
+    fn the_single_shard_manifest_id_matches_the_chain_vector() {
+        assert_eq!(
+            BudManifest::single_shard(b"hello")
+                .manifest_id()
+                .to_string(),
+            "eb4912748b11896901a5ab57022cb8e117554dfb67233933fd3ea2e9fc076ca1"
+        );
+    }
+
+    /// The same parity vector, for a manifest that carries a dedup dictionary.
+    ///
+    /// The single-shard vector above only covers the dictionary-free preimage,
+    /// which is why the missing `BDLM_DICTIONARY` label went unnoticed: every
+    /// id it pins stayed correct. This one is pinned with the chain's
+    /// computation (`src/storage/manifest.rs`, same bytes, same value).
+    #[test]
+    fn a_dictionary_bound_manifest_id_matches_the_chain_vector() {
+        let mut manifest = BudManifest::single_shard(b"hello");
+        manifest.dictionary_id = Some(ContentId([0x11; 32]));
+        assert_eq!(
+            manifest.manifest_id().to_string(),
+            "44a313a2852858e91df89880151350a22a8c236a3c0f1fc7c916c2dfb8f5c257"
+        );
+    }
+
+    /// A sharded object with a zero padded final stripe verifies; a flipped
+    /// byte in any shard does not.
+    #[test]
+    fn a_sharded_object_is_verified_shard_by_shard() {
+        let bytes: Vec<u8> = (0u8..10).collect();
+        let shard_a = ContentId::of(&bytes[0..4]);
+        let shard_b = ContentId::of(&bytes[4..8]);
+        let mut tail = bytes[8..10].to_vec();
+        tail.resize(4, 0);
+        let shard_c = ContentId::of(&tail);
+        let manifest = BudManifest {
+            shards: vec![
+                BudShard {
+                    index: 0,
+                    shard_id: shard_a,
+                    size: 4,
+                    parity: false,
+                },
+                BudShard {
+                    index: 1,
+                    shard_id: shard_b,
+                    size: 4,
+                    parity: false,
+                },
+                BudShard {
+                    index: 2,
+                    shard_id: shard_c,
+                    size: 4,
+                    parity: false,
+                },
+            ],
+            erasure_k: 3,
+            erasure_n: 3,
+            encryption_tag: 0,
+            content_size: 10,
+            total_size: 12,
+            source_commitment: Vec::new(),
+            edition_commitment: Vec::new(),
+            dictionary_id: None,
+        };
+        let id = manifest.manifest_id();
+        let ok = Table::bud(&manifest, &bytes);
+        assert_eq!(
+            fetch_and_verify(&ok, &Target::Bud(id))
+                .unwrap()
+                .evidence
+                .weakest(),
+            Strength::Verified
+        );
+        let mut bad = bytes.clone();
+        bad[9] ^= 1;
+        let t = Table::bud(&manifest, &bad);
+        assert_eq!(
+            fetch_and_verify(&t, &Target::Bud(id))
+                .unwrap()
+                .evidence
+                .weakest(),
+            Strength::Refused
+        );
+    }
+
+    /// The manifest id commits to every field: a manifest edited after the
+    /// fact no longer hashes to the id the target names.
+    #[test]
+    fn a_tampered_manifest_does_not_hash_to_its_id() {
+        let bytes = b"<html>ayaz</html>";
+        let honest = BudManifest::single_shard(bytes);
+        let id = honest.manifest_id();
+        let mut forged = honest.clone();
+        forged.encryption_tag = 3;
+        let mut t = Table::with(&id.to_string(), bytes);
+        t.manifests.insert(id.to_string(), forged);
+        let got = fetch_and_verify(&t, &Target::Bud(id)).unwrap();
+        assert_eq!(got.evidence.weakest(), Strength::Refused);
     }
 
     #[test]
@@ -283,9 +632,18 @@ mod tests {
     #[test]
     fn oversized_content_is_refused_by_size_not_by_hash() {
         let big = vec![0u8; MAX_CONTENT_BYTES + 1];
-        let id = ContentId::of(&big);
-        let t = Table::with(&id.to_string(), &big);
+        let manifest = BudManifest::single_shard(&big);
+        let id = manifest.manifest_id();
+        let t = Table::bud(&manifest, &big);
         let err = fetch_and_verify(&t, &Target::Bud(id)).unwrap_err();
         assert!(err.contains("limit"), "{err}");
+    }
+
+    #[test]
+    fn describes_refuses_oversized_shard_entry_without_allocating_4gib() {
+        let body = b"hello world";
+        let mut manifest = BudManifest::single_shard(body);
+        manifest.shards[0].size = u32::MAX;
+        assert!(!manifest.describes(body));
     }
 }

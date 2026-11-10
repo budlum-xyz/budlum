@@ -3,7 +3,7 @@
 //! Why: the repo's spell check lived ONLY in CI (`.github/workflows/
 //! typos.yml`, calibrated via `.quality/typos.toml`). That let tree-wide
 //! findings surface for the first time in CI - the 2026-09-22 case being a
-//! two-character parameter name in `tools/bpqs_checksum_domination_exact.py`
+//! two-character parameter name in `tools/bpqs_checksum_domination_exact.py` (since ported to Rust)
 //! that read as a typo of `and`, passed every local gate, and tripped only
 //! the CI workflow. This gate runs the same whole-tree calibrated scan
 //! locally so the finding class is caught where every other gate runs.
@@ -36,7 +36,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         .output();
     match out {
         Ok(o) if o.status.success() => Ok(String::from(
-            "typos temiz. (whole-tree, calibrated, mirrors the CI workflow)",
+            "typos clean. (whole-tree, calibrated, mirrors the CI workflow)",
         )),
         Ok(o) => Err(format!(
             "typos findings:\n{}{}",
@@ -45,6 +45,22 @@ pub fn run(root: &Path) -> Result<String, String> {
         )),
         Err(e) => Err(format!("typos did not run: {e}")),
     }
+}
+
+/// The canary counts only when typos exits with its findings code and the
+/// report names the planted word. Any other failure is not a catch.
+fn canary_verdict(code: Option<i32>, report: &str, word: &str) -> Result<(), String> {
+    if code != Some(2) {
+        return Err(format!(
+            "self-test FAILED: typos exited with {code:?}, not the findings code 2"
+        ));
+    }
+    if !report.contains(word) {
+        return Err(String::from(
+            "self-test FAILED: the typos report does not name the planted word",
+        ));
+    }
+    Ok(())
 }
 
 /// # Errors
@@ -70,7 +86,28 @@ pub fn self_test() -> Result<String, String> {
         Ok(o) if o.status.success() => Err(String::from(
             "self-test FAILED: typos reported the planted misspelling as clean",
         )),
-        Ok(_) => Ok(String::from("self-test: typos catches the planted word.")),
+        Ok(o) => {
+            let report = format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            );
+            canary_verdict(o.status.code(), &report, &word)?;
+            Ok(String::from("self-test: typos catches the planted word."))
+        }
         Err(e) => Err(format!("self-test: typos does not run here: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_findings_code_with_the_word_is_a_catch() {
+        assert!(canary_verdict(Some(2), "error: `abc` should be", "abc").is_ok());
+        assert!(canary_verdict(Some(1), "abc", "abc").is_err());
+        assert!(canary_verdict(None, "abc", "abc").is_err());
+        assert!(canary_verdict(Some(2), "unknown flag", "abc").is_err());
     }
 }

@@ -17,6 +17,7 @@
 //! Transport types).
 
 pub mod assignment;
+pub mod column_commitment;
 pub mod content_id;
 pub mod db;
 pub mod derived;
@@ -47,6 +48,8 @@ pub mod qr_png;
 pub mod qr_receive;
 pub mod qr_recipe;
 pub mod qr_reemit;
+pub mod qr_verify;
+pub mod qr_verify_indep;
 pub mod qr_video;
 pub mod render;
 pub mod reveal_gateway;
@@ -69,6 +72,7 @@ pub mod view_grant;
 pub use assignment::{
     assign_object, assign_shard, displaced_shards, AssignmentError, ShardCandidate,
 };
+pub use column_commitment::{column_proof, column_root, verify_column_proof};
 pub use content_id::{ContentId, DEFAULT_CHUNK_SIZE_BYTES};
 pub use derived::{
     DerivedError, DerivedSpec, DerivedTransform, PrefixSpan, DERIVED_BLOCK_PIXELS,
@@ -123,7 +127,7 @@ pub mod pact_binding;
 pub use view_grant::{
     confidential_commit_digest, grant_issue_digest, grant_revoke_digest, social_delete_digest,
     view_claim_digest, ConfidentialBodyCommit, ConfidentialProofKind, GrantAuthError,
-    GrantAuthorization, ViewGrant, ViewGrantError, ViewGrantRegistry, ViewPolicy,
+    GrantAuthorization, GrantIssueTerms, ViewGrant, ViewGrantError, ViewGrantRegistry, ViewPolicy,
     VIEW_CLAIM_MAX_AGE_SECS,
 };
 
@@ -161,7 +165,7 @@ pub use transformed::{
 };
 
 pub use reveal_gateway::{
-    GrantScope, RevealGateway, RevealGatewayError, DEFAULT_REVEAL_BUDGET_FRAMES,
+    GrantScope, PreparedReveal, RevealGateway, RevealGatewayError, DEFAULT_REVEAL_BUDGET_FRAMES,
     MAX_FRAMES_PER_CALL, MAX_REVEAL_SESSIONS, REVEAL_SESSION_TTL_SECS,
 };
 pub use three_nft::{

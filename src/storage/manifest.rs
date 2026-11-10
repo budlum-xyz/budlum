@@ -54,7 +54,9 @@ impl ShardRef {
             kind: ShardKind::Data,
             index,
             shard_id: ContentId::of(chunk),
-            size: chunk.len() as u32,
+            // A chunk longer than u32::MAX would wrap and understate its size;
+            // saturate so the manifest size checks still see an oversize shard.
+            size: u32::try_from(chunk.len()).unwrap_or(u32::MAX),
         }
     }
 }
@@ -66,6 +68,13 @@ impl ShardRef {
 /// bytes. An object declaring client-side encryption and carrying fewer than
 /// that was not produced by any of them.
 pub const MIN_AEAD_CIPHERTEXT_BYTES: u64 = 16;
+
+/// Most shards one manifest may list. The check runs before any per-shard work, so a hostile
+/// manifest cannot make validation allocate or loop without bound.
+///
+/// Convenience: pub so an upload caller can refuse past the same
+/// shard-count bound manifest validation enforces here.
+pub const MAX_MANIFEST_SHARDS: usize = 65_536;
 
 /// How the bytes behind a manifest were protected before they left the
 /// uploader.
@@ -456,6 +465,28 @@ pub struct ContentManifest {
     /// object advertise a protection it never had.
     #[serde(default)]
     pub encryption: ContentEncryption,
+    /// Merkle roots over the columns of every PARITY shard, in shard order
+    /// (parity index 0 first).
+    ///
+    /// A coding audit checks that an operator can produce one byte column of a
+    /// parity shard that is consistent with the code. Consistency alone is
+    /// satisfiable by a column of *some* codeword, so without a commitment the
+    /// audit could never tell a holder from a memoriser. These roots are that
+    /// commitment: an audit answer carries the inclusion path for the byte it
+    /// claims, and a path cannot be produced without the real shard.
+    ///
+    /// Empty for replication (there is no parity to audit) and for manifests
+    /// written before this field, which get none of the guarantee - the audit
+    /// keeps its old, weaker meaning for them rather than inventing a proof.
+    ///
+    /// IDENTITY: included when non-empty, and following the rule the other
+    /// optional fields follow - a claim is committed only when something is
+    /// claimed - so the ids of manifests recorded before this field are
+    /// unchanged. A manifest whose roots could be edited after the fact could
+    /// be re-pointed at a different object's columns, which is exactly the
+    /// attack the field exists to stop.
+    #[serde(default)]
+    pub column_roots: Vec<[u8; 32]>,
 }
 
 /// The serde form of [`ContentManifest`]: the same fields in the same shape,
@@ -489,6 +520,8 @@ struct ContentManifestWire {
     content_size: u64,
     #[serde(default)]
     encryption: ContentEncryption,
+    #[serde(default)]
+    column_roots: Vec<[u8; 32]>,
 }
 
 impl From<ContentManifestWire> for ContentManifest {
@@ -510,6 +543,7 @@ impl From<ContentManifestWire> for ContentManifest {
             edition: w.edition,
             content_size: w.content_size,
             encryption: w.encryption,
+            column_roots: w.column_roots,
         }
     }
 }
@@ -570,6 +604,10 @@ impl ContentManifest {
             content_size: total,
             encryption,
             shards,
+            // Built from shard refs alone, so no shard bytes exist here and no
+            // column commitment can be honest. Callers that hold the encoded
+            // bytes set them with `with_column_roots`.
+            column_roots: Vec::new(),
         })
     }
 
@@ -595,6 +633,7 @@ impl ContentManifest {
                 source: &source,
                 dictionary_id: self.dictionary_id.as_ref(),
                 edition: self.edition,
+                column_roots: &self.column_roots,
             },
         );
         self.source = source;
@@ -622,9 +661,24 @@ impl ContentManifest {
                 source: &self.source,
                 dictionary_id: self.dictionary_id.as_ref(),
                 edition,
+                column_roots: &self.column_roots,
             },
         );
         self.edition = edition;
+        self
+    }
+
+    /// Test-only until a dictionary mint path exists: nothing on the live
+    /// upload path attaches a dictionary, so there is no production caller
+    /// to keep honest yet. Mirrors the edition builder above.
+    #[cfg(test)]
+    /// Attach (or clear) the dictionary commitment. Recomputes the id: a
+    /// manifest whose provenance changed under a stale id is exactly the
+    /// squatted-registration shape `verify_id` refuses.
+    #[must_use]
+    pub fn with_dictionary_id(mut self, dictionary_id: Option<ContentId>) -> Self {
+        self.dictionary_id = dictionary_id;
+        self.recompute_id();
         self
     }
 
@@ -639,6 +693,7 @@ impl ContentManifest {
                 source: &self.source,
                 dictionary_id: self.dictionary_id.as_ref(),
                 edition: self.edition,
+                column_roots: &self.column_roots,
             },
         );
     }
@@ -704,6 +759,7 @@ impl ContentManifest {
                 source: &self.source,
                 dictionary_id: self.dictionary_id.as_ref(),
                 edition: self.edition,
+                column_roots: &self.column_roots,
             },
         );
         if expected != self.manifest_id {
@@ -729,6 +785,12 @@ impl ContentManifest {
     pub fn validate_untrusted(&self) -> Result<(), String> {
         if self.shards.is_empty() {
             return Err("ContentManifest must have at least one shard".into());
+        }
+        if self.shards.len() > MAX_MANIFEST_SHARDS {
+            return Err(format!(
+                "ContentManifest lists {} shards, above the {MAX_MANIFEST_SHARDS} allowed",
+                self.shards.len()
+            ));
         }
         if self.shards.len() as u32 != self.shard_count {
             return Err(format!(
@@ -831,6 +893,39 @@ impl ContentManifest {
     /// that claims a tolerance it cannot deliver is worse than one that claims
     /// none, because a repair trigger would read the claim and conclude the
     /// object is still safe.
+    /// Attach the per-parity-shard column commitments.
+    ///
+    /// The caller must have the encoded bytes: each root is
+    /// [`crate::storage::column_commitment::column_root`] over the parity
+    /// shard at the same position. One root per parity shard, in parity order.
+    ///
+    /// # Errors
+    ///
+    /// A count that does not match the scheme's parity count is refused: a
+    /// missing root would silently drop an audit back to the weaker check it
+    /// had before, and an extra one names a shard that does not exist.
+    pub fn with_column_roots(mut self, roots: Vec<[u8; 32]>) -> Result<Self, String> {
+        let parity = self.erasure.parity_count() as usize;
+        if roots.len() != parity {
+            return Err(format!(
+                "column_roots has {} entries but the scheme has {parity} parity shards",
+                roots.len()
+            ));
+        }
+        self.column_roots = roots;
+        self.recompute_id();
+        Ok(self)
+    }
+
+    /// The column commitment of one parity shard, if this manifest carries one.
+    #[must_use]
+    pub fn column_root(&self, parity_index: u32) -> Option<[u8; 32]> {
+        self.column_roots
+            .get(parity_index as usize)
+            .copied()
+            .filter(|_| !self.column_roots.is_empty())
+    }
+
     pub fn with_erasure(mut self, erasure: ErasureScheme) -> Result<Self, String> {
         erasure.validate()?;
         if erasure.n != self.shard_count {
@@ -954,7 +1049,9 @@ impl ContentManifest {
             let slice = &data[off..end];
             shards.push(ShardRef::from_bytes(i, slice));
             off = end;
-            i += 1;
+            i = i
+                .checked_add(1)
+                .ok_or_else(|| "ContentManifest shard count exceeds u32".to_string())?;
         }
         Self::from_shards(shards)
     }
@@ -1016,6 +1113,8 @@ pub fn manifest_id_from_shards(shards: &[ShardRef]) -> ContentId {
 /// came from and under which claim they are registered.
 #[derive(Debug, Clone, Copy)]
 struct ManifestProvenance<'a> {
+    /// Per-parity-shard column roots; committed only when non-empty.
+    column_roots: &'a [[u8; 32]],
     /// Where the bytes came from (the upload path).
     pub source: &'a crate::storage::generated::ContentSource,
     /// Optional dictionary binding (dedup) the manifest commits to.
@@ -1036,6 +1135,7 @@ fn manifest_id_from_parts(
         source,
         dictionary_id,
         edition,
+        column_roots,
     } = provenance;
     let mut buf = Vec::with_capacity(32 + shards.len() * (4 + 32 + 4 + 1));
     buf.extend_from_slice(b"BDLM_MANIFEST_V4");
@@ -1068,9 +1168,23 @@ fn manifest_id_from_parts(
     // The dictionary commitment follows the same rule as the source commitment.
     // With no dictionary, no byte is written, so the preimage of manifests
     // recorded before this field does not change and their ids are preserved.
+    // A label separates it from the source bytes before it.
     if let Some(dict) = dictionary_id {
+        buf.extend_from_slice(b"BDLM_DICTIONARY");
         buf.push(1u8);
         buf.extend_from_slice(&dict.0);
+    }
+    // Column commitments, on the same rule as the other optional fields: no
+    // roots, no bytes, so a manifest recorded before this field keeps its id.
+    // A label goes first so the roots cannot be confused with a dictionary
+    // that happens to follow them.
+    if !column_roots.is_empty() {
+        buf.extend_from_slice(b"BDLM_COLUMNS");
+        buf.push(1u8);
+        buf.extend_from_slice(&(column_roots.len() as u32).to_le_bytes());
+        for root in column_roots {
+            buf.extend_from_slice(root);
+        }
     }
     ContentId(hash_fields_bytes(&[b"BDLM_MANIFEST_V4", &buf]))
 }
@@ -1097,6 +1211,7 @@ pub fn manifest_id_from_parts_stored(
             source: &crate::storage::generated::ContentSource::Stored,
             dictionary_id: None,
             edition: crate::storage::generated::BudStorageEdition::Classic,
+            column_roots: &[],
         },
     )
 }
@@ -1106,12 +1221,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shard_ref_from_bytes_records_the_exact_chunk_length() {
+        let shard = ShardRef::from_bytes(3, &[7u8; 10]);
+        assert_eq!(shard.size, 10);
+        assert_eq!(shard.index, 3);
+    }
+
+    #[test]
     fn manifest_id_is_deterministic() {
         let m1 = ContentManifest::from_bytes_sliced(b"hello world", 4).unwrap();
         let m2 = ContentManifest::from_bytes_sliced(b"hello world", 4).unwrap();
         assert_eq!(m1.manifest_id, m2.manifest_id);
         assert_eq!(m1.total_size, m2.total_size);
         assert_eq!(m1.shard_count, m2.shard_count);
+    }
+
+    /// The browser core (`crates/budscan`, `BudManifest::manifest_id`) keeps a
+    /// copy of this preimage; the vector is pinned there with the same bytes.
+    /// If this changes, the browser verifies against a stale formula.
+    #[test]
+    fn manifest_id_of_a_single_stored_shard_matches_the_browser_vector() {
+        let m = ContentManifest::from_bytes_sliced(b"hello", 1024).unwrap();
+        assert_eq!(
+            hex::encode(m.manifest_id.0),
+            "eb4912748b11896901a5ab57022cb8e117554dfb67233933fd3ea2e9fc076ca1"
+        );
+    }
+
+    /// Same vector as the browser copy (`crates/budscan/src/fetch.rs`,
+    /// `a_dictionary_bound_manifest_id_matches_the_chain_vector`).
+    ///
+    /// The single-shard vector above is dictionary-free, so it cannot see a
+    /// missing `BDLM_DICTIONARY` label on the browser side - and that is
+    /// exactly what drifted: every dictionary-bound manifest hashed
+    /// differently there and failed its own integrity check.
+    #[test]
+    fn manifest_id_of_a_dictionary_bound_manifest_matches_the_browser_vector() {
+        let m = ContentManifest::from_bytes_sliced(b"hello", 1024)
+            .unwrap()
+            .with_dictionary_id(Some(ContentId([0x11; 32])));
+        assert_eq!(
+            hex::encode(m.manifest_id.0),
+            "44a313a2852858e91df89880151350a22a8c236a3c0f1fc7c916c2dfb8f5c257"
+        );
     }
 
     #[test]
@@ -1126,6 +1278,15 @@ mod tests {
         let m1 = ContentManifest::from_bytes_sliced(b"hello world", 4).unwrap();
         let m2 = ContentManifest::from_bytes_sliced(b"hello WORLD", 4).unwrap();
         assert_ne!(m1.manifest_id, m2.manifest_id);
+    }
+
+    #[test]
+    fn a_manifest_cannot_list_more_shards_than_the_ceiling() {
+        let mut manifest = ContentManifest::from_shards(vec![shard(0, ShardKind::Data)]).unwrap();
+        let first = manifest.shards[0].clone();
+        manifest.shards = vec![first; MAX_MANIFEST_SHARDS + 1];
+        let err = manifest.validate_untrusted().unwrap_err();
+        assert!(err.contains("allowed"), "{err}");
     }
 
     #[test]

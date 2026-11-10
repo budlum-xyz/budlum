@@ -24,9 +24,9 @@ pub const ED_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Edition {
-    Bud1, // your own server or device: no rules, bring your own
-    Bud2, // storage in a .bud container
-    Bud3, // the recipe as the only object
+    Bud1 = 1, // your own server or device: no rules, bring your own
+    Bud2 = 2, // storage in a .bud container
+    Bud3 = 3, // the recipe as the only object
 }
 
 impl Edition {
@@ -122,10 +122,14 @@ pub fn bud1_digest(nft: &Bud1Nft) -> [u8; 32] {
     h.update(ED_MAGIC);
     h.update([1]); // edition 1
     h.update(nft.id);
+    // Length prefixes keep the fields apart: without them a shifted split
+    // between the uri and the server hashes the same.
+    h.update((nft.content_uri.len() as u64).to_le_bytes());
     h.update(nft.content_uri.as_bytes());
     match &nft.custody {
         Bud1Custody::External { server } => {
             h.update([0]);
+            h.update((server.len() as u64).to_le_bytes());
             h.update(server.as_bytes());
         }
         Bud1Custody::Device => h.update([1]),
@@ -148,6 +152,8 @@ impl EditionChoice {
     pub fn digest(&self) -> [u8; 32] {
         let mut h = Sha3_256::new();
         h.update(ED_MAGIC);
+        h.update(b"CHOICE");
+        // The discriminants are the wire bytes that `from_u8` reads.
         h.update([self.edition as u8]);
         h.update(self.ts_unix.to_le_bytes());
         h.finalize().into()
@@ -157,6 +163,16 @@ impl EditionChoice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_digest_hashes_the_wire_byte_and_keeps_fields_apart() {
+        for v in 1u8..=3 {
+            assert_eq!(Edition::from_u8(v).unwrap() as u8, v);
+        }
+        let a = Bud1Nft::new_external([1u8; 32], "\0c".into(), "a".into());
+        let b = Bud1Nft::new_external([1u8; 32], "c".into(), "a\0".into());
+        assert_ne!(bud1_digest(&a), bud1_digest(&b));
+    }
 
     #[test]
     fn edition_selection_is_deterministic() {

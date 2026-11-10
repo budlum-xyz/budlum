@@ -176,7 +176,8 @@ const REDACTED_MARK: &str = "[REDACTED]";
 /// compound names match anywhere in the key (`AWS_SECRET_ACCESS_KEY`,
 /// `openai_api_key`); the bare words must be the whole key, or prose such as
 /// "the token: abc" would lose its next word.
-const COMPOUND_SECRET_KEYS: [(&str, &str); 7] = [
+const COMPOUND_SECRET_KEYS: [(&str, &str); 8] = [
+    ("secret_key", "secret"),
     ("aws_secret", "aws_secret"),
     ("api_key", "api_key"),
     ("apikey", "api_key"),
@@ -276,20 +277,42 @@ impl SecretRedactor {
     fn pieces(content: &str) -> Vec<Piece<'_>> {
         let mut out = Vec::new();
         let mut token_start: Option<usize> = None;
+        // True while the token is the value of a secret key. Such a value runs
+        // to the next whitespace or quote, not to the next character outside
+        // the token set: `password=p@ss!word` is one value.
+        let mut in_value = false;
         let mut state = KeyState::default();
+        let is_quote = |ch: char| matches!(ch, '"' | '\'');
         for (idx, ch) in content.char_indices() {
-            if Self::is_token_char(ch) {
-                token_start.get_or_insert(idx);
+            let continues = if in_value {
+                !(ch.is_whitespace() || is_quote(ch))
+            } else {
+                Self::is_token_char(ch)
+            };
+            if continues {
+                if token_start.is_none() {
+                    token_start = Some(idx);
+                    in_value = state.value_of.is_some();
+                }
                 continue;
             }
             if let Some(start) = token_start.take() {
                 out.push(Self::classify(&content[start..idx], &mut state));
+                in_value = false;
+            }
+            // A value that starts with a character outside the token set.
+            if state.value_of.is_some()
+                && !(ch.is_whitespace() || is_quote(ch) || matches!(ch, '=' | ':'))
+            {
+                token_start = Some(idx);
+                in_value = true;
+                continue;
             }
             if matches!(ch, '=' | ':') {
                 if state.after_key.is_some() {
                     state.value_of = state.after_key;
                 }
-            } else if !(ch.is_whitespace() || matches!(ch, '"' | '\'')) {
+            } else if !(ch.is_whitespace() || is_quote(ch)) {
                 state = KeyState::default();
             }
             out.push(Piece::Plain(&content[idx..idx + ch.len_utf8()]));
@@ -342,7 +365,14 @@ impl SecretRedactor {
         COMPOUND_SECRET_KEYS
             .iter()
             .find(|(name, _)| lower.contains(name))
-            .or_else(|| BARE_SECRET_KEYS.iter().find(|(name, _)| lower == *name))
+            .or_else(|| {
+                BARE_SECRET_KEYS.iter().find(|(name, _)| {
+                    lower == *name
+                        || lower
+                            .strip_suffix(name)
+                            .is_some_and(|rest| rest.ends_with('_'))
+                })
+            })
             .map(|(_, kind)| *kind)
     }
 }
@@ -549,6 +579,20 @@ mod tests {
                 "an unredacted {text} must fail"
             );
         }
+    }
+
+    /// BLG-0650: a secret value with a character outside the token set was
+    /// cut there and the rest leaked, and keys such as DB_PASSWORD were not
+    /// recognised.
+    #[test]
+    fn secret_value_is_redacted_to_the_end_of_the_word() {
+        let (out, _) = SecretRedactor::redact("password=p@ss!word next");
+        assert_eq!(out, "password=[REDACTED] next");
+        let (out, _) = SecretRedactor::redact("DB_PASSWORD=hunter2 SECRET_KEY: \"a$b\"");
+        assert_eq!(out, "DB_PASSWORD=[REDACTED] SECRET_KEY: \"[REDACTED]\"");
+        let (same, kinds) = SecretRedactor::redact("the token: abc");
+        assert_eq!(same, "the token: [REDACTED]");
+        assert_eq!(kinds, vec!["token".to_string()]);
     }
 
     /// The gate refuses the redaction the first version produced: marker

@@ -331,16 +331,6 @@ pub trait BudlumApi {
         domain: crate::domain::DomainId,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    #[method(name = "bud_burnBridgeTransferWithEvent")]
-    async fn burn_bridge_transfer_with_event(
-        &self,
-        message_id: crate::cross_domain::MessageId,
-        domain: crate::domain::DomainId,
-        domain_height: u64,
-        event_index: u32,
-        expiry_height: u64,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
     #[method(name = "bud_unlockBridgeTransfer")]
     async fn unlock_bridge_transfer(
         &self,
@@ -431,7 +421,7 @@ pub trait BudlumApi {
         role_id: u32,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Submit a ZK proof (L1 ↔ BudZKVM bridge). Permissionless: anyone may
+    /// Submit a ZK proof (chain ↔ BudZKVM bridge). Permissionless: anyone may
     /// Submit; a valid proof is accepted regardless of registration. Registered
     /// Provers additionally earn a reward. Invalid proofs burn the fee.
     #[method(name = "bud_submitZkProof")]
@@ -466,15 +456,15 @@ pub trait BudlumApi {
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// (security audit §4) submit a QC fault proof.
-    /// Permissionless: anyone can challenge a QC blob they suspect
-    /// Contains an invalid Dilithium attestation. The proof must
-    /// Pass the consensus-side Merkle-inclusion + cryptographic
-    /// Verification (see `QcFaultProof::verify_against_blob`),
-    /// Otherwise the call is rejected. On success the underlying
-    /// QC blob's finality is invalidated from the proof's
-    /// Checkpoint height. The cost of producing a valid proof
-    /// (full dilithium5 signature forgery) makes this a free
-    /// Permissionless surface without a fee gate.
+    ///
+    /// Fail-closed (P01-F22): every reachable proof shape is refused with a
+    /// named reason. A proof naming a signature that verifies targets a
+    /// valid attestation; one naming a signature that does not verify is not
+    /// evidence against the named validator - garbage bytes naming anyone
+    /// are free to produce, and acting on them would make this permissionless
+    /// surface a frame-up rail. A sound evidence form (two attested
+    /// checkpoints at one height under one key) is the double-sign
+    /// `SlashingEvidence` path, not this RPC.
     #[method(name = "bud_submitQcFaultProof")]
     async fn submit_qc_fault_proof(
         &self,

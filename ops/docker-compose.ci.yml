@@ -32,3 +32,24 @@ services:
       # it lives in a file that has to be named on the command line.
       - BUDLUM_RPC_AUTH_REQUIRED=0
       - BUDLUM_RPC_ALLOWED_IPS=
+
+  # node2-4 also start an RPC listener (default `rpc_auth_required=true`) but
+  # the smoke stack configures no API key for them, so without this override
+  # they exit at startup with "RPC auth is required but no API key was
+  # configured" and crash-loop. The whole four-node mesh must be up for the
+  # liveness, metrics and RPC-isolation probes to mean anything.
+  node2:
+    environment:
+      - RUST_LOG=info
+      - BUDLUM_RPC_AUTH_REQUIRED=0
+      - BUDLUM_RPC_ALLOWED_IPS=
+  node3:
+    environment:
+      - RUST_LOG=info
+      - BUDLUM_RPC_AUTH_REQUIRED=0
+      - BUDLUM_RPC_ALLOWED_IPS=
+  node4:
+    environment:
+      - RUST_LOG=info
+      - BUDLUM_RPC_AUTH_REQUIRED=0
+      - BUDLUM_RPC_ALLOWED_IPS=

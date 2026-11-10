@@ -235,7 +235,7 @@ impl StorageProvider for InMemoryStorageProvider {
             b"BDLM_STORAGE_PROVIDER_PUT_V1",
             manifest.manifest_id.as_bytes(),
             content_id.as_bytes(),
-            &bytes.len().to_le_bytes(),
+            &(bytes.len() as u64).to_le_bytes(),
         ]);
         Ok(PutReceipt {
             content_id,
@@ -407,6 +407,22 @@ mod tests {
 
     fn deal_id(byte: u8) -> DealId {
         [byte; 32]
+    }
+
+    /// The put receipt hashes the length as a fixed u64, so it is the same on
+    /// 32 and 64 bit targets (P26-F12).
+    #[test]
+    fn put_receipt_commitment_uses_fixed_width_length() {
+        let (manifest, bytes) = manifest_and_bytes();
+        let mut provider = InMemoryStorageProvider::new();
+        let receipt = provider.put(&manifest, &bytes).unwrap();
+        let expected = hash_fields_bytes(&[
+            b"BDLM_STORAGE_PROVIDER_PUT_V1",
+            manifest.manifest_id.as_bytes(),
+            receipt.content_id.as_bytes(),
+            &(bytes.len() as u64).to_le_bytes(),
+        ]);
+        assert_eq!(receipt.provider_commitment, expected);
     }
 
     /// Every transport shape the pipe can emit is refused from a body slot,

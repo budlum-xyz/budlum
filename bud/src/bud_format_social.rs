@@ -102,11 +102,22 @@ impl SocialBridgeRecord {
     pub fn record_hash(&self) -> [u8; 32] {
         let mut h = Sha3_256::new();
         h.update(Self::DOMAIN);
+        match &self.platform {
+            SocialPlatform::AtProto => h.update([0u8]),
+            SocialPlatform::ActivityPub => h.update([1u8]),
+            SocialPlatform::Other(label) => {
+                h.update([2u8]);
+                h.update((label.len() as u64).to_le_bytes());
+                h.update(label.as_bytes());
+            }
+        }
         h.update((self.source_uri.len() as u64).to_le_bytes());
         h.update(self.source_uri.as_bytes());
         h.update((self.owner_did.len() as u64).to_le_bytes());
         h.update(self.owner_did.as_bytes());
-        h.update(self.content_id);
+        // The identity binds the content itself, not the stored field, so a
+        // record with a wrong content_id cannot carry a valid-looking hash.
+        h.update(content_id(&self.content));
         h.update([match self.ownership {
             OwnershipKind::Owned => 0u8,
             OwnershipKind::Licensed => 1u8,
@@ -122,8 +133,10 @@ impl SocialBridgeRecord {
     }
 
     /// Source drift: if the content on the platform differs, REJECT (the source changed).
+    /// An empty fetch proves nothing (a blocked fetch looks the same as a
+    /// deleted post), so it is not a match unless the record is empty too.
     pub fn verify_source(&self, platform_content: &[u8]) -> bool {
-        platform_content.is_empty() || self.content_id == content_id(platform_content)
+        self.content_id == content_id(platform_content)
     }
 }
 
@@ -193,7 +206,7 @@ mod tests {
     }
 
     #[test]
-    fn source_mismatch_rejected_but_empty_ok() {
+    fn source_mismatch_and_empty_fetch_rejected() {
         let rec = SocialBridgeRecord::new(
             SocialPlatform::Other("x"),
             "https://x.com/u/1",
@@ -201,12 +214,30 @@ mod tests {
             b"post".to_vec(),
             200,
         );
-        // source deleted (empty) -> still authorised
-        assert!(rec.verify_source(b""));
+        // an empty fetch is not a match: it cannot show the source is unchanged
+        assert!(!rec.verify_source(b""));
         // source content differs -> drift REFUSED
         assert!(!rec.verify_source(b"different"));
         // source identical -> OK
         assert!(rec.verify_source(b"post"));
+    }
+
+    #[test]
+    fn record_hash_binds_the_content_and_the_platform() {
+        let mut a =
+            SocialBridgeRecord::new(SocialPlatform::AtProto, "uri", "did", b"x".to_vec(), 1);
+        let before = a.record_hash();
+        a.content_id = [9u8; 32];
+        assert_eq!(
+            a.record_hash(),
+            before,
+            "a stray content_id does not move it"
+        );
+        a.content = b"y".to_vec();
+        assert_ne!(a.record_hash(), before, "the content does");
+        let b =
+            SocialBridgeRecord::new(SocialPlatform::ActivityPub, "uri", "did", b"x".to_vec(), 1);
+        assert_ne!(b.record_hash(), before, "so does the platform");
     }
 
     #[test]

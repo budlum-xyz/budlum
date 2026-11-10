@@ -58,7 +58,7 @@ fuzz_target!(|data: &[u8]| {
         if *b == 0 {
             continue;
         }
-        let lane = (selector as usize + k) % 256;
+        let lane = (selector as usize + k) % LEN;
         let byte = ((k / 256) + selector as usize) % 32;
         sig[lane][byte] ^= *b;
         if k >= LEN * 32 {

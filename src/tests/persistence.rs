@@ -84,11 +84,15 @@ fn slashing_history_survives_snapshot_round_trip() {
     // Both slashes AND records the report into the persistent history.
     let report = SlashingReport::consensus_double_sign(
         offender,
-        10,
-        "HASH_A".into(),
-        "HASH_B".into(),
-        vec![1u8; 48],
-        vec![2u8; 48],
+        SlashingProof::DoubleSign {
+            height: 10,
+            kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+            epoch: None,
+            block_hash_1: "HASH_A".into(),
+            block_hash_2: "HASH_B".into(),
+            signature_1: vec![1u8; 48],
+            signature_2: vec![2u8; 48],
+        },
         None,
     );
     let outcome = state
@@ -266,7 +270,10 @@ fn schema_2_snapshot_without_new_fields_still_deserializes() {
         "global_header_summary": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
         "snapshot_hash": "h"
     }"#;
-    let v2 = StateSnapshotV2::from_bytes(json.as_bytes())
+    let mut legacy: StateSnapshotV2 =
+        serde_json::from_str(json).expect("old schema-2 JSON must parse");
+    legacy.reseal_after_manual_edit();
+    let v2 = StateSnapshotV2::from_bytes(&serde_json::to_vec(&legacy).unwrap())
         .expect("old schema-2 snapshot must still deserialize");
     // From_bytes upgrades schema-2 to current (4) via C6 legacy-import
     assert_eq!(v2.schema_version, CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION);
@@ -333,4 +340,27 @@ fn serde_json_failure_is_a_real_class_now_surfaced_not_swallowed() {
         "demonstrates the old silent-empty behavior"
     );
     // New persistence path surfaces the same class as an Err instead.
+}
+
+#[test]
+fn truncated_and_garbage_snapshot_bytes_are_refused() {
+    let mut state = AccountState::new();
+    state
+        .registry
+        .register_validator(addr(1), 5_000, 0)
+        .unwrap();
+    let bytes = StateSnapshotV2::from_state(&state, snapshot_params()).to_bytes();
+
+    assert!(StateSnapshotV2::from_bytes(&bytes[..bytes.len() / 2]).is_err());
+    assert!(StateSnapshotV2::from_bytes(b"not a snapshot").is_err());
+    assert!(StateSnapshotV2::from_bytes(&[]).is_err());
+}
+
+#[test]
+fn a_snapshot_with_a_tampered_hash_does_not_verify() {
+    let state = AccountState::new();
+    let mut snapshot = StateSnapshotV2::from_state(&state, snapshot_params());
+    assert!(snapshot.verify());
+    snapshot.snapshot_hash = "00".repeat(32);
+    assert!(!snapshot.verify());
 }

@@ -15,7 +15,7 @@ pub const ML_DSA_87_AUTH_SIG_LEN: usize = crate::crypto::primitives::ML_DSA_87_S
 /// Chain-submitted private transfer (from wallet intent).
 ///
 /// `spent_commitments` are required in v1 so the note set can be updated
-/// Without a full membership STARK inside L1; nullifiers remain the public
+/// Without a full membership STARK inside the chain; nullifiers remain the public
 /// Double-spend tags. TEE path may later replace spent_commitments with a
 /// Proof-only membership argument.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,6 +23,11 @@ pub struct PrivateTransferSubmit {
     pub spent_commitments: Vec<NoteHash>,
     pub nullifiers: Vec<NoteHash>,
     pub output_commitments: Vec<NoteHash>,
+    /// BLG-0058 (P03-F01): one derivation proof per input, checked as
+    /// `nullifier[i] == derive_nullifier(commitment[i], proof[i])`. The
+    /// registry refuses a transfer without them.
+    #[serde(default)]
+    pub nullifier_proofs: Vec<NoteHash>,
     /// Wallet authorization over public digest (ed25519, 64 bytes).
     pub authorization_sig: Vec<u8>,
     /// Echo of wallet `public_digest` for audit / light clients.
@@ -36,6 +41,10 @@ impl PrivateTransferSubmit {
         }
         if self.spent_commitments.len() != self.nullifiers.len() {
             return Err("private transfer: input arity mismatch".into());
+        }
+        // BLG-0058: proofs are part of the transaction, one per input.
+        if self.nullifier_proofs.len() != self.nullifiers.len() {
+            return Err("private transfer: nullifier proof arity mismatch".into());
         }
         if self.output_commitments.is_empty() {
             return Err("private transfer: empty outputs".into());
@@ -53,6 +62,7 @@ impl PrivateTransferSubmit {
             .spent_commitments
             .iter()
             .chain(&self.nullifiers)
+            .chain(&self.nullifier_proofs)
             .chain(&self.output_commitments);
         for h in hashes {
             if !is_note_hash(h) {
@@ -101,6 +111,25 @@ impl PrivateTransferSubmit {
         h.finalize().into()
     }
 
+    /// Domain-separated authorization preimage binding `public_digest` to the
+    /// chain id, sending account, and sender nonce (BLG-0275 / P17-F09).
+    #[must_use]
+    pub fn authorization_message(
+        chain_id: u64,
+        sender: &[u8; 32],
+        sender_nonce: u64,
+        public_digest: &[u8; 32],
+    ) -> [u8; 32] {
+        use sha3::{Digest, Sha3_256};
+        let mut h = Sha3_256::new();
+        h.update(b"BUDLUM_PRIVATE_TRANSFER_AUTH_V1");
+        h.update(chain_id.to_le_bytes());
+        h.update(sender);
+        h.update(sender_nonce.to_le_bytes());
+        h.update(public_digest);
+        h.finalize().into()
+    }
+
     pub fn verify_digest_matches(&self) -> bool {
         self.public_digest
             == Self::compute_public_digest(&self.nullifiers, &self.output_commitments)
@@ -112,12 +141,17 @@ mod tests {
     use super::*;
 
     fn submit_with_sig(len: usize) -> PrivateTransferSubmit {
-        let nullifiers = vec![budlum_note_packing::hash_from_field(1)];
+        let commitment = budlum_note_packing::hash_from_field(3);
+        let proof = budlum_note_packing::hash_from_field(1);
+        let nullifiers = vec![
+            crate::privacy::note_registry::L1NoteRegistry::derive_nullifier(&commitment, &proof),
+        ];
         let outputs = vec![budlum_note_packing::hash_from_field(2)];
         PrivateTransferSubmit {
-            spent_commitments: vec![budlum_note_packing::hash_from_field(3)],
+            spent_commitments: vec![commitment],
             nullifiers: nullifiers.clone(),
             output_commitments: outputs.clone(),
+            nullifier_proofs: vec![proof],
             authorization_sig: vec![0u8; len],
             public_digest: PrivateTransferSubmit::compute_public_digest(&nullifiers, &outputs),
         }

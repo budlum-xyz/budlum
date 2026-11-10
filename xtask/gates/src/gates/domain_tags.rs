@@ -40,20 +40,35 @@ use std::path::Path;
 const INVENTORY: &str = "src/crypto/domain_tags.rs";
 
 /// Scan `*.rs` files under `root` for literals with either tag prefix,
-/// optionally excluding one file name (the inventory itself).
-fn tags_under(root: &Path, exclude: Option<&str>) -> BTreeSet<String> {
+/// optionally excluding one file by its path relative to `root` (the inventory
+/// itself).
+///
+/// # Errors
+///
+/// A missing scan root, an unreadable directory or an unreadable file. A scan
+/// that cannot look is not a clean scan.
+fn tags_under(root: &Path, exclude: Option<&str>) -> Result<BTreeSet<String>, String> {
     let mut tags = BTreeSet::new();
     for dir in ["src", "budzero", "crates", "bud"] {
         let base = root.join(dir);
-        scan_dir(&base, exclude, &mut tags);
+        if !base.is_dir() {
+            return Err(format!(
+                "the scan root {} is missing: tags under it would never be seen",
+                base.display()
+            ));
+        }
+        scan_dir(root, &base, exclude, &mut tags)?;
     }
-    tags
+    Ok(tags)
 }
 
-fn scan_dir(dir: &Path, exclude: Option<&str>, out: &mut BTreeSet<String>) {
-    let Ok(rd) = fs::read_dir(dir) else {
-        return;
-    };
+fn scan_dir(
+    root: &Path,
+    dir: &Path,
+    exclude: Option<&str>,
+    out: &mut BTreeSet<String>,
+) -> Result<(), String> {
+    let rd = fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
     let mut entries: Vec<_> = rd.filter_map(Result::ok).collect();
     entries.sort_by_key(std::fs::DirEntry::file_name);
     for e in entries {
@@ -62,19 +77,24 @@ fn scan_dir(dir: &Path, exclude: Option<&str>, out: &mut BTreeSet<String>) {
         };
         let path = e.path();
         if path_kind.is_dir() {
-            scan_dir(&path, exclude, out);
+            scan_dir(root, &path, exclude, out)?;
         } else if path.extension().is_some_and(|x| x == "rs") {
             if let Some(ex) = exclude {
-                if path.file_name().is_some_and(|n| n == ex) {
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if rel == ex {
                     continue;
                 }
             }
-            let Ok(text) = fs::read_to_string(&path) else {
-                continue;
-            };
+            let text = fs::read_to_string(&path)
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
             extract(&text, out);
         }
     }
+    Ok(())
 }
 
 /// `"BDLM_[A-Z0-9_]+"` and `"BUDLUM_[A-Z0-9_]+"` literals, de-quoted.
@@ -134,7 +154,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         fs::read_to_string(&inventory_path).map_err(|e| format!("cannot read {INVENTORY}: {e}"))?;
     let mut listed = BTreeSet::new();
     extract(&inventory_text, &mut listed);
-    let used = tags_under(root, Some("domain_tags.rs"));
+    let used = tags_under(root, Some(INVENTORY))?;
 
     let missing: Vec<&String> = used.difference(&listed).collect();
     if !missing.is_empty() {
@@ -257,6 +277,16 @@ pub fn self_test() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A missing scan root must fail, not pass silently.
+    #[test]
+    fn missing_scan_root_is_an_error() {
+        let dir = std::env::temp_dir().join(format!("dtags-missing-{}", std::process::id()));
+        fs::create_dir_all(dir.join("src")).unwrap();
+        let out = tags_under(&dir, None);
+        fs::remove_dir_all(&dir).unwrap();
+        assert!(out.is_err());
+    }
 
     /// A `'"'` character literal must not hide the tags after it.
     #[test]

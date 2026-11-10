@@ -54,11 +54,11 @@ pub fn run(root: &Path) -> Result<String, String> {
     if !deal_code.contains("admits_body()") {
         return Err("open_deal must call admits_body() - Three must not open storage deals".into());
     }
-    if !deal.contains("Three admits no storage deal") && !deal.contains("admits no storage deal") {
+    if !deal_code.contains("admits no storage deal") {
         return Err("open_deal must state Three admits no storage deal".into());
     }
     // confidential body refuse Three
-    if !deal.contains("confidential body commit refused") {
+    if !deal_code.contains("confidential body commit refused") {
         return Err("confidential body commit must refuse Three manifests".into());
     }
 
@@ -107,6 +107,20 @@ fn conf() { "confidential body commit refused" }
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
         return Err("canary: missing SealedGenerated passed".into());
+    }
+    // The refusal text only in a comment is not a refusal.
+    std::fs::write(dir.join("src/storage/generated.rs"), good_gen).map_err(|e| e.to_string())?;
+    std::fs::write(
+        dir.join("src/domain/storage_deal.rs"),
+        good_deal.replace(
+            "return Err(\"Three admits no storage deal\");",
+            "// \"Three admits no storage deal\"",
+        ),
+    )
+    .map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err("canary: a commented-out refusal passed".into());
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok("three-is-recipe-only canary OK".into())

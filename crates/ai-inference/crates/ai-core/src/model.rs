@@ -86,17 +86,17 @@ impl ModelSpec {
     }
 }
 
-/// A placeholder digest: the real SHA-256 (ring/sha2) arrives in the
-/// production phase. This function carries no security purpose; it is only
-/// used in the skeleton tests.
+/// The digest the output lock and the manifest use: SHA-256 over a domain tag
+/// and the bytes. The earlier skeleton mixed bytes with add and xor, so zero
+/// bytes contributed nothing and collisions were constructible (P34-F07).
 #[must_use]
 pub fn placeholder_digest(bytes: &[u8]) -> Hash32 {
-    let mut out = [0u8; 32];
-    for (i, b) in bytes.iter().enumerate() {
-        out[i % 32] = out[i % 32].wrapping_add(*b);
-        out[(i * 7 + 3) % 32] ^= b.rotate_left((i % 8) as u32);
-    }
-    out
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"BDLM_AI_CORE_DIGEST_V1");
+    h.update((bytes.len() as u64).to_le_bytes());
+    h.update(bytes);
+    h.finalize().into()
 }
 
 #[cfg(test)]
@@ -134,6 +134,16 @@ mod tests {
             crate::tier::ModelTier::Light,
         );
         assert_eq!(spec.tier, crate::tier::ModelTier::Light);
+    }
+
+    /// P34-F07: zero bytes must change the digest.
+    #[test]
+    fn digest_distinguishes_zero_padding() {
+        assert_ne!(placeholder_digest(&[]), placeholder_digest(&[0u8; 32]));
+        assert_ne!(
+            placeholder_digest(&[0u8; 32]),
+            placeholder_digest(&[0u8; 33])
+        );
     }
 
     #[test]

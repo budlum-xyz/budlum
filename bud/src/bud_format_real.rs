@@ -78,18 +78,18 @@ impl RealCompressor {
 pub struct RealBench;
 
 impl RealBench {
-    /// Verified ratios: REPRODUCIBLE with `scripts/measure_ratios.py --seed 7`
+    /// Verified ratios: REPRODUCIBLE with `cargo run --release --bin measure_ratios -- --seed 7`
     /// (a deterministic corpus of 50k JSON / 60k CSV / 80k LOG). The
     /// 8.48x/5.51x/7.68x values written in the old table came from a different
     /// (non-reproducible) corpus - as K19 honesty requires, they were replaced
     /// with the verified values (EK13).
     pub fn measured_ratios() -> Vec<(&'static str, f64)> {
         vec![
-            ("structural+zstd19 JSON", 7.83), // measure_ratios.py seed=7 (50k records)
-            ("structural+xz9 JSON", 8.07),    // measure_ratios.py seed=7
-            ("structural+zstd19 CSV", 3.55),  // measure_ratios.py seed=7 (60k lines)
-            ("structural+zstd19 LOG", 6.17),  // measure_ratios.py seed=7 (80k lines)
-            ("structural+xz9 LOG", 6.30),     // measure_ratios.py seed=7
+            ("structural+zstd19 JSON", 7.83), // measure_ratios seed=7 (50k records)
+            ("structural+xz9 JSON", 8.07),    // measure_ratios seed=7
+            ("structural+zstd19 CSV", 3.55),  // measure_ratios seed=7 (60k lines)
+            ("structural+zstd19 LOG", 6.17),  // measure_ratios seed=7 (80k lines)
+            ("structural+xz9 LOG", 6.30),     // measure_ratios seed=7
             ("BUD-HFM1 (built-in Huffman) LOG", 1.69), // over a 13.98MB sample (CLI evidence)
         ]
     }

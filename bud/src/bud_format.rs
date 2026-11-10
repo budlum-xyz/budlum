@@ -186,8 +186,10 @@ impl BudHeader {
             chunk_count: 1,
             dictionary_hash: [0u8; 32],
             tier: 1,
-            erasure_k: 18,
-            erasure_p: 3,
+            // v1 stores no erasure code: (0, 0) says so. Real repair needs
+            // bud_format_erasure and a stored layout (see BLG-0568).
+            erasure_k: 0,
+            erasure_p: 0,
             version_number: 1,
             previous_version_hash: [0u8; 32],
         }
@@ -207,7 +209,11 @@ pub struct BudFile {
     pub chunks: Vec<BudChunk>,
     pub merkle_root: [u8; 32],
     pub pq_signature: Option<Vec<u8>>,
-    pub pq_public_key: Option<Vec<u8>>, // the ML-DSA-87 verification key (required for PQ_SIGNED)
+    /// UNTRUSTED provenance: the key the producer says it signed with.
+    /// Never feed this to a verifier - it travels inside the object it would
+    /// authenticate. Verification takes the caller's key
+    /// ([`BudFile::verify_pq_signature_with`]).
+    pub pq_public_key: Option<Vec<u8>>,
     pub encryption_key_wrapped: Option<Vec<u8>>,
     pub pollen_consent_token: Option<String>,
     pub files: Vec<BudFileEntry>,
@@ -224,9 +230,6 @@ fn hash(data: &[u8]) -> [u8; 32] {
     h.update(data);
     h.finalize().into()
 }
-fn xor(a: &[u8], b: &[u8]) -> Vec<u8> {
-    a.iter().zip(b.iter()).map(|(x, y)| x ^ y).collect()
-}
 
 impl BudFile {
     pub fn encode(
@@ -242,12 +245,12 @@ impl BudFile {
         let cid = hash(&payload);
         let orig = hash(original);
         let ch = hash(&payload);
-        let p1 = xor(&payload, &vec![0xAA; payload.len()]);
-        let p2 = xor(&payload, &vec![0x55; payload.len()]);
+        // No parity: the old shards were the payload XOR a constant, each one
+        // a full copy and no k-of-n code.
         let chunk = BudChunk {
             hash: ch,
             data: payload,
-            parity_shards: vec![p1, p2],
+            parity_shards: vec![],
         };
         let hdr = BudHeader::new(class, mime, w, h, cid, orig, pipe_id, flags);
         Self {
@@ -285,6 +288,10 @@ impl BudFile {
             if total > Self::MAX_DECOMPRESSED_BYTES {
                 return Err("K-BUD-STREAM: total > 100MB (OOM)");
             }
+            // Never hand unverified bytes to the sink.
+            if hash(&chunk.data) != chunk.hash {
+                return Err("K-BUD-STREAM: chunk hash mismatch");
+            }
             sink(&chunk.data)?;
         }
         Ok(total)
@@ -299,19 +306,33 @@ impl BudFile {
         original_len as f64 / payload as f64
     }
 
+    /// Verify the PQ signature against a key the CALLER trusts.
+    ///
     /// Fix (2026-08-16): a .bud carrying the PQ_SIGNED flag must not be
     /// accepted by looking at the signature SIZE alone; the signature must be
     /// verified CRYPTOGRAPHICALLY against the ML-DSA-87 (FIPS 204 NIST final)
     /// public key. The message is domain tagged: BDLM_PQ_SIGN_V1 || content_id.
     /// A signature that cannot be verified is REFUSED.
-    pub fn verify_pq_signature(&self) -> Result<(), &'static str> {
+    ///
+    /// `trusted_key` is the publisher key the caller already trusts - pinned in
+    /// its configuration, carried with the content id, or delivered out of
+    /// band. It is deliberately NOT read from the container: a verification key
+    /// that travels inside the object being authenticated proves only that the
+    /// object agrees with itself, because whoever can rewrite the file can
+    /// rewrite the key. [`Self::pq_public_key`] stays on the wire as untrusted
+    /// provenance for display and nothing on the authentication path may read
+    /// it.
+    ///
+    /// WIRING: this is the door for a caller that already holds the publisher
+    /// key - a pinned trust store, or the key that arrived with the content id
+    /// out of band. `decode` is deliberately not that caller: a container
+    /// cannot authenticate itself, so the call belongs where the publisher's
+    /// identity is known and not in the parser.
+    pub fn verify_pq_signature_with(&self, trusted_key: &[u8]) -> Result<(), &'static str> {
         let sig = self.pq_signature.as_ref().ok_or("KQ-BUD-PQ: no sig")?;
-        let pk = self
-            .pq_public_key
-            .as_ref()
-            .ok_or("KQ-BUD-PQ: no public key")?;
+        let pk = trusted_key;
         // ML-DSA-87: decode the key and the signature
-        let enc_vk = ml_dsa::EncodedVerifyingKey::<ml_dsa::MlDsa87>::try_from(pk.as_slice())
+        let enc_vk = ml_dsa::EncodedVerifyingKey::<ml_dsa::MlDsa87>::try_from(pk)
             .map_err(|_| "KQ-BUD-PQ: invalid public key")?;
         let vk87 = ml_dsa::VerifyingKey::<ml_dsa::MlDsa87>::decode(&enc_vk);
         let sig87 = ml_dsa::Signature::<ml_dsa::MlDsa87>::try_from(sig.as_slice())
@@ -349,9 +370,19 @@ impl BudFile {
             return Err("K-BUD: no chunks and no files");
         }
         if !self.chunks.is_empty() {
+            // v1 holds exactly one chunk. A second chunk would carry bytes that
+            // no hash covers, and decode returns the first chunk only.
+            if self.chunks.len() != 1 || self.header.chunk_count != 1 {
+                return Err("K-BUD: v1 holds exactly one chunk");
+            }
             let payload = &self.chunks[0].data;
             if hash(payload) != self.header.content_id {
                 return Err("K-BUD: content_id mismatch");
+            }
+            // The stored chunk hash is recomputed here, so the root below is
+            // the hash of the data and not a stored field.
+            if hash(payload) != self.chunks[0].hash {
+                return Err("K-BUD: chunk hash mismatch");
             }
             if self.merkle_root != self.chunks[0].hash {
                 return Err("K-BUD: merkle mismatch");
@@ -361,7 +392,21 @@ impl BudFile {
             return Err("K-BUD-ENCRYPT: no kw");
         }
         if self.header.flags.is_pq_signed() {
-            self.verify_pq_signature()?;
+            // Structural only. A signature inside a container cannot be
+            // verified without a key from outside it (see
+            // [`Self::verify_pq_signature_with`]), so `decode` checks that the
+            // file carries a well-formed signature and leaves the cryptographic
+            // answer to the caller that knows the publisher. Nothing here - and
+            // nothing downstream - treats the flag as provenance or
+            // authorisation on the strength of the embedded key.
+            self.pq_signature
+                .as_ref()
+                .ok_or("KQ-BUD-PQ: no sig")
+                .and_then(|sig| {
+                    ml_dsa::Signature::<ml_dsa::MlDsa87>::try_from(sig.as_slice())
+                        .map(|_| ())
+                        .map_err(|_| "KQ-BUD-PQ: invalid signature")
+                })?;
         }
         if self.header.flags.is_delta() && self.header.previous_version_hash == [0u8; 32] {
             return Err("K-BUD-VERSION: delta no prev");
@@ -373,13 +418,25 @@ impl BudFile {
         }
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
+    /// Serialise without silent truncation: a field that does not fit its
+    /// length prefix is an error (BLG-0574).
+    pub fn try_to_bytes(&self) -> Result<Vec<u8>, &'static str> {
+        fn len16(n: usize) -> Result<[u8; 2], &'static str> {
+            u16::try_from(n)
+                .map(u16::to_le_bytes)
+                .map_err(|_| "K-BUD: field over 65535 bytes")
+        }
+        fn len32(n: usize) -> Result<[u8; 4], &'static str> {
+            u32::try_from(n)
+                .map(u32::to_le_bytes)
+                .map_err(|_| "K-BUD: field over 4 GiB")
+        }
         let mut out = Vec::new();
         out.extend_from_slice(&BUD_MAGIC);
         out.extend_from_slice(&self.header.version.to_le_bytes());
         out.extend_from_slice(&(self.header.format_class as u16).to_le_bytes());
         let mime = self.header.original_mime.as_bytes();
-        out.extend_from_slice(&(mime.len() as u16).to_le_bytes());
+        out.extend_from_slice(&len16(mime.len())?);
         out.extend_from_slice(mime);
         out.extend_from_slice(&self.header.width.to_le_bytes());
         out.extend_from_slice(&self.header.height.to_le_bytes());
@@ -396,34 +453,48 @@ impl BudFile {
         out.extend_from_slice(&self.header.previous_version_hash);
         for chunk in &self.chunks {
             out.extend_from_slice(&chunk.hash);
-            out.extend_from_slice(&(chunk.data.len() as u32).to_le_bytes());
+            out.extend_from_slice(&len32(chunk.data.len())?);
             out.extend_from_slice(&chunk.data);
-            out.push(chunk.parity_shards.len() as u8);
+            let parity_count = u8::try_from(chunk.parity_shards.len())
+                .map_err(|_| "K-BUD: over 255 parity shards")?;
+            out.push(parity_count);
             for p in &chunk.parity_shards {
-                out.extend_from_slice(&(p.len() as u32).to_le_bytes());
+                out.extend_from_slice(&len32(p.len())?);
                 out.extend_from_slice(p);
             }
         }
         out.extend_from_slice(&self.merkle_root);
         if let Some(sig) = &self.pq_signature {
-            out.extend_from_slice(&(sig.len() as u16).to_le_bytes());
+            out.extend_from_slice(&len16(sig.len())?);
             out.extend_from_slice(sig);
         } else {
             out.extend_from_slice(&0u16.to_le_bytes());
         }
         if let Some(kw) = &self.encryption_key_wrapped {
-            out.extend_from_slice(&(kw.len() as u16).to_le_bytes());
+            out.extend_from_slice(&len16(kw.len())?);
             out.extend_from_slice(kw);
         } else {
             out.extend_from_slice(&0u16.to_le_bytes());
         }
         if let Some(token) = &self.pollen_consent_token {
-            out.extend_from_slice(&(token.len() as u16).to_le_bytes());
+            out.extend_from_slice(&len16(token.len())?);
             out.extend_from_slice(token.as_bytes());
         } else {
             out.extend_from_slice(&0u16.to_le_bytes());
         }
-        out
+        // Optional trailing field: the PQ verification key. It is written only
+        // when present, so a file without a key keeps its old bytes.
+        if let Some(pk) = &self.pq_public_key {
+            out.extend_from_slice(&len16(pk.len())?);
+            out.extend_from_slice(pk);
+        }
+        Ok(out)
+    }
+
+    /// Infallible form. A field that does not fit gives an empty vector,
+    /// which `from_bytes` refuses; use `try_to_bytes` to see the reason.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.try_to_bytes().unwrap_or_default()
     }
 
     pub fn from_bytes(data: &[u8]) -> Result<Self, &'static str> {
@@ -450,7 +521,9 @@ impl BudFile {
         if data.len() < off + mime_len {
             return Err("K-BUD: mime");
         }
-        let mime = String::from_utf8_lossy(&data[off..off + mime_len]).to_string();
+        let mime = std::str::from_utf8(&data[off..off + mime_len])
+            .map_err(|_| "K-BUD: mime not utf8")?
+            .to_string();
         off += mime_len;
         if data.len() < off + 4 + 4 + 32 + 32 + 2 + 2 + 4 + 32 + 3 + 4 + 32 {
             return Err("K-BUD: hdr");
@@ -573,11 +646,33 @@ impl BudFile {
             if data.len() < off + tok_len {
                 return Err("K-BUD: token");
             }
-            let t = String::from_utf8_lossy(&data[off..off + tok_len]).to_string();
+            let t = std::str::from_utf8(&data[off..off + tok_len])
+                .map_err(|_| "K-BUD: token not utf8")?
+                .to_string();
+            off += tok_len;
             Some(t)
         } else {
             None
         };
+        let pq_pk = if off < data.len() {
+            if data.len() < off + 2 {
+                return Err("K-BUD: pklen");
+            }
+            let pk_len = u16::from_le_bytes([data[off], data[off + 1]]) as usize;
+            off += 2;
+            if pk_len == 0 || data.len() < off + pk_len {
+                return Err("K-BUD: pk");
+            }
+            let k = data[off..off + pk_len].to_vec();
+            off += pk_len;
+            Some(k)
+        } else {
+            None
+        };
+        // Two byte strings must not parse to one file.
+        if off != data.len() {
+            return Err("K-BUD: trailing bytes");
+        }
         let hdr = BudHeader {
             version,
             format_class: class,
@@ -601,7 +696,7 @@ impl BudFile {
             chunks,
             merkle_root: merkle,
             pq_signature: pq_sig,
-            pq_public_key: None,
+            pq_public_key: pq_pk,
             encryption_key_wrapped: kw,
             pollen_consent_token: token,
             files: vec![],
@@ -623,7 +718,28 @@ pub struct RatioCandidate {
 pub struct MultiRatioConsensus;
 
 impl MultiRatioConsensus {
+    /// The ratio of a candidate, measured from its payload. A hand-written
+    /// literal is a claim, not a measurement (BLG-0573).
+    fn measured_ratio(original_len: usize, payload_len: usize) -> f64 {
+        if payload_len == 0 {
+            return 1.0;
+        }
+        original_len as f64 / payload_len as f64
+    }
+
     pub fn candidates_for_format(class: BudFormatClass, original: &[u8]) -> Vec<RatioCandidate> {
+        Self::claimed_candidates(class, original)
+            .into_iter()
+            .map(|mut c| {
+                // The listed ratio is the target of the pipe. Nothing here
+                // compresses, so the ratio that counts is the measured one.
+                c.ratio = Self::measured_ratio(original.len(), c.payload.len());
+                c
+            })
+            .collect()
+    }
+
+    fn claimed_candidates(class: BudFormatClass, original: &[u8]) -> Vec<RatioCandidate> {
         // Generation was removed from the lists: no regenerative, optical
         // prompt, diffusion or code recipe. Deterministic and proven only, with
         // no repo dependency.
@@ -817,6 +933,9 @@ impl BudGates {
     /// integer path gives the same answer everywhere.
     pub fn k_bud_ratio(f: &BudFile, original_len: usize) -> Result<(), &'static str> {
         let payload: usize = f.chunks.iter().map(|c| c.data.len()).sum();
+        if payload == 0 && original_len > 0 {
+            return Err("K-BUD-RATIO: empty payload for a non-empty original (zip bomb)");
+        }
         let measured = crate::bud_fixed_point::fixed_ratio(original_len as u64, payload as u64);
         if measured > MAX_RATIO_FIXED {
             return Err("K-BUD-RATIO: >100:1 (zip bomb)");
@@ -829,14 +948,6 @@ impl BudGates {
             // the old optical range, now forbidden
             return Err("K-BUD-GENERATIVE-REMOVED: generative pipe_id 10-19 is forbidden, generation was removed from the lists");
         }
-        Ok(())
-    }
-    pub fn k_bud_repo_dep(_f: &BudFile) -> Result<(), &'static str> {
-        // is there a repo hash? self-contained is OK
-        Ok(())
-    }
-    pub fn k_bud_report_exists() -> Result<(), &'static str> {
-        // check whether the report exists (file system)
         Ok(())
     }
     pub fn k_bud_video_revolutionary(ratio: f64) -> Result<(), &'static str> {
@@ -868,6 +979,96 @@ impl BudGates {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn v1_encode_stores_no_fake_parity() {
+        let payload = b"payload bytes".to_vec();
+        let f = BudFile::encode(
+            &payload,
+            BudFormatClass::Json,
+            "application/json",
+            0,
+            0,
+            3,
+            BudFlags::new(true, true, false, false, false, false),
+            payload.clone(),
+        );
+        assert!(f.chunks[0].parity_shards.is_empty());
+        assert_eq!((f.header.erasure_k, f.header.erasure_p), (0, 0));
+        // The file is about one payload, not three.
+        assert!(f.to_bytes().len() < 3 * payload.len() + 300);
+        let back = BudFile::from_bytes(&f.to_bytes()).unwrap();
+        assert_eq!(back.decode().unwrap(), payload);
+    }
+    fn one_chunk_file() -> BudFile {
+        BudFile::encode(
+            b"abc",
+            BudFormatClass::Json,
+            "application/json",
+            0,
+            0,
+            3,
+            BudFlags::new(true, true, false, false, false, false),
+            b"abc".to_vec(),
+        )
+    }
+    #[test]
+    fn decode_rejects_unauthenticated_extra_chunk() {
+        let mut f = one_chunk_file();
+        assert!(f.decode().is_ok());
+        f.chunks.push(BudChunk {
+            hash: [9u8; 32],
+            data: b"smuggled".to_vec(),
+            parity_shards: vec![],
+        });
+        f.header.chunk_count = 2;
+        assert!(f.decode().is_err());
+        // The streaming path refuses the chunk whose hash does not match.
+        let mut seen = Vec::new();
+        let r = f.decode_streaming(|c| {
+            seen.extend_from_slice(c);
+            Ok(())
+        });
+        assert!(r.is_err());
+        assert!(!seen.windows(8).any(|w| w == b"smuggled"));
+    }
+    #[test]
+    fn decode_recomputes_the_chunk_hash() {
+        let mut f = one_chunk_file();
+        f.chunks[0].hash = [7u8; 32];
+        f.merkle_root = [7u8; 32];
+        assert!(f.decode().is_err());
+    }
+    #[test]
+    fn a_pq_signed_file_survives_serialisation() {
+        let sk = ml_dsa::SigningKey::<ml_dsa::MlDsa87>::from_seed(&[5u8; 32].into());
+        let mut f = one_chunk_file();
+        f.header.flags = BudFlags(BudFlags::PQ_SIGNED);
+        f.sign_pq(&sk).unwrap();
+        let back = BudFile::from_bytes(&f.to_bytes()).unwrap();
+        assert_eq!(back.pq_public_key, f.pq_public_key);
+        assert_eq!(back.decode().unwrap(), b"abc");
+    }
+    #[test]
+    fn writer_refuses_truncation_and_reader_refuses_noise() {
+        let mut f = one_chunk_file();
+        f.header.original_mime = "a".repeat(70_000);
+        assert!(f.try_to_bytes().is_err());
+        assert!(BudFile::from_bytes(&f.to_bytes()).is_err());
+        let mut f = one_chunk_file();
+        f.chunks[0].parity_shards = vec![vec![1u8]; 256];
+        assert!(f.try_to_bytes().is_err());
+        let f = one_chunk_file();
+        let good = f.try_to_bytes().unwrap();
+        // Trailing bytes are refused.
+        let mut trailing = good.clone();
+        trailing.push(0);
+        assert!(BudFile::from_bytes(&trailing).is_err());
+        // Invalid UTF-8 in the mime is refused, not normalised.
+        let mut bad = good.clone();
+        bad[14] = 0xFF;
+        assert!(BudFile::from_bytes(&bad).is_err());
+        assert!(BudFile::from_bytes(&good).is_ok());
+    }
     #[test]
     fn generative_removed() {
         let f = BudFile::encode(
@@ -976,13 +1177,37 @@ mod tests {
         assert!(BudGates::k_bud_ratio(&f2, original.len()).is_ok());
     }
     #[test]
+    fn ratio_gate_rejects_empty_payload_with_claimed_original() {
+        let f = BudFile::encode(
+            &[],
+            BudFormatClass::Json,
+            "application/json",
+            0,
+            0,
+            3,
+            BudFlags::new(true, true, false, false, false, false),
+            Vec::new(),
+        );
+        assert!(BudGates::k_bud_ratio(&f, 4 << 30).is_err());
+        assert!(BudGates::k_bud_ratio(&f, 0).is_ok());
+    }
+    #[test]
     fn multi_ratio_best_all_files() {
-        let best_video =
-            MultiRatioConsensus::candidates_for_format(BudFormatClass::Video, b"video");
-        assert!(best_video.iter().any(|c| c.ratio >= 100.0));
-        let best_image =
-            MultiRatioConsensus::candidates_for_format(BudFormatClass::Image, b"image");
-        assert!(best_image.iter().any(|c| c.ratio >= 20.0));
+        // The payloads are the original bytes, so every measured ratio is 1.
+        for (class, data) in [
+            (BudFormatClass::Video, &b"video"[..]),
+            (BudFormatClass::Image, &b"image"[..]),
+            (BudFormatClass::Log, &b"log log log"[..]),
+        ] {
+            let cands = MultiRatioConsensus::candidates_for_format(class, data);
+            assert!(!cands.is_empty());
+            for c in cands {
+                assert_eq!(c.ratio, 1.0, "{}: ratio must be measured", c.pipe_name);
+            }
+        }
+        // A claim of 13750x is no longer selectable.
+        let log = MultiRatioConsensus::candidates_for_format(BudFormatClass::Log, b"x");
+        assert!(MultiRatioConsensus::select_best(log, 100.0).is_none());
     }
     #[test]
     fn from_bytes_never_panics_on_truncation() {
@@ -1027,8 +1252,11 @@ mod tests {
         );
         f.header.flags = BudFlags(BudFlags::PQ_SIGNED);
         f.sign_pq(&sk).expect("imzala");
+        // The trusted key comes from OUT OF BAND. `sign_pq` also stored a copy
+        // inside the container; that copy is provenance, not authority.
+        let publisher_key: Vec<u8> = sk.as_ref().encode().into_iter().collect();
         assert!(
-            f.verify_pq_signature().is_ok(),
+            f.verify_pq_signature_with(&publisher_key).is_ok(),
             "a correct signature is accepted"
         );
         // corrupt the signature -> REFUSED
@@ -1036,17 +1264,57 @@ mod tests {
         let sig = corrupted.pq_signature.as_mut().unwrap();
         sig[10] ^= 0xFF;
         assert!(
-            corrupted.verify_pq_signature().is_err(),
+            corrupted.verify_pq_signature_with(&publisher_key).is_err(),
             "a corrupt signature is REFUSED"
         );
-        // public key yoksa RED
-        let mut no_pk = f.clone();
-        no_pk.pq_public_key = None;
-        assert!(no_pk.verify_pq_signature().is_err());
+        // no signature at all -> REFUSED
+        let mut no_sig = f.clone();
+        no_sig.pq_signature = None;
+        assert!(no_sig.verify_pq_signature_with(&publisher_key).is_err());
+        // A key from another publisher -> REFUSED, even though the container
+        // carries a key of its own that would verify it. This is the whole
+        // point: the embedded key is never the one the check runs against.
+        let attacker = Msk::<ml_dsa::MlDsa87>::from_seed(&[9u8; 32].into());
+        let attacker_key: Vec<u8> = attacker.as_ref().encode().into_iter().collect();
+        assert!(
+            f.verify_pq_signature_with(&attacker_key).is_err(),
+            "a signature the container vouches for itself is not provenance"
+        );
+        // ... and the file still decodes: the flag is not an authentication
+        // result either way.
+        assert!(f.decode().is_ok());
         // without the PQ_SIGNED flag no verification is needed (decode passes)
         let mut plain = f.clone();
         plain.header.flags = BudFlags(0);
         assert!(plain.decode().is_ok());
+    }
+
+    /// Strix Review 4: a container signed with a freshly generated key whose
+    /// public key is embedded in the file. Decoding it is fine (the bytes are
+    /// well formed); accepting its signature is not, unless the caller holds
+    /// the same key out of band.
+    #[test]
+    fn a_container_signed_with_its_own_embedded_key_is_not_provenance() {
+        use ml_dsa::SigningKey as Msk;
+        let publisher = Msk::<ml_dsa::MlDsa87>::from_seed(&[3u8; 32].into());
+        let mut f = BudFile::encode(
+            b"self-signed body",
+            BudFormatClass::Text,
+            "text/plain",
+            0,
+            0,
+            3,
+            BudFlags(BudFlags::PQ_SIGNED),
+            b"payload".to_vec(),
+        );
+        f.sign_pq(&publisher).expect("sign");
+        assert!(f.pq_public_key.is_some(), "the file carries a key");
+        // No publisher key in hand -> the caller cannot authenticate: passing an
+        // empty key must refuse rather than fall back to the embedded one.
+        assert!(f.verify_pq_signature_with(&[]).is_err());
+        // The right key, supplied out of band, verifies.
+        let key: Vec<u8> = publisher.as_ref().encode().into_iter().collect();
+        assert!(f.verify_pq_signature_with(&key).is_ok());
     }
 
     /// When no candidate passes, `select_best` says so. It used to answer

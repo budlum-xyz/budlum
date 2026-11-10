@@ -37,9 +37,12 @@
 //! missing, and spreading the obligation past what the bond covers would put
 //! shards behind collateral that cannot pay for their loss.
 //!
-//! The weighting is the standard HRW form, `-stake / ln(u)` with `u` drawn
-//! from the hash. That distribution is exactly proportional to weight, which
-//! a simple `hash * stake` is not.
+//! The weighting follows the standard HRW form, `-stake / ln(u)` with `u`
+//! drawn from the hash, which is exactly proportional to weight. The code
+//! cannot take a logarithm in consensus arithmetic, so it uses the integer
+//! stand-in `u / (1 - u)` (see `rendezvous_score`): monotone and
+//! deterministic, and proportional to stake only approximately. It is still
+//! closer to proportional than a simple `hash * stake`.
 //!
 //! # What this does not do
 //!
@@ -165,7 +168,14 @@ fn rendezvous_score(shard_id: &ContentId, entropy: &Hash32, candidate: &ShardCan
     // non-zero value rather than special-cased into a different branch.
     let u = u128::from(raw).max(1);
     let denom = SCORE_SCALE - u.min(SCORE_SCALE - 1);
-    u128::from(candidate.stake).saturating_mul(u) / denom
+    // The ratio `u / (1 - u)` keeps 16 fractional bits. Without them a small
+    // stake floored to zero for every draw below one half, and the address
+    // tiebreak then decided those placements. `u` is under 2^64, so the
+    // shift cannot overflow. The product saturates only when the ratio
+    // exceeds about 2^48 for a stake near 2^64; that is a tie broken by
+    // address, not a wrong score.
+    let ratio = (u << 16) / denom;
+    u128::from(candidate.stake).saturating_mul(ratio)
 }
 
 /// Which validators hold shard `shard_id` this epoch, highest score first.
@@ -191,9 +201,12 @@ pub fn assign_shard(
     if replicas == 0 {
         return Err(AssignmentError::ZeroReplicas);
     }
+    // One address is one holder: a candidate listed twice must not take two
+    // of the `replicas` places. The first entry for an address counts.
+    let mut seen: std::collections::BTreeSet<Address> = std::collections::BTreeSet::new();
     let mut scored: Vec<(u128, Address)> = candidates
         .iter()
-        .filter(|c| c.stake > 0)
+        .filter(|c| c.stake > 0 && seen.insert(c.address))
         .map(|c| (rendezvous_score(shard_id, entropy, c), c.address))
         .collect();
     if scored.len() < replicas {
@@ -454,6 +467,38 @@ mod tests {
                 available: 4
             }
         );
+    }
+
+    /// P26-F08: a candidate listed twice holds one place, not two.
+    #[test]
+    fn a_duplicated_candidate_counts_once() {
+        let mut c = candidates(2);
+        c.push(c[0]);
+        let err = assign_shard(&shard(1), &[0u8; 32], &c, 3).unwrap_err();
+        assert_eq!(
+            err,
+            AssignmentError::NotEnoughValidators {
+                needed: 3,
+                available: 2
+            }
+        );
+    }
+
+    /// P26-F08: the smallest stake still gets a score that depends on the
+    /// draw. With integer flooring about half of the draws scored zero.
+    #[test]
+    fn a_small_stake_rarely_scores_zero() {
+        let candidate = ShardCandidate {
+            address: Address([9u8; 32]),
+            stake: 1,
+        };
+        let mut zeros = 0;
+        for tag in 0..200u8 {
+            if rendezvous_score(&shard(tag), &[3u8; 32], &candidate) == 0 {
+                zeros += 1;
+            }
+        }
+        assert!(zeros < 10, "stake 1 scored zero in {zeros}/200 draws");
     }
 
     #[test]

@@ -196,8 +196,11 @@ fn is_reusable_workflow(value: &str) -> bool {
 /// Local actions (`./.github/actions/x`) and docker references are not pinned
 /// this way and are not the risk being measured.
 fn is_sha_pinned(value: &str) -> bool {
-    if value.starts_with('.') || value.starts_with("docker://") {
+    if value.starts_with('.') {
         return true;
+    }
+    if value.starts_with("docker://") {
+        return value.contains("@sha256:");
     }
     value
         .split('@')
@@ -326,7 +329,7 @@ fn findings_for(wf: &Workflow, root: &Path) -> Vec<String> {
                 u.line, u.value
             ));
         }
-        if !u.job_level && !is_sha_pinned(&u.value) {
+        if !is_sha_pinned(&u.value) {
             out.push(format!(
                 "{rel}:{}: `{}` is not pinned to a 40-character commit SHA. A tag can be \
                  moved by whoever owns it, so a job that reads the repository is trusting \
@@ -472,13 +475,25 @@ name: X
 on: push
 jobs:
   provenance:
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator.yml@v1.9.0
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator.yml@0123456789abcdef0123456789abcdef01234567
 ";
     let wf = parse(Path::new("x.yml"), legal);
     let f = findings_for(&wf, root);
     if !f.is_empty() {
         problems.push(format!(
             "BROKEN: a job-level reusable workflow was rejected: {f:?}"
+        ));
+    }
+
+    // A tag reference at job level is a mutable reference too.
+    let tagged = legal.replace("0123456789abcdef0123456789abcdef01234567", "v1.9.0");
+    let wf = parse(Path::new("x.yml"), &tagged);
+    if !findings_for(&wf, root)
+        .iter()
+        .any(|x| x.contains("not pinned"))
+    {
+        problems.push(String::from(
+            "VACUOUS: a tag-pinned job-level reusable workflow was accepted",
         ));
     }
 

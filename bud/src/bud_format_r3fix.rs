@@ -247,22 +247,22 @@ mod tests {
         let t = R3Recipe::produce(b"data", "image/png", |d| d.to_vec(), b"qr");
         assert_eq!(r3f_digest(&t), r3f_digest(&t));
     }
-}
 
-#[test]
-fn the_real_r3_rent_measurements() {
-    // AVIF 59.68x -> 0.23342*1.031/59.68 = 0.00403 <= 0.016 OK
-    let k_avif = r3_real_rent(&Codec::Avif, 1.031);
-    assert!(k_avif <= 0.016, "AVIF is within 0.016: {k_avif}");
-    // FLAC 6.04x -> 0.0638 (outside the ceiling - the audio class needs scaling)
-    let k_flac = r3_real_rent(&Codec::Flac, 1.031);
-    assert!(
-        k_flac > 0.016,
-        "FLAC is outside the ceiling (honestly): {k_flac}"
-    );
-    // Raw video H.264 3393x -> very low
-    let k_vid = r3_real_rent(&Codec::Av1, 1.031);
-    assert!(k_vid < 0.001, "raw video is very cheap: {k_vid}");
-    // Canary: no claim above the measured ratio
-    assert_eq!(r3_measured_ratio(&Codec::Avif), 59.68);
+    #[test]
+    fn the_real_r3_rent_measurements() {
+        // AVIF 59.68x -> 0.23342*1.031/59.68 = 0.00403 <= 0.016 OK
+        let k_avif = r3_real_rent(&Codec::Avif, 1.031);
+        assert!(k_avif <= 0.016, "AVIF is within 0.016: {k_avif}");
+        // FLAC 6.04x -> 0.0638 (outside the ceiling - the audio class needs scaling)
+        let k_flac = r3_real_rent(&Codec::Flac, 1.031);
+        assert!(
+            k_flac > 0.016,
+            "FLAC is outside the ceiling (honestly): {k_flac}"
+        );
+        // Raw video H.264 3393x -> very low
+        let k_vid = r3_real_rent(&Codec::Av1, 1.031);
+        assert!(k_vid < 0.001, "raw video is very cheap: {k_vid}");
+        // Canary: no claim above the measured ratio
+        assert_eq!(r3_measured_ratio(&Codec::Avif), 59.68);
+    }
 }

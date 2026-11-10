@@ -16,6 +16,36 @@ fn account_path(root: &Path) -> std::path::PathBuf {
     root.join("src/core/account.rs")
 }
 
+/// Blank a nested block comment starting at `pos`, keeping the newlines.
+///
+/// Rust block comments nest (`/* outer /* inner */ tail */`); a flat scan
+/// stops at the first `*/` and leaves the tail looking like live code
+/// (CWE-697). Track depth instead.
+fn blank_block_comment(bytes: &[u8], pos: &mut usize, out: &mut String) {
+    out.push(' ');
+    out.push(' ');
+    *pos += 2;
+    let mut depth = 1usize;
+    while *pos < bytes.len() && depth > 0 {
+        if bytes[*pos..].starts_with(b"/*") {
+            depth += 1;
+            out.push(' ');
+            out.push(' ');
+            *pos += 2;
+            continue;
+        }
+        if bytes[*pos..].starts_with(b"*/") {
+            depth -= 1;
+            out.push(' ');
+            out.push(' ');
+            *pos += 2;
+            continue;
+        }
+        out.push(if bytes[*pos] == b'\n' { '\n' } else { ' ' });
+        *pos += 1;
+    }
+}
+
 /// Strip Rust comments and string literals (preserving line structure) so
 /// comment-bait or dead text cannot satisfy the gate (CWE-697).
 fn strip_rust_noise(src: &str) -> String {
@@ -31,31 +61,7 @@ fn strip_rust_noise(src: &str) -> String {
             continue;
         }
         if bytes[pos..].starts_with(b"/*") {
-            // Rust block comments nest (`/* outer /* inner */ tail */`); a
-            // flat scan stops at the first `*/` and leaves the tail looking
-            // like live code. Track depth instead (CWE-697).
-            out.push(' ');
-            out.push(' ');
-            pos += 2;
-            let mut depth = 1usize;
-            while pos < bytes.len() && depth > 0 {
-                if bytes[pos..].starts_with(b"/*") {
-                    depth += 1;
-                    out.push(' ');
-                    out.push(' ');
-                    pos += 2;
-                    continue;
-                }
-                if bytes[pos..].starts_with(b"*/") {
-                    depth -= 1;
-                    out.push(' ');
-                    out.push(' ');
-                    pos += 2;
-                    continue;
-                }
-                out.push(if bytes[pos] == b'\n' { '\n' } else { ' ' });
-                pos += 1;
-            }
+            blank_block_comment(bytes, &mut pos, &mut out);
             continue;
         }
         if bytes[pos] == b'r' || bytes[pos] == b'b' {
@@ -105,6 +111,32 @@ fn strip_rust_noise(src: &str) -> String {
                 }
             }
         }
+        // A char literal (`'"'`, `'\\''`, `'x'`) is not the start of a string.
+        // Without this arm a `'"'` opened a string that swallowed code up to
+        // the next quote and flipped the string state for the rest of the file.
+        // A lifetime (`'a`) has no closing quote two bytes on, so it is kept.
+        if bytes[pos] == b'\'' {
+            let close = if bytes.get(pos + 1) == Some(&b'\\') {
+                bytes
+                    .get(pos + 3..)
+                    .unwrap_or_default()
+                    .iter()
+                    .take(10)
+                    .position(|b| *b == b'\'')
+                    .map(|i| pos + 3 + i)
+            } else if bytes.get(pos + 2) == Some(&b'\'') && bytes.get(pos + 1) != Some(&b'\'') {
+                Some(pos + 2)
+            } else {
+                None
+            };
+            if let Some(close) = close {
+                while pos <= close {
+                    out.push(' ');
+                    pos += 1;
+                }
+                continue;
+            }
+        }
         if bytes[pos] == b'"' {
             out.push(' ');
             pos += 1;
@@ -138,11 +170,10 @@ fn collect(root: &Path) -> Result<String, String> {
 /// Literal matching misses typed or spaced forms (CWE-697).
 fn ok_success_in(text: &str) -> bool {
     let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-    // A unit-Ok used as a collection item (`vec![Ok(())]`, `[Ok(())]`) is not
-    // a control-flow success (CWE-697: nested-item).
-    if compact.contains("![Ok(())") || compact.contains("[Ok(()),") {
-        return false;
-    }
+    // A unit-Ok that sits in a collection (`vec![Ok(())]`) is still counted:
+    // exempting it let one decoy item hide every real success in the block,
+    // which is the bypass this gate exists to catch. A legitimate zero-address
+    // branch has no reason to build such a collection.
     compact.contains("Ok(())")
         || compact.contains("::Ok(())")
         || (compact.contains("Ok::<") && compact.contains(">(())"))
@@ -353,10 +384,41 @@ pub fn self_test() -> Result<String, String> {
         ));
     }
 
+    // A collection item `Ok(())` placed beside a real unguarded success must
+    // not hide it.
+    let decoy_vec = "pub fn validate_transaction_with_context(\n        &self,\n        tx: &Transaction,\n    ) -> Result<(), String> {\n    if tx.from == Address::zero() {\n        let _d = vec![Ok(())];\n        return Ok(());\n    }\n}\n";
+    if !judge(decoy_vec)
+        .iter()
+        .any(|p| p.contains("unguarded zero-address"))
+    {
+        problems.push(String::from(
+            "VACUOUS: a vec![Ok(())] decoy hid an unguarded zero-address success.",
+        ));
+    }
+
+    // A char literal `'"'` before the branch must not swallow the branch.
+    let quote_char = "pub fn validate_transaction_with_context(\n        &self,\n        tx: &Transaction,\n    ) -> Result<(), String> {\n    let c = '\"';\n    if tx.from == Address::zero() {\n        return Ok(());\n    }\n    let s = \"x\";\n}\n";
+    if !judge(quote_char)
+        .iter()
+        .any(|p| p.contains("unguarded zero-address"))
+    {
+        problems.push(String::from(
+            "VACUOUS: a char-literal quote hid an unguarded zero-address success.",
+        ));
+    }
+
     if !problems.is_empty() {
         return Err(problems.join("\n  "));
     }
     Ok(String::from(
         "zero-address gate self-test OK: the protected form passes, the unguarded bypass fails.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn self_test_passes() {
+        super::self_test().expect("zero-address self-test");
+    }
 }

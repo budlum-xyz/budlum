@@ -69,6 +69,12 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Forever, defeating the re-KYC discipline.
 pub const DEFAULT_KYC_HORIZON: u64 = 100_000;
 
+/// BLG-0094 (P04-F12): the validity horizon had no upper bound, so an admin
+/// could stamp an effectively permanent dossier and the re-KYC discipline
+/// would never bite. A finite ceiling in blocks; even at a one-second block
+/// this is years of run time, and it can only be reached deliberately.
+pub const MAX_KYC_VALIDITY_HORIZON: u64 = 2 * 365 * 24 * 60 * 60 * 5;
+
 /// What an authorized admin decided about an applicant, the audit vocabulary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OnboardingDecision {
@@ -244,6 +250,12 @@ impl PoAOnboarding {
         at_block: u64,
         validity_horizon: u64,
     ) -> Result<(), PoaMembershipError> {
+        if validity_horizon > MAX_KYC_VALIDITY_HORIZON {
+            return Err(PoaMembershipError::InvalidValidityHorizon {
+                requested: validity_horizon,
+                max: MAX_KYC_VALIDITY_HORIZON,
+            });
+        }
         let expiry = at_block.saturating_add(validity_horizon);
         self.registry.approve(domain, admin, applicant)?;
         self.kyc_expiry.insert((domain, applicant), expiry);
@@ -328,6 +340,12 @@ impl PoAOnboarding {
         if new_kyc_commitment == [0u8; 32] {
             return Err(PoaMembershipError::MissingKyc);
         }
+        if validity_horizon > MAX_KYC_VALIDITY_HORIZON {
+            return Err(PoaMembershipError::InvalidValidityHorizon {
+                requested: validity_horizon,
+                max: MAX_KYC_VALIDITY_HORIZON,
+            });
+        }
         // Must currently be a member in Approved state. A revoked member may
         // Re-KYC by going through approve again; renew is for active ones.
         let member = self
@@ -350,8 +368,17 @@ impl PoAOnboarding {
                 domain,
             });
         }
+        // BLG-0093 (P04-F11): the refreshed dossier is WRITTEN to the member
+        // record - renewing used to move the expiry horizon and leave the
+        // commitment naming the original submission forever.
+        self.registry
+            .update_kyc_commitment(domain, applicant, new_kyc_commitment)?;
         let expiry = at_block.saturating_add(validity_horizon);
         self.kyc_expiry.insert((domain, applicant), expiry);
+        // BLG-0094 (P04-F12): clear the one-shot expiry log entry so the
+        // expiry after THIS renewal is recorded again instead of being
+        // swallowed by the stale mark.
+        self.logged_expiry.remove(&(domain, applicant));
         self.audit.push(OnboardingEvent {
             domain,
             at_block,
@@ -364,7 +391,26 @@ impl PoAOnboarding {
         Ok(())
     }
 
+    /// BLG-0094 (P04-F12): remove an admin from a domain (see
+    /// [`PoaMembershipRegistry::remove_admin`] for the last-admin rule).
+    pub fn remove_admin(
+        &mut self,
+        domain: DomainId,
+        admin: Address,
+    ) -> Result<(), PoaMembershipError> {
+        self.registry.remove_admin(domain, admin)
+    }
+
     // ---- enforcement -----------------------------------------------------
+
+    /// BLG-0090 (P04-F08): the deterministic fold of the admission state -
+    /// admin set, member dossiers, KYC expiries and the audit trail. This
+    /// enters the state root and the snapshot digest, so a snapshot that
+    /// drops an admission record diverges instead of quietly unpermissioning
+    /// a domain.
+    pub fn root(&self) -> [u8; 32] {
+        self.registry.root_with_expiry(&self.kyc_expiry)
+    }
 
     /// Is `domain` a permissioned domain at all?
     ///
@@ -442,6 +488,133 @@ impl PoAOnboarding {
     }
 }
 
+/// The PoA admission door at the transaction layer (BLG-0089 / P04-F07).
+///
+/// Carries the registry's own operations and nothing else - the shape and
+/// its semantics cannot drift from the one body
+/// (`execute_poa_onboarding_tx`) that holds every authority rule. Admin
+/// operations name the admin as `tx.from`; the door never accepts an
+/// authority the transaction claims for itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PoAOnboardingTx {
+    /// Extend the admin set (an existing admin, or governance, bootstraps).
+    AddAdmin { domain: DomainId, admin: Address },
+    /// Remove an admin (BLG-0094). The last admin of a domain refuses.
+    RemoveAdmin { domain: DomainId, admin: Address },
+    /// A candidate applies for themselves; nothing else is accepted.
+    SubmitApplication {
+        domain: DomainId,
+        kyc_commitment: KycCommitment,
+    },
+    /// Admin approves a pending application within the horizon bound.
+    Approve {
+        domain: DomainId,
+        member: Address,
+        validity_horizon: u64,
+    },
+    /// Admin rejects a pending application.
+    Reject {
+        domain: DomainId,
+        member: Address,
+        reason: String,
+    },
+    /// Admin revokes an active member.
+    Revoke {
+        domain: DomainId,
+        member: Address,
+        reason: String,
+    },
+    /// Admin refreshes an active member's dossier (BLG-0093 writes it).
+    RenewKyc {
+        domain: DomainId,
+        member: Address,
+        kyc_commitment: KycCommitment,
+        validity_horizon: u64,
+    },
+}
+
+/// Run one PoA admission operation with the authority the SENDER actually
+/// has (BLG-0089 / P04-F07).
+///
+/// Two doors and only two: a candidate applies for themselves, and an admin
+/// of the target domain decides. The first admin of a domain arrives through
+/// governance (`GovernanceAction::PoaAddAdmin`), never through this door -
+/// an open first-admin slot would let anyone appoint themselves to any
+/// domain.
+pub fn execute_poa_onboarding_tx(
+    state: &mut PoAOnboarding,
+    sender: &Address,
+    action: PoAOnboardingTx,
+    at_block: u64,
+) -> Result<(), PoaMembershipError> {
+    match action {
+        PoAOnboardingTx::AddAdmin { domain, admin } => {
+            if !state.registry.is_admin(domain, sender) {
+                return Err(PoaMembershipError::NotAnAdmin {
+                    caller: *sender,
+                    domain,
+                });
+            }
+            state.add_admin(domain, admin);
+            Ok(())
+        }
+        PoAOnboardingTx::RemoveAdmin { domain, admin } => {
+            if !state.registry.is_admin(domain, sender) {
+                return Err(PoaMembershipError::NotAnAdmin {
+                    caller: *sender,
+                    domain,
+                });
+            }
+            state.remove_admin(domain, admin)
+        }
+        PoAOnboardingTx::SubmitApplication {
+            domain,
+            kyc_commitment,
+        } => {
+            // Self-application only: a sender cannot push another address
+            // into a KYC process. The domain must also be running admission
+            // control: the first admin arrives through governance, so an
+            // application to a domain that has none can never be decided - and
+            // an unbounded set of applicant-chosen domain ids makes every
+            // block close scan the whole membership set once per domain
+            // (CWE-407), which a few thousand cheap transactions turn into a
+            // permanent stall.
+            if !state.is_permissioned(domain) {
+                return Err(PoaMembershipError::NotPermissioned { domain });
+            }
+            state.submit_application(domain, *sender, kyc_commitment, at_block)
+        }
+        PoAOnboardingTx::Approve {
+            domain,
+            member,
+            validity_horizon,
+        } => state.approve(domain, *sender, member, at_block, validity_horizon),
+        PoAOnboardingTx::Reject {
+            domain,
+            member,
+            reason,
+        } => state.reject(domain, *sender, member, at_block, reason),
+        PoAOnboardingTx::Revoke {
+            domain,
+            member,
+            reason,
+        } => state.revoke(domain, *sender, member, at_block, reason),
+        PoAOnboardingTx::RenewKyc {
+            domain,
+            member,
+            kyc_commitment,
+            validity_horizon,
+        } => state.renew_kyc(
+            domain,
+            *sender,
+            member,
+            kyc_commitment,
+            at_block,
+            validity_horizon,
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,7 +634,8 @@ mod tests {
         const _: () = assert!(DEFAULT_KYC_HORIZON > 0);
     }
 
-    #[allow(clippy::too_many_lines)] // lifecycle test is intentionally thorough
+    // BLG-0107 (P04-F25): the stale `too_many_lines` allow is gone with the
+    // refactor that shrank this test; no allow without a reason and a date.
     #[test]
     fn whitelist_member_round_trip() {
         let admin = addr(0xAD);
@@ -472,5 +646,141 @@ mod tests {
         assert!(!poa.whitelist(0, 0).contains(&member));
         assert!(poa.approve(0, admin, member, 0, 1_000).is_ok());
         assert!(poa.whitelist(0, 0).contains(&member));
+    }
+
+    /// BLG-0089 (P04-F07): the first admin of a domain arrives through
+    /// governance (`add_admin` at the trust root); the door appoints only
+    /// behind an existing admin, so nobody self-appoints.
+    #[test]
+    fn the_first_admin_is_a_governance_act() {
+        let mut onboarding = PoAOnboarding::new();
+        let stranger = addr(1);
+        let err = execute_poa_onboarding_tx(
+            &mut onboarding,
+            &stranger,
+            PoAOnboardingTx::AddAdmin {
+                domain: 0,
+                admin: stranger,
+            },
+            1,
+        )
+        .unwrap_err();
+        assert!(matches!(err, PoaMembershipError::NotAnAdmin { .. }));
+        // The trust root adds the first admin; from there the door works.
+        onboarding.add_admin(0, stranger);
+        assert!(execute_poa_onboarding_tx(
+            &mut onboarding,
+            &stranger,
+            PoAOnboardingTx::AddAdmin {
+                domain: 0,
+                admin: addr(2),
+            },
+            1,
+        )
+        .is_ok());
+        assert!(onboarding.registry().is_admin(0, &addr(2)));
+    }
+
+    /// BLG-0089 (P04-F07): a candidate applies for themselves - the door
+    /// carries no applicant id to retarget.
+    #[test]
+    fn a_candidate_applies_for_themselves() {
+        let mut onboarding = PoAOnboarding::new();
+        onboarding.add_admin(0, addr(9));
+        let applicant = addr(3);
+        assert!(execute_poa_onboarding_tx(
+            &mut onboarding,
+            &applicant,
+            PoAOnboardingTx::SubmitApplication {
+                domain: 0,
+                kyc_commitment: kyc(7),
+            },
+            5,
+        )
+        .is_ok());
+        // An admin decides through the same door.
+        assert!(execute_poa_onboarding_tx(
+            &mut onboarding,
+            &addr(9),
+            PoAOnboardingTx::Approve {
+                domain: 0,
+                member: applicant,
+                validity_horizon: 100,
+            },
+            5,
+        )
+        .is_ok());
+        assert!(onboarding.is_authorized_now(0, &applicant, 50));
+    }
+
+    /// BLG-0093 + BLG-0094 (P04-F11/F12): renewal writes the new dossier
+    /// and reopens the expiry log for the NEXT expiry.
+    #[test]
+    fn renew_kyc_writes_the_dossier_and_reopens_the_expiry_log() {
+        let mut onboarding = PoAOnboarding::new();
+        onboarding.add_admin(0, addr(9));
+        let member = addr(3);
+        onboarding.submit_application(0, member, kyc(1), 0).unwrap();
+        onboarding.approve(0, addr(9), member, 1, 10).unwrap();
+        onboarding
+            .renew_kyc(0, addr(9), member, kyc(2), 5, 10)
+            .unwrap();
+        assert_eq!(
+            onboarding
+                .registry()
+                .get(0, &member)
+                .unwrap()
+                .kyc_commitment,
+            kyc(2),
+            "the refreshed dossier must be written to the record"
+        );
+        // Expiry episode one (window ends at 15) logs at 16; renewal at 16
+        // opens a second window and clears the one-shot mark, so the expiry
+        // of THAT window (after 26) logs again instead of being swallowed.
+        let _ = onboarding.whitelist(0, 16);
+        onboarding
+            .renew_kyc(0, addr(9), member, kyc(3), 16, 10)
+            .unwrap();
+        let _ = onboarding.whitelist(0, 27);
+        let expired_events = onboarding
+            .audit_log()
+            .iter()
+            .filter(|e| matches!(e.decision, OnboardingDecision::KycExpired { .. }))
+            .count();
+        assert_eq!(
+            expired_events, 2,
+            "a post-renewal expiry must be logged again"
+        );
+    }
+
+    /// BLG-0094 (P04-F12): the validity horizon is bounded.
+    #[test]
+    fn a_validity_horizon_beyond_the_bound_is_refused() {
+        let mut onboarding = PoAOnboarding::new();
+        onboarding.add_admin(0, addr(9));
+        onboarding
+            .submit_application(0, addr(3), kyc(1), 0)
+            .unwrap();
+        let err = onboarding
+            .approve(0, addr(9), addr(3), 1, MAX_KYC_VALIDITY_HORIZON + 1)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            PoaMembershipError::InvalidValidityHorizon { .. }
+        ));
+    }
+
+    /// BLG-0094 (P04-F12): admins may remove admins but never the last one;
+    /// governance can (force_remove_admin).
+    #[test]
+    fn the_last_admin_refuses_removal_through_the_door() {
+        let mut onboarding = PoAOnboarding::new();
+        onboarding.add_admin(0, addr(9));
+        let err = onboarding.remove_admin(0, addr(9)).unwrap_err();
+        assert!(matches!(err, PoaMembershipError::LastAdmin));
+        onboarding.add_admin(0, addr(8));
+        assert!(onboarding.remove_admin(0, addr(8)).is_ok());
+        onboarding.registry_mut().force_remove_admin(0, addr(9));
+        assert!(!onboarding.is_permissioned(0));
     }
 }

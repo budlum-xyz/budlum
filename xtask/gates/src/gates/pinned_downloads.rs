@@ -90,6 +90,34 @@ fn checksum_url(lower: &str) -> bool {
     false
 }
 
+/// The shell commands of a file, with `\`-continued lines joined.
+///
+/// The repo style puts the URL on the line after `curl ... \`; tested alone,
+/// that line holds no `curl` and its checksum URL was never seen. The number is
+/// the line the command starts on.
+fn logical_lines(text: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut start = 0usize;
+    for (i, line) in text.lines().enumerate() {
+        if current.is_empty() {
+            start = i + 1;
+        }
+        let trimmed = line.trim_end();
+        if let Some(head) = trimmed.strip_suffix('\\') {
+            current.push_str(head);
+            current.push(' ');
+            continue;
+        }
+        current.push_str(trimmed);
+        out.push((start, std::mem::take(&mut current)));
+    }
+    if !current.is_empty() {
+        out.push((start, current));
+    }
+    out
+}
+
 /// Does this line fetch a checksum over http(s)?
 fn fetches_checksum(line: &str) -> bool {
     let t = line.trim();
@@ -126,9 +154,9 @@ pub fn run(root: &Path) -> Result<String, String> {
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-        for (n, line) in text.lines().enumerate() {
-            if fetches_checksum(line) {
-                offenders.push(format!("{name}:{}", n + 1));
+        for (n, command) in logical_lines(&text) {
+            if fetches_checksum(&command) {
+                offenders.push(format!("{name}:{n}"));
             }
         }
         if text.contains("sha256sum -c") || text.contains("shasum -a 256 -c") {
@@ -242,4 +270,20 @@ pub fn self_test() -> Result<String, String> {
         "pinned-downloads canary OK (network checksum FAILs, also upper-cased, in a query \
          string, inside quotes and behind a query or fragment; in-repo hash PASSes).",
     ))
+}
+
+#[cfg(test)]
+mod continuation_tests {
+    use super::*;
+
+    #[test]
+    fn a_checksum_url_on_the_continuation_line_is_found() {
+        let text = "run: |\n  curl -sSfL -o /tmp/t.tar.gz \\\n    https://example.com/t.tar.gz.sha256\n  echo done\n";
+        let hits: Vec<usize> = logical_lines(text)
+            .into_iter()
+            .filter(|(_, c)| fetches_checksum(c))
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(hits, vec![2]);
+    }
 }

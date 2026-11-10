@@ -38,9 +38,12 @@
 //!
 //! # WIRING STATUS - read this before trusting anything below
 //!
-//! **Wired through [`intake`].** The two consensus decisions the earlier
-//! version of this notice deferred were made, in writing, in
-//! `intake.rs`'s module docs:
+//! **Wired through [`intake`]** - with the limit spelled out here
+//! (BLG-0166/P07-F21): the attestation is NOT part of any block or header
+//! yet. `state_digest` is an RPC value a consumer can compare; nothing in
+//! consensus commits it until the `GlobalBlockHeader` root lands. The two
+//! consensus decisions the earlier version of this notice deferred were
+//! made, in writing, in `intake.rs`'s module docs:
 //!
 //! 1. The registry lives on `Blockchain` as `external_intake`
 //!    ([`IntakeState`]), persisted by the storage layer and clocked from
@@ -58,6 +61,12 @@
 //! [`ExternalDomainFinalityBridge`] for a `Custom` domain bound to
 //! [`EXTERNAL_DOMAIN_FINALITY_ADAPTER`]. Re-derive before believing, as
 //! always: `grep -rn 'external_intake' src/ --include='*.rs'`.
+//!
+//! **Limit of that claim (P07-F21).** The call sites are wired, but the
+//! attestations are not part of any block or header: the digest is an RPC
+//! value only, and the intake is written outside block execution. Two nodes
+//! agree on it only if they saw the same calls. This is the external-roots
+//! gap tracked in STATUS.md section 4.5.
 //!
 //! # The rule underneath all six
 //!
@@ -293,6 +302,9 @@ mod tests {
                 domain: DomainKey::from_parts(&self.descriptor().id, &evidence.network),
                 height: 1,
                 state_root: [1; 32],
+                attested_block_hash: None,
+                attested_event_root: None,
+                attested_tx_root: None,
                 finalized_at: 1,
                 time_unit: TimeUnit::Height,
                 security: SecurityBacking::None,
@@ -378,15 +390,19 @@ mod tests {
         // The refusal half of the name, asserted directly: each probe's
         // corrupted evidence is rejected by the adapter itself, not merely
         // counted as passed by the report.
-        for (name, _) in &report.probes {
-            let mut corrupted = Tiny
-                .golden_evidence()
-                .expect("the golden sample exists above");
-            corrupted.payload.clear();
+        let golden = Tiny
+            .golden_evidence()
+            .expect("the golden sample exists above");
+        let probes = Tiny.fault_probes();
+        assert_eq!(probes.len(), report.total());
+        for probe in &probes {
+            let corrupted = selftest::apply_patch(&golden, &probe.patch)
+                .unwrap_or_else(|reason| panic!("probe {} must apply: {reason}", probe.name));
             assert!(
                 Tiny.verify(&corrupted, &VerificationPolicy::strict(10))
                     .is_err(),
-                "emptied evidence must be refused (probe context: {name})"
+                "probe {} must be refused by the adapter itself",
+                probe.name
             );
         }
         assert!(report.admitted);
@@ -502,7 +518,7 @@ mod tests {
         assert!(policy.window(1).is_some());
         assert_eq!(policy.current_version_at(0), Some(1));
 
-        policy.schedule_fork(1, 2, 500, 100).unwrap();
+        policy.schedule_fork(1, 2, 500, 100, &[1, 2]).unwrap();
 
         // Before the fork: only v1.
         assert!(policy.gate(1, 400).is_ok());
@@ -537,7 +553,9 @@ mod tests {
     #[test]
     fn a_grace_window_wider_than_the_domain_allows_is_refused() {
         let mut policy = VersionPolicy::single(AdapterId::from_name("x"), 1, 100);
-        let err = policy.schedule_fork(1, 2, 500, 10_000).unwrap_err();
+        let err = policy
+            .schedule_fork(1, 2, 500, 10_000, &[1, 2])
+            .unwrap_err();
         assert!(matches!(err, ForkError::GraceTooWide { .. }));
     }
 
@@ -547,7 +565,7 @@ mod tests {
         // formats are current forever, which is the state that produces silent
         // divergence between nodes.
         let mut policy = VersionPolicy::single(AdapterId::from_name("x"), 1, 1_000);
-        policy.schedule_fork(1, 2, 500, 50).unwrap();
+        policy.schedule_fork(1, 2, 500, 50, &[1, 2]).unwrap();
         let old = policy.window(1).expect("v1 stays readable after sunset");
         assert_eq!(old.sunset_height, Some(550));
     }
@@ -556,7 +574,7 @@ mod tests {
     fn forking_into_a_known_version_or_from_an_unknown_one_is_refused() {
         let mut policy = VersionPolicy::single(AdapterId::from_name("x"), 1, 1_000);
         assert!(matches!(
-            policy.schedule_fork(1, 1, 500, 10).unwrap_err(),
+            policy.schedule_fork(1, 1, 500, 10, &[1, 2]).unwrap_err(),
             ForkError::SameVersion { .. }
         ));
         assert!(matches!(
@@ -564,12 +582,12 @@ mod tests {
             // looks the old version up in the windows and refuses when it was
             // never scheduled. Passing the unknown number as the new version
             // schedules it successfully, which is the opposite of the claim.
-            policy.schedule_fork(9, 2, 500, 10).unwrap_err(),
+            policy.schedule_fork(9, 2, 500, 10, &[1, 2]).unwrap_err(),
             ForkError::UnknownOldVersion { .. }
         ));
-        policy.schedule_fork(1, 2, 500, 10).unwrap();
+        policy.schedule_fork(1, 2, 500, 10, &[1, 2]).unwrap();
         assert!(matches!(
-            policy.schedule_fork(2, 2, 600, 10).unwrap_err(),
+            policy.schedule_fork(2, 2, 600, 10, &[1, 2]).unwrap_err(),
             ForkError::SameVersion { .. }
         ));
     }
@@ -577,6 +595,42 @@ mod tests {
     // ---------------------------------------------------------------------
     // profile
     // ---------------------------------------------------------------------
+
+    /// BLG-0161 (P07-F16): a fork lands only on a version the adapter
+    /// accepts, and a policy whose every window has sunset cannot serve.
+    #[test]
+    fn a_fork_only_lands_on_a_version_the_adapter_accepts() {
+        let mut policy = VersionPolicy::single(AdapterId::from_name("x"), 1, 1_000);
+        let err = policy
+            .schedule_fork(1, 7, 500, 10, &[1, 2])
+            .expect_err("version 7 is not in the accepted set");
+        assert!(
+            matches!(
+                err,
+                crate::cross_domain::external::ForkError::VersionNotAccepted { version: 7 }
+            ),
+            "got: {err:?}"
+        );
+        let all_sunset = VersionPolicy {
+            windows: vec![
+                crate::cross_domain::external::VersionWindow {
+                    version: 1,
+                    valid_from_height: 1,
+                    sunset_height: Some(2),
+                },
+                crate::cross_domain::external::VersionWindow {
+                    version: 2,
+                    valid_from_height: 2,
+                    sunset_height: Some(3),
+                },
+            ],
+            ..VersionPolicy::single(AdapterId::from_name("x"), 1, 1_000)
+        };
+        assert!(
+            !all_sunset.is_consistent(),
+            "a policy whose every window has sunset must not be consistent"
+        );
+    }
 
     #[test]
     fn the_profile_carries_no_score() {
@@ -662,7 +716,8 @@ mod tests {
             None,
             "never is not the same as stale"
         );
-        assert!(!p.state.serves() || p.state == DomainState::Admitted);
+        assert_eq!(p.state, DomainState::Admitted);
+        assert!(p.state.serves());
     }
 
     // ---------------------------------------------------------------------
@@ -783,6 +838,26 @@ mod tests {
         );
     }
 
+    /// BLG-0141 (P06-F13): the reward is paid out of the slashed bond, so a
+    /// floor larger than the slash is capped at the slash.
+    #[test]
+    fn a_challenge_reward_never_exceeds_what_was_slashed() {
+        let mut bond = ProverBond {
+            prover: Address([1; 32]),
+            bond_atoms: 100,
+            ceiling_atoms: 1_000,
+            slashed_atoms: 0,
+            slashings: Vec::new(),
+            accepted: 0,
+            refused: 0,
+        };
+        let challenger = Address([2; 32]);
+        let taken = bond.slash(5, [0; 32], 10, challenger, 1_000);
+        assert_eq!(taken, 10);
+        let record = bond.slashings.last().expect("recorded");
+        assert_eq!(record.challenge_reward_atoms, 10);
+    }
+
     // ---------------------------------------------------------------------
     // ethereum
     // ---------------------------------------------------------------------
@@ -866,7 +941,7 @@ mod tests {
     fn the_adapter_refuses_when_no_verifier_is_installed() {
         // There is no mode in which this adapter accepts an unchecked
         // signature. Without a verifier it must refuse, not approximate.
-        let adapter = EthereumSyncAdapter::new("testnet", [0; 32], None);
+        let adapter = EthereumSyncAdapter::new("testnet", Some(test_committee()), None);
         let evidence = sync_evidence(&adapter, 64, 128, 0);
         let err = adapter
             .verify(&evidence, &VerificationPolicy::strict(1_000))
@@ -879,7 +954,11 @@ mod tests {
 
     #[test]
     fn the_adapter_accepts_a_well_formed_update_with_a_verifier_installed() {
-        let adapter = EthereumSyncAdapter::new("testnet", [0; 32], Some(Box::new(StrictTestBls)));
+        let adapter = EthereumSyncAdapter::new(
+            "testnet",
+            Some(test_committee()),
+            Some(Box::new(StrictTestBls)),
+        );
         let evidence = sync_evidence(&adapter, 64, 128, 0);
         let attestation = adapter
             .verify(&evidence, &VerificationPolicy::strict(1_000))
@@ -902,7 +981,11 @@ mod tests {
 
     #[test]
     fn a_participation_one_short_of_the_threshold_is_refused() {
-        let adapter = EthereumSyncAdapter::new("testnet", [0; 32], Some(Box::new(StrictTestBls)));
+        let adapter = EthereumSyncAdapter::new(
+            "testnet",
+            Some(test_committee()),
+            Some(Box::new(StrictTestBls)),
+        );
         let mut evidence = sync_evidence(&adapter, 64, 128, 0);
         evidence.payload[280..344].copy_from_slice(&bits_for(341));
         let err = adapter
@@ -916,7 +999,11 @@ mod tests {
 
     #[test]
     fn a_finalized_slot_ahead_of_the_attested_one_is_refused() {
-        let adapter = EthereumSyncAdapter::new("testnet", [0; 32], Some(Box::new(StrictTestBls)));
+        let adapter = EthereumSyncAdapter::new(
+            "testnet",
+            Some(test_committee()),
+            Some(Box::new(StrictTestBls)),
+        );
         let evidence = sync_evidence(&adapter, 200, 128, 0);
         let err = adapter
             .verify(&evidence, &VerificationPolicy::strict(1_000))
@@ -928,7 +1015,11 @@ mod tests {
     fn a_period_that_does_not_match_the_slot_is_refused() {
         // The period is derived, not believed: otherwise one committee's
         // signature could be presented for another period.
-        let adapter = EthereumSyncAdapter::new("testnet", [0; 32], Some(Box::new(StrictTestBls)));
+        let adapter = EthereumSyncAdapter::new(
+            "testnet",
+            Some(test_committee()),
+            Some(Box::new(StrictTestBls)),
+        );
         let evidence = sync_evidence(&adapter, 64, 128, 9);
         let err = adapter
             .verify(&evidence, &VerificationPolicy::strict(1_000))
@@ -938,7 +1029,11 @@ mod tests {
 
     #[test]
     fn a_lying_declaration_is_refused_when_the_policy_requires_the_match() {
-        let adapter = EthereumSyncAdapter::new("testnet", [0; 32], Some(Box::new(StrictTestBls)));
+        let adapter = EthereumSyncAdapter::new(
+            "testnet",
+            Some(test_committee()),
+            Some(Box::new(StrictTestBls)),
+        );
         let mut evidence = sync_evidence(&adapter, 64, 128, 0);
         evidence.declared_height = 65;
         let err = adapter
@@ -952,7 +1047,11 @@ mod tests {
 
     #[test]
     fn depth_and_age_come_from_the_caller_not_the_adapter() {
-        let adapter = EthereumSyncAdapter::new("testnet", [0; 32], Some(Box::new(StrictTestBls)));
+        let adapter = EthereumSyncAdapter::new(
+            "testnet",
+            Some(test_committee()),
+            Some(Box::new(StrictTestBls)),
+        );
         let evidence = sync_evidence(&adapter, 64, 128, 0);
 
         let mut policy = VerificationPolicy::strict(1_000);
@@ -972,7 +1071,11 @@ mod tests {
         // the harness must admit it. This is the check that the probe offsets
         // actually line up with the layout - a probe that patches the wrong
         // bytes would show up here as Accepted.
-        let adapter = EthereumSyncAdapter::new("testnet", [0; 32], Some(Box::new(StrictTestBls)));
+        let adapter = EthereumSyncAdapter::new(
+            "testnet",
+            Some(test_committee()),
+            Some(Box::new(StrictTestBls)),
+        );
         let golden = sync_evidence(&adapter, 64, 128, 0);
         let adapter = adapter.with_golden(golden);
         let report = admit(&adapter, &VerificationPolicy::strict(1_000));
@@ -1002,6 +1105,16 @@ mod tests {
     }
 
     /// Builds a well-formed evidence sample for the sync adapter.
+    /// The committee the sync tests pin: matches `sync_evidence`'s payload
+    /// key and period (BLG-0130/P06-F01).
+    fn test_committee() -> crate::cross_domain::external::ethereum::PinnedCommittee {
+        crate::cross_domain::external::ethereum::PinnedCommittee {
+            period: 0,
+            aggregate_pubkey: vec![0x11; 96],
+            next_committee_root: [0xbb; 32],
+        }
+    }
+
     fn sync_evidence(
         adapter: &EthereumSyncAdapter,
         finalized_slot: u64,
@@ -1022,7 +1135,8 @@ mod tests {
         let descriptor = adapter.descriptor();
         RawConsensusEvidence {
             adapter: descriptor.id,
-            evidence_version: 1,
+            // BLG-0131 (P06-F02): the ethereum-sync evidence format is v2.
+            evidence_version: 2,
             network: "testnet".to_string(),
             payload: payload.clone(),
             declared_height: finalized_slot,

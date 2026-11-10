@@ -243,7 +243,9 @@ pub struct BudV2Header {
 impl BudV2Header {
     pub const MAGIC: [u8; 8] = *b"\xB5\x55\x44\xB0\x02\x00\x00\x00";
 
-    pub fn new(codec: FormatCodec, chunks: &[StructuralChunk]) -> Self {
+    // Private: only `BudV2File::new_with_codec` has bounded the count and the
+    // sizes that this constructor casts and sums.
+    fn new(codec: FormatCodec, chunks: &[StructuralChunk]) -> Self {
         let mut h = Sha3_256::new();
         h.update(b"BDLM_BUD_V2");
         for c in chunks {
@@ -406,6 +408,11 @@ impl BudV2File {
         {
             return None;
         }
+        // A supplied id must match its data, or the file written here could
+        // not be read back.
+        if chunks.iter().any(|c| c.content_id != content_id(&c.data)) {
+            return None;
+        }
         let header = BudV2Header::new(codec, &chunks);
         Some(BudV2File {
             header,
@@ -503,18 +510,34 @@ impl BudV2File {
     /// is, Huffman -> decompress, Zstd -> decompress). No panics; zstd
     /// decompression is bounded by the K25 ceiling (ZSTD_MAX_DECOMPRESSED).
     pub fn restore_original(&self) -> Option<Vec<u8>> {
-        let mut out = Vec::new();
+        self.restore_original_within(Self::MAX_TOTAL_BYTES)
+    }
+
+    /// Like [`Self::restore_original`], with a ceiling on the TOTAL output.
+    /// The per-chunk ceiling alone lets many small chunks each expand to the
+    /// full limit; here every chunk may only use what is left of `max_total`.
+    fn restore_original_within(&self, max_total: u64) -> Option<Vec<u8>> {
+        let mut out: Vec<u8> = Vec::new();
         for c in &self.chunks {
+            let left = max_total.checked_sub(out.len() as u64)?;
             match self.chunk_codec {
-                ChunkCodec::Raw => out.extend_from_slice(&c.data),
+                ChunkCodec::Raw => {
+                    if c.data.len() as u64 > left {
+                        return None;
+                    }
+                    out.extend_from_slice(&c.data);
+                }
                 ChunkCodec::Huffman => {
                     let d = crate::bud_format_huffman::HuffmanCoder::decompress(&c.data)?;
+                    if d.len() as u64 > left {
+                        return None;
+                    }
                     out.extend_from_slice(&d);
                 }
                 ChunkCodec::Zstd => {
                     let d = crate::bud_format_real::zstd_decompress_safe(
                         &c.data,
-                        crate::bud_format_real::ZSTD_MAX_DECOMPRESSED,
+                        left.min(crate::bud_format_real::ZSTD_MAX_DECOMPRESSED),
                     )?;
                     out.extend_from_slice(&d);
                 }
@@ -959,6 +982,25 @@ mod tests {
         assert!(BudV2File::decode(&enc[..59]).is_none());
     }
 
+    /// BLG-0586: the output ceiling is shared by all chunks, not granted to
+    /// each chunk again.
+    #[test]
+    fn restore_original_bounds_the_total_output() {
+        let zeros = vec![0u8; 400 * 1024];
+        let chunks: Vec<StructuralChunk> = (0..4)
+            .map(|_| StructuralChunk {
+                content_id: content_id(&zeros),
+                data: zeros.clone(),
+            })
+            .collect();
+        let file = BudV2File::new_zstd(FormatCodec::Unknown, chunks).expect("container");
+        let all = file.restore_original().expect("within the ceiling");
+        assert_eq!(all.len(), 4 * zeros.len());
+        // 1 MiB is below the 1.6 MiB the four chunks expand to.
+        assert!(file.restore_original_within(1024 * 1024).is_none());
+        assert!(file.restore_original_within(all.len() as u64).is_some());
+    }
+
     #[test]
     fn bud_v2_file_bomb_guards() {
         let csv = b"a\n";
@@ -1001,6 +1043,15 @@ mod tests {
         let chunks = vec![StructuralChunk {
             content_id: content_id(&big),
             data: big,
+        }];
+        assert!(BudV2File::new(FormatCodec::Text, chunks).is_none());
+    }
+
+    #[test]
+    fn bud_v2_file_new_rejects_a_wrong_chunk_id() {
+        let chunks = vec![StructuralChunk {
+            content_id: [7u8; 32],
+            data: b"payload".to_vec(),
         }];
         assert!(BudV2File::new(FormatCodec::Text, chunks).is_none());
     }

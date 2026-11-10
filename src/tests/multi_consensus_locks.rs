@@ -163,9 +163,9 @@ mod poa_authority_binding {
         declared: &[crate::core::address::Address],
     ) -> FinalityProof {
         let msg = crate::domain::finality_adapter::poa_commit_signing_message(
+            domain.domain_chain_id,
             domain.id,
-            commitment.domain_height,
-            &commitment.domain_block_hash,
+            commitment,
         );
         let signatures = signers
             .iter()
@@ -345,6 +345,7 @@ mod poa_authority_binding {
             epoch: 0,
             checkpoint_height: pos_commitment.domain_height,
             checkpoint_hash: hex::encode(pos_commitment.domain_block_hash),
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             agg_sig_bls: vec![],
             bitmap: vec![],
             set_hash: snapshot.set_hash.clone(),

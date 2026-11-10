@@ -17,6 +17,17 @@ fn code_of(root: &Path, rel: &str) -> Result<String, String> {
     std::fs::read_to_string(&f).map_err(|e| e.to_string())
 }
 
+/// Production lines (before the first test module) that name the mock proof
+/// without the `cfg!(test)` guard.
+fn unguarded_mock_sites(src: &str) -> usize {
+    let production = src.split("\n#[cfg(test)]").next().unwrap_or(src);
+    production
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .filter(|l| l.contains("test-mock-proof") && !l.contains("cfg!(test) &&"))
+        .count()
+}
+
 /// # Errors
 ///
 /// Returns the first violated claim.
@@ -46,6 +57,11 @@ pub fn run(root: &Path) -> Result<String, String> {
         if !src.contains(needle) {
             return Err(msg.to_string());
         }
+    }
+    if unguarded_mock_sites(&src) > 0 {
+        return Err(String::from(
+            "storage_deal.rs names test-mock-proof in production code outside the cfg!(test) guard",
+        ));
     }
     let root_bound = src.contains("storage_root") && src.contains("proof_bytes")
         || src.contains("storage_root.is_some");
@@ -111,4 +127,22 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "Storage proof boundary canary OK (clean PASSes, broken FAILs).",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unguarded_mock_proof_in_production_is_counted() {
+        let guarded = "fn a() {\n    if cfg!(test) && proof_bytes == b\"test-mock-proof\" {}\n}\n";
+        assert_eq!(unguarded_mock_sites(guarded), 0);
+        let open =
+            format!("{guarded}fn b() {{\n    if proof_bytes == b\"test-mock-proof\" {{}}\n}}\n");
+        assert_eq!(unguarded_mock_sites(&open), 1);
+        let in_tests = format!(
+            "{guarded}\n#[cfg(test)]\nmod t {{ const P: &[u8] = b\"test-mock-proof\"; }}\n"
+        );
+        assert_eq!(unguarded_mock_sites(&in_tests), 0);
+    }
 }

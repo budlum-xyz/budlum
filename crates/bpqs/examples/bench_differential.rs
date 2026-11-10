@@ -27,8 +27,8 @@ use std::time::Instant;
 
 use budlum_bpqs::sign::BpqsSigner;
 use budlum_bpqs::{
-    keygen_root, sign_at_height, verify_at_height, BpqsParams, EpochWindow,
-    Poseidon2GoldilocksHash, Sha3_256Hash, Shake256Hash,
+    keygen_root, verify_at_height, BpqsParams, EpochWindow, Poseidon2GoldilocksHash, Sha3_256Hash,
+    Shake256Hash,
 };
 use ml_dsa::signature::{Signer as MlSigner, Verifier as MlVerifier};
 use ml_dsa::Keypair as _;
@@ -118,26 +118,29 @@ fn row(label: &str, keygen_us: f64, sign_us: f64, verify_us: f64, sig_bytes: usi
 
 fn bench_bpqs_row<H: budlum_bpqs::BpqsHash>(label: &str) {
     let t0 = Instant::now();
-    let signer = BpqsSigner::<BenchFast, H>::ceremonial_keygen([7u8; 32], EpochWindow(3))
+    let mut signer = BpqsSigner::<BenchFast, H>::fresh_device([7u8; 32], EpochWindow(3))
         .unwrap_or_else(|e| panic!("keygen: {e}"));
     let keygen_us = t0.elapsed().as_micros() as f64;
 
-    // EpochWindow(3): rotate heights so every epoch sees at most 3 mints,
-    // staying under q_max=4 the way the ceremony would.
+    // One mint per epoch: Q_MAX is 1 (one-time posture) and the device
+    // enforces the quota itself (BLG-0041), so the bench rotates epochs.
     let iters = 20u32;
     let t1 = Instant::now();
     for i in 0..iters {
-        let h = (i / 3) as u64 * 9 + [0u64, 3, 6][(i % 3) as usize];
-        let _ = sign_at_height::<H, BenchFast>(&signer, h, i % 3, MSG)
+        let h = u64::from(i) * 3;
+        let _ = signer
+            .sign_at_height(h, MSG)
             .unwrap_or_else(|e| panic!("sign: {e}"));
     }
     let sign_us = t1.elapsed().as_micros() as f64 / iters as f64;
 
-    let sig =
-        sign_at_height::<H, BenchFast>(&signer, 1, 0, MSG).unwrap_or_else(|e| panic!("s: {e}"));
+    let verify_height = u64::from(iters) * 3;
+    let sig = signer
+        .sign_at_height(verify_height, MSG)
+        .unwrap_or_else(|e| panic!("s: {e}"));
     let t2 = Instant::now();
     for _ in 0..iters {
-        verify_at_height::<H, BenchFast>(signer.public(), 1, MSG, &sig)
+        verify_at_height::<H, BenchFast>(signer.public(), verify_height, MSG, &sig)
             .unwrap_or_else(|e| panic!("verify: {e}"));
     }
     let verify_us = t2.elapsed().as_micros() as f64 / iters as f64;

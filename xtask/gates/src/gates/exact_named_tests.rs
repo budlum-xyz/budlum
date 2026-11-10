@@ -14,6 +14,11 @@ use std::path::Path;
 /// the log, where `name` is the full test path (e.g.
 /// `tests::bns::tests::test_bns_registration_and_resolution`).
 pub fn check_exact_log(log: &Path, tests: &[&str], subject: &str) -> Result<String, String> {
+    if tests.is_empty() {
+        return Err(format!(
+            "the {subject} gate has no required test names, so it would check nothing"
+        ));
+    }
     if !log.is_file() {
         return Err(format!(
             "the test output is missing/empty: {}",

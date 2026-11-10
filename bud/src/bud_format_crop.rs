@@ -45,7 +45,12 @@ impl CropDerivation {
 
     /// The MCU alignment check: are the crop edges multiples of 16?
     pub fn is_mcu_aligned(x: u32, y: u32, w: u32, h: u32) -> bool {
-        x.is_multiple_of(MCU_SIZE)
+        // An empty region, or one whose far edge overflows, is not a crop.
+        w > 0
+            && h > 0
+            && x.checked_add(w).is_some()
+            && y.checked_add(h).is_some()
+            && x.is_multiple_of(MCU_SIZE)
             && y.is_multiple_of(MCU_SIZE)
             && w.is_multiple_of(MCU_SIZE)
             && h.is_multiple_of(MCU_SIZE)
@@ -123,6 +128,10 @@ impl CropDerivation {
         if bytes.len() != HDR + 32 {
             return None;
         }
+        // The flag is not in the hash, so it is recomputed, not trusted.
+        if aligned != Self::is_mcu_aligned(x, y, w, h) {
+            return None;
+        }
         let rec = CropDerivation {
             master_content_id: master,
             x,
@@ -180,6 +189,22 @@ mod tests {
             CropDerivation::new(master, 0, 0, 16, 16).derivation_hash()
         );
         assert_ne!(aligned.derivation_hash(), misaligned.derivation_hash());
+    }
+
+    #[test]
+    fn a_flipped_aligned_flag_is_refused() {
+        let rec = CropDerivation::new([1u8; 32], 1, 0, 16, 16);
+        assert!(!rec.aligned);
+        let mut blob = rec.to_blob();
+        blob[57] = 1; // the hash does not cover this byte
+        assert!(CropDerivation::from_blob(&blob).is_none());
+    }
+
+    #[test]
+    fn empty_and_overflowing_regions_are_not_aligned() {
+        assert!(!CropDerivation::is_mcu_aligned(0, 0, 0, 0));
+        assert!(!CropDerivation::is_mcu_aligned(0, 0, 16, 0));
+        assert!(!CropDerivation::is_mcu_aligned(u32::MAX - 15, 0, 32, 16));
     }
 
     #[test]

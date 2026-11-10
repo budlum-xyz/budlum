@@ -94,12 +94,25 @@ fn function_body(text: &str, signature: &str) -> Option<String> {
 /// derivation at all, which is itself a finding: the gate must not silently
 /// pass a function it failed to understand.
 fn parse_derivation(body: &str, what: &str) -> Result<Derivation, String> {
+    let body = body
+        .lines()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body = body.as_str();
     let hasher = body
-        .find("::new()")
-        .and_then(|at| {
+        .match_indices("::new()")
+        .filter_map(|(at, _)| {
             let head = body.get(..at)?;
-            let start = head.rfind(|c: char| !(c.is_alphanumeric() || c == '_'))?;
-            head.get(start + 1..).map(str::to_string)
+            let start = head
+                .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .map_or(0, |p| p + 1);
+            head.get(start..).map(str::to_string)
+        })
+        .find(|name| {
+            ["Sha", "Keccak", "Blake", "Hash"]
+                .iter()
+                .any(|k| name.contains(k))
         })
         .ok_or_else(|| format!("{what}: no `<Hasher>::new()` call found"))?;
 
@@ -353,4 +366,17 @@ pub fn self_test() -> Result<String, String> {
          differences FAIL; agreeing on a trailing tag FAILs; a renamed or unparsable derivation \
          FAILs).",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_hasher_is_a_hash_constructor_not_any_new() {
+        let body = "let mut v = Vec::new();\n// Keccak256::new()\nlet mut h = Sha3_256::new();\nh.update(b\"TAG\");\nh.update(key);\n";
+        let d = parse_derivation(body, "x").expect("parses");
+        assert_eq!(d.hasher, "Sha3_256");
+        assert!(d.separator_first);
+    }
 }

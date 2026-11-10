@@ -220,11 +220,9 @@ impl TransformedPayload {
     ///
     /// # Errors
     ///
-    /// Empty bytes refused.
+    /// None today. Empty bytes are a valid empty payload, as in
+    /// [`transform_content`].
     pub fn from_bytes(bytes: Vec<u8>, codec_flags: CodecFlags) -> Result<Self, TransformError> {
-        if bytes.is_empty() {
-            return Err(TransformError::Empty);
-        }
         let class = if codec_flags.contains(CodecFlags::CIPHERTEXT) {
             ContentClass::Ciphertext
         } else if codec_flags.contains(CodecFlags::ENTROPY_CODED) {
@@ -251,8 +249,6 @@ impl TransformedPayload {
 /// A0 errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransformError {
-    /// Empty transform refused.
-    Empty,
     /// Pinned digest no longer matches the body at the A1 handoff.
     HashMismatch,
     /// Input larger than lab hard cap.
@@ -267,7 +263,6 @@ pub enum TransformError {
 impl std::fmt::Display for TransformError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Empty => write!(f, "transformed payload refuses empty bytes"),
             Self::HashMismatch => {
                 write!(f, "transformed payload body does not match its pinned hash")
             }
@@ -303,13 +298,18 @@ pub struct TransformOpts {
 ///
 /// # Errors
 ///
-/// Empty / oversized input.
+/// Oversized input. Empty input is a valid empty payload of class Generic.
 pub fn transform_content(
     input: &[u8],
     opts: TransformOpts,
 ) -> Result<TransformedPayload, TransformError> {
     if input.is_empty() {
-        return Err(TransformError::Empty);
+        return Ok(TransformedPayload {
+            bytes: Vec::new(),
+            content_sha256: calculate_hash_bytes(&[]),
+            codec_flags: CodecFlags::NONE,
+            class: ContentClass::Generic,
+        });
     }
     if input.len() > MAX_TRANSFORM_IN {
         return Err(TransformError::TooLarge {
@@ -370,15 +370,30 @@ mod tests {
     }
 
     #[test]
-    fn empty_refused() {
-        assert_eq!(
-            TransformedPayload::from_bytes(vec![], CodecFlags::NONE).unwrap_err(),
-            TransformError::Empty
-        );
-        assert_eq!(
-            transform_content(b"", TransformOpts::default()).unwrap_err(),
-            TransformError::Empty
-        );
+    fn from_bytes_accepts_empty_as_generic() {
+        let t = TransformedPayload::from_bytes(vec![], CodecFlags::NONE).unwrap();
+        assert!(t.bytes.is_empty());
+        assert_eq!(t.class, ContentClass::Generic);
+        assert_eq!(t.content_sha256, calculate_hash_bytes(&[]));
+        assert!(t.verify_hash());
+    }
+
+    #[test]
+    fn empty_input_gives_empty_generic_payload() {
+        for apply_zlib in [false, true] {
+            let t = transform_content(
+                b"",
+                TransformOpts {
+                    apply_zlib,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(t.bytes.is_empty());
+            assert_eq!(t.class, ContentClass::Generic);
+            assert_eq!(t.content_sha256, calculate_hash_bytes(b""));
+            assert!(!t.codec_flags.contains(CodecFlags::PRE_SHRUNK));
+        }
     }
 
     #[test]

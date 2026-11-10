@@ -14,26 +14,37 @@
 #![forbid(unsafe_code)]
 
 use sha3::{Digest, Sha3_256};
+use std::collections::HashSet;
 
 pub const BLOOM_MAGIC: [u8; 8] = *b"\xB5BLM1\0\0\0";
+
+/// Parameter ceilings. With these, `num_bits` is at most 2^30, so it fits the
+/// `u32` in the digest and the filter takes at most 128 MiB. `k` is at most
+/// 45, so it fits the `u8` in the digest and in the position hash.
+const MAX_EXPECTED: usize = 1 << 24;
+const MAX_BITS_PER_ENTRY: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct BloomDedupIndex {
     bits: Vec<u64>, // bit dizisi
     num_bits: usize,
-    k: usize,             // the number of hashes
-    inserted: usize,      // the number of chunks inserted
-    exact: Vec<[u8; 32]>, // the exact verification set (the second stage)
+    k: usize,                 // the number of hashes
+    inserted: usize,          // the number of chunks inserted
+    exact: HashSet<[u8; 32]>, // the exact verification set (the second stage)
 }
 
 impl BloomDedupIndex {
     /// For `expected` chunks, with `bits_per_entry` bits (the default 14 gives
     /// a 1 percent false-positive rate).
     pub fn new(expected: usize, bits_per_entry: usize) -> Option<Self> {
-        if expected == 0 || bits_per_entry == 0 {
+        if expected == 0
+            || bits_per_entry == 0
+            || expected > MAX_EXPECTED
+            || bits_per_entry > MAX_BITS_PER_ENTRY
+        {
             return None;
         }
-        let num_bits = expected.saturating_mul(bits_per_entry).max(64);
+        let num_bits = expected.checked_mul(bits_per_entry)?.max(64);
         let k = ((num_bits as f64 / expected as f64) * std::f64::consts::LN_2)
             .round()
             .max(1.0) as usize;
@@ -42,7 +53,7 @@ impl BloomDedupIndex {
             num_bits,
             k,
             inserted: 0,
-            exact: Vec::new(),
+            exact: HashSet::new(),
         })
     }
 
@@ -66,7 +77,7 @@ impl BloomDedupIndex {
         for p in self.hash_positions(&h) {
             self.bits[p / 64] |= 1u64 << (p % 64);
         }
-        self.exact.push(h);
+        self.exact.insert(h);
         self.inserted += 1;
     }
 
@@ -149,6 +160,14 @@ mod tests {
         let saving = b.ram_saving_vs_full();
         assert!(saving > 0.5, "the RAM saving is {:.2}", saving);
         assert!(b.filter_bytes() < 500 * 32);
+    }
+
+    #[test]
+    fn oversized_parameters_are_refused() {
+        assert!(BloomDedupIndex::new(usize::MAX, 14).is_none());
+        assert!(BloomDedupIndex::new(1 << 40, 64).is_none());
+        assert!(BloomDedupIndex::new(1000, 100_000).is_none());
+        assert!(BloomDedupIndex::new(1000, 64).is_some());
     }
 
     #[test]

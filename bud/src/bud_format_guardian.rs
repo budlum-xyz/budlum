@@ -128,6 +128,11 @@ pub struct MiniGuardianAudit {
 
 /// A lying device proof (the Y9 risk): an unsigned or corrupt proof raises the fault counter.
 pub fn audit_mini(device: &mut Guardian, audit: &MiniGuardianAudit) -> bool {
+    // An audit written for another device counts neither for nor against
+    // this one.
+    if audit.device_id != device.id {
+        return false;
+    }
     if audit.shard_ok && audit.signed {
         true
     } else {
@@ -232,6 +237,19 @@ mod tests {
             !none.opt_in,
             "without opt-in it does not join the selection"
         );
+    }
+
+    #[test]
+    fn an_audit_for_another_device_is_ignored() {
+        let mut dev = Guardian::new([9u8; 32], GuardianRole::MiniDevice);
+        let other = MiniGuardianAudit {
+            device_id: [8u8; 32],
+            pact_id: [1u8; 32],
+            shard_ok: true,
+            signed: true,
+        };
+        assert!(!audit_mini(&mut dev, &other));
+        assert_eq!(dev.fault_count, 0, "no fault for a foreign audit");
     }
 
     #[test]

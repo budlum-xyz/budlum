@@ -1,5 +1,18 @@
 # osv-scanner.toml, justified exceptions for the OSV.dev based vulnerability scan
 #
+# WHY THIS FILE IS HERE AND NOT UNDER `.quality/`: osv-scanner loads
+# `osv-scanner.toml` from the directory of the thing it is scanning unless the
+# caller passes `--config`. The project's own workflow passes the path
+# explicitly, so a private location worked for it - but every OTHER OSV consumer
+# reads the default path, and one of them is in the Security tab: the OpenSSF
+# Scorecard `Vulnerabilities` check calls osv-scanner on the checked-out tree with
+# no override (scorecard v5 `clients/osv.go` builds `osvscanner.ScannerActions`
+# with an empty `ConfigOverridePath`), so the reviewed exceptions below were
+# invisible to it and the eight accepted unmaintained records kept the alert
+# open. `budzero/osv-scanner.toml` already described this file as "the root
+# osv-scanner.toml" - this is that path. One reviewed list, read by every
+# scanner that speaks OSV, instead of two lists that can drift.
+#
 # WHY A SEPARATE SCANNER: cargo-audit and cargo-deny read only the RustSec advisory
 # database. OSV.dev is an aggregator (RustSec + GHSA + NVD + CVE) and it also sees
 # records that have NO COUNTERPART in RustSec. This is not a theoretical difference:
@@ -77,3 +90,29 @@ ecosystem = "crates.io"
 vulnerability.ignore = true
 effectiveUntil = 2026-12-01
 reason = "RUSTSEC-2026-0253 is PATCHED in lru >= 0.18.2 (lru-rs#238: the node is detached before the key is dropped), so the locked 0.18.4 is upstream of the affected range and carries no finding to silence; this entry is kept version-pinned so the reachability record follows the dependency instead of disappearing with the rqrr 0.10.1 -> 0.11.0 bump. If the advisory's affected range were reinterpreted down, the same VEX argument still holds: the only lru instantiation in the tree is rqrr 0.11.0's LruCache<u8, ColoredRegion> (prepare.rs), whose key type has no Drop implementation and cannot panic during pop(). RUSTSEC-2026-0002 does not apply (fixed in 0.16.3)."
+
+# 2026-10-27: GHSA-qwgh-2vcv-g2f7 ("block_buffer: panic corrupts inline buffer
+# position", CVSS 6.3, fixed in block-buffer 0.12.1) was published against the
+# block-buffer 0.10.4 that is still in ten lockfiles through digest 0.10.7 ->
+# sha2 0.10. That line is pinned deliberately: `sha2_010` exists only for
+# bls12_381 0.9's RFC 9380 hash-to-curve API, and block-buffer 0.12 changed the
+# buffer API under digest 0.10, so the patched version is NOT selectable until
+# bls12_381 moves to digest 0.11 (tracked on the dependency roadmap; the
+# application's own hashing is sha2/sha3 0.11, which already resolves to
+# block-buffer 0.12.1 and is outside the affected range).
+#
+# Why it is unreachable here (VEX): the advisory needs a caller-supplied
+# `compress` callback to panic, the panic to be caught, and the same hasher to
+# keep being used afterwards. The only instantiation of the 0.10 line is
+# `ExpandMsgXmd<Sha256>` inside bls12_381's `hash_to_curve`, which passes
+# sha2's own infallible compression function, hashes fixed-size inputs, and has
+# no `catch_unwind` anywhere around it in the tree - so there is no panic to
+# catch and no corrupted cursor to read. Pinned to the package and version the
+# reasoning was written for, and dated so the waiver lapses on its own.
+[[PackageOverrides]]
+name = "block-buffer"
+version = "0.10.4"
+ecosystem = "crates.io"
+vulnerability.ignore = true
+effectiveUntil = 2027-01-31
+reason = "GHSA-qwgh-2vcv-g2f7 requires a panicking caller-supplied compress callback whose caught panic leaves the buffer cursor corrupted; the only 0.10 instantiation is ExpandMsgXmd<Sha256> in bls12_381's hash_to_curve, which uses sha2's infallible compression and never runs under catch_unwind. Not upgradable in place: the fix (block-buffer 0.12.1) is incompatible with digest 0.10, which is pinned for the bls12_381 0.9 API."

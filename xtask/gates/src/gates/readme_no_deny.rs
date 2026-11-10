@@ -38,10 +38,17 @@ fn strip_comments(text: &str) -> String {
 }
 
 /// Case-insensitive substring match (the shell regexes are simple phrases).
+///
+/// Runs of whitespace, newlines included, are one space on both sides, so a
+/// denial that the README wraps over two lines still matches.
 fn matches(text: &str, pat: &str) -> bool {
-    let t = text.to_lowercase();
-    let p = pat.to_lowercase();
-    t.contains(&p)
+    let squash = |s: &str| {
+        s.to_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    squash(text).contains(&squash(pat))
 }
 
 /// # Errors
@@ -61,7 +68,11 @@ pub fn run(root: &Path) -> Result<String, String> {
             continue;
         }
         if !evidence.is_file() {
-            checked += 1;
+            // A moved evidence file must not turn the pair into a pass.
+            problems.push(format!(
+                "{evidence_rel} is missing, so the claim in {readme_rel} cannot be checked. If \
+                 the code moved, update this gate in the same commit."
+            ));
             continue;
         }
         checked += 1;
@@ -120,4 +131,21 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "readme-no-deny canary OK (a denial FAILs, honesty PASSes).",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_wrapped_denial_still_matches() {
+        assert!(matches(
+            "Redundancy is not\n  erasure coding, it is x",
+            "redundancy is not erasure coding"
+        ));
+        assert!(!matches(
+            "redundancy is erasure coding",
+            "redundancy is not erasure coding"
+        ));
+    }
 }

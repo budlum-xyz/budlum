@@ -276,6 +276,15 @@ where
         deserializer.deserialize_map(StringKeyMap(PhantomData))
     } else {
         let entries = Vec::<(Key, Value)>::deserialize(deserializer)?;
+        // The serializer writes a BTreeMap in key order, so a stored row is
+        // strictly ascending. Accepting anything else would let two byte
+        // strings decode to one map (P20-F13); the JSON path already rejects
+        // duplicates.
+        if entries.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+            return Err(de::Error::custom(
+                "map entries are not strictly ascending by key",
+            ));
+        }
         Ok(entries.into_iter().collect())
     }
 }
@@ -300,6 +309,21 @@ mod tests {
         #[serde(with = "super")]
         by_route: BTreeMap<(DomainId, DomainId, Address), u64>,
         tail: u8,
+    }
+
+    #[test]
+    fn non_canonical_binary_map_rows_are_refused() {
+        let empty_route: Vec<((DomainId, DomainId, Address), u64)> = Vec::new();
+        for entries in [
+            vec![([2u8; 32], 1u64), ([1u8; 32], 2)],
+            vec![([1u8; 32], 1u64), ([1u8; 32], 2)],
+        ] {
+            let bytes = bincode::serialize(&(entries, empty_route.clone(), 0u8)).unwrap();
+            assert!(bincode::deserialize::<Keyed>(&bytes).is_err());
+        }
+        let ok = bincode::serialize(&(vec![([1u8; 32], 1u64), ([2u8; 32], 2)], empty_route, 0u8))
+            .unwrap();
+        assert!(bincode::deserialize::<Keyed>(&ok).is_ok());
     }
 
     fn sample() -> (Derived, Keyed) {

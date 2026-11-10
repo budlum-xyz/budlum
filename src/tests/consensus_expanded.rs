@@ -48,14 +48,30 @@ fn test_blockchain_invalid_previous_hash() {
 
 #[test]
 fn test_blockchain_future_timestamp_buffer() {
+    use crate::consensus::ConsensusEngine;
     let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc = Blockchain::new(consensus, None, 45262, None);
+    let mut bc = Blockchain::new(consensus.clone(), None, 45262, None);
     let mut block = Block::new(1, bc.chain[0].hash.clone(), vec![]);
     block.chain_id = 45262;
-    // Block far in the future (e.g., 1 hour) - most protocols reject.
-    block.timestamp = bc.chain[0].timestamp + 3600 * 1000 + 1000;
+    // One hour ahead of the real clock. The devnet genesis is dated 0, so a
+    // block dated from genesis would be in the past and never reach the
+    // drift gate.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    block.timestamp = now_ms + 3600 * 1000;
+    // The gate itself names the reason.
+    let reason = consensus
+        .validate_timestamp(&block, Some(&bc.chain[0]))
+        .unwrap_err();
+    assert!(
+        reason.0.contains("too far in the future"),
+        "wrong reason: {}",
+        reason.0
+    );
+    // And the chain refuses the block.
     let res = bc.validate_and_add_block(block).map(|_| ());
-    // A block with a future timestamp has to be refused - timestamp drift protection.
     assert!(
         res.is_err(),
         "future-timestamp block must be rejected (timestamp drift protection)"
@@ -68,7 +84,14 @@ macro_rules! gen_pow_difficulty_tests {
             #[test]
             fn $name() {
                 let engine = PoWEngine::new($diff);
-                assert_eq!(engine.info().contains(&$diff.to_string()), $diff > 0 || engine.info().contains("0"));
+                assert_eq!(
+                    engine.info(),
+                    format!(
+                        "PoW (difficulty: {}, binary target: {} leading zero bits)",
+                        $diff,
+                        $diff * 4
+                    )
+                );
             }
         )*
     }
@@ -94,102 +117,16 @@ fn chain_genesis_balance_check() {
     assert!(bc.state.get_balance(&Address::from([0x01; 32])) >= 1_000_000_000);
 }
 
-// 40 variations of block production tests
-macro_rules! gen_block_prod_tests {
-    ($($name:ident, $idx:expr),*) => {
-        $(
-            #[test]
-            fn $name() {
-                let consensus = Arc::new(PoWEngine::new(0));
-                let mut bc = Blockchain::new(consensus, None, 45262, None);
-                let p = addr($idx);
-                let res = bc.produce_block(p);
-                assert!(res.is_some());
-                assert_eq!(bc.chain.len(), 2);
-            }
-        )*
+// P01-F25: the forty copies of one block-production test are one loop over
+// the producer addresses. Same assertions per address, no macro stamp-out.
+#[test]
+fn block_production_works_across_producer_addresses() {
+    for idx in 1u8..=40 {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
+        let p = addr(idx);
+        let res = bc.produce_block(p);
+        assert!(res.is_some(), "production must succeed for producer {idx}");
+        assert_eq!(bc.chain.len(), 2);
     }
 }
-
-gen_block_prod_tests!(
-    prod_test_1,
-    1,
-    prod_test_2,
-    2,
-    prod_test_3,
-    3,
-    prod_test_4,
-    4,
-    prod_test_5,
-    5,
-    prod_test_6,
-    6,
-    prod_test_7,
-    7,
-    prod_test_8,
-    8,
-    prod_test_9,
-    9,
-    prod_test_10,
-    10,
-    prod_test_11,
-    11,
-    prod_test_12,
-    12,
-    prod_test_13,
-    13,
-    prod_test_14,
-    14,
-    prod_test_15,
-    15,
-    prod_test_16,
-    16,
-    prod_test_17,
-    17,
-    prod_test_18,
-    18,
-    prod_test_19,
-    19,
-    prod_test_20,
-    20,
-    prod_test_21,
-    21,
-    prod_test_22,
-    22,
-    prod_test_23,
-    23,
-    prod_test_24,
-    24,
-    prod_test_25,
-    25,
-    prod_test_26,
-    26,
-    prod_test_27,
-    27,
-    prod_test_28,
-    28,
-    prod_test_29,
-    29,
-    prod_test_30,
-    30,
-    prod_test_31,
-    31,
-    prod_test_32,
-    32,
-    prod_test_33,
-    33,
-    prod_test_34,
-    34,
-    prod_test_35,
-    35,
-    prod_test_36,
-    36,
-    prod_test_37,
-    37,
-    prod_test_38,
-    38,
-    prod_test_39,
-    39,
-    prod_test_40,
-    40
-);

@@ -66,7 +66,7 @@ fn is_ident_char(c: char) -> bool {
 }
 
 /// Remove `#[cfg(test)] mod tests { ... }` blocks, braces balanced.
-fn strip_test_mods(src: &str) -> String {
+pub(crate) fn strip_test_mods(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
     let bytes: Vec<char> = src.chars().collect();
     let mut i = 0;
@@ -82,7 +82,7 @@ fn strip_test_mods(src: &str) -> String {
         // that calls `registry/quarantine_ledger.rs`, so a wired module read
         // as unwired. `test_item_end` skips strings and comments and stops at
         // the item's own terminator instead.
-        if bytes[i] == '#' && src[byte_index(&bytes, i)..].starts_with("#[cfg(test)]") {
+        if bytes[i] == '#' && is_test_cfg(&src[byte_index(&bytes, i)..]) {
             i = test_item_end(&bytes, i);
             continue;
         }
@@ -90,6 +90,33 @@ fn strip_test_mods(src: &str) -> String {
         i += 1;
     }
     out
+}
+
+/// Does the text start with a `cfg` attribute that is true only under test?
+///
+/// `all(test, ..)` is test-only as well. `any(test, ..)` is not, but a call
+/// inside it is not production evidence either, so both are treated as test.
+fn is_test_cfg(text: &str) -> bool {
+    ["#[cfg(test)]", "#[cfg(all(test", "#[cfg(any(test"]
+        .iter()
+        .any(|p| text.starts_with(p))
+}
+
+/// End of a char literal such as `'{'` or `'\n'` that starts at `j`.
+///
+/// Returns `None` for a lifetime or a label.
+fn char_literal_end(chars: &[char], j: usize) -> Option<usize> {
+    if chars.get(j) != Some(&'\'') {
+        return None;
+    }
+    if chars.get(j + 1) == Some(&'\\') {
+        let close = (j + 3..(j + 12).min(chars.len())).find(|&k| chars[k] == '\'')?;
+        return Some(close + 1);
+    }
+    if chars.get(j + 2) == Some(&'\'') {
+        return Some(j + 3);
+    }
+    None
 }
 
 /// Index just past the item a `#[cfg(test)]` attribute at `start` attaches to.
@@ -137,6 +164,10 @@ fn test_item_end(chars: &[char], start: usize) -> usize {
             j = string_end(chars, j);
             continue;
         }
+        if let Some(e) = char_literal_end(chars, j) {
+            j = e;
+            continue;
+        }
         // A `;` before any brace ends the item: a const, use or statement.
         if chars[j] == ';' {
             return j + 1;
@@ -166,6 +197,10 @@ fn test_item_end(chars: &[char], start: usize) -> usize {
                         j += 1;
                     }
                     j = (j + 2).min(n);
+                    continue;
+                }
+                if let Some(e) = char_literal_end(chars, j) {
+                    j = e;
                     continue;
                 }
                 if chars[j] == '{' {
@@ -242,6 +277,66 @@ fn byte_index(chars: &[char], idx: usize) -> usize {
     chars[..idx].iter().map(|c| c.len_utf8()).sum()
 }
 
+/// Is `name` a live test in `src`: a `#[test] fn` that is not ignored, is not
+/// in a comment and asserts something?
+///
+/// Comments and string literals are blanked first. The attributes are read
+/// from the text between the previous item and the `fn`, in either order, so
+/// `#[ignore]` before or after `#[test]` is seen. An empty body enforces
+/// nothing and is not live.
+pub(crate) fn test_is_live(src: &str, name: &str) -> bool {
+    let code = strip_noise(src);
+    let needle = format!("fn {name}");
+    let mut from = 0usize;
+    while let Some(rel) = code[from..].find(&needle) {
+        let at = from + rel;
+        from = at + needle.len();
+        let after = &code[from..];
+        if !after.trim_start().starts_with('(') || after.starts_with(is_ident_char) {
+            continue;
+        }
+        let head = &code[..at];
+        let attrs = &head[head.rfind(['}', ';', '{']).map_or(0, |i| i + 1)..];
+        if !attrs.contains("#[test]") || attrs.contains("#[ignore") || attrs.contains("#[cfg(") {
+            continue;
+        }
+        let Some(open) = after.find('{') else {
+            continue;
+        };
+        let mut depth = 0i32;
+        let mut body_end = None;
+        for (i, c) in after[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        body_end = Some(open + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = body_end else {
+            continue;
+        };
+        let body = &after[open + 1..end];
+        if ["assert", "panic!", "unwrap", "expect", "unreachable!"]
+            .iter()
+            .any(|m| body.contains(m))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Source with test items, comments and string literals removed: code only.
+pub(crate) fn code_only(src: &str) -> String {
+    strip_noise(&strip_test_mods(src))
+}
+
 /// Blank out string literals, including raw strings, and line comments that
 /// carry doc links. What remains is code.
 fn strip_noise(src: &str) -> String {
@@ -296,6 +391,21 @@ fn strip_noise(src: &str) -> String {
                 }
                 i = j;
                 out.push(' ');
+                continue;
+            }
+        }
+        // Char literal. This has to be recognised before the string
+        // branch below: a quote character written as a char literal would
+        // otherwise open a string that runs until the next quote in the
+        // file, and everything between vanishes from the scan. That is
+        // measured, not hypothetical: a `c == '"'` comparison in the
+        // redaction code swallowed six hundred lines this way, and a
+        // function defined in the swallowed region read as deleted.
+        // `char_literal_end` already tells a literal from a lifetime.
+        if chars[i] == '\'' {
+            if let Some(end) = char_literal_end(&chars, i) {
+                out.push(' ');
+                i = end;
                 continue;
             }
         }
@@ -628,7 +738,8 @@ fn read_bodies(root: &Path) -> Result<(Vec<PathBuf>, BTreeMap<PathBuf, String>),
 
     let mut bodies: BTreeMap<PathBuf, String> = BTreeMap::new();
     for p in &files {
-        let raw = std::fs::read_to_string(p).unwrap_or_default();
+        let raw = std::fs::read_to_string(p)
+            .map_err(|e| format!("{} could not be read: {e}", p.display()))?;
         bodies.insert(p.clone(), strip_test_mods(&raw));
     }
     Ok((files, bodies))
@@ -934,9 +1045,6 @@ fn self_test_extraction(problems: &mut Vec<String>) {
     }
 }
 
-/// # Errors
-///
-/// The canaries that did not behave.
 /// Canaries for `strip_test_mods`: a call from inside a test module must
 /// vanish, and a `#[cfg(test)]` item that opens no brace must not swallow
 /// the block after it.
@@ -993,6 +1101,15 @@ fn self_test_mentions_canaries(problems: &mut Vec<String>) {
         &BTreeSet::new(),
     ) {
         problems.push(String::from("VACUOUS: a doc link counted as a call"));
+    }
+
+    // A quote written as a char literal does not open a string: the code
+    // after it has to survive stripping, or a definition below a
+    // `c == '"'` comparison reads as deleted.
+    if !code_only("fn k(c: char) -> bool { c == '\"' }\nfn alpha() {}\n").contains("fn alpha") {
+        problems.push(String::from(
+            "VACUOUS: a quote char literal opened a string and swallowed the code after it",
+        ));
     }
 
     // A mention in a string is not a call.
@@ -1083,6 +1200,9 @@ fn self_test_mentions_canaries(problems: &mut Vec<String>) {
     }
 }
 
+/// # Errors
+///
+/// The canaries that did not behave.
 pub fn self_test() -> Result<String, String> {
     let mut problems: Vec<String> = Vec::new();
 
@@ -1099,4 +1219,48 @@ pub fn self_test() -> Result<String, String> {
          plain calls, turbofish calls, own-module paths and bare type mentions are accepted; \
          name extraction and the unwired marker behave.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_test_cfg_is_stripped() {
+        let src = "#[cfg(all(test, feature = \"x\"))]\nmod t { fn only_test() {} }\nfn prod() {}\n";
+        let out = strip_test_mods(src);
+        assert!(!out.contains("only_test"));
+        assert!(out.contains("fn prod"));
+    }
+
+    #[test]
+    fn char_brace_in_test_module_does_not_end_it_early() {
+        let src = "#[cfg(test)]\nmod t { fn a() { let c = '}'; leaked_call(); } }\nfn prod() {}\n";
+        let out = strip_test_mods(src);
+        assert!(!out.contains("leaked_call"));
+        assert!(out.contains("fn prod"));
+    }
+
+    #[test]
+    fn live_test_needs_attr_assertion_and_no_ignore() {
+        let ok = "#[test]\nfn a() { assert!(true); }\n";
+        assert!(test_is_live(ok, "a"));
+        assert!(!test_is_live("#[test]\nfn a() {}\n", "a"));
+        assert!(!test_is_live(
+            "#[ignore]\n#[test]\nfn a() { assert!(true); }\n",
+            "a"
+        ));
+        assert!(!test_is_live(
+            "#[test]\n#[ignore]\nfn a() { assert!(true); }\n",
+            "a"
+        ));
+        assert!(!test_is_live(
+            "// #[test]\nfn a() { assert!(true); }\n",
+            "a"
+        ));
+        assert!(test_is_live(
+            "#[test]\n#[should_panic]\nfn a() { assert!(true); }\n",
+            "a"
+        ));
+    }
 }

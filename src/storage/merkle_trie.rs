@@ -35,7 +35,8 @@
 //! structures.
 
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::OnceLock;
 
 const TRIE_DEPTH: usize = 256;
 const DOMAIN_PREFIX: &[u8] = b"BDLM_MERKLE_TRIE_V1";
@@ -82,21 +83,45 @@ impl MerkleProof {
 #[derive(Debug, Clone, Default)]
 pub struct MerkleTrie {
     leaves: BTreeMap<[u8; 32], (u64, u64)>,
+    /// Hashes of every non-empty subtree that holds two or more leaves, and
+    /// of every single leaf subtree at the depth where it becomes alone.
+    /// Built once on the first root or proof request and dropped by every
+    /// change, so a trie held across requests pays for the hashing once.
+    index: OnceLock<NodeIndex>,
+}
+
+/// Subtree hashes keyed by `(depth, address prefix padded with zeros)`.
+#[derive(Debug, Clone, Default)]
+struct NodeIndex {
+    root: [u8; 32],
+    nodes: HashMap<(usize, [u8; 32]), [u8; 32]>,
 }
 
 impl MerkleTrie {
     pub const fn new() -> Self {
         Self {
             leaves: BTreeMap::new(),
+            index: OnceLock::new(),
         }
+    }
+
+    fn node_index(&self) -> &NodeIndex {
+        self.index.get_or_init(|| {
+            let leaves: Vec<_> = self.leaves.iter().map(|(a, (b, n))| (*a, *b, *n)).collect();
+            let mut nodes = HashMap::new();
+            let root = index_subtree(&leaves, 0, &mut nodes);
+            NodeIndex { root, nodes }
+        })
     }
 
     pub fn insert(&mut self, address: &[u8; 32], balance: u64, nonce: u64) {
         self.leaves.insert(*address, (balance, nonce));
+        self.index = OnceLock::new();
     }
 
     pub fn remove(&mut self, address: &[u8; 32]) {
         self.leaves.remove(address);
+        self.index = OnceLock::new();
     }
 
     pub fn root(&mut self) -> [u8; 32] {
@@ -104,8 +129,7 @@ impl MerkleTrie {
     }
 
     pub fn root_ref(&self) -> [u8; 32] {
-        let leaves: Vec<_> = self.leaves.iter().map(|(a, (b, n))| (*a, *b, *n)).collect();
-        finalize_root(&hash_leaves(&leaves, 0))
+        finalize_root(&self.node_index().root)
     }
 
     pub fn proof(&self, address: &[u8; 32]) -> MerkleProof {
@@ -114,6 +138,7 @@ impl MerkleTrie {
             .get(address)
             .map_or([0u8; 32], |(b, n)| hash_leaf(address, *b, *n));
 
+        let index = self.node_index();
         let mut siblings = Vec::with_capacity(TRIE_DEPTH);
         let mut directions = Vec::with_capacity(TRIE_DEPTH);
 
@@ -134,19 +159,23 @@ impl MerkleTrie {
             // at each of the 256 levels instead made one proof cost O(256 n);
             // measured at 5000 accounts that was 224 ms of work per proof, on
             // an endpoint a remote caller chooses when to invoke.
+            //
+            // The hash comes from the node index. A sibling that lies below
+            // the point where a single leaf became alone has no entry; it is
+            // that one leaf folded up from the bottom.
             let (lo, hi) = sibling_bounds(address, bit_index);
-            let side: Vec<([u8; 32], u64, u64)> = self
-                .leaves
-                .range(lo..=hi)
-                .map(|(a, (b, n))| (*a, *b, *n))
-                .collect();
-            debug_assert!(
-                side.iter()
-                    .all(|(a, _, _)| prefix_eq(a, address, bit_index)
-                        && get_bit(a, bit_index) != bit),
-                "the range picked up a leaf outside the sibling subtree"
-            );
-            siblings.push(hash_leaves(&side, bit_index + 1));
+            let key = node_key(&flip_bit(address, bit_index), bit_index + 1);
+            let sibling = match index.nodes.get(&key) {
+                Some(hash) => *hash,
+                None => self
+                    .leaves
+                    .range(lo..=hi)
+                    .next()
+                    .map_or([0u8; 32], |(a, (b, n))| {
+                        fold_single_leaf(a, *b, *n, bit_index + 1)
+                    }),
+            };
+            siblings.push(sibling);
         }
 
         MerkleProof {
@@ -169,6 +198,7 @@ impl MerkleTrie {
         for (addr, balance, nonce) in entries {
             self.leaves.insert(*addr, (*balance, *nonce));
         }
+        self.index = OnceLock::new();
     }
 }
 
@@ -329,7 +359,77 @@ fn empty_trie_root() -> [u8; 32] {
     finalize_root(&[0u8; 32])
 }
 
-/// Recursively hash a leaf set under a fixed prefix of `from_bit` bits.
+/// Hash of a subtree at `from_bit` that holds only this leaf: the leaf hash
+/// folded up through an empty sibling at every level below `from_bit`.
+fn fold_single_leaf(address: &[u8; 32], balance: u64, nonce: u64, from_bit: usize) -> [u8; 32] {
+    let empty = [0u8; 32];
+    let mut node = hash_leaf(address, balance, nonce);
+    for level in (from_bit..TRIE_DEPTH).rev() {
+        node = if get_bit(address, level) {
+            combine_nodes(&empty, &node)
+        } else {
+            combine_nodes(&node, &empty)
+        };
+    }
+    node
+}
+
+/// Address with bit `level` toggled.
+fn flip_bit(address: &[u8; 32], level: usize) -> [u8; 32] {
+    let mut flipped = *address;
+    if let Some(byte) = flipped.get_mut(level / 8) {
+        *byte ^= 1 << (7 - (level % 8));
+    }
+    flipped
+}
+
+/// Index key of the subtree under the first `bits` bits of `address`.
+fn node_key(address: &[u8; 32], bits: usize) -> (usize, [u8; 32]) {
+    let mut prefix = [0u8; 32];
+    for (i, byte) in prefix.iter_mut().enumerate() {
+        let start = i * 8;
+        let source = address.get(i).copied().unwrap_or(0);
+        if start + 8 <= bits {
+            *byte = source;
+        } else if start < bits {
+            *byte = source & (0xFFu8 << (8 - (bits - start)));
+        }
+    }
+    (bits, prefix)
+}
+
+/// Hash a sorted leaf slice under a fixed prefix of `from_bit` bits and
+/// record every subtree hash on the way into `nodes`.
+///
+/// Same result as the reference `hash_leaves`; a subtree with one leaf is
+/// folded directly instead of being split down to depth 256.
+fn index_subtree(
+    leaves: &[([u8; 32], u64, u64)],
+    from_bit: usize,
+    nodes: &mut HashMap<(usize, [u8; 32]), [u8; 32]>,
+) -> [u8; 32] {
+    let Some(&(first, first_balance, first_nonce)) = leaves.first() else {
+        return [0u8; 32];
+    };
+    let hash = if from_bit >= TRIE_DEPTH {
+        hash_leaf(&first, first_balance, first_nonce)
+    } else if leaves.len() == 1 {
+        fold_single_leaf(&first, first_balance, first_nonce, from_bit)
+    } else {
+        // Leaves are sorted and share the first `from_bit` bits, so the ones
+        // with a zero bit at `from_bit` come first.
+        let split = leaves.partition_point(|entry| !get_bit(&entry.0, from_bit));
+        let (left_leaves, right_leaves) = leaves.split_at(split);
+        let l = index_subtree(left_leaves, from_bit + 1, nodes);
+        let r = index_subtree(right_leaves, from_bit + 1, nodes);
+        combine_nodes(&l, &r)
+    };
+    nodes.insert(node_key(&first, from_bit), hash);
+    hash
+}
+
+/// Reference hash of a leaf set, kept to check [`index_subtree`] in tests.
+#[cfg(test)]
 fn hash_leaves(leaves: &[([u8; 32], u64, u64)], from_bit: usize) -> [u8; 32] {
     if leaves.is_empty() {
         return [0u8; 32];
@@ -359,15 +459,6 @@ const fn get_bit(address: &[u8; 32], level: usize) -> bool {
         return false;
     }
     (address[byte_idx] >> bit_idx) & 1 == 1
-}
-
-fn prefix_eq(a: &[u8; 32], b: &[u8; 32], bits: usize) -> bool {
-    for i in 0..bits {
-        if get_bit(a, i) != get_bit(b, i) {
-            return false;
-        }
-    }
-    true
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────
@@ -657,5 +748,61 @@ mod tests {
             "a state change must move the root, or staleness would be undetectable"
         );
         assert_eq!(stale.balance, 100, "the held trie reports what it holds");
+    }
+
+    /// Addresses spread over the key space plus a pair that share 200 bits.
+    fn spread_entries() -> Vec<([u8; 32], u64, u64)> {
+        let mut entries = Vec::new();
+        for i in 0u64..60 {
+            let digest: [u8; 32] = Sha256::digest(i.to_le_bytes()).into();
+            entries.push((digest, i + 1, i));
+        }
+        let mut near = [0xA5u8; 32];
+        entries.push((near, 11, 1));
+        near[25] ^= 0x01;
+        entries.push((near, 12, 2));
+        entries
+    }
+
+    /// P26-F03: the indexed root equals the reference recursive hash.
+    #[test]
+    fn the_indexed_root_matches_the_reference_hash() {
+        let entries = spread_entries();
+        let mut trie = MerkleTrie::new();
+        trie.bulk_insert(&entries);
+        let mut sorted = entries;
+        sorted.sort_by_key(|entry| entry.0);
+        assert_eq!(trie.root_ref(), finalize_root(&hash_leaves(&sorted, 0)));
+    }
+
+    /// P26-F03: proofs drawn from the index verify for present and absent
+    /// addresses, including ones that diverge below a lone leaf.
+    #[test]
+    fn indexed_proofs_verify_for_present_and_absent_addresses() {
+        let entries = spread_entries();
+        let mut trie = MerkleTrie::new();
+        trie.bulk_insert(&entries);
+        let root = trie.root_ref();
+        for (address, _, _) in &entries {
+            assert!(trie.proof(address).verify(&root));
+        }
+        let mut absent = [0xA5u8; 32];
+        absent[30] ^= 0x01;
+        assert!(trie.proof(&absent).verify(&root));
+        absent[31] ^= 0x80;
+        assert!(trie.proof(&absent).verify(&root));
+    }
+
+    /// P26-F03: a change drops the index, so the next root is the new one.
+    #[test]
+    fn a_change_after_a_proof_moves_the_indexed_root() {
+        let mut trie = MerkleTrie::new();
+        trie.insert(&addr(1), 10, 1);
+        let before = trie.root_ref();
+        let _ = trie.proof(&addr(1));
+        trie.insert(&addr(2), 20, 2);
+        assert_ne!(before, trie.root_ref());
+        trie.remove(&addr(2));
+        assert_eq!(before, trie.root_ref());
     }
 }

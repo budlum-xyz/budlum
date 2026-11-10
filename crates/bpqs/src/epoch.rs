@@ -1,7 +1,7 @@
 //! Epoch semantics - the "self-timestamping" half of the design.
 //!
 //! Decisions pinned (user, 2026-09-19): the epoch index is derived from the
-//! **chain tempo**, not a wall clock: `t = floor(h / W)` with `W` the
+//! chain tempo, not a wall clock: `t = floor(h / W)` with `W` the
 //! settlement finality window (chosen by the anchor integration; the
 //! reference surface keeps it an input called [`EpochWindow`]). A signer can
 //! never "run ahead" of the chain, and stale signatures pinned to old epochs
@@ -15,7 +15,7 @@ use crate::hash::BpqsHash;
 /// Length of one epoch in blocks. Must be chosen once by the integration;
 /// `floor(height / W)` flips exactly once per window, and the anchor flow
 /// emits at most one anchor per window - so the few-time quota is naturally
-/// respected, with headroom (q_max = 4) for legitimate re-attempts.
+/// respected, with the one-time quota (Q_MAX = 1) the params pin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EpochWindow(pub u64);
 
@@ -27,7 +27,10 @@ pub fn epoch_of(height: u64, window: EpochWindow) -> Result<u32, BpqsError> {
     if window.0 == 0 {
         return Err(BpqsError::BadEpochWindow);
     }
-    Ok((height / window.0) as u32)
+    // BLG-0053: the truncating cast wrapped heights at 2^32 back to small,
+    // in-range epochs. A height the epoch arithmetic cannot hold is refused.
+    u32::try_from(height / window.0)
+        .map_err(|_| BpqsError::Malformed("epoch does not fit the tree's u32 headroom"))
 }
 
 /// Pseudorandom per-epoch seed, drawn from the member's long-term root seed

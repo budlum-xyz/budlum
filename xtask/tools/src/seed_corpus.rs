@@ -39,9 +39,9 @@ const SEEDS: &[Seed] = &[
     },
     Seed {
         name: "02_branch_loop.bud",
-        what: "a branch loop with Jmp (0x0A)",
+        what: "a branch loop with Jmp (0x10)",
         bytes: &[
-            0x0a, 0x01, 0x02, 0x03, 0x05, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x10, 0x01, 0x02, 0x03, 0x05, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00,
         ],
     },
@@ -52,13 +52,13 @@ const SEEDS: &[Seed] = &[
     },
     Seed {
         name: "04_poseidon_hash.bud",
-        what: "a Poseidon (0x1D) hash round",
-        bytes: &[0x1d, 0x01, 0x02, 0x03, 0x0a, 0x00, 0x00, 0x00],
+        what: "a Poseidon (0x19) hash round",
+        bytes: &[0x19, 0x01, 0x02, 0x03, 0x0a, 0x00, 0x00, 0x00],
     },
     Seed {
         name: "05_memory_ops.bud",
-        what: "SRead (0x10) + SWrite (0x11)",
-        bytes: &[0x10, 0x01, 0x02, 0x00, 0x11, 0x01, 0x02, 0x00],
+        what: "SRead (0x1B) + SWrite (0x1C)",
+        bytes: &[0x1b, 0x01, 0x02, 0x00, 0x1c, 0x01, 0x02, 0x00],
     },
 ];
 
@@ -162,6 +162,20 @@ pub fn self_test() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seed_opcodes_match_the_instruction_set() {
+        let first = |name: &str| {
+            SEEDS
+                .iter()
+                .find(|s| s.name.contains(name))
+                .map(|s| s.bytes[0])
+        };
+        assert_eq!(first("branch"), Some(0x10));
+        assert_eq!(first("poseidon"), Some(0x19));
+        assert_eq!(first("memory"), Some(0x1b));
+        assert_eq!(first("merkle"), Some(0x1e));
+    }
 
     #[test]
     fn every_seed_is_binary_not_text() {

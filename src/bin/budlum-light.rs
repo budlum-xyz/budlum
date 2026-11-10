@@ -74,10 +74,57 @@ struct ChainExport {
     qc_blobs: Vec<QcBlob>,
 }
 
+/// The interval must be positive: with 0 no checkpoint is ever due, and the
+/// run would end as "trusted" without checking a single certificate.
+fn check_interval(interval: u64) -> Result<(), String> {
+    if interval == 0 {
+        return Err("--checkpoint-interval must be greater than 0".to_string());
+    }
+    Ok(())
+}
+
+/// A run that verified no checkpoint proved nothing. The target at or below
+/// the anchor, or a range with no multiple of the interval, ends here
+/// instead of printing a trusted height with exit code 0.
+fn ensure_checkpoints_verified(
+    count: usize,
+    trusted_height: u64,
+    target: u64,
+) -> Result<(), String> {
+    if count == 0 {
+        return Err(format!(
+            "no checkpoint above height {trusted_height} up to height {target} was verified"
+        ));
+    }
+    Ok(())
+}
+
+/// Largest chain export the tool reads.
+const MAX_CHAIN_FILE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Read a file but refuse one longer than `max` bytes.
+fn read_bounded(path: &std::path::Path, max: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut buf = Vec::new();
+    file.take(max.saturating_add(1))
+        .read_to_end(&mut buf)
+        .map_err(|e| e.to_string())?;
+    if buf.len() as u64 > max {
+        return Err(format!("file is larger than {max} bytes"));
+    }
+    Ok(buf)
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    let raw = match fs::read(&cli.chain_file) {
+    if let Err(e) = check_interval(cli.checkpoint_interval) {
+        eprintln!("{e}");
+        return ExitCode::FAILURE;
+    }
+
+    let raw = match read_bounded(&cli.chain_file, MAX_CHAIN_FILE_BYTES) {
         Ok(raw) => raw,
         Err(e) => {
             eprintln!("cannot read {}: {e}", cli.chain_file.display());
@@ -124,6 +171,7 @@ fn main() -> ExitCode {
 
     // The anchor itself is not re-verified; everything strictly above it must
     // carry a verified finality certificate.
+    let mut verified_count = 0usize;
     let mut next = client.next_checkpoint_height(cli.checkpoint_interval, target);
     while let Some(checkpoint_height) = next {
         let Some(header) = export.headers.iter().find(|h| h.index == checkpoint_height) else {
@@ -171,6 +219,7 @@ fn main() -> ExitCode {
                     eprintln!("cannot advance trust anchor: {e}");
                     return ExitCode::FAILURE;
                 }
+                verified_count += 1;
             }
             Err(e) => {
                 eprintln!("checkpoint {checkpoint_height} rejected: {e}");
@@ -181,10 +230,39 @@ fn main() -> ExitCode {
         next = client.next_checkpoint_height(cli.checkpoint_interval, target);
     }
 
+    if let Err(e) = ensure_checkpoints_verified(verified_count, cli.trusted_height, target) {
+        eprintln!("{e}");
+        return ExitCode::FAILURE;
+    }
+
     let trusted = client.trusted();
     println!(
         "LIGHT CLIENT TRUSTED height={} hash={} set={}",
         trusted.height, trusted.block_hash, trusted.set_hash
     );
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{check_interval, ensure_checkpoints_verified, read_bounded};
+
+    /// BLG-0705: a run that verifies nothing must not end as trusted.
+    #[test]
+    fn an_unverified_run_is_refused() {
+        assert!(check_interval(0).is_err());
+        assert!(check_interval(10).is_ok());
+        assert!(ensure_checkpoints_verified(0, 5, 5).is_err());
+        assert!(ensure_checkpoints_verified(0, 5, 9).is_err());
+        assert!(ensure_checkpoints_verified(1, 5, 20).is_ok());
+    }
+
+    #[test]
+    fn an_oversized_file_is_refused() {
+        let path = std::env::temp_dir().join(format!("budlum_light_bound_{}", std::process::id()));
+        std::fs::write(&path, [0u8; 16]).unwrap();
+        assert!(read_bounded(&path, 16).is_ok());
+        assert!(read_bounded(&path, 15).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
 }

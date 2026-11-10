@@ -1,14 +1,14 @@
 //! `syn`-based AST security gates.
 //!
-//! Substring+brace-walk gate'ler (`zero_address_sender_is_verified`,
+//! Substring and brace-walk gates (`zero_address_sender_is_verified`,
 //! `tee_trust_boundary_is_structural`, `gov_slash_evidence_is_validator_only`)
 //! could not model parser-level reasoning: each round found a new
-//! varyant (closure, nested helper, nested conditional, move closure,
+//! variant (closure, nested helper, nested conditional, move closure,
 //! collection item). This module verifies the same three guards on a REAL Rust AST;
 //! function bodies are walked with `syn::visit`, and closures
 //! and nested blocks are distinguished as AST nodes.
 //!
-//! Korumalar:
+//! Guards:
 //!   1. zero-address: inside `validate_transaction_with_context`, success in the zero-address
 //!      branch (`Ok(())` / `return Ok(())`) must be DIRECTLY inside the `if tx.verify()`
 //!      block (not in a closure, nested fn item, nested if, match
@@ -44,6 +44,48 @@ fn compact<T: ToTokens>(t: &T) -> String {
         .collect()
 }
 
+/// Extra nesting overrides shared by the three direct-member visitors: code
+/// under `while`, `for`, an async block, a nested method or a labelled block
+/// may never run, so it is not a direct member.
+macro_rules! more_nesting {
+    () => {
+        fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+            self.nesting += 1;
+            visit::visit_expr_while(self, node);
+            self.nesting -= 1;
+        }
+
+        fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
+            self.nesting += 1;
+            visit::visit_expr_for_loop(self, node);
+            self.nesting -= 1;
+        }
+
+        fn visit_expr_async(&mut self, node: &'ast syn::ExprAsync) {
+            self.nesting += 1;
+            visit::visit_expr_async(self, node);
+            self.nesting -= 1;
+        }
+
+        fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+            self.nesting += 1;
+            visit::visit_impl_item_fn(self, node);
+            self.nesting -= 1;
+        }
+
+        fn visit_expr_block(&mut self, node: &'ast syn::ExprBlock) {
+            let labelled = node.label.is_some();
+            if labelled {
+                self.nesting += 1;
+            }
+            visit::visit_expr_block(self, node);
+            if labelled {
+                self.nesting -= 1;
+            }
+        }
+    };
+}
+
 /// Is it an `Ok(())` call? The last path segment is `Ok` and the single argument is the empty tuple.
 fn is_ok_unit_call(node: &ExprCall) -> bool {
     matches!(node.func.as_ref(), Expr::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "Ok"))
@@ -62,6 +104,15 @@ fn is_err_call(node: &ExprCall) -> bool {
     matches!(node.func.as_ref(), Expr::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "Err"))
 }
 
+/// Is the expression a call of `Err(..)`? Parentheses are looked through.
+fn expr_is_err_call(e: &Expr) -> bool {
+    match e {
+        Expr::Call(c) => is_err_call(c),
+        Expr::Paren(p) => expr_is_err_call(&p.expr),
+        _ => false,
+    }
+}
+
 /// Walk the inside of the `if tx.verify() { .. }` block; success counts only as a direct
 /// (nesting == 0) `Ok(())` / `return Ok(())`. An `Ok(())` inside a closure, nested
 /// fn item, nested if, match arm or loop is a decoy (
@@ -73,6 +124,8 @@ struct VerifySuccess {
 }
 
 impl<'ast> Visit<'ast> for VerifySuccess {
+    more_nesting!();
+
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
         if self.nesting == 0 && is_ok_unit_call(node) {
             self.found = true;
@@ -139,7 +192,7 @@ fn stmt_fails_closed(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Expr(Expr::Return(ret), _) => match &ret.expr {
             None => true,
-            Some(e) => compact(e).contains("Err"),
+            Some(e) => expr_is_err_call(e),
         },
         Stmt::Expr(Expr::Call(call), None) => is_err_call(call),
         _ => false,
@@ -252,10 +305,12 @@ struct GuardErrCheck {
 }
 
 impl<'ast> Visit<'ast> for GuardErrCheck {
+    more_nesting!();
+
     fn visit_expr_return(&mut self, node: &'ast ExprReturn) {
         if self.nesting == 0 {
             if let Some(expr) = &node.expr {
-                if compact(expr).contains("Err") {
+                if expr_is_err_call(expr) {
                     self.found = true;
                 }
             }
@@ -359,7 +414,7 @@ impl<'ast> Visit<'ast> for TeeVisitor {
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
         if self.in_sign_with_privacy && is_ok_call(node) {
             // The source is ordered (pre-order): if the guards come after the success
-            // islenirse asagida yakalanir.
+            // a guard seen after this point is reported as coming after the success.
             self.saw_success = true;
         }
         visit::visit_expr_call(self, node);
@@ -380,21 +435,31 @@ impl<'ast> Visit<'ast> for TeeVisitor {
             if let Some(kind) = which {
                 let mut g = GuardErrCheck::default();
                 g.visit_block(&node.then_branch);
-                let ok = g.found;
+                // The condition must refuse: `!verify_..(..)` or `backend != ..`.
+                // An inverted test (`if verify_..(..) { return Err }`) is no guard.
+                let refuses = if kind == 1 {
+                    cond.contains("!=")
+                } else {
+                    cond.starts_with('!')
+                };
+                let ok = g.found && refuses;
                 let after_success = self.saw_success;
+                // A later `if` that mentions the same word never clears a guard
+                // that was already found.
                 match kind {
-                    0 => {
-                        self.measurement_guard = ok;
+                    0 if ok && !self.measurement_guard => {
+                        self.measurement_guard = true;
                         self.measurement_after_success = after_success;
                     }
-                    1 => {
-                        self.backend_guard = ok;
+                    1 if ok && !self.backend_guard => {
+                        self.backend_guard = true;
                         self.backend_after_success = after_success;
                     }
-                    _ => {
-                        self.report_guard = ok;
+                    2 if ok && !self.report_guard => {
+                        self.report_guard = true;
                         self.report_after_success = after_success;
                     }
+                    _ => {}
                 }
                 return;
             }
@@ -413,6 +478,8 @@ struct TopLevelTrue {
 }
 
 impl<'ast> Visit<'ast> for TopLevelTrue {
+    more_nesting!();
+
     fn visit_expr_return(&mut self, node: &'ast ExprReturn) {
         if self.nesting == 0 {
             if let Some(expr) = &node.expr {
@@ -466,18 +533,30 @@ fn closure_tail_is_digest_cmp(body: &Expr) -> bool {
         },
         other => Some(other),
     };
-    last.is_some_and(|e| {
-        let c = compact(e);
-        c.contains("evidence_hash") && c.contains("==")
-    })
+    last.is_some_and(is_digest_eq)
+}
+
+/// Is the expression exactly `<x> == <y>` with `evidence_hash` on one side?
+///
+/// `a == evidence_hash || true` is an `||` expression and does not count,
+/// and neither does `!=`.
+fn is_digest_eq(e: &Expr) -> bool {
+    match e {
+        Expr::Paren(p) => is_digest_eq(&p.expr),
+        Expr::Binary(b) => {
+            matches!(b.op, syn::BinOp::Eq(_))
+                && (compact(&b.left).contains("evidence_hash")
+                    || compact(&b.right).contains("evidence_hash"))
+        }
+        _ => false,
+    }
 }
 
 /// Does the closure body contain any digest comparison? (Enough for
 /// `has_digest_condition` even when not in tail position; `digest_guards_return`
 /// only accepts the tail form.)
 fn closure_has_digest_cmp(body: &Expr) -> bool {
-    let c = compact(body);
-    c.contains("evidence_hash") && c.contains("sha2")
+    compact(body).contains("evidence_hash")
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -486,6 +565,9 @@ struct GovSlashVisitor {
     in_slash_validator: bool,
     has_digest_condition: bool,
     digest_guards_return: bool,
+    /// A digest condition was seen that does not drive the success. It is
+    /// sticky: a later good `if` cannot clear it.
+    digest_weak: bool,
 }
 
 impl GovSlashVisitor {
@@ -495,6 +577,7 @@ impl GovSlashVisitor {
             in_slash_validator: false,
             has_digest_condition: false,
             digest_guards_return: false,
+            digest_weak: false,
         }
     }
 }
@@ -544,8 +627,10 @@ impl<'ast> Visit<'ast> for GovSlashVisitor {
                 self.has_digest_condition = true;
                 let mut v = TopLevelTrue::default();
                 v.visit_block(&node.then_branch);
-                if v.found {
+                if v.found && is_digest_eq(&node.cond) {
                     self.digest_guards_return = true;
+                } else {
+                    self.digest_weak = true;
                 }
                 return;
             }
@@ -561,6 +646,8 @@ impl<'ast> Visit<'ast> for GovSlashVisitor {
                         self.has_digest_condition = true;
                         if closure_tail_is_digest_cmp(&c.body) {
                             self.digest_guards_return = true;
+                        } else {
+                            self.digest_weak = true;
                         }
                     }
                 }
@@ -651,7 +738,7 @@ fn judge_file(src: &str, checks: Checks) -> Vec<String> {
             problems.push(String::from(
                 "AST: no digest condition in the SlashValidator branch (neither if digest == evidence_hash nor an .any closure tail).",
             ));
-        } else if !gs.digest_guards_return {
+        } else if !gs.digest_guards_return || gs.digest_weak {
             problems.push(String::from(
                 "AST: the digest condition in the SlashValidator branch does not drive the success: there is no direct return true in the if block, or the .any closure tail is not the digest comparison.",
             ));
@@ -882,7 +969,7 @@ pub fn self_test() -> Result<String, String> {
         "good .any tail tree rejected",
     );
 
-    // Zero-address: guard'siz, nested-item, closure-decoy, failed-verify.
+    // Zero-address: unguarded, nested-item, closure-decoy, failed-verify.
     expect_problem(
         &mut problems,
         ZA_BAD,
@@ -957,4 +1044,88 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "AST security gates self-test OK: good tree passes, decoy variants rejected.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEE_ONLY: Checks = Checks {
+        zero_address: false,
+        tee: true,
+        gov_slash: false,
+    };
+
+    fn tee_src(m: &str, b: &str, r: &str, extra: &str) -> String {
+        format!(
+            "fn sign_with_privacy() {{ let q = w.quote(); verifier.verify_quote(q); {m} {b} {r} {extra} Ok(()) }}"
+        )
+    }
+
+    const M: &str = "if !a.verify_measurement(t) { return Err(E); }";
+    const B: &str = "if a.backend != k { return Err(E); }";
+    const R: &str = "if !a.verify_report_data(d) { return Err(E); }";
+
+    #[test]
+    fn real_guards_pass() {
+        assert!(judge_file(&tee_src(M, B, R, ""), TEE_ONLY).is_empty());
+    }
+
+    #[test]
+    fn inverted_guards_fail() {
+        let inv_m = "if a.verify_measurement(t) { return Err(E); }";
+        assert!(!judge_file(&tee_src(inv_m, B, R, ""), TEE_ONLY).is_empty());
+        let inv_b = "if a.backend == k { return Err(E); }";
+        assert!(!judge_file(&tee_src(M, inv_b, R, ""), TEE_ONLY).is_empty());
+    }
+
+    #[test]
+    fn later_decoy_if_does_not_overwrite_a_guard() {
+        let decoy = "if a.backend_name.is_empty() { log(); }";
+        assert!(judge_file(&tee_src(M, B, R, decoy), TEE_ONLY).is_empty());
+    }
+
+    #[test]
+    fn return_ok_of_error_type_is_not_a_refusal() {
+        let m = "if !a.verify_measurement(t) { return Ok(Error::X); }";
+        assert!(!judge_file(&tee_src(m, B, R, ""), TEE_ONLY).is_empty());
+    }
+
+    const GOV_ONLY: Checks = Checks {
+        zero_address: false,
+        tee: false,
+        gov_slash: true,
+    };
+
+    fn gov_src(body: &str) -> String {
+        format!(
+            "fn execute_proposal() {{ match p.p_type {{ ProposalType::SlashValidator {{ evidence_hash }} => {{ {body} }} }} }}"
+        )
+    }
+
+    #[test]
+    fn gov_digest_forms() {
+        let good = "let ok = h.iter().any(|r| { let d = f(r); d == evidence_hash });";
+        assert!(judge_file(&gov_src(good), GOV_ONLY).is_empty());
+        let or_true = "let ok = h.iter().any(|r| { let d = f(r); d == evidence_hash || true });";
+        assert!(!judge_file(&gov_src(or_true), GOV_ONLY).is_empty());
+        let inverted = "if d != evidence_hash { return true; }";
+        assert!(!judge_file(&gov_src(inverted), GOV_ONLY).is_empty());
+        let good_if = "if d == evidence_hash { return true; }";
+        assert!(judge_file(&gov_src(good_if), GOV_ONLY).is_empty());
+    }
+
+    #[test]
+    fn gov_weak_condition_is_sticky() {
+        let both = "if d == evidence_hash { return true; } if d != evidence_hash { return true; }";
+        assert!(!judge_file(&gov_src(both), GOV_ONLY).is_empty());
+    }
+
+    #[test]
+    fn loop_and_nested_method_are_not_direct() {
+        let w = "if !a.verify_measurement(t) { while false { return Err(E); } }";
+        assert!(!judge_file(&tee_src(w, B, R, ""), TEE_ONLY).is_empty());
+        let f = "if !a.verify_measurement(t) { for _ in x { return Err(E); } }";
+        assert!(!judge_file(&tee_src(f, B, R, ""), TEE_ONLY).is_empty());
+    }
 }

@@ -51,10 +51,16 @@ ourselves keeps the origin at `bud://<name>`.
      "viewsource",
 --- /dev/null
 +++ b/netwerk/protocol/bud/moz.build
-@@ -0,0 +1,26 @@
+@@ -0,0 +1,32 @@
 +# This Source Code Form is subject to the terms of the Mozilla Public
 +# License, v. 2.0. If a copy of the MPL was not distributed with this
 +# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++XPIDL_SOURCES += [
++    "nsIBudChannel.idl",
++]
++
++XPIDL_MODULE = "necko_bud"
 +
 +EXPORTS.mozilla.net += [
 +    "BudChannel.h",
@@ -78,6 +84,32 @@ ourselves keeps the origin at `bud://<name>`.
 +include("/ipc/chromium/chromium-config.mozbuild")
 +
 +FINAL_LIBRARY = "xul"
+--- /dev/null
++++ b/netwerk/protocol/bud/nsIBudChannel.idl
+@@ -0,0 +1,23 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "nsISupports.idl"
++
++/**
++ * How strongly the bytes behind a bud:// channel were verified.
++ *
++ * The address-bar badge reads this through QueryInterface. Without an
++ * interface that script can call, the badge cannot read the strength and
++ * every page would show the refused state.
++ */
++[scriptable, builtinclass, uuid(2f6a9c1e-4b7d-4e53-9a08-5c1d7e3b6a42)]
++interface nsIBudChannel : nsISupports
++{
++  /** budscan::evidence::Strength: 0 Refused, 1 claim only, 2 transport only,
++   *  3 Verified. */
++  readonly attribute octet strength;
++
++  /** The weakest-link badge text, from the core, untranslated. */
++  readonly attribute ACString badgeText;
++};
 --- /dev/null
 +++ b/netwerk/protocol/bud/budscan_ffi.h
 @@ -0,0 +1,73 @@
@@ -122,12 +154,12 @@ ourselves keeps the origin at `bud://<name>`.
 + * and the badge text. Opaque to C++. */
 +typedef struct BudPage BudPage;
 +
-+/* Run the name rule over a bud:// spec. */
++/* Run the name rule over a bare name (the URI host, no scheme or path). */
 +BudNameVerdict budscan_check_name(const char* spec);
 +uint8_t budscan_verdict_ok(BudNameVerdict verdict);
 +const char* budscan_verdict_reason(BudNameVerdict verdict);
 +
-+/* Resolve, fetch and verify a bud:// spec. Never null: a failure at any
++/* Resolve, fetch and verify "bud://<name>" (no path). Never null: a failure at any
 + * step comes back as a page whose strength is Refused. */
 +BudPage* budscan_open(const char* spec);
 +
@@ -220,7 +252,7 @@ ourselves keeps the origin at `bud://<name>`.
 +#endif  // mozilla_net_BudProtocolHandler_h
 --- /dev/null
 +++ b/netwerk/protocol/bud/BudProtocolHandler.cpp
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,59 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -258,8 +290,10 @@ ourselves keeps the origin at `bud://<name>`.
 +  NS_ENSURE_ARG_POINTER(aURI);
 +  NS_ENSURE_ARG_POINTER(aLoadInfo);
 +
-+  nsAutoCString spec;
-+  nsresult rv = aURI->GetSpec(spec);
++  // Only the host is the name. GetSpec would add the scheme separator and the
++  // trailing slash nsStandardURL appends, and the name rule refuses both.
++  nsAutoCString name;
++  nsresult rv = aURI->GetAsciiHost(name);
 +  NS_ENSURE_SUCCESS(rv, rv);
 +
 +  // The name rule runs here, before anything is resolved or fetched. It is
@@ -269,7 +303,7 @@ ourselves keeps the origin at `bud://<name>`.
 +  // A refusal is not an error return: the caller gets a channel that produces
 +  // an explanation page. "It did not open" without a reason is not an answer
 +  // a user can act on.
-+  BudNameVerdict verdict = budscan_check_name(spec.get());
++  BudNameVerdict verdict = budscan_check_name(name.get());
 +
 +  RefPtr<BudChannel> channel = new BudChannel(aURI, aLoadInfo, verdict);
 +  channel.forget(aResult);
@@ -280,7 +314,7 @@ ourselves keeps the origin at `bud://<name>`.
 +}  // namespace mozilla
 --- /dev/null
 +++ b/netwerk/protocol/bud/BudChannel.h
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,67 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -290,6 +324,7 @@ ourselves keeps the origin at `bud://<name>`.
 +
 +#include "budscan_ffi.h"
 +#include "nsBaseChannel.h"
++#include "nsIBudChannel.h"
 +
 +namespace mozilla {
 +namespace net {
@@ -321,8 +356,11 @@ ourselves keeps the origin at `bud://<name>`.
 + * name: the channel gives them an opaque principal, so they are not
 + * same-origin with anything the name's verified pages stored or sent.
 + */
-+class BudChannel final : public nsBaseChannel {
++class BudChannel final : public nsBaseChannel, public nsIBudChannel {
 + public:
++  NS_DECL_ISUPPORTS_INHERITED
++  NS_DECL_NSIBUDCHANNEL
++
 +  BudChannel(nsIURI* aURI, nsILoadInfo* aLoadInfo, BudNameVerdict aVerdict);
 +
 +  BudStrength Strength() const { return mStrength; }
@@ -346,7 +384,7 @@ ourselves keeps the origin at `bud://<name>`.
 +#endif  // mozilla_net_BudChannel_h
 --- /dev/null
 +++ b/netwerk/protocol/bud/BudChannel.cpp
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,96 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -376,11 +414,28 @@ ourselves keeps the origin at `bud://<name>`.
 +  return NS_NewCStringInputStream(aStream, bytes);
 +}
 +
++NS_IMPL_ISUPPORTS_INHERITED(BudChannel, nsBaseChannel, nsIBudChannel)
++
++NS_IMETHODIMP BudChannel::GetStrength(uint8_t* aStrength) {
++  *aStrength = static_cast<uint8_t>(mStrength);
++  return NS_OK;
++}
++
++NS_IMETHODIMP BudChannel::GetBadgeText(nsACString& aBadgeText) {
++  aBadgeText = mBadge;
++  return NS_OK;
++}
++
 +nsresult BudChannel::OpenContentStream(bool aAsync, nsIInputStream** aStream,
 +                                       nsIChannel** aChannel) {
-+  nsAutoCString spec;
-+  nsresult rv = URI()->GetSpec(spec);
++  nsAutoCString host;
++  nsresult rv = URI()->GetAsciiHost(host);
 +  NS_ENSURE_SUCCESS(rv, rv);
++
++  // budscan classifies "bud://<name>". The trailing slash of GetSpec is not
++  // part of that spelling, and a path has no route in this version.
++  nsAutoCString spec("bud://");
++  spec.Append(host);
 +
 +  // A name that failed the rule never reaches resolution. The page it gets is
 +  // an explanation, not a blank refusal.

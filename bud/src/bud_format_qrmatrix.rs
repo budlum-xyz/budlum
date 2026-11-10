@@ -108,15 +108,16 @@ impl QrMatrix {
             let mut row = if upward { d - 1 } else { 0 };
             loop {
                 for &c in &cols {
+                    // Function modules are skipped and consume no data bit.
+                    if self.is_function(row, c) {
+                        continue;
+                    }
                     let bit = if bit_idx < total_bits {
                         (data[bit_idx / 8] >> (7 - (bit_idx % 8))) & 1
                     } else {
                         1 // padding
                     };
-                    // Do not overwrite the function modules.
-                    if !self.is_function(row, c) {
-                        self.modules[row * d + c] = bit;
-                    }
+                    self.modules[row * d + c] = bit;
                     bit_idx += 1;
                 }
                 if upward {
@@ -208,6 +209,28 @@ mod tests {
         // The data modules are filled, mixing dark and light.
         let dark = m.modules.iter().filter(|&&x| x == 0).count();
         assert!(dark > 10, "the dark module count: {dark}");
+    }
+
+    #[test]
+    fn every_data_bit_reaches_a_data_module() {
+        // All-zero data is dark (0). Padding is light (1). So the dark data
+        // modules must number exactly 8 bits per byte.
+        let data = [0u8; 17];
+        let m = QrMatrix::encode(&data).unwrap();
+        assert_eq!(m.version, 1);
+        let mut dark = 0usize;
+        for row in 0..m.dim {
+            for col in 0..m.dim {
+                if !m.is_function(row, col) && m.modules[row * m.dim + col] == 0 {
+                    dark += 1;
+                }
+            }
+        }
+        assert_eq!(
+            dark,
+            data.len() * 8,
+            "data bits were lost on function modules"
+        );
     }
 
     #[test]

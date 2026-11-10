@@ -143,6 +143,10 @@ impl EngineResult {
     }
 }
 
+/// The bytes after the container in an engine blob: steps_hash(32),
+/// measured_ratio(8), pact(32), production(32).
+const ENGINE_TAIL: usize = 32 + 8 + 32 + 32;
+
 /// Domain tag of a shard digest inside the pack.
 const SHARD_DIGEST_DOMAIN: &[u8] = b"BDLM_BUD_SHARD_V1";
 
@@ -212,26 +216,53 @@ fn open_shard_pack(pack: &[u8]) -> Option<Vec<u8>> {
     }
     let original_len = usize::try_from(u64::from_le_bytes(pack[2..HDR].try_into().ok()?)).ok()?;
     let shard_len = original_len.div_ceil(4);
+    let record_len = shard_len.checked_add(32 + 4)?;
+    let total = record_len.checked_mul(6)?.checked_add(HDR)?;
+    if pack.len() > total {
+        return None;
+    }
+    let mut found: [Option<Vec<u8>>; 6] = Default::default();
+    // Pass 1: follow each record's own length field. This keeps working when
+    // a record was emptied and its bytes removed, so later records moved up.
     let mut pos = HDR;
-    let mut survivors: Vec<(usize, Vec<u8>)> = Vec::with_capacity(6);
-    for index in 0..6 {
-        if pack.len() < pos + 32 + 4 {
-            return None;
-        }
-        let digest: [u8; 32] = pack[pos..pos + 32].try_into().ok()?;
-        pos += 32;
-        let len = u32::from_le_bytes(pack[pos..pos + 4].try_into().ok()?) as usize;
-        pos += 4;
-        if pack.len() < pos + len {
-            return None;
-        }
-        let shard = &pack[pos..pos + len];
+    for (index, slot) in found.iter_mut().enumerate() {
+        let Some(head) = pack.get(pos..pos + 36) else {
+            break;
+        };
+        let digest: [u8; 32] = head[..32].try_into().ok()?;
+        let len = u32::from_le_bytes(head[32..36].try_into().ok()?) as usize;
+        pos += 36;
+        let Some(shard) = pos.checked_add(len).and_then(|end| pack.get(pos..end)) else {
+            break;
+        };
         pos += len;
         if len == shard_len && shard_digest(index, shard) == digest {
-            survivors.push((index, shard.to_vec()));
+            *slot = Some(shard.to_vec());
         }
     }
-    if pos != pack.len() || survivors.len() < 4 {
+    // Pass 2: every record is `36 + shard_len` bytes, so its place follows
+    // from the header alone. A cut tail or a damaged length field cannot hide
+    // the records that are still whole. Digests make the union safe.
+    for (index, slot) in found.iter_mut().enumerate() {
+        if slot.is_some() {
+            continue;
+        }
+        let start = HDR + index * record_len;
+        let Some(rec) = pack.get(start..start + record_len) else {
+            continue;
+        };
+        let digest: [u8; 32] = rec[..32].try_into().ok()?;
+        let shard = &rec[36..];
+        if shard_digest(index, shard) == digest {
+            *slot = Some(shard.to_vec());
+        }
+    }
+    let survivors: Vec<(usize, Vec<u8>)> = found
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, s)| s.map(|s| (i, s)))
+        .collect();
+    if survivors.len() < 4 {
         return None;
     }
     let mds = CauchyMds::new(4, 2)?;
@@ -259,7 +290,13 @@ pub fn engine_restore(result_blob: &[u8], erasure: bool) -> Option<Vec<u8>> {
     let _chunk_mode = result_blob[9]; // 0=structural 1=fastcdc (not needed for restore: the container carries the chunks)
     let container_len = u32::from_le_bytes(result_blob[10..14].try_into().ok()?) as usize;
     let container_start = HDR;
-    if result_blob.len() < container_start + container_len {
+    // The blob ends with exactly the tail `to_blob` writes. A cut or
+    // extended tail is refused.
+    if container_start
+        .checked_add(container_len)?
+        .checked_add(ENGINE_TAIL)?
+        != result_blob.len()
+    {
         return None;
     }
     let container = &result_blob[container_start..container_start + container_len];
@@ -307,21 +344,30 @@ fn engine_store_with(data: &[u8], erasure: bool, ts_unix: u64, fcdc: bool) -> Op
     let mut transform_kind = TransformKind::None;
     let transformed: Vec<u8> = match (codec, class) {
         (FormatCodec::Json, _) => {
-            steps.push(PipeStep::Transform);
             match crate::bud_format_columnar::columnar_encode(
                 data,
                 crate::bud_format_columnar::ColumnarMode::Exact,
             ) {
+                // The transform is kept only when it restores the exact input
+                // bytes. Key order, spacing, escapes and number spelling can
+                // differ after a decode, and a container that restores to
+                // other bytes must not be reported as stored.
                 Some(col) => {
-                    transform_kind = TransformKind::Columnar;
-                    crate::bud_format_columnar::columnar_to_blob(&col)?
+                    let blob = crate::bud_format_columnar::columnar_to_blob(&col)?;
+                    let restored = crate::bud_format_columnar::columnar_from_blob(&blob)
+                        .and_then(|c| crate::bud_format_columnar::columnar_decode(&c));
+                    if restored.as_deref() == Some(data) {
+                        transform_kind = TransformKind::Columnar;
+                        blob
+                    } else {
+                        data.to_vec()
+                    }
                 }
                 None => data.to_vec(),
             }
         }
         (FormatCodec::Log, _) => match crate::bud_format_logfield::LogFieldColumnar::encode(data) {
             Some(col) => {
-                steps.push(PipeStep::Transform);
                 transform_kind = TransformKind::LogField;
                 col.to_blob()
             }
@@ -330,6 +376,10 @@ fn engine_store_with(data: &[u8], erasure: bool, ts_unix: u64, fcdc: bool) -> Op
         _ => data.to_vec(),
     };
     let _ = (codec, class);
+    // The step is recorded only when a transform really ran.
+    if transform_kind != TransformKind::None {
+        steps.push(PipeStep::Transform);
+    }
     // 3) chunk it - FastCDC (content-defined) for binary/arbitrary classes, structural
     //    16KB for the rest. FastCDC: edit-resistant dedup anchors + a lossless join.
     let chunks: Vec<StructuralChunk> = if fcdc {
@@ -487,7 +537,13 @@ pub fn engine_restore_raw(result_blob: &[u8], erasure: bool) -> Option<Vec<u8>> 
     }
     let container_len = u32::from_le_bytes(result_blob[10..14].try_into().ok()?) as usize;
     let container_start = HDR;
-    if result_blob.len() < container_start + container_len {
+    // The blob ends with exactly the tail `to_blob` writes. A cut or
+    // extended tail is refused.
+    if container_start
+        .checked_add(container_len)?
+        .checked_add(ENGINE_TAIL)?
+        != result_blob.len()
+    {
         return None;
     }
     let container = &result_blob[container_start..container_start + container_len];
@@ -549,6 +605,16 @@ mod tests {
         // the record blob
         let blob = res.to_blob();
         assert_eq!(&blob[..8], &ENGINE_MAGIC);
+    }
+
+    /// BLG-0581: a JSON array whose records list their keys in another order
+    /// restored to different bytes while the store reported success.
+    #[test]
+    fn json_that_does_not_roundtrip_exactly_is_stored_untransformed() {
+        let json = br#"[{"a":1,"b":2},{"b":3,"a":4}]"#.to_vec();
+        let res = engine_store(&json, false, 1).expect("engine");
+        let restored = engine_restore_container(&res.container, res.transform_kind.to_u8(), false);
+        assert_eq!(restored, Some(json));
     }
 
     #[test]
@@ -713,6 +779,26 @@ mod tests {
         );
     }
 
+    /// BLG-0603: a cut tail or a damaged length field must not lose the
+    /// records that are still whole.
+    #[test]
+    fn shard_pack_survives_truncation_and_bad_length_field() {
+        let encoded: Vec<u8> = (0u8..=255).cycle().take(4_001).collect();
+        let pack = pack_shards(&encoded).expect("pack");
+        let (start5, shard_len) = shard_record(&pack, 5);
+        let (start4, _) = shard_record(&pack, 4);
+        let cut = &pack[..start4 + 36 + shard_len / 2];
+        assert_eq!(open_shard_pack(cut).expect("truncated tail"), encoded);
+        let cut = &pack[..start5];
+        assert_eq!(open_shard_pack(cut).expect("one record cut"), encoded);
+        let (start1, _) = shard_record(&pack, 1);
+        let mut bad = pack.clone();
+        bad[start1 + 32] ^= 0x01;
+        assert_eq!(open_shard_pack(&bad).expect("bad len field"), encoded);
+        let (start3, _) = shard_record(&pack, 3);
+        assert!(open_shard_pack(&pack[..start3 + 10]).is_none());
+    }
+
     /// The same recovery through the public restore path: a stored engine
     /// blob whose data shard 1 rotted in storage still yields the original.
     #[test]
@@ -727,6 +813,35 @@ mod tests {
         let back = engine_restore_full(&blob, res.transform_kind.to_u8(), true)
             .expect("restore with one rotten data shard");
         assert_eq!(back, bin);
+    }
+
+    #[test]
+    fn the_transform_step_is_recorded_only_when_a_transform_ran() {
+        // A JSON object is not an array of records: no columnar transform.
+        let r = engine_store(br#"{"a":1,"b":[1,2,3]}"#, false, 1).expect("store");
+        assert_eq!(r.transform_kind, TransformKind::None);
+        assert!(!r.steps.contains(&PipeStep::Transform));
+        // Records that columnar restores exactly do record it.
+        let rows = br#"[{"a":1,"b":"x"},{"a":2,"b":"y"},{"a":3,"b":"z"}]"#;
+        let r = engine_store(rows, false, 1).expect("store");
+        if r.transform_kind == TransformKind::Columnar {
+            assert!(r.steps.contains(&PipeStep::Transform));
+        }
+    }
+
+    #[test]
+    fn a_blob_with_a_cut_or_extended_tail_is_refused() {
+        let data = b"line one of the log\nline two of the log\nline three of the log\n".repeat(20);
+        let r = engine_store(&data, false, 1).expect("store");
+        let blob = r.to_blob();
+        assert_eq!(engine_restore_raw(&blob, false).as_deref(), Some(&data[..]));
+        let mut longer = blob.clone();
+        longer.push(0);
+        assert!(engine_restore(&longer, false).is_none());
+        assert!(engine_restore_raw(&longer, false).is_none());
+        let shorter = &blob[..blob.len() - 1];
+        assert!(engine_restore(shorter, false).is_none());
+        assert!(engine_restore_raw(shorter, false).is_none());
     }
 
     #[test]

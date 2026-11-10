@@ -12,7 +12,7 @@
 //! Bytes. No "Budlum Inc. indexer" or centralized service is
 //! Required. The store is fully permissionless.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, RwLock};
 
 /// A content identifier - 32-byte hash of the chunk data.
@@ -24,13 +24,17 @@ use std::sync::{Arc, RwLock};
 pub struct ContentId(pub [u8; 32]);
 
 impl ContentId {
-    /// Compute the `ContentId` of a chunk using the same domain-separated
-    /// SHA-256 as `budlum-core` (`BDLM_CONTENT_V1` tag).
+    /// Compute the `ContentId` of a chunk. Same definition as
+    /// `budlum-core`: SHA-256 over length-prefixed fields. Each field is
+    /// a u64 little-endian length, then the bytes. Fields: the
+    /// `BDLM_CONTENT_V1` tag, then the chunk.
     pub fn of(chunk: &[u8]) -> Self {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::default();
-        hasher.update(b"BDLM_CONTENT_V1");
-        hasher.update(chunk);
+        for field in [&b"BDLM_CONTENT_V1"[..], chunk] {
+            hasher.update((field.len() as u64).to_le_bytes());
+            hasher.update(field);
+        }
         let result = hasher.finalize();
         let mut id = [0u8; 32];
         id.copy_from_slice(&result);
@@ -63,6 +67,8 @@ pub enum StoreError {
     ReadOnly,
     #[error("response cid does not match the requested cid: wanted {wanted}, got {got}")]
     UnexpectedCid { wanted: ContentId, got: ContentId },
+    #[error("chunk of {len} bytes exceeds the limit of {max} bytes")]
+    TooLarge { len: usize, max: usize },
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -99,7 +105,25 @@ pub trait ContentStore: Send + Sync {
     }
 }
 
-/// In-memory content store backed by a `BTreeMap`.
+/// Largest chunk the store accepts: 16 MiB, the `MAX_CHUNK_SIZE` of
+/// `storage_params.rs` and the bitswap message limit.
+const MAX_CHUNK_BYTES: usize = 16 * 1024 * 1024;
+
+/// Default chunk size (256 KiB), used to derive the default byte budget.
+const DEFAULT_CHUNK_BYTES: usize = 256 * 1024;
+
+/// What the memory store holds. One lock covers all three fields, so the byte
+/// count and the eviction order never disagree with the map.
+#[derive(Default)]
+struct StoreState {
+    chunks: BTreeMap<ContentId, Vec<u8>>,
+    /// Insertion order, oldest first. Eviction pops from the front.
+    order: VecDeque<ContentId>,
+    /// Sum of the chunk lengths in `chunks`.
+    bytes: usize,
+}
+
+/// In-memory content store.
 ///
 /// Suitable for testing, devnet, and short-lived nodes. Data is lost
 /// On process exit. For persistent storage, use `SledContentStore`
@@ -107,27 +131,71 @@ pub trait ContentStore: Send + Sync {
 ///
 /// Thread-safe via `RwLock`. Read operations (`get`, `has`) acquire
 /// A shared lock; writes (`put`) acquire an exclusive lock.
+///
+/// The store is bounded in chunks and in bytes. A chunk larger than
+/// `MAX_CHUNK_BYTES` is refused, and when either bound is reached the
+/// oldest inserted chunks are evicted first.
 #[derive(Clone)]
 pub struct MemoryContentStore {
-    inner: Arc<RwLock<BTreeMap<ContentId, Vec<u8>>>>,
-    /// Maximum number of chunks to store. When exceeded, the oldest
-    /// Chunk (lowest CID) is evicted. Prevents unbounded memory growth.
+    inner: Arc<RwLock<StoreState>>,
+    /// Maximum number of chunks to store.
     max_capacity: usize,
+    /// Maximum total bytes of chunk data.
+    max_bytes: usize,
 }
 
 impl MemoryContentStore {
-    /// Create a new empty store with the given capacity.
+    /// Create a new empty store with the given chunk capacity. The byte budget
+    /// is that many default-size (256 KiB) chunks.
     pub fn new(max_capacity: usize) -> Self {
+        // An overflow means "more than any machine has": no byte bound.
+        let max_bytes = max_capacity.saturating_mul(DEFAULT_CHUNK_BYTES);
+        Self::with_limits(max_capacity, max_bytes)
+    }
+
+    /// Create a new empty store bounded by chunk count and total bytes.
+    fn with_limits(max_capacity: usize, max_bytes: usize) -> Self {
         Self {
-            inner: Arc::new(RwLock::new(BTreeMap::new())),
+            inner: Arc::new(RwLock::new(StoreState::default())),
             max_capacity,
+            max_bytes,
         }
     }
 
-    /// Create a store with default capacity (10,000 chunks ≈ 2.5 GiB
-    /// At 256 KiB per chunk).
+    /// Create a store with default capacity (10,000 chunks, at most 2.5 GiB
+    /// of data: 256 KiB per chunk on average).
     pub fn with_default_capacity() -> Self {
         Self::new(10_000)
+    }
+
+    /// The largest single chunk this store accepts.
+    fn chunk_limit(&self) -> usize {
+        MAX_CHUNK_BYTES.min(self.max_bytes)
+    }
+
+    /// Would adding `len` bytes break the chunk or byte bound?
+    fn over_budget(&self, state: &StoreState, len: usize) -> bool {
+        if state.chunks.len() >= self.max_capacity {
+            return true;
+        }
+        match state.bytes.checked_add(len) {
+            Some(total) => total > self.max_bytes,
+            None => true,
+        }
+    }
+}
+
+/// Remove a chunk and keep the byte count right.
+fn remove_chunk(state: &mut StoreState, id: &ContentId) -> bool {
+    match state.chunks.remove(id) {
+        Some(data) => {
+            // The count is the sum of the stored lengths, so it cannot go
+            // below zero; a mismatch resets to zero instead of wrapping.
+            state.bytes = state.bytes.saturating_sub(data.len());
+            state.order.retain(|queued| queued != id);
+            true
+        }
+        None => false,
     }
 }
 
@@ -141,38 +209,60 @@ impl ContentStore for MemoryContentStore {
                 actual: computed,
             });
         }
+        let limit = self.chunk_limit();
+        if data.len() > limit {
+            return Err(StoreError::TooLarge {
+                len: data.len(),
+                max: limit,
+            });
+        }
 
-        let mut map = self
+        let mut state = self
             .inner
             .write()
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
-        // Evict oldest if at capacity.
-        if map.len() >= self.max_capacity && !map.contains_key(&id) {
-            if let Some(oldest) = map.keys().next().copied() {
-                map.remove(&oldest);
+        // The same CID is the same bytes: nothing to store, and the chunk
+        // keeps its place in the eviction order.
+        if state.chunks.contains_key(&id) {
+            return Ok(());
+        }
+
+        // Evict the oldest inserted chunks until the new one fits.
+        while self.over_budget(&state, data.len()) {
+            let Some(oldest) = state.order.pop_front() else {
+                break;
+            };
+            if let Some(old) = state.chunks.remove(&oldest) {
+                state.bytes = state.bytes.saturating_sub(old.len());
                 tracing::debug!(%oldest, "evicted oldest chunk (capacity reached)");
             }
         }
 
-        map.insert(id, data);
+        state.bytes = state.bytes.saturating_add(data.len());
+        state.order.push_back(id);
+        state.chunks.insert(id, data);
         Ok(())
     }
 
     fn get(&self, id: &ContentId) -> Result<Vec<u8>, StoreError> {
-        let map = self
+        let state = self
             .inner
             .read()
             .map_err(|e| StoreError::Internal(e.to_string()))?;
-        map.get(id).cloned().ok_or(StoreError::NotFound(*id))
+        state
+            .chunks
+            .get(id)
+            .cloned()
+            .ok_or(StoreError::NotFound(*id))
     }
 
     fn delete(&self, id: &ContentId) -> Result<(), StoreError> {
-        let mut map = self
+        let mut state = self
             .inner
             .write()
             .map_err(|e| StoreError::Internal(e.to_string()))?;
-        if map.remove(id).is_some() {
+        if remove_chunk(&mut state, id) {
             tracing::info!(cid = %id, "content physically deleted from store");
             Ok(())
         } else {
@@ -183,19 +273,22 @@ impl ContentStore for MemoryContentStore {
     fn has(&self, id: &ContentId) -> bool {
         self.inner
             .read()
-            .map(|map| map.contains_key(id))
+            .map(|state| state.chunks.contains_key(id))
             .unwrap_or(false)
     }
 
     fn list_cids(&self) -> Vec<ContentId> {
         self.inner
             .read()
-            .map(|map| map.keys().copied().collect())
+            .map(|state| state.chunks.keys().copied().collect())
             .unwrap_or_default()
     }
 
     fn len(&self) -> usize {
-        self.inner.read().map(|map| map.len()).unwrap_or(0)
+        self.inner
+            .read()
+            .map(|state| state.chunks.len())
+            .unwrap_or(0)
     }
 }
 
@@ -264,12 +357,77 @@ mod tests {
         }
         assert_eq!(store.len(), 3);
 
-        // 4th chunk triggers eviction of the oldest (lowest CID).
+        // 4th chunk triggers eviction of the oldest inserted chunk.
         store.put(chunks[3].0, chunks[3].1.clone()).unwrap();
         assert_eq!(store.len(), 3);
 
-        // The 4th chunk is present.
+        // The 4th chunk is present, the first one is gone.
         assert!(store.has(&chunks[3].0));
+        assert!(!store.has(&chunks[0].0));
+        assert!(store.has(&chunks[1].0));
+    }
+
+    /// Eviction follows insertion order, not the CID order: a chunk with the
+    /// lowest CID that was inserted last must survive.
+    #[test]
+    fn eviction_follows_insertion_order_not_cid_order() {
+        let store = MemoryContentStore::new(2);
+        let mut chunks: Vec<(ContentId, Vec<u8>)> = (0..3)
+            .map(|i| {
+                let data = format!("order {i}").into_bytes();
+                (ContentId::of(&data), data)
+            })
+            .collect();
+        // Insert the highest CID first, the lowest CID last.
+        chunks.sort_by_key(|chunk| std::cmp::Reverse(chunk.0));
+        store.put(chunks[0].0, chunks[0].1.clone()).unwrap();
+        store.put(chunks[1].0, chunks[1].1.clone()).unwrap();
+        store.put(chunks[2].0, chunks[2].1.clone()).unwrap();
+        assert!(!store.has(&chunks[0].0), "the first inserted is evicted");
+        assert!(store.has(&chunks[1].0));
+        assert!(store.has(&chunks[2].0), "the lowest CID was not evicted");
+    }
+
+    /// The byte budget bounds the store, not only the chunk count.
+    #[test]
+    fn the_byte_budget_evicts_old_chunks() {
+        let store = MemoryContentStore::with_limits(100, 10);
+        let a = vec![1u8; 6];
+        let b = vec![2u8; 6];
+        store.put(ContentId::of(&a), a.clone()).unwrap();
+        store.put(ContentId::of(&b), b.clone()).unwrap();
+        assert!(!store.has(&ContentId::of(&a)));
+        assert!(store.has(&ContentId::of(&b)));
+        assert_eq!(store.len(), 1);
+    }
+
+    /// A chunk over the per-chunk limit is refused.
+    #[test]
+    fn an_oversized_chunk_is_refused() {
+        let store = MemoryContentStore::with_limits(100, 10);
+        let big = vec![3u8; 11];
+        let err = store.put(ContentId::of(&big), big).expect_err("too large");
+        assert!(matches!(err, StoreError::TooLarge { len: 11, max: 10 }));
+        assert!(store.is_empty());
+        let huge = vec![4u8; MAX_CHUNK_BYTES + 1];
+        let big_store = MemoryContentStore::with_default_capacity();
+        assert!(matches!(
+            big_store.put(ContentId::of(&huge), huge),
+            Err(StoreError::TooLarge { .. })
+        ));
+    }
+
+    /// Deleting frees the byte budget.
+    #[test]
+    fn delete_frees_bytes() {
+        let store = MemoryContentStore::with_limits(100, 10);
+        let a = vec![1u8; 6];
+        let b = vec![2u8; 6];
+        store.put(ContentId::of(&a), a.clone()).unwrap();
+        store.delete(&ContentId::of(&a)).unwrap();
+        store.put(ContentId::of(&b), b.clone()).unwrap();
+        assert_eq!(store.len(), 1);
+        assert!(store.has(&ContentId::of(&b)));
     }
 
     #[test]
@@ -287,5 +445,38 @@ mod tests {
         assert_eq!(cids.len(), 2);
         assert!(cids.contains(&id1));
         assert!(cids.contains(&id2));
+    }
+
+    fn seeded_bytes(len: usize) -> Vec<u8> {
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        (0..len)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x >> 24) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn content_id_golden_vectors_match_core() {
+        let cases: [(Vec<u8>, &str); 3] = [
+            (
+                vec![],
+                "b9c2e41839278bfe0711bbdfb660ed31087513891bc2fa80c84f2bb6fa160104",
+            ),
+            (
+                vec![0u8],
+                "ae6ac769b38f211a1ee7d8c3bf7b17ea2e905d99a5ae515e46b55192a22b7ed1",
+            ),
+            (
+                seeded_bytes(65_536),
+                "09dd6421a5383e6d54fde97f523c6ad9ca6b33ffa8838801818f2992fbb7ab94",
+            ),
+        ];
+        for (data, want) in &cases {
+            assert_eq!(ContentId::of(data).to_hex(), *want, "len {}", data.len());
+        }
     }
 }

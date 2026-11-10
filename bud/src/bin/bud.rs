@@ -327,7 +327,9 @@ fn run(cli: Cli) -> Result<String, String> {
                     data.clone(),
                 ),
             };
-            let bytes = file.to_bytes();
+            let bytes = file
+                .try_to_bytes()
+                .map_err(|e| format!("encode error: {e}"))?;
             write_file(&output, &bytes)?;
             Ok(format!(
                 "v1 encode: {} bytes -> {} bytes (ratio {:.2}x, threshold {required_ratio})",

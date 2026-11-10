@@ -57,12 +57,6 @@ const BUDGETS: &[Budget] = &[
         reason: "`last_block` returns `&Block` and the genesis block is written by the constructor, so there is no owned value to fall back to and no caller that could act on an `Option`; the invariant is enforced at construction rather than re-checked on every read",
     },
     Budget {
-        file: "src/account_abstraction/quantum_account.rs",
-        lint: "clippy::cast_precision_loss",
-        count: 1,
-        reason: "a storage cost in dollars per TB-month is an estimate, and the byte count it divides is far below the 2^53 where an f64 stops counting integers exactly; the alternative is fixed-point arithmetic for a number that is displayed, not settled on",
-    },
-    Budget {
         file: "build.rs",
         lint: "clippy::expect_used",
         count: 1,
@@ -73,12 +67,6 @@ const BUDGETS: &[Budget] = &[
         lint: "clippy::expect_used",
         count: 1,
         reason: "`prove` does not return a `Result` in this trait, so a shape violation the prover itself constructed has nowhere to go; the verifier-side counterpart of this check is a returned error, which is where adversary-supplied input arrives",
-    },
-    Budget {
-        file: "budzero/bud-compiler/src/codegen.rs",
-        lint: "dead_code",
-        count: 1,
-        reason: "a field kept for the generated-code layout that nothing reads yet; listed so the difference between not-read-yet and silently-ignored stays visible",
     },
     Budget {
         file: "budzero/bud-proof/src/bud_stark/prover.rs",
@@ -285,40 +273,28 @@ const BUDGETS: &[Budget] = &[
         reason: "consensus or storage entry points whose arguments are all required and none of which groups into a meaningful struct; the fourth is `accept_storage_reallocation_with_escrow`, whose ticket/operator/payer/epoch-window/economics/proof arguments each come from a different authority and bundling them would hide which fields a caller must supply",
     },
     Budget {
-        file: "src/chain/blockchain.rs",
-        lint: "dead_code",
-        count: 2,
-        reason: "fields or helpers read only under a feature or by a subset of tests; kept beside their siblings rather than deleted and rewritten",
-    },
-    Budget {
         file: "src/chain/chain_actor.rs",
         lint: "clippy::too_many_arguments",
         count: 4,
         reason: "actor-boundary mirrors of the bridge lock/mint entry points; each argument crosses the channel as part of one message and none groups into a meaningful struct, so bundling them would hide which fields a caller must supply",
     },
     Budget {
+        file: "src/cross_domain/bridge.rs",
+        lint: "clippy::too_many_arguments",
+        count: 1,
+        reason: "the lock arguments are the transfer's parameter set (route, indices, parties, amount, expiry); a struct would mirror them one for one",
+    },
+    Budget {
+        file: "src/cross_domain/bridge_relayer.rs",
+        lint: "clippy::too_many_arguments",
+        count: 1,
+        reason: "the pipeline lock mirrors the bridge lock parameter set one for one",
+    },
+    Budget {
         file: "src/cross_domain/external/registry.rs",
         lint: "clippy::too_many_arguments",
         count: 2,
         reason: "`register` takes the full admission surface (network, descriptor, bond, probes, height) and `check` re-verifies that same surface; both lists are load-bearing - dropping an argument silently narrows what admission covers - and a struct would let a caller omit a field by default",
-    },
-    Budget {
-        file: "src/consensus/pos.rs",
-        lint: "clippy::type_complexity",
-        count: 1,
-        reason: "a nested collection type that names itself better inline than behind an alias nobody would recognise",
-    },
-    Budget {
-        file: "src/consensus/qc.rs",
-        lint: "clippy::too_many_arguments",
-        count: 1,
-        reason: "a consensus or storage entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply",
-    },
-    Budget {
-        file: "src/consensus/qc.rs",
-        lint: "clippy::type_complexity",
-        count: 1,
-        reason: "a nested collection type that names itself better inline than behind an alias nobody would recognise",
     },
     Budget {
         file: "src/core/encoding.rs",
@@ -333,58 +309,16 @@ const BUDGETS: &[Budget] = &[
         reason: "a consensus or storage entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply",
     },
     Budget {
-        file: "src/cross_domain/bridge.rs",
-        lint: "clippy::too_many_arguments",
-        count: 1,
-        reason: "a consensus or storage entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply",
-    },
-    Budget {
-        file: "src/cross_domain/bridge_relayer.rs",
-        lint: "clippy::too_many_arguments",
-        count: 1,
-        reason: "a consensus or storage entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply",
-    },
-    Budget {
-        file: "src/cross_domain/evm/adapter.rs",
-        lint: "clippy::nursery",
-        count: 1,
-        reason: "nursery lints are unstable by definition and this file predates the crate-wide ratchet; listed so the exception is visible rather than assumed",
-    },
-    Budget {
-        file: "src/cross_domain/evm/adapter.rs",
-        lint: "clippy::pedantic",
-        count: 1,
-        reason: "pedantic is denied crate-wide; these files were exempted before the ratchet and each exemption is a debt, not a decision",
-    },
-    Budget {
-        file: "src/cross_domain/evm/bud_to_eth.rs",
-        lint: "clippy::nursery",
-        count: 1,
-        reason: "nursery lints are unstable by definition and this file predates the crate-wide ratchet; listed so the exception is visible rather than assumed",
-    },
-    Budget {
-        file: "src/cross_domain/evm/bud_to_eth.rs",
-        lint: "clippy::pedantic",
-        count: 1,
-        reason: "pedantic is denied crate-wide; these files were exempted before the ratchet and each exemption is a debt, not a decision",
-    },
-    Budget {
-        file: "src/cross_domain/evm/bud_to_eth.rs",
-        lint: "clippy::too_many_arguments",
-        count: 1,
-        reason: "a consensus or storage entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply",
-    },
-    Budget {
         file: "src/crypto/pkcs11.rs",
         lint: "dead_code",
-        count: 4,
+        count: 1,
         reason: "fields or helpers read only under a feature or by a subset of tests; kept beside their siblings rather than deleted and rewritten",
     },
     Budget {
         file: "src/domain/storage_deal.rs",
         lint: "clippy::too_many_arguments",
-        count: 4,
-        reason: "a consensus or storage entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply",
+        count: 5,
+        reason: "a consensus or storage entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply. The fifth is `answer_coding_audit`: the answer, the audit it answers and the clock reading are three different things, and the column, the byte and the inclusion path have to stay three slices a caller cannot confuse",
     },
     Budget {
         file: "src/ai_inference/executor.rs",
@@ -441,18 +375,6 @@ const BUDGETS: &[Budget] = &[
         reason: "a consensus or storage entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply; the fourth is the signed_purchase test helper mirroring the purchase preimage parameters",
     },
     Budget {
-        file: "src/registry/evidence.rs",
-        lint: "clippy::too_many_arguments",
-        count: 1,
-        reason: "a consensus or storage entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply",
-    },
-    Budget {
-        file: "src/registry/poa_onboarding.rs",
-        lint: "clippy::too_many_lines",
-        count: 1,
-        reason: "a linear onboarding sequence that reads worse split into pieces called once each",
-    },
-    Budget {
         file: "src/relayer/policy.rs",
         lint: "clippy::too_many_arguments",
         count: 1,
@@ -469,18 +391,6 @@ const BUDGETS: &[Budget] = &[
         lint: "dead_code",
         count: 2,
         reason: "fields or helpers read only under a feature or by a subset of tests; kept beside their siblings rather than deleted and rewritten",
-    },
-    Budget {
-        file: "src/tests/finality_adversarial.rs",
-        lint: "clippy::needless_range_loop",
-        count: 1,
-        reason: "test code indexing two slices in step, where the index is the point",
-    },
-    Budget {
-        file: "src/tests/finality_live_path.rs",
-        lint: "clippy::needless_range_loop",
-        count: 1,
-        reason: "test code indexing two slices in step, where the index is the point",
     },
     Budget {
         file: "src/ai_inference/inference.rs",
@@ -530,6 +440,30 @@ const BUDGETS: &[Budget] = &[
         count: 1,
         reason: "the node-local emission driver mirrors assemble_anchor's seven-argument shape and adds only the two knobs it uniquely owns (the log path and the mode gate); bundling them into a params struct would hide from the seam wiring which values the consensus caller must supply",
     },
+    Budget {
+        file: "crates/ai-inference/crates/ai-ops/src/logparse.rs",
+        lint: "dead_code",
+        count: 1,
+        reason: "the module header says it is not wired yet (WIRING note), so its items have no caller; the allow is removed when the module is wired",
+    },
+    Budget {
+        file: "crates/budscan/src/query.rs",
+        lint: "clippy::too_many_lines",
+        count: 1,
+        reason: "one linear query dispatcher in the light-client crate that reads worse split into pieces called once each",
+    },
+    Budget {
+        file: "xtask/gates/src/gates/ast_security_gates.rs",
+        lint: "clippy::struct_excessive_bools",
+        count: 2,
+        reason: "two visitor state structs whose booleans are independent guard flags of one syn walk; a bit set would hide which guard each flag records",
+    },
+    Budget {
+        file: "xtask/gates/src/gates/budscan_patchset.rs",
+        lint: "clippy::too_many_lines",
+        count: 1,
+        reason: "the patch-set check is one linear sequence of independent verdicts; splitting it would scatter the failure messages that read in order",
+    },
 ];
 
 /// Lints that may never be suppressed anywhere.
@@ -561,6 +495,16 @@ fn allows_in(src: &str) -> Vec<String> {
             i += 1;
             continue;
         }
+        // The attribute must open its line. `"#[allow(..)]"` inside a string
+        // fixture and `// #[allow(..)]` in a comment are not suppressions.
+        let line_start = chars[..i]
+            .iter()
+            .rposition(|c| *c == '\n')
+            .map_or(0, |p| p + 1);
+        if chars[line_start..i].iter().any(|c| !c.is_whitespace()) {
+            i += 1;
+            continue;
+        }
         let mut j = i + 1;
         if j < chars.len() && chars[j] == '!' {
             j += 1;
@@ -570,12 +514,22 @@ fn allows_in(src: &str) -> Vec<String> {
             continue;
         }
         j += 1;
-        let kw: String = chars[j..(j + 6).min(chars.len())].iter().collect();
-        if kw != "allow(" {
+        while j < chars.len() && chars[j].is_whitespace() {
+            j += 1;
+        }
+        let word_start = j;
+        while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+            j += 1;
+        }
+        let kw: String = chars[word_start..j].iter().collect();
+        while j < chars.len() && chars[j].is_whitespace() {
+            j += 1;
+        }
+        if (kw != "allow" && kw != "expect") || j >= chars.len() || chars[j] != '(' {
             i += 1;
             continue;
         }
-        j += 6;
+        j += 1;
         // Read to the matching close paren.
         let start = j;
         let mut depth = 1i32;
@@ -591,7 +545,10 @@ fn allows_in(src: &str) -> Vec<String> {
             j += 1;
         }
         let inner: String = chars[start..j.min(chars.len())].iter().collect();
-        for lint in inner.split(',') {
+        let lints = inner
+            .find("reason")
+            .map_or(inner.as_str(), |at| &inner[..at]);
+        for lint in lints.split(',') {
             let l = lint.trim();
             if !l.is_empty() {
                 out.push(l.to_string());
@@ -684,7 +641,9 @@ fn judge(found: &[Found]) -> Vec<String> {
 /// `build.rs`. A gate that watches part of the tree reports what it watched,
 /// not what is true, so the scope is named here and the count below is the
 /// count for all of it.
-const SCANNED: &[&str] = &["src", "benches", "budzero", "build.rs"];
+const SCANNED: &[&str] = &[
+    "src", "benches", "budzero", "build.rs", "crates", "bud", "xtask", "fuzz", "kani", "examples",
+];
 
 pub fn run(root: &Path) -> Result<String, String> {
     let mut files = Vec::new();
@@ -705,7 +664,8 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     let mut found = Vec::new();
     for f in &files {
-        let src = std::fs::read_to_string(f).unwrap_or_default();
+        let src =
+            std::fs::read_to_string(f).map_err(|e| format!("cannot read {}: {e}", f.display()))?;
         let rel = f.strip_prefix(root).unwrap_or(f).display().to_string();
         for lint in allows_in(&src) {
             found.push(Found {
@@ -744,10 +704,33 @@ pub fn self_test() -> Result<String, String> {
     if got != vec!["dead_code", "clippy::all", "unused"] {
         problems.push(format!("BROKEN: allows_in read {got:?}"));
     }
+    let spelled = "#[ expect (clippy::a,\n    reason = \"x, y\")]\nfn c() {}\n";
+    if allows_in(spelled) != vec!["clippy::a"] {
+        problems.push(format!(
+            "BROKEN: expect or spaced form read {:?}",
+            allows_in(spelled)
+        ));
+    }
     if !allows_in("// #[allow(x)] in a comment\n").is_empty() {
         // A comment mentioning one is still text the parser sees; recorded
         // rather than fixed, because a suppression written in a comment is
         // not one and over-reporting here is the safe direction.
+    }
+    // A string fixture and a comment that show an attribute are not
+    // suppressions; an indented attribute on its own line is.
+    if !allows_in("let s = \"#[allow(dead_code)]\";\n// #[allow(x)]\n").is_empty() {
+        problems.push(String::from(
+            "BROKEN: a string or comment mention was counted as a suppression",
+        ));
+    }
+    if allows_in("    #[allow(dead_code)]\n") != vec!["dead_code"] {
+        problems.push(String::from("BROKEN: an indented attribute was not read"));
+    }
+    // The scope covers the crates the node links and the tools around it.
+    for tree in ["crates", "bud", "xtask", "fuzz"] {
+        if !SCANNED.contains(&tree) {
+            problems.push(format!("BROKEN: {tree}/ is not scanned"));
+        }
     }
     if !allows_in("fn f() {}\n").is_empty() {
         problems.push(String::from("BROKEN: a file with no allows reported some"));
@@ -799,7 +782,7 @@ pub fn self_test() -> Result<String, String> {
         .collect();
     if !judge(&one_over)
         .iter()
-        .any(|p| p.contains("budgeted at 4 and appears 5"))
+        .any(|p| p.contains("src/crypto/pkcs11.rs") && p.contains("is budgeted at"))
     {
         problems.push(String::from(
             "VACUOUS: one suppression over budget was accepted",
@@ -829,4 +812,12 @@ pub fn self_test() -> Result<String, String> {
          matching nothing and a count one over budget are all refused; the exact budget \
          passes and the parser reads inner and outer attributes.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn self_test_passes() {
+        super::self_test().expect("suppressions self-test");
+    }
 }

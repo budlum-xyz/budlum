@@ -74,7 +74,9 @@ pub struct DomainForkChoice {
 impl ConsensusDomainForkChoice for DomainForkChoice {
     fn fork_choice(&self, candidates: &[ForkCandidate]) -> Result<ResolvedHead, ForkChoiceError> {
         ensure_single_domain(self.domain_id, candidates)?;
-        if candidates.len() == 1 {
+        // A lone BFT or PoA candidate still needs its certificate or quorum. Only the
+        // kinds without a per-candidate proof flag take the single candidate shortcut.
+        if candidates.len() == 1 && !matches!(self.kind, ConsensusKind::Bft | ConsensusKind::PoA) {
             return Ok(resolve_single(candidates[0].clone()));
         }
         match &self.kind {
@@ -220,6 +222,13 @@ fn resolve_poa(candidates: &[ForkCandidate]) -> Result<ResolvedHead, ForkChoiceE
         .filter(|c| c.authority_quorum)
         .max_by(|a, b| a.height.cmp(&b.height).then(b.head_hash.cmp(&a.head_hash)))
         .ok_or(ForkChoiceError::MissingAuthorityQuorum)?;
+    let same_height_conflicts = candidates
+        .iter()
+        .filter(|c| c.authority_quorum && c.height == best.height && c.head_hash != best.head_hash)
+        .count();
+    if same_height_conflicts > 0 {
+        return Err(ForkChoiceError::ConflictingFinality);
+    }
     Ok(ResolvedHead {
         domain_id: best.domain_id,
         head_hash: best.head_hash,
@@ -308,8 +317,8 @@ mod tests {
         };
         let a = candidate(4, 10, 0x41);
         assert_eq!(
-            resolver.fork_choice(&[a]).unwrap().reason,
-            ForkChoiceReason::SingleCandidate
+            resolver.fork_choice(&[a]).unwrap_err(),
+            ForkChoiceError::MissingAuthorityQuorum
         );
         let mut b = candidate(4, 11, 0x42);
         b.authority_quorum = true;
@@ -318,6 +327,34 @@ mod tests {
             .unwrap();
         assert_eq!(head.head_hash, b.head_hash);
         assert_eq!(head.reason, ForkChoiceReason::PoaRoundRobinAuthority);
+    }
+
+    #[test]
+    fn poa_conflicting_quorum_at_one_height_is_rejected() {
+        let resolver = DomainForkChoice {
+            domain_id: 4,
+            kind: ConsensusKind::PoA,
+        };
+        let mut a = candidate(4, 10, 0x41);
+        a.authority_quorum = true;
+        let mut b = candidate(4, 10, 0x42);
+        b.authority_quorum = true;
+        assert_eq!(
+            resolver.fork_choice(&[a, b]).unwrap_err(),
+            ForkChoiceError::ConflictingFinality
+        );
+    }
+
+    #[test]
+    fn bft_single_candidate_without_qc_is_rejected() {
+        let resolver = DomainForkChoice {
+            domain_id: 3,
+            kind: ConsensusKind::Bft,
+        };
+        assert_eq!(
+            resolver.fork_choice(&[candidate(3, 10, 0x31)]).unwrap_err(),
+            ForkChoiceError::MissingQuorumCertificate
+        );
     }
 
     #[test]

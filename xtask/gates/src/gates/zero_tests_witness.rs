@@ -100,6 +100,13 @@ fn has_direct_assert(air_code: &str, snake: &str, air_reg: &str) -> bool {
     })
 }
 
+/// The witness column is read by a statement other than its own definition.
+fn witness_is_used(air_code: &str, witness: &str) -> bool {
+    statements(air_code)
+        .iter()
+        .any(|s| s.contains(witness) && !s.contains("const "))
+}
+
 /// # Errors
 ///
 /// Returns the list of violated claims.
@@ -129,10 +136,10 @@ pub fn run(root: &Path) -> Result<String, String> {
             continue;
         }
         checked += 1;
-        if !air_src.contains(witness) {
+        if !witness_is_used(&air_code, witness) {
             problems.push(format!(
                 "`{opcode}` tests `{reg}` against zero in the VM and the AIR has no \
-                 `{witness}`. A field element has no order, so non-zero cannot be \
+                 `{witness}` in use. A field element has no order, so non-zero cannot be \
                  stated directly; without a witness the AIR is enforcing some \
                  other rule, and the two only have to agree on the values the \
                  tests happen to use."
@@ -192,7 +199,7 @@ pub fn self_test() -> Result<String, String> {
     let _ = std::fs::create_dir_all(dir.join("budzero/bud-proof/src"));
 
     let good_vm = "match opcode {\n            Opcode::Assert => {\n                if src1_val == 0 { return Err(VmError::AssertionFailed); }\n            }\n            Opcode::Div => {\n                let result = if src2_val != 0 { 1 } else { 0 };\n            }\n            Opcode::Inv => {\n                let result = if src1_val != 0 { 1 } else { 0 };\n            }\n            Opcode::Jnz => {\n                let taken = src1_val != 0;\n            }\n            Opcode::Not => {\n                let result = if src1_val == 0 { 1 } else { 0 };\n            }\n        }";
-    let good_air = "pub const COL_ASSERT_INV: usize = 740;\npub const COL_DIV_INV: usize = 58;\npub const COL_INV_ZERO: usize = 60;\npub const COL_JNZ_COND_INV: usize = 62;\n        let assert_inv: AB::Expr = cur[COL_ASSERT_INV].into();\n        let assert_z = rs1_val.clone() * assert_inv;\n        builder.when(is_assert.clone()).assert_bool(assert_z.clone());\n        builder.when(is_assert).assert_one(assert_z);\n";
+    let good_air = "pub const COL_ASSERT_INV: usize = 740;\npub const COL_DIV_INV: usize = 58;\npub const COL_INV_ZERO: usize = 60;\npub const COL_JNZ_COND_INV: usize = 62;\n        let assert_inv: AB::Expr = cur[COL_ASSERT_INV].into();\n        let assert_z = rs1_val.clone() * assert_inv;\n        let div_inv: AB::Expr = cur[COL_DIV_INV].into();\n        let inv_zero: AB::Expr = cur[COL_INV_ZERO].into();\n        let jnz_inv: AB::Expr = cur[COL_JNZ_COND_INV].into();\n        builder.when(is_assert.clone()).assert_bool(assert_z.clone());\n        builder.when(is_assert).assert_one(assert_z);\n";
     std::fs::write(dir.join("budzero/bud-vm/src/lib.rs"), good_vm).map_err(|e| e.to_string())?;
     std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), good_air)
         .map_err(|e| e.to_string())?;
@@ -200,6 +207,16 @@ pub fn self_test() -> Result<String, String> {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from("canary: a correct tree was refused"));
     }
+    // Definitions alone do not constrain anything.
+    let defs_only = "pub const COL_ASSERT_INV: usize = 740;\npub const COL_DIV_INV: usize = 58;\npub const COL_INV_ZERO: usize = 60;\npub const COL_JNZ_COND_INV: usize = 62;\n";
+    std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), defs_only)
+        .map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from("canary: unused witness definitions passed"));
+    }
+    std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), good_air)
+        .map_err(|e| e.to_string())?;
     // Direct assert_one bypass. Prefixed with `good_air` so every witness
     // constant the gate looks for is present: the refusal must come from the
     // direct-assertion check alone, not from a missing witness column that

@@ -217,7 +217,7 @@ impl AdmissionReport {
             &self.adapter_version.to_le_bytes(),
             &self.evidence_version.to_le_bytes(),
             &[u8::from(self.golden_verified)],
-            &self.probes.len().to_le_bytes(),
+            &(self.probes.len() as u64).to_le_bytes(),
             &self.probe_commitment,
         ]);
         for (name, outcome) in &self.probes {
@@ -326,7 +326,7 @@ pub fn run_probe(
 fn probe_commitment(probes: &[FaultProbe]) -> [u8; 32] {
     let mut acc = crate::core::hash::hash_fields_bytes(&[
         b"bud-admission-probes-v1",
-        &probes.len().to_le_bytes(),
+        &(probes.len() as u64).to_le_bytes(),
     ]);
     for probe in probes {
         let patch = patch_label(&probe.patch);
