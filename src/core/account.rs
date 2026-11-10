@@ -490,6 +490,7 @@ pub struct AccountState {
 pub(crate) fn enforce_classical_message_intake(
     message: &crate::cross_domain::message::CrossDomainMessage,
     alarm: &crate::security::quantum_canary::QuantumAlarmState,
+    anchored_budlum_height: Option<u64>,
     current_block_height: u64,
 ) -> Result<(), String> {
     if message.source_quantum_class == Some(crate::crypto::facts::QuantumClass::Classical) {
@@ -497,16 +498,26 @@ pub(crate) fn enforce_classical_message_intake(
         match classical_intake(alarm) {
             ClassicalIntake::Open => {}
             ClassicalIntake::Wait(blocks) => {
-                let ready = message.source_height.saturating_add(blocks);
+                // Age the Watch hold strictly from the Budlum block height at
+                // which the source commitment was accepted into consensus,
+                // never from `message.source_height` (which is chosen by the
+                // message builder or measured in a foreign block space).
+                let Some(anchored_at) = anchored_budlum_height else {
+                    return Err(
+                        "classical-class message is held by the quantum alarm: source commitment is not anchored on Budlum"
+                            .into(),
+                    );
+                };
+                let ready = anchored_at.saturating_add(blocks);
                 if current_block_height < ready {
                     return Err(format!(
-                        "classical-class message is held by the quantum alarm until height {ready} (now {current_block_height})"
+                        "classical-class message is held by the quantum alarm until height {ready} (anchored at {anchored_at}, now {current_block_height})"
                     ));
                 }
             }
             ClassicalIntake::Stopped => {
                 return Err(
-                    "the quantum alarm stopped the intake of classical-class messages".into(),
+                    "the quantum alarm has stopped the intake of classical-class messages".into(),
                 );
             }
         }
@@ -1228,6 +1239,23 @@ impl AccountState {
         // for its source domain, never one the relayer chose. A message that
         // hides a classical source behind a lattice label (or the reverse) is
         // refused here, before any rule reads the class.
+        let source_domain = self
+            .settlement
+            .domains
+            .get(message.source_domain)
+            .ok_or_else(|| format!("unknown source domain {}", message.source_domain))?;
+        if source_domain.status != crate::domain::types::DomainStatus::Active {
+            return Err(format!(
+                "source domain {} is not active (status={:?})",
+                message.source_domain, source_domain.status
+            ));
+        }
+        if !source_domain.bridge_enabled {
+            return Err(format!(
+                "source domain {} is not bridge-enabled",
+                message.source_domain
+            ));
+        }
         let derived = self
             .settlement
             .domains
@@ -1239,9 +1267,14 @@ impl AccountState {
                 message.source_quantum_class, derived, message.source_domain
             ));
         }
+        let anchored_height = self
+            .settlement
+            .commitments
+            .earliest_accepted_height(message.source_domain, message.source_height);
         enforce_classical_message_intake(
             message,
             self.settlement.quantum.alarm(),
+            anchored_height,
             self.current_block_height,
         )?;
         if message.source_domain == message.target_domain {
