@@ -4603,11 +4603,15 @@ impl Blockchain {
             // unambiguous owner (a legacy zero-owner manifest, or an id with
             // two claims) is refused here and left to the scheduled
             // `pending_prune_manifests` pass, which is not caller-driven.
-            if !next_state.storage_registry.has_claim(&content_id, &burner) {
+            if next_state.storage_registry.owner_of(&content_id) != Some(burner)
+                || next_state
+                    .storage_registry
+                    .has_active_deal_for_other_payer(&content_id, &burner)
+            {
                 tracing::warn!(
                     %content_id,
                     %burner,
-                    "Refusing an NFT-burn-driven storage prune: the burner is not the manifest owner"
+                    "Refusing an NFT-burn-driven storage prune: the burner is not the unambiguous sole owner"
                 );
                 continue;
             }
@@ -12416,7 +12420,7 @@ mod bond_and_reorg_tests {
         let forged = crate::chain::finality::Precommit {
             chain_id: 45262,
             epoch: bc.state.epoch_index,
-            checkpoint_height: 100,
+            checkpoint_height: 10,
             checkpoint_hash: "aa".repeat(32),
             voter_id: keyless_validator,
             sig_bls: crate::chain::finality::sign_bls_pop(
