@@ -282,6 +282,15 @@ impl PeerManager {
         true
     }
 
+    /// Whether `peer_id` already holds an established connection in the live
+    /// peer set. Simultaneous inbound/outbound dials to the same peer emit two
+    /// `ConnectionEstablished` events; the second must not re-spend a `/24`
+    /// subnet slot and disconnect the peer we just connected to.
+    #[must_use]
+    pub fn is_connected(&self, peer_id: &PeerId) -> bool {
+        self.connected_peers.contains(peer_id)
+    }
+
     /// Drop subnet accounting when a peer disconnects.
     ///
     /// Returns `true` if this call removed a previously live peer. Duplicate
@@ -1741,5 +1750,18 @@ mod tests {
             4,
             "disconnecting sheds session headroom back to max_tracked_peers while keeping all bans"
         );
+    }
+
+    #[test]
+    fn simultaneous_dial_to_same_peer_is_recognized_as_already_connected() {
+        let mut manager = PeerManager::new();
+        let peer = test_peer_id();
+        assert!(!manager.is_connected(&peer));
+        assert!(manager.note_connected(peer, Some([127, 0, 0])));
+        assert!(manager.is_connected(&peer));
+        assert!(!manager.note_connected(peer, Some([127, 0, 0])));
+        assert!(manager.is_connected(&peer));
+        assert!(manager.note_disconnected(&peer));
+        assert!(!manager.is_connected(&peer));
     }
 }
