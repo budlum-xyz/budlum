@@ -337,6 +337,56 @@ mod rpc_tests {
         );
     }
 
+    /// Regression for the failed chain-45261 rehearsal on #110: the faucet
+    /// sends 100 BUD, but the RPC quoted only the 1-atom base fee while live
+    /// admission required 20001 (base plus the governed 200 ppm). Keep the
+    /// quote tied to the live registry parameters, not a hard-coded RPC rate.
+    #[tokio::test]
+    async fn estimate_gas_includes_testnet_transfer_rate_for_faucet_grant() {
+        use crate::core::transaction::TransactionType;
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut blockchain = Blockchain::new(consensus, None, 45261, None);
+        blockchain.state.base_fee = 1;
+        blockchain
+            .state
+            .registry
+            .set_params(crate::registry::RegistryParams::testnet_defaults());
+        let (server, _) = setup_with_blockchain(blockchain).await;
+        let mut tx = Transaction::new_with_chain_id(
+            Address::from([21u8; 32]),
+            Address::from([22u8; 32]),
+            100 * crate::tokenomics::BUD_UNIT,
+            0,
+            0,
+            vec![],
+            45261,
+            TransactionType::Transfer,
+        );
+        tx.hash = tx.calculate_hash();
+        let transfer = server.estimate_gas(tx.clone()).await.unwrap();
+        let transfer = u64::from_str_radix(transfer.trim_start_matches("0x"), 16).unwrap();
+        assert_eq!(transfer, 20_001, "base 1 plus 200 ppm of 100 BUD");
+
+        tx.tx_type = TransactionType::Stake;
+        tx.hash = tx.calculate_hash();
+        let stake = server.estimate_gas(tx.clone()).await.unwrap();
+        assert_eq!(
+            u64::from_str_radix(stake.trim_start_matches("0x"), 16).unwrap(),
+            1
+        );
+
+        tx.tx_type = TransactionType::Transfer;
+        tx.fee = 30_000;
+        tx.max_fee = tx.fee;
+        tx.hash = tx.calculate_hash();
+        let chosen = server.estimate_gas(tx).await.unwrap();
+        assert_eq!(
+            u64::from_str_radix(chosen.trim_start_matches("0x"), 16).unwrap(),
+            30_000,
+            "a caller's higher offered fee still takes precedence"
+        );
+    }
+
     /// A caller that already priced its transaction above the floor gets its
     /// Own fee back - that is what will be charged, since the flat-fee protocol
     /// Takes `tx.fee` verbatim once it clears `base_fee`.

@@ -1715,6 +1715,19 @@ impl AccountState {
         )
     }
 
+    /// Return the fee floor enforced by transaction admission for a given
+    /// type and value. An RPC quote must use these same *live state* parameters:
+    /// testnet charges the base fee plus the governed transfer percentage.
+    pub(crate) fn required_transaction_fee(&self, tx_type: &TransactionType, amount: u64) -> u64 {
+        if matches!(tx_type, TransactionType::Transfer) {
+            self.registry
+                .params()
+                .required_transfer_fee(amount, self.base_fee)
+        } else {
+            self.base_fee
+        }
+    }
+
     pub fn validate_transaction(&self, tx: &Transaction) -> Result<(), String> {
         // The context argument is a spendable balance, so it has to be the
         // vesting-gated one; `get_balance` would let this entry point admit a
@@ -1866,13 +1879,7 @@ impl AccountState {
         // into a bond the sender still owns, `Unstake` moves it back, and
         // charging a percentage of a bond every time it is adjusted would tax
         // participation rather than value movement.
-        let required_fee = match tx.tx_type {
-            TransactionType::Transfer => self
-                .registry
-                .params()
-                .required_transfer_fee(tx.amount, self.base_fee),
-            _ => self.base_fee,
-        };
+        let required_fee = self.required_transaction_fee(&tx.tx_type, tx.amount);
         if tx.fee < required_fee {
             return Err(format!(
                 "Fee too low: fee {} < required {} (base_fee {}, amount {})",

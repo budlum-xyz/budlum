@@ -76,6 +76,14 @@ services:
         --rpc-public-listener=127.0.0.1:8545 --rpc-operator-listener=127.0.0.1:8546
         --metrics-listener=0.0.0.0:9090
         --bootstrap="$$(cat /home/budlum/ceremony/validator2.bootnode)"
+    # The image's RPC healthcheck can succeed before the P2P listener starts.
+    # The other nodes dial this bootnode once at startup; if they race its
+    # listener, they remain disconnected and the RPC tip stays at genesis.
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/5001'"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
     depends_on:
       ceremony:
         condition: service_completed_successfully
@@ -102,6 +110,8 @@ services:
     depends_on:
       ceremony:
         condition: service_completed_successfully
+      validator1:
+        condition: service_healthy
 
   validator3:
     <<: *node
@@ -125,6 +135,8 @@ services:
     depends_on:
       ceremony:
         condition: service_completed_successfully
+      validator1:
+        condition: service_healthy
 
   validator4:
     <<: *node
@@ -148,6 +160,8 @@ services:
     depends_on:
       ceremony:
         condition: service_completed_successfully
+      validator1:
+        condition: service_healthy
 
   rpc:
     <<: *node
@@ -177,6 +191,8 @@ services:
     depends_on:
       ceremony:
         condition: service_completed_successfully
+      validator1:
+        condition: service_healthy
 
   faucet:
     <<: *node

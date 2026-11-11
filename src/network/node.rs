@@ -38,7 +38,7 @@ fn publish_reached_the_mesh(error: &gossipsub::PublishError) -> bool {
 /// And automatically reset. Prevents nodes from reporting stale
 /// "syncing" status indefinitely when a peer disconnects mid-sync or
 /// When gossipsub publish fails without a corresponding reset.
-const SYNC_TIMEOUT_SECS: u64 = 60;
+const SYNC_TIMEOUT_SECS: u64 = 15;
 /// Concurrent request/response streams per connection. The libp2p default is
 /// 100; with a 1 MiB request ceiling that pins 100 MiB or more per peer.
 const MAX_SYNC_CONCURRENT_STREAMS: usize = 16;
@@ -748,6 +748,78 @@ pub fn resolve_dns_seeds(seeds: &[String], port: u16) -> Vec<String> {
 /// One-shot responders that are all completed when the block arrives.
 pub type PendingBitswapFetches = HashMap<[u8; 32], Vec<oneshot::Sender<Result<Vec<u8>, String>>>>;
 
+/// Multi-frame range-sync cursor for the active `/sync` round.
+struct SyncRangeCursor {
+    peer: PeerId,
+    next_from: u64,
+    final_to: u64,
+    fork_recovery: bool,
+    chunks_remaining: u32,
+    staged_suffix: Vec<crate::core::block::Block>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SyncHeaderPlan {
+    NothingNew,
+    AboveNext {
+        first: u64,
+    },
+    ForkDepthExceeded {
+        depth: u64,
+    },
+    Fetch {
+        from: u64,
+        final_to: u64,
+        fork_recovery: bool,
+        max_chunks: u32,
+    },
+}
+
+fn plan_sync_headers(
+    headers: &[crate::core::block::BlockHeader],
+    first_unheld: usize,
+    our_height: u64,
+) -> SyncHeaderPlan {
+    let Some(needed) = headers.get(first_unheld..) else {
+        return SyncHeaderPlan::NothingNew;
+    };
+    let (Some(first), Some(last)) = (needed.first(), needed.last()) else {
+        return SyncHeaderPlan::NothingNew;
+    };
+    let from = first.index;
+    let headers_end = last.index.saturating_add(1);
+    if from > our_height.saturating_add(1) {
+        return SyncHeaderPlan::AboveNext { first: from };
+    }
+    let max_batch = u64::try_from(crate::network::protocol::MAX_CHAIN_SYNC_BLOCKS).unwrap_or(1);
+    if from <= our_height {
+        let max_depth = u64::try_from(crate::consensus::MAX_REORG_DEPTH).unwrap_or(0);
+        let replaced = our_height.saturating_add(1).saturating_sub(from);
+        if replaced > max_depth {
+            return SyncHeaderPlan::ForkDepthExceeded { depth: replaced };
+        }
+        let final_to = headers_end
+            .min(our_height.saturating_add(1).saturating_add(max_batch))
+            .min(from.saturating_add(max_depth));
+        SyncHeaderPlan::Fetch {
+            from,
+            final_to,
+            fork_recovery: true,
+            max_chunks: 12,
+        }
+    } else {
+        let max_chunks = 4u32;
+        let final_to =
+            headers_end.min(from.saturating_add(max_batch.saturating_mul(u64::from(max_chunks))));
+        SyncHeaderPlan::Fetch {
+            from,
+            final_to,
+            fork_recovery: false,
+            max_chunks,
+        }
+    }
+}
+
 pub struct Node {
     swarm: Swarm<BudlumBehaviour>,
     command_rx: mpsc::Receiver<NodeCommand>,
@@ -776,6 +848,8 @@ pub struct Node {
     pub sync_started_at: Arc<AtomicU64>,
     /// Outbound request currently responsible for the one active sync round.
     active_sync_request: Option<request_response::OutboundRequestId>,
+    /// Multi-chunk range-sync cursor for the active sync round.
+    sync_range_cursor: Option<SyncRangeCursor>,
     /// Spacing between the locator re-walks a fork signal triggers. Without it
     /// a follower that cannot name an ancestor re-asks inside the same
     /// iteration, the peer's rate limiter stops serving it, and the round
@@ -1570,6 +1644,27 @@ impl Node {
         self.sync_state.store(0, Ordering::SeqCst);
         self.sync_started_at.store(0, Ordering::SeqCst);
         self.active_sync_request = None;
+        self.sync_range_cursor = None;
+    }
+
+    fn expire_stuck_sync_round(&mut self) {
+        if self.sync_state.load(Ordering::SeqCst) == 1 {
+            let started = self.sync_started_at.load(Ordering::SeqCst);
+            if started > 0 {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                if now.saturating_sub(started) > SYNC_TIMEOUT_SECS {
+                    warn!(
+                        "Sync state stuck for {}s (timeout={}s), resetting to 0",
+                        now.saturating_sub(started),
+                        SYNC_TIMEOUT_SECS,
+                    );
+                    self.clear_sync_round();
+                }
+            }
+        }
     }
 
     /// Try to switch to the fork that `suffix` belongs to.
@@ -2171,6 +2266,7 @@ impl Node {
             sync_state,
             sync_started_at,
             active_sync_request: None,
+            sync_range_cursor: None,
             fork_rewalk: crate::network::fork_rewalk::ForkRewalkGate::new(),
             deferred_votes: crate::network::deferred_votes::DeferredVotes::new(),
             pending_bitswap_fetches: HashMap::new(),
@@ -2410,8 +2506,11 @@ impl Node {
         self.swarm
             .behaviour_mut()
             .kad
-            .add_address(&peer_id, multiaddr);
-        self.swarm.behaviour_mut().kad.bootstrap()?;
+            .add_address(&peer_id, multiaddr.clone());
+        if !self.swarm.is_connected(&peer_id) && peer_id != self.peer_id {
+            let _ = self.swarm.dial(multiaddr);
+        }
+        let _ = self.swarm.behaviour_mut().kad.bootstrap();
         Ok(())
     }
     /// Restore the vote high-water marks written by a previous run.
@@ -2627,6 +2726,7 @@ impl Node {
 
         let mut gc_interval = tokio::time::interval(Duration::from_secs(60));
         let mut discovery_interval = tokio::time::interval(Duration::from_secs(300));
+        discovery_interval.reset();
         // The vote beat. A checkpoint is `finality_checkpoint_interval` blocks
         // away (two on the devnet, about 2.4 s) and an aggregator holds one
         // round at a time, so the beat has to be well inside a round: on a
@@ -2692,23 +2792,7 @@ impl Node {
                     // The sync cycle is considered stuck (e.g., peer disconnected
                     // Mid-sync) and we reset it to 0 so the node reports correct
                     // Status and can initiate a new sync.
-                    if self.sync_state.load(Ordering::SeqCst) == 1 {
-                        let started = self.sync_started_at.load(Ordering::SeqCst);
-                        if started > 0 {
-                            let now = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs();
-                            if now.saturating_sub(started) > SYNC_TIMEOUT_SECS {
-                                warn!(
-                                    "Sync state stuck for {}s (timeout={}s), resetting to 0",
-                                    now.saturating_sub(started),
-                                    SYNC_TIMEOUT_SECS,
-                                );
-                                self.clear_sync_round();
-                            }
-                        }
-                    }
+                    self.expire_stuck_sync_round();
                 }
                 _ = discovery_interval.tick() => {
                     info!("Running periodic peer discovery...");
@@ -2719,6 +2803,7 @@ impl Node {
                     }
                 }
                 _ = qc_retry_interval.tick() => {
+                    self.expire_stuck_sync_round();
                     // Later finality makes older pending requests unnecessary.
                     let finalized = self.chain.get_finalized_height().await;
                     self.pending_qc_fetches.retain(|pending| pending.height > finalized);
@@ -2766,35 +2851,92 @@ impl Node {
                                 agg_state.epoch
                             );
                         }
+                        let mut held_prevotes = Vec::new();
+                        let mut held_precommits = Vec::new();
                         for vote in due {
                             match vote {
-                                crate::network::deferred_votes::DeferredVote::Prevote(vote) => {
-                                    if let Err(e) = self.chain.handle_prevote(vote).await {
-                                        tracing::debug!("held prevote still refused: {e}");
-                                    }
+                                crate::network::deferred_votes::DeferredVote::Prevote(v) => {
+                                    held_prevotes.push(v);
                                 }
-                                crate::network::deferred_votes::DeferredVote::Precommit(vote) => {
-                                    match self.chain.handle_precommit(vote).await {
-                                        Ok(Some(cert)) => {
-                                            let topic = gossipsub::IdentTopic::new("blocks");
-                                            let _ = self.swarm.behaviour_mut().gossipsub.publish(
-                                                topic,
-                                                NetworkMessage::FinalityCert {
-                                                    epoch: cert.epoch,
-                                                    checkpoint_height: cert.checkpoint_height,
-                                                    checkpoint_hash: cert.checkpoint_hash,
-                                                    agg_sig_bls: cert.agg_sig_bls,
-                                                    bitmap: cert.bitmap,
-                                                    set_hash: cert.set_hash,
-                                                    scheme_id:
-                                                        crate::chain::finality::BLS_SCHEME_RFC9380_V1
-                                                            .to_string(),
-                                                }
-                                                .to_bytes(),
-                                            );
+                                crate::network::deferred_votes::DeferredVote::Precommit(v) => {
+                                    held_precommits.push(v);
+                                }
+                            }
+                        }
+                        for vote in held_prevotes {
+                            let relay = NetworkMessage::Prevote {
+                                epoch: vote.epoch,
+                                checkpoint_height: vote.checkpoint_height,
+                                checkpoint_hash: vote.checkpoint_hash.clone(),
+                                voter_id: vote.voter_id.to_hex(),
+                                sig_bls: vote.sig_bls.clone(),
+                                auth_sig: vote.auth_sig.clone(),
+                            };
+                            match self.chain.handle_prevote(vote).await {
+                                Ok(()) => {
+                                    let topic = gossipsub::IdentTopic::new("blocks");
+                                    let _ = self
+                                        .swarm
+                                        .behaviour_mut()
+                                        .gossipsub
+                                        .publish(topic, relay.to_bytes());
+                                }
+                                Err(e) => tracing::debug!("held prevote still refused: {e}"),
+                            }
+                        }
+                        for vote in held_precommits {
+                            let relay = NetworkMessage::Precommit {
+                                epoch: vote.epoch,
+                                checkpoint_height: vote.checkpoint_height,
+                                checkpoint_hash: vote.checkpoint_hash.clone(),
+                                voter_id: vote.voter_id.to_hex(),
+                                sig_bls: vote.sig_bls.clone(),
+                                auth_sig: vote.auth_sig.clone(),
+                                pq_sig: vote.pq_sig.clone(),
+                            };
+                            match self.chain.handle_precommit(vote.clone()).await {
+                                Ok(Some(cert)) => {
+                                    let topic = gossipsub::IdentTopic::new("blocks");
+                                    let _ = self
+                                        .swarm
+                                        .behaviour_mut()
+                                        .gossipsub
+                                        .publish(topic.clone(), relay.to_bytes());
+                                    let _ = self.swarm.behaviour_mut().gossipsub.publish(
+                                        topic,
+                                        NetworkMessage::FinalityCert {
+                                            epoch: cert.epoch,
+                                            checkpoint_height: cert.checkpoint_height,
+                                            checkpoint_hash: cert.checkpoint_hash,
+                                            agg_sig_bls: cert.agg_sig_bls,
+                                            bitmap: cert.bitmap,
+                                            set_hash: cert.set_hash,
+                                            scheme_id:
+                                                crate::chain::finality::BLS_SCHEME_RFC9380_V1
+                                                    .to_string(),
                                         }
-                                        Ok(None) => {}
-                                        Err(e) => tracing::debug!("held precommit still refused: {e}"),
+                                        .to_bytes(),
+                                    );
+                                }
+                                Ok(None) => {
+                                    let topic = gossipsub::IdentTopic::new("blocks");
+                                    let _ = self
+                                        .swarm
+                                        .behaviour_mut()
+                                        .gossipsub
+                                        .publish(topic, relay.to_bytes());
+                                }
+                                Err(e) => {
+                                    if e.contains("Cannot precommit before prevote quorum") {
+                                        self.deferred_votes.push(
+                                            vote.epoch,
+                                            vote.checkpoint_height,
+                                            crate::network::deferred_votes::DeferredVote::Precommit(
+                                                vote,
+                                            ),
+                                        );
+                                    } else {
+                                        tracing::debug!("held precommit still refused: {e}");
                                     }
                                 }
                             }
@@ -2973,7 +3115,7 @@ impl Node {
                     // (one or two blocks ahead of its peers) contributed to
                     // no round at all.
                     let prevote_retry = agg_state.active
-                        && !agg_state.prevote_quorum_reached
+                        && !agg_state.precommit_quorum_reached
                         && vote_retry_due(
                             self.prevote_published.as_ref(),
                             agg_state.epoch,
@@ -3368,9 +3510,10 @@ impl Node {
                             // node. The rest of this file recovers the
                             // guard and keeps enforcing; these four
                             // sites were the ones that did not.
-                            let admit = self
-                                .peer_manager_lock()
-                                .can_admit_subnet(subnet);
+                            let already_connected =
+                                self.peer_manager_lock().is_connected(&peer_id);
+                            let admit = already_connected
+                                || self.peer_manager_lock().can_admit_subnet(subnet);
                             if !admit {
                                 warn!(
                                     "Eclipse bound: rejecting {} from {:?} (/24 limit)",
@@ -3380,7 +3523,7 @@ impl Node {
                                 continue;
                             }
                             // H5.2 outbound diversity: an extra /24 limit for outbound connections.
-                            if endpoint.is_dialer() {
+                            if !already_connected && endpoint.is_dialer() {
                                 let ob_admit = self
                                     .peer_manager_lock()
                                     .can_admit_outbound_subnet(subnet);
@@ -3485,6 +3628,9 @@ impl Node {
                             num_established,
                             ..
                         } => {
+                            if num_established > 0 {
+                                continue;
+                            }
                             // Retire ONLY Bitswap requests addressed to `peer_id` when its
                             // last connection closes, and recompute remaining live asks per
                             // cid from `bitswap_requests` so unrelated peer churn never
@@ -3815,6 +3961,10 @@ impl Node {
                                                         } else {
                                                             pm.report_invalid_block(&peer_id);
                                                         }
+                                                    }
+                                                    if unjoined && self.sync_state.load(Ordering::SeqCst) == 0 {
+                                                        let locator = self.chain.get_locator().await;
+                                                        let _ = self.request_headers_from_peer(Some(peer_id), locator, 500);
                                                     }
                                                     self.report_gossip(
                                                         &id,
@@ -4279,17 +4429,19 @@ impl Node {
                                             Err(e) => {
                                                 warn!("Prevote from {peer_id} rejected: {e}");
                                                 if refusal_is_round_scope(&e) {
-                                                    // The round may simply not be
-                                                    // open yet, and a vote is
-                                                    // published once: hold it
-                                                    // for the round it names
-                                                    // instead of spending its
-                                                    // only delivery (AF-18).
-                                                    self.deferred_votes.push(
-                                                        prevote.epoch,
-                                                        prevote.checkpoint_height,
-                                                        crate::network::deferred_votes::DeferredVote::Prevote(prevote),
-                                                    );
+                                                    if !e.contains("Duplicate") {
+                                                        // The round may simply not be
+                                                        // open yet, and a vote is
+                                                        // published once: hold it
+                                                        // for the round it names
+                                                        // instead of spending its
+                                                        // only delivery (AF-18).
+                                                        self.deferred_votes.push(
+                                                            prevote.epoch,
+                                                            prevote.checkpoint_height,
+                                                            crate::network::deferred_votes::DeferredVote::Prevote(prevote),
+                                                        );
+                                                    }
                                                     self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                     continue;
                                                 }
@@ -4364,20 +4516,22 @@ impl Node {
                                             Err(e) => {
                                                 warn!("Precommit from {peer_id} rejected: {e}");
                                                 if refusal_is_round_scope(&e) {
-                                                    // `Cannot precommit before
-                                                    // prevote quorum` is the
-                                                    // common case here: the
-                                                    // prevotes that justify this
-                                                    // precommit are still being
-                                                    // replayed. Hold the vote for
-                                                    // the round it names rather
-                                                    // than dropping its only
-                                                    // delivery (AF-18).
-                                                    self.deferred_votes.push(
-                                                        precommit.epoch,
-                                                        precommit.checkpoint_height,
-                                                        crate::network::deferred_votes::DeferredVote::Precommit(precommit),
-                                                    );
+                                                    if !e.contains("Duplicate") {
+                                                        // `Cannot precommit before
+                                                        // prevote quorum` is the
+                                                        // common case here: the
+                                                        // prevotes that justify this
+                                                        // precommit are still being
+                                                        // replayed. Hold the vote for
+                                                        // the round it names rather
+                                                        // than dropping its only
+                                                        // delivery (AF-18).
+                                                        self.deferred_votes.push(
+                                                            precommit.epoch,
+                                                            precommit.checkpoint_height,
+                                                            crate::network::deferred_votes::DeferredVote::Precommit(precommit),
+                                                        );
+                                                    }
                                                     self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                     continue;
                                                 }
@@ -4647,6 +4801,7 @@ impl Node {
                                             };
                                             if !pre_allowed {
                                                 warn!("Rejected sync request from banned/rate-limited peer {peer}");
+                                                let _ = self.swarm.behaviour_mut().sync.send_response(channel, Vec::new());
                                                 continue;
                                             }
                                             let parsed = NetworkMessage::from_bytes_validated(&request);
@@ -4659,10 +4814,12 @@ impl Node {
                                                 || self.peer_manager_lock().is_handshaked(&peer);
                                             if !handshaked {
                                                 warn!("Rejected sync request from unhandshaked peer {peer}");
+                                                let _ = self.swarm.behaviour_mut().sync.send_response(channel, Vec::new());
                                                 continue;
                                             }
                                             if is_handshake {
                                                 let Some((what, fields)) = parsed.ok().and_then(Self::handshake_fields) else {
+                                                    let _ = self.swarm.behaviour_mut().sync.send_response(channel, Vec::new());
                                                     continue;
                                                 };
                                                 let ack = what == "HandshakeAck";
@@ -4696,6 +4853,7 @@ impl Node {
                                                                 let mut pm = self.peer_manager_lock();
                                                                 pm.report_bad_behavior(&peer);
                                                             }
+                                                            let _ = self.swarm.behaviour_mut().sync.send_response(channel, Vec::new());
                                                             continue;
                                                         }
                                                         let start_idx_opt = self.chain.find_common_height(locator).await;
@@ -4720,6 +4878,7 @@ impl Node {
                                                                 let mut pm = self.peer_manager_lock();
                                                                 pm.report_bad_behavior(&peer);
                                                             }
+                                                            let _ = self.swarm.behaviour_mut().sync.send_response(channel, Vec::new());
                                                             continue;
                                                         }
                                                         let our_height = self.chain.get_height().await + 1;
@@ -4752,6 +4911,7 @@ impl Node {
                                                         );
                                                         if admission == QcServeAdmission::Invalid {
                                                             self.peer_manager_lock().report_bad_behavior(&peer);
+                                                            let _ = self.swarm.behaviour_mut().sync.send_response(channel, Vec::new());
                                                             continue;
                                                         }
                                                         // A saturated table, duplicate start or exhausted rate
@@ -4780,11 +4940,18 @@ impl Node {
                                                                 self.qc_serves.remove(&key);
                                                                 let _ = self.swarm.behaviour_mut().sync.send_response(channel, answer.to_bytes());
                                                             }
-                                                            Err(e) => warn!("QC blob at height {checkpoint_height} cannot be served: {e}"),
+                                                            Err(e) => {
+                                                                warn!("QC blob at height {checkpoint_height} cannot be served: {e}");
+                                                                let _ = self.swarm.behaviour_mut().sync.send_response(channel, Vec::new());
+                                                            }
                                                         }
                                                     }
-                                                    _ => {}
+                                                    _ => {
+                                                        let _ = self.swarm.behaviour_mut().sync.send_response(channel, Vec::new());
+                                                    }
                                                 }
+                                            } else {
+                                                let _ = self.swarm.behaviour_mut().sync.send_response(channel, Vec::new());
                                             }
                                         }
                                         request_response::Message::Response { request_id, response } => {
@@ -4844,13 +5011,6 @@ impl Node {
                                                             continue;
                                                         }
                                                         if headers.is_empty() {
-                                                            // The peer has nothing past our locator: we
-                                                            // are level with it. Nothing to fetch, so the
-                                                            // round closes now rather than at the timeout.
-                                                            // Said out loud: an empty answer from a peer
-                                                            // that just announced a higher block is a
-                                                            // locator disagreement, and it is the one way
-                                                            // a follower can re-ask forever.
                                                             let our_height = self.chain.get_height().await;
                                                             info!(
                                                                 peer = %peer,
@@ -4858,27 +5018,103 @@ impl Node {
                                                                 "peer returned no headers past our locator"
                                                             );
                                                             self.clear_sync_round();
-                                                        }
-                                                        if !headers.is_empty() {
-                                                            let from = headers[0].index;
-                                                            if let Some(last) = headers.last() {
-                                                                // GetBlocksRange uses a half-open [from, to) interval.
-                                                                let to = last.index.saturating_add(1);
-                                                                let req = NetworkMessage::GetBlocksRange { from, to };
-                                                                self.sync_state.store(1, Ordering::SeqCst);
-                                                                self.sync_started_at.store(
-                                                                    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
-                                                                    Ordering::SeqCst,
-                                                                );
-                                                                if let Some(ref m) = self.metrics {
-                                                                    m.p2p_sync_requests.inc();
+                                                        } else {
+                                                            let our_height = self.chain.get_height().await;
+                                                            let prefix_count =
+                                                                headers.partition_point(|h| h.index <= our_height);
+                                                            let mut lo = 0usize;
+                                                            let mut hi = prefix_count;
+                                                            while lo < hi {
+                                                                let mid = lo + (hi - lo) / 2;
+                                                                let matches_local = if let Some(hdr) = headers.get(mid) {
+                                                                    self.chain
+                                                                        .get_block(hdr.index)
+                                                                        .await
+                                                                        .is_some_and(|held| held.hash == hdr.hash)
+                                                                } else {
+                                                                    false
+                                                                };
+                                                                if matches_local {
+                                                                    lo = mid + 1;
+                                                                } else {
+                                                                    hi = mid;
                                                                 }
-                                                                self.active_sync_request = Some(
-                                                                    self.swarm
-                                                                        .behaviour_mut()
-                                                                        .sync
-                                                                        .send_request(&peer, req.to_bytes()),
-                                                                );
+                                                            }
+                                                            match plan_sync_headers(&headers, lo, our_height) {
+                                                                SyncHeaderPlan::NothingNew => {
+                                                                    info!(
+                                                                        peer = %peer,
+                                                                        our_height,
+                                                                        "peer returned no unheld headers past our locator"
+                                                                    );
+                                                                    self.clear_sync_round();
+                                                                }
+                                                                SyncHeaderPlan::AboveNext { first } => {
+                                                                    warn!(
+                                                                        peer = %peer,
+                                                                        first,
+                                                                        our_height,
+                                                                        "sync header batch starts above the next block: walking the locator"
+                                                                    );
+                                                                    self.clear_sync_round();
+                                                                    self.peer_manager_lock()
+                                                                        .report_unjoined_block(&peer);
+                                                                    continue;
+                                                                }
+                                                                SyncHeaderPlan::ForkDepthExceeded { depth } => {
+                                                                    warn!(
+                                                                        peer = %peer,
+                                                                        depth,
+                                                                        our_height,
+                                                                        "sync header fork exceeds max reorg depth; closing round"
+                                                                    );
+                                                                    self.clear_sync_round();
+                                                                    self.peer_manager_lock()
+                                                                        .report_unjoined_block(&peer);
+                                                                    continue;
+                                                                }
+                                                                SyncHeaderPlan::Fetch {
+                                                                    from,
+                                                                    final_to,
+                                                                    fork_recovery,
+                                                                    max_chunks,
+                                                                } => {
+                                                                    let max_batch = u64::try_from(
+                                                                        crate::network::protocol::MAX_CHAIN_SYNC_BLOCKS,
+                                                                    )
+                                                                    .unwrap_or(1);
+                                                                    let chunk_to =
+                                                                        final_to.min(from.saturating_add(max_batch));
+                                                                    let req = NetworkMessage::GetBlocksRange {
+                                                                        from,
+                                                                        to: chunk_to,
+                                                                    };
+                                                                    self.sync_state.store(1, Ordering::SeqCst);
+                                                                    self.sync_started_at.store(
+                                                                        SystemTime::now()
+                                                                            .duration_since(UNIX_EPOCH)
+                                                                            .unwrap_or_default()
+                                                                            .as_secs(),
+                                                                        Ordering::SeqCst,
+                                                                    );
+                                                                    if let Some(ref m) = self.metrics {
+                                                                        m.p2p_sync_requests.inc();
+                                                                    }
+                                                                    self.active_sync_request = Some(
+                                                                        self.swarm
+                                                                            .behaviour_mut()
+                                                                            .sync
+                                                                            .send_request(&peer, req.to_bytes()),
+                                                                    );
+                                                                    self.sync_range_cursor = Some(SyncRangeCursor {
+                                                                        peer,
+                                                                        next_from: from,
+                                                                        final_to,
+                                                                        fork_recovery,
+                                                                        chunks_remaining: max_chunks.saturating_sub(1),
+                                                                        staged_suffix: Vec::new(),
+                                                                    });
+                                                                }
                                                             }
                                                         }
                                                         {
@@ -4898,26 +5134,186 @@ impl Node {
                                                             self.clear_sync_round();
                                                             continue;
                                                         }
-                                                        // A batch that does not continue this chain still
-                                                        // costs the round: the same range is asked for again
-                                                        // next second and refused again, and the height does
-                                                        // not move. Raise a flag and walk the locator once the
-                                                        // round is closed, so the next request starts at the
-                                                        // common ancestor where a suffix can actually be
-                                                        // joined.
                                                         let mut fork_retry = false;
                                                         let mut joined = 0u32;
-                                                        if !blocks.is_empty() {
-                                                            let start_idx = blocks[0].index;
+                                                        let mut fork_suffix_ready: Option<Vec<crate::core::block::Block>> = None;
+                                                        let cursor_opt = self.sync_range_cursor.take();
+                                                        if let Some(mut cur) = cursor_opt.filter(|c| c.peer == peer) {
+                                                            let contiguous = !blocks.is_empty()
+                                                                && blocks
+                                                                    .iter()
+                                                                    .enumerate()
+                                                                    .all(|(i, b)| {
+                                                                        b.index == cur.next_from.saturating_add(i as u64)
+                                                                    });
+                                                            if !contiguous {
+                                                                {
+                                                                    let mut pm = self.peer_manager_lock();
+                                                                    pm.report_invalid_block(&peer);
+                                                                }
+                                                                self.clear_sync_round();
+                                                                continue;
+                                                            }
+                                                            if cur.fork_recovery {
+                                                                let prev_ok = match cur.staged_suffix.last() {
+                                                                    Some(prev) => blocks
+                                                                        .first()
+                                                                        .is_some_and(|first| first.previous_hash == prev.hash),
+                                                                    None => true,
+                                                                };
+                                                                let inner_ok = blocks
+                                                                    .windows(2)
+                                                                    .all(|w| matches!(w, [a, b] if b.previous_hash == a.hash));
+                                                                let within_cap = cur
+                                                                    .staged_suffix
+                                                                    .len()
+                                                                    .saturating_add(blocks.len())
+                                                                    <= crate::consensus::MAX_REORG_DEPTH;
+                                                                if !prev_ok || !inner_ok || !within_cap {
+                                                                    {
+                                                                        let mut pm = self.peer_manager_lock();
+                                                                        pm.report_invalid_block(&peer);
+                                                                    }
+                                                                    self.clear_sync_round();
+                                                                    continue;
+                                                                }
+                                                                let next_from = blocks
+                                                                    .last()
+                                                                    .map_or(cur.next_from, |b| b.index.saturating_add(1));
+                                                                cur.staged_suffix.extend(blocks);
+                                                                cur.next_from = next_from;
+                                                                if cur.next_from < cur.final_to && cur.chunks_remaining > 0 {
+                                                                    cur.chunks_remaining -= 1;
+                                                                    let max_batch = u64::try_from(
+                                                                        crate::network::protocol::MAX_CHAIN_SYNC_BLOCKS,
+                                                                    )
+                                                                    .unwrap_or(1);
+                                                                    let chunk_to = cur
+                                                                        .final_to
+                                                                        .min(cur.next_from.saturating_add(max_batch));
+                                                                    let req = NetworkMessage::GetBlocksRange {
+                                                                        from: cur.next_from,
+                                                                        to: chunk_to,
+                                                                    };
+                                                                    self.sync_state.store(1, Ordering::SeqCst);
+                                                                    self.sync_started_at.store(
+                                                                        SystemTime::now()
+                                                                            .duration_since(UNIX_EPOCH)
+                                                                            .unwrap_or_default()
+                                                                            .as_secs(),
+                                                                        Ordering::SeqCst,
+                                                                    );
+                                                                    if let Some(ref m) = self.metrics {
+                                                                        m.p2p_sync_requests.inc();
+                                                                    }
+                                                                    self.active_sync_request = Some(
+                                                                        self.swarm
+                                                                            .behaviour_mut()
+                                                                            .sync
+                                                                            .send_request(&peer, req.to_bytes()),
+                                                                    );
+                                                                    self.sync_range_cursor = Some(cur);
+                                                                    self.peer_manager_lock()
+                                                                        .report_good_behavior(&peer);
+                                                                    continue;
+                                                                }
+                                                                fork_suffix_ready = Some(cur.staged_suffix);
+                                                            } else {
+                                                                let start_idx = cur.next_from;
+                                                                let our_height = self.chain.get_height().await;
+                                                                let ours = self.chain.get_block(start_idx).await;
+                                                                let shares_the_index = match (ours, blocks.first()) {
+                                                                    (Some(held), Some(first)) => held.hash != first.hash,
+                                                                    _ => false,
+                                                                };
+                                                                if start_idx > our_height.saturating_add(1) {
+                                                                    warn!(
+                                                                        peer = %peer,
+                                                                        first = start_idx,
+                                                                        our_height,
+                                                                        "sync batch starts above the next block: walking the locator"
+                                                                    );
+                                                                    fork_retry = true;
+                                                                } else if shares_the_index {
+                                                                    fork_suffix_ready = Some(blocks);
+                                                                } else {
+                                                                    let batch_len = blocks.len();
+                                                                    for block in blocks {
+                                                                        let h = self.chain.get_height().await;
+                                                                        if block.index == h + 1 {
+                                                                            let index = block.index;
+                                                                            match self.chain.validate_and_add_block(block).await {
+                                                                                Ok(pruned_cids) => {
+                                                                                    info!("Added block #{index} to local chain");
+                                                                                    joined = joined.saturating_add(1);
+                                                                                    for cid in pruned_cids {
+                                                                                        let _ = self.command_tx.send(NodeCommand::StoragePrune { cid }).await;
+                                                                                    }
+                                                                                }
+                                                                                Err(e) => {
+                                                                                    fork_retry |= e.contains("Previous hash mismatch");
+                                                                                    warn!(
+                                                                                        peer = %peer,
+                                                                                        index,
+                                                                                        error = %e,
+                                                                                        "sync block refused"
+                                                                                    );
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    let next_from =
+                                                                        cur.next_from.saturating_add(u64::from(joined));
+                                                                    if !fork_retry
+                                                                        && usize::try_from(joined).unwrap_or(0) == batch_len
+                                                                        && next_from < cur.final_to
+                                                                        && cur.chunks_remaining > 0
+                                                                    {
+                                                                        cur.next_from = next_from;
+                                                                        cur.chunks_remaining -= 1;
+                                                                        self.fork_rewalk.record_progress();
+                                                                        let max_batch = u64::try_from(
+                                                                            crate::network::protocol::MAX_CHAIN_SYNC_BLOCKS,
+                                                                        )
+                                                                        .unwrap_or(1);
+                                                                        let chunk_to = cur
+                                                                            .final_to
+                                                                            .min(cur.next_from.saturating_add(max_batch));
+                                                                        let req = NetworkMessage::GetBlocksRange {
+                                                                            from: cur.next_from,
+                                                                            to: chunk_to,
+                                                                        };
+                                                                        self.sync_state.store(1, Ordering::SeqCst);
+                                                                        self.sync_started_at.store(
+                                                                            SystemTime::now()
+                                                                                .duration_since(UNIX_EPOCH)
+                                                                                .unwrap_or_default()
+                                                                                .as_secs(),
+                                                                            Ordering::SeqCst,
+                                                                        );
+                                                                        if let Some(ref m) = self.metrics {
+                                                                            m.p2p_sync_requests.inc();
+                                                                        }
+                                                                        self.active_sync_request = Some(
+                                                                            self.swarm
+                                                                                .behaviour_mut()
+                                                                                .sync
+                                                                                .send_request(&peer, req.to_bytes()),
+                                                                        );
+                                                                        self.sync_range_cursor = Some(cur);
+                                                                        self.peer_manager_lock()
+                                                                            .report_good_behavior(&peer);
+                                                                        continue;
+                                                                    }
+                                                                }
+                                                            }
+                                                        } else if let Some(first_block) = blocks.first() {
+                                                            let start_idx = first_block.index;
+                                                            let first_hash = first_block.hash.clone();
                                                             let our_height = self.chain.get_height().await;
-                                                            // A batch that starts above the next
-                                                            // block cannot be joined, and asking
-                                                            // for the same range again returns the
-                                                            // same batch: only a locator walk from
-                                                            // a lower ancestor can close the gap.
                                                             let ours = self.chain.get_block(start_idx).await;
                                                             let shares_the_index =
-                                                                ours.is_some_and(|held| held.hash != blocks[0].hash);
+                                                                ours.is_some_and(|held| held.hash != first_hash);
                                                             if start_idx > our_height.saturating_add(1) {
                                                                 warn!(
                                                                     peer = %peer,
@@ -4927,17 +5323,7 @@ impl Node {
                                                                 );
                                                                 fork_retry = true;
                                                             } else if shares_the_index {
-                                                                if let Some(flight_guard) = ReorgFlightGuard::try_acquire(&self.reorg_in_flight) {
-                                                                    let reorg_chain = self.chain.clone();
-                                                                    let reorg_peer = peer;
-                                                                    let last_completed = Arc::clone(&self.reorg_last_completed_at);
-                                                                    let strikes = Arc::clone(&self.reorg_strikes);
-                                                                    tokio::spawn(async move {
-                                                                        Self::reorg_to_peer_suffix(reorg_chain, blocks, reorg_peer, flight_guard, last_completed, strikes).await;
-                                                                    });
-                                                                } else {
-                                                                    warn!("Sync reorg from {peer} ignored: another reorg attempt is already in flight");
-                                                                }
+                                                                fork_suffix_ready = Some(blocks);
                                                             } else {
                                                                 for block in blocks {
                                                                     let h = self.chain.get_height().await;
@@ -4951,9 +5337,6 @@ impl Node {
                                                                                     let _ = self.command_tx.send(NodeCommand::StoragePrune { cid }).await;
                                                                                 }
                                                                             }
-                                                                            // Silent refusal is how a follower can fetch the
-                                                                            // same range every second and never move: the
-                                                                            // round closes as a success, the height does not.
                                                                             Err(e) => {
                                                                                 fork_retry |= e.contains("Previous hash mismatch");
                                                                                 warn!(
@@ -4966,6 +5349,27 @@ impl Node {
                                                                         }
                                                                     }
                                                                 }
+                                                            }
+                                                        }
+                                                        if let Some(suffix_for_reorg) = fork_suffix_ready {
+                                                            if let Some(flight_guard) = ReorgFlightGuard::try_acquire(&self.reorg_in_flight) {
+                                                                let reorg_chain = self.chain.clone();
+                                                                let reorg_peer = peer;
+                                                                let last_completed = Arc::clone(&self.reorg_last_completed_at);
+                                                                let strikes = Arc::clone(&self.reorg_strikes);
+                                                                tokio::spawn(async move {
+                                                                    Self::reorg_to_peer_suffix(
+                                                                        reorg_chain,
+                                                                        suffix_for_reorg,
+                                                                        reorg_peer,
+                                                                        flight_guard,
+                                                                        last_completed,
+                                                                        strikes,
+                                                                    )
+                                                                    .await;
+                                                                });
+                                                            } else {
+                                                                warn!("Sync reorg from {peer} ignored: another reorg attempt is already in flight");
                                                             }
                                                         }
                                                         self.clear_sync_round();
@@ -5016,8 +5420,14 @@ impl Node {
                                                             pm.report_good_behavior(&peer);
                                                         }
                                                     }
-                                                    _ => {}
+                                                    _ => {
+                                                        if self.active_sync_request == Some(request_id) {
+                                                            self.clear_sync_round();
+                                                        }
+                                                    }
                                                 }
+                                            } else if self.active_sync_request == Some(request_id) {
+                                                self.clear_sync_round();
                                             }
                                         }
                                     }
@@ -6226,5 +6636,102 @@ mod finality_publish_tests {
         let dir_as_file = dir.path().join("occupied_dir");
         std::fs::create_dir_all(&dir_as_file).unwrap();
         assert!(super::Node::write_vote_history_file(&dir_as_file, 16, 14).is_err());
+    }
+
+    #[test]
+    fn plan_sync_headers_skips_shared_locator_prefix_and_caps_fork_and_forward_windows() {
+        let headers: Vec<crate::core::block::BlockHeader> = (1..=47u64)
+            .map(|idx| {
+                let blk = crate::core::block::Block::new(idx, format!("{:064x}", idx - 1), vec![]);
+                crate::core::block::BlockHeader::from_block(&blk)
+            })
+            .collect();
+        let max_batch = u64::try_from(crate::network::protocol::MAX_CHAIN_SYNC_BLOCKS).unwrap();
+
+        assert_eq!(
+            super::plan_sync_headers(&headers, 7, 18),
+            super::SyncHeaderPlan::Fetch {
+                from: 8,
+                final_to: 19u64.saturating_add(max_batch).min(48),
+                fork_recovery: true,
+                max_chunks: 12,
+            }
+        );
+        assert_eq!(
+            super::plan_sync_headers(&headers, 7, 7),
+            super::SyncHeaderPlan::Fetch {
+                from: 8,
+                final_to: 8u64.saturating_add(max_batch.saturating_mul(4)).min(48),
+                fork_recovery: false,
+                max_chunks: 4,
+            }
+        );
+        assert_eq!(
+            super::plan_sync_headers(&headers, 10, 7),
+            super::SyncHeaderPlan::AboveNext { first: 11 }
+        );
+        assert_eq!(
+            super::plan_sync_headers(&headers, 0, 120),
+            super::SyncHeaderPlan::ForkDepthExceeded { depth: 120 }
+        );
+        assert_eq!(
+            super::plan_sync_headers(&headers, headers.len(), 47),
+            super::SyncHeaderPlan::NothingNew
+        );
+    }
+
+    fn production_source() -> &'static str {
+        include_str!("node.rs")
+            .split_once("#[cfg(test)]")
+            .map(|(before, _)| before)
+            .expect("node.rs keeps its tests behind #[cfg(test)]")
+    }
+
+    #[test]
+    fn unjoined_next_height_fork_sync_and_connection_guards_are_in_production_source() {
+        let src = production_source();
+        assert!(
+            src.contains("if unjoined && self.sync_state.load(Ordering::SeqCst) == 0"),
+            "an unjoined height+1 block must trigger header sync to resolve lockstep forks"
+        );
+        assert!(
+            src.contains("if num_established > 0 {"),
+            "ConnectionClosed must keep the peer connected while established connections remain"
+        );
+        assert!(
+            src.contains("!self.swarm.is_connected(&peer_id)"),
+            "bootstrap must skip dialing peers that already hold an active connection"
+        );
+        assert!(
+            src.contains("self.expire_stuck_sync_round();"),
+            "stalled sync rounds must be expired on the fast heartbeat"
+        );
+    }
+
+    #[test]
+    fn deferred_votes_two_pass_replay_and_prevote_retry_until_precommit_quorum() {
+        let src = production_source();
+        let prevotes_pos = src
+            .find("for vote in held_prevotes")
+            .expect("held_prevotes pass must exist");
+        let precommits_pos = src
+            .find("for vote in held_precommits")
+            .expect("held_precommits pass must exist");
+        assert!(
+            prevotes_pos < precommits_pos,
+            "deferred prevotes must replay before deferred precommits"
+        );
+        assert!(
+            src.contains("if e.contains(\"Cannot precommit before prevote quorum\")"),
+            "deferred precommits arriving before prevote quorum must be retained"
+        );
+        assert!(
+            src.contains("if !e.contains(\"Duplicate\")"),
+            "duplicate votes must not be re-queued into deferred_votes"
+        );
+        assert!(
+            src.contains("let prevote_retry = agg_state.active\n                        && !agg_state.precommit_quorum_reached"),
+            "prevote retry must stay active until precommit quorum is reached across 2-hop meshes"
+        );
     }
 }
