@@ -69,11 +69,7 @@ pub enum ChainCommand {
     GetChainId(oneshot::Sender<u64>),
     GetBaseFee(oneshot::Sender<u64>),
     /// Quote the same governed fee floor that admission uses, in one actor turn.
-    GetRequiredTransactionFee(
-        crate::core::transaction::TransactionType,
-        u64,
-        oneshot::Sender<u64>,
-    ),
+    GetRequiredTransactionFee(Box<Transaction>, oneshot::Sender<u64>),
     GetValidatorSetHash(oneshot::Sender<String>),
     GetMempoolSize(oneshot::Sender<usize>),
     /// Whether the mempool still holds the transaction with this hash.
@@ -742,12 +738,14 @@ impl ChainHandle {
     /// The actor is unreachable or did not answer.
     pub async fn get_required_transaction_fee(
         &self,
-        tx_type: crate::core::transaction::TransactionType,
-        amount: u64,
+        candidate: Transaction,
     ) -> Result<u64, String> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(ChainCommand::GetRequiredTransactionFee(tx_type, amount, tx))
+            .send(ChainCommand::GetRequiredTransactionFee(
+                Box::new(candidate),
+                tx,
+            ))
             .await
             .map_err(|_| String::from("chain actor unavailable for fee estimate"))?;
         rx.await
@@ -2627,11 +2625,8 @@ impl ChainActor {
                 ChainCommand::GetBaseFee(tx) => {
                     let _ = tx.send(self.blockchain.state.base_fee);
                 }
-                ChainCommand::GetRequiredTransactionFee(tx_type, amount, tx) => {
-                    let fee = self
-                        .blockchain
-                        .state
-                        .required_transaction_fee(&tx_type, amount);
+                ChainCommand::GetRequiredTransactionFee(candidate, tx) => {
+                    let fee = self.blockchain.state.required_transaction_fee(&candidate);
                     let _ = tx.send(fee);
                 }
                 ChainCommand::GetValidatorSetHash(tx) => {

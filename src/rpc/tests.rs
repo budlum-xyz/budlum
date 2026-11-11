@@ -387,6 +387,55 @@ mod rpc_tests {
         );
     }
 
+    /// The actor must see sender and payload, not only type and amount:
+    /// subsequent governance proposals in one epoch require a higher fee.
+    /// Quoting base_fee alone would leave a wallet signing a rejected vote.
+    #[tokio::test]
+    async fn estimate_gas_includes_escalating_governance_proposal_fee() {
+        use crate::core::governance::ProposalType;
+        use crate::core::transaction::TransactionType;
+
+        let proposer = Address::from([23u8; 32]);
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
+        blockchain.state.base_fee = 7;
+        blockchain
+            .state
+            .governance
+            .create_proposal(proposer, ProposalType::ChangeBaseFee(100), 0, 10)
+            .expect("one earlier proposal doubles this sender's fee");
+        assert_eq!(
+            blockchain.state.required_governance_proposal_fee(&proposer),
+            14
+        );
+        let (server, _) = setup_with_blockchain(blockchain).await;
+
+        let mut vote = Transaction::new_with_chain_id(
+            proposer,
+            Address::zero(),
+            0,
+            0,
+            0,
+            vec![42; 10],
+            45262,
+            TransactionType::Vote,
+        );
+        vote.hash = vote.calculate_hash();
+        let quote = server.estimate_gas(vote.clone()).await.unwrap();
+        assert_eq!(
+            u64::from_str_radix(quote.trim_start_matches("0x"), 16).unwrap(),
+            14
+        );
+
+        vote.data.truncate(9); // ordinary ballot, not a proposal
+        vote.hash = vote.calculate_hash();
+        let ballot_quote = server.estimate_gas(vote).await.unwrap();
+        assert_eq!(
+            u64::from_str_radix(ballot_quote.trim_start_matches("0x"), 16).unwrap(),
+            7
+        );
+    }
+
     /// A caller that already priced its transaction above the floor gets its
     /// Own fee back - that is what will be charged, since the flat-fee protocol
     /// Takes `tx.fee` verbatim once it clears `base_fee`.

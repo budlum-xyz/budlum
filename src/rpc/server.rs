@@ -1778,15 +1778,16 @@ impl BudlumApiServer for RpcServer {
         }
         // This is a flat-fee chain, not EVM gas metering. Its consensus
         // admission floor comes from the *live* state: base_fee for most
-        // transactions, but base_fee plus the governed proportional rate for
-        // transfers. Returning only base_fee made a 100 BUD testnet faucet
+        // transactions, the governed proportional rate for transfers, and the
+        // sender's escalating fee for governance proposals. Returning only
+        // base_fee made a 100 BUD testnet faucet
         // grant quote 1 atom while admission required 20001. The faucet
         // reserved its allowance and got a 502 instead of funding the user.
         // Query the same method admission calls; do not duplicate a static
         // testnet rate here or turn an unavailable chain actor into a cheap fee.
         let required = self
             .chain
-            .get_required_transaction_fee(tx.tx_type.clone(), tx.amount)
+            .get_required_transaction_fee(tx.clone())
             .await
             .map_err(|error| {
                 ErrorObjectOwned::owned(
