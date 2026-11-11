@@ -4422,7 +4422,11 @@ impl Blockchain {
                         // delete worker as well as the registry prune, so a
                         // burn by anybody but the manifest claimant must
                         // contribute no cid to either sink.
-                        if state.storage_registry.has_claim(&nft.content_id, &tx.from) {
+                        if state.storage_registry.owner_of(&nft.content_id) == Some(tx.from)
+                            && !state
+                                .storage_registry
+                                .has_active_deal_for_other_payer(&nft.content_id, &tx.from)
+                        {
                             cids.push((nft.content_id, tx.from));
                         }
                     }

@@ -50,7 +50,7 @@ jobs:
           shard='${{ matrix.shard_index }}'
           shards=24
           echo "Enumerating storage tests for shard $shard/$shards..."
-          cargo +nightly-2026-07-19 miri test -p budlum-core --lib -- storage --list \
+          cargo +nightly-2026-07-19 test -p budlum-core --lib -- storage --list \
             2>&1 | tee /tmp/miri-storage-list.txt
           mapfile -t tests < <(sed -n 's/: test$//p' /tmp/miri-storage-list.txt)
           total_listed=${#tests[@]}
@@ -102,6 +102,10 @@ jobs:
             a_newer_schema_version_refuses_to_open
             with_storage_refuses_unreadable_accounts
             nft_burn_prunes_matching_storage_manifest_on_produce
+            a_storage_registry_row_from_before_the_tag_still_loads
+            pruning_witnesses_keeps_the_block_hash_and_happens_once
+            qc_blob_binary_storage_and_legacy_bincode_are_readable
+            qc_blob_storage_rejects_corruption_and_cross_height_rows
           )
 
           # Pass the selected tests as exact libtest filters. The previous
