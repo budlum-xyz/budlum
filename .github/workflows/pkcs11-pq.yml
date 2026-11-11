@@ -41,8 +41,19 @@ jobs:
           shared-key: budlum-core
       - name: Install build dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq protobuf-compiler clang libclang-dev libsqlite3-dev perl
+          set -euo pipefail
+          if ! command -v protoc >/dev/null 2>&1; then
+            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
+              https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-linux-x86_64.zip
+            echo "3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a  /tmp/protoc.zip" | sha256sum -c -
+            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+            rm -f /tmp/protoc.zip
+          fi
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            sudo sed -i '/security\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
+          fi
+          sudo apt-get -o Acquire::Retries=5 update -qq
+          sudo apt-get -o Acquire::Retries=5 install -y -qq --fix-missing clang libclang-dev libsqlite3-dev perl
       - name: Fetch OpenSSL and kryoptic sources
         run: |
           set -euo pipefail
